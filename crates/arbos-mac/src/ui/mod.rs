@@ -26,6 +26,7 @@ pub mod media_viewer;
 pub mod member_menu;
 pub mod mention;
 pub mod message_menu;
+pub mod modal;
 pub mod motion;
 pub mod notify;
 pub mod onboarding;

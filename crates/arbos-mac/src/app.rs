@@ -332,6 +332,20 @@ pub fn forwarded_from_text(by: &str) -> String {
 
 pub const FORWARDED_FROM_PREFIX: &str = "Forwarded from ";
 
+/// The picker's list for what was typed: a case-insensitive match on the
+/// chat's name or subtitle ("@sam", "Group · 4 members", "Agent"), most recent
+/// first; an empty query keeps every chat.
+pub fn filter_forward_targets(mut targets: Vec<ForwardTarget>, query: &str) -> Vec<ForwardTarget> {
+    let query = query.trim().to_lowercase();
+    targets.retain(|t| {
+        query.is_empty()
+            || t.name.to_lowercase().contains(&query)
+            || t.subtitle.to_lowercase().contains(&query)
+    });
+    targets.sort_by_key(|t| std::cmp::Reverse(t.last_activity));
+    targets
+}
+
 /// What the composer should look like for the active chat (§3.10).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ComposerMode {
@@ -5469,8 +5483,7 @@ impl AppState {
     /// rail, the current chat included, filtered by `query`, most recent first.
     /// Channels are left out — they carry no attachments yet (Matrix `m.text`).
     pub fn forward_targets(&self, query: &str) -> Vec<ForwardTarget> {
-        let query = query.trim().to_lowercase();
-        let mut out: Vec<ForwardTarget> = self
+        let out: Vec<ForwardTarget> = self
             .projects
             .iter()
             .filter_map(|p| {
@@ -5499,14 +5512,8 @@ impl AppState {
                         .unwrap_or(0),
                 })
             })
-            .filter(|t| {
-                query.is_empty()
-                    || t.name.to_lowercase().contains(&query)
-                    || t.subtitle.to_lowercase().contains(&query)
-            })
             .collect();
-        out.sort_by_key(|t| std::cmp::Reverse(t.last_activity));
-        out
+        filter_forward_targets(out, query)
     }
 
     /// Forward the open item to `target`: the row lands in that chat at once
@@ -9220,5 +9227,61 @@ mod chat_image_scale_tests {
         // Aspect ≈ 3024/1964.
         let ratio = w as f32 / h as f32;
         assert!((ratio - 3024.0 / 1964.0).abs() < 0.02);
+    }
+}
+
+#[cfg(test)]
+mod forward_filter_tests {
+    //! feedback forward-sheet-focus-2026-10-24: typing in the "Forward to"
+    //! field filters the list (once keys reach the field at all).
+    use super::{filter_forward_targets, ForwardTarget};
+
+    fn target(name: &str, subtitle: &str, at: u64) -> ForwardTarget {
+        ForwardTarget {
+            space_id: format!("s-{name}"),
+            chat_id: format!("c-{name}"),
+            name: name.into(),
+            subtitle: subtitle.into(),
+            last_activity: at,
+        }
+    }
+
+    fn all() -> Vec<ForwardTarget> {
+        vec![
+            target("Arbos", "Agent", 10),
+            target("sam", "@sam", 30),
+            target("Launch week", "Group · 5 members", 20),
+            target("Samir Haddad", "@samir", 5),
+        ]
+    }
+
+    fn names(v: &[ForwardTarget]) -> Vec<&str> {
+        v.iter().map(|t| t.name.as_str()).collect()
+    }
+
+    #[test]
+    fn an_empty_query_keeps_every_chat_most_recent_first() {
+        assert_eq!(
+            names(&filter_forward_targets(all(), "  ")),
+            ["sam", "Launch week", "Arbos", "Samir Haddad"]
+        );
+    }
+
+    #[test]
+    fn typing_narrows_by_name_or_subtitle_case_insensitively() {
+        assert_eq!(
+            names(&filter_forward_targets(all(), "sam")),
+            ["sam", "Samir Haddad"]
+        );
+        assert_eq!(
+            names(&filter_forward_targets(all(), "SAMI")),
+            ["Samir Haddad"]
+        );
+        assert_eq!(
+            names(&filter_forward_targets(all(), "group")),
+            ["Launch week"]
+        );
+        assert_eq!(names(&filter_forward_targets(all(), "agent")), ["Arbos"]);
+        assert!(filter_forward_targets(all(), "zzz").is_empty());
     }
 }

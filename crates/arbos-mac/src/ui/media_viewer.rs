@@ -20,6 +20,7 @@ use crate::app::{AppState, ForwardTarget, ViewerItem};
 use crate::model::AttachmentKind;
 use crate::ui::avatars;
 use crate::ui::icons::icon;
+use crate::ui::modal::modal_overlay;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, TEXT_SMALL, TEXT_TINY};
 
@@ -46,6 +47,10 @@ const DISMISS_SCROLL_PX: f32 = 48.0;
 const PICKER_WIDTH: f32 = 360.0;
 const PICKER_HEIGHT: f32 = 420.0;
 const PICKER_ROW: f32 = 52.0;
+/// The picker's search field (feedback forward-sheet-focus-2026-10-24): 28 pt
+/// tall, 13 pt text — the row-name size, like Grok's palette field.
+pub const PICKER_FIELD_HEIGHT: f32 = 28.0;
+pub const PICKER_FIELD_FONT: f32 = 13.0;
 
 fn white(alpha: f32) -> Hsla {
     Hsla {
@@ -545,17 +550,21 @@ fn forward_picker(
         ForwardSource::Media => s.media_viewer_toggle_forward(cx),
         ForwardSource::Message => s.close_forward_message(cx),
     };
+    // The field is the sheet's standard search field: as tall as a list row's
+    // avatar band, text the size of the row names (Grok's palette field reads
+    // like its row titles), not the composer's body size.
     let search = div()
         .flex()
         .items_center()
         .gap(px(7.0))
-        .h(px(30.0))
+        .h(px(PICKER_FIELD_HEIGHT))
         .mx(px(12.0))
         .px(px(10.0))
         .rounded(px(8.0))
         .bg(theme.surface_2)
         .cursor_text()
-        .child(icon("search", 13.0, theme.text_muted))
+        .text_size(px(PICKER_FIELD_FONT))
+        .child(icon("search", 12.0, theme.text_muted))
         .child(div().flex_1().min_w_0().child(shell.viewer_search.clone()));
     let mut list = div()
         .id("media-viewer-forward-list")
@@ -696,19 +705,11 @@ fn forward_picker(
         .child(search)
         .child(list)
         .child(footnote);
-    div()
-        .id("media-viewer-forward-backdrop")
-        .absolute()
-        .inset_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(Theme::with_alpha(gpui::black(), 0.35))
-        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-            cx.stop_propagation();
-            close.update(cx, |s, cx| dismiss(s, cx));
-        })
-        .child(card)
+    modal_overlay(
+        "media-viewer-forward-backdrop",
+        move |_, cx| close.update(cx, |s, cx| dismiss(s, cx)),
+        card,
+    )
 }
 
 #[cfg(test)]

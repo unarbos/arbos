@@ -1,5 +1,5 @@
 //! The conversation header (unified top bar, Jacob 2026-10-20, mockups
-//! `topbar-unify/`): one top-left pill for every chat — avatar + name, the
+//! `topbar-unify/`): one centred pill for every chat — avatar + name, the
 //! same control for agents, people and groups. Click the name → that chat's
 //! right pane. An agent's pill also carries a "+" that starts a new chat with
 //! that agent. When the agent has more than one tab, a second hit region
@@ -396,8 +396,8 @@ pub mod metrics {
 }
 
 /// The frame of every chat header — agent, DM, group, server channel: 44 pt,
-/// the sidebar toggle in the left slot when the sidebar is hidden, the pill
-/// top-left with a little air under the window edge, the whole bar a
+/// equal side slots (the sidebar toggle left when the sidebar is hidden), the
+/// pill centred with a little air under the window edge, the whole bar a
 /// window-drag region (the pill and the toggle stop the drag themselves). The
 /// list runs under it and fades (`metrics::FADE_BAND`), so there is no hairline.
 pub(crate) fn bar_frame(left: Option<AnyElement>, pill: AnyElement) -> Div {
@@ -422,21 +422,24 @@ pub(crate) fn bar_frame(left: Option<AnyElement>, pill: AnyElement) -> Div {
         .overflow_hidden()
         .window_drag()
         .debug_selector(|| "chat-header-bar".into())
-        .children(left.map(|el| {
+        // Always reserve the left slot so the pill stays centred whether the
+        // sidebar toggle is present or not ([feedback
+        // app-01M5Q1CQZ5JBNY33WCKPN0Y8G9]).
+        .child(
             div()
                 .w(side)
                 .h(content_h)
                 .flex_shrink_0()
                 .flex()
                 .items_center()
-                .child(el)
-        }))
+                .children(left),
+        )
         .child(
             div()
                 .flex_1()
                 .min_w_0()
                 .flex()
-                .justify_start()
+                .justify_center()
                 .mt(px(metrics::PILL_MT))
                 .child(
                     div()
@@ -1083,26 +1086,6 @@ mod header_tests {
         vcx.update(|_, cx| cx.default_global::<WindowDragPress>().moves)
     }
 
-    fn pill_w(kind: Kind) -> f32 {
-        match kind {
-            Kind::Agent => 150.0,
-            Kind::Dm => 110.0,
-            Kind::Group => 130.0,
-            Kind::Channel => 170.0,
-        }
-    }
-
-    /// Left edge of the pill inside the bar: leading pad, and when folded the
-    /// toggle slot plus the flex gap.
-    fn pill_x(folded: bool) -> f32 {
-        let leading = metrics::PILL_LEADING;
-        if folded {
-            leading + (CONTROL + 8.0) + 10.0
-        } else {
-            leading
-        }
-    }
-
     #[gpui::test]
     fn every_kind_has_the_same_bar_height_and_pill_position(cx: &mut TestAppContext) {
         for kind in [Kind::Agent, Kind::Dm, Kind::Group, Kind::Channel] {
@@ -1117,11 +1100,11 @@ mod header_tests {
                 assert_eq!(h, metrics::HEIGHT, "bar height, folded={folded}");
                 assert_eq!(top, metrics::PILL_TOP, "pill top, folded={folded}");
                 assert_eq!(ph, metrics::PILL_HEIGHT, "pill height, folded={folded}");
-                let left: f32 = (pill.origin.x - bar.origin.x).into();
+                let cx_pill: f32 = (pill.origin.x + pill.size.width / 2.0).into();
+                let cx_bar: f32 = (bar.origin.x + bar.size.width / 2.0).into();
                 assert!(
-                    (left - pill_x(folded)).abs() <= 1.0,
-                    "pill top-left, folded={folded}: left={left} want={}",
-                    pill_x(folded)
+                    (cx_pill - cx_bar).abs() <= 1.0,
+                    "pill centred, folded={folded}"
                 );
             }
         }
@@ -1192,19 +1175,16 @@ mod header_tests {
     #[gpui::test]
     fn the_empty_band_drags_for_every_kind_and_the_pill_does_not(cx: &mut TestAppContext) {
         for kind in [Kind::Agent, Kind::Dm, Kind::Group, Kind::Channel] {
-            let x0 = pill_x(false);
-            let x0_folded = 72.0 + pill_x(true);
-            let w = pill_w(kind);
-            // Right of the left-aligned pill, still in the bar.
-            assert_eq!(moves_after(cx, kind, false, x0 + w + 40.0), 1, "band drags");
+            // Left of the pill, right of the side slot.
+            assert_eq!(moves_after(cx, kind, false, 120.0), 1, "band drags");
             assert_eq!(
-                moves_after(cx, kind, true, x0_folded + w + 40.0),
+                moves_after(cx, kind, true, 72.0 + 60.0),
                 1,
                 "band drags, folded"
             );
             // The pill's centre.
             assert_eq!(
-                moves_after(cx, kind, false, x0 + w / 2.0),
+                moves_after(cx, kind, false, WIDTH / 2.0),
                 0,
                 "pill is a control"
             );

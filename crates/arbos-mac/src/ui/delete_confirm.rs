@@ -13,6 +13,7 @@ use gpui::{
 
 use crate::app::DeleteConfirm;
 use crate::ui::icons::icon;
+use crate::ui::modal::modal_overlay;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, TEXT_SMALL, TEXT_TINY};
 use crate::ui::transcript::message_line;
@@ -201,21 +202,12 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> O
         .child(buttons);
 
     Some(
-        div()
-            .id("delete-confirm-backdrop")
-            .absolute()
-            .inset_0()
-            .occlude()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(Theme::with_alpha(gpui::black(), 0.35))
-            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                cx.stop_propagation();
-                close_bg.update(cx, |s, cx| s.close_delete_confirm(cx));
-            })
-            .child(card)
-            .into_any_element(),
+        modal_overlay(
+            "delete-confirm-backdrop",
+            move |_, cx| close_bg.update(cx, |s, cx| s.close_delete_confirm(cx)),
+            card,
+        )
+        .into_any_element(),
     )
 }
 

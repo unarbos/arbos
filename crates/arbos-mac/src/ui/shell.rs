@@ -35,6 +35,7 @@ use crate::ui::local::{LocalEvent, LocalPanel};
 use crate::ui::media_viewer;
 use crate::ui::member_menu;
 use crate::ui::message_menu;
+use crate::ui::modal;
 use crate::ui::motion::{ease_out_cubic, PulseClock, COMPOSER_DROP_MS, SHAKE_MS};
 use crate::ui::onboarding;
 use crate::ui::people;
@@ -569,7 +570,10 @@ impl Shell {
         let search_input = cx.new(ComposerInput::new);
         search_input.update(cx, |input, _| input.set_placeholder("Search"));
         let viewer_search = cx.new(ComposerInput::new);
-        viewer_search.update(cx, |input, _| input.set_placeholder("Search"));
+        viewer_search.update(cx, |input, _| {
+            input.set_placeholder("Search");
+            input.set_font_size(media_viewer::PICKER_FIELD_FONT);
+        });
         cx.observe(&viewer_search, |_, _, cx| cx.notify()).detach();
         cx.observe(&pairing_input, |_, _, cx| cx.notify()).detach();
         cx.observe(&project_input, |_, _, cx| cx.notify()).detach();
@@ -1020,6 +1024,37 @@ impl Shell {
             || self.secrets.read(cx).input_focused(window, cx)
             || self.skills.read(cx).has_focus(window, cx)
             || (self.routines_open && self.routines.read(cx).has_focus(window, cx))
+    }
+
+    /// The focus handle a modal sheet owns while it is up (`ui::modal`): the
+    /// Forward picker's search field (from a bubble or the media viewer), the
+    /// viewer itself, the "Delete message?" card. Keys go there and nowhere
+    /// else — `render` moves focus back every frame, so the composer behind a
+    /// sheet never types (Jacob, feedback forward-sheet-focus-2026-10-24).
+    pub(crate) fn modal_focus(&self, cx: &App) -> Option<FocusHandle> {
+        let state = self.state.read(cx);
+        if state.forward_message.is_some() {
+            return Some(self.viewer_search.read(cx).focus_handle(cx));
+        }
+        if let Some(viewer) = state.media_viewer.as_ref() {
+            return Some(if viewer.forward_open {
+                self.viewer_search.read(cx).focus_handle(cx)
+            } else {
+                self.viewer_focus.clone()
+            });
+        }
+        if state.delete_confirm.is_some() {
+            return Some(self.delete_confirm_focus.clone());
+        }
+        None
+    }
+
+    /// Keep the keyboard inside the open sheet: whatever else took focus
+    /// (the composer, a click, a stale handle) hands it back to the owner.
+    fn enforce_modal_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(owner) = self.modal_focus(cx) {
+            modal::keep_focus(&owner, window, cx);
+        }
     }
 
     pub(crate) fn open_feedback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4015,16 +4050,19 @@ impl Render for Shell {
                 window.focus(&self.viewer_focus, cx);
             }
             root = root.child(media_viewer::overlay(self, &self.viewer_focus, cx));
-        } else if self.viewer_focus.is_focused(window)
-            || self
-                .viewer_search
-                .read(cx)
-                .focus_handle(cx)
-                .is_focused(window)
+        } else if self.state.read(cx).forward_message.is_none()
+            && (self.viewer_focus.is_focused(window)
+                || self
+                    .viewer_search
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window))
         {
-            // Closed by × / the backdrop / Forward: typing goes back to the composer.
+            // Closed by × / the backdrop / Forward: typing goes back to the
+            // composer (unless the bubble menu's picker owns the field now).
             Composer::focus(&self.composer, window, cx);
         }
+        self.enforce_modal_focus(window, cx);
         // Collapsed video call: the camera keeps showing in a draggable tile.
         let collapsed_video = self
             .state
