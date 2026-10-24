@@ -10,6 +10,7 @@
   "online": false,
   "read_receipts": true,
   "role": "owner",
+  "silenced": false,
   "status": "member",
   "user_id": "gh_101"
 }

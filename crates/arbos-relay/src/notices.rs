@@ -70,20 +70,23 @@ pub fn agent_name(state: &AppState, project_id: &str) -> String {
         .unwrap_or_else(|| project_id.to_owned())
 }
 
-/// Write `text` as a system line into a people chat's doc and broadcast the row. Returns the
-/// row's seq. Errors are the caller's to log: a notice must never fail the membership change
-/// it describes.
-pub async fn post_people_notice(
+/// One relay-authored edit of a chat's doc: rebuild it from the checkpoint and rows, apply
+/// `edit`, store the update as a row signed `relay`, broadcast it to the room like any device
+/// row, and let the Matrix mirror pick it up. `project_id` is `None` for a people chat.
+/// Returns the row's seq. Every write the relay makes on its own authority (membership
+/// notices, moderation) goes through here, so no client has to be trusted with it.
+pub async fn write_doc(
     state: &AppState,
+    project_id: Option<&str>,
     chat_id: &str,
-    text: &str,
+    edit: impl FnOnce(&ChatDoc) -> anyhow::Result<()>,
 ) -> anyhow::Result<i64> {
-    let room_name = wire::room_name(PEOPLE_PROJECT, chat_id);
-    let doc = load_doc(state, chat_id, None)?.unwrap_or_else(|| ChatDoc::new(None, false));
+    let room_name = wire::room_name(project_id.unwrap_or(PEOPLE_PROJECT), chat_id);
+    let doc = load_doc(state, chat_id, project_id)?.unwrap_or_else(|| ChatDoc::new(None, false));
     let base = doc.oplog_vv();
-    doc.append_system_line(&ulid(), text, RELAY_DEVICE, None)?;
+    edit(&doc)?;
     let bytes = doc.export_updates_since(&base);
-    anyhow::ensure!(!bytes.is_empty(), "system line produced no update");
+    anyhow::ensure!(!bytes.is_empty(), "the edit produced no update");
     let batch_id = ulid();
     let (seq, dup) = state
         .db
@@ -101,9 +104,24 @@ pub async fn post_people_notice(
             bytes: frame,
             seq,
         });
-        // The Matrix mirror picks the new row up like a device's.
-        state.matrix.touch_rows(state, chat_id, None);
+        state.matrix.touch_rows(state, chat_id, project_id);
     }
+    Ok(seq)
+}
+
+/// Write `text` as a system line into a people chat's doc and broadcast the row. Returns the
+/// row's seq. Errors are the caller's to log: a notice must never fail the membership change
+/// it describes.
+pub async fn post_people_notice(
+    state: &AppState,
+    chat_id: &str,
+    text: &str,
+) -> anyhow::Result<i64> {
+    let seq = write_doc(state, None, chat_id, |doc| {
+        doc.append_system_line(&ulid(), text, RELAY_DEVICE, None)?;
+        Ok(())
+    })
+    .await?;
     tracing::info!(chat = %chat_id, seq, %text, "membership notice");
     Ok(seq)
 }

@@ -1,12 +1,12 @@
 {
   "archived_at": null,
+  "avatar_leaf": null,
+  "avatar_leaf_color": null,
   "created_at": 1700000000000,
   "created_by": "gh_101",
   "head_seq": 0,
   "id": "people_dm",
   "image_key": null,
-  "avatar_leaf": null,
-  "avatar_leaf_color": null,
   "kind": "dm",
   "last_activity_at": 1700000000000,
   "lock_state": "people_only",
@@ -14,7 +14,8 @@
     "archived_at": null,
     "muted": false,
     "read_receipts": true,
-    "role": null
+    "role": null,
+    "silenced": false
   },
   "members": [
     {
@@ -29,6 +30,7 @@
       "online": false,
       "read_receipts": true,
       "role": "owner",
+      "silenced": false,
       "status": "member",
       "user_id": "gh_101"
     },
@@ -44,6 +46,7 @@
       "online": false,
       "read_receipts": true,
       "role": "member",
+      "silenced": false,
       "status": "member",
       "user_id": "gh_102"
     }

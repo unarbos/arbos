@@ -27,9 +27,6 @@ use crate::ui::theme::{
     TEXT_TINY,
 };
 
-/// Where a device row's kind tag sits: left of the trailing Sign out / "This Mac".
-const INSET_TAG_RIGHT: f32 = 92.0;
-
 /// Drag payload for the Appearance glass-opacity slider (no preview view).
 #[derive(Clone)]
 struct GlassOpacityDrag;
@@ -797,58 +794,58 @@ impl Shell {
                         continue;
                     }
                     let title: SharedString = r.name.clone().into();
-                    let trailing: Option<gpui::AnyElement> = if !r.revokable() {
-                        Some(
-                            div()
-                                .flex_shrink_0()
-                                .text_size(px(TEXT_SMALL))
-                                .text_color(theme.text_muted)
-                                .child("This Mac")
-                                .into_any_element(),
-                        )
-                    } else {
-                        let id = r.id.clone();
-                        Some(
-                            link_button("device-revoke", "Sign out", true, &theme)
-                                .id(ElementId::Name(SharedString::from(format!(
-                                    "device-revoke-{}",
-                                    r.id
-                                ))))
-                                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                    cx.stop_propagation()
-                                })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.device_revoke_armed = Some(id.clone());
-                                    cx.notify();
-                                }))
-                                .into_any_element(),
-                        )
-                    };
-                    let mut row = kit::row(
-                        ElementId::Name(SharedString::from(format!("device-{}", r.id))),
-                        kit::Leading::Tile(r.glyph),
-                        title,
-                        Some(r.subtitle.clone().into()),
-                        None,
-                        trailing,
-                        false,
-                        &theme,
-                    );
+                    // The kind tag ("read-only") and the control share the trailing
+                    // slot, in flow — never over the name (seen on the gate build).
+                    let mut trailing = div().flex().flex_shrink_0().items_center().gap(px(8.0));
                     if let Some(tag) = r.tag {
-                        row = row.child(
+                        trailing = trailing.child(
                             div()
-                                .absolute()
-                                .top(px(7.0))
-                                .right(px(INSET_TAG_RIGHT))
                                 .px(px(6.0))
                                 .py(px(1.0))
                                 .rounded_full()
                                 .bg(theme.surface_2)
                                 .text_size(px(TEXT_TINY))
                                 .text_color(theme.text_muted)
+                                .whitespace_nowrap()
                                 .child(tag),
                         );
                     }
+                    trailing = if !r.revokable() {
+                        trailing.child(
+                            div()
+                                .text_size(px(TEXT_SMALL))
+                                .text_color(theme.text_muted)
+                                .whitespace_nowrap()
+                                .child("This Mac"),
+                        )
+                    } else {
+                        let id = r.id.clone();
+                        trailing.child(
+                            link_button("device-revoke", "Sign out", true, &theme)
+                                .id(ElementId::Name(SharedString::from(format!(
+                                    "device-revoke-{}",
+                                    r.id
+                                ))))
+                                .whitespace_nowrap()
+                                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                    cx.stop_propagation()
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.device_revoke_armed = Some(id.clone());
+                                    cx.notify();
+                                })),
+                        )
+                    };
+                    let row = kit::row(
+                        ElementId::Name(SharedString::from(format!("device-{}", r.id))),
+                        kit::Leading::Tile(r.glyph),
+                        title,
+                        Some(r.subtitle.clone().into()),
+                        None,
+                        Some(trailing.into_any_element()),
+                        false,
+                        &theme,
+                    );
                     rows.push(row.into_any_element());
                 }
                 body = body.child(

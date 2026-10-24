@@ -755,11 +755,19 @@ struct GroupProfileView: View {
     @State private var showEdit = false
     @State private var pendingRemoveId: String?
     @State private var pendingRemoveName: String?
+    /// Ban confirm (remove and block rejoin), same shape as server member ban.
+    @State private var pendingBanId: String?
+    @State private var pendingBanName: String?
     /// Human member (not you) whose row was tapped: offer View profile / Send private message.
     @State private var memberActions: ProfilePerson?
     /// Footer confirm: leave (member) or delete (owner) this people group.
     @State private var confirmLeave = false
     @State private var confirmDelete = false
+    /// People-group invite links (create / copy / share / revoke), same shape as server invites.
+    @State private var groupInvites: [ServerInviteLink] = []
+    @State private var inviteExpires = false
+    @State private var inviteSingleUse = false
+    @State private var inviteCopied = false
 
     private var people: PeopleChat? { model.peopleChat(chatId) }
     private var project: Project? { projectId.flatMap { model.project($0) } }
@@ -796,6 +804,23 @@ struct GroupProfileView: View {
         return rowRole == "owner" || rowRole == "admin"
     }
 
+    private var isGroupOwner: Bool {
+        if people?.myRole == "owner" { return true }
+        return people?.humans.first(where: { $0.id == model.user?.id })?.role == "owner"
+    }
+
+    /// My human row in this people group (for mute/ban rights).
+    private var myMember: ChatMember? {
+        people?.humans.first(where: { $0.id == model.user?.id })
+    }
+
+    /// Owner always; an admin only when the owner left mute/ban on for them.
+    private var iCanMuteBan: Bool {
+        if isGroupOwner { return true }
+        guard people?.myRole == "admin" || myMember?.role == "admin" else { return false }
+        return myMember?.canMuteBan ?? true
+    }
+
     /// People: owners/admins remove anyone but themselves and other owners.
     /// Agents: only the agent's own owner (the relay's rule for
     /// `DELETE /chats/{id}/agents/{project}`), and only in people chats.
@@ -805,7 +830,16 @@ struct GroupProfileView: View {
             let member = people?.agents.first { $0.id == agent.id }
             return (member?.ownerId ?? agent.ownerId) == me
         }
+        if isGroupOwner && r.role == "admin" { return true }
+        if people?.myRole == "admin" || myMember?.role == "admin" {
+            return r.person.id != model.user?.id && r.role == "member"
+        }
         return canManageMembers && r.person.id != model.user?.id && r.role != "owner"
+    }
+
+    /// Mute / ban this human: same targets as remove, plus I must have mute/ban rights.
+    private func canMuteBan(_ r: Row) -> Bool {
+        r.agent == nil && canRemove(r) && iCanMuteBan
     }
 
     private var groupImageURL: String? {
@@ -851,7 +885,7 @@ struct GroupProfileView: View {
                         ),
                         tabs: PaneKinds.group,
                         selected: $tab,
-                        body: tab == "Members" ? membersSections : librarySections,
+                        body: tab == "Members" ? membersSections + groupInviteSections : librarySections,
                         footer: leaveFooter
                     )
                     Color.clear.frame(height: 40)
@@ -872,7 +906,7 @@ struct GroupProfileView: View {
                     if rows.first(where: { $0.id == id })?.agent != nil {
                         model.removeAgent(chatId: chatId, projectId: id)
                     } else {
-                        model.removeMember(chatId: chatId, userId: id)
+                        model.removeMember(chatId: chatId, userId: id, ban: false)
                     }
                 }
                 pendingRemoveId = nil
@@ -882,6 +916,30 @@ struct GroupProfileView: View {
                 pendingRemoveId = nil
                 pendingRemoveName = nil
             }
+        } message: {
+            Text("They can be added again later.")
+        }
+        .confirmationDialog(
+            pendingBanName.map { "Ban \($0) from \(title)?" } ?? "Ban from chat?",
+            isPresented: Binding(
+                get: { pendingBanId != nil },
+                set: { if !$0 { pendingBanId = nil; pendingBanName = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Ban", role: .destructive) {
+                if let id = pendingBanId {
+                    model.removeMember(chatId: chatId, userId: id, ban: true)
+                }
+                pendingBanId = nil
+                pendingBanName = nil
+            }
+            Button("Cancel", role: .cancel) {
+                pendingBanId = nil
+                pendingBanName = nil
+            }
+        } message: {
+            Text("They are removed and cannot rejoin.")
         }
         .confirmationDialog(
             "Leave \(title)?",
@@ -952,6 +1010,9 @@ struct GroupProfileView: View {
         }
         .task {
             if let projectId { projectMembers = await model.projectMembers(projectId) }
+            if projectId == nil, people?.kind == "group" {
+                groupInvites = await model.groupInvites(chatId)
+            }
         }
         .onAppear {
             // Rig: `ARBOS_SHOW=removemember` arms the Remove confirm for the first other member.
@@ -968,6 +1029,82 @@ struct GroupProfileView: View {
             }
             if let t = DebugHooks.panelTab, PaneKinds.group.contains(t) { tab = t }
         }
+    }
+
+    /// Invite links for a people group (not a shared project chat): mint, copy, share, revoke.
+    private var groupInviteSections: [PaneSection] {
+        guard projectId == nil, people?.kind == "group" else { return [] }
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        var rows: [AnyView] = []
+        if groupInvites.isEmpty {
+            rows.append(AnyView(PaneRow(leading: .tile("link"), title: "No invite links",
+                                        subtitle: "People you add by name need none")))
+        }
+        for inv in groupInvites {
+            let short = inv.url.split(separator: "/").last.map(String.init) ?? inv.code
+            rows.append(AnyView(
+                PaneRow(leading: .tile("link"), title: "…/g/\(short)", subtitle: inv.terms(now: now),
+                        trailing: AnyView(HStack(spacing: 4) {
+                            if inv.usable {
+                                Button {
+                                    UIPasteboard.general.string = inv.url
+                                    inviteCopied = true
+                                    Task { @MainActor in
+                                        try? await Task.sleep(for: .seconds(1.5))
+                                        inviteCopied = false
+                                    }
+                                } label: {
+                                    Image(systemName: inviteCopied ? "checkmark" : "doc.on.doc")
+                                        .font(theme.font(15)).foregroundStyle(theme.muted)
+                                        .frame(width: 30, height: 44).contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Copy link")
+                                if let url = URL(string: inv.url) {
+                                    ShareLink(item: url) {
+                                        Image(systemName: "square.and.arrow.up")
+                                            .font(theme.font(15)).foregroundStyle(theme.muted)
+                                            .frame(width: 30, height: 44).contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                            Button {
+                                Task {
+                                    if await model.revokeGroupInvite(chatId, inviteId: inv.id) {
+                                        groupInvites.removeAll { $0.id == inv.id }
+                                    }
+                                }
+                            } label: {
+                                Image(systemName: "xmark.circle")
+                                    .font(theme.font(17)).foregroundStyle(theme.muted)
+                                    .frame(width: 30, height: 44).contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Revoke link")
+                        }))
+                .opacity(inv.usable ? 1 : 0.55)
+            ))
+        }
+        let options: [AnyView] = [
+            AnyView(PaneToggleRow(title: "Expires after 7 days", isOn: $inviteExpires)),
+            AnyView(PaneToggleRow(title: "Single use", subtitle: "One person joins, then the link is spent", isOn: $inviteSingleUse)),
+            AnyView(Button {
+                Task {
+                    if let inv = await model.createGroupInvite(chatId, expires: inviteExpires, singleUse: inviteSingleUse) {
+                        groupInvites.insert(inv, at: 0)
+                    }
+                }
+            } label: {
+                PaneRow(leading: .glyph("plus"), title: "New invite link")
+            }.buttonStyle(.plain)),
+        ]
+        return [
+            .title("Invite links"),
+            .card(rows, separatorInset: PaneKit.separatorInset(.tile(""))),
+            .card(options),
+            .footnote("Share a link so someone can join this group. Add people who already have an account from Add members above."),
+        ]
     }
 
     /// The hero picture: the agent's leaf for a shared project; the group's
@@ -1030,21 +1167,82 @@ struct GroupProfileView: View {
         let title = r.agent?.name ?? (isMe ? "\(r.person.displayName) (you)" : r.person.displayName)
         let avatar: AnyView = r.agent.map { AnyView(AgentAvatar(project: $0, theme: theme, size: PaneKit.avatar, still: true)) }
             ?? AnyView(PersonAvatar(url: r.person.avatarUrl, handle: r.person.handle, size: PaneKit.avatar, name: r.person.name, id: r.person.id, colorIndex: r.person.avatarColorIndex))
-        // Jacob (2026-10-20): a small ✕ at the trailing edge removes a member in
-        // one tap plus the confirmation; owners only.
-        let remove: AnyView? = canRemove(r) ? AnyView(
-            Button {
-                pendingRemoveId = r.person.id
-                pendingRemoveName = r.agent?.name ?? "@\(r.person.handle)"
+        let member = r.agent == nil ? people?.members.first(where: { !$0.isAgent && $0.id == r.person.id }) : nil
+        let isSilenced = member?.isSilencedNow ?? false
+        let label = r.agent?.name ?? "@\(r.person.handle)"
+        let showManage = canRemove(r) || (isGroupOwner && r.agent == nil && r.person.id != model.user?.id && r.role != "owner")
+        // Owners/admins: Mute (with duration) / Unmute, Remove, Ban; owner also
+        // Make admin and mute/ban rights. Same ellipsis pattern as the server row.
+        let manage: AnyView? = showManage ? AnyView(
+            Menu {
+                if r.agent == nil {
+                    if canMuteBan(r) {
+                        if isSilenced {
+                            Button {
+                                model.setMemberSilenced(chatId: chatId, userId: r.person.id, silenced: false)
+                            } label: { Label("Unmute", systemImage: "speaker.wave.2") }
+                        } else {
+                            Menu {
+                                ForEach(MemberMuteDuration.allCases) { duration in
+                                    Button(duration.title) {
+                                        model.setMemberSilenced(
+                                            chatId: chatId, userId: r.person.id,
+                                            silenced: true, duration: duration
+                                        )
+                                    }
+                                }
+                            } label: { Label("Mute", systemImage: "speaker.slash") }
+                        }
+                    }
+                    if isGroupOwner {
+                        if r.role == "member" {
+                            Button {
+                                model.setMemberRole(chatId: chatId, userId: r.person.id, role: "admin")
+                            } label: { Label("Make admin", systemImage: "person.badge.key") }
+                        } else if r.role == "admin" {
+                            let allowed = member?.canMuteBan ?? true
+                            Button {
+                                model.setMemberCanMuteBan(
+                                    chatId: chatId, userId: r.person.id, canMuteBan: !allowed
+                                )
+                            } label: {
+                                Label(
+                                    allowed ? "Revoke mute and ban" : "Allow mute and ban",
+                                    systemImage: allowed ? "hand.raised.slash" : "hand.raised"
+                                )
+                            }
+                            Button {
+                                model.setMemberRole(chatId: chatId, userId: r.person.id, role: "member")
+                            } label: { Label("Remove admin", systemImage: "person.badge.minus") }
+                        }
+                    }
+                    if canRemove(r) {
+                        Divider()
+                        Button(role: .destructive) {
+                            pendingRemoveId = r.person.id
+                            pendingRemoveName = label
+                        } label: { Label("Remove", systemImage: "person.badge.minus") }
+                        if canMuteBan(r) {
+                            Button(role: .destructive) {
+                                pendingBanId = r.person.id
+                                pendingBanName = label
+                            } label: { Label("Ban", systemImage: "hand.raised") }
+                        }
+                    }
+                } else if canRemove(r) {
+                    Button(role: .destructive) {
+                        pendingRemoveId = r.person.id
+                        pendingRemoveName = label
+                    } label: { Label("Remove", systemImage: "person.badge.minus") }
+                }
             } label: {
-                Image(systemName: "xmark")
-                    .font(theme.font(12, weight: .semibold))
+                Image(systemName: "ellipsis.circle")
+                    .font(theme.font(17))
                     .foregroundStyle(theme.muted)
                     .frame(width: 32, height: 44)
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.borderless)
-            .accessibilityLabel("Remove @\(r.person.handle)")
+            .accessibilityLabel("Member options")
         ) : nil
         // borderless (not .plain): .plain steals long-press on recent iOS,
         // so the remove context menu never appears (same as HomeView rows).
@@ -1058,14 +1256,16 @@ struct GroupProfileView: View {
                 memberActions = r.person
             }
         } label: {
-            PaneRow(leading: .avatar(avatar), title: title, subtitle: memberSubtitle(r), trailing: remove)
+            PaneRow(
+                leading: .avatar(avatar),
+                title: title,
+                subtitle: memberRowSubtitle(r, member: member, isSilenced: isSilenced),
+                trailing: manage
+            )
         }
         .buttonStyle(.borderless)
-        // Long-press (Jacob, 2026-10-22; the Mac's Shift-/right-click menu): View profile,
-        // Send private message (other people), and for whoever may remove this member a
-        // divider and Remove from group — which asks first (the confirm above) and then
-        // lets the relay write "<me> removed X". Your own row never offers Remove;
-        // leaving is the pane footer's Leave group chat (or Delete for the owner).
+        // Long-press: View profile, Send private message, Mute (with duration) /
+        // Unmute, owner admin rights, Remove, Ban.
         .contextMenu {
             if r.agent == nil && !isMe {
                 Button {
@@ -1078,14 +1278,88 @@ struct GroupProfileView: View {
             Button {
                 if let a = r.agent { model.showProfile(.agent(projectId: a.id)) } else { model.showProfile(.user(r.person)) }
             } label: { Label("View profile", systemImage: "person.crop.circle") }
-            if canRemove(r) {
+            if showManage {
                 Divider()
-                Button(role: .destructive) {
-                    pendingRemoveId = r.person.id
-                    pendingRemoveName = r.agent?.name ?? "@\(r.person.handle)"
-                } label: { Label("Remove from group", systemImage: "xmark") }
+                if r.agent == nil {
+                    if canMuteBan(r) {
+                        if isSilenced {
+                            Button {
+                                model.setMemberSilenced(chatId: chatId, userId: r.person.id, silenced: false)
+                            } label: { Label("Unmute", systemImage: "speaker.wave.2") }
+                        } else {
+                            ForEach(MemberMuteDuration.allCases) { duration in
+                                Button("Mute · \(duration.title)") {
+                                    model.setMemberSilenced(
+                                        chatId: chatId, userId: r.person.id,
+                                        silenced: true, duration: duration
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    if isGroupOwner {
+                        if r.role == "member" {
+                            Button {
+                                model.setMemberRole(chatId: chatId, userId: r.person.id, role: "admin")
+                            } label: { Label("Make admin", systemImage: "person.badge.key") }
+                        } else if r.role == "admin" {
+                            let allowed = member?.canMuteBan ?? true
+                            Button {
+                                model.setMemberCanMuteBan(
+                                    chatId: chatId, userId: r.person.id, canMuteBan: !allowed
+                                )
+                            } label: {
+                                Label(
+                                    allowed ? "Revoke mute and ban" : "Allow mute and ban",
+                                    systemImage: allowed ? "hand.raised.slash" : "hand.raised"
+                                )
+                            }
+                            Button {
+                                model.setMemberRole(chatId: chatId, userId: r.person.id, role: "member")
+                            } label: { Label("Remove admin", systemImage: "person.badge.minus") }
+                        }
+                    }
+                    if canRemove(r) {
+                        Button(role: .destructive) {
+                            pendingRemoveId = r.person.id
+                            pendingRemoveName = label
+                        } label: { Label("Remove from group", systemImage: "person.badge.minus") }
+                        if canMuteBan(r) {
+                            Button(role: .destructive) {
+                                pendingBanId = r.person.id
+                                pendingBanName = label
+                            } label: { Label("Ban from group", systemImage: "hand.raised") }
+                        }
+                    }
+                } else if canRemove(r) {
+                    Button(role: .destructive) {
+                        pendingRemoveId = r.person.id
+                        pendingRemoveName = label
+                    } label: { Label("Remove from group", systemImage: "xmark") }
+                }
             }
         }
+    }
+
+    private func memberRowSubtitle(_ r: Row, member: ChatMember?, isSilenced: Bool) -> String {
+        var parts: [String] = [memberSubtitle(r)]
+        if r.role == "admin" {
+            let rights = (member?.canMuteBan ?? true) ? "can mute & ban" : "no mute & ban"
+            parts.append(rights)
+        }
+        if isSilenced {
+            if let until = member?.silencedUntil {
+                let date = Date(timeIntervalSince1970: TimeInterval(until) / 1000)
+                let f = DateFormatter()
+                f.doesRelativeDateFormatting = true
+                f.dateStyle = .short
+                f.timeStyle = .short
+                parts.append("Muted until \(f.string(from: date))")
+            } else {
+                parts.append("Muted")
+            }
+        }
+        return parts.joined(separator: " · ")
     }
 
     /// Library: every image, then every file shared in the chat — one place.

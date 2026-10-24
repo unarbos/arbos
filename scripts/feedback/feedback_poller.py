@@ -1340,6 +1340,8 @@ class Loop:
         rows = []
         for fid in self.store.items():
             st = self.store.state(fid)
+            if not gate:
+                break  # gate off: nothing is held; the list is empty by definition
             if st.get("status") not in ("awaiting_jacob",) and not (st.get("awaiting") and st.get("status") == "gating" and not st.get("approved_by_jacob")):
                 continue
             aw = st.get("awaiting") or {}
@@ -1442,7 +1444,7 @@ class Loop:
             self.store.event(fid, "unparked", to=st["status"])
             if st.get("issue"):
                 with contextlib.suppress(HttpError):
-                    self.gh.set_labels(st["issue"], [], ["frozen"])
+                    self.gh.set_labels(st["issue"], [], ["frozen"] + (["awaiting-jacob"] if not self.approval_state() else []))
             n += 1
         (self.cfg.state_dir / self.FREEZE_FILE).unlink(missing_ok=True)
         return n
@@ -3363,6 +3365,7 @@ class Loop:
             log(f"main-red watch failed: {e}")
         try:
             self.watch_deploys()
+            self.note_canary_failure()
         except Exception as e:  # noqa: BLE001
             log(f"deploy watch failed: {e}")
         try:
@@ -3670,6 +3673,77 @@ class Loop:
 
     # ---- landed-not-shipped: code that is on main but runs somewhere no build carries ------------
 
+    DEPLOY_STATE = Path("/var/lib/arbos-deploy")
+
+    def deploy_lane(self) -> dict:
+        """What the CD lane says about agentd image rolls: hold file, last smoke failure (image, reason, log
+        excerpt), items landed on main but not in any rolled image (pending_deploy agentd)."""
+        out: dict = {"held": None, "last_fail": None, "waiting": []}
+        hold = self.DEPLOY_STATE / "agentd.hold"
+        if hold.is_file():
+            with contextlib.suppress(Exception):
+                out["held"] = dict(l.split("=", 1) for l in hold.read_text().splitlines() if "=" in l)
+        fails = []
+        with contextlib.suppress(Exception):
+            for f in (self.DEPLOY_STATE / "failed").glob("agentd-*"):
+                rec = dict(l.split("=", 1) for l in f.read_text().splitlines() if "=" in l)
+                rec["sha"] = f.name.split("-", 1)[1]
+                fails.append(rec)
+        if fails:
+            last = max(fails, key=lambda r: int(r.get("at") or 0))
+            m = re.search(r"image (\d+\.\d+\.\d+)", last.get("reason") or "")
+            version = m.group(1) if m else None
+            excerpt = ""
+            if version:
+                logf = self.DEPLOY_STATE / "runs" / f"agentd-{version}-smoke.log"
+                with contextlib.suppress(Exception):
+                    excerpt = "\n".join(logf.read_text().splitlines()[-25:])
+            out["last_fail"] = {**last, "image": version, "excerpt": excerpt}
+        for fid in self.store.items():
+            st = self.store.state(fid)
+            if st.get("status") in ("pushed", "shipped") and "agentd" in (st.get("pending_deploy") or []):
+                out["waiting"].append(fid)
+        return out
+
+    def print_deploy_lane(self) -> None:
+        lane = self.deploy_lane()
+        if not (lane["held"] or lane["last_fail"] or lane["waiting"]):
+            return
+        print("deploy lane (agentd image):")
+        if lane["held"]:
+            h = lane["held"]
+            print(f"  HELD since {h.get('at')} — {h.get('reason')} (sha {str(h.get('sha'))[:8]}, image {h.get('image')}); lifts on a [canary-fix] commit or `arbos-deploy-worker hold-agentd off`")
+        if lane["last_fail"]:
+            f = lane["last_fail"]
+            print(f"  last failure: image {f.get('image')} @ {f['sha'][:8]} attempt {f.get('attempts')} — {f.get('reason')}")
+        if lane["waiting"]:
+            print(f"  landed on main, not in a rolled image ({len(lane['waiting'])}): "
+                  + ", ".join(f"{fid} #{self.store.state(fid).get('issue')}" for fid in lane["waiting"]))
+
+    def note_canary_failure(self) -> None:
+        """Once per failed image: post the canary log excerpt on every issue whose fix is landed-not-shipped
+        because of it, so owners see why their fix is not live."""
+        lane = self.deploy_lane()
+        f = lane.get("last_fail")
+        if not f or not f.get("image") or not lane["waiting"]:
+            return
+        cur = self.store.cursor()
+        noted = cur.setdefault("canary_noted", [])
+        if f["image"] in noted:
+            return
+        body = (f"Not live yet: the sandbox image **{f['image']}** (agentd @ `{f['sha'][:8]}`) failed the busy-reply canary — "
+                f"{f.get('reason')}. Boxes stay on the previous image; agentd rolls are held until a `[canary-fix]` commit lands "
+                f"(bisect in progress).\n\nCanary log tail:\n```\n{(f.get('excerpt') or '(no log excerpt)')[-2500:]}\n```")
+        for fid in lane["waiting"]:
+            st = self.store.state(fid)
+            if st.get("issue"):
+                with contextlib.suppress(HttpError):
+                    self.gh.comment(st["issue"], body)
+                self.store.event(fid, "canary_failure_noted", image=f["image"])
+        noted.append(f["image"])
+        self.store.save_cursor(cur)
+        log(f"deploy lane: canary failure of image {f['image']} noted on {len(lane['waiting'])} issue(s)")
+
     def watch_deploys(self) -> None:
         """Items whose fix runs on the voice pod (`voice/**`) or in the sandbox image (`crates/arbos-agentd`)
         are live only after that service is redeployed. The audit marks them `pending_deploy`; this clears
@@ -3864,6 +3938,7 @@ class Loop:
             print(f"FEEDBACK FREEZE since {fz.get('since')} (allow: {', '.join(fz.get('allow', []))}); parked {len(parked)}: "
                   + ", ".join(f"{k} {v}" for k, v in sorted(by.items())) + " — `arbos-feedback unfreeze` lifts it")
         self.print_gate_queue(cur)
+        self.print_deploy_lane()
         for fid in self.store.items():
             st = self.store.state(fid)
             bits = [st.get("status", "?"), st.get("target", ""), st.get("tier", ""), st.get("tester", "")]
@@ -4358,7 +4433,22 @@ def main(argv: list[str]) -> int:
         # `approval-gate on --allow unarbos,arbos,const [--by <who>]` / `approval-gate off`
         args = argv[2:]
         if args[:1] == ["off"]:
-            (cfg.state_dir / Loop.APPROVAL_FILE).unlink(missing_ok=True); print("release-approval gate off"); return 0
+            (cfg.state_dir / Loop.APPROVAL_FILE).unlink(missing_ok=True)
+            # Nothing is held any more: release every awaiting item to the normal merge path and drop the label
+            # (03:0x Oct 24: 22 issues kept `awaiting-jacob` after the first gate-off pass).
+            n = 0
+            with (cfg.state_dir / ".lock").open("w") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                for fid in loop.store.items():
+                    st = loop.store.state(fid)
+                    if st.get("status") == "awaiting_jacob":
+                        st["status"] = "gating"; st["released_from_awaiting"] = iso(); loop.store.save_state(fid, st)
+                        loop.store.event(fid, "approval_gate_off", why="gate switched off; back to the normal merge path")
+                    if st.get("awaiting") and st.get("issue") and st.get("status") not in TERMINAL:
+                        with contextlib.suppress(HttpError):
+                            loop.gh.set_labels(st["issue"], [], ["awaiting-jacob"])
+                        n += 1
+            print(f"release-approval gate off; {n} awaiting item(s) released, label dropped"); return 0
         allow = [a.strip() for a in (args[args.index("--allow") + 1] if "--allow" in args else "").split(",") if a.strip()]
         if args[:1] != ["on"] or not allow:
             print("approval-gate on --allow <reporter,...> | approval-gate off"); return 2

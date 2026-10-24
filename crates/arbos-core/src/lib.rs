@@ -30,3 +30,9 @@ pub const TURN_DEADLINE_SECS: u64 = 900;
 
 /// Offload threshold for the main agent's tool results (design §4.4.1).
 pub const OFFLOAD_CHARS: usize = 4_000;
+
+/// `asked_by` a box sends when a human row in a shared chat names no account it can resolve
+/// (no `sender: user:<id>`, unknown device, no matching handle). Never a real user id and never
+/// the owner's, so the relay's secrets checks treat the asker as a person on no People list,
+/// and an owner's "Always allow" for such an ask puts nobody on the list (#1580).
+pub const UNKNOWN_ASKER: &str = "unknown";

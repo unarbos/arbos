@@ -1117,24 +1117,28 @@ struct DevicesPage: View {
     }
 
     @ViewBuilder private func trailing(_ d: AuthDevice) -> some View {
+        // Tag and control on one line, never wrapping (the gate build broke
+        // "Sign out" over two lines next to the "read-only" tag).
         HStack(spacing: 8) {
             if let tag = d.kindTag {
                 Text(tag)
                     .font(theme.font(Theme.tiny))
                     .foregroundStyle(theme.muted)
+                    .lineLimit(1).fixedSize()
                     .padding(.horizontal, 6).padding(.vertical, 2)
                     .background(Capsule().fill(theme.field))
             }
             if d.current {
-                Text("This iPhone").font(theme.font(Theme.small)).foregroundStyle(theme.muted)
+                Text("This iPhone").font(theme.font(Theme.small)).foregroundStyle(theme.muted).lineLimit(1).fixedSize()
             } else {
                 Button { pending = d } label: {
-                    Text("Sign out").font(theme.font(Theme.small)).foregroundStyle(theme.danger)
+                    Text("Sign out").font(theme.font(Theme.small)).foregroundStyle(theme.danger).lineLimit(1).fixedSize()
                 }
                 .buttonStyle(.borderless)
                 .accessibilityLabel("Sign out \(d.displayName)")
             }
         }
+        .fixedSize()
     }
 }
 

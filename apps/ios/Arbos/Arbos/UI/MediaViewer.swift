@@ -885,16 +885,20 @@ extension AppModel {
     }
 
     /// Bubble long-press → Forward: send the message's text to `target` as a
-    /// new message (no reply quote — it is a fresh send in that chat).
-    func forwardText(_ text: String, to target: ForwardTarget) {
+    /// new message (no reply quote — it is a fresh send in that chat) carrying
+    /// `forwardedFrom: by`, so every client draws "Forwarded from <by>" on it
+    /// (feedback app-01M5MXRZ7609S70P9S9P2RZDDF).
+    func forwardText(_ text: String, from by: String, to target: ForwardTarget) {
         let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !body.isEmpty else { return }
+        let name = by.trimmingCharacters(in: .whitespacesAndNewlines)
+        let forwardedFrom = name.isEmpty ? nil : name
         switch target.kind {
         case .people(let c):
-            sendPeople(chatId: c.id, text: body, replyTo: nil)
+            sendPeople(chatId: c.id, text: body, replyTo: nil, forwardedFrom: forwardedFrom)
         case .agent(let p):
             guard let chat = primaryChat(of: p.id) else { return }
-            send(chatId: chat.id, text: body)
+            send(chatId: chat.id, text: body, forwardedFrom: forwardedFrom)
         }
     }
 }

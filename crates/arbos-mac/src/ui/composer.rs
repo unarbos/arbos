@@ -67,11 +67,23 @@ actions!(
         Paste,
         Copy,
         Cut,
+        Undo,
+        Redo,
         Escape,
         AcceptMention,
         PrevMention,
     ]
 );
+
+/// One restore point for ⌘Z / ⌘⇧Z in the composer field.
+#[derive(Clone, PartialEq, Eq)]
+struct EditSnapshot {
+    content: String,
+    selected_range: Range<usize>,
+    selection_reversed: bool,
+}
+
+const UNDO_LIMIT: usize = 100;
 
 pub const MAX_LINES: usize = 10;
 pub const COMPOSER_RADIUS: f32 = COMPOSER_HEIGHT / 2.0;
@@ -188,6 +200,10 @@ pub struct ComposerInput {
     is_selecting: bool,
     /// Vertical scroll inside the box once it reaches `MAX_LINES`.
     scroll_y: f32,
+    /// Prior text states for ⌘Z (paste, word-delete, typing, cut).
+    undo_stack: Vec<EditSnapshot>,
+    /// States undone by ⌘Z, waiting for ⌘⇧Z.
+    redo_stack: Vec<EditSnapshot>,
     /// Runs deferred, after this entity's update ends, so the owner may read
     /// and update the input freely.
     pub on_submit: Option<SubmitHandler>,
@@ -225,6 +241,8 @@ impl ComposerInput {
             layout: None,
             is_selecting: false,
             scroll_y: 0.0,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
             on_submit: None,
             on_mention_next: None,
             on_mention_prev: None,
@@ -270,6 +288,8 @@ impl ComposerInput {
         self.selection_reversed = false;
         self.marked_range = None;
         self.scroll_y = 0.0;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
         cx.notify();
     }
 
@@ -292,6 +312,8 @@ impl ComposerInput {
         self.selection_reversed = false;
         self.marked_range = None;
         self.scroll_y = 0.0;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
         cx.notify();
     }
 
@@ -419,12 +441,62 @@ impl ComposerInput {
         if self.content[at + 1..].contains(char::is_whitespace) {
             return;
         }
+        self.record_undo();
         self.content.truncate(at);
         self.content.push('@');
         self.content.push_str(handle);
         self.content.push(' ');
         let len = self.content.len();
         self.selected_range = len..len;
+        cx.notify();
+    }
+
+    fn snapshot(&self) -> EditSnapshot {
+        EditSnapshot {
+            content: self.content.clone(),
+            selected_range: self.selected_range.clone(),
+            selection_reversed: self.selection_reversed,
+        }
+    }
+
+    fn apply_snapshot(&mut self, snap: EditSnapshot) {
+        self.content = snap.content;
+        self.selected_range = snap.selected_range;
+        self.selection_reversed = snap.selection_reversed;
+        self.marked_range = None;
+    }
+
+    /// Push the current text before a user edit so ⌘Z can restore it.
+    fn record_undo(&mut self) {
+        let snap = self.snapshot();
+        if self.undo_stack.last() == Some(&snap) {
+            return;
+        }
+        self.undo_stack.push(snap);
+        if self.undo_stack.len() > UNDO_LIMIT {
+            self.undo_stack.remove(0);
+        }
+        self.redo_stack.clear();
+    }
+
+    fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(prev) = self.undo_stack.pop() else {
+            return;
+        };
+        self.redo_stack.push(self.snapshot());
+        self.apply_snapshot(prev);
+        cx.notify();
+    }
+
+    fn redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(next) = self.redo_stack.pop() else {
+            return;
+        };
+        self.undo_stack.push(self.snapshot());
+        if self.undo_stack.len() > UNDO_LIMIT {
+            self.undo_stack.remove(0);
+        }
+        self.apply_snapshot(next);
         cx.notify();
     }
 
@@ -1022,6 +1094,12 @@ impl EntityInputHandler for ComposerInput {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        // IME commits keep `marked_range`; the checkpoint was taken when
+        // composition started. Every other edit (paste, word-delete, typing)
+        // records here so ⌘Z restores the prior text.
+        if self.marked_range.is_none() {
+            self.record_undo();
+        }
         self.content =
             self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
@@ -1042,6 +1120,10 @@ impl EntityInputHandler for ComposerInput {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+        // One undo step for the whole IME composition: checkpoint only at start.
+        if self.marked_range.is_none() {
+            self.record_undo();
+        }
         self.content =
             self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
         if !new_text.is_empty() {
@@ -1486,6 +1568,8 @@ impl Render for ComposerInput {
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::undo))
+            .on_action(cx.listener(Self::redo))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))

@@ -17,6 +17,14 @@ private struct PendingForward: Identifiable, Equatable {
     let from: String
 }
 
+/// Long-press → Delete: the row waiting on "Delete message?" (feedback
+/// app-01M5MXQ90MEEWF6C8W090VCZHF). Nothing is deleted until the confirm.
+private struct PendingDelete: Identifiable, Equatable {
+    var id: Id { messageId }
+    let messageId: Id
+    let title: String
+}
+
 struct ChatView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -90,6 +98,7 @@ struct ChatView: View {
     @State private var replySwipeActive = false
     /// Long-press → Forward: the text to send and who wrote it (Forward sheet).
     @State private var pendingForward: PendingForward?
+    @State private var pendingDelete: PendingDelete?
 
     /// Rows after the in-chat search filter (profile "search").
     private var visibleRows: [Row] {
@@ -180,6 +189,8 @@ struct ChatView: View {
         Task { await calls.start(chatId: chatId, projectId: isPeople ? nil : projectId, kind: kind, title: callTitle) }
     }
     @State private var replyTo: Message?
+    /// Long-press → Edit: the own message whose text is in the composer.
+    @State private var editing: Message?
     /// Drives the connection pill's dot pulse while it is reconnecting / syncing.
     @State private var pulsePhase = false
     /// The original a quote tap scrolled to; tinted until the fade timer clears it.
@@ -428,9 +439,12 @@ struct ChatView: View {
         }
         .animation(.easeOut(duration: 0.2), value: awayFromBottom)
         .animation(.easeOut(duration: 0.2), value: newBelowCount > 0)
+        .environment(\.composerInset, composerSideInset)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
                 presenceRow
+                    .environment(\.composerInset, composerSideInset)
+                    .animation(.easeOut(duration: 0.25), value: composerFocused)
                 Group {
                     if isChannel, !model.channelCanPost(chatId) {
                         // Rule 9: a restricted channel I cannot post in — one quiet line, no composer.
@@ -440,6 +454,14 @@ struct ChatView: View {
                             .frame(maxWidth: .infinity)
                             .frame(height: Theme.fieldHeight)
                             .accessibilityIdentifier("channel-read-only")
+                    } else if isPeople, people?.isSilencedNow == true {
+                        // Group admin muted me from posting — one quiet line, no composer.
+                        Text("You've been muted in this group")
+                            .font(theme.font(Theme.small))
+                            .foregroundStyle(theme.muted)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: Theme.fieldHeight)
+                            .accessibilityIdentifier("group-silenced")
                     } else {
                         composer
                     }
@@ -469,7 +491,7 @@ struct ChatView: View {
                         safeTop: geo.safeAreaInsets.top,
                         safeBottom: geo.safeAreaInsets.bottom,
                         held: heldReactions(row),
-                        items: MessageMenu.items,
+                        items: MessageMenu.items(forMessage: true, canEdit: canEditMessage(row), canDelete: canDelete(row)),
                         onReact: { emoji in
                             closeActions()
                             model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: emoji)
@@ -518,10 +540,24 @@ struct ChatView: View {
         .sheet(isPresented: $showProfile) {
             AgentEditSheet(projectId: projectId).environmentObject(model).environment(\.theme, theme)
         }
+        .confirmationDialog(
+            pendingDelete?.title ?? "Delete message?",
+            isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
+            titleVisibility: .visible,
+            presenting: pendingDelete
+        ) { pending in
+            Button("Delete", role: .destructive) {
+                pendingDelete = nil
+                model.deleteMessage(chatId: chatId, messageId: pending.messageId, projectId: isPeople ? nil : projectId)
+            }
+            Button("Cancel", role: .cancel) { pendingDelete = nil }
+        } message: { _ in
+            Text(MessageDeleteCopy.body)
+        }
         .sheet(item: $pendingForward) { pending in
             ForwardSheet(fromName: pending.from) { target in
                 pendingForward = nil
-                model.forwardText(pending.text, to: target)
+                model.forwardText(pending.text, from: pending.from, to: target)
                 model.notice = Notice(text: "Forwarded to \(target.title)")
             }
             .environmentObject(model)
@@ -685,6 +721,24 @@ struct ChatView: View {
                             model.fixtureAgentMessage(chatId: chatId, received: show == "agent-message-received")
                         }
                         #endif
+                    case "forward":
+                        // Rig: the Forward sheet for the newest message bubble.
+                        if let row = rows.last(where: { isMessageRow($0) }) { beginForward(row) }
+                    case "forwarded":
+                        // Rig: a sent bubble forwarded from Sam Rivera (fixture only).
+                        #if DEBUG
+                        if model.isFixture {
+                            model.fixtureAppend(chatId: chatId,
+                                                text: "Sending in a sec. Also: can we add your Arbos agent here so it can pull the numbers while we talk?",
+                                                attachments: [], forwardedFrom: "Sam Rivera")
+                        }
+                        #endif
+                    case "actions":
+                        // Rig: the long-press actions (capsule + menu) on the newest bubble.
+                        if let row = rows.last(where: { isMessageRow($0) }) { actionsRow = row }
+                    case "delete":
+                        // Rig: the "Delete message?" confirm for the newest bubble.
+                        if let row = rows.last(where: { isMessageRow($0) }) { beginDelete(row) }
                     case "replied":
                         // Rig: a sent bubble quoting the newest agent message (fixture only).
                         #if DEBUG
@@ -1101,6 +1155,8 @@ struct ChatView: View {
                     Color.clear.frame(height: 28).id("bottom")
                 }
                 .padding(.horizontal, 16)
+                // The avatar column follows the `+` as the composer inset animates with the keyboard.
+                .animation(.easeOut(duration: 0.25), value: composerFocused)
                 // Short threads: fill the viewport and pin rows to the bottom so
                 // two bubbles cannot float mid-screen (scroll-anchor alone was
                 // centering them on iOS 26). Empty-state copy keeps its own
@@ -1205,8 +1261,9 @@ struct ChatView: View {
     }
 
     /// "@sam" / "Bob" (the agent of this chat) / "you" for the composer's reply preview.
+    /// My own rows carry `sender: user:<my id>` in shared projects — still "you".
     private func replyLabel(for m: Message) -> String {
-        if let h = m.senderHandle, m.sender != "user" { return "@\(h)" }
+        if let h = m.senderHandle, m.sender != "user", m.sender != model.myUserId { return "@\(h)" }
         if m.role == .assistant || m.role == .project { return project?.name ?? "the agent" }
         return "you"
     }
@@ -1252,10 +1309,28 @@ struct ChatView: View {
         return Set(m.reactions.filter { $0.senders.contains(me) }.map(\.emoji))
     }
 
+    /// The relay's delete rule for this row (`MessageDeleteRule`): owners moderate; members
+    /// delete their own and their own agents'.
+    private func canDelete(_ row: Row) -> Bool {
+        guard let m = messageById[row.messageId] else { return false }
+        let meId = model.user?.id
+        let moderates: Bool
+        var agentOwners: [String: String] = [:]
+        if let people {
+            moderates = people.myRole == "owner" || people.myRole == "admin"
+            for a in people.agents { if let owner = a.ownerId { agentOwners[a.id] = owner } }
+        } else if isChannel {
+            moderates = false
+        } else {
+            moderates = !(project?.shared ?? false)
+        }
+        return MessageDeleteRule.mayDelete(sender: m.sender, meId: meId, moderates: moderates, agentOwnerIds: agentOwners)
+    }
+
     /// The long-press menu's actions (`MessageMenu`): Copy the text, Reply
     /// (in a people chat the agent that wrote it becomes the recipient),
     /// Forward to another chat, Reply in DM (open a private chat with the human
-    /// who wrote it), Delete for everyone.
+    /// who wrote it), Edit (own text), Delete for everyone.
     private func runMessageMenu(_ item: MessageMenuItem, row: Row) {
         switch item {
         case .copy:
@@ -1274,9 +1349,35 @@ struct ChatView: View {
                   m.sender != model.myUserId
             else { return }
             Task { _ = await model.openDM(handle: handle) }
+        case .edit:
+            beginEdit(row)
         case .delete:
-            model.deleteMessage(chatId: chatId, messageId: row.messageId)
+            beginDelete(row)
         }
+    }
+
+    /// Own user text the long-press menu may offer Edit for.
+    private func canEditMessage(_ row: Row) -> Bool {
+        guard isMessageRow(row), let m = messageById[row.messageId] else { return false }
+        guard isOwnMessage(m) else { return false }
+        return !m.plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// A message this device's user wrote (people `user:<id>`, or bare `user` in
+    /// a solo project chat).
+    private func isOwnMessage(_ m: Message) -> Bool {
+        guard m.role == .user else { return false }
+        if let me = model.myUserId, m.sender == me { return true }
+        return m.sender == "user" || m.sender.isEmpty
+    }
+
+    /// Long-press → Delete: ask first. The title names the sender when it is not my message
+    /// (a moderator deleting a member's or an agent's line).
+    private func beginDelete(_ row: Row) {
+        guard let m = messageById[row.messageId] else { return }
+        let mine = m.role == .user && (m.sender == "user" || m.sender == model.myUserId)
+        let sender = mine ? "" : MediaAlbum.senderName(m) { model.project($0)?.name }
+        pendingDelete = PendingDelete(messageId: row.messageId, title: MessageDeleteCopy.title(mine: mine, sender: sender))
     }
 
     /// Long-press → Forward: open the chat picker with this row's text.
@@ -1284,7 +1385,10 @@ struct ChatView: View {
         guard let m = messageById[row.messageId] else { return }
         let text = m.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
-        let from = MediaAlbum.senderName(m) { model.project($0)?.name }
+        // "Forwarded from <name>" names me by my display name, not "You".
+        let from = m.role == .user && m.senderName == nil && (m.sender == "user" || m.sender == model.myUserId)
+            ? (model.user.map { me in me.name.flatMap { $0.isEmpty ? nil : $0 } ?? me.login } ?? "You")
+            : MediaAlbum.senderName(m) { model.project($0)?.name }
         pendingForward = PendingForward(text: text, from: from)
     }
 
@@ -1292,10 +1396,22 @@ struct ChatView: View {
     /// Shared by the long-press Reply item and swipe-right-to-reply on the bubble.
     private func beginReply(to row: Row) {
         guard let m = messageById[row.messageId] else { return }
+        editing = nil
         replyTo = m
         if isPeople, let member = agentMember(for: m)?.member {
             talkTo = [member]
         }
+        composerFocused = true
+    }
+
+    /// Edit this own message: put its text in the composer with an Editing bar.
+    private func beginEdit(_ row: Row) {
+        guard let m = messageById[row.messageId] else { return }
+        let text = m.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, isOwnMessage(m) else { return }
+        replyTo = nil
+        editing = m
+        draft = m.plainText
         composerFocused = true
     }
 
@@ -1417,6 +1533,7 @@ struct ChatView: View {
                             composerFocused = true
                         }
                         replyTo = nil
+                        editing = nil
                     } label: {
                         HStack(spacing: 6) {
                             if m.isAgent, let p = m.project {
@@ -1501,6 +1618,28 @@ struct ChatView: View {
         .accessibilityElement(children: .combine)
     }
 
+    /// Same height/shape as the reply preview: glyph, "Editing", one truncated line, ×.
+    private func editPreview(_ m: Message) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "pencil").font(.system(size: 12)).foregroundStyle(theme.muted)
+            Text("Editing").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                .lineLimit(1).fixedSize()
+            Text(Quote.line(of: m, maxChars: Theme.replyPreviewChars))
+                .font(theme.font(Theme.tiny)).foregroundStyle(theme.text)
+                .lineLimit(1).truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button { editing = nil } label: { Image(systemName: "xmark").font(.system(size: 11, weight: .bold)).foregroundStyle(theme.muted) }
+                .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 14)
+        .frame(maxWidth: .infinity)
+        .frame(height: Theme.replyPreviewHeight)
+        .clipped()
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(theme.bubbleAssistant))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Editing message")
+    }
+
     /// The blob of the first picture on the quoted message, for the preview's thumbnail.
     private func quotedImageRef(_ m: Message) -> String? {
         for part in m.parts {
@@ -1514,7 +1653,9 @@ struct ChatView: View {
             if let q = mentionQuery, isPeople, let people {
                 mentionList(people, query: q)
             }
-            if let r = replyTo {
+            if let e = editing {
+                editPreview(e)
+            } else if let r = replyTo {
                 replyPreview(r)
             }
             if !pending.isEmpty {
@@ -1934,6 +2075,7 @@ struct ChatView: View {
         draft = ""
         model.setComposerDraft("", for: chatId)
         replyTo = nil
+        editing = nil
         mentionQuery = nil
         pinTalkTo(afterSending: address, chipMentions: chips)
         sentOnce = true
@@ -1984,6 +2126,18 @@ struct ChatView: View {
         pinnedToBottom = true
         awayFromBottom = false
         newBelowCount = 0
+        if let edit = editing {
+            // Save the edit in place — no new bubble, no send command.
+            guard !text.isEmpty else { return }
+            model.editMessage(chatId: chatId, messageId: edit.id, text: text)
+            pending.removeAll()
+            draft = ""
+            model.setComposerDraft("", for: chatId)
+            editing = nil
+            replyTo = nil
+            sentOnce = true
+            return
+        }
         if isChannel {
             // Rule 3/9: the composer sends through the shared client's `sendText`.
             guard !text.isEmpty else { return }

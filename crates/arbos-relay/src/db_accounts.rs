@@ -593,6 +593,19 @@ impl Db {
         })
     }
 
+    /// Device ids of a user, most recently seen first — revoked ones included, since a row they
+    /// wrote keeps its `deviceId` for good. Capped so a roster stays small.
+    pub fn device_ids_of_user(&self, user_id: &str, limit: usize) -> Result<Vec<String>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT id FROM devices WHERE user_id = ?1
+                 ORDER BY COALESCE(last_seen_at, created_at) DESC LIMIT ?2",
+            )?;
+            let rows = st.query_map(params![user_id, limit as i64], |r| r.get(0))?;
+            rows.collect()
+        })
+    }
+
     pub fn insert_auth_grant(
         &self,
         code_hash: &str,

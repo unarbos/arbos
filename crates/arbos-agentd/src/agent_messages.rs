@@ -354,6 +354,8 @@ impl Agent {
                 &[
                     ("agentReplyTo", json!(from_name)),
                     ("agentReplyToId", json!(from_id)),
+                    // The quote header on the bubble points at the incoming row (#1521).
+                    ("replyTo", json!(msg_id)),
                 ],
             );
         }

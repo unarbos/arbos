@@ -141,6 +141,12 @@ struct RootView: View {
                 Task { await model.joinFromLink(code: code) }
                 return
             }
+            // Group invite links: arbos://join-group/<code> — what arbos.life/g/<code> hands to the app.
+            if url.scheme == "arbos", url.host == "join-group" {
+                let code = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                Task { await model.joinGroupFromLink(code: code) }
+                return
+            }
             guard AuthEndpoints.isConnectorCallback(url) else { return }
             model.refreshConnectors()
         }

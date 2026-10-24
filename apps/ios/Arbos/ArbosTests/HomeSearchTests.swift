@@ -106,3 +106,39 @@ final class HomeSearchTests: XCTestCase {
         XCTAssertNil(HomeSearch.snippet("plain", q: "x"))
     }
 }
+
+/// The home list filter — All · Agents · People · Servers (Mac parity,
+/// 2026-10-24; the Mac twin is `sidebar::strip_tests` in crates/arbos-mac).
+final class HomeListFilterTests: XCTestCase {
+    func testTheFourSegmentsInOrder() {
+        XCTAssertEqual(HomeListFilter.allCases.map(\.rawValue), ["All", "Agents", "People", "Servers"])
+    }
+
+    func testAllShowsEverything() {
+        XCTAssertTrue(HomeListFilter.all.showsProjects)
+        XCTAssertTrue(HomeListFilter.all.showsPeople)
+        XCTAssertTrue(HomeListFilter.all.showsServers)
+        XCTAssertTrue(HomeListFilter.all.admitsProject(shared: true))
+    }
+
+    func testAgentsShowsMyAgentsOnly() {
+        XCTAssertTrue(HomeListFilter.agents.admitsProject(shared: false))
+        XCTAssertFalse(HomeListFilter.agents.admitsProject(shared: true), "a shared-in agent stays out")
+        XCTAssertFalse(HomeListFilter.agents.showsPeople)
+        XCTAssertFalse(HomeListFilter.agents.showsServers)
+    }
+
+    func testPeopleShowsPeopleChatsOnly() {
+        XCTAssertTrue(HomeListFilter.people.showsPeople)
+        XCTAssertFalse(HomeListFilter.people.showsProjects)
+        XCTAssertFalse(HomeListFilter.people.admitsProject(shared: false))
+        XCTAssertFalse(HomeListFilter.people.showsServers)
+    }
+
+    func testServersShowsServersOnly() {
+        XCTAssertTrue(HomeListFilter.servers.showsServers)
+        XCTAssertFalse(HomeListFilter.servers.showsProjects)
+        XCTAssertFalse(HomeListFilter.servers.showsPeople)
+        XCTAssertEqual(HomeListFilter.servers.emptyCopy, "No servers yet")
+    }
+}

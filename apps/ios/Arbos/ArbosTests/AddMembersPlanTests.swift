@@ -19,7 +19,7 @@ final class AddMembersPlanTests: XCTestCase {
     private func testingGroup() -> PeopleChat {
         PeopleChat(id: "chat_testing", kind: "group", createdBy: "gh_me", createdAt: 0, title: "Testing", pending: false,
                    members: [member("gh_me", "unarbos"), member("gh_1", "allan"), member("gh_2", "const"), member("proj_lium", "lium", agent: true)],
-                   headSeq: 0, readSeq: 0, unread: false, lockState: "people_only", lastActivityAt: 0, myRole: "owner", muted: false)
+                   headSeq: 0, readSeq: 0, unread: false, lockState: "people_only", lastActivityAt: 0, myRole: "owner", muted: false, silenced: false)
     }
 
     func testExistingMembersCountAsAlreadyInTheGroup() {

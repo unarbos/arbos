@@ -1121,6 +1121,8 @@ pub(crate) fn chat_dto_for(state: &AppState, c: &Chat, user: Option<&str>) -> Ch
     dto.me = Some(ChatMeDto {
         role: None,
         muted: None,
+        silenced: None,
+        silenced_until: None,
         archived_at,
         read_receipts: None,
     });

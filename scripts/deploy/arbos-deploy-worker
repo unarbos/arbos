@@ -117,6 +117,37 @@ record_failure() {
   log "$kind: deploy of $sha FAILED (attempt $((n + 1))) — $reason"
 }
 
+# Image-roll hold (2026-10-24 01:1x): three images in a row (0.1.101/102/103) failed the busy-reply canary on
+# the same bad agentd commit; every new merge burned another image. After a canary failure the lane is HELD:
+# no agentd roll starts until an operator lifts it (`arbos-deploy-worker hold-agentd off`) or a commit whose
+# message carries `[canary-fix]` reaches main. The hold file names the failing image and sha.
+agentd_hold_file() { echo "$STATE/agentd.hold"; }
+agentd_held() { [[ -f "$(agentd_hold_file)" ]]; }
+hold_agentd() {
+  # hold_agentd <sha> <version> <reason>
+  printf 'sha=%s\nimage=%s\nat=%s\nreason=%s\n' "$1" "$2" "$(date -u +%FT%TZ)" "$3" > "$(agentd_hold_file)"
+  event agentd "$1" roll_held "image $2: $3 — agentd rolls held until a [canary-fix] commit lands or the hold is lifted"
+  log "agentd: HOLD — $3 (image $2); no further images until a [canary-fix] commit lands or 'hold-agentd off'"
+}
+agentd_hold_release_if_fixed() {
+  # A commit tagged [canary-fix] on main since the hold lifts it.
+  agentd_held || return 0
+  local held_sha c
+  held_sha="$(sed -n 's/^sha=//p' "$(agentd_hold_file)" | head -1)"
+  # Only a commit that (a) carries the tag in its subject and (b) touches agentd code lifts the hold — a
+  # commit that merely mentions the tag in prose (01:30 Oct 24: this very feature's commit, which rolled
+  # 0.1.105 without the fix) must not.
+  while read -r c; do
+    [[ -n "$c" ]] || continue
+    if git -C "$REPO" diff-tree --no-commit-id --name-only -r "$c" 2>/dev/null | grep -qE '^(crates/arbos-agentd/|image/)'; then
+      log "agentd: canary-fix commit ${c:0:9} is on main; lifting the hold"
+      event agentd "$c" roll_hold_lifted "canary-fix commit ${c:0:9} landed"
+      rm -f "$(agentd_hold_file)"
+      return 0
+    fi
+  done < <(git -C "$REPO" log --format='%H %s' "${held_sha:-HEAD~50}..origin/main" 2>/dev/null | grep -i 'canary-fix\]' | cut -d' ' -f1)
+}
+
 gh_api() {
   # gh_api <path-after-repo> [curl args…]
   local path="$1"; shift
@@ -558,6 +589,11 @@ roll_image() {
   need_root
   local sha="$1" version tag t0 st waited=0 image snapshot
   ensure_repo
+  agentd_hold_release_if_fixed
+  if agentd_held; then
+    log "agentd: roll of $1 skipped — lane held ($(sed -n 's/^reason=//p' "$(agentd_hold_file)" | head -1)); 'arbos-deploy-worker hold-agentd off' or a [canary-fix] commit lifts it"
+    exit 0
+  fi
   sha="$(resolve "$sha")" || { log "agentd: cannot resolve $1"; exit 1; }
   version="$(next_image_version "$sha")"
   tag="image-v$version"
@@ -595,6 +631,7 @@ roll_image() {
   fi
   if (( smoke_rc == 1 )); then
     record_failure agentd "$sha" "busy-reply smoke failed on the canary box (image $version); default not switched, nothing rolled"
+    hold_agentd "$sha" "$version" "busy-reply canary failed (turn never started); log $STATE/runs/agentd-$version-smoke.log"
     exit 1
   fi
   if grep -q '^ARBOS_DAYTONA_SNAPSHOT=' "$RELAY_ENV"; then
@@ -905,6 +942,7 @@ status() {
   echo "queue:"; ls -l "$QUEUE" 2>/dev/null | tail -n +2 || true
   for f in "$QUEUE"/*; do [[ -f "$f" ]] && { echo "  $(basename "$f"): $(tr '\n' ' ' < "$f")"; }; done
   echo "failed:"; for f in "$STATE"/failed/*; do [[ -f "$f" ]] && echo "  $(basename "$f"): $(tr '\n' ' ' < "$f")"; done
+  if agentd_held; then echo "agentd lane HELD: $(tr '\n' ' ' < "$(agentd_hold_file)")"; else echo "agentd lane: open"; fi
   echo "agentd roll unit: $(systemctl show -p ActiveState --value arbos-deploy-agentd.service 2>/dev/null || true)"
   [[ -f "$STATE/agentd.rolling" ]] && echo "agentd roll pending: $(tr '\n' ' ' < "$STATE/agentd.rolling")"
   echo "events (last 5):"; tail -n 5 "$EVENTS" 2>/dev/null || true
@@ -940,5 +978,11 @@ case "${1:-}" in
   roll-image) roll_image "${2:?sha}" ;;
   roll-continue) roll_continue ;;
   status) status ;;
-  *) echo "usage: arbos-deploy-worker tick | roll-image <sha> | roll-continue | status | selftest" >&2; exit 2 ;;
+  hold-agentd)
+    case "${2:-}" in
+      off) rm -f "$(agentd_hold_file)"; event agentd "$(resolve origin/main 2>/dev/null || echo unknown)" roll_hold_lifted "lifted by the operator"; echo "agentd lane open" ;;
+      on) hold_agentd "$(resolve origin/main 2>/dev/null || echo unknown)" manual "${3:-held by the operator}"; echo "agentd lane held" ;;
+      *) if agentd_held; then tr '\n' ' ' < "$(agentd_hold_file)"; echo; else echo "agentd lane open"; fi ;;
+    esac ;;
+  *) echo "usage: arbos-deploy-worker tick | roll-image <sha> | roll-continue | status | hold-agentd [on <reason>|off] | selftest" >&2; exit 2 ;;
 esac

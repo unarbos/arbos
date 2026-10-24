@@ -300,6 +300,30 @@ async fn run(
     timeout: Duration,
 ) -> Result<()> {
     let mut s = Session::load(cfg, project, chat)?;
+    // People chats: the row names its author like the apps do (`user:<id>`, handle, name) so
+    // the agent knows who asked (D72 attribution; a secret's People list, spec §7.7). In a
+    // project's own chats the plain `user` sender is the owner.
+    let author = if project == "people" && matches!(mode, Mode::Send { .. }) {
+        match crate::client::Relay::new(cfg).get("/me").await {
+            Ok(me) => {
+                let u = me.pointer("/user").unwrap_or(&me);
+                let id = u.get("id").and_then(Value::as_str).unwrap_or("").to_owned();
+                (!id.is_empty()).then(|| {
+                    (
+                        format!("user:{id}"),
+                        u.get("login").and_then(Value::as_str).map(str::to_owned),
+                        u.get("name")
+                            .and_then(Value::as_str)
+                            .filter(|n| !n.is_empty())
+                            .map(str::to_owned),
+                    )
+                })
+            }
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
     let ws = connect(cfg, &s.room).await?;
     let (mut sink, mut stream) = ws.split();
     let hello = Frame::new(
@@ -476,12 +500,24 @@ async fn run(
                                     .append_user_answer(&msg_id, &rendered, &qid, value, &s.device);
                             }
                             None => {
+                                let mut extra: Vec<(&str, Value)> = Vec::new();
+                                if let Some((_, handle, name)) = &author {
+                                    if let Some(h) = handle {
+                                        extra.push(("senderHandle", json!(h)));
+                                    }
+                                    if let Some(n) = name {
+                                        extra.push(("senderName", json!(n)));
+                                    }
+                                }
                                 s.doc.append_user_message_from(
                                     &msg_id,
                                     text,
                                     &s.device,
-                                    "user",
-                                    &[],
+                                    author
+                                        .as_ref()
+                                        .map(|(id, _, _)| id.as_str())
+                                        .unwrap_or("user"),
+                                    &extra,
                                 );
                             }
                         }

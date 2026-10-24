@@ -89,9 +89,55 @@ struct ChatMember: Identifiable, Equatable {
     var description: String? = nil
     /// D79 `avatar_color_index_effective` from the relay (nil → derived from `id`).
     var avatarColorIndex: Int? = nil
+    /// Group admin muted this person from posting (not notification mute).
+    var silenced: Bool = false
+    /// When the admin mute ends (ms). nil while muted = until unmuted.
+    var silencedUntil: Int64? = nil
+    /// Admin: owner granted mute/ban rights (default true). Meaningful only when role is admin.
+    var canMuteBan: Bool = true
 
     var isAgent: Bool { kind == .agent }
     var displayName: String { kind == .agent ? (project?.name ?? handle) : (name?.isEmpty == false ? name! : handle) }
+
+    /// True while an admin mute still blocks posting (honours timed `silencedUntil`).
+    var isSilencedNow: Bool {
+        guard silenced else { return false }
+        if let until = silencedUntil {
+            let now = Int64(Date().timeIntervalSince1970 * 1000)
+            if until <= now { return false }
+        }
+        return true
+    }
+}
+
+/// How long an admin mute lasts when silencing a group member from posting.
+enum MemberMuteDuration: CaseIterable, Identifiable {
+    case oneHour
+    case eightHours
+    case oneDay
+    case untilUnmuted
+
+    var id: String { title }
+
+    var title: String {
+        switch self {
+        case .oneHour: return "For 1 hour"
+        case .eightHours: return "For 8 hours"
+        case .oneDay: return "For 24 hours"
+        case .untilUnmuted: return "Until unmuted"
+        }
+    }
+
+    /// Relay `silenced_until` in ms, or nil for until unmuted.
+    var silencedUntilMs: Int64? {
+        let now = Date().timeIntervalSince1970 * 1000
+        switch self {
+        case .oneHour: return Int64(now + 60 * 60 * 1000)
+        case .eightHours: return Int64(now + 8 * 60 * 60 * 1000)
+        case .oneDay: return Int64(now + 24 * 60 * 60 * 1000)
+        case .untilUnmuted: return nil
+        }
+    }
 }
 
 extension ChatMember {
@@ -140,6 +186,9 @@ extension ChatMember {
         self.online = dto.online ?? false
         self.avatarColorIndex = dto.avatar_color_index_effective.map(Int.init)
         self.description = dto.description ?? dto.project?.description
+        self.silenced = dto.silenced ?? false
+        self.silencedUntil = dto.silenced_until
+        self.canMuteBan = dto.can_mute_ban ?? true
     }
 
     static func parse(_ raw: Any) -> ChatMember? {
@@ -178,10 +227,24 @@ struct PeopleChat: Identifiable, Equatable {
     var lastActivityAt: Int64
     var myRole: String
     var muted: Bool
+    /// Admin muted me from posting in this group.
+    var silenced: Bool
+    /// When my admin mute ends (ms). nil while muted = until unmuted.
+    var silencedUntil: Int64? = nil
     /// Per-user sidebar archive (`archived_at` on the relay); nil = in the list.
     var archivedAt: Int64? = nil
     /// Group policy: members may see who has read messages (owner/admin toggle). Default on.
     var membersSeeReads: Bool = true
+
+    /// True while I am muted from posting (honours timed mute).
+    var isSilencedNow: Bool {
+        guard silenced else { return false }
+        if let until = silencedUntil {
+            let now = Int64(Date().timeIntervalSince1970 * 1000)
+            if until <= now { return false }
+        }
+        return true
+    }
 
     var humans: [ChatMember] { members.filter { !$0.isAgent } }
     var agents: [ChatMember] { members.filter { $0.isAgent } }
@@ -220,6 +283,8 @@ extension PeopleChat {
         self.lastActivityAt = dto.last_activity_at
         self.myRole = dto.me.role.flatMap { $0 } ?? "member"
         self.muted = dto.me.muted ?? false
+        self.silenced = dto.me.silenced ?? false
+        self.silencedUntil = dto.me.silenced_until
         self.archivedAt = dto.archived_at.flatMap { $0 > 0 ? $0 : nil }
         self.membersSeeReads = dto.members_see_reads ?? true
     }

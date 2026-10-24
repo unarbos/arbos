@@ -807,6 +807,50 @@ impl ChatDoc {
         Ok(())
     }
 
+    /// Client write: replace the body of a message's last `text` part and set
+    /// `editedAt`. Does not commit. No-op when the id is missing or there is no
+    /// text part (attachment-only rows). User rows keep one text part after any
+    /// attachments; that is the part this updates.
+    pub fn edit_message_text(&self, msg_id: &str, text: &str) -> CoreResult<()> {
+        if msg_id.is_empty() {
+            return Ok(());
+        }
+        let Some(map) = self.find_message(msg_id) else {
+            return Ok(());
+        };
+        let Some(parts) = self.parts_of(msg_id) else {
+            return Ok(());
+        };
+        let mut text_part: Option<(String, LoroMap)> = None;
+        for i in 0..parts.len() {
+            let Some(ValueOrContainer::Container(Container::Map(p))) = parts.get(i) else {
+                continue;
+            };
+            let kind = match p.get("kind") {
+                Some(ValueOrContainer::Value(LoroValue::String(s))) => s.to_string(),
+                _ => continue,
+            };
+            if kind != "text" {
+                continue;
+            }
+            let id = match p.get("id") {
+                Some(ValueOrContainer::Value(LoroValue::String(s))) => s.to_string(),
+                _ => continue,
+            };
+            text_part = Some((id, p));
+        }
+        let Some((part_id, part)) = text_part else {
+            return Ok(());
+        };
+        let t = loro_err(part.insert_container("text", LoroText::new()))?;
+        loro_err(t.insert(0, text))?;
+        self.live_text
+            .borrow_mut()
+            .insert((msg_id.to_owned(), part_id), t);
+        loro_err(map.insert("editedAt", now_ms()))?;
+        Ok(())
+    }
+
     /// Client write: append a `commands` row. Does not commit. Returns the command id.
     /// Object payloads become a nested `LoroMap` (arrays → `LoroList`).
     pub fn push_command(&self, kind: &str, payload: Value, device_id: &str) -> String {
@@ -2134,6 +2178,29 @@ mod tests {
         b.import(&a.export_updates_since(&base)).unwrap();
         assert_eq!(b.messages_list().len(), 1);
         assert_eq!(b.messages()[0].id, "keep");
+    }
+
+    #[test]
+    fn edit_message_text_replaces_body_and_syncs() {
+        let a = ChatDoc::new(None, false);
+        let mut b = ChatDoc::new(None, false);
+        a.transact(|d| {
+            d.append_user_message("m1", "hello", "dev:a", &UserMessageOpts::default())
+                .unwrap();
+        });
+        b.import(&a.snapshot()).unwrap();
+        assert_eq!(message_text(&a.to_json()["messages"][0]), "hello");
+
+        let base = a.oplog_vv();
+        a.transact(|d| d.edit_message_text("m1", "hello edited").unwrap());
+        let row = &a.to_json()["messages"][0];
+        assert_eq!(message_text(row), "hello edited");
+        assert!(row.get("editedAt").and_then(|v| v.as_i64()).unwrap_or(0) > 0);
+        a.edit_message_text("missing", "x").unwrap(); // missing id is a no-op
+        a.edit_message_text("", "x").unwrap();
+
+        b.import(&a.export_updates_since(&base)).unwrap();
+        assert_eq!(message_text(&b.to_json()["messages"][0]), "hello edited");
     }
 
     #[test]

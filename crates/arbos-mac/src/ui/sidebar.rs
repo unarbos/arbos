@@ -1,8 +1,21 @@
-//! The chat list: the iPhone home screen as a Mac sidebar. A top bar with an
-//! oval Search field on the left, "+" and the collapse control on the right,
-//! then every agent and person as one row — avatar, name, time, last line.
-//! The account circle (its dot is the machine state) and gear sit at the
-//! bottom; the Update pill only while a newer build exists.
+//! The chat list: the iPhone home screen as a Mac sidebar. The top strip holds
+//! three round buttons on the right — search (a closed button that expands
+//! into its field on click / ⌘F), "+", and the collapse toggle — then the
+//! iPhone home's All · Agents · People · Servers filter, then every agent,
+//! person and server as one row — avatar, name, time, last line. The account
+//! circle (its dot is the machine state) sits at the bottom; the Update pill
+//! only while a newer build exists.
+//!
+//! # Three-pane rule (app-wide, Jacob 2026-10-20; `docs/mac-design-rules.md`)
+//!
+//! Exactly three panes. **Left** always lists chats, groups and servers, and
+//! its top strip holds only three controls: **+**, **search**, **minimize**
+//! (collapse). Entering a server slides this pane over to that server's
+//! channel list. **Centre** is always a chat. **Right** shows every
+//! details / members / settings screen and closes with an X. The strip's
+//! composition is pinned by [`strip_controls`] and its tests; #1491 replaced
+//! the buttons with an always-open Search pill, and Jacob asked for the
+//! compact round buttons back ([feedback sidebar-strip-filter-2026-10-24]).
 
 use std::sync::Arc;
 
@@ -25,8 +38,8 @@ use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::shell::{Shell, TRAFFIC_LIGHTS_INSET};
 use crate::ui::theme::{
-    Theme, AVATAR_ROW, HEADER_HEIGHT, PANEL_RADIUS, SIDEBAR_RESIZE_HANDLE, TEXT_BODY, TEXT_SMALL,
-    TEXT_TINY,
+    Theme, AVATAR_ROW, CONTROL, HEADER_HEIGHT, PANEL_RADIUS, SIDEBAR_RESIZE_HANDLE, TEXT_BODY,
+    TEXT_SMALL, TEXT_TINY,
 };
 
 /// Drag payload for the chat-list column's right-edge resize handle.
@@ -42,17 +55,168 @@ impl Render for SidebarResizeDragGhost {
 }
 
 /// The drag strip beside the traffic lights: Grok Mac's 44 pt top band, the
-/// same height as the chat header ([feedback mac-header-height-grok]). An oval
-/// Search field sits left of the lights' gap; "+" and the collapse control
-/// sit on the right end of the strip so folding the pane is intuitive
-/// ([feedback app-01M5MWZ5T20MS6KA35CFZY8CTG]). Controls are centred on the
-/// lights' line: macOS draws them at 20.75 pt in this window, so the 44 band
-/// is centred 1 pt high (Grok: 21.75 / 21.75).
+/// same height as the chat header ([feedback mac-header-height-grok]). Its
+/// three round buttons (search · + · collapse, [`STRIP_BUTTON`] discs,
+/// [`STRIP_GAP`] apart, [`STRIP_INSET`] from the right edge) are centred on
+/// the lights' line: macOS draws them at 20.75 pt in this window, so the 44
+/// band is centred 1 pt high (Grok: 21.75 / 21.75). The collapse toggle keeps
+/// the right end so folding the pane stays intuitive (#1491).
 fn top_strip() -> f32 {
     if cfg!(target_os = "macos") {
         HEADER_HEIGHT
     } else {
         40.0
+    }
+}
+
+/// Disc size of the strip's three round buttons (the #1134 redesign's compact
+/// buttons; measured 32 pt on the approved mock).
+pub(crate) const STRIP_BUTTON: f32 = CONTROL;
+/// Space between two strip buttons.
+pub(crate) const STRIP_GAP: f32 = 10.0;
+/// The strip's right inset (the buttons end here) and the search field's left edge.
+pub(crate) const STRIP_INSET: f32 = 12.0;
+/// The filter capsules under the strip: the iPhone `PaneTabs` geometry (32 pt
+/// capsule, 4 pt gap) with 10 pt side padding instead of the iPhone's 16 —
+/// four segments at 16 would be wider than the 296 pt default sidebar.
+pub(crate) const FILTER_HEIGHT: f32 = 32.0;
+pub(crate) const FILTER_GAP: f32 = 4.0;
+pub(crate) const FILTER_PAD_X: f32 = 10.0;
+/// Server rows draw their picture as a rounded square (corner = this fraction
+/// of the size) so they read apart from the agent and people discs.
+pub(crate) const SERVER_PICTURE_CORNER: f32 = 11.0 / 36.0;
+
+/// One control of the top strip, left to right.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StripControl {
+    /// The round search button (closed).
+    Search,
+    /// The search button expanded into its field (click or ⌘F); it stays
+    /// open while a query is typed.
+    SearchField,
+    /// The round "+" (new chat / new channel inside a server).
+    New,
+    /// The round collapse toggle: folds the pane.
+    Collapse,
+}
+
+/// Open/closed state of the strip's search button. The field shows while the
+/// button was clicked (or ⌘F pressed) or while a query is typed; Escape and
+/// the clear dot fold it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SearchStrip {
+    pub(crate) open: bool,
+}
+
+impl SearchStrip {
+    /// The search button was clicked or ⌘F was pressed.
+    pub(crate) fn focus(&mut self) {
+        self.open = true;
+    }
+
+    /// Escape, or the clear dot: back to the round button.
+    pub(crate) fn fold(&mut self) {
+        self.open = false;
+    }
+
+    /// Whether the field (not the round button) is drawn for `query`.
+    pub(crate) fn shown(&self, query: &str) -> bool {
+        self.open || !query.trim().is_empty()
+    }
+}
+
+/// What the strip holds, left to right (three-pane rule: exactly +, search,
+/// minimize — nothing else). `show_plus` is false for a server member who
+/// cannot add channels; the search is a spacer inside a server.
+pub(crate) fn strip_controls(
+    search: SearchStrip,
+    query: &str,
+    in_server: bool,
+    show_plus: bool,
+) -> Vec<StripControl> {
+    let mut controls = Vec::with_capacity(3);
+    if !in_server {
+        controls.push(if search.shown(query) {
+            StripControl::SearchField
+        } else {
+            StripControl::Search
+        });
+    }
+    if show_plus {
+        controls.push(StripControl::New);
+    }
+    controls.push(StripControl::Collapse);
+    controls
+}
+
+/// The filter row is drawn under the strip whenever the chat list is — with
+/// the search field open or closed — and never inside a server (the channel
+/// list has nothing to scope).
+pub(crate) fn filter_shown(in_server: bool) -> bool {
+    !in_server
+}
+
+/// The segment under the strip — the iPhone home's `HomeListFilter`
+/// (`HomeView.swift`) with the same four labels; both apps scope the same list.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ListFilter {
+    #[default]
+    All,
+    /// My agents only — not people, not agents shared in by someone else.
+    Agents,
+    /// People chats: DMs and groups.
+    People,
+    /// Servers only.
+    Servers,
+}
+
+impl ListFilter {
+    pub(crate) const ALL: [ListFilter; 4] = [
+        ListFilter::All,
+        ListFilter::Agents,
+        ListFilter::People,
+        ListFilter::Servers,
+    ];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            ListFilter::All => "All",
+            ListFilter::Agents => "Agents",
+            ListFilter::People => "People",
+            ListFilter::Servers => "Servers",
+        }
+    }
+
+    /// `ARBOS_SIDEBAR_FILTER=…` (rig) and the labels, case-insensitively.
+    pub(crate) fn parse(s: &str) -> Option<Self> {
+        ListFilter::ALL
+            .into_iter()
+            .find(|f| f.label().eq_ignore_ascii_case(s.trim()))
+    }
+
+    /// Whether a chat row (agent, DM, group) is in this segment.
+    pub(crate) fn admits_space(self, space: &Project) -> bool {
+        match self {
+            ListFilter::All => true,
+            ListFilter::Agents => !space.is_people() && !space.is_guest(),
+            ListFilter::People => space.is_people(),
+            ListFilter::Servers => false,
+        }
+    }
+
+    /// Whether server rows are in this segment.
+    pub(crate) fn admits_servers(self) -> bool {
+        matches!(self, ListFilter::All | ListFilter::Servers)
+    }
+
+    /// Copy for an empty list under this segment (no query typed).
+    pub(crate) fn empty_copy(self) -> &'static str {
+        match self {
+            ListFilter::All => "No conversations yet",
+            ListFilter::Agents => "No agents yet",
+            ListFilter::People => "No people chats yet",
+            ListFilter::Servers => "No servers yet",
+        }
     }
 }
 
@@ -256,6 +420,29 @@ fn channel_last_line(row: &arbos_matrix::ChannelRow) -> String {
 /// Without a query every row is a `Title` hit, so the list is by activity.
 type RowKey = (search::HitKind, std::cmp::Reverse<u64>);
 
+/// The chats list's top and bottom fade (Jacob likes it, Oct 23). The band
+/// sits under the strip's bottom edge: the scroll box is pulled up by the band
+/// and the list pads by the same amount, so at rest the first row starts where
+/// the fade ends and only rows that scroll under the strip cross it (the pane
+/// rule from #1365 / #1424). The bottom band stays over the list's end.
+pub const LIST_FADE_BAND: f32 = 14.0;
+
+/// The wrapper is a flex column: the list inside keeps `flex_1 / min_h_0`, so
+/// it stays bounded and scrolls. (#1497's first try used a block div here —
+/// the list took its content height and painted through the account row,
+/// #1528; `row_bounds_tests` pins this.)
+pub(crate) fn faded_list(list: impl IntoElement) -> gpui::AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .mt(px(-LIST_FADE_BAND))
+        .debug_selector(|| "sidebar-list-frame".into())
+        .child(edge_faded(LIST_FADE_BAND, true, true, list))
+        .into_any_element()
+}
+
 pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);
@@ -274,8 +461,14 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     let hidden_mode = shell.hidden_open && query.is_empty();
     let hidden_count = state.archived_space_count();
     let shows = |archived: bool| hidden_mode == archived || !query.is_empty();
+    // The All · Agents · People · Servers segment scopes the list — with and
+    // without a query, like the iPhone home ([feedback sidebar-strip-filter-2026-10-24]).
+    let filter = shell.list_filter;
     let mut rows: Vec<(RowKey, ListEntry)> = Vec::new();
     for s in state.servers.iter() {
+        if !filter.admits_servers() {
+            break;
+        }
         let Some(hit) = search::server_hit(s, &query) else {
             continue;
         };
@@ -300,6 +493,9 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         ));
     }
     for p in state.projects.iter() {
+        if !filter.admits_space(p) {
+            continue;
+        }
         // Display name / @handle, title, a member, a chat title, or a loaded
         // message — ranked in that order; a hit beyond the row's own name is
         // explained on the second line.
@@ -349,94 +545,99 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         PulseClock::request(cx);
     }
 
-    // ----- top: oval Search left, "+" and collapse on the right ---------------
-    // Collapse lives here (not the chat header). When the rail is hidden the
-    // header still shows an expand control so the list can come back.
-    // ([feedback app-01M5MWZ5T20MS6KA35CFZY8CTG])
-    let collapse = div()
-        .id("sidebar-collapse")
-        .size(px(28.0))
-        .flex_shrink_0()
-        .rounded(px(7.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor_pointer()
-        .bg(theme.surface_2)
-        .hover(|s| s.bg(theme.surface_2))
-        .child(icon("sidebar-left", 17.0, theme.text))
-        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_click(cx.listener(|this, _, window, cx| {
-            this.menu_open = false;
-            let width: f32 = window.viewport_size().width.into();
-            this.state.update(cx, |s, cx| {
-                let narrow = s.window_is_narrow(width);
-                s.toggle_rail(narrow, cx)
-            });
-        }));
-    let plus = div()
-        .id("sidebar-new")
-        .size(px(28.0))
-        .flex_shrink_0()
-        .rounded(px(7.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
-        .child(icon("plus", 17.0, theme.text_muted))
-        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_click({
-            let in_server = open_server.as_ref().map(|s| s.id.clone());
-            cx.listener(move |this, _, window, cx| {
-                this.menu_open = false;
-                // Inside a server the "+" makes a channel (D88 rule 7; owner/admin only —
-                // the button is not drawn for members).
-                if let Some(server_id) = in_server.clone() {
-                    this.open_server_sheet(
-                        crate::app::ServerSheet::NewChannel { server_id },
-                        window,
-                        cx,
-                    );
-                    return;
-                }
-                this.people_input.update(cx, |i, cx| {
-                    i.clear(cx);
-                    i.set_placeholder("Search people");
-                });
-                this.state.update(cx, |s, cx| s.open_new_chat(cx));
-                let handle = this.people_input.read(cx).focus_handle(cx);
-                window.focus(&handle, cx);
-            })
-        });
+    // ----- top: three round buttons on the right — search · + · collapse ------
+    // Three-pane rule: the strip holds exactly +, search, minimize. Collapse
+    // lives here (not the chat header) and keeps the right end so folding the
+    // pane is intuitive (#1491). When the rail is hidden the header still shows
+    // an expand control so the list can come back.
     let show_plus = open_server.is_none() || open_server_admin;
-    // Oval Search field in the top strip (magnifier + "Search" placeholder).
-    // Escape or the clear dot empty it; the field stays in the strip.
-    let search = div()
-        .id("sidebar-search")
-        .flex_1()
-        .min_w_0()
-        .h(px(28.0))
-        .pl(px(9.0))
-        .pr(px(8.0))
-        .flex()
-        .items_center()
-        .gap(px(6.0))
-        .rounded_full()
-        .bg(theme.surface_2)
-        .cursor_text()
-        .child(icon("search", 13.0, theme.text_muted))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .h_full()
-                .flex()
-                .items_center()
-                .child(shell.search_input.clone()),
-        )
-        .when(!query.is_empty(), |el| {
-            el.child(
+    let controls = strip_controls(shell.search_strip, &query, open_server.is_some(), show_plus);
+    let round = |id: &'static str, theme: &Theme| {
+        div()
+            .id(id)
+            .size(px(STRIP_BUTTON))
+            .flex_shrink_0()
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .bg(theme.surface_2)
+            .hover(|s| s.bg(Theme::with_alpha(theme.text, 0.14)))
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+    };
+    let collapse = |cx: &mut Context<Shell>| {
+        round("sidebar-collapse", &theme)
+            .child(icon("sidebar-left", 16.0, theme.text))
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.menu_open = false;
+                let width: f32 = window.viewport_size().width.into();
+                this.state.update(cx, |s, cx| {
+                    let narrow = s.window_is_narrow(width);
+                    s.toggle_rail(narrow, cx)
+                });
+            }))
+    };
+    let plus = |cx: &mut Context<Shell>| {
+        round("sidebar-new", &theme)
+            .child(icon("plus", 16.0, theme.text))
+            .on_click({
+                let in_server = open_server.as_ref().map(|s| s.id.clone());
+                cx.listener(move |this, _, window, cx| {
+                    this.menu_open = false;
+                    // Inside a server the "+" makes a channel (D88 rule 7; owner/admin only —
+                    // the button is not drawn for members).
+                    if let Some(server_id) = in_server.clone() {
+                        this.open_server_sheet(
+                            crate::app::ServerSheet::NewChannel { server_id },
+                            window,
+                            cx,
+                        );
+                        return;
+                    }
+                    this.people_input.update(cx, |i, cx| {
+                        i.clear(cx);
+                        i.set_placeholder("Search people");
+                    });
+                    this.state.update(cx, |s, cx| s.open_new_chat(cx));
+                    let handle = this.people_input.read(cx).focus_handle(cx);
+                    window.focus(&handle, cx);
+                })
+            })
+    };
+    // The closed search button: a click expands it into the field (⌘F does the same).
+    let search_button = |cx: &mut Context<Shell>| {
+        round("sidebar-search-toggle", &theme)
+            .child(icon("search", 15.0, theme.text))
+            .on_click(cx.listener(|this, _, window, cx| this.open_search(window, cx)))
+    };
+    // The expanded field: a capsule from the strip's left edge to the "+"
+    // (magnifier, the typed query, a clear dot). Escape or the dot fold it.
+    let search_field = |cx: &mut Context<Shell>| {
+        div()
+            .id("sidebar-search")
+            .flex_1()
+            .min_w_0()
+            .h(px(STRIP_BUTTON))
+            .pl(px(STRIP_INSET))
+            .pr(px(8.0))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .rounded_full()
+            .bg(theme.surface_2)
+            .cursor_text()
+            .child(icon("search", 13.0, theme.text_muted))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .child(shell.search_input.clone()),
+            )
+            .child(
                 div()
                     .id("sidebar-search-clear")
                     .size(px(16.0))
@@ -447,36 +648,88 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
                     .justify_center()
                     .cursor_pointer()
                     .child(icon("xmark", 8.0, theme.bg))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.search_input.update(cx, |i, cx| i.clear(cx));
-                        Composer::focus(&this.composer, window, cx);
-                        cx.notify();
-                    })),
+                    .on_click(cx.listener(|this, _, window, cx| this.close_search(window, cx))),
             )
-        })
-        .on_mouse_down(
-            gpui::MouseButton::Left,
-            cx.listener(|this, _, window, cx| {
-                this.menu_open = false;
-                let handle = this.search_input.read(cx).focus_handle(cx);
-                window.focus(&handle, cx);
-                cx.stop_propagation();
-            }),
-        );
-    let strip = div()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    this.menu_open = false;
+                    let handle = this.search_input.read(cx).focus_handle(cx);
+                    window.focus(&handle, cx);
+                    cx.stop_propagation();
+                }),
+            )
+    };
+    let mut strip = div()
         .h(px(top_strip()))
         .flex_shrink_0()
         .flex()
         .items_center()
-        .gap(px(4.0))
-        .pl(px(TRAFFIC_LIGHTS_INSET + 12.0))
-        .pr(px(12.0))
+        .justify_end()
+        .gap(px(STRIP_GAP))
+        .pl(px(TRAFFIC_LIGHTS_INSET + STRIP_INSET))
+        .pr(px(STRIP_INSET))
         .pb(px(2.0))
-        .when(open_server.is_none(), |el| el.child(search))
-        .when(open_server.is_some(), |el| el.child(div().flex_1()))
-        .when(show_plus, |el| el.child(plus))
-        .child(collapse)
-        .window_drag();
+        .when(open_server.is_some(), |el| el.child(div().flex_1()));
+    for control in controls {
+        strip = match control {
+            StripControl::Search => strip.child(search_button(cx)),
+            StripControl::SearchField => strip.child(search_field(cx)),
+            StripControl::New => strip.child(plus(cx)),
+            StripControl::Collapse => strip.child(collapse(cx)),
+        };
+    }
+    let strip = strip.window_drag();
+    // ----- filter: All · Agents · People · Servers (the iPhone home's PaneTabs) --
+    // Bare labels, the selected one on a capsule, centred; no track, no border.
+    // It stays while the search field is open: the query narrows the list and
+    // the segment still scopes it.
+    let filter_bar = div()
+        .id("sidebar-filter")
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(FILTER_GAP))
+        .pt(px(6.0))
+        .pb(px(8.0))
+        .px(px(8.0))
+        .children(ListFilter::ALL.into_iter().map(|f| {
+            let on = f == filter;
+            div()
+                .id(ElementId::Name(SharedString::from(format!(
+                    "sidebar-filter-{}",
+                    f.label().to_ascii_lowercase()
+                ))))
+                .h(px(FILTER_HEIGHT))
+                .px(px(FILTER_PAD_X))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .cursor_pointer()
+                .bg(if on {
+                    theme.bubble_assistant
+                } else {
+                    gpui::transparent_black()
+                })
+                .hover(move |s| if on { s } else { s.text_color(theme.text) })
+                .text_size(px(TEXT_BODY))
+                .font_weight(if on {
+                    FontWeight::SEMIBOLD
+                } else {
+                    FontWeight::NORMAL
+                })
+                .text_color(if on { theme.text } else { theme.text_muted })
+                .child(f.label())
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.menu_open = false;
+                    this.row_menu = None;
+                    this.list_filter = f;
+                    cx.notify();
+                }))
+        }));
     // ----- rows -------------------------------------------------------------
     let mut list = div()
         .id("chat-list")
@@ -485,7 +738,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .flex_1()
         .min_h_0()
         .px(px(8.0))
-        .pt(px(6.0))
+        .pt(px(LIST_FADE_BAND + 6.0))
         .pb(px(12.0))
         .overflow_y_scroll();
     // D89: the host that runs everyone's computer is full; this account is in line. Chats and
@@ -566,14 +819,20 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
                         .child(line),
                 ),
         );
-    } else if rows.is_empty() {
+    } else if rows.is_empty() && !hidden_mode {
+        // Nothing under this segment (or for this query) — the iPhone's copy.
         list = list.child(
             div()
+                .id("sidebar-filter-empty")
                 .pt(px(40.0))
                 .text_center()
                 .text_size(px(TEXT_SMALL))
                 .text_color(theme.text_muted)
-                .child(format!("Nothing matches “{typed}”.")),
+                .child(if query.is_empty() {
+                    filter.empty_copy().to_string()
+                } else {
+                    format!("Nothing matches “{typed}”.")
+                }),
         );
     }
     if hidden_mode {
@@ -797,12 +1056,14 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .border_r_1()
         .border_color(theme.border)
         .child(strip)
+        // The filter belongs to the chat list, not to a server's channel list.
+        .when(filter_shown(open_server.is_some()), |el| {
+            el.child(filter_bar)
+        })
         .child(match open_server.as_ref() {
             // Inside a server the left pane shows its channels (mockup h).
-            Some(server) => {
-                edge_faded(14.0, true, true, server_channels(server, shell, &theme, cx))
-            }
-            None => edge_faded(14.0, true, true, list),
+            Some(server) => faded_list(server_channels(server, shell, &theme, cx)),
+            None => faded_list(list),
         });
     if let Some(update) = shell.render_update_button(cx) {
         column = column.child(div().px(px(12.0)).pb(px(8.0)).child(update));
@@ -833,8 +1094,15 @@ pub fn server_picture(server: &ServerInfo, size: f32, theme: &Theme) -> Div {
     )
 }
 
-/// A server row (D88 rule 1): drawn exactly like a group row — disc, name, time, last line,
-/// unread dot. No badge, no count, no disclosure.
+/// A server row's picture: [`server_picture`] on a rounded square instead of
+/// the disc, so servers read apart from agents and people in the one list
+/// (approved mock, [feedback sidebar-strip-filter-2026-10-24]).
+pub fn server_row_picture(server: &ServerInfo, size: f32, theme: &Theme) -> Div {
+    server_picture(server, size, theme).rounded(px(size * SERVER_PICTURE_CORNER))
+}
+
+/// A server row (D88 rule 1): drawn like a group row — picture, name, time, last line,
+/// unread dot. No badge, no count, no disclosure. The picture is a rounded square.
 fn render_server_row(
     row: ServerRowView,
     theme: &Theme,
@@ -919,7 +1187,7 @@ fn render_server_row(
                 .relative()
                 .size(px(AVATAR_ROW))
                 .flex_shrink_0()
-                .child(server_picture(&server, AVATAR_ROW, theme)),
+                .child(server_row_picture(&server, AVATAR_ROW, theme)),
         )
         .child(
             div()
@@ -1050,7 +1318,7 @@ fn server_channels(
         .flex_1()
         .min_h_0()
         .px(px(8.0))
-        .pt(px(6.0))
+        .pt(px(LIST_FADE_BAND + 6.0))
         .pb(px(12.0))
         .overflow_y_scroll()
         .child(back);
@@ -2032,11 +2300,152 @@ pub fn chat_menu(
 }
 
 #[cfg(test)]
+mod strip_tests {
+    use super::{strip_controls, ListFilter, SearchStrip, StripControl};
+    use crate::model::{Project, SpaceKind};
+
+    /// Three-pane rule: the chat list's strip holds exactly three controls —
+    /// search, +, collapse, in that order — and nothing else (#1134; the
+    /// always-open pill of #1491 is gone).
+    #[test]
+    fn the_strip_holds_exactly_search_plus_collapse() {
+        let controls = strip_controls(SearchStrip::default(), "", false, true);
+        assert_eq!(
+            controls,
+            vec![
+                StripControl::Search,
+                StripControl::New,
+                StripControl::Collapse
+            ]
+        );
+        assert_eq!(controls.len(), 3, "exactly three controls");
+    }
+
+    /// ⌘F (or a click on the round button) expands the search into its field;
+    /// the other two buttons stay. Escape folds it back to the button.
+    #[test]
+    fn cmd_f_expands_the_search_and_escape_folds_it() {
+        let mut search = SearchStrip::default();
+        search.focus();
+        assert_eq!(
+            strip_controls(search, "", false, true),
+            vec![
+                StripControl::SearchField,
+                StripControl::New,
+                StripControl::Collapse
+            ]
+        );
+        search.fold();
+        assert_eq!(
+            strip_controls(search, "", false, true)[0],
+            StripControl::Search
+        );
+    }
+
+    /// A typed query keeps the field open even after the button state folded
+    /// (the clear dot empties the query first, so both go together).
+    #[test]
+    fn a_typed_query_keeps_the_field_open() {
+        let search = SearchStrip::default();
+        assert!(search.shown("sam"));
+        assert!(!search.shown("   "));
+    }
+
+    /// Inside a server there is no search; a member without admin rights has
+    /// no "+" either — the collapse toggle always stays.
+    #[test]
+    fn a_server_drops_the_search_and_members_drop_the_plus() {
+        assert_eq!(
+            strip_controls(SearchStrip::default(), "", true, true),
+            vec![StripControl::New, StripControl::Collapse]
+        );
+        assert_eq!(
+            strip_controls(SearchStrip::default(), "", true, false),
+            vec![StripControl::Collapse]
+        );
+    }
+
+    fn agent(shared: bool) -> Project {
+        Project {
+            kind: SpaceKind::Project,
+            shared,
+            ..Project::default()
+        }
+    }
+
+    fn people(kind: SpaceKind) -> Project {
+        Project {
+            kind,
+            ..Project::default()
+        }
+    }
+
+    /// The four segments scope the list like the iPhone home: All shows
+    /// everything; Agents my agents only; People DMs and groups; Servers only
+    /// servers (the new fourth segment).
+    #[test]
+    fn the_filter_scopes_agents_people_and_servers() {
+        let mine = agent(false);
+        let shared_in = agent(true);
+        let dm = people(SpaceKind::Dm);
+        let group = people(SpaceKind::Group);
+        for f in [ListFilter::All, ListFilter::Servers] {
+            assert!(f.admits_servers(), "{f:?} shows servers");
+        }
+        for f in [ListFilter::Agents, ListFilter::People] {
+            assert!(!f.admits_servers(), "{f:?} hides servers");
+        }
+        assert!(ListFilter::All.admits_space(&mine));
+        assert!(ListFilter::All.admits_space(&shared_in));
+        assert!(ListFilter::All.admits_space(&dm));
+        assert!(ListFilter::All.admits_space(&group));
+        assert!(ListFilter::Agents.admits_space(&mine));
+        assert!(!ListFilter::Agents.admits_space(&shared_in));
+        assert!(!ListFilter::Agents.admits_space(&dm));
+        assert!(ListFilter::People.admits_space(&dm));
+        assert!(ListFilter::People.admits_space(&group));
+        assert!(!ListFilter::People.admits_space(&mine));
+        for p in [&mine, &shared_in, &dm, &group] {
+            assert!(
+                !ListFilter::Servers.admits_space(p),
+                "Servers shows only servers"
+            );
+        }
+    }
+
+    /// The labels are the iPhone's (`HomeListFilter` in HomeView.swift), in
+    /// the same order, with "Servers" fourth; the rig parses them.
+    #[test]
+    fn the_segments_match_the_iphone_home() {
+        let labels: Vec<_> = ListFilter::ALL.iter().map(|f| f.label()).collect();
+        assert_eq!(labels, ["All", "Agents", "People", "Servers"]);
+        assert_eq!(ListFilter::parse("servers"), Some(ListFilter::Servers));
+        assert_eq!(ListFilter::parse("nope"), None);
+        assert_eq!(ListFilter::default(), ListFilter::All);
+    }
+
+    /// The search field open does not hide the filter: both scope the one list.
+    #[test]
+    fn search_open_keeps_the_filter() {
+        let mut search = SearchStrip::default();
+        search.focus();
+        // The filter row is drawn whenever the chat list is (not inside a
+        // server); the strip's state has no say in it.
+        let controls = strip_controls(search, "sam", false, true);
+        assert_eq!(controls[0], StripControl::SearchField);
+        assert!(
+            super::filter_shown(false),
+            "filter drawn with the field open"
+        );
+        assert!(!super::filter_shown(true), "no filter inside a server");
+    }
+}
+
+#[cfg(test)]
 mod row_bounds_tests {
     use gpui::{div, prelude::*, px, ScrollHandle, TestAppContext};
 
-    use super::top_strip;
-    use crate::ui::frost::edge_faded;
+    use super::{faded_list, top_strip, LIST_FADE_BAND};
 
     const ROWS: usize = 12;
     const ROW_H: f32 = 58.0;
@@ -2054,7 +2463,10 @@ mod row_bounds_tests {
             _: &mut gpui::Window,
             _: &mut gpui::Context<Self>,
         ) -> impl IntoElement {
-            let strip = div().h(px(top_strip())).flex_shrink_0();
+            let strip = div()
+                .h(px(top_strip()))
+                .flex_shrink_0()
+                .debug_selector(|| "sidebar-strip".into());
             let mut list = div()
                 .id("chat-list")
                 .flex()
@@ -2062,7 +2474,7 @@ mod row_bounds_tests {
                 .flex_1()
                 .min_h_0()
                 .px(px(8.0))
-                .pt(px(6.0))
+                .pt(px(LIST_FADE_BAND + 6.0))
                 .pb(px(12.0))
                 .overflow_y_scroll()
                 .track_scroll(&self.scroll)
@@ -2087,7 +2499,7 @@ mod row_bounds_tests {
                 .flex()
                 .flex_col()
                 .child(strip)
-                .child(edge_faded(14.0, true, true, list))
+                .child(faded_list(list))
                 .child(account)
         }
     }
@@ -2116,6 +2528,25 @@ mod row_bounds_tests {
                 list_bottom <= account_top + 0.5,
                 "{pass}: list bottom {list_bottom} runs into the account row at {account_top}"
             );
+            if pass == "top" {
+                // #1497: the fade band ends at the strip's bottom edge and the
+                // first row starts its 6 pt under it, clear of the fade.
+                let frame = vcx.debug_bounds("sidebar-list-frame").expect("frame");
+                let strip = vcx.debug_bounds("sidebar-strip").expect("strip");
+                let first = vcx.debug_bounds("row-0").expect("first row");
+                let fade_bottom: f32 = f32::from(frame.origin.y) + LIST_FADE_BAND;
+                let strip_bottom: f32 = strip.bottom().into();
+                let row_top: f32 = first.origin.y.into();
+                assert!(
+                    (fade_bottom - strip_bottom).abs() <= 0.5,
+                    "fade band ends at {fade_bottom}, strip at {strip_bottom}"
+                );
+                assert!(
+                    (row_top - (strip_bottom + 6.0)).abs() <= 0.5,
+                    "first row at {row_top}, strip + 6 = {}",
+                    strip_bottom + 6.0
+                );
+            }
             let mut spans: Vec<(f32, f32)> = Vec::new();
             for i in 0..ROWS {
                 let sel: &'static str = Box::leak(format!("row-{i}").into_boxed_str());

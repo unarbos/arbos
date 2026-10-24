@@ -7,14 +7,16 @@
 //! file), counter top-centre, Close · Download · Forward pills at the bottom.
 //! Video shows its poster with Play (QuickTime Player); a file shows its tile
 //! with Quick Look. Forward opens a picker of DMs, agents and groups; one
-//! click sends the item there as a new message.
+//! click sends the item there as a new message. The same picker serves the
+//! bubble menu's Forward (feedback app-01M5MXRZ7609S70P9S9P2RZDDF), over the
+//! chat instead of the lightbox.
 
 use gpui::{
     actions, div, img, prelude::*, px, AnyElement, Context, Div, ElementId, FocusHandle,
     FontWeight, Hsla, MouseButton, ObjectFit, Stateful,
 };
 
-use crate::app::{AppState, ForwardTarget, MediaViewer, ViewerItem};
+use crate::app::{AppState, ForwardTarget, ViewerItem};
 use crate::model::AttachmentKind;
 use crate::ui::avatars;
 use crate::ui::icons::icon;
@@ -409,9 +411,32 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
     );
 
     if viewer.forward_open {
-        root = root.child(forward_picker(shell, &viewer, &item, &theme, cx));
+        root = root.child(forward_picker(
+            shell,
+            &item.by,
+            ForwardSource::Media,
+            &theme,
+            cx,
+        ));
     }
     root.into_any_element()
+}
+
+/// What the "Forward to" picker sends on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForwardSource {
+    /// The media viewer's open item.
+    Media,
+    /// The bubble the menu's Forward was clicked on (`AppState::forward_message`).
+    Message,
+}
+
+/// The bubble menu's Forward: the same picker over the chat (its backdrop
+/// dims the window; a click outside or Esc closes it).
+pub fn message_forward_overlay(shell: &Shell, cx: &mut Context<Shell>) -> Option<AnyElement> {
+    let by = shell.state.read(cx).forward_message.as_ref()?.by.clone();
+    let theme = Theme::of(cx).clone();
+    Some(forward_picker(shell, &by, ForwardSource::Message, &theme, cx).into_any_element())
 }
 
 /// "No preview" (image bytes missing) — the glyph and the file's name.
@@ -503,11 +528,12 @@ fn file_body(
 }
 
 /// The Forward picker: a card with a search field and every DM, agent and
-/// group, most recent first; one click sends the item there.
+/// group, most recent first; one click sends the item (the viewer's media or
+/// the menu's message, per `source`) there. `by` names the original sender.
 fn forward_picker(
     shell: &Shell,
-    _viewer: &MediaViewer,
-    item: &ViewerItem,
+    by: &str,
+    source: ForwardSource,
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> impl IntoElement {
@@ -515,6 +541,10 @@ fn forward_picker(
     let targets: Vec<ForwardTarget> = shell.state.read(cx).forward_targets(&query);
     let close = shell.state.clone();
     let close_x = shell.state.clone();
+    let dismiss = move |s: &mut AppState, cx: &mut Context<AppState>| match source {
+        ForwardSource::Media => s.media_viewer_toggle_forward(cx),
+        ForwardSource::Message => s.close_forward_message(cx),
+    };
     let search = div()
         .flex()
         .items_center()
@@ -603,7 +633,10 @@ fn forward_picker(
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
                     let pick = pick.clone();
-                    this.state.update(cx, |s, cx| s.forward_media_to(pick, cx));
+                    this.state.update(cx, |s, cx| match source {
+                        ForwardSource::Media => s.forward_media_to(pick, cx),
+                        ForwardSource::Message => s.forward_message_to(pick, cx),
+                    });
                 })),
         );
     }
@@ -614,10 +647,7 @@ fn forward_picker(
         .border_color(theme.border)
         .text_size(px(TEXT_TINY))
         .text_color(theme.text_muted)
-        .child(format!(
-            "Sends it as a new message, “Forwarded from {}”.",
-            item.by
-        ));
+        .child(format!("Sends it as a new message, “Forwarded from {by}”."));
     let card = div()
         .id("media-viewer-forward")
         .w(px(PICKER_WIDTH))
@@ -659,7 +689,7 @@ fn forward_picker(
                         .child(icon("xmark", 11.0, theme.text_muted))
                         .on_click(move |_, _, cx| {
                             cx.stop_propagation();
-                            close_x.update(cx, |s, cx| s.media_viewer_toggle_forward(cx));
+                            close_x.update(cx, |s, cx| dismiss(s, cx));
                         }),
                 ),
         )
@@ -676,7 +706,7 @@ fn forward_picker(
         .bg(Theme::with_alpha(gpui::black(), 0.35))
         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
             cx.stop_propagation();
-            close.update(cx, |s, cx| s.media_viewer_toggle_forward(cx));
+            close.update(cx, |s, cx| dismiss(s, cx));
         })
         .child(card)
 }

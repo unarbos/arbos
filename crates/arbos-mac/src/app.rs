@@ -306,6 +306,24 @@ pub struct ForwardTarget {
     pub last_activity: u64,
 }
 
+/// Bubble menu → Forward (feedback app-01M5MXRZ7609S70P9S9P2RZDDF): the text
+/// message the open picker will send on, and who wrote it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForwardMessage {
+    pub chat_id: Id,
+    pub message_id: Id,
+    /// The original sender's display name ("Forwarded from <by>").
+    pub by: String,
+}
+
+/// Bubble menu → Delete (feedback app-01M5MXQ90MEEWF6C8W090VCZHF): the message
+/// the "Delete message?" confirm is open for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeleteConfirm {
+    pub chat_id: Id,
+    pub message_id: Id,
+}
+
 /// The text line a forwarded attachment travels with (every client renders
 /// it as the card's hint, not a bubble; agents read it as prose).
 pub fn forwarded_from_text(by: &str) -> String {
@@ -482,6 +500,10 @@ pub struct AppState {
     pub media_viewer: Option<MediaViewer>,
     /// Bumped on every open so the shell focuses the viewer once per opening.
     pub media_viewer_generation: u64,
+    /// Bubble menu → Forward: the message the "Forward to" picker is open for.
+    pub forward_message: Option<ForwardMessage>,
+    /// Bubble menu → Delete: the "Delete message?" confirm, when open.
+    pub delete_confirm: Option<DeleteConfirm>,
     pub new_project_open: bool,
     /// Debug: per-message "Show details" disclosures in the transcript.
     pub show_details: bool,
@@ -842,6 +864,8 @@ impl AppState {
             details_open: None,
             media_viewer: None,
             media_viewer_generation: 0,
+            forward_message: None,
+            delete_confirm: None,
             new_project_open: false,
             show_details: false,
             machine: Machine::default(),
@@ -2746,6 +2770,7 @@ impl AppState {
             .find(|c| c.id == chat_id)
         {
             chat.unread = false;
+            chat.unread_count = 0;
         }
         self.command(ClientCommand::OpenChat {
             chat_id: chat_id.clone(),
@@ -2860,6 +2885,7 @@ impl AppState {
             .find(|c| c.id == chat_id)
         {
             chat.unread = false;
+            chat.unread_count = 0;
         }
         self.sync_badge();
         self.command(ClientCommand::MarkRead {
@@ -2917,6 +2943,7 @@ impl AppState {
                 kind: ChatKind::Chat,
                 participants: Vec::new(),
                 unread: false,
+                unread_count: 0,
                 last_message_at: now_ms(),
                 archived_at: None,
             });
@@ -3153,6 +3180,7 @@ impl AppState {
                 sender_avatar_color: None,
                 mentions: Vec::new(),
                 reply_to: reply_to.clone(),
+                forwarded_from: None,
                 asked_by_handle: None,
                 owner_handle: None,
                 usage: None,
@@ -3877,6 +3905,7 @@ impl AppState {
                 sender_avatar_color: None,
                 mentions: Vec::new(),
                 reply_to: None,
+                forwarded_from: None,
                 asked_by_handle: None,
                 owner_handle: None,
                 usage: None,
@@ -4276,6 +4305,7 @@ impl AppState {
                 sender_avatar_color: None,
                 mentions: Vec::new(),
                 reply_to: None,
+                forwarded_from: None,
                 asked_by_handle: None,
                 owner_handle: None,
                 created_at: now_ms(),
@@ -4369,6 +4399,34 @@ impl AppState {
             message_id,
         });
         cx.notify();
+    }
+
+    /// Bubble menu → Delete: ask first (feedback app-01M5MXQ90MEEWF6C8W090VCZHF).
+    /// The menu only offers Delete where `may_delete_message` holds, so the
+    /// confirm's one action is always "delete for everyone".
+    pub fn open_delete_confirm(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
+        if message_id.is_empty() {
+            return;
+        }
+        self.delete_confirm = Some(DeleteConfirm {
+            chat_id,
+            message_id,
+        });
+        cx.notify();
+    }
+
+    pub fn close_delete_confirm(&mut self, cx: &mut Context<Self>) {
+        if self.delete_confirm.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// The confirm's Delete (click or Return): delete and close.
+    pub fn confirm_delete(&mut self, cx: &mut Context<Self>) {
+        let Some(confirm) = self.delete_confirm.take() else {
+            return;
+        };
+        self.delete_message(confirm.chat_id, confirm.message_id, cx);
     }
 
     pub fn retry(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
@@ -5182,7 +5240,7 @@ impl AppState {
     }
 
     /// Who shared it, for the viewer's caption: name, else `@handle`, else "You" / the agent.
-    fn viewer_sender_name(&self, m: &Message) -> String {
+    pub fn viewer_sender_name(&self, m: &Message) -> String {
         if let Some(n) = m.sender_name.as_deref().filter(|n| !n.is_empty()) {
             return n.to_string();
         }
@@ -5496,6 +5554,7 @@ impl AppState {
                 sender_avatar_color: None,
                 mentions: Vec::new(),
                 reply_to: None,
+                forwarded_from: None,
                 asked_by_handle: None,
                 owner_handle: None,
                 usage: None,
@@ -5519,6 +5578,135 @@ impl AppState {
             from_slot,
             attachment,
             text,
+        });
+        self.push_notice(format!("Forwarded to {}", target.name));
+        cx.emit(AppEvent::TranscriptChanged {
+            chat_id: target.chat_id,
+        });
+        cx.notify();
+    }
+
+    // ----- bubble menu → Forward (feedback app-01M5MXRZ7609S70P9S9P2RZDDF) -----
+
+    /// Who a message is from, for "Forwarded from <name>": the row's sender
+    /// name, else the person's display name, my own name for my bubbles, else
+    /// the agent's name.
+    pub fn forward_sender_name(&self, m: &Message) -> String {
+        if self.is_mine(m) {
+            if let Some(a) = self.account.as_ref() {
+                let name = if a.name.trim().is_empty() {
+                    a.login.clone()
+                } else {
+                    a.name.clone()
+                };
+                if !name.is_empty() {
+                    return name;
+                }
+            }
+        }
+        self.viewer_sender_name(m)
+    }
+
+    /// Open the "Forward to" picker for a bubble (the media viewer's picker,
+    /// over the chat).
+    pub fn open_forward_message(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
+        let Some(message) = self
+            .messages
+            .get(&chat_id)
+            .and_then(|ms| ms.iter().find(|m| m.id == message_id))
+        else {
+            return;
+        };
+        if message.plain_text().trim().is_empty() {
+            self.push_notice("Nothing to forward");
+            cx.notify();
+            return;
+        }
+        let by = self.forward_sender_name(message);
+        self.forward_message = Some(ForwardMessage {
+            chat_id,
+            message_id,
+            by,
+        });
+        cx.notify();
+    }
+
+    pub fn close_forward_message(&mut self, cx: &mut Context<Self>) {
+        if self.forward_message.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Forward the picked message's text to `target` as a new message of mine
+    /// there (no reply quote), carrying `forwardedFrom: <name>` so every client
+    /// draws the "Forwarded from <name>" header on the bubble.
+    pub fn forward_message_to(&mut self, target: ForwardTarget, cx: &mut Context<Self>) {
+        let Some(source) = self.forward_message.take() else {
+            return;
+        };
+        let Some(text) = self
+            .messages
+            .get(&source.chat_id)
+            .and_then(|ms| ms.iter().find(|m| m.id == source.message_id))
+            .map(|m| m.plain_text().trim().to_owned())
+            .filter(|t| !t.is_empty())
+        else {
+            cx.notify();
+            return;
+        };
+        let message_id = new_id();
+        let parts = vec![Part::Text {
+            id: new_id(),
+            text: text.clone(),
+        }];
+        self.messages
+            .entry(target.chat_id.clone())
+            .or_default()
+            .push(Message {
+                id: message_id.clone(),
+                chat_id: target.chat_id.clone(),
+                role: Role::User,
+                sender: "user".into(),
+                status: MessageStatus::Queued,
+                turn: None,
+                decision: None,
+                subagent_id: None,
+                subagent_name: None,
+                handoff_messages: None,
+                agent_reply_to: None,
+                reactions: Default::default(),
+                in_reply_to: None,
+                routine_name: None,
+                sender_name: None,
+                sender_icon: None,
+                sender_handle: None,
+                sender_avatar: None,
+                sender_avatar_color: None,
+                mentions: Vec::new(),
+                reply_to: None,
+                forwarded_from: Some(source.by.clone()),
+                asked_by_handle: None,
+                owner_handle: None,
+                usage: None,
+                return_contract: None,
+                waiting_user: false,
+                waiting_approval: false,
+                model: None,
+                effort: None,
+                created_at: now_ms(),
+                completed_at: None,
+                call_id: None,
+                activity: None,
+                pending: true,
+                parts,
+                hidden_parts: Vec::new(),
+                greeting: false,
+            });
+        self.command(ClientCommand::ForwardText {
+            chat_id: target.chat_id.clone(),
+            message_id,
+            text,
+            forwarded_from: source.by,
         });
         self.push_notice(format!("Forwarded to {}", target.name));
         cx.emit(AppEvent::TranscriptChanged {
@@ -5563,6 +5751,7 @@ impl AppState {
     }
 
     /// Light the unread dot (and Dock badge) until the next refresh confirms.
+    /// Until `GET /me/unread` returns, count at least one missed message (same as iOS).
     fn mark_chat_unread(&mut self, chat_id: &str) {
         if let Some(chat) = self
             .chats
@@ -5571,6 +5760,7 @@ impl AppState {
             .find(|c| c.id == chat_id)
         {
             chat.unread = true;
+            chat.unread_count = chat.unread_count.max(1);
         }
         self.sync_badge();
     }
@@ -5899,14 +6089,14 @@ impl AppState {
         cx.activate(true);
     }
 
-    /// Dock badge = chats with something unread (cleared as they are read).
+    /// Dock badge = unread messages across chats (from `GET /me/unread`; cleared as they are read).
     pub fn sync_badge(&self) {
         let total = self
             .chats
             .values()
             .flat_map(|v| v.iter())
-            .filter(|c| c.unread)
-            .count();
+            .map(Chat::missed_count)
+            .sum();
         notify::set_badge(total);
     }
 
@@ -8634,6 +8824,7 @@ pub(crate) fn forked_chat(source: &Chat, project: &Project, id: Id) -> Option<Ch
         kind: ChatKind::Chat,
         participants: Vec::new(),
         unread: false,
+        unread_count: 0,
         last_message_at: now_ms(),
         archived_at: None,
     })
@@ -8845,6 +9036,7 @@ mod fork_tests {
             kind: ChatKind::Chat,
             participants: Vec::new(),
             unread: false,
+            unread_count: 0,
             last_message_at: 0,
             archived_at: None,
         }

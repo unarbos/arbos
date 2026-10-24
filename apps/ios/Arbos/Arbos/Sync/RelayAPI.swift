@@ -1013,8 +1013,71 @@ final class RelayAPI {
         return try await peopleChat(chatId)
     }
 
-    func removeMember(chatId: String, userId: String) async throws {
-        _ = try await request("DELETE", "/chats/\(chatId)/members/\(userId)")
+    /// `DELETE /chats/{id}/members/{userId}[?ban=1]` — owner/admin remove or ban.
+    func removeMember(chatId: String, userId: String, ban: Bool = false) async throws {
+        _ = try await request("DELETE", "/chats/\(chatId)/members/\(userId)\(ban ? "?ban=1" : "")")
+    }
+
+    /// `PUT /chats/{id}/members/{userId}` — mute/unmute from posting (optional duration).
+    func setMemberSilenced(
+        chatId: String,
+        userId: String,
+        silenced: Bool,
+        silencedUntilMs: Int64? = nil
+    ) async throws -> PeopleChat {
+        var body: [String: Any] = ["silenced": silenced]
+        if silenced, let until = silencedUntilMs {
+            body["silenced_until"] = until
+        }
+        let v = try await json("PUT", "/chats/\(chatId)/members/\(userId)", body: body)
+        if let chat = PeopleChat.parse(v) { return chat }
+        return try await peopleChat(chatId)
+    }
+
+    /// Owner: set a member's role to `admin` or `member`.
+    func setMemberRole(chatId: String, userId: String, role: String) async throws -> PeopleChat {
+        let v = try await json("PUT", "/chats/\(chatId)/members/\(userId)", body: ["role": role])
+        if let chat = PeopleChat.parse(v) { return chat }
+        return try await peopleChat(chatId)
+    }
+
+    /// Owner: whether this admin may mute and ban members.
+    func setMemberCanMuteBan(chatId: String, userId: String, canMuteBan: Bool) async throws -> PeopleChat {
+        let v = try await json("PUT", "/chats/\(chatId)/members/\(userId)", body: ["can_mute_ban": canMuteBan])
+        if let chat = PeopleChat.parse(v) { return chat }
+        return try await peopleChat(chatId)
+    }
+
+    /// `GET /chats/{id}/invites` — group invite links (same shape as server invites).
+    func groupInvites(_ chatId: String) async throws -> [ServerInviteLink] {
+        let v = try await json("GET", "/chats/\(chatId)/invites")
+        let list = ((v as? [String: Any])?["invites"] as? [Any]) ?? []
+        return list.compactMap(ServerInviteLink.parse)
+    }
+
+    /// `POST /chats/{id}/invites {expires, max_uses}` → the new group invite link.
+    func createGroupInvite(_ chatId: String, expires: Bool, maxUses: Int?) async throws -> ServerInviteLink? {
+        var body: [String: Any] = ["expires": expires]
+        if let maxUses { body["max_uses"] = maxUses }
+        return ServerInviteLink.parse(try await json("POST", "/chats/\(chatId)/invites", body: body))
+    }
+
+    /// `DELETE /chats/{id}/invites/{iid}` — the link stops working at once.
+    func revokeGroupInvite(_ chatId: String, inviteId: String) async throws {
+        _ = try await request("DELETE", "/chats/\(chatId)/invites/\(inviteId)")
+    }
+
+    /// `POST /chats/join {code}` (the code or the whole link) → the people group chat.
+    func joinGroup(code: String) async throws -> PeopleChat {
+        let v = try await json("POST", "/chats/join", body: ["code": code.trimmingCharacters(in: .whitespacesAndNewlines)])
+        guard let chat = PeopleChat.parse(v) else { throw RelayError(status: 0, message: "The relay returned no chat") }
+        return chat
+    }
+
+    /// Delete a message for everyone: the relay checks who may (403 `not_yours`) and writes
+    /// the deletion into the doc itself. `room` is `people/<chat>` or `<project>/<chat>`.
+    func deleteMessage(room: String, messageId: String) async throws {
+        _ = try await request("DELETE", "/room/\(room)/messages/\(messageId)")
     }
 
     /// `PUT /chats/{id}/settings {read_receipts?, muted?, archived?}` per member.

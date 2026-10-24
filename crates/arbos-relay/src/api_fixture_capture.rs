@@ -792,6 +792,7 @@ fn push_fixture_events() -> Vec<(&'static str, PushEventDto)> {
                 user_id: "gh_202".into(),
                 handle: "user202".into(),
                 by_handle: "user201".into(),
+                banned: None,
             }),
         ),
         (

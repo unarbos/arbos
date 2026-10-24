@@ -40,6 +40,7 @@ mod livekit;
 mod local;
 mod matrix;
 mod migrate;
+mod moderation;
 mod notices;
 mod notify;
 mod people;
@@ -554,12 +555,22 @@ async fn main() -> anyhow::Result<()> {
             get(people::chats_list).post(people::chats_create_group),
         )
         .route("/chats/dm", post(people::dm_create))
+        .route("/chats/join", post(people::group_join))
         .route(
             "/chats/{id}",
             get(people::chat_get)
                 .patch(people::chat_patch)
                 .delete(people::chat_delete),
         )
+        .route(
+            "/chats/{id}/invites",
+            get(people::group_invites_list).post(people::group_invites_create),
+        )
+        .route(
+            "/chats/{id}/invites/{iid}",
+            delete(people::group_invites_revoke),
+        )
+        .route("/g/{code}", get(people::group_invite_landing))
         .route("/chats/{id}/read", axum::routing::put(people::chat_read))
         .route(
             "/chats/{id}/settings",
@@ -582,7 +593,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route(
             "/chats/{id}/members/{user_id}",
-            delete(people::member_remove),
+            put(people::member_patch).delete(people::member_remove),
         )
         .route("/box/people/{id}", get(people::box_people_chat))
         .route(
@@ -765,6 +776,10 @@ async fn main() -> anyhow::Result<()> {
             get(rooms::get_checkpoint).post(rooms::post_checkpoint),
         )
         .route("/room/{project}/{chat}/stats", get(rooms::room_stats))
+        .route(
+            "/room/{project}/{chat}/messages/{message_id}",
+            delete(moderation::delete_message),
+        )
         .route("/blob/{project}/{key}", get(blobs::get).put(blobs::put))
         .route("/feedback", post(feedback::submit))
         .route("/feedback/capture/{id}", post(feedback::device_capture))

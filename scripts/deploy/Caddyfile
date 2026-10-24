@@ -78,6 +78,10 @@ arbos.life {
 	handle /s/* {
 		reverse_proxy @RELAY_LISTEN@
 	}
+	# Group chat invite links: arbos.life/g/<code> → arbos://join-group/<code>.
+	handle /g/* {
+		reverse_proxy @RELAY_LISTEN@
+	}
 	header /favicon.ico Cache-Control "public, max-age=3600"
 	header /favicon.svg Cache-Control "public, max-age=3600"
 	header /apple-touch-icon.png Cache-Control "public, max-age=3600"

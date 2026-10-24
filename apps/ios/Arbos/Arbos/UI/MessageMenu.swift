@@ -1,15 +1,17 @@
 import SwiftUI
 
 /// The message bubble's menu under the reaction capsule (`MessageActions.swift`):
-/// **Copy, Reply, Forward, Reply in DM, Delete** (#1370 + #1472); reactions live
-/// in the capsule, never here (Jacob, 2026-10-23). Forward opens the same chat
-/// picker the media viewer uses; Reply in DM opens a private chat with the human
-/// who wrote the message. Non-message rows get `copyOnly` as a plain `.contextMenu`.
+/// **Copy, Reply, Forward, Reply in DM, Edit (own messages), Delete** (#1370 +
+/// #1472); reactions live in the capsule, never here (Jacob, 2026-10-23). Forward
+/// opens the same chat picker the media viewer uses; Reply in DM opens a private
+/// chat with the human who wrote the message. Non-message rows get `copyOnly` as
+/// a plain `.contextMenu`.
 enum MessageMenuItem: CaseIterable, Equatable {
     case copy
     case reply
     case forward
     case replyInDM
+    case edit
     case delete
 
     var label: String {
@@ -18,6 +20,7 @@ enum MessageMenuItem: CaseIterable, Equatable {
         case .reply: return "Reply"
         case .forward: return "Forward"
         case .replyInDM: return "Reply in DM"
+        case .edit: return "Edit"
         case .delete: return "Delete"
         }
     }
@@ -28,6 +31,7 @@ enum MessageMenuItem: CaseIterable, Equatable {
         case .reply: return "arrowshape.turn.up.left"
         case .forward: return "arrowshape.turn.up.right"
         case .replyInDM: return "bubble.left"
+        case .edit: return "pencil"
         case .delete: return "trash"
         }
     }
@@ -36,7 +40,8 @@ enum MessageMenuItem: CaseIterable, Equatable {
 }
 
 enum MessageMenu {
-    /// The items, in order, for every real message bubble.
+    /// The items, in order, for every real message bubble (Edit / Delete are
+    /// gated per row via `items(forMessage:canEdit:canDelete:)`).
     static let items: [MessageMenuItem] = [.copy, .reply, .forward, .replyInDM, .delete]
 
     /// Rows that are not a message in a shared doc (channels, date / system
@@ -44,11 +49,40 @@ enum MessageMenu {
     static let copyOnly: [MessageMenuItem] = [.copy]
 
     static func items(forMessage: Bool) -> [MessageMenuItem] {
-        forMessage ? items : copyOnly
+        items(forMessage: forMessage, canEdit: false, canDelete: true)
+    }
+
+    /// Edit only on the user's own text; Delete only when the relay would allow it
+    /// (`MessageDeleteRule.mayDelete`).
+    static func items(forMessage: Bool, canEdit: Bool = false, canDelete: Bool = true) -> [MessageMenuItem] {
+        guard forMessage else { return copyOnly }
+        var out: [MessageMenuItem] = [.copy, .reply, .forward, .replyInDM]
+        if canEdit { out.append(.edit) }
+        if canDelete { out.append(.delete) }
+        return out
     }
 }
 
-/// The menu's buttons, for `.contextMenu { MessageMenuContent(...) }`.
+/// Who may delete a message for everyone — the relay's rule (`arbos-relay/src/moderation.rs`),
+/// mirrored so the menu never offers a Delete the relay would refuse: your own always; in a
+/// people group the owner (and admins) delete anyone's; an agent's message is its owner's to
+/// delete; in a project chat the owner deletes anything, a guest their own. System lines are a
+/// moderator's only.
+enum MessageDeleteRule {
+    static func mayDelete(sender: String, meId: String?, moderates: Bool, agentOwnerIds: [String: String]) -> Bool {
+        if moderates { return true }
+        guard let meId else { return false }
+        if sender == "user" || sender == "user:\(meId)" { return true }
+        if sender.hasPrefix("agent:") {
+            let pid = String(sender.dropFirst(6))
+            return agentOwnerIds[pid] == meId
+        }
+        return false
+    }
+}
+
+/// The menu's buttons, for `.contextMenu { MessageMenuContent(...) }` and the
+/// long-press overlay under the reaction capsule.
 struct MessageMenuContent: View {
     let items: [MessageMenuItem]
     let action: (MessageMenuItem) -> Void
@@ -61,5 +95,19 @@ struct MessageMenuContent: View {
                 Label(item.label, systemImage: item.systemImage)
             }
         }
+    }
+}
+
+/// "Delete message?" — what the confirm says before a bubble is deleted
+/// (feedback app-01M5MXQ90MEEWF6C8W090VCZHF). Delete is always for everyone:
+/// the menu only offered it where `MessageDeleteRule` holds. A moderator
+/// deleting someone else's message sees whose it is in the title.
+enum MessageDeleteCopy {
+    static let body = "This removes it from the chat for everyone. This can’t be undone."
+
+    static func title(mine: Bool, sender: String) -> String {
+        let name = sender.trimmingCharacters(in: .whitespacesAndNewlines)
+        if mine || name.isEmpty { return "Delete message?" }
+        return "Delete \(name)’s message?"
     }
 }

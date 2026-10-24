@@ -659,6 +659,9 @@ struct Message: Identifiable, Equatable {
     var askedByHandle: String? = nil
     var mentions: [String] = []
     var replyTo: String? = nil
+    /// Bubble menu → Forward: the original sender's name; the bubble draws
+    /// "Forwarded from <name>" above the text (`forwardedFrom` on the row).
+    var forwardedFrom: String? = nil
     /// What the agent is doing right now ("Cloning RaoFoundation/subtensor"),
     /// written by the harness while the turn runs; the working line shows it.
     var activity: String? = nil
@@ -827,6 +830,7 @@ enum DocJSON {
             askedByHandle: str(m["askedByHandle"]),
             mentions: (m["mentions"] as? [Any])?.compactMap { $0 as? String } ?? [],
             replyTo: str(m["replyTo"]),
+            forwardedFrom: str(m["forwardedFrom"]).flatMap { $0.isEmpty ? nil : $0 },
             activity: str(m["activity"]).flatMap { $0.isEmpty ? nil : $0 },
             voice: bool(m["voice"]) || str(m["source"]) == "voice",
             greeting: bool(m["greeting"]),

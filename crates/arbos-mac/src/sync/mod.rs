@@ -748,6 +748,15 @@ pub enum ClientCommand {
         attachment: Attachment,
         text: String,
     },
+    /// Bubble menu → Forward: write `text` as a new user row in `chat_id`
+    /// carrying `forwardedFrom: <name>` (the bubble's "Forwarded from" header).
+    /// `message_id` is the optimistic row's id.
+    ForwardText {
+        chat_id: Id,
+        message_id: Id,
+        text: String,
+        forwarded_from: String,
+    },
     /// Settings → Connectors opened or asked for a refresh.
     RefreshConnectors,
     /// Connect a provider: OAuth when `token` is `None`, else store the pasted token.

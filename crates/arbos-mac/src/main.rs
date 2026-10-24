@@ -23,6 +23,7 @@ use std::rc::Rc;
 
 use crate::app::AppState;
 use crate::ui::composer;
+use crate::ui::delete_confirm;
 use crate::ui::feedback;
 use crate::ui::media_viewer;
 use crate::ui::motion::{self, PulseClock};
@@ -163,8 +164,9 @@ fn main() {
     });
 }
 
-/// The menu bar: the app menu, Edit (Cut / Copy / Paste — ⌘V reaches the chat
-/// through AppKit's `paste:` selector), and Help → Send Feedback… (⌘⇧F).
+/// The menu bar: the app menu, Edit (Undo / Redo / Cut / Copy / Paste — ⌘V
+/// reaches the chat through AppKit's `paste:` selector), and Help → Send
+/// Feedback… (⌘⇧F).
 fn set_menus(cx: &mut App) {
     cx.set_menus(vec![
         Menu {
@@ -175,6 +177,9 @@ fn set_menus(cx: &mut App) {
         Menu {
             name: "Edit".into(),
             items: vec![
+                MenuItem::os_action("Undo", composer::Undo, OsAction::Undo),
+                MenuItem::os_action("Redo", composer::Redo, OsAction::Redo),
+                MenuItem::separator(),
                 MenuItem::os_action("Cut", composer::Cut, OsAction::Cut),
                 MenuItem::os_action("Copy", composer::Copy, OsAction::Copy),
                 MenuItem::os_action("Paste", composer::Paste, OsAction::Paste),
@@ -240,6 +245,12 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-c", composer::Copy, input),
         KeyBinding::new("cmd-x", composer::Cut, input),
         KeyBinding::new("ctrl-x", composer::Cut, input),
+        KeyBinding::new("cmd-z", composer::Undo, input),
+        KeyBinding::new("ctrl-z", composer::Undo, input),
+        KeyBinding::new("cmd-shift-z", composer::Redo, input),
+        KeyBinding::new("ctrl-shift-z", composer::Redo, input),
+        KeyBinding::new("cmd-y", composer::Redo, input),
+        KeyBinding::new("ctrl-y", composer::Redo, input),
         KeyBinding::new("enter", widgets::SubmitAnswer, Some("QuestionCard")),
         KeyBinding::new("down", widgets::NextOption, Some("QuestionCard")),
         KeyBinding::new("right", widgets::NextOption, Some("QuestionCard")),
@@ -261,7 +272,16 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-t", shell::NewTab, None),
         KeyBinding::new("cmd-b", shell::ToggleRail, None),
         KeyBinding::new("ctrl-b", shell::ToggleRail, None),
+        // ⌘F expands the chat list's round search button into its field.
+        KeyBinding::new("cmd-f", shell::FocusSearch, None),
+        KeyBinding::new("ctrl-f", shell::FocusSearch, None),
         KeyBinding::new("escape", shell::Escape, None),
+        // "Delete message?": Return confirms (Esc cancels via the shell).
+        KeyBinding::new(
+            "enter",
+            delete_confirm::ConfirmDelete,
+            Some("DeleteConfirm"),
+        ),
         // Media viewer: ← → page through the album (Esc closes via the shell).
         KeyBinding::new("left", media_viewer::Prev, Some("MediaViewer")),
         KeyBinding::new("right", media_viewer::Next, Some("MediaViewer")),
