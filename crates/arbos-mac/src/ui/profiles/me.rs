@@ -679,7 +679,7 @@ impl Shell {
                          you type. The open chat comes back."
                             .into()
                     } else {
-                        "Arbos only tells you about new versions; press Update in the rail to install."
+                        "Arbos only tells you about new versions; the blue update button at the bottom of the chat list installs one when you press it."
                             .into()
                     },
                     &theme,

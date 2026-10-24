@@ -769,7 +769,16 @@ impl AppState {
             }
         });
 
-        let update_state = UpdateState::new();
+        let mut update_state = UpdateState::new();
+        // Rig: `ARBOS_UPDATE_STATE=available|downloading|installed|failed` —
+        // the footer's update disc in that state for a fake 0.6.999 build
+        // (the worker never polls while the variable is set).
+        if let Some(phase) = std::env::var("ARBOS_UPDATE_STATE")
+            .ok()
+            .and_then(|v| UpdateState::fixture_phase(&v, &update_state.current_version))
+        {
+            update_state.phase = phase;
+        }
         let (update_event_tx, mut update_event_rx) = mpsc::unbounded_channel::<UpdateEvent>();
         let (update_command_tx, update_command_rx) = mpsc::unbounded_channel::<UpdateCommand>();
         let update_worker = Tokio::spawn(
@@ -998,7 +1007,7 @@ impl AppState {
                             self.install_update(cx);
                         } else if fresh {
                             self.push_notice(format!(
-                                "Arbos {version} is ready to install — press Update in the rail."
+                                "Arbos {version} is ready — press the blue update button at the bottom of the chat list to install it."
                             ));
                         }
                     }
@@ -1057,7 +1066,7 @@ impl AppState {
                 }
                 self.push_notice(format!(
                     "Arbos {version} is installed — it restarts in a minute while you are in Arbos, \
-                     or when you pause. Press Restart now in the rail to do it at once."
+                     or when you pause. Press the blue update button at the bottom of the chat list to do it at once."
                 ));
                 cx.spawn(async move |this, cx| loop {
                     cx.background_executor()
@@ -1083,12 +1092,11 @@ impl AppState {
                         self.auto_update_failed = Some(a.item.version.clone());
                     }
                 }
-                // A quiet "Retry" in the rail is not enough: say what went wrong and offer the
-                // download page.
+                // The disc alone is not enough: say what went wrong and offer the download page.
                 let next = if message.ends_with('.') {
-                    " Press Retry"
+                    " Press the blue update button to retry"
                 } else {
-                    " — press Retry"
+                    " — press the blue update button to retry"
                 };
                 self.push_notice(format!(
                     "Update failed: {message}{next}, or get the newest version from {}.",
@@ -1212,34 +1220,36 @@ impl AppState {
         cx.notify();
     }
 
-    /// The rail button: download, verify, swap, relaunch in one click. From a translocated or
-    /// read-only copy the new version is installed into Applications instead.
+    /// The footer's update disc (and Settings → Updates → Install): one click does what
+    /// [`UpdateState::disc_action`] says — download, verify, swap and relaunch; restart now
+    /// for an installed build; from a translocated or read-only copy the move to Applications.
     pub fn install_update(&mut self, cx: &mut Context<Self>) {
         if self.update.busy() {
             return;
         }
-        if matches!(self.update.phase, UpdatePhase::Installed { .. }) {
-            // "Restart now": the automatic install is done; skip the wait.
-            if let Some(installed) = self.pending_relaunch.take() {
-                update::log("auto-update: Restart now pressed");
-                self.relaunch_into(installed, cx);
+        match self.update.click_action() {
+            update::DiscAction::Hidden | update::DiscAction::Busy => {}
+            update::DiscAction::Relaunch => {
+                // "Restart now": the automatic install is done; skip the wait.
+                if let Some(installed) = self.pending_relaunch.take() {
+                    update::log("auto-update: Restart now pressed");
+                    self.relaunch_into(installed, cx);
+                }
             }
-            return;
+            update::DiscAction::MoveToApplications => self.move_to_applications(cx),
+            update::DiscAction::Install => {
+                let Some(available) = self.update.available().cloned() else {
+                    return;
+                };
+                self.update.phase = UpdatePhase::Downloading {
+                    available,
+                    got: 0,
+                    total: None,
+                };
+                let _ = self.update_commands.send(UpdateCommand::Install);
+                cx.notify();
+            }
         }
-        if self.update.button_moves() {
-            self.move_to_applications(cx);
-            return;
-        }
-        let Some(available) = self.update.available().cloned() else {
-            return;
-        };
-        self.update.phase = UpdatePhase::Downloading {
-            available,
-            got: 0,
-            total: None,
-        };
-        let _ = self.update_commands.send(UpdateCommand::Install);
-        cx.notify();
     }
 
     fn apply(&mut self, event: SyncEvent, cx: &mut Context<Self>) {
