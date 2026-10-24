@@ -816,6 +816,13 @@ struct GroupProfileView: View {
         return out
     }
 
+    private var bannedRows: [Row] {
+        guard let people else { return [] }
+        return people.banned.map { m in
+            Row(id: m.id, person: ProfilePerson(m), role: m.role, agent: nil)
+        }
+    }
+
     private var memberCount: Int { rows.filter { $0.agent == nil }.count }
 
     /// Owners (and admins, when a chat has that role) can remove other people.
@@ -1189,6 +1196,7 @@ struct GroupProfileView: View {
     /// Members: Add members, Share invite link (people groups), Activity for
     /// owners/admins, then every person (name, @handle) and agent as kit rows.
     /// Owners/admins also get a read-receipts policy card (members see who read).
+    /// Banned people (owner/admin) sit under Banned with Unban.
     private var membersSections: [PaneSection] {
         var list: [AnyView] = [
             AnyView(Button { showAdd = true } label: {
@@ -1246,7 +1254,49 @@ struct GroupProfileView: View {
                 )
             ))]), at: 0)
         }
+        if !bannedRows.isEmpty {
+            out.append(.title("Banned"))
+            out.append(.card(bannedRows.map { r in AnyView(bannedRow(r)) },
+                             separatorInset: PaneKit.separatorInset(.glyph(""))))
+        }
         return out
+    }
+
+    /// A banned person: name, @handle · banned, Unban for whoever may mute/ban.
+    private func bannedRow(_ r: Row) -> some View {
+        let unban: AnyView? = iCanMuteBan ? AnyView(
+            Button {
+                model.unbanMember(chatId: chatId, userId: r.person.id)
+            } label: {
+                Text("Unban")
+                    .font(theme.font(Theme.small, weight: .medium))
+            }
+            .buttonStyle(.bordered)
+            .tint(theme.muted)
+            .accessibilityLabel("Unban @\(r.person.handle)")
+        ) : nil
+        return Button {
+            model.showProfile(.user(r.person))
+        } label: {
+            PaneRow(
+                leading: .avatar(AnyView(PersonAvatar(url: r.person.avatarUrl, handle: r.person.handle, size: PaneKit.avatar, name: r.person.name, id: r.person.id, colorIndex: r.person.avatarColorIndex))),
+                title: r.person.displayName,
+                subtitle: "@\(r.person.handle) · banned",
+                trailing: unban
+            )
+        }
+        .buttonStyle(.borderless)
+        .contextMenu {
+            Button {
+                model.showProfile(.user(r.person))
+            } label: { Label("View profile", systemImage: "person.crop.circle") }
+            if iCanMuteBan {
+                Divider()
+                Button {
+                    model.unbanMember(chatId: chatId, userId: r.person.id)
+                } label: { Label("Unban", systemImage: "hand.raised.slash") }
+            }
+        }
     }
 
     /// Reuse a usable invite URL, or mint one, then open the system share sheet.

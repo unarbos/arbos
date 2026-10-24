@@ -34,14 +34,93 @@ private struct PendingDelete: Identifiable, Equatable {
 
 struct ChatView: View {
     @EnvironmentObject private var model: AppModel
+    let chatId: Id
+    let projectId: Id
+
+    var body: some View {
+        ChatSessionHost(model: model, chatId: chatId, projectId: projectId)
+    }
+
+    /// Photos leave the phone as JPEG or PNG no wider than 2048 px: the models behind the
+    /// agent read those; a 12 MB HEIC straight from the camera they do not. Videos and
+    /// anything that is not an image pass through unchanged.
+    static func imageForUpload(_ data: Data, type: UTType?) -> (data: Data, mime: String, ext: String) {
+        let original = (data: data, mime: type?.preferredMIMEType ?? "image/jpeg", ext: type?.preferredFilenameExtension ?? "jpg")
+        if let type, type.conforms(to: .movie) || type.conforms(to: .video) { return original }
+        guard let image = UIImage(data: data) else { return original }
+        let longest = max(image.size.width, image.size.height) * image.scale
+        let isWebFormat = type.map { $0.conforms(to: .jpeg) || $0.conforms(to: .png) } ?? false
+        if isWebFormat && longest <= 2048 && data.count <= 4 * 1024 * 1024 { return original }
+        let scale = min(1, 2048 / max(longest, 1))
+        let size = CGSize(width: (image.size.width * scale).rounded(), height: (image.size.height * scale).rounded())
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        let drawn = UIGraphicsImageRenderer(size: size, format: format).image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }
+        guard let jpeg = drawn.jpegData(compressionQuality: 0.85) else { return original }
+        return (jpeg, "image/jpeg", "jpg")
+    }
+
+    /// Fixed-locale stamp for photo attachment names (relay blob keys must be ASCII).
+    static let photoStamp: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd HH.mm.ss"
+        return f
+    }()
+}
+
+/// Forwards only chat-scoped `AppModel` publishes into `ChatSession`. Unrelated
+/// fields (credits, devices, goals, …) no longer rebuild the open chat.
+private struct ChatSessionHost: View {
+    let model: AppModel
+    let chatId: Id
+    let projectId: Id
+    @State private var tick = 0
+
+    var body: some View {
+        let _ = tick
+        ChatSession(model: model, chatId: chatId, projectId: projectId)
+            .onReceive(model.$messages) { _ in tick &+= 1 }
+            .onReceive(model.$messagesVersion) { _ in tick &+= 1 }
+            .onReceive(model.$channelRows) { _ in tick &+= 1 }
+            .onReceive(model.$caughtUp) { _ in tick &+= 1 }
+            .onReceive(model.$typing) { _ in tick &+= 1 }
+            .onReceive(model.$peopleChats) { _ in tick &+= 1 }
+            .onReceive(model.$machine) { _ in tick &+= 1 }
+            .onReceive(model.$roomLinks) { _ in tick &+= 1 }
+            .onReceive(model.$relayLink) { _ in tick &+= 1 }
+            .onReceive(model.$linkPillRepaint) { _ in tick &+= 1 }
+            .onReceive(model.$projects) { _ in tick &+= 1 }
+            .onReceive(model.$directory) { _ in tick &+= 1 }
+            .onReceive(model.$servers) { _ in tick &+= 1 }
+            .onReceive(model.$pendingSearchChat) { _ in tick &+= 1 }
+            .onReceive(model.$user) { _ in tick &+= 1 }
+            .onReceive(model.$appearanceSetting) { _ in tick &+= 1 }
+            .onReceive(model.$surfaceSetting) { _ in tick &+= 1 }
+            .onReceive(model.$textScaleSetting) { _ in tick &+= 1 }
+            .onReceive(model.$firstLogin) { _ in tick &+= 1 }
+            .onReceive(model.$chats) { _ in tick &+= 1 }
+            .onReceive(model.$mutedChannelIds) { _ in tick &+= 1 }
+            .onReceive(model.$models) { _ in tick &+= 1 }
+            .onReceive(model.$notice) { _ in tick &+= 1 }
+            .onReceive(model.$lastSeen) { _ in tick &+= 1 }
+    }
+}
+
+/// One open conversation. Holds `model` as a plain reference (not
+/// `@EnvironmentObject`) so only `ChatSessionHost`'s filtered publishes rebuild it.
+/// Composer draft lives in `ComposerDraft` / `ComposerField` — keystrokes do not
+/// re-evaluate this view (arbonites-chat-lag + feedback app-01M5NNJ001NHHYBHXTASM5NXBZ).
+private struct ChatSession: View {
+    let model: AppModel
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
     let chatId: Id
     let projectId: Id
 
     /// The composer text lives in its own observable so a keystroke re-renders the
-    /// field, not this 2 000-line screen (arbonites-chat-lag, 2026-10-24). Read it as
-    /// `composerDraft.text` for actions; the field observes it for display.
+    /// field, not this screen. Read it as `composerDraft.text` for actions; the
+    /// field observes it for display.
     @State private var composerDraft = ComposerDraft()
     /// `AppModel.addressesEveryone(text)` for the current draft, updated only when it flips.
     @State private var draftAddressesEveryone = false
@@ -51,6 +130,9 @@ struct ChatView: View {
     /// Bumped by every `refreshRows`; with the window bounds it identifies `shown`
     /// without comparing the row array (that compare ran once per row per change).
     @State private var rowsVersion = 0
+    /// Message ids that `rows` / `messageById` currently mirror — used to skip a full
+    /// `Transcript.rows` rebuild on streaming deltas and single appends.
+    @State private var refreshIds: [Id] = []
     /// id → message for the rows on screen (menus, search, replies); rebuilt with `rows`.
     @State private var messageById: [Id: Message] = [:]
     /// How many of the newest rows are in the view tree. The transcript is a plain
@@ -58,12 +140,10 @@ struct ChatView: View {
     /// a long group chat put thousands in it and the open took seconds (long-chat-perf,
     /// 2026-10-23). Cap stays modest so finger-scrolling stays smooth; older rows join
     /// as the user nears the top (`growWindow`).
-    @State private var windowCount = ChatView.windowInitial
-    /// iOS 17 has no scroll-geometry callback to grow the window with, so it keeps every row.
-    static let windowInitial: Int = {
-        if #available(iOS 18, *) { return 80 }
-        return Int.max
-    }()
+    @State private var windowCount = ChatSession.windowInitial
+    /// Same initial window on iOS 17 — PreferenceKey geometry near the top grows it
+    /// (feedback app-01M5NNJ001NHHYBHXTASM5NXBZ). iOS 18+ uses onScrollGeometryChange.
+    static let windowInitial: Int = 80
     /// Rows added per step. Small on purpose: a step builds and lays out this many
     /// bubbles in one frame (≈4 ms each in a Debug simulator build).
     static let windowStep = 30
@@ -439,6 +519,8 @@ struct ChatView: View {
 
     /// Rebuild transcript rows. Membership lines ("Jacob added Home, hjkb and Doug",
     /// "Alice left") are system messages the relay writes into the doc (#1349).
+    /// Streaming deltas and single appends rebuild only the tail (feedback
+    /// app-01M5NNJ001NHHYBHXTASM5NXBZ); everything else still does a full pass.
     private func refreshRows() {
         // A channel is a people-style transcript: my lines right, everyone else by name.
         let slot = isPeople ? "\(peopleSlot):\(chatId)" : isChannel ? "\(channelSlot):\(chatId)" : projectId
@@ -452,13 +534,81 @@ struct ChatView: View {
         let refreshStarted = Date()
         defer { PerfCounters.time("rows()", ms: Date().timeIntervalSince(refreshStarted) * 1000) }
         #endif
-        let byId = Transcript.index(list)
+        let me = isChannel ? model.channelMe : model.myUserId
         // Sender names inside the bubbles: groups and channels only — never a 1:1 chat.
         let multiParty = isChannel || (people?.isGroup ?? false)
-        let next = Transcript.rows(list, byId: byId, projectId: slot,
-                                   me: isChannel ? model.channelMe : model.myUserId,
-                                   people: isPeople || isChannel, agentNames: agentNames,
-                                   multiParty: multiParty)
+        let peopleFlag = isPeople || isChannel
+
+        // Incremental: same ids and only the last message's content changed (streaming
+        // token) — rebuild only the tail. A middle edit (reaction, etc.) falls through.
+        if list.count == refreshIds.count, list.count > 0,
+           zip(list, refreshIds).allSatisfy({ $0.id == $1 }) {
+            let last = list[list.count - 1]
+            let prefixSame = list.dropLast().allSatisfy { messageById[$0.id] == $0 }
+            if prefixSame {
+                if messageById[last.id] == last { return }
+                var byId = messageById
+                byId[last.id] = last
+                let cut = rows.firstIndex(where: { $0.messageId == last.id }).map { ix -> Int in
+                    if ix > 0, rows[ix - 1].id == "\(last.id)#date" { return ix - 1 }
+                    return ix
+                } ?? rows.count
+                let prev = list.count >= 2 ? list[list.count - 2] : nil
+                let slice = prev.map { [$0, last] } ?? [last]
+                let rebuilt = Transcript.rows(slice, byId: byId, projectId: slot, me: me,
+                                              people: peopleFlag, agentNames: agentNames, multiParty: multiParty)
+                let newTail: [Row]
+                if let prev {
+                    let start = rebuilt.firstIndex(where: { $0.messageId == last.id }).map { ix -> Int in
+                        if ix > 0, rebuilt[ix - 1].id == "\(last.id)#date" { return ix - 1 }
+                        return ix
+                    } ?? rebuilt.count
+                    newTail = Array(rebuilt[start...])
+                } else {
+                    newTail = rebuilt
+                }
+                rows = Array(rows.prefix(cut)) + newTail
+                messageById = byId
+                rowsVersion &+= 1
+                return
+            }
+        }
+
+        // Incremental append: one new message at the end.
+        if list.count == refreshIds.count + 1, list.count > 0,
+           zip(list.dropLast(), refreshIds).allSatisfy({ $0.id == $1 }) {
+            let last = list[list.count - 1]
+            var byId = messageById
+            byId[last.id] = last
+            let prev = list.count >= 2 ? list[list.count - 2] : nil
+            let slice = prev.map { [$0, last] } ?? [last]
+            let rebuilt = Transcript.rows(slice, byId: byId, projectId: slot, me: me,
+                                          people: peopleFlag, agentNames: agentNames, multiParty: multiParty)
+            let newTail: [Row]
+            if let prev {
+                let start = rebuilt.firstIndex(where: { $0.messageId == last.id }).map { ix -> Int in
+                    if ix > 0, rebuilt[ix - 1].id == "\(last.id)#date" { return ix - 1 }
+                    return ix
+                } ?? rebuilt.count
+                newTail = Array(rebuilt[start...])
+            } else {
+                newTail = rebuilt
+            }
+            if windowSkipEnd == 0, windowCount < rows.count + newTail.count {
+                windowCount = min(rows.count + newTail.count, windowCount + newTail.count)
+            } else if windowSkipEnd > 0 {
+                windowSkipEnd += newTail.count
+            }
+            rows = rows + newTail
+            messageById = byId
+            refreshIds = list.map(\.id)
+            rowsVersion &+= 1
+            return
+        }
+
+        let byId = Transcript.index(list)
+        let next = Transcript.rows(list, byId: byId, projectId: slot, me: me,
+                                   people: peopleFlag, agentNames: agentNames, multiParty: multiParty)
         // Rows appended after the last one we had (new messages) join the window, so the
         // oldest row on screen does not fall out of the view tree when a new one lands.
         // History that arrives above it — the first snapshot, a backfill, an older
@@ -474,6 +624,7 @@ struct ChatView: View {
         }
         messageById = byId
         rows = next
+        refreshIds = list.map(\.id)
         rowsVersion &+= 1
     }
 
@@ -1258,6 +1409,16 @@ struct ChatView: View {
                 // bottom safe-area inset, and LazyVStack can drop every visible row
                 // for a white transcript until the next layout pass.
                 VStack(alignment: .leading, spacing: 0) {
+                    // iOS 17 window growth: report this top edge's position in the scroll space.
+                    Color.clear.frame(height: 0)
+                        .background(
+                            GeometryReader { geo in
+                                Color.clear.preference(
+                                    key: ChatScrollTopKey.self,
+                                    value: geo.frame(in: .named("arbosChatScroll")).minY
+                                )
+                            }
+                        )
                     Color.clear.frame(height: (showsMemberChips ? 104 : 64) + headerExtra).onAppear { scroller = proxy }
                     if let banner = machineBannerText {
                         // Grok (Mac refs 69/70): a quiet notice, not a red strip — the
@@ -2237,33 +2398,6 @@ struct ChatView: View {
         composerDraft.caret = caret
     }
 
-    /// Fixed-locale stamp for photo attachment names (relay blob keys must be ASCII).
-    private static let photoStamp: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.dateFormat = "yyyy-MM-dd HH.mm.ss"
-        return f
-    }()
-
-    /// Photos leave the phone as JPEG or PNG no wider than 2048 px: the models behind the
-    /// agent read those; a 12 MB HEIC straight from the camera they do not. Videos and
-    /// anything that is not an image pass through unchanged.
-    static func imageForUpload(_ data: Data, type: UTType?) -> (data: Data, mime: String, ext: String) {
-        let original = (data: data, mime: type?.preferredMIMEType ?? "image/jpeg", ext: type?.preferredFilenameExtension ?? "jpg")
-        if let type, type.conforms(to: .movie) || type.conforms(to: .video) { return original }
-        guard let image = UIImage(data: data) else { return original }
-        let longest = max(image.size.width, image.size.height) * image.scale
-        let isWebFormat = type.map { $0.conforms(to: .jpeg) || $0.conforms(to: .png) } ?? false
-        if isWebFormat && longest <= 2048 && data.count <= 4 * 1024 * 1024 { return original }
-        let scale = min(1, 2048 / max(longest, 1))
-        let size = CGSize(width: (image.size.width * scale).rounded(), height: (image.size.height * scale).rounded())
-        let format = UIGraphicsImageRendererFormat.default()
-        format.scale = 1
-        let drawn = UIGraphicsImageRenderer(size: size, format: format).image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }
-        guard let jpeg = drawn.jpegData(compressionQuality: 0.85) else { return original }
-        return (jpeg, "image/jpeg", "jpg")
-    }
-
     /// Chip / inferred agent, or `"everyone"` when the draft says so — matches `composerPrompt`.
     /// A bare person `@handle` in the text drops a sticky agent so bob does not answer that ping.
     /// A person's display name alone does not drop an agent handle/slug match ("Arbos …" still
@@ -2779,8 +2913,9 @@ private struct TranscriptRows: View, Equatable {
     }
 }
 
-/// Fires once each time the scroll view comes within 900 pt of its top (iOS 18+;
-/// a channel loads one older page then). Earlier systems keep the newest page.
+/// Fires when the scroll view comes near its top (channel older page / grow window).
+/// iOS 18+ uses scroll geometry; iOS 17 watches a top-of-content frame in a named
+/// coordinate space so the row window can grow (feedback app-01M5NNJ001NHHYBHXTASM5NXBZ).
 private struct NearTopReporter: ViewModifier {
     let enabled: Bool
     let onNear: () -> Void
@@ -2794,9 +2929,24 @@ private struct NearTopReporter: ViewModifier {
             } action: { _, near in
                 if near { onNear() }
             }
+        } else if enabled {
+            content
+                .coordinateSpace(name: "arbosChatScroll")
+                .onPreferenceChange(ChatScrollTopKey.self) { minY in
+                    // Content top near the scroll view's top → grow the row window.
+                    if minY > -40 && minY < 900 { onNear() }
+                }
         } else {
             content
         }
+    }
+}
+
+private struct ChatScrollTopKey: PreferenceKey {
+    /// Unset until the top sentinel lays out (must not look "near top").
+    static var defaultValue: CGFloat = -.greatestFiniteMagnitude
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
     }
 }
 

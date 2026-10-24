@@ -304,6 +304,10 @@ pub struct PeopleChatDto {
     pub members_see_reads: Option<bool>,
     pub pending: bool,
     pub members: Vec<ChatMemberDto>,
+    /// Banned people (owner/admin with mute-ban rights); empty for everyone else.
+    /// Unban from the member list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub banned: Vec<ChatMemberDto>,
     pub room: String,
     #[typeshare(serialized_as = "I54")]
     pub head_seq: i64,

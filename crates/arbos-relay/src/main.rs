@@ -595,6 +595,10 @@ async fn main() -> anyhow::Result<()> {
             "/chats/{id}/members/{user_id}",
             put(people::member_patch).delete(people::member_remove),
         )
+        .route(
+            "/chats/{id}/members/{user_id}/unban",
+            post(people::member_unban),
+        )
         .route("/box/people/{id}", get(people::box_people_chat))
         .route(
             "/projects/{id}/members",

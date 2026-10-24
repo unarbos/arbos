@@ -535,6 +535,20 @@ pub fn people_chat_dto(
     let has_agent = live.iter().any(|m| m.project_id().is_some());
     let mine = live.iter().find(|m| m.user_id() == Some(me)).copied();
     let archived_at = state.db.chat_archived_at(me, &cm.chat.id).ok().flatten();
+    let can_see_banned =
+        mine.is_some_and(|m| m.role == "owner" || (m.role == "admin" && member_can_mute_ban(m)));
+    let banned = if can_see_banned {
+        state
+            .db
+            .banned_members_of(&cm.chat.id)
+            .unwrap_or_default()
+            .iter()
+            .filter(|m| m.user_id().is_some())
+            .map(|m| member_dto(state, m))
+            .collect()
+    } else {
+        Vec::new()
+    };
     PeopleChatDto {
         id: cm.chat.id.clone(),
         archived_at,
@@ -555,6 +569,7 @@ pub fn people_chat_dto(
         members_see_reads: Some(cm.chat.members_see_reads),
         pending,
         members,
+        banned,
         room: format!("/room/{PEOPLE_PROJECT}/{}", cm.chat.id),
         head_seq,
         last_activity_at: if last_row_at > 0 {
@@ -2314,6 +2329,55 @@ pub async fn member_patch(
     }
 }
 
+/// `POST /chats/{id}/members/{user_id}/unban` — clear a ban so they can be added again.
+pub async fn member_unban(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((id, user_id)): Path<(String, String)>,
+) -> Response {
+    let (me, cm) = match member_chat(&state, &principal, &id) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    let mine = cm.members.iter().find(|m| m.user_id() == Some(me.as_str()));
+    let allowed = match mine {
+        Some(m) if m.role == "owner" => true,
+        Some(m) if m.role == "admin" && member_can_mute_ban(m) => true,
+        _ => false,
+    };
+    if !allowed {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "owner_only",
+            "only an owner or an admin with mute and ban rights can unban",
+        );
+    }
+    match state.db.unban_member(&id, &format!("user:{user_id}")) {
+        Ok(true) => {}
+        Ok(false) => {
+            return api_error(
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "that person is not banned",
+            )
+        }
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    }
+    state.matrix.touch_chat(&state, &id, None);
+    notify_members(
+        &state,
+        &cm,
+        &me,
+        &PushEventDto::PeopleChatUpdated(PeopleChatUpdatedPayloadDto {
+            chat_id: id.clone(),
+        }),
+    );
+    match load_chat(&state, &id) {
+        Ok(cm) => Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response(),
+        Err(r) => *r,
+    }
+}
+
 /// `GET /box/people/{chat_id}` — the chat as the owner's box sees it (members and settings).
 pub async fn box_people_chat(
     State(state): State<AppState>,
@@ -4009,6 +4073,28 @@ mod agent_tests {
             .db
             .add_member(&chat, &format!("user:{bob}"), "member", &alice, &json!({}))
             .is_err());
+
+        // Unban Bob — they can be added again.
+        let r = member_unban(
+            State(state.clone()),
+            alice_dev.clone(),
+            Path((chat.clone(), bob.clone())),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert!(!state
+            .db
+            .member_is_banned(&chat, &format!("user:{bob}"))
+            .unwrap());
+        state
+            .db
+            .add_member(&chat, &format!("user:{bob}"), "member", &alice, &json!({}))
+            .unwrap();
+        assert!(state
+            .db
+            .membership(&chat, &format!("user:{bob}"))
+            .unwrap()
+            .is_some());
     }
 
     #[tokio::test]

@@ -3027,7 +3027,11 @@ final class AppModel: ObservableObject {
             do {
                 try await api.removeMember(chatId: chatId, userId: userId, ban: ban)
                 if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
-                    peopleChats[i].members.removeAll { !$0.isAgent && $0.id == userId }
+                    if ban, let chat = try? await api.peopleChat(chatId) {
+                        peopleChats[i] = chat
+                    } else {
+                        peopleChats[i].members.removeAll { !$0.isAgent && $0.id == userId }
+                    }
                 }
                 // The relay writes "<me> removed @handle" into the chat (#1349).
             } catch {
@@ -3035,6 +3039,23 @@ final class AppModel: ObservableObject {
                 notice = Notice(text: e?.type == "owner_only" ? "Only an owner or admin can manage members."
                                  : (ban ? "Ban failed: \(error.localizedDescription)"
                                     : "Remove failed: \(error.localizedDescription)"))
+            }
+        }
+    }
+
+    /// Owner/admin clears a ban (`POST …/members/{userId}/unban`) so the person can be added again.
+    func unbanMember(chatId: String, userId: String) {
+        Task {
+            do {
+                let chat = try await api.unbanMember(chatId: chatId, userId: userId)
+                if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+                    peopleChats[i] = chat
+                }
+            } catch {
+                let e = error as? RelayError
+                notice = Notice(text: e?.type == "owner_only"
+                                 ? "Only an owner or an admin with mute and ban rights can unban."
+                                 : "Unban failed: \(error.localizedDescription)")
             }
         }
     }

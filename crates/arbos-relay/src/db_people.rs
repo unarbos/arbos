@@ -365,6 +365,30 @@ impl Db {
         })
     }
 
+    /// Clear a ban so the person can be added again. Does not re-add them.
+    pub fn unban_member(&self, chat_id: &str, member: &str) -> Result<bool> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE people_members SET banned_at = NULL
+                 WHERE chat_id = ?1 AND member = ?2 AND banned_at IS NOT NULL",
+                params![chat_id, member],
+            )
+            .map(|n| n > 0)
+        })
+    }
+
+    /// Banned people for the group member list's Unban rows (not live members).
+    pub fn banned_members_of(&self, chat_id: &str) -> Result<Vec<Membership>> {
+        self.with(|c| {
+            let mut st = c.prepare(&format!(
+                "SELECT {MEMBER_COLS} FROM people_members
+                 WHERE chat_id = ?1 AND banned_at IS NOT NULL ORDER BY banned_at DESC"
+            ))?;
+            let rows = st.query_map(params![chat_id], membership_from_row)?;
+            rows.collect()
+        })
+    }
+
     /// Mute (`silenced`) from posting. `until` is ms when the mute ends; `None` = until unmuted.
     pub fn set_member_silenced(
         &self,

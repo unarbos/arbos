@@ -266,6 +266,8 @@ struct PeopleChat: Identifiable, Equatable {
     var archivedAt: Int64? = nil
     /// Group policy: members may see who has read messages (owner/admin toggle). Default on.
     var membersSeeReads: Bool = true
+    /// Banned people (owner/admin with mute-ban rights); Unban from the member list.
+    var banned: [ChatMember] = []
 
     /// True while I am muted from posting (honours timed mute).
     var isSilencedNow: Bool {
@@ -319,6 +321,7 @@ extension PeopleChat {
         self.silencedUntil = dto.me.silenced_until
         self.archivedAt = dto.archived_at.flatMap { $0 > 0 ? $0 : nil }
         self.membersSeeReads = dto.members_see_reads ?? true
+        self.banned = (dto.banned ?? []).map { ChatMember(dto: $0) }
     }
 
     /// Is this person already in the chat? Me (`meId`) counts as in. A handle

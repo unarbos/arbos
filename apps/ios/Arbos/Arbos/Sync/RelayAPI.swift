@@ -1022,6 +1022,13 @@ final class RelayAPI {
         _ = try await request("DELETE", "/chats/\(chatId)/members/\(userId)\(ban ? "?ban=1" : "")")
     }
 
+    /// `POST /chats/{id}/members/{userId}/unban` — clear a ban so they can be added again.
+    func unbanMember(chatId: String, userId: String) async throws -> PeopleChat {
+        let v = try await json("POST", "/chats/\(chatId)/members/\(userId)/unban")
+        if let chat = PeopleChat.parse(v) { return chat }
+        return try await peopleChat(chatId)
+    }
+
     /// `PUT /chats/{id}/members/{userId}` — mute/unmute from posting (optional duration).
     func setMemberSilenced(
         chatId: String,
