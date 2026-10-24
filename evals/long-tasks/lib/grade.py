@@ -270,7 +270,11 @@ def grade_turn(turn, ctx, box, project, env):
             if len(runs) < spec["min_runs"]:
                 reasons.append(f"routine ran {len(runs)} times, expected ≥ {spec['min_runs']}")
     if turn.get("latency_max_s") is not None:
-        t = res.get("ttfr_s")
+        # "first reply" = the first thing the user sees: since image 0.1.113 an `act` turn's
+        # acknowledgement rides the working line (a status part), not a text bubble, so the
+        # earlier of first text and first status counts (#1598 / kill-placeholders-working-row)
+        cands = [x for x in (res.get("ttfr_s"), res.get("first_status_s")) if x is not None]
+        t = min(cands) if cands else None
         if t is None or t > turn["latency_max_s"]:
             reasons.append(f"first reply took {t} s (limit {turn['latency_max_s']} s)")
     if turn.get("max_doc_tool_parts") is not None and (dm.get("tool_parts") or 0) > turn["max_doc_tool_parts"]:
