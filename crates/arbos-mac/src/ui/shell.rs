@@ -2430,53 +2430,58 @@ impl Shell {
         }
     }
 
-    // ----- update pill (sidebar bottom) ------------------------------------------
+    // ----- update disc (sidebar footer, right end) --------------------------------
 
-    /// The Update button (D42): absent while up to date; appears the moment
-    /// the feed has a newer build; one click downloads, verifies, swaps the
-    /// bundle, and relaunches. It sits at the bottom of the chat list.
-    pub(crate) fn render_update_button(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+    /// Grok Bot's update button ([feedback footer-update-button-grok-2026-10-24]):
+    /// a solid blue disc with the white cloud-download glyph at the footer's
+    /// right end, the button family's size, drawn only when the update is
+    /// ready for a click (`UpdateState::disc_action`). One click downloads,
+    /// verifies, swaps the bundle and relaunches — or restarts now when the
+    /// automatic path already installed it. Brighter under the pointer,
+    /// brighter still while pressed (the chip rule, [feedback mention-chips]);
+    /// pulsing and inert while it works. Replaces the "Update" pill (D42).
+    pub(crate) fn render_update_disc(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
         let theme = Theme::of(cx).clone();
         let update = self.state.read(cx).update.clone();
-        if !update.button_visible() {
+        let action = update.disc_action();
+        if action == crate::update::DiscAction::Hidden {
             return None;
         }
-        let busy = update.busy();
-        let failed = matches!(update.phase, crate::update::UpdatePhase::Failed { .. });
+        let busy = action == crate::update::DiscAction::Busy;
         if busy {
             PulseClock::request(cx);
         }
-        let phase = if busy {
-            PulseClock::phase(cx, 1400)
+        let fill = if busy {
+            Theme::with_alpha(
+                theme.update_disc,
+                sidebar::DISC_BUSY_ALPHA_MIN
+                    + (1.0 - sidebar::DISC_BUSY_ALPHA_MIN) * PulseClock::phase(cx, 1400),
+            )
         } else {
-            1.0
+            theme.update_disc
         };
-        let bg = if failed {
-            theme.danger_soft
-        } else {
-            Theme::with_alpha(theme.primary, 0.75 + 0.25 * phase)
-        };
-        let fg = if failed { theme.text } else { theme.on_primary };
-        let label = update.button_label();
+        let glyph = theme.on_update_disc;
         Some(
-            div()
-                .id("rail-update")
-                .w_full()
-                .h(px(38.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .gap(px(6.0))
-                .rounded_full()
-                .bg(bg)
-                .text_color(fg)
-                .text_size(px(TEXT_SMALL))
-                .font_weight(FontWeight::SEMIBOLD)
-                .when(!busy, |el| el.cursor_pointer().hover(|s| s.opacity(0.88)))
-                .child(icon(if failed { "xmark" } else { "arrow-down" }, 14.0, fg))
-                .child(label)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.state.update(cx, |s, cx| s.install_update(cx));
+            sidebar::footer_disc_frame("sidebar-update")
+                .bg(fill)
+                .when(!busy, |el| {
+                    el.cursor_pointer()
+                        .hover(|s| {
+                            s.bg(Theme::lighter(theme.update_disc, sidebar::DISC_HOVER_LIFT))
+                        })
+                        .active(|s| {
+                            s.bg(Theme::lighter(
+                                theme.update_disc,
+                                sidebar::DISC_PRESSED_LIFT,
+                            ))
+                        })
+                })
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(icon("cloud-download", sidebar::FOOTER_DISC_GLYPH, glyph))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if !busy {
+                        this.state.update(cx, |s, cx| s.install_update(cx));
+                    }
                 })),
         )
     }
