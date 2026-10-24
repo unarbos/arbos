@@ -215,7 +215,13 @@ extension View {
     func messageRowGestures(isMessage: Bool, onLongPress: @escaping () -> Void,
                             onCopyMenu: @escaping (MessageMenuItem) -> Void) -> some View {
         if isMessage {
-            onLongPressGesture(minimumDuration: 0.35, perform: onLongPress)
+            // simultaneous so the chat ScrollView keeps vertical pans that start
+            // on a bubble; exclusive onLongPressGesture eats the scroll
+            // ([feedback app-01M5Q1N6C1HAKHC6P2XPEWMRSS]).
+            simultaneousGesture(
+                LongPressGesture(minimumDuration: 0.35)
+                    .onEnded { _ in onLongPress() }
+            )
         } else {
             contextMenu { MessageMenuContent(items: MessageMenu.copyOnly, action: onCopyMenu) }
         }

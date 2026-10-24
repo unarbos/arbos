@@ -7,6 +7,7 @@ mod budget;
 mod channels;
 mod config;
 mod connectors;
+mod disk;
 mod eval;
 mod feedback;
 mod goals;
@@ -336,6 +337,9 @@ async fn boot() -> Result<()> {
     std::env::set_var("ARBOS_RELAY_URL", &relay_url);
     let cfg = BoxConfig::from_env()?;
     std::fs::create_dir_all(cfg.box_state_dir().join("logs"))?;
+    // Disk headroom (#1641): arm the ballast and keep it armed while there is room.
+    disk::boot(&cfg.work_root)?;
+    disk::spawn_ballast_keeper(cfg.work_root.clone());
     let sup = Supervisor::new(cfg.clone());
 
     // Box HTTP (health, per-workspace history/metrics, browser stream) first: the relay's preview

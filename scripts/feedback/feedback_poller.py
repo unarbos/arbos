@@ -1297,7 +1297,10 @@ class Loop:
 
     def hold_for_approval(self, fid: str, st: dict) -> None:
         main_head = self.gh.branch_head("main") or ""
-        first = st.get("status") != "awaiting_jacob"
+        # The hold attaches to the ITEM, not to one green head: a re-gate after main moved returns here with
+        # `awaiting` already set — same listing, same ready_since, no second "held" comment (#1551 was
+        # announced three times on 2026-10-24 while nothing about it had changed for Jacob).
+        first = not st.get("awaiting")
         aw = st.get("awaiting") or {}
         aw.update(ready=True, ready_head=st.get("branch_head"), main_head=main_head, ready_since=aw.get("ready_since") or iso(), conflict=False)
         aw.setdefault("since", iso())
@@ -3956,9 +3959,13 @@ class Loop:
         print(f"launches today={self.store.launches_today()}/{self.cfg.max_per_day} last={self.store.last_launch()}")
         print(f"kill file: {'PRESENT' if self.cfg.kill_file.exists() else 'absent'} ({self.cfg.kill_file})")
         gate = self.approval_state()
-        n = sum(1 for f in self.store.items() if self.store.state(f).get("status") == "awaiting_jacob")
+        held = [self.store.state(f) for f in self.store.items()]
+        held = [h for h in held if h.get("status") == "awaiting_jacob" or (h.get("awaiting") and h.get("status") == "gating" and not h.get("approved_by_jacob"))]
+        n = len(held)
+        regating = sum(1 for h in held if h.get("status") == "gating")
         if gate:
-            print(f"RELEASE-APPROVAL GATE on (standing rule; allow: {', '.join(gate.get('allow', []))}); awaiting Jacob: {n} — "
+            print(f"RELEASE-APPROVAL GATE on (standing rule; allow: {', '.join(gate.get('allow', []))}); awaiting Jacob: {n}"
+                  + (f" ({regating} re-gating after main moved — still awaiting, approve/decline any time)" if regating else "") + " — "
                   f"list: {self.cfg.state_dir / self.AWAITING_DOC}; `arbos-feedback approve <item>` / `decline <item> \"<note>\"`")
         else:
             print(f"RELEASE-APPROVAL GATE *** LIFTED WHOLESALE *** {(self.cfg.state_dir / self.APPROVAL_LIFTED_FILE).read_text().strip()} — "

@@ -5,6 +5,7 @@
 //! in the chat — never a silent stop.
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1258,6 +1259,10 @@ impl ModelError {
         if let Some((notice, _)) = classify_hard_limit(&self.detail) {
             return notice.to_owned();
         }
+        if crate::disk::is_enospc(&self.detail) {
+            // The model call path writes its request/response files to the workspace (#1641).
+            return "Your workspace disk is full. Say *clean up* and I will remove caches and toolchains, or delete files yourself; then send your message again.".to_owned();
+        }
         "I couldn't answer that: the model call failed. Ask me again in a moment.".to_owned()
     }
 
@@ -1265,6 +1270,8 @@ impl ModelError {
     pub fn code(&self) -> &'static str {
         if self.refusal {
             "model_refused"
+        } else if crate::disk::is_enospc(&self.detail) {
+            "disk_full"
         } else {
             "model_error"
         }
@@ -2074,7 +2081,11 @@ impl Agent {
                             h.doc
                                 .start_assistant_message(&id, user_msg, &self.cfg.device_id);
                             h.doc.add_status_part(&id, "failed", "Failed");
-                            h.doc.add_error_part(&id, "send_failed", &e.to_string());
+                            h.doc.add_error_part(
+                                &id,
+                                "send_failed",
+                                &crate::disk::friendly(&e.to_string(), &self.work_root()),
+                            );
                             h.doc.finish_message(&id, MessageStatus::Error);
                         }
                     }
@@ -3040,6 +3051,15 @@ impl Agent {
         })
     }
 
+    /// `/work`: the parent of this workspace's folder (box-level state lives in `/work/.arbos`).
+    pub fn work_root(&self) -> PathBuf {
+        self.cfg
+            .work_dir
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.cfg.work_dir.clone())
+    }
+
     /// One prompt to the main pi session, folded into a new assistant message. The caller holds
     /// `turn_lock`. Finalizes the message (decision, usage, status), T3, and turn metrics.
     ///
@@ -3135,12 +3155,98 @@ impl Agent {
             pid
         };
 
+        // Disk headroom (#1641): decide before pi touches its session files. A full disk is
+        // answered here with a plain line (or a clean-up), never with a raw errno.
+        let work_root = self.work_root();
+        let gate = {
+            let root = work_root.clone();
+            tokio::task::spawn_blocking(move || crate::disk::gate(&root))
+                .await
+                .unwrap_or(crate::disk::Gate::Ok)
+        };
+        let mut disk_note: Option<String> = None;
+        match &gate {
+            crate::disk::Gate::Ok => {}
+            crate::disk::Gate::Warn(st) => {
+                disk_note = Some(crate::disk::warn_note(st));
+            }
+            crate::disk::Gate::Recover(st) => {
+                let dirs = {
+                    let root = work_root.clone();
+                    tokio::task::spawn_blocking(move || crate::disk::biggest_dirs(&root, 4))
+                        .await
+                        .unwrap_or_default()
+                };
+                disk_note = Some(crate::disk::recover_note(st, &dirs));
+            }
+            crate::disk::Gate::Blocked(st) => {
+                let st = *st;
+                let root = work_root.clone();
+                let cleanup =
+                    matches!(kind, TurnKind::User) && crate::disk::is_cleanup_request(prompt_text);
+                let (line, status, code) = if cleanup {
+                    let rep = tokio::task::spawn_blocking(move || {
+                        crate::disk::prune(&root, crate::disk::PruneLevel::All)
+                    })
+                    .await
+                    .unwrap_or_default();
+                    tracing::warn!(
+                        chat_id,
+                        freed_mb = rep.freed_mb,
+                        "disk full: clean-up on request"
+                    );
+                    (
+                        crate::disk::cleanup_line(&rep),
+                        MessageStatus::Done,
+                        "disk_cleanup",
+                    )
+                } else {
+                    let dirs =
+                        tokio::task::spawn_blocking(move || crate::disk::biggest_dirs(&root, 4))
+                            .await
+                            .unwrap_or_default();
+                    tracing::warn!(chat_id, avail_mb = st.avail_mb, "disk full: turn refused");
+                    (
+                        crate::disk::full_line(&st, &dirs),
+                        MessageStatus::Error,
+                        "disk_full",
+                    )
+                };
+                {
+                    let h = host.lock().await;
+                    if status == MessageStatus::Done {
+                        h.doc.append_text(&assistant_msg_id, &text_part_id, &line);
+                        h.doc.add_status_part(&assistant_msg_id, "done", "Done");
+                    } else {
+                        h.doc
+                            .add_status_part(&assistant_msg_id, "failed", "Disk full");
+                        h.doc.add_error_part(&assistant_msg_id, code, &line);
+                    }
+                    h.doc.finish_message(&assistant_msg_id, status);
+                }
+                let _ = self.turn.lock().await.take();
+                return Err(anyhow!("workspace disk full ({})", st.human()));
+            }
+        }
+        if let Some(text) = crate::disk::working_text(&gate) {
+            let h = host.lock().await;
+            h.doc.set_activity(&assistant_msg_id, Some(&text));
+        }
+        let prompt_text: String = match &disk_note {
+            Some(note) => format!("{note}\n\n{prompt_text}"),
+            None => prompt_text.to_owned(),
+        };
+        let prompt_text = prompt_text.as_str();
+
         if let Err(e) = self.ensure_chat_session(chat_id).await {
             {
                 let h = host.lock().await;
                 h.doc.add_status_part(&assistant_msg_id, "failed", "Failed");
-                h.doc
-                    .add_error_part(&assistant_msg_id, "session", &e.to_string());
+                h.doc.add_error_part(
+                    &assistant_msg_id,
+                    "session",
+                    &crate::disk::friendly(&e.to_string(), &work_root),
+                );
                 h.doc
                     .finish_message(&assistant_msg_id, MessageStatus::Error);
             }
@@ -3311,7 +3417,11 @@ impl Agent {
         {
             let h = host.lock().await;
             if let Some(e) = &err_text {
-                h.doc.add_error_part(&assistant_msg_id, "turn_failed", e);
+                h.doc.add_error_part(
+                    &assistant_msg_id,
+                    "turn_failed",
+                    &crate::disk::friendly(e, &self.work_root()),
+                );
             }
             if let Some(m) = &model_failed {
                 h.doc

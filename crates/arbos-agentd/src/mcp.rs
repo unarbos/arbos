@@ -83,6 +83,7 @@ fn tools() -> Value {
         a.extend(crate::goals::tool_specs());
         a.extend(crate::web::tool_specs());
         a.extend(crate::feedback::tool_specs());
+        a.extend(crate::disk::tool_specs());
     }
     list
 }
@@ -669,6 +670,7 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
         "web_search" => crate::web::web_search(a, args, &chat_for_scratch).await,
         "web_fetch" => crate::web::web_fetch(a, args, &chat_for_scratch).await,
         "submit_feedback" => crate::feedback::submit_feedback(a, args, &chat_for_scratch).await,
+        "free_space" => crate::disk::free_space_tool(a, args).await,
         "browser_fill" => crate::vault::browser_fill(a, args, &chat_for_scratch).await,
         "routines_list" | "routines_create" | "routines_update" | "routines_delete" => {
             crate::routines::call_tool(a, name, args, &chat_for_scratch).await
