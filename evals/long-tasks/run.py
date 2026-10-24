@@ -236,6 +236,17 @@ class Lane(threading.Thread):
                 turns_out.append({"turn": i, "chat_id": val.get("chat_id"), "prompt": turn.get("prompt", "")[:300], "ok": not reasons, "reasons": reasons, "ttfr_s": val.get("ttfr_s"), "first_status_s": None, "wall_s": val.get("wall_s"), "timed_out": False, "stalls": 0, "approvals_rejected": [], "routes": val.get("routes") or [], "tool_calls": 0, "tool_errors": 0, "model_calls": 0, "compactions": 0, "audit_denied": 0, "rubric": rb, "truth": {k: v for k, v in val.items() if k not in ("reply",)}, "verify_out": "", "reply": reply[:1500], "excerpt": f"**User (capped):** {turn.get('prompt','')[:300]}\n\n**Assistant:** {reply[:900]}"})
                 self.say(f"{tid} state turn {i}: {'ok' if not reasons else 'FAIL ' + str(reasons)[:160]}")
                 continue
+            if turn.get("expect_no_reply_s"):
+                # a people-chat message not for the agent: it must stay quiet
+                t0 = time.time()
+                rl.ctl("chat", "send", "people", chat_id, prompt, "--timeout", "3", timeout=40)
+                time.sleep(turn["expect_no_reply_s"])
+                doc = rl.chat_dump("people", chat_id)
+                late = [m for m in doc.get("messages", []) if m.get("role") == "assistant" and (m.get("createdAt") or 0) >= int(t0 * 1000) - 1000 and dr.text_of(m)]
+                ok = not late
+                turns_out.append({"turn": i, "chat_id": chat_id, "prompt": prompt[:300], "ok": ok, "reasons": [] if ok else [f"the agent answered a message not addressed to it: {dr.text_of(late[0])[:80]!r}"], "ttfr_s": None, "first_status_s": None, "wall_s": turn["expect_no_reply_s"], "timed_out": False, "stalls": 0, "approvals_rejected": [], "routes": [], "tool_calls": 0, "tool_errors": 0, "model_calls": 0, "compactions": 0, "audit_denied": 0, "rubric": None, "truth": {}, "verify_out": "", "reply": "", "excerpt": f"**User (not for the agent):** {prompt}\n\n(agent stayed quiet: {ok})"})
+                self.say(f"{tid} quiet turn {i}: {'ok' if ok else 'FAIL'}")
+                continue
             if turn.get("peer"):
                 # the colleague writes in the DM; we watch the agent's reply by polling the doc
                 text = prompt.replace("[peer] ", "")
@@ -402,6 +413,10 @@ class Lane(threading.Thread):
                 texts = " ".join(dr.text_of(m) for m in proj_rows)
                 if plc.get("expect_text") and plc["expect_text"] not in texts:
                     reasons.append(f"lane-b's pinned chat shows no agent message carrying {plc['expect_text']!r} ({len(proj_rows)} project rows)")
+                if plc.get("verify_peer"):
+                    code, out = self.box.run_as_ws(peer_pid, plc["verify_peer"], timeout=60)
+                    if "PASS" not in out:
+                        reasons.append(f"peer lane check: {out.strip()[-120:]}")
                 if plc.get("expect_reply_to"):
                     ids = {m.get("id") for m in proj_rows}
                     answered = [m for m in recent if m.get("role") == "assistant" and m.get("inReplyTo") in ids]
