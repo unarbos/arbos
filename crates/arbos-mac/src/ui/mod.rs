@@ -41,6 +41,7 @@ pub mod servers;
 pub mod shell;
 pub mod sidebar;
 pub mod skills;
+pub mod slide;
 pub mod theme;
 pub mod tones;
 pub mod transcript;
