@@ -374,6 +374,11 @@ pub struct Theme {
     pub on_primary: Hsla,
     /// Presence green.
     pub online: Hsla,
+    /// Grok Bot's update disc: the solid blue circle at the footer's right end
+    /// with the white cloud-download glyph (`#326CCB` / `#F5F5F5`, measured
+    /// on Jacob's Oct-2026 ref) — [feedback footer-update-button-grok-2026-10-24].
+    pub update_disc: Hsla,
+    pub on_update_disc: Hsla,
     pub warn: Hsla,
     pub danger: Hsla,
     pub danger_soft: Hsla,
@@ -423,6 +428,8 @@ impl Theme {
             primary: grey(1.0),
             on_primary: grey(0.0),
             online: hex(0x34c759),
+            update_disc: hex(0x326ccb),
+            on_update_disc: hex(0xf5f5f5),
             warn: hex(0xffb340),
             danger: hex(0xff453a),
             danger_soft: hex_a(0xff453a, 0.14),
@@ -466,6 +473,9 @@ impl Theme {
             primary: hex(0x111111),
             on_primary: grey(1.0),
             online: hex(0x34c759),
+            // The same blue on the light sidebar (white glyph 5.0:1 on it).
+            update_disc: hex(0x326ccb),
+            on_update_disc: hex(0xf5f5f5),
             warn: hex(0xe59a00),
             danger: hex(0xd7332a),
             danger_soft: hex_a(0xd7332a, 0.10),
@@ -627,6 +637,14 @@ impl Theme {
 
     pub fn with_alpha(mut c: Hsla, a: f32) -> Hsla {
         c.a = a;
+        c
+    }
+
+    /// The same hue, `by` lighter (HSL lightness, clamped): a solid control's
+    /// hover and pressed fills — brighter under the hand, brighter still while
+    /// the button is down (the chip rule).
+    pub fn lighter(mut c: Hsla, by: f32) -> Hsla {
+        c.l = (c.l + by).clamp(0.0, 1.0);
         c
     }
 }

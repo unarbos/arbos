@@ -142,6 +142,15 @@ const ICONS: &[(&str, &str)] = &[
     icon!("crown", "<path d=\"M4 17h16l1-9-5 3.5L12 5l-4 6.5L3 8z\" fill=\"#000\"/>"),
     icon!("photo", "<rect x=\"3\" y=\"5\" width=\"18\" height=\"14\" rx=\"2\"/><circle cx=\"9\" cy=\"10\" r=\"1.5\" fill=\"#000\"/><path d=\"M21 16l-5-5-8 8\"/>"),
     icon!("arrow-down", "<path d=\"M12 5v14M5 12l7 7 7-7\" stroke-width=\"2.6\"/>"),
+    // Grok Bot's update disc glyph (SF `icloud.and.arrow.down`): a cloud open
+    // at the bottom — 8 pt dome, 3 pt lobes, straight sides — with the arrow
+    // coming out of it. Traced pixel for pixel from the 72 px disc in Jacob's
+    // Oct-2026 ref (glyph box 26 × 28 px, 2.5 px stroke): 15.6 × 16.2 on the
+    // 24 grid at a 1.5 stroke, so `size` 20 paints Grok's 13 × 14 pt mark.
+    icon!(
+        "cloud-download",
+        "<path d=\"M4.95 13.8V11.4A3 3 0 0 1 7.95 8.4A4.05 4.05 0 0 1 16.05 8.4A3 3 0 0 1 19.05 11.4V13.8\" stroke-width=\"1.5\"/><path d=\"M12 11.4V19M8.4 15.6L12 19L15.6 15.6\" stroke-width=\"1.5\"/>"
+    ),
     icon!("cpu", "<rect x=\"6\" y=\"6\" width=\"12\" height=\"12\" rx=\"2\"/><rect x=\"10\" y=\"10\" width=\"4\" height=\"4\" fill=\"#000\" stroke=\"none\"/><path d=\"M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4\"/>"),
     icon!("window", "<rect x=\"3\" y=\"4\" width=\"18\" height=\"16\" rx=\"2\"/><path d=\"M3 9h18\"/>"),
     // Settings root rows (D80 / iPhone parity): Credits, Machine, Appearance, About.
