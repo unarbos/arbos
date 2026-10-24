@@ -1017,6 +1017,12 @@ final class RelayAPI {
         _ = try await request("DELETE", "/chats/\(chatId)/members/\(userId)")
     }
 
+    /// Delete a message for everyone: the relay checks who may (403 `not_yours`) and writes
+    /// the deletion into the doc itself. `room` is `people/<chat>` or `<project>/<chat>`.
+    func deleteMessage(room: String, messageId: String) async throws {
+        _ = try await request("DELETE", "/room/\(room)/messages/\(messageId)")
+    }
+
     /// `PUT /chats/{id}/settings {read_receipts?, muted?, archived?}` per member.
     func chatSettings(chatId: String, muted: Bool? = nil, readReceipts: Bool? = nil, archived: Bool? = nil) async throws {
         var body: [String: Any] = [:]

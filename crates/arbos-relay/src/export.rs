@@ -445,16 +445,22 @@ pub async fn send_message(
             "text is over 20000 characters",
         );
     }
-    let me = state.db.user(user_id).ok().flatten();
+    // The card's handle is never empty: a legacy device-token account gets its device-name
+    // slug, so the row is attributable even without a GitHub login (#1580).
+    let me = state.db.user_card(user_id).ok().flatten();
     let opts = UserMessageOpts {
         reply_to: b.reply_to.filter(|r| !r.trim().is_empty()),
         sender: Some(format!("user:{user_id}")),
-        sender_handle: me.as_ref().and_then(|u| u.login.clone()),
+        sender_handle: me
+            .as_ref()
+            .map(|c| c.handle.clone())
+            .filter(|h| !h.is_empty())
+            .or_else(|| Some(user_id.clone())),
         sender_name: me
             .as_ref()
-            .and_then(|u| u.name.clone())
+            .and_then(|c| c.name.clone())
             .filter(|n| !n.is_empty()),
-        sender_avatar: me.as_ref().and_then(|u| u.avatar_url.clone()),
+        sender_avatar: me.as_ref().and_then(|c| c.avatar_url.clone()),
         ..Default::default()
     };
     let room_name = wire::room_name(PEOPLE_PROJECT, &id);
@@ -1174,6 +1180,8 @@ mod tests {
         assert_eq!(row["role"], "user");
         assert_eq!(row["status"], "done");
         assert_eq!(row["sender"], format!("user:{bob}"));
+        // The row itself names its author (§3): a box reading the doc must not need the DB.
+        assert_eq!(row["senderHandle"], "user3013");
         let Principal::Device { id: bob_device, .. } = &bob_dev else {
             panic!("device")
         };

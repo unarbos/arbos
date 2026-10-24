@@ -2752,14 +2752,22 @@ pub fn build_rows(
                 let mut lane: Option<String> = None;
                 let in_people =
                     message.sender.starts_with("agent:") && message.asked_by_handle.is_some();
-                // Quote the user message this answers: prefer `replyTo` (platform
-                // reply feature); fall back to `inReplyTo` (turn link / older rows)
-                // so consecutive replies do not look like one run (#1447).
+                // Quote the message this answers: `replyTo` is the platform reply the
+                // box sets by the #1521 rule (always in groups / channels / people chats
+                // and for a row another agent sent; in a 1:1 only when answering an
+                // earlier message than the latest). Rows from older boxes in attributed
+                // chats fall back to `inReplyTo` (#1447); a plain 1:1 answer to the
+                // latest message carries no quote.
+                let attributed = message.role == Role::Project || in_people;
                 let reply_quote = message
                     .reply_to
                     .as_deref()
                     .filter(|id| !id.is_empty())
-                    .or_else(|| message.in_reply_to.as_deref().filter(|id| !id.is_empty()))
+                    .or_else(|| {
+                        attributed
+                            .then(|| message.in_reply_to.as_deref().filter(|id| !id.is_empty()))
+                            .flatten()
+                    })
                     .map(|id| Quote::for_reply(id, messages));
                 if message.role == Role::Project || in_people {
                     // A people-chat agent (or another Project, F6) speaks in its own lane;
@@ -3016,7 +3024,15 @@ pub fn build_rows(
                     )
                 });
                 let failed = !errors.is_empty() || matches!(message.status, MessageStatus::Error);
-                if shows_nothing && finished && !streaming && (failed || only_empty) {
+                // A hand-off row (a subagent brief, an agent-to-agent send) is its own line
+                // ("Messaged ◉ X"); it never gets the stock line, even with no parts (#1466).
+                let handoff_row = message.subagent_name.is_some()
+                    && matches!(
+                        message.turn,
+                        Some(TurnKind::New | TurnKind::Spawn | TurnKind::Wake)
+                    );
+                if shows_nothing && finished && !streaming && !handoff_row && (failed || only_empty)
+                {
                     let line = errors
                         .first()
                         .map(|(_, _, text)| text.trim())
@@ -5341,6 +5357,7 @@ mod system_line_tests {
             kind: crate::model::ChatKind::Group,
             participants: Vec::new(),
             unread: false,
+            unread_count: 0,
             last_message_at: 0,
             archived_at: None,
         };

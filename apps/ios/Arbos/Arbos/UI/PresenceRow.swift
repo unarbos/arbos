@@ -65,8 +65,10 @@ struct PresenceRow: View {
     /// Round picture size: the avatar column's disc — the sender's picture beside a
     /// people-chat bubble, centred on the composer's `+` (`Theme.memberAvatar`).
     static let avatar: CGFloat = Theme.memberAvatar
-    /// Where the first picture starts inside the 16 pt chat edge (= the `+` column).
-    static let inset: CGFloat = Theme.avatarColumnInset
+    /// Where the first picture starts inside the 16 pt chat edge (= the `+` column,
+    /// which moves with the keyboard — read from the environment).
+    @Environment(\.composerInset) private var composerInset
+    var inset: CGFloat { Theme.avatarColumnInset(composerInset: composerInset) }
     /// How far each further picture tucks under the one before it.
     static let overlap: CGFloat = 8
     /// Pictures → text: the picture → bubble gap, so the text starts where the bubble body starts.
@@ -125,7 +127,7 @@ struct PresenceRow: View {
                 .id(text)
             Spacer(minLength: 0)
         }
-        .padding(.leading, Self.inset)
+        .padding(.leading, inset)
         .frame(height: Self.height)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(text)

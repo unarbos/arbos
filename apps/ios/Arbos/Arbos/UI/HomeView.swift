@@ -1,10 +1,43 @@
 // Home, Grok Bot layout: top bar with the account circle (GitHub avatar, left)
-// and search + "+" circles (right), then All | Agents | People and the chat
+// and search + "+" circles (right), then All | Agents | People | Servers and the chat
 // list (avatar, name, time, preview). One machine: its state is the small dot
 // on the account circle; the machine details live in Settings.
 
 import ArbosFFI
 import SwiftUI
+
+/// Selection above the home list: All | Agents | People | Servers. The Mac
+/// sidebar carries the same four segments (`sidebar::ListFilter` in
+/// crates/arbos-mac); the scope rules here are the shared contract.
+enum HomeListFilter: String, CaseIterable, Identifiable {
+    case all = "All"
+    case agents = "Agents"
+    case people = "People"
+    case servers = "Servers"
+    var id: String { rawValue }
+
+    /// Agent (project) rows are listed under All and Agents.
+    var showsProjects: Bool { self == .all || self == .agents }
+    /// People chats (DMs, groups) are listed under All and People.
+    var showsPeople: Bool { self == .all || self == .people }
+    /// Servers are listed under All and Servers.
+    var showsServers: Bool { self == .all || self == .servers }
+
+    /// Agents: my agents only — an agent shared in by someone else stays out.
+    func admitsProject(shared: Bool) -> Bool {
+        showsProjects && !(self == .agents && shared)
+    }
+
+    /// Copy for an empty list under this segment (no query typed).
+    var emptyCopy: String {
+        switch self {
+        case .all: return "No conversations yet"
+        case .agents: return "No agents yet"
+        case .people: return "No people chats yet"
+        case .servers: return "No servers yet"
+        }
+    }
+}
 
 struct HomeView: View {
     @EnvironmentObject private var model: AppModel
@@ -46,13 +79,6 @@ struct HomeView: View {
     private var hiddenCount: Int { hiddenProjects.count + hiddenPeople.count + hiddenServers.count }
     @FocusState private var searchFocused: Bool
 
-    /// Selection above the home list (All | Agents | People).
-    private enum HomeListFilter: String, CaseIterable, Identifiable {
-        case all = "All"
-        case agents = "Agents"
-        case people = "People"
-        var id: String { rawValue }
-    }
 
     /// Folded query (case + diacritics, leading `@` stripped) so "@robert" and "Zoe" find their rows.
     private var searchQuery: String { HomeSearch.normalizeQuery(query) }
@@ -391,6 +417,11 @@ struct HomeView: View {
             if DebugHooks.show == "hidden", DebugHooks.openProject == nil {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showHidden = true }
             }
+            // Rig: `ARBOS_HOME_FILTER=all|agents|people|servers` selects a segment at launch.
+            if let raw = DebugHooks.homeFilter,
+               let f = HomeListFilter.allCases.first(where: { $0.rawValue.lowercased() == raw.lowercased() }) {
+                listFilter = f
+            }
             // Rig: `ARBOS_SEARCH=<text>` opens the home search with that query.
             if let q = DebugHooks.search, DebugHooks.openProject == nil {
                 model.paintTranscriptsForSearch()
@@ -691,21 +722,22 @@ struct HomeView: View {
     /// newest activity. With one: people (display name / @handle) first, then rows
     /// matched by title, then by a member, then by a message — newest first inside
     /// each group; a hit beyond the row's own name is explained on its second line.
-    /// `listFilter` can hide people (Agents) or agents/servers (People).
+    /// `listFilter` scopes the rows: Agents hides people and servers, People
+    /// hides agents and servers, Servers shows only servers (`HomeListFilter`).
     private var homeRows: [HomeEntry] {
         let q = searchQuery
         var rows: [(HomeSearch.Kind, Bool, Int64, HomeEntry)] = []
-        if listFilter != .people {
+        if listFilter.showsProjects {
             for p in model.projects {
                 // Agents: my agents only (`!shared`) — no shared-in agents.
-                if listFilter == .agents && p.shared { continue }
+                if !listFilter.admitsProject(shared: p.shared) { continue }
                 // Archived agents stay out of the home list until search (or open).
                 if q.isEmpty && model.isArchived(p.id) { continue }
                 guard let hit = projectHit(p, q: q) else { continue }
                 rows.append((hit.kind, model.isHomePinned(projectId: p.id), lastActivity(p), HomeEntry(row: .project(p), hit: hit)))
             }
         }
-        if listFilter != .agents {
+        if listFilter.showsPeople {
             for c in model.peopleChats {
                 // Archived people stay out of the home list until search (or open).
                 if q.isEmpty && model.isArchived(peopleChatId: c.id) { continue }
@@ -713,8 +745,9 @@ struct HomeView: View {
                 rows.append((hit.kind, model.isHomePinned(peopleChatId: c.id), peopleActivity(c), HomeEntry(row: .people(c), hit: hit)))
             }
         }
-        if listFilter == .all {
-            // D88: servers sort among the chats by last activity (rule 1).
+        if listFilter.showsServers {
+            // D88: servers sort among the chats by last activity (rule 1); the
+            // Servers segment shows them alone (Mac parity, 2026-10-24).
             for s in model.servers {
                 // Archived servers stay out of the home list until search (or Unarchive).
                 if q.isEmpty && model.isArchived(serverId: s.id) { continue }
@@ -763,7 +796,7 @@ struct HomeView: View {
         }
     }
 
-    /// All | Agents | People — same capsule pill as profile panes (`PaneTabs`).
+    /// All | Agents | People | Servers — same capsule pill as profile panes (`PaneTabs`).
     private var listFilterBar: some View {
         let selected = Binding(
             get: { listFilter.rawValue },
@@ -782,14 +815,7 @@ struct HomeView: View {
         if !searchQuery.isEmpty {
             return "No conversations match \"\(query.trimmingCharacters(in: .whitespaces))\""
         }
-        switch listFilter {
-        case .all:
-            return "No conversations yet"
-        case .agents:
-            return "No agents yet"
-        case .people:
-            return "No people chats yet"
-        }
+        return listFilter.emptyCopy
     }
 
     /// Open the chat the hit points at (a chat title or a message), else the agent's landing chat.

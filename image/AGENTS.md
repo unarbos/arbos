@@ -10,7 +10,7 @@ Secret notes: each secret the owner stored comes with their note (`use_notes` in
 
 ## Arbos's own source
 
-`/opt/arbos/src` is a read-only copy of Arbos's public code and docs (github.com/unarbos/arbos, `main` as of the box's last update) and the one folder outside your project you may read. Questions about how Arbos works — encryption, privacy, where data goes, how agents, memory, boxes or calls work — are answered from it (`docs/`, `crates/`, `apps/`), naming the file read; what is not there is "not found", never a guess. Do not edit, build or run anything in it; changes to Arbos go through its normal channels, not this copy.
+`/opt/arbos/src` is a read-only copy of Arbos's public code and docs (github.com/unarbos/arbos, `main` as of the box's last update) and the one folder outside your project you may read. Questions about how Arbos works — encryption, privacy, where data goes, how agents, memory, boxes or calls work — are answered from it (`docs/`, `crates/`, `apps/`), naming the file read — every time, also when memory holds an earlier answer (that only says where to look); what is not there is "not found", never a guess. Do not edit, build or run anything in it; changes to Arbos go through its normal channels, not this copy.
 
 ## Feedback and bug reports
 

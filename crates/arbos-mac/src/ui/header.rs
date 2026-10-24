@@ -327,23 +327,23 @@ fn link_pill(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     )
 }
 
-/// The expand control while the sidebar is hidden: the same 28 pt tile as the
-/// sidebar strip's collapse control, beside the traffic lights (72 + 12 pt)
-/// ([feedback mac-collapsed-toggle-inline]).
+/// The expand control while the sidebar is hidden: the same round disc as the
+/// sidebar strip's collapse toggle, beside the traffic lights (72 + 12 pt)
+/// ([feedback mac-collapsed-toggle-inline], [feedback sidebar-strip-filter-2026-10-24]).
 fn sidebar_toggle(shell: &Shell, theme: &Theme, cx: &mut Context<Shell>) -> Stateful<Div> {
     let _ = shell.state.read(cx).sidebar_overlay;
     div()
         .id("header-sidebar")
-        .size(px(28.0))
+        .size(px(crate::ui::sidebar::STRIP_BUTTON))
         .flex_shrink_0()
-        .rounded(px(7.0))
+        .rounded_full()
         .flex()
         .items_center()
         .justify_center()
         .cursor_pointer()
         .bg(theme.surface_2)
-        .hover(|s| s.bg(theme.surface_2))
-        .child(icon("sidebar-left", 17.0, theme.text))
+        .hover(|s| s.bg(Theme::with_alpha(theme.text, 0.14)))
+        .child(icon("sidebar-left", 16.0, theme.text))
         // The bar is a window-drag region; a control is not part of it.
         .on_mouse_down(
             gpui::MouseButton::Left,
@@ -1027,7 +1027,7 @@ mod header_tests {
             let left = self.folded.then(|| {
                 div()
                     .id("toggle")
-                    .size(px(28.0))
+                    .size(px(crate::ui::sidebar::STRIP_BUTTON))
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .into_any_element()
             });

@@ -31,6 +31,27 @@ extension AppModel {
         let tints = ["fx-comms": 5, "fx-affine": 3, "fx-hyper": 1, "fx-expense": 6, "fx-invoices": 4, "fx-scout": 2]
         for i in list.indices { list[i].avatarColorIndexEffective = tints[list[i].id] }
         setFixture(projects: list, now: now)
+        if DebugHooks.fixtureServers { setFixtureServers(now: now) }
+    }
+
+    /// Three servers for the home list's Servers segment (D88 servers otherwise come from the
+    /// relay only). No Matrix rows: the preview falls back to the server's own line.
+    private func setFixtureServers(now: Int64) {
+        let seeds: [(String, String, Int, String)] = [
+            ("fx-server-hq", "Arbos HQ", 1, "owner"),
+            ("fx-server-affine", "Affine", 2, "member"),
+            ("fx-server-hyper", "Hyper", 3, "member"),
+        ]
+        servers = seeds.enumerated().map { i, seed in
+            let (id, name, tint, role) = seed
+            let created = now - Int64(i + 1) * 2_700_000
+            let general = ServerChannel(id: "\(id)-general", serverId: id, name: "general", topic: nil,
+                                        restricted: false, position: 0, roomId: nil, createdAt: created)
+            return Server(id: id, name: name, imageKey: nil, ownerUserId: role == "owner" ? "fx-me" : "fx-other",
+                          spaceRoomId: nil, createdAt: created, myRole: role, memberCount: 4 + i, channels: [general],
+                          generalChannelId: general.id, avatarColorIndex: tint, isOpen: false, invite: nil, members: [])
+        }
+        serversAvailable = true
     }
 
     private func setFixture(projects list: [Project], now: Int64) {

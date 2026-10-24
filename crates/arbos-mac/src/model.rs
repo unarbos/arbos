@@ -237,6 +237,45 @@ impl Project {
     }
 }
 
+/// May I delete `message` for everyone in `space`? The relay's rule
+/// (`arbos-relay/src/moderation.rs`), mirrored so the menu never offers a
+/// Delete the relay would refuse: my own messages always; in a people group
+/// the owner (and admins) delete anyone's; an agent's message is its owner's
+/// to delete; in a project chat the owner deletes anything, a guest their own.
+/// System lines are a moderator's only.
+pub fn may_delete_message(
+    space: &Project,
+    me_id: &str,
+    me_handle: &str,
+    message: &Message,
+) -> bool {
+    let sender = message.sender.as_str();
+    // A bare `user` row is the project owner's (a guest's rows carry `user:<id>`).
+    let mine = sender == format!("user:{me_id}")
+        || (sender == "user" && !space.is_people() && !space.is_guest());
+    let moderates = if space.is_people() {
+        space.owner_handle.as_deref().is_none_or(|o| o == me_handle)
+    } else {
+        !space.is_guest()
+    };
+    if moderates {
+        return true;
+    }
+    if mine {
+        return true;
+    }
+    if let Some(pid) = sender.strip_prefix("agent:") {
+        return space
+            .agents
+            .iter()
+            .find(|a| a.project_id == pid)
+            .is_some_and(|a| a.owner_handle == me_handle || a.owner_id == me_id);
+    }
+    // Bare `agent` / `assistant` in a project chat is the project's own agent:
+    // the owner's (handled above); a guest leaves it.
+    false
+}
+
 /// After "Create": the people group that just appeared (`after` but not
 /// `before`) with exactly the picked `handles`. Empty handles (a group of
 /// agents) never match — the relay names that group by id instead.
@@ -1003,6 +1042,11 @@ pub struct Chat {
     /// S15 system tab "Projects ⇄".
     pub is_system: bool,
     pub unread: bool,
+    /// Unread message count from `GET /me/unread` (Dock badge). `0` when read or unknown.
+    /// Live arrivals may set [`Self::unread`] with this still `0` until the next refresh;
+    /// the badge treats that as one missed message.
+    #[serde(default)]
+    pub unread_count: u32,
     pub last_message_at: u64,
     /// §9c: archived for me (per user, synced by the relay); `None` = not archived.
     #[serde(default)]
@@ -1017,6 +1061,17 @@ pub struct Chat {
 impl Chat {
     pub fn is_group(&self) -> bool {
         self.kind == ChatKind::Group
+    }
+
+    /// Missed messages for the Dock badge: the relay count, or 1 when only the unread flag is lit.
+    pub fn missed_count(&self) -> usize {
+        if self.unread_count > 0 {
+            self.unread_count as usize
+        } else if self.unread {
+            1
+        } else {
+            0
+        }
     }
 }
 
@@ -3097,6 +3152,133 @@ mod add_members_tests {
         let plan = add_members_plan(&g, "unarbos", &[person("gh_1", "allan")], &[]);
         assert_eq!(plan.chat_id, "chat_testing");
         assert!(plan.handles.is_empty() && plan.agent_ids.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod delete_permission_tests {
+    use super::*;
+
+    fn msg(sender: &str, role: Role) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": "m", "chatId": "c", "role": match role { Role::User => "user", Role::Assistant => "assistant", _ => "system" },
+            "sender": sender, "status": "done", "parts": []
+        }))
+        .unwrap()
+    }
+
+    fn group(owner: &str) -> Project {
+        Project {
+            id: "g".into(),
+            kind: SpaceKind::Group,
+            owner_handle: Some(owner.into()),
+            agents: vec![AgentMember {
+                project_id: "p_bob".into(),
+                owner_id: "u_bob".into(),
+                owner_handle: "bob".into(),
+                ..AgentMember::default()
+            }],
+            ..Project::default()
+        }
+    }
+
+    #[test]
+    fn member_deletes_own_only_owner_deletes_all() {
+        let g = group("alice");
+        // Bob, a member: his own yes, Alice's no, system no, his agent's yes.
+        assert!(may_delete_message(
+            &g,
+            "u_bob",
+            "bob",
+            &msg("user:u_bob", Role::User)
+        ));
+        assert!(!may_delete_message(
+            &g,
+            "u_bob",
+            "bob",
+            &msg("user:u_alice", Role::User)
+        ));
+        assert!(!may_delete_message(
+            &g,
+            "u_bob",
+            "bob",
+            &msg("system", Role::System)
+        ));
+        assert!(may_delete_message(
+            &g,
+            "u_bob",
+            "bob",
+            &msg("agent:p_bob", Role::Assistant)
+        ));
+        // Carol: not even Bob's agent.
+        assert!(!may_delete_message(
+            &g,
+            "u_carol",
+            "carol",
+            &msg("agent:p_bob", Role::Assistant)
+        ));
+        // Alice owns the group: everything.
+        assert!(may_delete_message(
+            &g,
+            "u_alice",
+            "alice",
+            &msg("user:u_bob", Role::User)
+        ));
+        assert!(may_delete_message(
+            &g,
+            "u_alice",
+            "alice",
+            &msg("agent:p_bob", Role::Assistant)
+        ));
+        assert!(may_delete_message(
+            &g,
+            "u_alice",
+            "alice",
+            &msg("system", Role::System)
+        ));
+    }
+
+    #[test]
+    fn project_owner_deletes_all_guest_own_only() {
+        let mine = Project {
+            id: "p".into(),
+            ..Project::default()
+        };
+        assert!(may_delete_message(
+            &mine,
+            "u_me",
+            "me",
+            &msg("agent", Role::Assistant)
+        ));
+        assert!(may_delete_message(
+            &mine,
+            "u_me",
+            "me",
+            &msg("user:u_guest", Role::User)
+        ));
+        let shared = Project {
+            id: "p".into(),
+            shared: true,
+            ..Project::default()
+        };
+        assert!(may_delete_message(
+            &shared,
+            "u_guest",
+            "guest",
+            &msg("user:u_guest", Role::User)
+        ));
+        assert!(!may_delete_message(
+            &shared,
+            "u_guest",
+            "guest",
+            &msg("agent", Role::Assistant)
+        ));
+        assert!(!may_delete_message(
+            &shared,
+            "u_guest",
+            "guest",
+            &msg("user", Role::User)
+        ));
     }
 }
 

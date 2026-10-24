@@ -26,5 +26,8 @@
       "title": "eval handoff"
     }
   ],
-  "regression": "F6 group chats: cross-agent handoff"
+  "regression": "F6 group chats: cross-agent handoff",
+  "doc_checks": {
+    "agent_replies_carry_reply_to": true
+  }
 }

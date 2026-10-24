@@ -56,6 +56,16 @@ pub const ITEMS: [MessageMenuItem; 3] = [
     MessageMenuItem::Delete,
 ];
 
+/// The items for one bubble: Copy and Reply always; Delete only when the
+/// relay would let this user delete it (`model::may_delete_message`) — a
+/// member sees Copy / Reply on someone else's message, the owner sees all.
+pub fn items_for(can_delete: bool) -> Vec<MessageMenuItem> {
+    ITEMS
+        .into_iter()
+        .filter(|i| can_delete || !i.danger())
+        .collect()
+}
+
 /// Divider before the destructive item.
 const DIVIDERS: usize = 1;
 
@@ -127,9 +137,25 @@ pub fn rig_anchor() -> Option<Point<Pixels>> {
 pub fn render(shell: &Shell, window: &Window, cx: &mut Context<Shell>) -> Option<Div> {
     let (chat_id, message_id, at) = shell.message_menu.clone()?;
     let theme = Theme::of(cx).clone();
+    let can_delete = {
+        let state = shell.state.read(cx);
+        let space_id = state.space_of_chat(&chat_id);
+        match (
+            state.project(&space_id),
+            state
+                .messages_of(&chat_id)
+                .iter()
+                .find(|m| m.id == message_id),
+        ) {
+            (Some(space), Some(message)) => {
+                crate::model::may_delete_message(space, &state.me_id(), &state.me_handle(), message)
+            }
+            _ => false,
+        }
+    };
     let (origin, _) = placed_rect(at, window.viewport_size());
     let mut body = div().flex().flex_col().gap(px(MENU_GAP));
-    for item in ITEMS {
+    for item in items_for(can_delete) {
         if item.danger() {
             body = body.child(glass::menu_divider(&theme));
         }
@@ -178,9 +204,10 @@ fn run(
                 .update(cx, |s, cx| s.set_reply_to(chat_id, message_id, cx));
         }
         MessageMenuItem::Delete => {
+            // Asks first ("Delete message?", `delete_confirm`); nothing is deleted yet.
             shell
                 .state
-                .update(cx, |s, cx| s.delete_message(chat_id, message_id, cx));
+                .update(cx, |s, cx| s.open_delete_confirm(chat_id, message_id, cx));
         }
     }
 }
@@ -204,6 +231,13 @@ mod tests {
         assert_eq!(labels, ["Copy", "Reply", "Delete"]);
         // No emoji row: every label is plain ASCII text.
         assert!(ITEMS.iter().all(|i| i.label().is_ascii()));
+    }
+
+    #[test]
+    fn delete_is_offered_only_when_allowed() {
+        let labels = |v: Vec<MessageMenuItem>| v.iter().map(|i| i.label()).collect::<Vec<_>>();
+        assert_eq!(labels(items_for(true)), ["Copy", "Reply", "Delete"]);
+        assert_eq!(labels(items_for(false)), ["Copy", "Reply"]);
     }
 
     #[test]

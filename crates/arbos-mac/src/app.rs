@@ -306,6 +306,14 @@ pub struct ForwardTarget {
     pub last_activity: u64,
 }
 
+/// Bubble menu → Delete (feedback app-01M5MXQ90MEEWF6C8W090VCZHF): the message
+/// the "Delete message?" confirm is open for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeleteConfirm {
+    pub chat_id: Id,
+    pub message_id: Id,
+}
+
 /// The text line a forwarded attachment travels with (every client renders
 /// it as the card's hint, not a bubble; agents read it as prose).
 pub fn forwarded_from_text(by: &str) -> String {
@@ -482,6 +490,8 @@ pub struct AppState {
     pub media_viewer: Option<MediaViewer>,
     /// Bumped on every open so the shell focuses the viewer once per opening.
     pub media_viewer_generation: u64,
+    /// Bubble menu → Delete: the "Delete message?" confirm, when open.
+    pub delete_confirm: Option<DeleteConfirm>,
     pub new_project_open: bool,
     /// Debug: per-message "Show details" disclosures in the transcript.
     pub show_details: bool,
@@ -842,6 +852,7 @@ impl AppState {
             details_open: None,
             media_viewer: None,
             media_viewer_generation: 0,
+            delete_confirm: None,
             new_project_open: false,
             show_details: false,
             machine: Machine::default(),
@@ -2746,6 +2757,7 @@ impl AppState {
             .find(|c| c.id == chat_id)
         {
             chat.unread = false;
+            chat.unread_count = 0;
         }
         self.command(ClientCommand::OpenChat {
             chat_id: chat_id.clone(),
@@ -2860,6 +2872,7 @@ impl AppState {
             .find(|c| c.id == chat_id)
         {
             chat.unread = false;
+            chat.unread_count = 0;
         }
         self.sync_badge();
         self.command(ClientCommand::MarkRead {
@@ -2917,6 +2930,7 @@ impl AppState {
                 kind: ChatKind::Chat,
                 participants: Vec::new(),
                 unread: false,
+                unread_count: 0,
                 last_message_at: now_ms(),
                 archived_at: None,
             });
@@ -4371,6 +4385,34 @@ impl AppState {
         cx.notify();
     }
 
+    /// Bubble menu → Delete: ask first (feedback app-01M5MXQ90MEEWF6C8W090VCZHF).
+    /// The menu only offers Delete where `may_delete_message` holds, so the
+    /// confirm's one action is always "delete for everyone".
+    pub fn open_delete_confirm(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
+        if message_id.is_empty() {
+            return;
+        }
+        self.delete_confirm = Some(DeleteConfirm {
+            chat_id,
+            message_id,
+        });
+        cx.notify();
+    }
+
+    pub fn close_delete_confirm(&mut self, cx: &mut Context<Self>) {
+        if self.delete_confirm.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// The confirm's Delete (click or Return): delete and close.
+    pub fn confirm_delete(&mut self, cx: &mut Context<Self>) {
+        let Some(confirm) = self.delete_confirm.take() else {
+            return;
+        };
+        self.delete_message(confirm.chat_id, confirm.message_id, cx);
+    }
+
     pub fn retry(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
         self.command(ClientCommand::Retry {
             chat_id,
@@ -5170,7 +5212,7 @@ impl AppState {
     }
 
     /// Who shared it, for the viewer's caption: name, else `@handle`, else "You" / the agent.
-    fn viewer_sender_name(&self, m: &Message) -> String {
+    pub fn viewer_sender_name(&self, m: &Message) -> String {
         if let Some(n) = m.sender_name.as_deref().filter(|n| !n.is_empty()) {
             return n.to_string();
         }
@@ -5551,6 +5593,7 @@ impl AppState {
     }
 
     /// Light the unread dot (and Dock badge) until the next refresh confirms.
+    /// Until `GET /me/unread` returns, count at least one missed message (same as iOS).
     fn mark_chat_unread(&mut self, chat_id: &str) {
         if let Some(chat) = self
             .chats
@@ -5559,6 +5602,7 @@ impl AppState {
             .find(|c| c.id == chat_id)
         {
             chat.unread = true;
+            chat.unread_count = chat.unread_count.max(1);
         }
         self.sync_badge();
     }
@@ -5887,14 +5931,14 @@ impl AppState {
         cx.activate(true);
     }
 
-    /// Dock badge = chats with something unread (cleared as they are read).
+    /// Dock badge = unread messages across chats (from `GET /me/unread`; cleared as they are read).
     pub fn sync_badge(&self) {
         let total = self
             .chats
             .values()
             .flat_map(|v| v.iter())
-            .filter(|c| c.unread)
-            .count();
+            .map(Chat::missed_count)
+            .sum();
         notify::set_badge(total);
     }
 
@@ -8622,6 +8666,7 @@ pub(crate) fn forked_chat(source: &Chat, project: &Project, id: Id) -> Option<Ch
         kind: ChatKind::Chat,
         participants: Vec::new(),
         unread: false,
+        unread_count: 0,
         last_message_at: now_ms(),
         archived_at: None,
     })
@@ -8833,6 +8878,7 @@ mod fork_tests {
             kind: ChatKind::Chat,
             participants: Vec::new(),
             unread: false,
+            unread_count: 0,
             last_message_at: 0,
             archived_at: None,
         }

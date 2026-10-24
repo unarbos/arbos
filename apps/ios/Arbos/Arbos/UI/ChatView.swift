@@ -17,6 +17,14 @@ private struct PendingForward: Identifiable, Equatable {
     let from: String
 }
 
+/// Long-press → Delete: the row waiting on "Delete message?" (feedback
+/// app-01M5MXQ90MEEWF6C8W090VCZHF). Nothing is deleted until the confirm.
+private struct PendingDelete: Identifiable, Equatable {
+    var id: Id { messageId }
+    let messageId: Id
+    let title: String
+}
+
 struct ChatView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -90,6 +98,7 @@ struct ChatView: View {
     @State private var replySwipeActive = false
     /// Long-press → Forward: the text to send and who wrote it (Forward sheet).
     @State private var pendingForward: PendingForward?
+    @State private var pendingDelete: PendingDelete?
 
     /// Rows after the in-chat search filter (profile "search").
     private var visibleRows: [Row] {
@@ -437,9 +446,12 @@ struct ChatView: View {
         }
         .animation(.easeOut(duration: 0.2), value: awayFromBottom)
         .animation(.easeOut(duration: 0.2), value: newBelowCount > 0)
+        .environment(\.composerInset, composerSideInset)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
                 presenceRow
+                    .environment(\.composerInset, composerSideInset)
+                    .animation(.easeOut(duration: 0.25), value: composerFocused)
                 Group {
                     if isChannel, !model.channelCanPost(chatId) {
                         // Rule 9: a restricted channel I cannot post in — one quiet line, no composer.
@@ -481,7 +493,8 @@ struct ChatView: View {
                         items: MessageMenu.items(
                             forMessage: true,
                             canPin: canPinInThisChat,
-                            isPinned: model.isMessagePinned(chatId: chatId, messageId: row.messageId)
+                            isPinned: model.isMessagePinned(chatId: chatId, messageId: row.messageId),
+                            canDelete: canDelete(row)
                         ),
                         onReact: { emoji in
                             closeActions()
@@ -530,6 +543,20 @@ struct ChatView: View {
         }
         .sheet(isPresented: $showProfile) {
             AgentEditSheet(projectId: projectId).environmentObject(model).environment(\.theme, theme)
+        }
+        .confirmationDialog(
+            pendingDelete?.title ?? "Delete message?",
+            isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
+            titleVisibility: .visible,
+            presenting: pendingDelete
+        ) { pending in
+            Button("Delete", role: .destructive) {
+                pendingDelete = nil
+                model.deleteMessage(chatId: chatId, messageId: pending.messageId, projectId: isPeople ? nil : projectId)
+            }
+            Button("Cancel", role: .cancel) { pendingDelete = nil }
+        } message: { _ in
+            Text(MessageDeleteCopy.body)
         }
         .sheet(item: $pendingForward) { pending in
             ForwardSheet(fromName: pending.from) { target in
@@ -698,6 +725,12 @@ struct ChatView: View {
                             model.fixtureAgentMessage(chatId: chatId, received: show == "agent-message-received")
                         }
                         #endif
+                    case "actions":
+                        // Rig: the long-press actions (capsule + menu) on the newest bubble.
+                        if let row = rows.last(where: { isMessageRow($0) }) { actionsRow = row }
+                    case "delete":
+                        // Rig: the "Delete message?" confirm for the newest bubble.
+                        if let row = rows.last(where: { isMessageRow($0) }) { beginDelete(row) }
                     case "replied":
                         // Rig: a sent bubble quoting the newest agent message (fixture only).
                         #if DEBUG
@@ -1114,6 +1147,8 @@ struct ChatView: View {
                     Color.clear.frame(height: 28).id("bottom")
                 }
                 .padding(.horizontal, 16)
+                // The avatar column follows the `+` as the composer inset animates with the keyboard.
+                .animation(.easeOut(duration: 0.25), value: composerFocused)
                 // Short threads: fill the viewport and pin rows to the bottom so
                 // two bubbles cannot float mid-screen (scroll-anchor alone was
                 // centering them on iOS 26). Empty-state copy keeps its own
@@ -1218,8 +1253,9 @@ struct ChatView: View {
     }
 
     /// "@sam" / "Bob" (the agent of this chat) / "you" for the composer's reply preview.
+    /// My own rows carry `sender: user:<my id>` in shared projects — still "you".
     private func replyLabel(for m: Message) -> String {
-        if let h = m.senderHandle, m.sender != "user" { return "@\(h)" }
+        if let h = m.senderHandle, m.sender != "user", m.sender != model.myUserId { return "@\(h)" }
         if m.role == .assistant || m.role == .project { return project?.name ?? "the agent" }
         return "you"
     }
@@ -1316,6 +1352,24 @@ struct ChatView: View {
         return Set(m.reactions.filter { $0.senders.contains(me) }.map(\.emoji))
     }
 
+    /// The relay's delete rule for this row (`MessageDeleteRule`): owners moderate; members
+    /// delete their own and their own agents'.
+    private func canDelete(_ row: Row) -> Bool {
+        guard let m = messageById[row.messageId] else { return false }
+        let meId = model.user?.id
+        let moderates: Bool
+        var agentOwners: [String: String] = [:]
+        if let people {
+            moderates = people.myRole == "owner" || people.myRole == "admin"
+            for a in people.agents { if let owner = a.ownerId { agentOwners[a.id] = owner } }
+        } else if isChannel {
+            moderates = false
+        } else {
+            moderates = !(project?.shared ?? false)
+        }
+        return MessageDeleteRule.mayDelete(sender: m.sender, meId: meId, moderates: moderates, agentOwnerIds: agentOwners)
+    }
+
     /// The long-press menu's actions (`MessageMenu`): Copy the text, Reply
     /// (in a people chat the agent that wrote it becomes the recipient),
     /// Forward to another chat, Reply in DM (open a private chat with the human
@@ -1343,8 +1397,17 @@ struct ChatView: View {
         case .unpin:
             model.unpinMessage(chatId: chatId, messageId: row.messageId)
         case .delete:
-            model.deleteMessage(chatId: chatId, messageId: row.messageId)
+            beginDelete(row)
         }
+    }
+
+    /// Long-press → Delete: ask first. The title names the sender when it is not my message
+    /// (a moderator deleting a member's or an agent's line).
+    private func beginDelete(_ row: Row) {
+        guard let m = messageById[row.messageId] else { return }
+        let mine = m.role == .user && (m.sender == "user" || m.sender == model.myUserId)
+        let sender = mine ? "" : MediaAlbum.senderName(m) { model.project($0)?.name }
+        pendingDelete = PendingDelete(messageId: row.messageId, title: MessageDeleteCopy.title(mine: mine, sender: sender))
     }
 
     /// Long-press → Forward: open the chat picker with this row's text.

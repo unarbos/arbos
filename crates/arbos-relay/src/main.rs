@@ -40,6 +40,7 @@ mod livekit;
 mod local;
 mod matrix;
 mod migrate;
+mod moderation;
 mod notices;
 mod notify;
 mod people;
@@ -765,6 +766,10 @@ async fn main() -> anyhow::Result<()> {
             get(rooms::get_checkpoint).post(rooms::post_checkpoint),
         )
         .route("/room/{project}/{chat}/stats", get(rooms::room_stats))
+        .route(
+            "/room/{project}/{chat}/messages/{message_id}",
+            delete(moderation::delete_message),
+        )
         .route("/blob/{project}/{key}", get(blobs::get).put(blobs::put))
         .route("/feedback", post(feedback::submit))
         .route("/feedback/capture/{id}", post(feedback::device_capture))

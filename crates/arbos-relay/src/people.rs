@@ -548,7 +548,7 @@ pub fn people_chat_dto(
     }
 }
 
-fn load_chat(state: &AppState, chat_id: &str) -> Result<ChatWithMembers, Box<Response>> {
+pub(crate) fn load_chat(state: &AppState, chat_id: &str) -> Result<ChatWithMembers, Box<Response>> {
     let chat = state
         .db
         .people_chat(chat_id)
@@ -1941,7 +1941,7 @@ pub async fn box_people_chat(
         );
     }
     match load_chat(&state, &id) {
-        Ok(cm) => Json(chat_json(&state, &cm, user_id, &device_of(&principal))).into_response(),
+        Ok(cm) => Json(box_chat_json(&state, &cm, user_id, &device_of(&principal))).into_response(),
         Err(r) => *r,
     }
 }
@@ -1953,8 +1953,34 @@ pub fn people_chats_of_project(state: &AppState, project_id: &str, owner: &str) 
         .chats_of_member(&format!("agent:{project_id}"))
         .unwrap_or_default()
         .iter()
-        .map(|cm| chat_json(state, cm, owner, "box"))
+        .map(|cm| box_chat_json(state, cm, owner, "box"))
         .collect()
+}
+
+/// How many device ids a box-facing roster lists per person.
+const MEMBER_DEVICES_MAX: usize = 64;
+
+/// The chat as a box sees it: the apps' roster plus, on every human member, `devices` — the
+/// ids that person's devices write into `deviceId`. A row that carries no `sender: user:<id>`
+/// (an older app, `arbosctl`) is attributed by the box through this list instead of being
+/// guessed as the owner's (#1580). Apps never get it; they have the row's author fields.
+pub fn box_chat_json(state: &AppState, cm: &ChatWithMembers, me: &str, device_id: &str) -> Value {
+    let mut chat = chat_json(state, cm, me, device_id);
+    if let Some(members) = chat.get_mut("members").and_then(Value::as_array_mut) {
+        for m in members {
+            let Some(uid) = m.get("user_id").and_then(Value::as_str).map(str::to_owned) else {
+                continue;
+            };
+            let ids = state
+                .db
+                .device_ids_of_user(&uid, MEMBER_DEVICES_MAX)
+                .unwrap_or_default();
+            if let Some(o) = m.as_object_mut() {
+                o.insert("devices".into(), json!(ids));
+            }
+        }
+    }
+    chat
 }
 
 // ---- projects together (step 3) ----------------------------------------------------------------
@@ -2869,6 +2895,63 @@ mod tests {
             .remove_member(&chat, &format!("user:{bob}"))
             .expect("leave");
         assert!(!state.allows(&bob_dev, &key));
+    }
+
+    /// #1580: the box roster lists each person's device ids (revoked ones too) so a row with
+    /// only a `deviceId` is attributed to its author; the apps' roster does not carry them.
+    #[test]
+    fn box_roster_carries_member_devices_and_the_app_roster_does_not() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 11);
+        let (bob, bob_dev) = person(&state, 12);
+        let chat = dm(&state, &alice, &bob);
+        let old = ulid();
+        state
+            .db
+            .insert_device(&old, "old phone", &ulid(), &bob, "github")
+            .expect("device");
+        state.db.revoke_device(&old).expect("revoke");
+        let cm = load_chat(&state, &chat).expect("chat");
+
+        let boxed = box_chat_json(&state, &cm, &alice, "box");
+        let devices_of = |v: &Value, user: &str| -> Vec<String> {
+            v["members"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["member"] == format!("user:{user}"))
+                .and_then(|m| m["devices"].as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|d| d.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let Principal::Device { id: bob_id, .. } = &bob_dev else {
+            panic!("device")
+        };
+        let Principal::Device { id: alice_id, .. } = &alice_dev else {
+            panic!("device")
+        };
+        let bobs = devices_of(&boxed, &bob);
+        assert!(bobs.contains(bob_id), "{bobs:?}");
+        assert!(bobs.contains(&old), "revoked devices still name their rows");
+        assert_eq!(devices_of(&boxed, &alice), vec![alice_id.clone()]);
+        let agent_rows: Vec<&Value> = boxed["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["devices"].is_array())
+            .collect();
+        assert_eq!(agent_rows.len(), 2, "humans only");
+
+        let app = chat_json(&state, &cm, &alice, alice_id);
+        assert!(app["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m.get("devices").is_none()));
     }
 }
 
