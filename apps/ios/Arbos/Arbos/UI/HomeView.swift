@@ -1,20 +1,26 @@
 // Home, Grok Bot layout: top bar with the account circle (GitHub avatar, left)
 // and search + "+" circles (right), then All | Agents | People | Servers and the chat
-// list (avatar, name, time, preview). One machine: its state is the small dot
-// on the account circle; the machine details live in Settings.
+// list (avatar, name, time, preview). "+" opens a menu (New Message / New group / …).
+// The filter pills jump to sections in one vertical list so you can scroll Agents →
+// People → Servers without tapping (feedback app-01M5QN8V93PXQBZ6NGP1VJFGFK). One
+// machine: its state is the small dot on the account circle; details live in Settings.
 
 import ArbosFFI
 import SwiftUI
 
 /// Selection above the home list: All | Agents | People | Servers. The Mac
 /// sidebar carries the same four segments (`sidebar::ListFilter` in
-/// crates/arbos-mac); the scope rules here are the shared contract.
+/// crates/arbos-mac). On iPhone the pills jump to sections in one vertical
+/// list (scroll without tapping); search still scopes with these rules.
 enum HomeListFilter: String, CaseIterable, Identifiable {
     case all = "All"
     case agents = "Agents"
     case people = "People"
     case servers = "Servers"
     var id: String { rawValue }
+
+    /// Scroll anchor for the matching home section (`ScrollViewReader`).
+    var sectionId: String { "home-section-\(rawValue)" }
 
     /// Agent (project) rows are listed under All and Agents.
     var showsProjects: Bool { self == .all || self == .agents }
@@ -43,6 +49,8 @@ struct HomeView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     @State private var showNewChat = false
+    /// "+" menu → Create agent / group / server (New Message stays `showNewChat`).
+    @State private var showCreate: CreateKind? = nil
     @State private var searching = false
     @State private var query = ""
     @State private var slowConnect = false
@@ -57,9 +65,12 @@ struct HomeView: View {
     /// Goals list (long-running objectives) from the home sidebar section.
     @State private var showGoals = false
     @State private var openGoalId: String?
-    /// Home list scope: All mixes agents, people and servers; Agents is your
-    /// own agents only (no people chats / other users); People is DMs and groups.
+    /// Home list section highlight: All | Agents | People | Servers. Without a
+    /// search query the list is one vertical scroll of sections; the pill jumps
+    /// to that section. Search still scopes rows with `HomeListFilter`.
     @State private var listFilter: HomeListFilter = .all
+    /// Bumped on every filter-pill tap so a re-tap of the same section still scrolls.
+    @State private var filterScrollTicket = 0
 
     private var hiddenProjects: [Project] {
         model.projects.filter { model.isArchived($0.id) }.sorted { lastActivity($0) > lastActivity($1) }
@@ -85,291 +96,114 @@ struct HomeView: View {
         NavigationStack(path: $model.path) {
             ZStack(alignment: .top) {
                 theme.bg.ignoresSafeArea()
-                List {
-                    Color.clear.frame(height: 66)
-                        .listRowInsets(EdgeInsets())
-                        .listRowSeparator(.hidden)
-                        .listRowBackground(Color.clear)
-                        .accessibilityHidden(true)
-                    if model.projects.isEmpty && model.peopleChats.isEmpty && model.servers.isEmpty {
-                        emptyState
-                            .listRowInsets(EdgeInsets())
-                            .listRowSeparator(.hidden)
-                            .listRowBackground(Color.clear)
-                    } else if homeRows.isEmpty {
-                        listFilterBar
-                            .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 8, trailing: 20))
-                            .listRowSeparator(.hidden)
-                            .listRowBackground(theme.bg)
-                        Text(homeEmptyCopy)
-                            .font(theme.font(Theme.small))
-                            .foregroundStyle(theme.muted)
-                            .frame(maxWidth: .infinity)
-                            .padding(.top, 80)
-                            .listRowInsets(EdgeInsets())
-                            .listRowSeparator(.hidden)
-                            .listRowBackground(Color.clear)
-                            .accessibilityIdentifier(searchQuery.isEmpty ? "home-filter-empty" : "home-search-empty")
-                    } else {
-                        listFilterBar
-                            .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 8, trailing: 20))
-                            .listRowSeparator(.hidden)
-                            .listRowBackground(theme.bg)
-                        if searchQuery.isEmpty {
-                            if let update = model.availableUpdate {
-                                UpdateCard(update: update)
-                                    .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
-                                    .listRowSeparator(.hidden)
-                                    .listRowBackground(theme.bg)
-                            }
-                            if let position = model.waitlistPosition {
-                                WaitlistCard(position: position)
-                                    .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
-                                    .listRowSeparator(.hidden)
-                                    .listRowBackground(theme.bg)
-                            }
-                            if !plannedTasks.isEmpty {
-                                plannedTasksSection
-                            }
-                        }
-                        ForEach(homeRows) { entry in
-                            switch entry.row {
-                            case .project(let project):
-                                let pinned = model.isHomePinned(projectId: project.id)
-                                // borderless (not .plain): .plain steals the list swipe /
-                                // long-press on recent iOS, so archive and the menu fail.
-                                Button { openSearchHit(project, hit: entry.hit) } label: {
-                                    AgentRow(project: project, preview: entry.hit.reason ?? preview(project),
-                                             previewIcon: entry.hit.reason == nil ? previewIcon(project) : nil, time: timeLabel(project),
-                                             streaming: model.isStreaming(project: project.id),
-                                             unread: model.chats(of: project.id).contains { model.chatHasUnread($0) },
-                                             pinned: pinned)
-                                }
-                                .buttonStyle(.borderless)
-                                .contextMenu {
-                                    // Long-press: Pin (also on leading swipe), reorder when
-                                    // pinned, Fork (owned), Archive (also on trailing swipe),
-                                    // then Delete for owned agents. Profile is the chat header.
-                                    Button {
-                                        withAnimation {
-                                            if pinned { model.unpinHome(projectId: project.id) }
-                                            else { model.pinHome(projectId: project.id) }
-                                        }
-                                    } label: {
-                                        Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
-                                    }
-                                    if let pinIndex = model.homePinIndex(projectId: project.id) {
-                                        if pinIndex > 0 {
-                                            Button {
-                                                withAnimation { model.moveHomePinToTop(projectId: project.id) }
-                                            } label: {
-                                                Label("Move to top", systemImage: "arrow.up.to.line")
-                                            }
-                                            Button {
-                                                withAnimation { model.moveHomePinUp(projectId: project.id) }
-                                            } label: {
-                                                Label("Move up", systemImage: "arrow.up")
-                                            }
-                                        }
-                                        if pinIndex + 1 < model.pinnedHomeIds.count {
-                                            Button {
-                                                withAnimation { model.moveHomePinDown(projectId: project.id) }
-                                            } label: {
-                                                Label("Move down", systemImage: "arrow.down")
-                                            }
-                                        }
-                                    }
-                                    if !project.shared {
-                                        Button { model.duplicateProject(project) } label: {
-                                            Label("Fork", systemImage: "arrow.triangle.branch")
-                                        }
-                                    }
-                                    Button {
-                                        withAnimation { model.archive(project.id) }
-                                    } label: {
-                                        Label("Archive", systemImage: "archivebox")
-                                    }
-                                    if !project.shared {
-                                        Divider()
-                                        Button(role: .destructive) { model.deleteProject(project.id) } label: {
-                                            Label("Delete", systemImage: "trash")
-                                        }
-                                    }
-                                }
-                                .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
-                                .listRowSeparator(.hidden)
-                                .listRowBackground(theme.bg)
-                                .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                                    Button {
-                                        withAnimation {
-                                            if pinned { model.unpinHome(projectId: project.id) }
-                                            else { model.pinHome(projectId: project.id) }
-                                        }
-                                    } label: {
-                                        Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
-                                    }
-                                    .tint(Color(hex: "#1084FE")!)
-                                }
-                                // Trailing = swipe left. Full-swipe archives (Telegram-easy).
-                                // Archive alone so a destructive Delete cannot steal the full swipe.
-                                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                                    Button {
-                                        withAnimation { model.archive(project.id) }
-                                    } label: {
-                                        Label("Archive", systemImage: "archivebox")
-                                    }
-                                    .tint(Color(hex: "#636366")!)
-                                }
-                            case .people(let chat):
-                                let pinned = model.isHomePinned(peopleChatId: chat.id)
-                                Button { model.open(peopleChat: chat) } label: {
-                                    PeopleRow(chat: chat, preview: entry.hit.reason ?? peoplePreview(chat), time: timeLabel(ms: peopleActivity(chat)),
-                                              unread: model.peopleUnread.contains(chat.id) || model.unreadCount(for: chat) > 0,
-                                              count: model.unreadCount(for: chat), me: model.user?.id,
-                                              pinned: pinned)
-                                }
-                                .buttonStyle(.borderless)
-                                .contextMenu {
-                                    // Long-press: Pin, reorder when pinned, Archive,
-                                    // Mute (groups), Profile/Group info, Delete.
-                                    Button {
-                                        withAnimation {
-                                            if pinned { model.unpinHome(peopleChatId: chat.id) }
-                                            else { model.pinHome(peopleChatId: chat.id) }
-                                        }
-                                    } label: {
-                                        Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
-                                    }
-                                    if let pinIndex = model.homePinIndex(peopleChatId: chat.id) {
-                                        if pinIndex > 0 {
-                                            Button {
-                                                withAnimation { model.moveHomePinToTop(peopleChatId: chat.id) }
-                                            } label: {
-                                                Label("Move to top", systemImage: "arrow.up.to.line")
-                                            }
-                                            Button {
-                                                withAnimation { model.moveHomePinUp(peopleChatId: chat.id) }
-                                            } label: {
-                                                Label("Move up", systemImage: "arrow.up")
-                                            }
-                                        }
-                                        if pinIndex + 1 < model.pinnedHomeIds.count {
-                                            Button {
-                                                withAnimation { model.moveHomePinDown(peopleChatId: chat.id) }
-                                            } label: {
-                                                Label("Move down", systemImage: "arrow.down")
-                                            }
-                                        }
-                                    }
-                                    Button {
-                                        withAnimation { model.archive(peopleChatId: chat.id) }
-                                    } label: {
-                                        Label("Archive", systemImage: "archivebox")
-                                    }
-                                    if chat.isGroup {
-                                        if model.isPeopleChatMuted(chat.id) {
-                                            Button { model.unmutePeopleChat(chat.id) } label: {
-                                                Label("Unmute", systemImage: "bell")
-                                            }
-                                        } else {
-                                            Menu {
-                                                ForEach(ChatMuteDuration.allCases) { duration in
-                                                    Button(duration.title) {
-                                                        model.mutePeopleChat(chat.id, for: duration)
-                                                    }
-                                                }
-                                            } label: {
-                                                Label("Mute", systemImage: "bell.slash")
-                                            }
-                                        }
-                                    }
-                                    if chat.kind == "dm", let other = chat.counterpart(me: model.user?.id) {
-                                        Button { model.showProfile(.user(ProfilePerson(other))) } label: { Label("Profile", systemImage: "person.crop.circle") }
-                                    } else {
-                                        Button { model.showProfile(.group(chatId: chat.id, projectId: nil)) } label: { Label("Group info", systemImage: "person.2") }
-                                    }
-                                    Button(role: .destructive) { model.deleteOrLeavePeopleChat(chat) } label: {
-                                        Label("Delete", systemImage: "trash")
-                                    }
-                                }
-                                .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
-                                .listRowSeparator(.hidden)
-                                .listRowBackground(theme.bg)
-                                .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                                    Button {
-                                        withAnimation {
-                                            if pinned { model.unpinHome(peopleChatId: chat.id) }
-                                            else { model.pinHome(peopleChatId: chat.id) }
-                                        }
-                                    } label: {
-                                        Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
-                                    }
-                                    .tint(Color(hex: "#1084FE")!)
-                                }
-                                // Trailing = swipe left. Full-swipe archives (same as agents).
-                                // Archive alone so Delete stays on long-press / Hidden chats.
-                                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                                    Button {
-                                        withAnimation { model.archive(peopleChatId: chat.id) }
-                                    } label: {
-                                        Label("Archive", systemImage: "archivebox")
-                                    }
-                                    .tint(Color(hex: "#636366")!)
-                                }
-                            case .server(let server):
-                                // D88 rule 1: a server row is a chat row — avatar, name, preview,
-                                // time, unread dot; no counts, badges or disclosure. Tap → its
-                                // channel list; the user then opens a channel.
-                                Button { model.open(server: server) } label: {
-                                    ServerRow(server: server, preview: entry.hit.reason ?? model.serverPreview(server),
-                                              time: timeLabel(ms: model.serverActivity(server)),
-                                              unread: model.serverUnread(server))
-                                }
-                                .buttonStyle(.borderless)
-                                .contextMenu {
-                                    Button { model.showProfile(.server(serverId: server.id)) } label: {
-                                        Label("Server info", systemImage: "person.2")
-                                    }
-                                    Button {
-                                        withAnimation { model.archive(serverId: server.id) }
-                                    } label: {
-                                        Label("Archive", systemImage: "archivebox")
-                                    }
-                                }
-                                .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
-                                .listRowSeparator(.hidden)
-                                .listRowBackground(theme.bg)
-                            }
-                        }
-                        if searchQuery.isEmpty, hiddenCount > 0 {
-                            hiddenFooter
-                                .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
-                                .listRowSeparator(.hidden)
-                                .listRowBackground(theme.bg)
-                        }
-                        // Launch timing: the populated list is on screen.
-                        Color.clear.frame(height: 1)
+                ScrollViewReader { proxy in
+                    List {
+                        Color.clear.frame(height: 66)
                             .listRowInsets(EdgeInsets())
                             .listRowSeparator(.hidden)
                             .listRowBackground(Color.clear)
                             .accessibilityHidden(true)
-                            .onAppear { LaunchClock.mark("first-content", detail: "source=\(model.contentOrigin) rows=\(homeRows.count)") }
+                            .id(HomeListFilter.all.sectionId)
+                        if model.projects.isEmpty && model.peopleChats.isEmpty && model.servers.isEmpty {
+                            emptyState
+                                .listRowInsets(EdgeInsets())
+                                .listRowSeparator(.hidden)
+                                .listRowBackground(Color.clear)
+                        } else if !searchQuery.isEmpty && homeRows.isEmpty {
+                            listFilterBar
+                                .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 8, trailing: 20))
+                                .listRowSeparator(.hidden)
+                                .listRowBackground(theme.bg)
+                            Text(homeEmptyCopy)
+                                .font(theme.font(Theme.small))
+                                .foregroundStyle(theme.muted)
+                                .frame(maxWidth: .infinity)
+                                .padding(.top, 80)
+                                .listRowInsets(EdgeInsets())
+                                .listRowSeparator(.hidden)
+                                .listRowBackground(Color.clear)
+                                .accessibilityIdentifier("home-search-empty")
+                        } else {
+                            listFilterBar
+                                .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 8, trailing: 20))
+                                .listRowSeparator(.hidden)
+                                .listRowBackground(theme.bg)
+                            if searchQuery.isEmpty {
+                                if let update = model.availableUpdate {
+                                    UpdateCard(update: update)
+                                        .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
+                                        .listRowSeparator(.hidden)
+                                        .listRowBackground(theme.bg)
+                                }
+                                if let position = model.waitlistPosition {
+                                    WaitlistCard(position: position)
+                                        .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
+                                        .listRowSeparator(.hidden)
+                                        .listRowBackground(theme.bg)
+                                }
+                                if !plannedTasks.isEmpty {
+                                    plannedTasksSection
+                                }
+                                homeSection(filter: .agents, entries: agentSectionEntries)
+                                homeSection(filter: .people, entries: peopleSectionEntries)
+                                homeSection(filter: .servers, entries: serverSectionEntries)
+                                if agentSectionEntries.isEmpty && peopleSectionEntries.isEmpty
+                                    && serverSectionEntries.isEmpty {
+                                    Text(HomeListFilter.all.emptyCopy)
+                                        .font(theme.font(Theme.small))
+                                        .foregroundStyle(theme.muted)
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.top, 80)
+                                        .listRowInsets(EdgeInsets())
+                                        .listRowSeparator(.hidden)
+                                        .listRowBackground(Color.clear)
+                                        .accessibilityIdentifier("home-filter-empty")
+                                }
+                            } else {
+                                ForEach(homeRows) { entry in
+                                    homeEntryRow(entry)
+                                }
+                            }
+
+                            if searchQuery.isEmpty, hiddenCount > 0 {
+                                hiddenFooter
+                                    .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
+                                    .listRowSeparator(.hidden)
+                                    .listRowBackground(theme.bg)
+                            }
+                            // Launch timing: the populated list is on screen.
+                            Color.clear.frame(height: 1)
+                                .listRowInsets(EdgeInsets())
+                                .listRowSeparator(.hidden)
+                                .listRowBackground(Color.clear)
+                                .accessibilityHidden(true)
+                                .onAppear {
+                                    let n = agentSectionEntries.count + peopleSectionEntries.count + serverSectionEntries.count
+                                    LaunchClock.mark("first-content", detail: "source=\(model.contentOrigin) rows=\(n)")
+                                }
+                        }
+                    }
+                    .listStyle(.plain)
+                    .scrollContentBackground(.hidden)
+                    .background(theme.bg)
+                    // Fade under the top bar as an overlay — a List `.mask` clips the
+                    // system scroll indicator on the right edge (feedback
+                    // app-01M5MY2Y9HTFR019WAEPPDCNYS). Same treatment as ChatView's
+                    // headerBlur: keep the soft edge, leave the scroller free.
+                    .scrollIndicators(.visible)
+                    .overlay(alignment: .top) {
+                        LinearGradient(colors: [theme.bg, theme.bg.opacity(0)], startPoint: .top, endPoint: .bottom)
+                            .frame(height: 100)
+                            .allowsHitTesting(false)
+                    }
+                    .refreshable { await model.refreshRegistry() }
+                    .onChange(of: filterScrollTicket) { _, _ in
+                        guard searchQuery.isEmpty else { return }
+                        withAnimation(.snappy(duration: 0.25)) {
+                            proxy.scrollTo(listFilter.sectionId, anchor: .top)
+                        }
                     }
                 }
-                .listStyle(.plain)
-                .scrollContentBackground(.hidden)
-                .background(theme.bg)
-                // Fade under the top bar as an overlay — a List `.mask` clips the
-                // system scroll indicator on the right edge (feedback
-                // app-01M5MY2Y9HTFR019WAEPPDCNYS). Same treatment as ChatView's
-                // headerBlur: keep the soft edge, leave the scroller free.
-                .scrollIndicators(.visible)
-                .overlay(alignment: .top) {
-                    LinearGradient(colors: [theme.bg, theme.bg.opacity(0)], startPoint: .top, endPoint: .bottom)
-                        .frame(height: 100)
-                        .allowsHitTesting(false)
-                }
-                .refreshable { await model.refreshRegistry() }
                 topBar
             }
             .task(id: model.link) {
@@ -415,6 +249,17 @@ struct HomeView: View {
             .sheet(isPresented: $showNewChat) {
                 NewChatSheet().environmentObject(model).environment(\.theme, theme)
             }
+            .sheet(item: $showCreate) { kind in
+                NavigationStack {
+                    CreateEntityView(kind: kind, onDone: { showCreate = nil })
+                        .environmentObject(model)
+                        .environment(\.theme, theme)
+                }
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+                .presentationCornerRadius(28)
+                .preferredColorScheme(theme.isDark ? .dark : .light)
+            }
         }
         .task {
             if DebugHooks.demo, model.isFixture {
@@ -447,6 +292,7 @@ struct HomeView: View {
             if let raw = DebugHooks.homeFilter,
                let f = HomeListFilter.allCases.first(where: { $0.rawValue.lowercased() == raw.lowercased() }) {
                 listFilter = f
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { filterScrollTicket += 1 }
             }
             // Rig: `ARBOS_SEARCH=<text>` opens the home search with that query.
             if let q = DebugHooks.search, DebugHooks.openProject == nil {
@@ -667,7 +513,22 @@ struct HomeView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Search conversations")
-                Button { showNewChat = true } label: {
+                Menu {
+                    Button { showNewChat = true } label: {
+                        Label("New Message", systemImage: "bubble.left.and.bubble.right")
+                    }
+                    Button { showCreate = .group } label: {
+                        Label("New group", systemImage: "person.2.fill")
+                    }
+                    Button { showCreate = .agent } label: {
+                        Label("New agent", systemImage: "sparkles")
+                    }
+                    if model.serversAvailable {
+                        Button { showCreate = .server } label: {
+                            Label("New server", systemImage: "number")
+                        }
+                    }
+                } label: {
                     GlassCircle {
                         Image(systemName: "plus")
                             .font(theme.font(19, weight: .regular))
@@ -675,6 +536,8 @@ struct HomeView: View {
                     }
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Create")
+                .accessibilityIdentifier("home-create-menu")
             }
         }
         // Grok home header: 20 pt side margins, 42 pt circles.
@@ -757,21 +620,23 @@ struct HomeView: View {
         var id: String { row.id }
     }
 
-    /// Projects, DMs and servers in one list. Without a query: pinned first (in the
-    /// user's pin order), then newest activity. With one: people (display name /
-    /// @handle) first, then rows matched by title, then by a member, then by a
-    /// message — newest first inside each group; a hit beyond the row's own name is
-    /// explained on its second line. `listFilter` scopes the rows: Agents hides
-    /// people and servers, People hides agents and servers, Servers shows only
-    /// servers (`HomeListFilter`).
-    private var homeRows: [HomeEntry] {
+    /// Search hits under the current filter pill (scoped). Without a query the
+    /// home list uses the vertical sections instead (`agentSectionEntries`…).
+    private var homeRows: [HomeEntry] { homeEntries(for: listFilter) }
+
+    /// Projects, DMs and servers for one filter. Without a query: pinned first
+    /// (in the user's pin order), then newest activity. With one: people
+    /// (display name / @handle) first, then rows matched by title, then by a
+    /// member, then by a message — newest first inside each group; a hit beyond
+    /// the row's own name is explained on its second line.
+    private func homeEntries(for filter: HomeListFilter) -> [HomeEntry] {
         let q = searchQuery
         // pinRank: strip index when pinned (0 = top), Int.max when not.
         var rows: [(HomeSearch.Kind, Int, Int64, HomeEntry)] = []
-        if listFilter.showsProjects {
+        if filter.showsProjects {
             for p in model.projects {
                 // Agents: my agents only (`!shared`) — no shared-in agents.
-                if !listFilter.admitsProject(shared: p.shared) { continue }
+                if !filter.admitsProject(shared: p.shared) { continue }
                 // Archived agents stay out of the home list until search (or open).
                 if q.isEmpty && model.isArchived(p.id) { continue }
                 guard let hit = projectHit(p, q: q) else { continue }
@@ -779,7 +644,7 @@ struct HomeView: View {
                 rows.append((hit.kind, pinRank, lastActivity(p), HomeEntry(row: .project(p), hit: hit)))
             }
         }
-        if listFilter.showsPeople {
+        if filter.showsPeople {
             for c in model.peopleChats {
                 // Archived people stay out of the home list until search (or open).
                 if q.isEmpty && model.isArchived(peopleChatId: c.id) { continue }
@@ -788,7 +653,7 @@ struct HomeView: View {
                 rows.append((hit.kind, pinRank, peopleActivity(c), HomeEntry(row: .people(c), hit: hit)))
             }
         }
-        if listFilter.showsServers {
+        if filter.showsServers {
             // D88: servers sort among the chats by last activity (rule 1); the
             // Servers segment shows them alone (Mac parity, 2026-10-24).
             for s in model.servers {
@@ -839,7 +704,253 @@ struct HomeView: View {
         }
     }
 
+    /// Agents (including shared) for the vertical home sections.
+    private var agentSectionEntries: [HomeEntry] {
+        homeEntries(for: .all).filter {
+            if case .project = $0.row { return true }
+            return false
+        }
+    }
+
+    /// People chats for the vertical home sections.
+    private var peopleSectionEntries: [HomeEntry] {
+        homeEntries(for: .people)
+    }
+
+    /// Servers for the vertical home sections.
+    private var serverSectionEntries: [HomeEntry] {
+        homeEntries(for: .servers)
+    }
+
+    /// One block in the unified vertical list. Invisible scroll anchor for the
+    /// matching filter pill (no section titles — Grok Bot has none). Empty
+    /// sections still expose the anchor so the pill has somewhere to land.
+    @ViewBuilder
+    private func homeSection(filter: HomeListFilter, entries: [HomeEntry]) -> some View {
+        Color.clear.frame(height: 0)
+            .listRowInsets(EdgeInsets())
+            .listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
+            .id(filter.sectionId)
+            .accessibilityHidden(true)
+        ForEach(entries) { entry in
+            homeEntryRow(entry)
+        }
+    }
+
+    @ViewBuilder
+    private func homeEntryRow(_ entry: HomeEntry) -> some View {
+                        switch entry.row {
+                        case .project(let project):
+                            let pinned = model.isHomePinned(projectId: project.id)
+                            // borderless (not .plain): .plain steals the list swipe /
+                            // long-press on recent iOS, so archive and the menu fail.
+                            Button { openSearchHit(project, hit: entry.hit) } label: {
+                                AgentRow(project: project, preview: entry.hit.reason ?? preview(project),
+                                         previewIcon: entry.hit.reason == nil ? previewIcon(project) : nil, time: timeLabel(project),
+                                         streaming: model.isStreaming(project: project.id),
+                                         unread: model.chats(of: project.id).contains { model.chatHasUnread($0) },
+                                         pinned: pinned)
+                            }
+                            .buttonStyle(.borderless)
+                            .contextMenu {
+                                // Long-press: Pin (also on leading swipe), reorder when
+                                // pinned, Fork (owned), Archive (also on trailing swipe),
+                                // then Delete for owned agents. Profile is the chat header.
+                                Button {
+                                    withAnimation {
+                                        if pinned { model.unpinHome(projectId: project.id) }
+                                        else { model.pinHome(projectId: project.id) }
+                                    }
+                                } label: {
+                                    Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
+                                }
+                                if let pinIndex = model.homePinIndex(projectId: project.id) {
+                                    if pinIndex > 0 {
+                                        Button {
+                                            withAnimation { model.moveHomePinToTop(projectId: project.id) }
+                                        } label: {
+                                            Label("Move to top", systemImage: "arrow.up.to.line")
+                                        }
+                                        Button {
+                                            withAnimation { model.moveHomePinUp(projectId: project.id) }
+                                        } label: {
+                                            Label("Move up", systemImage: "arrow.up")
+                                        }
+                                    }
+                                    if pinIndex + 1 < model.pinnedHomeIds.count {
+                                        Button {
+                                            withAnimation { model.moveHomePinDown(projectId: project.id) }
+                                        } label: {
+                                            Label("Move down", systemImage: "arrow.down")
+                                        }
+                                    }
+                                }
+                                if !project.shared {
+                                    Button { model.duplicateProject(project) } label: {
+                                        Label("Fork", systemImage: "arrow.triangle.branch")
+                                    }
+                                }
+                                Button {
+                                    withAnimation { model.archive(project.id) }
+                                } label: {
+                                    Label("Archive", systemImage: "archivebox")
+                                }
+                                if !project.shared {
+                                    Divider()
+                                    Button(role: .destructive) { model.deleteProject(project.id) } label: {
+                                        Label("Delete", systemImage: "trash")
+                                    }
+                                }
+                            }
+                            .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(theme.bg)
+                            .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                                Button {
+                                    withAnimation {
+                                        if pinned { model.unpinHome(projectId: project.id) }
+                                        else { model.pinHome(projectId: project.id) }
+                                    }
+                                } label: {
+                                    Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
+                                }
+                                .tint(Color(hex: "#1084FE")!)
+                            }
+                            // Trailing = swipe left. Full-swipe archives (Telegram-easy).
+                            // Archive alone so a destructive Delete cannot steal the full swipe.
+                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                Button {
+                                    withAnimation { model.archive(project.id) }
+                                } label: {
+                                    Label("Archive", systemImage: "archivebox")
+                                }
+                                .tint(Color(hex: "#636366")!)
+                            }
+                        case .people(let chat):
+                            let pinned = model.isHomePinned(peopleChatId: chat.id)
+                            Button { model.open(peopleChat: chat) } label: {
+                                PeopleRow(chat: chat, preview: entry.hit.reason ?? peoplePreview(chat), time: timeLabel(ms: peopleActivity(chat)),
+                                          unread: model.peopleUnread.contains(chat.id) || model.unreadCount(for: chat) > 0,
+                                          count: model.unreadCount(for: chat), me: model.user?.id,
+                                          pinned: pinned)
+                            }
+                            .buttonStyle(.borderless)
+                            .contextMenu {
+                                // Long-press: Pin, reorder when pinned, Archive,
+                                // Mute (groups), Profile/Group info, Delete.
+                                Button {
+                                    withAnimation {
+                                        if pinned { model.unpinHome(peopleChatId: chat.id) }
+                                        else { model.pinHome(peopleChatId: chat.id) }
+                                    }
+                                } label: {
+                                    Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
+                                }
+                                if let pinIndex = model.homePinIndex(peopleChatId: chat.id) {
+                                    if pinIndex > 0 {
+                                        Button {
+                                            withAnimation { model.moveHomePinToTop(peopleChatId: chat.id) }
+                                        } label: {
+                                            Label("Move to top", systemImage: "arrow.up.to.line")
+                                        }
+                                        Button {
+                                            withAnimation { model.moveHomePinUp(peopleChatId: chat.id) }
+                                        } label: {
+                                            Label("Move up", systemImage: "arrow.up")
+                                        }
+                                    }
+                                    if pinIndex + 1 < model.pinnedHomeIds.count {
+                                        Button {
+                                            withAnimation { model.moveHomePinDown(peopleChatId: chat.id) }
+                                        } label: {
+                                            Label("Move down", systemImage: "arrow.down")
+                                        }
+                                    }
+                                }
+                                Button {
+                                    withAnimation { model.archive(peopleChatId: chat.id) }
+                                } label: {
+                                    Label("Archive", systemImage: "archivebox")
+                                }
+                                if chat.isGroup {
+                                    if model.isPeopleChatMuted(chat.id) {
+                                        Button { model.unmutePeopleChat(chat.id) } label: {
+                                            Label("Unmute", systemImage: "bell")
+                                        }
+                                    } else {
+                                        Menu {
+                                            ForEach(ChatMuteDuration.allCases) { duration in
+                                                Button(duration.title) {
+                                                    model.mutePeopleChat(chat.id, for: duration)
+                                                }
+                                            }
+                                        } label: {
+                                            Label("Mute", systemImage: "bell.slash")
+                                        }
+                                    }
+                                }
+                                if chat.kind == "dm", let other = chat.counterpart(me: model.user?.id) {
+                                    Button { model.showProfile(.user(ProfilePerson(other))) } label: { Label("Profile", systemImage: "person.crop.circle") }
+                                } else {
+                                    Button { model.showProfile(.group(chatId: chat.id, projectId: nil)) } label: { Label("Group info", systemImage: "person.2") }
+                                }
+                                Button(role: .destructive) { model.deleteOrLeavePeopleChat(chat) } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
+                            }
+                            .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(theme.bg)
+                            .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                                Button {
+                                    withAnimation {
+                                        if pinned { model.unpinHome(peopleChatId: chat.id) }
+                                        else { model.pinHome(peopleChatId: chat.id) }
+                                    }
+                                } label: {
+                                    Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
+                                }
+                                .tint(Color(hex: "#1084FE")!)
+                            }
+                            // Trailing = swipe left. Full-swipe archives (same as agents).
+                            // Archive alone so Delete stays on long-press / Hidden chats.
+                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                Button {
+                                    withAnimation { model.archive(peopleChatId: chat.id) }
+                                } label: {
+                                    Label("Archive", systemImage: "archivebox")
+                                }
+                                .tint(Color(hex: "#636366")!)
+                            }
+                        case .server(let server):
+                            // D88 rule 1: a server row is a chat row — avatar, name, preview,
+                            // time, unread dot; no counts, badges or disclosure. Tap → its
+                            // channel list; the user then opens a channel.
+                            Button { model.open(server: server) } label: {
+                                ServerRow(server: server, preview: entry.hit.reason ?? model.serverPreview(server),
+                                          time: timeLabel(ms: model.serverActivity(server)),
+                                          unread: model.serverUnread(server))
+                            }
+                            .buttonStyle(.borderless)
+                            .contextMenu {
+                                Button { model.showProfile(.server(serverId: server.id)) } label: {
+                                    Label("Server info", systemImage: "person.2")
+                                }
+                                Button {
+                                    withAnimation { model.archive(serverId: server.id) }
+                                } label: {
+                                    Label("Archive", systemImage: "archivebox")
+                                }
+                            }
+                            .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(theme.bg)
+                        }
+    }
+
     /// All | Agents | People | Servers — same capsule pill as profile panes (`PaneTabs`).
+    /// Tapping jumps to that section in the vertical list (All = top).
     private var listFilterBar: some View {
         let selected = Binding(
             get: { listFilter.rawValue },
@@ -847,10 +958,12 @@ struct HomeView: View {
                 guard let next = HomeListFilter(rawValue: raw) else { return }
                 Haptics.pick()
                 withAnimation(.snappy(duration: 0.2)) { listFilter = next }
+                filterScrollTicket += 1
             }
         )
         return PaneTabs(tabs: HomeListFilter.allCases.map(\.rawValue), selected: selected)
             .accessibilityIdentifier("home-list-filter")
+            .accessibilityHint("Scrolls the chat list to that section")
     }
 
     /// Empty copy when the current filter (or search) has no rows.

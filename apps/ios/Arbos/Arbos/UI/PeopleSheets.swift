@@ -454,8 +454,16 @@ struct PersonRow: View {
 /// sets up its workspace. The preview is the Telegram-style initials circle
 /// (D79): Automatic until a swatch is picked.
 /// What the Create screen creates (D93: one style, parameterised by entity).
-enum CreateKind {
+enum CreateKind: Identifiable {
     case agent, group, server
+
+    var id: String {
+        switch self {
+        case .agent: return "agent"
+        case .group: return "group"
+        case .server: return "server"
+        }
+    }
 
     var title: String {
         switch self {
