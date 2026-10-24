@@ -113,7 +113,13 @@ def send_turn(project, chat_id, prompt, timeout_s, reject_approvals=True, on_row
     first_row_at = None
     over = False
     repaired = False
-    time.sleep(2)
+    if on_poll:
+        # a tight first second for checks with a short deadline (the steer's working-row change)
+        for _ in range(4):
+            time.sleep(0.5)
+            on_poll()
+    else:
+        time.sleep(2)
     while time.time() < deadline:
         # repair once: the stream saw assistant text but the replica shows no assistant rows
         stuck = watcher.first_text_at is not None and not rows and time.time() - t0 - watcher.first_text_at > 20

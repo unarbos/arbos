@@ -341,3 +341,14 @@ def capped_user_turn(handle, cap_usd, prompt, timeout_s=240):
     errors = [pp.get("message") or pp.get("text") for m in rows for pp in m.get("parts", []) if pp.get("kind") in ("error", "status") and (pp.get("code") in ("failed", "error", "cap", "daily_cap") or "cap" in str(pp.get("message") or "").lower())]
     st, me = http("GET", f"{RELAY}/me", token=tok["access_token"])
     return {"user_id": uid, "project": pid, "chat_id": chat_id, "reply": reply, "errors": errors, "routes": [m.get("decision") for m in rows], "wall_s": round(time.time() - t0, 1), "stream_tail": out[-800:], "credits": (me or {}).get("credits"), "cap_hit": any("cap" in str(e).lower() for e in errors) or "cap" in reply.lower()}
+
+
+def project_activity(project):
+    """The working-row line the relay shows for the project (agentd `post_activity`), or None."""
+    st, v = relay("GET", f"/projects/{project}")
+    if st != 200:
+        return None
+    a = ((v or {}).get("project") or v or {}).get("activity")
+    if isinstance(a, dict):
+        return a.get("text")
+    return a

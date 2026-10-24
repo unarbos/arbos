@@ -14,13 +14,13 @@
     {
       "prompt": "Change of plan: stop at 20, not 40. Please apply that to the run that is going now.",
       "pre_wait_s": 15,
-      "latency_max_s": 8,
       "background": true,
       "rubric": {
-        "criteria": "Judge the reply only: the agent acknowledges the change (stop at 20) and says it applies to the running job, without claiming it is already done.",
+        "criteria": "Judge the reply only. By the no-placeholder rule there is no 'steering…' bubble; the steer is acknowledged on the working row (checked programmatically). Pass if the final reply shows the change was applied to the running job (stopped at 20) and is honest about how; fail if it ignores the steer, says it cannot change a running job, or reports an outcome that contradicts the file.",
         "min": 3
       },
-      "timeout_s": 60
+      "timeout_s": 60,
+      "expect_activity_change_s": 5
     },
     {
       "prompt": "Done? What was the last number?",
@@ -35,5 +35,5 @@
     "no_truncated_reply": true,
     "no_repeated_sentence": true
   },
-  "regression": "steer path (bc-d117b386 [guide] side)"
+  "regression": "steer path: the working row's activity changes within 5 s of a steer (agentd post_activity 'Steering: …'), result applied (bc-d117b386 #1598)"
 }

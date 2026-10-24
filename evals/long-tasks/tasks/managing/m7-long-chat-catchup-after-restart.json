@@ -31,5 +31,5 @@
     "no_truncated_reply": true,
     "no_repeated_sentence": true
   },
-  "regression": "#1575/#1610 session liveness across a restart; memory survives (D77)"
+  "regression": "#1575/#1610 session liveness across a restart; memory survives (D77) · regression case for #1648 (doubled reply after restart; fixed main 78a3e6b2, image 0.1.116)"
 }

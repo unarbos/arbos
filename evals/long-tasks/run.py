@@ -261,8 +261,14 @@ class Lane(threading.Thread):
                 self.say(f"{tid} peer turn {i}: {'ok' if g['ok'] else 'FAIL ' + str(g['reasons'])[:160]} | ttfr {ttfr}")
                 continue
             decided = []
+            activity_seen = {"before": rl.project_activity(self.project) if turn.get("expect_activity_change_s") else None, "changed_at": None, "text": None, "t0": time.time()}
 
             def on_poll():
+                if turn.get("expect_activity_change_s") and activity_seen["changed_at"] is None:
+                    a = rl.project_activity(self.project)
+                    if a and a != activity_seen["before"]:
+                        activity_seen["changed_at"] = round(time.time() - activity_seen["t0"], 2)
+                        activity_seen["text"] = a
                 if not turn.get("secret_decide"):
                     return
                 for req in rl.project_secret_requests(self.project):
@@ -276,7 +282,7 @@ class Lane(threading.Thread):
                 prompt,
                 turn.get("timeout_s", task.get("timeout_s", 600)),
                 until_first_reply=bool(turn.get("background")),
-                on_poll=on_poll if turn.get("secret_decide") else None,
+                on_poll=on_poll if (turn.get("secret_decide") or turn.get("expect_activity_change_s")) else None,
                 skip_secret_cards=bool(turn.get("secret_decide")),
             )
             res["secret_requests_decided"] = decided
@@ -296,6 +302,12 @@ class Lane(threading.Thread):
                 if turn_spec.get(k) and task_state.get("old_name"):
                     turn_spec[k] = turn_spec[k].replace("{OLD_NAME}", re.escape(task_state["old_name"]))
             g = gr.grade_turn(turn_spec, ctx, self.box, self.project, env)
+            if turn.get("expect_activity_change_s"):
+                g["truth"]["activity_changed_s"] = activity_seen["changed_at"]
+                g["truth"]["activity_text"] = (activity_seen["text"] or "")[:80]
+                if activity_seen["changed_at"] is None or activity_seen["changed_at"] > turn["expect_activity_change_s"]:
+                    g["ok"] = False
+                    g["reasons"].append(f"the working row's activity did not change within {turn['expect_activity_change_s']} s of the steer (changed at {activity_seen['changed_at']}, text {activity_seen['text']!r})")
             if turn.get("expect_secret_request") and not res.get("secret_requests_decided"):
                 g["ok"] = False
                 g["reasons"].append("no secret access request (approval card) appeared for the driver to decide")
