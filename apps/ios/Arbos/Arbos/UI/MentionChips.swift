@@ -137,7 +137,8 @@ final class MentionTable {
                 h.combine(p.name)
                 h.combine(p.avatarColorIndex)
             }
-            for chat in model.peopleChats {
+            // Sorted: a chat moving to the top on activity must not change the table.
+            for chat in model.peopleChats.sorted(by: { $0.id < $1.id }) {
                 h.combine(chat.id)
                 h.combine(chat.title)
                 h.combine(chat.avatarLeaf)

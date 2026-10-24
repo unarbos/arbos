@@ -76,6 +76,10 @@ pub struct TextSelection {
     /// The pointer over the transcript's mention chips (hover / pressed), by
     /// bubble key and the chip's byte range in that bubble's plain text.
     pub chips: mention::ChipPointer<ChipKey>,
+    /// Screenshot rig (`ARBOS_RIG_CHIP=hover|pressed`): every chip paints in
+    /// that pointer state. The EC2 Mac's VNC session cannot hold a button
+    /// down for a capture, so the rig asks.
+    rig_chip: Option<mention::ChipState>,
     /// The cursor the last painted bubble text asked for (tests).
     #[cfg(test)]
     pub(crate) cursor: CursorStyle,
@@ -91,6 +95,9 @@ impl TextSelection {
             focus_handle: cx.focus_handle(),
             model: Model::default(),
             chips: mention::ChipPointer::default(),
+            rig_chip: std::env::var("ARBOS_RIG_CHIP")
+                .ok()
+                .and_then(|s| mention::ChipState::parse(&s)),
             #[cfg(test)]
             cursor: CursorStyle::Arrow,
         }
@@ -429,6 +436,7 @@ impl BubbleSelectable {
             styled: StyledText::new(text.clone()).with_runs(runs),
             key: self.key.clone(),
             bubble_text: self.text.clone(),
+            span: at..at + text.len(),
             at,
             links: Vec::new(),
             chips,
@@ -628,6 +636,8 @@ pub struct SelectableText {
     key: SharedString,
     bubble_text: SharedString,
     at: usize,
+    /// `at..at + text.len()`: the bubble bytes this element covers.
+    span: Range<usize>,
     styled: StyledText,
     links: Vec<(Range<usize>, String)>,
     chips: Vec<Chip>,
@@ -703,9 +713,33 @@ impl Element for SelectableText {
         let now = Instant::now();
         let snap = cx.reduce_motion();
         let mut fading = false;
-        selection.update(cx, |s, _| s.chips.tidy(now));
+        // The text may have moved under a still pointer (the pane opening
+        // reflows the bubbles): a hot chip of ours that is no longer under
+        // the pointer cools now, not at the next mouse move.
+        let under_pointer = hitbox
+            .is_hovered(window)
+            .then(|| chip_at(&chips, &layout, window.mouse_position()))
+            .flatten()
+            .map(|c| c.key.clone());
+        let (key, span) = (self.key.clone(), self.span.clone());
+        selection.update(cx, |s, _| {
+            s.chips.tidy(now);
+            // Ours: a chip in this element, or a chip this bubble no longer
+            // has at that byte range (the text changed).
+            let mine = s
+                .chips
+                .hot()
+                .is_some_and(|(k, range)| *k == key && span.contains(&range.start));
+            if mine && under_pointer.is_none() {
+                s.chips.hover(None, now);
+            }
+        });
+        let rig = selection.read(cx).rig_chip;
         for chip in chips.iter() {
-            let (alpha, still) = selection.read(cx).chips.alpha(&chip.key, now, snap);
+            let (alpha, still) = match rig {
+                Some(state) if chip.clickable() => (state.alpha(), false),
+                _ => selection.read(cx).chips.alpha(&chip.key, now, snap),
+            };
             fading |= still;
             paint_chip_pill(
                 &layout,
@@ -754,6 +788,7 @@ impl Element for SelectableText {
                 selection.clone(),
                 chips.clone(),
             );
+            let (key, span) = (key.clone(), span.clone());
             move |event: &MouseMoveEvent, phase, window, cx| {
                 if phase != DispatchPhase::Bubble {
                     return;
@@ -770,7 +805,7 @@ impl Element for SelectableText {
                     .read(cx)
                     .chips
                     .hot()
-                    .is_some_and(|k| chips.iter().any(|c| c.key == *k));
+                    .is_some_and(|(k, range)| *k == key && span.contains(&range.start));
                 if over.is_none() && !mine {
                     return;
                 }
@@ -1465,6 +1500,43 @@ mod tests {
             assert_eq!(s.chips.state(&key), ChipState::Rest);
             assert_eq!(s.cursor, CursorStyle::IBeam);
             assert_eq!(settled(s, false), PILL_ALPHA, "fades back to rest");
+        });
+    }
+
+    /// The pane opening reflows the bubble: a chip that moves out from under
+    /// a still pointer cools at the next paint, not at the next mouse move.
+    #[gpui::test]
+    fn a_chip_that_moves_away_from_a_still_pointer_cools(cx: &mut gpui::TestAppContext) {
+        use crate::ui::mention::ChipState;
+        use std::cell::RefCell;
+        let opened = Rc::new(RefCell::new(Vec::new()));
+        let mentions = chip_table(&opened);
+        let selection = cx.update(|cx| cx.new(TextSelection::new));
+        let (view, vcx) = cx.add_window_view(|_, _| ChipBubble {
+            selection: selection.clone(),
+            mentions,
+            text: "@Comms says hi".into(),
+        });
+        vcx.run_until_parked();
+        let bounds = vcx.debug_bounds("chip-text").expect("text drawn");
+        let on_chip = point(
+            bounds.origin.x + px(12.0),
+            bounds.origin.y + bounds.size.height / 2.0,
+        );
+        vcx.simulate_mouse_move(on_chip, None, gpui::Modifiers::default());
+        vcx.run_until_parked();
+        selection.read_with(&*vcx, |s, _| {
+            assert_eq!(s.chips.state(&("m1".into(), 0..6)), ChipState::Hover);
+        });
+        // The text changes under the pointer: the chip is now further right.
+        view.update(vcx, |v, cx| {
+            v.text = "moved along: @Comms".into();
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        selection.read_with(&*vcx, |s, _| {
+            assert_eq!(s.chips.hot(), None, "nothing under the pointer any more");
+            assert_eq!(s.chips.state(&("m1".into(), 13..19)), ChipState::Rest);
         });
     }
 

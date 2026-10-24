@@ -148,7 +148,13 @@ final class AppModel: ObservableObject {
     /// `machine.waitlisted` / `machine.waitlist_position`). nil = not waitlisted.
     @Published var waitlistPosition: Int?
     /// People chats (D72): DMs I am a member of, newest activity first.
-    @Published var peopleChats: [PeopleChat] = []
+    @Published var peopleChats: [PeopleChat] = [] {
+        didSet {
+            #if DEBUG
+            PerfCounters.bump("pub.peopleChats")
+            #endif
+        }
+    }
     /// Chat ids with unread rows: the relay's per-user `unread` flag plus live rows from
     /// others that landed while the chat was off screen (never `head_seq > read_seq`, #1438).
     @Published var peopleUnread: Set<String> = []
@@ -245,7 +251,13 @@ final class AppModel: ObservableObject {
         didSet {
         }
     }
-    @Published var chats: [Id: [Chat]] = [:]
+    @Published var chats: [Id: [Chat]] = [:] {
+        didSet {
+            #if DEBUG
+            PerfCounters.bump("pub.chats")
+            #endif
+        }
+    }
     @Published var messages: [Id: [Message]] = [:] {
         didSet { bumpVersions(from: oldValue, to: messages) }
     }
@@ -260,6 +272,9 @@ final class AppModel: ObservableObject {
     /// off the version. Arrays are COW, so unchanged chats share storage with the old
     /// dictionary and keep their version (arbonites-chat-lag, 2026-10-24).
     private func bumpVersions(from old: [Id: [Message]], to new: [Id: [Message]]) {
+        #if DEBUG
+        PerfCounters.bump("pub.messages")
+        #endif
         for (id, list) in new where !Self.sameStorage(list, old[id]) {
             messagesVersion[id, default: 0] &+= 1
             activityCache[id] = nil
@@ -276,7 +291,13 @@ final class AppModel: ObservableObject {
         if a.isEmpty { return true }
         return a.withUnsafeBufferPointer { pa in b.withUnsafeBufferPointer { pb in pa.baseAddress == pb.baseAddress } }
     }
-    @Published var caughtUp: Set<Id> = []
+    @Published var caughtUp: Set<Id> = [] {
+        didSet {
+            #if DEBUG
+            PerfCounters.bump("pub.caughtUp")
+            #endif
+        }
+    }
     @Published var link: Link = .connecting
     /// Per-room link, for the chat header's connection pill. The pill must not
     /// use the global `link`: any other room's brief reconnect was painting
@@ -672,6 +693,20 @@ final class AppModel: ObservableObject {
     /// Re-reading the transcript at most this often keeps the paint moving and the
     /// decode cost linear in the backfill, not quadratic.
     static let snapshotCoalesceMs = 80
+    /// While a room catches up (not yet `caughtUp`) every doc change — list or message
+    /// touch — folds into one re-read per this window, and the home list's activity bump
+    /// happens with that re-read, not per row. 72 rows replayed per row cost 11 s of
+    /// blocked main thread on a 1 500-message group (iphone-open-scroll-block, 2026-10-24).
+    static let catchUpCoalesceMs = 600
+    /// Live rows: the first lands at once, the rest of a burst fold into one read per window.
+    static let liveCoalesceMs = 150
+    /// Lists at or above this size are decoded off the main actor (`emitSnapshot`).
+    static let asyncSnapshotMinRows = 300
+    /// Per-chat generation of the last requested snapshot; a slower background decode
+    /// that finishes after a newer one is dropped.
+    private var snapshotGeneration: [Id: Int] = [:]
+    /// Rooms whose home-list activity bump waits for the next snapshot (catch-up).
+    private var activityPending: Set<Id> = []
     private var registryTask: Task<Void, Never>?
 
     // MARK: On-device store (#929)
@@ -1753,6 +1788,70 @@ final class AppModel: ObservableObject {
 
     /// `restored`: a doc imported from the on-device store with the relay
     /// cursor it was saved at and the pushes the relay never ACKed.
+    #if DEBUG
+    /// Perf rig (iphone-open-scroll-block): the fixture group as a real room restored from
+    /// an exported checkpoint, then the exported rows imported on the main actor one by
+    /// one — the same `onChange` → `requestSnapshot` → `emitSnapshot` path a live socket
+    /// drives. `rooms` > 1 adds clones under other ids so several chats catch up at once.
+    func perfReplay(checkpointPath: String, rowsPath: String, rooms: Int, gapMs: Int, afterMs: Int) {
+        guard let ckpt = FileManager.default.contents(atPath: checkpointPath),
+              let rowsText = try? String(contentsOfFile: rowsPath, encoding: .utf8) else {
+            NSLog("perf replay: missing files")
+            return
+        }
+        let rowBytes: [Data] = rowsText.split(separator: "\n").compactMap { line in
+            guard let bar = line.firstIndex(of: "|") else { return nil }
+            return Data(hexString: String(line[line.index(after: bar)...]))
+        }
+        var keys: [Id] = ["fx-group-launch"]
+        for i in 1..<max(1, rooms) { keys.append("fx-replay-\(i)") }
+        var docs: [(Id, CoreChatDoc)] = []
+        for key in keys {
+            guard let doc = try? CoreChatDoc(key: key, snapshot: ckpt) else { continue }
+            if key != "fx-group-launch", let group = peopleChats.first(where: { $0.id == "fx-group-launch" }) {
+                var clone = group
+                clone.id = key
+                clone.title = "Replay \(key)"
+                peopleChats.append(clone)
+            }
+            // Store-restore shape: the doc and its decoded list land before the room starts.
+            ensureRoom(projectId: peopleSlot, key: key, roomChat: key, restored: (doc, 0, [], doc.readAll()))
+            // No relay in the rig: the socket would redial forever and flap the link
+            // (each flap publishes `caughtUp`). The doc's change handler stays.
+            self.rooms[key]?.stop()
+            caughtUp.remove(key)
+            docs.append((key, doc))
+        }
+        LaunchClock.mark("replay-restored", detail: "rooms=\(docs.count) rows=\(rowBytes.count) ckpt=\(ckpt.count)B")
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(afterMs))
+            // `ARBOS_PERF_REPLAY_LIVE=1`: the rooms count as live (rows arriving while the
+            // reader scrolls) instead of catching up.
+            for (key, _) in docs { if DebugHooks.perfReplayLive { caughtUp.insert(key) } else { caughtUp.remove(key) } }
+            PerfLog.mark("phase replay begin", ms: 0)
+            let started = Date()
+            for (ix, bytes) in rowBytes.enumerated() {
+                for (_, doc) in docs {
+                    let t0 = Date()
+                    _ = try? doc.importUpdateReportingPending(bytes)
+                    PerfCounters.time("import", ms: Date().timeIntervalSince(t0) * 1000)
+                }
+                if gapMs > 0 { try? await Task.sleep(for: .milliseconds(gapMs)) } else { await Task.yield() }
+                if ix == rowBytes.count - 1 {
+                    for (key, _) in docs {
+                        caughtUp.insert(key)
+                        #if DEBUG
+                        PerfCounters.bump("emit.L1838")
+                        #endif
+                        emitSnapshot(key)
+                    }
+                }
+            }
+            PerfLog.mark("phase replay end", ms: Date().timeIntervalSince(started) * 1000)
+        }
+    }
+    #endif
+
     private func ensureRoom(projectId: Id, key: Id, roomChat: String,
                             restored: (doc: CoreChatDoc, cursor: Int64, pending: [(String, Data)], messages: [Message]?)? = nil) {
         guard rooms[key] == nil else { return }
@@ -1782,19 +1881,18 @@ final class AppModel: ObservableObject {
                 self.markDirty(key)
                 if isProjectDoc {
                     self.applyProjectDoc(projectId)
+                } else if !self.caughtUp.contains(key), touched.listChanged || !touched.messages.isEmpty {
+                    // Catching up: the relay streams one row per frame. One re-read per
+                    // window for all of them (list or message touches alike), and the
+                    // home-list bump rides along instead of re-sorting per row.
+                    self.activityPending.insert(key)
+                    self.requestSnapshot(key, windowMs: Self.catchUpCoalesceMs, deferAlways: true)
                 } else if touched.listChanged {
-                    if self.caughtUp.contains(key) {
-                        self.emitSnapshot(key)
-                        self.markActivity(chatId: key)
-                        // Loro is live; /me/pushes and /me/unread can lag — light the
-                        // blue circle and drain the push queue as soon as a new row lands.
-                        self.noteLiveUnread(chatId: key)
-                    } else {
-                        // Catching up: the relay sends one row per frame; re-read the
-                        // transcript once per window, not once per row.
-                        self.requestSnapshot(key)
-                        self.markActivity(chatId: key)
-                    }
+                    // Live: a burst of rows (agents answering each other) folds into one
+                    // re-read per short window too; the home-list bump and the unread
+                    // light ride with that read (`applySnapshot`) instead of per row.
+                    self.activityPending.insert(key)
+                    self.requestSnapshot(key, windowMs: Self.liveCoalesceMs)
                 } else if !touched.messages.isEmpty {
                     self.emitMessages(key, indexes: touched.messages)
                     // Same kick project chats get via `chats` in markActivity — people
@@ -1804,6 +1902,9 @@ final class AppModel: ObservableObject {
                 } else if self.messages[key] == nil, let doc = self.docs[key], doc.count > 0 {
                     // Checkpoint / bulk import sometimes reports no list path —
                     // still paint so home search can see the transcript.
+                    #if DEBUG
+                    PerfCounters.bump("emit.L1897")
+                    #endif
                     self.emitSnapshot(key)
                 }
             }
@@ -1833,6 +1934,9 @@ final class AppModel: ObservableObject {
         }
         room.onDocPaint = { [weak self] in
             guard let self, !isProjectDoc else { return }
+            #if DEBUG
+            PerfCounters.bump("emit.L1926")
+            #endif
             self.emitSnapshot(key)
         }
         room.onCaughtUp = { [weak self] in
@@ -1840,8 +1944,12 @@ final class AppModel: ObservableObject {
             if isProjectDoc {
                 self.applyProjectDoc(projectId)
             } else {
-                self.emitSnapshot(key)
+                // Live before the final read, so that read also bumps the home list.
                 self.caughtUp.insert(key)
+                #if DEBUG
+                PerfCounters.bump("emit.L1935")
+                #endif
+                self.emitSnapshot(key)
                 self.firstLoginChatSynced(key)
             }
         }
@@ -1851,6 +1959,9 @@ final class AppModel: ObservableObject {
             guard let self, !isProjectDoc else { return }
             guard self.unacked[key] != nil else { return }
             self.unacked[key] = nil
+            #if DEBUG
+            PerfCounters.bump("emit.L1945")
+            #endif
             self.emitSnapshot(key)
         }
         if !isProjectDoc {
@@ -1872,6 +1983,9 @@ final class AppModel: ObservableObject {
             } else if let list = effective.messages {
                 messages[key] = list
             } else {
+                #if DEBUG
+                PerfCounters.bump("emit.L1966")
+                #endif
                 emitSnapshot(key)
             }
         }
@@ -1938,19 +2052,28 @@ final class AppModel: ObservableObject {
     /// A list change from the doc: re-read now when the room was quiet, else once
     /// at the end of the coalesce window. Direct `emitSnapshot` callers (catch-up,
     /// checkpoint paint, ACK) still read at once and clear a pending request.
-    private func requestSnapshot(_ chatId: Id) {
+    /// `deferAlways`: never read at once (a catch-up's first row must not cost a
+    /// full re-read when the next 70 arrive within the window); the paint the
+    /// reader sees meanwhile is the store / checkpoint one.
+    private func requestSnapshot(_ chatId: Id, windowMs: Int = AppModel.snapshotCoalesceMs, deferAlways: Bool = false) {
         guard !snapshotPending.contains(chatId) else { return }
-        let window = Double(Self.snapshotCoalesceMs) / 1000
+        let window = Double(windowMs) / 1000
         let since = Date().timeIntervalSince1970 - (snapshotLastAt[chatId] ?? 0)
-        guard since < window else {
+        guard since < window || deferAlways else {
+            #if DEBUG
+            PerfCounters.bump("emit.L2040")
+            #endif
             emitSnapshot(chatId)
             return
         }
         snapshotPending.insert(chatId)
-        let delayMs = max(1, Int((window - since) * 1000))
+        let delayMs = deferAlways ? windowMs : max(1, Int((window - since) * 1000))
         Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(delayMs))
             guard let self, self.snapshotPending.contains(chatId) else { return }
+            #if DEBUG
+            PerfCounters.bump("emit.L2048")
+            #endif
             self.emitSnapshot(chatId)
         }
     }
@@ -1959,7 +2082,36 @@ final class AppModel: ObservableObject {
         snapshotPending.remove(chatId)
         snapshotLastAt[chatId] = Date().timeIntervalSince1970
         guard let doc = docs[chatId] else { return }
-        var list = doc.readAll()
+        let gen = (snapshotGeneration[chatId] ?? 0) &+ 1
+        snapshotGeneration[chatId] = gen
+        // Short lists decode inline (tests and the fixture read `messages` right after);
+        // a long group's 1 MB of rows is read and parsed off the main actor — the FFI doc
+        // is thread-safe — and applied when it is back, unless a newer read superseded it.
+        if doc.count < Self.asyncSnapshotMinRows {
+            applySnapshot(chatId, list: doc.readAll())
+            return
+        }
+        Task.detached(priority: .userInitiated) { [weak self] in
+            #if DEBUG
+            let t0 = Date()
+            #endif
+            let list = doc.readAll()
+            #if DEBUG
+            PerfCounters.time("readAll.bg", ms: Date().timeIntervalSince(t0) * 1000)
+            #endif
+            await MainActor.run {
+                guard let self, self.snapshotGeneration[chatId] == gen else { return }
+                self.applySnapshot(chatId, list: list)
+            }
+        }
+    }
+
+    private func applySnapshot(_ chatId: Id, list: [Message]) {
+        #if DEBUG
+        let t0 = Date()
+        defer { PerfCounters.time("applySnapshot", ms: Date().timeIntervalSince(t0) * 1000) }
+        #endif
+        var list = list
         let pendingIds = unacked[chatId] ?? []
         for i in list.indices where list[i].role == .user {
             list[i].pending = pendingIds.contains(list[i].id)
@@ -1970,6 +2122,13 @@ final class AppModel: ObservableObject {
         var next = messages
         next[chatId] = list
         messages = next
+        // The home list re-sorts once the room is live, not per catch-up snapshot.
+        if caughtUp.contains(chatId), activityPending.remove(chatId) != nil {
+            markActivity(chatId: chatId)
+            // Loro is live; /me/pushes and /me/unread can lag — light the
+            // blue circle and drain the push queue as soon as a new row lands.
+            noteLiveUnread(chatId: chatId)
+        }
     }
 
     private func emitMessages(_ chatId: Id, indexes: Set<Int>) {
@@ -1989,6 +2148,9 @@ final class AppModel: ObservableObject {
             }
         }
         if needSnapshot {
+            #if DEBUG
+            PerfCounters.bump("emit.L2119")
+            #endif
             emitSnapshot(chatId)
         } else {
             var next = messages
@@ -2741,8 +2903,18 @@ final class AppModel: ObservableObject {
         let words = text.split(whereSeparator: { $0.isWhitespace })
         for t in words where t.hasPrefix("@") {
             let slug = t.dropFirst().trimmingCharacters(in: CharacterSet(charactersIn: ".,!?:;")).lowercased()
-            if slug == "everyone" || slug == "all" {
+            if slug == "everyone" || slug == "all" || slug == "agents" {
                 appendAgents()
+                continue
+            }
+            // `@here` (Jacob, 2026-10-24): everyone in this chat — its people but me, and its
+            // agents — as member ids, which is what every agent's gate reads (rule 3), so they wake.
+            if slug == "here" {
+                for m in members where !out.contains(m.member) {
+                    if !m.isAgent, let mine, m.handle.lowercased() == mine { continue }
+                    if m.isAgent, m.project == nil { continue }
+                    out.append(m.member)
+                }
                 continue
             }
             // A committed chip says who this is (#1596) — no tie rule needed.
@@ -2775,6 +2947,13 @@ final class AppModel: ObservableObject {
     /// addresses every agent in the chat.
     static func addressesEveryone(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        // `@here` / `@agents` chips (collective mentions, 2026-10-24) address every agent.
+        if trimmed.split(whereSeparator: { $0.isWhitespace }).contains(where: {
+            let t = $0.trimmingCharacters(in: CharacterSet(charactersIn: ".,!?:;"))
+            return t == "@here" || t == "@agents"
+        }) {
+            return true
+        }
         for g in [
             "hey everyone", "hi everyone", "hello everyone", "yo everyone", "ok everyone", "okay everyone",
             "hey agents", "hi agents", "hello agents", "yo agents", "ok agents", "okay agents",
@@ -3978,6 +4157,9 @@ final class AppModel: ObservableObject {
         for (key, doc) in docs {
             guard rooms[key]?.roomChat != projectDocChatId else { continue }
             if messages[key] == nil, doc.count > 0 {
+                #if DEBUG
+                PerfCounters.bump("emit.L4066")
+                #endif
                 emitSnapshot(key)
             }
         }

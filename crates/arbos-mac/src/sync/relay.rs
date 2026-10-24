@@ -2690,8 +2690,8 @@ fn text_has_at_token(lower: &str, token: &str) -> bool {
     })
 }
 
-/// `@slug` / `@handle` in the text → `agent:<project>` / `user:<id>` (API §3).
-/// Group/server owners may also use `@here` (every human) and `@agents` (every agent).
+/// `@slug` / `@handle` in the text → `agent:<project>` / `user:<id>` (API §3);
+/// `@here` / `@agents` expand to the chat's members (`sync::expand_collectives`).
 /// Who a people-chat send mentions: the composer's committed chips (`tokens`,
 /// member ids, #1596) first, then every `@handle` the text names that no chip
 /// already accounts for — so a chip for one of two entities sharing a handle
@@ -2703,34 +2703,10 @@ fn mentions_for(shared: &Shared, chat_id: &str, text: &str, tokens: &[String]) -
     let Some(space) = projects.iter().find(|p| p.id == chat_id) else {
         return tokens.to_vec();
     };
-    let mut out: Vec<String> = Vec::new();
-    for t in tokens {
-        if !out.contains(t) {
-            out.push(t.clone());
-        }
-    }
+    // Chips first (collective markers expanded into the members), then the text.
+    let mut out = crate::sync::expand_collectives(space, &lower, tokens, &shared.me_id());
     let claimed = crate::sync::claimed_handles(space, tokens);
     let me_handle = shared.me_handle();
-    let i_own_group =
-        space.is_people_group() && space.owner_handle.as_deref().is_none_or(|o| o == me_handle);
-    if i_own_group {
-        if text_has_at_token(&lower, "here") {
-            for p in &space.people {
-                let id = format!("user:{}", p.id);
-                if !out.iter().any(|x| x == &id) {
-                    out.push(id);
-                }
-            }
-        }
-        if text_has_at_token(&lower, "agents") {
-            for a in &space.agents {
-                let id = format!("agent:{}", a.project_id);
-                if !out.iter().any(|x| x == &id) {
-                    out.push(id);
-                }
-            }
-        }
-    }
     for a in &space.agents {
         let handle = a.handle.to_lowercase();
         let slug = Project::mention_slug(&a.name);

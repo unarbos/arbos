@@ -907,8 +907,12 @@ struct RowView: View, Equatable {
     /// bubble. ChatView still observes the model and rebuilds rows when the
     /// transcript changes; actions call through this reference.
     let model: AppModel
-    @Environment(\.theme) private var theme
-    @Environment(\.composerInset) private var composerInset
+    /// Plain inputs, not `@Environment`: an environment read made every bubble's body
+    /// re-run on each AppModel publish even when the value was equal (SwiftUI marks the
+    /// environment dependency changed per write) — the open-time freeze on long groups
+    /// (iphone-open-scroll-block, 2026-10-24). The row list reads them once.
+    let theme: Theme
+    let composerInset: CGFloat
     let row: Row
     let chatId: Id
     let width: CGFloat
@@ -944,6 +948,8 @@ struct RowView: View, Equatable {
             && lhs.timeReveal == rhs.timeReveal
             && lhs.highlighted == rhs.highlighted
             && lhs.mentions.stamp == rhs.mentions.stamp
+            && lhs.composerInset == rhs.composerInset
+            && lhs.theme == rhs.theme
         #if DEBUG
         PerfCounters.bump(same ? "rowEqTrue" : "rowEqFalse")
         #endif
@@ -975,6 +981,7 @@ struct RowView: View, Equatable {
     var body: some View {
         #if DEBUG
         let _ = PerfCounters.bump("rowBody")
+        let _ = DebugHooks.perfChanges ? Self._printChanges() : ()
         #endif
         VStack(spacing: 4) {
             bubble

@@ -250,6 +250,10 @@ extension AppModel {
                 messages["fx-group-launch"] = list
             }
         }
+        if let replay = DebugHooks.perfReplay {
+            perfReplay(checkpointPath: replay.checkpoint, rowsPath: replay.rows, rooms: DebugHooks.perfReplayRooms,
+                       gapMs: DebugHooks.perfReplayGapMs, afterMs: DebugHooks.perfReplayAfterMs)
+        }
         // `ARBOS_FIXTURE_WORKING=<n>`: the first n agents of the group (and the opened
         // agent chat's one agent) stream a row with no words yet — "<name> is working".
         if DebugHooks.fixtureWorking > 0 {
@@ -670,6 +674,31 @@ extension AppModel {
             out.append(m)
         }
         return out
+    }
+}
+
+extension Data {
+    /// Bytes from a hex string (the relay's `rows.hex` export).
+    init?(hexString: String) {
+        let chars = Array(hexString.utf8)
+        guard chars.count % 2 == 0 else { return nil }
+        var out = Data(capacity: chars.count / 2)
+        var i = 0
+        while i < chars.count {
+            guard let hi = Self.nibble(chars[i]), let lo = Self.nibble(chars[i + 1]) else { return nil }
+            out.append(hi << 4 | lo)
+            i += 2
+        }
+        self = out
+    }
+
+    private static func nibble(_ c: UInt8) -> UInt8? {
+        switch c {
+        case 48...57: return c - 48
+        case 65...70: return c - 55
+        case 97...102: return c - 87
+        default: return nil
+        }
     }
 }
 #endif

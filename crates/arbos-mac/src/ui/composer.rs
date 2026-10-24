@@ -425,6 +425,7 @@ impl ComposerInput {
             handle: handle.to_string(),
             name: name.to_string(),
             id,
+            kind: MentionToken::kind_of(handle),
         };
         let at = self
             .tokens
@@ -464,6 +465,7 @@ impl ComposerInput {
             let replaced = self.splice(range.clone(), &chip);
             let token = MentionToken {
                 range: replaced.start..replaced.start + chip.len(),
+                kind: MentionToken::kind_of(&handle),
                 handle,
                 name: m.name.clone(),
                 id: m.id.clone(),
@@ -1951,12 +1953,23 @@ impl InputElement {
         let hits: Rc<Vec<ChipHit>> = Rc::new(std::mem::take(&mut prepaint.chip_hits));
         let hitbox = prepaint.hitbox.clone();
         let now = Instant::now();
-        self.input.update(cx, |input, _| input.chips.tidy(now));
+        let under_pointer = hitbox
+            .is_hovered(window)
+            .then(|| chip_hit_at(&hits, window.mouse_position()))
+            .flatten()
+            .map(|h| h.range.clone());
+        self.input.update(cx, |input, _| {
+            input.chips.tidy(now);
+            // The text moved under a still pointer: a hot chip that is no
+            // longer under it cools now, not at the next mouse move.
+            if under_pointer.is_none() && input.chips.hot().is_some() {
+                input.chips.hover(None, now);
+            }
+        });
         if hits.is_empty() && self.input.read(cx).chips.hot().is_none() {
             return;
         }
-        let over =
-            hitbox.is_hovered(window) && chip_hit_at(&hits, window.mouse_position()).is_some();
+        let over = under_pointer.is_some();
         if over {
             window.set_cursor_style(CursorStyle::PointingHand, &hitbox);
         }
@@ -2575,9 +2588,10 @@ impl Composer {
     }
 
     /// Who the `@token` can mean here (#1596, behaviours 1–2): people and
-    /// agents of the current space, `@here` / `@agents` for the owner of a
-    /// group; a server channel keeps the owner-only collective pings (the
-    /// client has no member list for a server yet). Case-insensitive prefix on
+    /// agents of the current space, plus `@here` (everyone in this chat) and
+    /// `@agents` (all agents here) for any member of a group or people chat
+    /// (Jacob, 2026-10-24); a server channel keeps the owner-only collective
+    /// pings (the client has no member list for a server yet). Case-insensitive prefix on
     /// the handle or on any word of the display name; handle matches first,
     /// then name matches, alphabetical by handle; at most six rows. A handle
     /// an agent and a person both carry (#1538) tags each of those two rows.
@@ -2592,23 +2606,30 @@ impl Composer {
         let state = self.state.read(cx);
         let me_handle = state.me_handle();
         let mut out: Vec<MentionCandidate> = Vec::new();
-        let collective = |handle: &str, name: &str, is_agent: bool| MentionCandidate {
-            handle: handle.into(),
-            name: name.into(),
-            id: None,
-            is_agent,
-            picture: mention::initials_picture(handle, handle, None, &theme),
-            tag: None,
+        // The chip reads `here` / `agents` (as the bubble chips do); the row
+        // says `@here · everyone in this chat`.
+        let collective =
+            |handle: &str, description: &'static str, is_agent: bool| MentionCandidate {
+                handle: handle.into(),
+                name: handle.into(),
+                id: Some(handle.into()),
+                is_agent,
+                picture: mention::initials_picture(handle, handle, None, &theme),
+                tag: None,
+                description: Some(description),
+            };
+        let collectives = |out: &mut Vec<MentionCandidate>| {
+            if "here".starts_with(&query) {
+                out.push(collective("here", "everyone in this chat", false));
+            }
+            if "agents".starts_with(&query) {
+                out.push(collective("agents", "all agents here", true));
+            }
         };
 
         if let Some((server, _)) = state.selected_channel_info() {
             if server.is_owner() {
-                if "here".starts_with(&query) {
-                    out.push(collective("here", "Everyone here", false));
-                }
-                if "agents".starts_with(&query) {
-                    out.push(collective("agents", "All agents", true));
-                }
+                collectives(&mut out);
             }
             return out;
         }
@@ -2619,16 +2640,7 @@ impl Composer {
         if !space.is_people() && space.people.is_empty() {
             return Vec::new();
         }
-        let i_own_group =
-            space.is_people_group() && space.owner_handle.as_deref().is_none_or(|o| o == me_handle);
-        if i_own_group {
-            if "here".starts_with(&query) {
-                out.push(collective("here", "Everyone here", false));
-            }
-            if "agents".starts_with(&query) {
-                out.push(collective("agents", "All agents", true));
-            }
-        }
+        collectives(&mut out);
         let mut members: Vec<(MentionCandidate, bool)> = Vec::new();
         for a in &space.agents {
             let Some(by_handle) = mention_match(&query, &a.handle, &a.name) else {
@@ -2642,6 +2654,7 @@ impl Composer {
                     is_agent: true,
                     picture: mention::agent_member_picture(state, Some(space), a, &theme),
                     tag: None,
+                    description: None,
                 },
                 by_handle,
             ));
@@ -2661,6 +2674,7 @@ impl Composer {
                     is_agent: false,
                     picture: mention::person_picture(state, p, &theme),
                     tag: None,
+                    description: None,
                 },
                 by_handle,
             ));
@@ -2693,6 +2707,7 @@ impl Composer {
                 is_agent: true,
                 picture: mention::agent_member_picture(state, Some(space), a, &theme),
                 tag: Some("the agent in this chat"),
+                description: None,
             });
         }
         out.truncate(MENTION_ROWS_MAX);
@@ -2815,7 +2830,10 @@ impl Composer {
                         .text_size(px(TEXT_SMALL))
                         .text_color(theme.text)
                         .whitespace_nowrap()
-                        .child(c.name.clone()),
+                        .child(match c.description {
+                            Some(_) => format!("@{}", c.handle),
+                            None => c.name.clone(),
+                        }),
                 )
                 .child(
                     div()
@@ -2825,7 +2843,10 @@ impl Composer {
                         .text_color(theme.text_muted)
                         .whitespace_nowrap()
                         .overflow_hidden()
-                        .child(format!("@{}", c.handle)),
+                        .child(match c.description {
+                            Some(d) => format!("· {d}"),
+                            None => format!("@{}", c.handle),
+                        }),
                 );
             if let Some(tag) = c.tag {
                 row = row.child(
@@ -2863,12 +2884,16 @@ impl Composer {
 pub struct MentionCandidate {
     pub handle: String,
     pub name: String,
-    /// `user:<id>` / `agent:<project-id>`; `None` for `@here` / `@agents`.
+    /// `user:<id>` / `agent:<project-id>`, or the collective marker
+    /// (`here` / `agents`) the source expands into the chat's members.
     pub id: Option<String>,
     pub is_agent: bool,
     pub picture: mention::Picture,
     /// `agent` / `person` when the handle is shared (#1538), or a note.
     pub tag: Option<&'static str>,
+    /// A collective's row text in place of `@handle`: `@here · everyone in
+    /// this chat`, `@agents · all agents here`.
+    pub description: Option<&'static str>,
 }
 
 /// Picker geometry (pt), the approved mock: a 320 pt card, 32 pt rows with a
@@ -4180,6 +4205,33 @@ mod mention_token_tests {
                         },
                     ),
                 ),
+                // The collectives, as `Mentions::from_state` adds them.
+                (
+                    "here",
+                    mention::Mention {
+                        page: None,
+                        name: "here".into(),
+                        picture: mention::Picture::Initials {
+                            text: "H".into(),
+                            top: gpui::Hsla::default(),
+                            bottom: gpui::Hsla::default(),
+                        },
+                        id: Some("here".into()),
+                    },
+                ),
+                (
+                    "agents",
+                    mention::Mention {
+                        page: None,
+                        name: "agents".into(),
+                        picture: mention::Picture::Initials {
+                            text: "A".into(),
+                            top: gpui::Hsla::default(),
+                            bottom: gpui::Hsla::default(),
+                        },
+                        id: Some("agents".into()),
+                    },
+                ),
                 // `@arbos` is an agent and a person (#1538).
                 (
                     "arbos",
@@ -4497,6 +4549,48 @@ mod mention_token_tests {
         assert_eq!(
             sent(&input, cx),
             ("hi @sam ok".into(), vec!["user:gh_sam".into()])
+        );
+    }
+
+    #[gpui::test]
+    fn here_and_agents_become_collective_chips_whose_marker_the_send_carries(
+        cx: &mut TestAppContext,
+    ) {
+        let (input, cx) = input(cx);
+        // Typed with a space: a chip without the picker (Jacob's iPhone bug, 2026-10-24).
+        cx.simulate_input("how is the iphone now @here ");
+        let tokens = cx.update(|_, cx| input.read(cx).tokens().to_vec());
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].kind, mention::TokenKind::Collective);
+        assert_eq!(tokens[0].handle, "here");
+        assert_eq!(
+            sent(&input, cx),
+            ("how is the iphone now @here ".into(), vec!["here".into()])
+        );
+        assert_eq!(
+            text(&input, cx),
+            format!("how is the iphone now {} ", chip("here"))
+        );
+        // Picked from the menu as the Composer does it; Enter resolves a trailing one too.
+        cx.update(|_, cx| {
+            input.update(cx, |i, cx| {
+                i.insert_mention("agents", "agents", Some("agents".into()), cx)
+            })
+        });
+        cx.simulate_input("and @sam");
+        cx.update(|_, cx| input.update(cx, |i, cx| i.resolve_exact_handles(cx)));
+        let tokens = cx.update(|_, cx| input.read(cx).tokens().to_vec());
+        assert_eq!(
+            tokens.iter().map(|t| t.kind).collect::<Vec<_>>(),
+            vec![
+                mention::TokenKind::Collective,
+                mention::TokenKind::Collective,
+                mention::TokenKind::Member
+            ]
+        );
+        assert_eq!(
+            sent(&input, cx).1,
+            vec!["here".to_string(), "agents".into(), "user:gh_sam".into()]
         );
     }
 

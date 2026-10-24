@@ -1078,6 +1078,71 @@ pub enum ClientCommand {
     },
 }
 
+/// Collective mentions (Jacob, 2026-10-24, after #1596): `@here` is everyone
+/// in the chat — its people (not the sender) and its agents — and `@agents`
+/// every agent. Any member may use them in a group or a people chat. The sent
+/// row carries the expansion as member ids, which is what every agent's gate
+/// reads (`people_gate` rule 3, a resolved `agent:<me>` mention; two or more
+/// agent ids make it a shared reply), so the agents wake.
+pub const COLLECTIVE_HERE: &str = "here";
+pub const COLLECTIVE_AGENTS: &str = "agents";
+
+/// `here` / `agents` — a collective handle (the composer's token id for its
+/// chip is the handle itself, a marker the sources expand).
+pub fn is_collective(handle: &str) -> bool {
+    handle.eq_ignore_ascii_case(COLLECTIVE_HERE) || handle.eq_ignore_ascii_case(COLLECTIVE_AGENTS)
+}
+
+/// `@token` as a whole word in `lower` (lower-case text).
+pub fn text_has_at_token(lower: &str, token: &str) -> bool {
+    let needle = format!("@{token}");
+    lower.match_indices(&needle).any(|(i, _)| {
+        let before = lower[..i].chars().last();
+        let after = lower[i + needle.len()..].chars().next();
+        before.is_none_or(|c| !c.is_alphanumeric() && c != '@')
+            && after.is_none_or(|c| !(c.is_alphanumeric() || c == '_' || c == '-' || c == '.'))
+    })
+}
+
+/// The member ids a send starts from: the composer's chips (`tokens`: member
+/// ids and collective markers) and the `@here` / `@agents` the text names,
+/// collectives expanded into the chat's members; markers never reach the row.
+pub fn expand_collectives(
+    space: &Project,
+    text_lower: &str,
+    tokens: &[String],
+    me_id: &str,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |id: String| {
+        if !out.contains(&id) {
+            out.push(id);
+        }
+    };
+    let here = tokens.iter().any(|t| t == COLLECTIVE_HERE)
+        || text_has_at_token(text_lower, COLLECTIVE_HERE);
+    let agents = tokens.iter().any(|t| t == COLLECTIVE_AGENTS)
+        || text_has_at_token(text_lower, COLLECTIVE_AGENTS);
+    for t in tokens {
+        if !is_collective(t) {
+            push(t.clone());
+        }
+    }
+    if here {
+        for p in &space.people {
+            if p.id != me_id {
+                push(format!("user:{}", p.id));
+            }
+        }
+    }
+    if here || agents {
+        for a in &space.agents {
+            push(format!("agent:{}", a.project_id));
+        }
+    }
+    out
+}
+
 /// The handles (and name slugs) the composer's mention chips already account
 /// for (#1596): the text scan skips these so a chip for one of two entities
 /// sharing a handle (#1538) is the one and only answer for that handle.
@@ -1152,4 +1217,101 @@ fn relay_url_from_defaults() -> Option<String> {
     }
     let url = String::from_utf8(out.stdout).ok()?.trim().to_string();
     (!url.is_empty()).then_some(url)
+}
+
+#[cfg(test)]
+mod collective_tests {
+    use super::*;
+    use crate::model::{AgentMember, Person};
+
+    fn space() -> Project {
+        Project {
+            id: "g-launch".into(),
+            name: "Launch week".into(),
+            people: vec![
+                Person {
+                    id: "gh_me".into(),
+                    handle: "jacob".into(),
+                    ..Default::default()
+                },
+                Person {
+                    id: "gh_sam".into(),
+                    handle: "sam".into(),
+                    ..Default::default()
+                },
+                Person {
+                    id: "gh_mira".into(),
+                    handle: "mira-k".into(),
+                    ..Default::default()
+                },
+            ],
+            agents: vec![
+                AgentMember {
+                    project_id: "p-comms".into(),
+                    name: "Comms".into(),
+                    handle: "comms".into(),
+                    ..Default::default()
+                },
+                AgentMember {
+                    project_id: "p-test".into(),
+                    name: "TestAgent2".into(),
+                    handle: "testagent2".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn here_is_everyone_but_me_and_agents_is_every_agent() {
+        let s = space();
+        // A chip (marker) — the row carries the members, never the marker.
+        let ids = expand_collectives(
+            &s,
+            "how is the iphone now @here",
+            &["here".to_string()],
+            "gh_me",
+        );
+        assert_eq!(
+            ids,
+            vec![
+                "user:gh_sam",
+                "user:gh_mira",
+                "agent:p-comms",
+                "agent:p-test"
+            ]
+        );
+        assert!(!ids.iter().any(|i| i == "here"));
+        // Plain text (no chip) expands the same way.
+        assert_eq!(
+            expand_collectives(&s, "@agents status?", &[], "gh_me"),
+            vec!["agent:p-comms", "agent:p-test"]
+        );
+        // Member chips stay in front, deduplicated against the expansion.
+        assert_eq!(
+            expand_collectives(
+                &s,
+                "@comms and @agents",
+                &["agent:p-comms".to_string(), "agents".to_string()],
+                "gh_me"
+            ),
+            vec!["agent:p-comms", "agent:p-test"]
+        );
+        // Nothing collective → nothing added.
+        assert_eq!(
+            expand_collectives(&s, "hello there", &[], "gh_me"),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn at_token_is_a_whole_word() {
+        assert!(text_has_at_token("ping @here now", "here"));
+        assert!(text_has_at_token("@agents?", "agents"));
+        assert!(!text_has_at_token("@heresy", "here"));
+        assert!(!text_has_at_token("mail a@here.com", "here"));
+        assert!(!text_has_at_token("@agents-2", "agents"));
+        assert!(is_collective("Here") && is_collective("agents") && !is_collective("sam"));
+    }
 }

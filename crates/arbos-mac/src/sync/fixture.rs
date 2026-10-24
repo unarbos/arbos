@@ -5987,33 +5987,8 @@ fn text_has_at_token(lower: &str, token: &str) -> bool {
 /// Group owners may also use `@here` (every human) and `@agents` (every agent).
 fn mentions_in(space: &Project, text: &str, tokens: &[String]) -> Vec<String> {
     let lower = text.to_lowercase();
-    let mut out: Vec<String> = Vec::new();
-    for t in tokens {
-        if !out.contains(t) {
-            out.push(t.clone());
-        }
-    }
+    let mut out = crate::sync::expand_collectives(space, &lower, tokens, ME_ID);
     let claimed = crate::sync::claimed_handles(space, tokens);
-    let i_own_group =
-        space.is_people_group() && space.owner_handle.as_deref().is_none_or(|o| o == ME_HANDLE);
-    if i_own_group {
-        if text_has_at_token(&lower, "here") {
-            for p in &space.people {
-                let id = format!("user:{}", p.id);
-                if !out.iter().any(|x| x == &id) {
-                    out.push(id);
-                }
-            }
-        }
-        if text_has_at_token(&lower, "agents") {
-            for a in &space.agents {
-                let id = format!("agent:{}", a.project_id);
-                if !out.iter().any(|x| x == &id) {
-                    out.push(id);
-                }
-            }
-        }
-    }
     for a in &space.agents {
         let handle = a.handle.to_lowercase();
         let slug = Project::mention_slug(&a.name);

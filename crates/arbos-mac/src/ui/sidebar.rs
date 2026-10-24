@@ -64,7 +64,12 @@ impl Render for SidebarResizeDragGhost {
 /// the lights' line: macOS draws them at 20.75 pt in this window, so the 44
 /// band is centred 1 pt high (Grok: 21.75 / 21.75). The collapse toggle keeps
 /// the right end so folding the pane stays intuitive (#1491).
-fn top_strip() -> f32 {
+///
+/// Native full screen keeps this exact band: the shell paints the traffic
+/// lights into it (`traffic_lights::overlay`) and nothing is added above the
+/// strip ([feedback fullscreen-traffic-lights-2026-10-24]; pinned by
+/// `traffic_lights::tests::full_screen_adds_no_band_above_the_strip`).
+pub(crate) fn top_strip(_fullscreen: bool) -> f32 {
     if cfg!(target_os = "macos") {
         HEADER_HEIGHT
     } else {
@@ -596,7 +601,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
             .on_click(cx.listener(|this, _, window, cx| this.open_palette(window, cx)))
     };
     let mut strip = div()
-        .h(px(top_strip()))
+        .h(px(top_strip(shell.fullscreen)))
         .flex_shrink_0()
         .flex()
         .items_center()
@@ -2414,7 +2419,7 @@ mod row_bounds_tests {
             _: &mut gpui::Context<Self>,
         ) -> impl IntoElement {
             let strip = div()
-                .h(px(top_strip()))
+                .h(px(top_strip(false)))
                 .flex_shrink_0()
                 .debug_selector(|| "sidebar-strip".into());
             let mut list = div()

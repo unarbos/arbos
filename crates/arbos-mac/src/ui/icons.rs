@@ -63,6 +63,11 @@ const ICONS: &[(&str, &str)] = &[
         "<path d=\"M7 3h10M7 21h10M8 3c0 5 4 6 4 9s-4 4-4 9M16 3c0 5-4 6-4 9s4 4 4 9\"/>"
     ),
     icon!("xmark", "<path d=\"M6 6l12 12M18 6L6 18\"/>"),
+    // The zoom light's hover glyph in full screen: two triangles pointing inward.
+    icon!(
+        "fullscreen-exit",
+        "<path d=\"M10.5 10.5V3.5L3.5 10.5z\" fill=\"#000\" stroke=\"none\"/><path d=\"M13.5 13.5v7l7-7z\" fill=\"#000\" stroke=\"none\"/>"
+    ),
     icon!(
         "archivebox",
         "<rect x=\"3\" y=\"4\" width=\"18\" height=\"4\" rx=\"1\"/><path d=\"M5 8v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8M10 12h4\"/>"

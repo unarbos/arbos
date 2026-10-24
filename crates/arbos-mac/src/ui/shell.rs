@@ -52,6 +52,7 @@ use crate::ui::theme::{
     COMPOSER_BOTTOM, COMPOSER_WIDTH, DRAWER_WIDTH, GLASS_OPACITY_MAX, GLASS_OPACITY_MIN,
     HEADER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS, TAB_BAR_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
 };
+use crate::ui::traffic_lights;
 use crate::ui::transcript::{column_row, Transcript, TranscriptEvent};
 use crate::ui::voice::Voice;
 use crate::ui::voicepicker;
@@ -270,6 +271,9 @@ pub struct Shell {
     fixture_drag_over: bool,
     /// True while the sign-in screen is up; its clearing focuses the composer.
     signing_in: bool,
+    /// The window is in native full screen (read at each render): the shell
+    /// paints the traffic lights itself (`traffic_lights::overlay`).
+    pub(crate) fullscreen: bool,
     /// Flag of the header's former "…" menu (removed, feedback
     /// app-01M5ATBWSY9E1HHBKH2QQVDEZX). Nothing renders it; escapes and
     /// click-outside still clear it so leftover true never sticks.
@@ -917,6 +921,7 @@ impl Shell {
             file_drop_over: false,
             fixture_drag_over: std::env::var("ARBOS_FIXTURE_DRAG_OVER").is_ok_and(|v| v == "1"),
             signing_in: false,
+            fullscreen: false,
             menu_open: false,
             // Rig: `ARBOS_SIDEBAR_FILTER=all|agents|people|servers` selects a segment at launch.
             list_filter: std::env::var("ARBOS_SIDEBAR_FILTER")
@@ -3819,6 +3824,7 @@ impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let width: f32 = window.viewport_size().width.into();
+        self.fullscreen = window.is_fullscreen();
         let state = self.state.read(cx);
         let sidebar_hidden = state.rail_collapsed || state.window_is_narrow(width);
         let sidebar_overlay = sidebar_hidden && state.sidebar_overlay;
@@ -3916,6 +3922,7 @@ impl Render for Shell {
             self.signing_in = true;
             return root
                 .child(self.render_pairing(&pairing, cx))
+                .children(traffic_lights::overlay(window, cx))
                 .into_any_element();
         }
         if self.signing_in {
@@ -3968,6 +3975,10 @@ impl Render for Shell {
                 root = root.child(pane);
             }
         }
+        // Native full screen: the three panes are laid out as in windowed mode and
+        // the traffic lights are painted into the strip's band; menus and sheets
+        // below paint over them, as they paint over the rest of the chrome.
+        root = root.children(traffic_lights::overlay(window, cx));
         if let Some(menu) = sidebar::row_menu(self, cx) {
             root = root.child(menu);
         }

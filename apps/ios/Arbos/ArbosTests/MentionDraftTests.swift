@@ -4,6 +4,12 @@ import XCTest
 /// Composer @-mention autocomplete (#1596): the open `@token`, the chip spans
 /// in the plain draft, exact-handle auto-resolve, the picker's rows and what
 /// the send carries.
+///
+/// Main actor: `AppModel.mentions(in:)` / `addressesEveryone` are statics on
+/// the `@MainActor` model and `MentionTextView.makeCoordinator()` is
+/// main-actor isolated — a nonisolated test method cannot call them
+/// synchronously (main's unit-test target failed to compile, 2026-10-24).
+@MainActor
 final class MentionDraftTests: XCTestCase {
     private func project(_ id: String, _ name: String) -> Project {
         Project(id: id, name: name, icon: "A", color: "#000000", state: .awake, stateSince: nil, stateDetail: nil,
@@ -140,7 +146,48 @@ final class MentionDraftTests: XCTestCase {
         XCTAssertEqual(chips.map(\.memberId), ["user:gh_sam", "agent:p_studio"])
     }
 
-    @MainActor
+    func testCollectivesAreOfferedAndChippedInPeopleChats() {
+        // Jacob (2026-10-24): "@here" typed on the iPhone stayed plain text.
+        XCTAssertEqual(MentionDraft.collectiveCandidates(query: ""), [.here, .agents])
+        XCTAssertEqual(MentionDraft.collectiveCandidates(query: "h"), [.here])
+        XCTAssertEqual(MentionDraft.collectiveCandidates(query: "ag"), [.agents])
+        XCTAssertTrue(MentionDraft.collectiveCandidates(query: "x").isEmpty)
+        XCTAssertEqual(CollectiveMention.here.description, "everyone in this chat")
+        XCTAssertEqual(CollectiveMention.agents.description, "all agents here")
+        // Auto-resolve on the separator, in a people chat; never outside one.
+        let text = "How is the iPhone now @here "
+        let m = MentionDraft.autoResolve(text: text, caret: (text as NSString).length, mentions: [], members: members, me: "unconst")
+        XCTAssertEqual(m?.target, .collective(.here))
+        XCTAssertEqual(m?.range, 22..<27)
+        XCTAssertEqual(m?.name, "here")
+        XCTAssertEqual(m?.plain, "@here")
+        XCTAssertNil(MentionDraft.autoResolve(text: text, caret: (text as NSString).length, mentions: [], members: members, me: "unconst", collectives: false))
+        // Picked from the row: one chip, the marker as its id.
+        var draft = "ping "
+        var chips: [ComposerMention] = []
+        let caret = MentionDraft.insert(.collective(.agents), at: 5..<5, text: &draft, mentions: &chips)
+        XCTAssertEqual(draft, "ping @agents ")
+        XCTAssertEqual(caret, 13)
+        XCTAssertEqual(chips.map(\.memberId), ["agents"])
+        XCTAssertTrue(chips[0].isCollective)
+        XCTAssertEqual(MentionDraft.tokens(chips), ["agents": "agents"])
+        // A restored draft gets the collective chips back too.
+        XCTAssertEqual(MentionDraft.resolveAll(text: "@here and @sam", mentions: [], members: members, me: "unconst").map(\.memberId), ["here", "user:gh_sam"])
+    }
+
+    func testTheSentRowCarriesTheCollectiveAsMemberIds() {
+        // What the agents' gate reads: every agent's `agent:<id>` (rule 3), two or more → shared.
+        XCTAssertEqual(AppModel.mentions(in: "How is the iPhone now @here", members: members, senderHandle: "unconst"),
+                       ["user:gh_sam", "user:gh_mira", "agent:p_studio", "agent:p_scout"], "everyone in the chat but me")
+        XCTAssertEqual(AppModel.mentions(in: "@agents status?", members: members, senderHandle: "unconst", chipTokens: ["agents": "agents"]),
+                       ["agent:p_studio", "agent:p_scout"], "all agents here")
+        XCTAssertEqual(AppModel.mentions(in: "@sam and @agents", members: members, senderHandle: "unconst", chipTokens: ["sam": "user:gh_sam"]),
+                       ["user:gh_sam", "agent:p_studio", "agent:p_scout"])
+        XCTAssertTrue(AppModel.addressesEveryone("hi @here"))
+        XCTAssertTrue(AppModel.addressesEveryone("@agents?"))
+        XCTAssertFalse(AppModel.addressesEveryone("@heresy"))
+    }
+
     func testPlainAndAttributedOffsetsAgree() {
         let field = MentionTextView(text: .constant(""), mentions: .constant([]), caret: .constant(0), isFocused: .constant(false),
                                     placeholder: "", theme: Theme.dark)

@@ -44,6 +44,7 @@ pub mod sidebar;
 pub mod skills;
 pub mod theme;
 pub mod tones;
+pub mod traffic_lights;
 pub mod transcript;
 pub mod veil;
 pub mod voice;

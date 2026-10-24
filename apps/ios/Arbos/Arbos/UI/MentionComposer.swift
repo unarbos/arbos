@@ -12,20 +12,78 @@ import UIKit
 // carries each chip's member id in the row's `mentions`. The Mac twin is
 // `ui/composer.rs` (`MentionToken`).
 
+/// `@here` (everyone in this chat) and `@agents` (all agents here) — Jacob,
+/// 2026-10-24. Any member of a group or people chat may use them. The chip's
+/// id is the marker; `AppModel.mentions(in:)` expands it into the chat's
+/// member ids, which is what every agent's gate reads, so the agents wake.
+enum CollectiveMention: String, CaseIterable, Equatable {
+    case here, agents
+
+    var handle: String { rawValue }
+    /// The picker row: `@here · everyone in this chat`.
+    var description: String {
+        switch self {
+        case .here: return "everyone in this chat"
+        case .agents: return "all agents here"
+        }
+    }
+}
+
+/// What a chip stands for.
+enum ComposerMentionTarget: Equatable {
+    case member(ChatMember)
+    case collective(CollectiveMention)
+}
+
 /// One committed chip: the `@handle` span in the plain draft (UTF-16 offsets)
-/// and the member it stands for.
+/// and the member — or collective — it stands for.
 struct ComposerMention: Equatable {
     var range: Range<Int>
-    let member: ChatMember
+    let target: ComposerMentionTarget
 
-    /// What the text reads after `@` (an agent's name slug, a person's handle).
-    var handle: String { ComposerMention.handle(of: member) }
-    var name: String {
-        if member.isAgent { return (member.project?.name ?? member.handle).trimmingCharacters(in: .whitespaces) }
-        return member.name?.isEmpty == false ? member.name! : member.handle
+    init(range: Range<Int>, target: ComposerMentionTarget) {
+        self.range = range
+        self.target = target
     }
-    /// `user:<id>` / `agent:<project-id>` — what the sent row carries.
-    var memberId: String { member.member }
+
+    init(range: Range<Int>, member: ChatMember) {
+        self.init(range: range, target: .member(member))
+    }
+
+    var member: ChatMember? {
+        if case .member(let m) = target { return m }
+        return nil
+    }
+    var collective: CollectiveMention? {
+        if case .collective(let c) = target { return c }
+        return nil
+    }
+    var isCollective: Bool { collective != nil }
+
+    /// What the text reads after `@` (an agent's name slug, a person's handle, `here`).
+    var handle: String {
+        switch target {
+        case .member(let m): return ComposerMention.handle(of: m)
+        case .collective(let c): return c.handle
+        }
+    }
+    /// The chip's label — as the bubble chips read it (`here` / `agents` for the collectives).
+    var name: String {
+        switch target {
+        case .member(let m):
+            if m.isAgent { return (m.project?.name ?? m.handle).trimmingCharacters(in: .whitespaces) }
+            return m.name?.isEmpty == false ? m.name! : m.handle
+        case .collective(let c):
+            return c.handle
+        }
+    }
+    /// `user:<id>` / `agent:<project-id>`, or the collective marker the send expands.
+    var memberId: String {
+        switch target {
+        case .member(let m): return m.member
+        case .collective(let c): return c.handle
+        }
+    }
     /// The plain text of the chip.
     var plain: String { "@" + handle }
 
@@ -86,11 +144,16 @@ enum MentionDraft {
     /// point) followed by one space; returns the caret after the space.
     @discardableResult
     static func insert(_ member: ChatMember, at range: Range<Int>, text: inout String, mentions: inout [ComposerMention]) -> Int {
-        let handle = ComposerMention.handle(of: member)
-        let chip = "@" + handle
+        insert(.member(member), at: range, text: &text, mentions: &mentions)
+    }
+
+    @discardableResult
+    static func insert(_ target: ComposerMentionTarget, at range: Range<Int>, text: inout String, mentions: inout [ComposerMention]) -> Int {
+        let probe = ComposerMention(range: 0..<0, target: target)
+        let chip = probe.plain
         let replaced = splice(&text, range, with: chip + " ", mentions: &mentions)
         let span = replaced.lowerBound..<(replaced.lowerBound + (chip as NSString).length)
-        mentions.append(ComposerMention(range: span, member: member))
+        mentions.append(ComposerMention(range: span, target: target))
         mentions.sort { $0.range.lowerBound < $1.range.lowerBound }
         return span.upperBound + 1
     }
@@ -107,9 +170,16 @@ enum MentionDraft {
         return nil
     }
 
+    /// `resolve` with the collectives: `@here` / `@agents` when `collectives`
+    /// (a group or people chat), else a member.
+    static func resolveTarget(handle: String, members: [ChatMember], me: String?, collectives: Bool) -> ComposerMentionTarget? {
+        if collectives, let c = CollectiveMention(rawValue: handle.lowercased()) { return .collective(c) }
+        return resolve(handle: handle, members: members, me: me).map { .member($0) }
+    }
+
     /// Every plain `@handle` in `text` that `members` resolve (not already a
     /// chip) as a chip — a restored draft, or the text at send time.
-    static func resolveAll(text: String, mentions: [ComposerMention], members: [ChatMember], me: String?) -> [ComposerMention] {
+    static func resolveAll(text: String, mentions: [ComposerMention], members: [ChatMember], me: String?, collectives: Bool = true) -> [ComposerMention] {
         var out = mentions
         let ns = text as NSString
         var i = 0
@@ -120,8 +190,8 @@ enum MentionDraft {
             while end < ns.length, isHandleChar(ns.character(at: end)) { end += 1 }
             while end > i + 1, [0x2E, 0x2D].contains(ns.character(at: end - 1)) { end -= 1 }
             if end > i + 1, !out.contains(where: { $0.range.lowerBound < end && $0.range.upperBound > i }),
-               let m = resolve(handle: ns.substring(with: NSRange(location: i + 1, length: end - i - 1)), members: members, me: me) {
-                out.append(ComposerMention(range: i..<end, member: m))
+               let t = resolveTarget(handle: ns.substring(with: NSRange(location: i + 1, length: end - i - 1)), members: members, me: me, collectives: collectives) {
+                out.append(ComposerMention(range: i..<end, target: t))
             }
             i = max(end, i + 1)
         }
@@ -131,7 +201,7 @@ enum MentionDraft {
 
     /// Typed a separator at `caret`: the `@handle` right before it becomes a
     /// chip when `members` resolve it (behaviour 5).
-    static func autoResolve(text: String, caret: Int, mentions: [ComposerMention], members: [ChatMember], me: String?) -> ComposerMention? {
+    static func autoResolve(text: String, caret: Int, mentions: [ComposerMention], members: [ChatMember], me: String?, collectives: Bool = true) -> ComposerMention? {
         let ns = text as NSString
         guard caret >= 2, caret <= ns.length else { return nil }
         guard let sep = Unicode.Scalar(ns.character(at: caret - 1)), completesHandle(Character(sep)) else { return nil }
@@ -143,8 +213,15 @@ enum MentionDraft {
         var end = caret - 1
         while end > start, [0x2E, 0x2D].contains(ns.character(at: end - 1)) { end -= 1 }
         guard end > start, !mentions.contains(where: { $0.range.lowerBound < end && $0.range.upperBound > at }) else { return nil }
-        guard let m = resolve(handle: ns.substring(with: NSRange(location: start, length: end - start)), members: members, me: me) else { return nil }
-        return ComposerMention(range: at..<end, member: m)
+        guard let t = resolveTarget(handle: ns.substring(with: NSRange(location: start, length: end - start)), members: members, me: me, collectives: collectives) else { return nil }
+        return ComposerMention(range: at..<end, target: t)
+    }
+
+    /// The collective rows for `query` (lower-case prefix), listed above the
+    /// members: `@here` then `@agents`.
+    static func collectiveCandidates(query: String) -> [CollectiveMention] {
+        let q = query.lowercased()
+        return CollectiveMention.allCases.filter { $0.handle.hasPrefix(q) }
     }
 
     /// The picker's rows for `query` (lower-case): people and agents of the
@@ -398,7 +475,7 @@ struct MentionTextView: UIViewRepresentable {
                     if sel == range.location, caretPlain == nil { caretPlain = plainLen }
                     let chip = a.mention.plain
                     let len = (chip as NSString).length
-                    mentions.append(ComposerMention(range: plainLen..<(plainLen + len), member: a.mention.member))
+                    mentions.append(ComposerMention(range: plainLen..<(plainLen + len), target: a.mention.target))
                     plain += chip
                     plainLen += len
                     if sel == range.location + range.length, caretPlain == nil { caretPlain = plainLen }
@@ -435,10 +512,18 @@ struct MentionTextView: UIViewRepresentable {
             if let hit = chipCache[key] { return hit }
             let theme = parent.theme
             let picture: AnyView
-            if m.member.isAgent, let p = parent.agentProject(m.member) {
-                picture = AnyView(AgentAvatar(project: p, theme: theme, size: MentionTable.picture, still: true))
-            } else {
-                picture = AnyView(PersonAvatar(url: m.member.avatarUrl, handle: m.member.handle, size: MentionTable.picture, name: m.member.name, id: m.member.id, colorIndex: m.member.avatarColorIndex))
+            switch m.target {
+            case .member(let member) where member.isAgent:
+                if let p = parent.agentProject(member) {
+                    picture = AnyView(AgentAvatar(project: p, theme: theme, size: MentionTable.picture, still: true))
+                } else {
+                    picture = AnyView(InitialsAvatar(name: member.name ?? member.handle, handle: member.handle, id: member.id, size: MentionTable.picture))
+                }
+            case .member(let member):
+                picture = AnyView(PersonAvatar(url: member.avatarUrl, handle: member.handle, size: MentionTable.picture, name: member.name, id: member.id, colorIndex: member.avatarColorIndex))
+            case .collective(let c):
+                // The same disc the bubble chip and the Mac draw: initials of `here` / `agents`.
+                picture = AnyView(InitialsAvatar(name: c.handle, handle: c.handle, id: c.handle, size: MentionTable.picture))
             }
             let view = HStack(spacing: 4) {
                 picture

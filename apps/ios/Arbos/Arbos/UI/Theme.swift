@@ -54,6 +54,18 @@ enum TextScale {
 /// (every bubble) was re-evaluated on each publish, bypassing the rows' Equatable
 /// guards (arbonites-chat-lag, 2026-10-24).
 struct Theme: Equatable {
+    static func == (a: Theme, b: Theme) -> Bool {
+        let same = a.isDark == b.isDark && a.surface == b.surface && a.textScale == b.textScale
+            && a.bg == b.bg && a.bubbleAssistant == b.bubbleAssistant && a.bubbleUser == b.bubbleUser
+            && a.field == b.field && a.fieldBorder == b.fieldBorder && a.text == b.text && a.muted == b.muted
+            && a.placeholder == b.placeholder && a.icon == b.icon && a.accent == b.accent && a.unread == b.unread
+            && a.online == b.online && a.warn == b.warn && a.danger == b.danger && a.dangerSoft == b.dangerSoft
+            && a.card == b.card && a.separator == b.separator && a.codeChip == b.codeChip && a.userCodeChip == b.userCodeChip
+        #if DEBUG
+        PerfCounters.bump(same ? "themeEq.true" : "themeEq.false")
+        #endif
+        return same
+    }
     let isDark: Bool
     var surface: Surface
     /// Q6 text size: one factor over every point size that goes through `font(_:)`

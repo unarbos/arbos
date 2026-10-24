@@ -142,3 +142,20 @@ Code: `transcript.rs` `hover_time()` (returns nothing at opacity 0) and
 `bubble_footer()` (receipt only), pinned by
 `layout_tests::the_time_is_hidden_at_rest_and_beside_the_bubble_on_hover`;
 iPhone `Transcript.swift` `RowView` + `SenderNameRowTests`.
+
+## Full screen (Jacob 2026-10-24, [feedback fullscreen-traffic-lights-2026-10-24])
+
+Native full screen looks like Chrome's: the window just grows to the screen.
+
+| Item | Rule |
+|---|---|
+| Traffic lights | Stay visible, top left, on the strip's line (centre 21 pt from the top, close at x 14 — the windowed position) |
+| Strip and filter | Exactly where they are in windowed mode: no band above, no layout jump |
+| Hover at the top edge | macOS still slides its own title bar in with the menu bar; that is the system's, we add nothing |
+
+macOS hides a full-screen window's real buttons and shows them only in that
+slide-in bar, so in full screen the shell paints its own three lights
+(`ui/traffic_lights.rs`, `LightsGeometry`) in the 72 pt the strip already
+keeps clear for them (`TRAFFIC_LIGHTS_INSET`), wired to close / leave full
+screen (minimise is disabled in full screen, as AppKit disables it). Pinned by
+`traffic_lights::tests` (`full_screen_adds_no_band_above_the_strip`).

@@ -177,6 +177,8 @@ private struct ChatSession: View {
     /// Follow the end as rows stream / grow. Cleared when the user scrolls up;
     /// restored when they return near the end or tap the chevron / pill (Mac stick pin).
     @State private var pinnedToBottom = true
+    /// When this chat screen appeared (the history window does not grow in its first second).
+    @State private var appearedAt = Date()
     /// Rows that arrived while the reader was away from the end — drives the
     /// "New messages" pill. Cleared when they re-pin or jump to the latest.
     @State private var newBelowCount = 0
@@ -631,6 +633,7 @@ private struct ChatSession: View {
     var body: some View {
         #if DEBUG
         let _ = PerfCounters.bump("chatBody")
+        let _ = DebugHooks.perfChanges ? Self._printChanges() : ()
         #endif
         // Header stays outside GeometryReader (same pattern as ServerChannelsView /
         // HiddenChatsView). Nesting it inside the reader let iOS 26/27 vertically
@@ -773,7 +776,7 @@ private struct ChatSession: View {
                         },
                         onDismiss: { closeActions() },
                         bubble: {
-                            RowView(model: model, row: row, chatId: chatId, width: geo.size.width, timeReveal: 0,
+                            RowView(model: model, theme: theme, composerInset: composerSideInset, row: row, chatId: chatId, width: geo.size.width, timeReveal: 0,
                                     mentions: MentionTable.Cache.shared.table(model: model, theme: theme))
                                 .padding(.horizontal, 16)
                         }
@@ -903,6 +906,7 @@ private struct ChatSession: View {
             }
         }
         .onAppear {
+            appearedAt = Date()
             LaunchClock.mark("chat-appear", detail: "messages=\(messages.count)")
             // Force: re-PUT even if the cursor is unchanged so the relay clears
             // unread events recorded after the last PUT (other apps / badge).
@@ -935,7 +939,7 @@ private struct ChatSession: View {
             if composerDraft.text.isEmpty, !saved.isEmpty {
                 composerDraft.text = saved
                 composerDraft.caret = (saved as NSString).length
-                composerDraft.mentions = MentionDraft.resolveAll(text: saved, mentions: [], members: people?.members ?? [], me: model.user?.login)
+                composerDraft.mentions = MentionDraft.resolveAll(text: saved, mentions: [], members: people?.members ?? [], me: model.user?.login, collectives: isPeople)
                 if DebugHooks.composerDraft != nil { composerFocused = true }
             }
             if isPeople { model.markPeopleRead(chatId, force: true) }
@@ -1469,6 +1473,8 @@ private struct ChatSession: View {
                     // skip the ForEach when the transcript inputs are unchanged.
                     TranscriptRows(
                         model: model,
+                        theme: theme,
+                        composerInset: composerSideInset,
                         mentions: mentions,
                         shown: shown,
                         shownStamp: Self.shownStamp(rowsVersion, windowCount, windowSkipEnd, searchText, showSearch),
@@ -1527,6 +1533,10 @@ private struct ChatSession: View {
             // Nearing the top: the next older slice of rows joins the view tree; a channel
             // also asks the server for one older page.
             .modifier(NearTopReporter(enabled: true) {
+                // The first layout reports offset 0 before the bottom anchor applies; a
+                // grow step there (30 more bubbles) landed inside the open and cost a
+                // 200–300 ms frame on a long group. History waits a beat after appear.
+                guard Date().timeIntervalSince(appearedAt) > 1.0 else { return }
                 if windowCount + windowSkipEnd < visibleRows.count {
                     growWindow()
                 } else if isChannel {
@@ -1829,7 +1839,7 @@ private struct ChatSession: View {
         editing = m
         composerDraft.text = m.plainText
         composerDraft.caret = (m.plainText as NSString).length
-        composerDraft.mentions = MentionDraft.resolveAll(text: m.plainText, mentions: [], members: people?.members ?? [], me: model.user?.login)
+        composerDraft.mentions = MentionDraft.resolveAll(text: m.plainText, mentions: [], members: people?.members ?? [], me: model.user?.login, collectives: isPeople)
         composerFocused = true
     }
 
@@ -2315,9 +2325,36 @@ private struct ChatSession: View {
     /// Tap inserts the chip.
     private func mentionList(_ people: PeopleChat, query: String) -> some View {
         let rows = MentionDraft.candidates(query: query, members: people.members, me: model.user?.login)
+        // `@here` / `@agents` first (Jacob, 2026-10-24): every member of a group or people chat may use them.
+        let collectives = MentionDraft.collectiveCandidates(query: query)
+        let hairline = Rectangle().fill(theme.isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.08))
+            .frame(height: 0.5)
+            .padding(.leading, 12 + 28 + 12)
+            .padding(.trailing, 12)
         return Group {
-            if !rows.isEmpty {
+            if !rows.isEmpty || !collectives.isEmpty {
                 VStack(spacing: 0) {
+                    ForEach(collectives, id: \.rawValue) { c in
+                        Button { completeMention(.collective(c)) } label: {
+                            HStack(spacing: 12) {
+                                InitialsAvatar(name: c.handle, handle: c.handle, id: c.handle, size: 28)
+                                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                    Text("@" + c.handle)
+                                        .font(theme.font(Theme.body)).foregroundStyle(theme.text).lineLimit(1)
+                                    Text("· " + c.description)
+                                        .font(theme.font(Theme.small)).foregroundStyle(theme.muted).lineLimit(1)
+                                }
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.horizontal, 12)
+                            .frame(height: 44)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        if c != collectives.last || !rows.isEmpty {
+                            hairline
+                        }
+                    }
                     ForEach(Array(rows.enumerated()), id: \.element.id) { i, m in
                         Button { completeMention(m) } label: {
                             HStack(spacing: 12) {
@@ -2343,10 +2380,7 @@ private struct ChatSession: View {
                         }
                         .buttonStyle(.plain)
                         if i < rows.count - 1 {
-                            Rectangle().fill(theme.isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.08))
-                                .frame(height: 0.5)
-                                .padding(.leading, 12 + 28 + 12)
-                                .padding(.trailing, 12)
+                            hairline
                         }
                     }
                 }
@@ -2365,21 +2399,34 @@ private struct ChatSession: View {
 
     /// The picked row becomes one chip over the open `@token` (behaviour 4).
     private func completeMention(_ m: ChatMember) {
-        ensureMention(m)
-        talkTo = [m.member]
+        completeMention(.member(m))
+    }
+
+    /// A collective chip addresses everyone: no sticky conversation chip.
+    private func completeMention(_ target: ComposerMentionTarget) {
+        ensureMention(target)
+        switch target {
+        case .member(let m): talkTo = [m.member]
+        case .collective: talkTo = []
+        }
         mentionQuery = nil
     }
 
-    /// Put `m`'s chip in the draft: over the open `@token` when there is one,
-    /// else at the end — unless the chip is already there (conversation chips).
     private func ensureMention(_ m: ChatMember) {
-        let handle = ComposerMention.handle(of: m).lowercased()
-        if composerDraft.mentions.contains(where: { $0.memberId == m.member }) { return }
+        ensureMention(.member(m))
+    }
+
+    /// Put the chip in the draft: over the open `@token` when there is one,
+    /// else at the end — unless the chip is already there (conversation chips).
+    private func ensureMention(_ target: ComposerMentionTarget) {
+        let probe = ComposerMention(range: 0..<0, target: target)
+        let handle = probe.handle.lowercased()
+        if composerDraft.mentions.contains(where: { $0.memberId == probe.memberId }) { return }
         var text = composerDraft.text
         var mentions = composerDraft.mentions
         let caret: Int
         if let open = MentionDraft.openToken(text: text, caret: composerDraft.caret, mentions: mentions) {
-            caret = MentionDraft.insert(m, at: open.range, text: &text, mentions: &mentions)
+            caret = MentionDraft.insert(target, at: open.range, text: &text, mentions: &mentions)
         } else {
             let lower = text.lowercased()
             let present = lower.split(whereSeparator: { $0.isWhitespace }).contains(where: {
@@ -2387,12 +2434,13 @@ private struct ChatSession: View {
             })
             if present {
                 // Typed by hand: just make it the chip.
-                composerDraft.mentions = MentionDraft.resolveAll(text: text, mentions: mentions, members: [m], me: nil)
+                let members: [ChatMember] = probe.member.map { [$0] } ?? []
+                composerDraft.mentions = MentionDraft.resolveAll(text: text, mentions: mentions, members: members, me: nil)
                 return
             }
             if !text.isEmpty, !text.hasSuffix(" ") { text += " " }
             let end = (text as NSString).length
-            caret = MentionDraft.insert(m, at: end..<end, text: &text, mentions: &mentions)
+            caret = MentionDraft.insert(target, at: end..<end, text: &text, mentions: &mentions)
         }
         composerDraft.mentions = mentions
         composerDraft.text = text
@@ -2841,6 +2889,8 @@ struct ModelPickerView: View {
 /// does not rebuild every bubble when the row list is unchanged.
 private struct TranscriptRows: View, Equatable {
     let model: AppModel
+    let theme: Theme
+    let composerInset: CGFloat
     let mentions: MentionTable
     let shown: [Row]
     /// Identity of `shown` (rows version + window bounds + search): compared instead of the array.
@@ -2863,13 +2913,13 @@ private struct TranscriptRows: View, Equatable {
     static func == (lhs: TranscriptRows, rhs: TranscriptRows) -> Bool {
         let same = lhs.shownStamp == rhs.shownStamp
             && lhs.actionsRowId == rhs.actionsRowId
+            && lhs.composerInset == rhs.composerInset
+            && lhs.theme == rhs.theme
             && lhs.chatId == rhs.chatId
             && lhs.width == rhs.width
             && lhs.timeReveal == rhs.timeReveal
             && lhs.highlightedMessage == rhs.highlightedMessage
             && lhs.mentions.stamp == rhs.mentions.stamp
-            && lhs.rowsCount == rhs.rowsCount
-            && lhs.messagesCount == rhs.messagesCount
         #if DEBUG
         PerfCounters.bump(same ? "rowsEqTrue" : "rowsEqFalse")
         if !same {
@@ -2882,13 +2932,14 @@ private struct TranscriptRows: View, Equatable {
     var body: some View {
         #if DEBUG
         let _ = PerfCounters.bump("transcriptRowsBody")
+        let _ = DebugHooks.perfChanges ? Self._printChanges() : ()
         #endif
         // Rows keyed by id, never by position: a grow step prepends older rows and
         // must not touch the ones already laid out (arbonites-chat-lag).
         let firstId = shown.first?.id
         ForEach(shown) { row in
             let reply = canReply(row)
-            RowView(model: model, row: row, chatId: chatId, width: width, timeReveal: timeReveal,
+            RowView(model: model, theme: theme, composerInset: composerInset, row: row, chatId: chatId, width: width, timeReveal: timeReveal,
                     onQuoteTap: onQuoteTap,
                     highlighted: highlightedMessage == row.messageId,
                     onReply: reply ? { onReply(row) } : nil,
@@ -2901,6 +2952,9 @@ private struct TranscriptRows: View, Equatable {
                     // Once per open — not on every row (group chats fire this dozens of times).
                     if row.id == firstId {
                         LaunchClock.mark("chat-first-row", detail: "shown=\(shown.count) rows=\(rowsCount) messages=\(messagesCount)")
+                        #if DEBUG
+                        PerfLog.shared.armScrollable()
+                        #endif
                     }
                 }
                 // A message bubble: long-press → the reaction capsule + menu overlay

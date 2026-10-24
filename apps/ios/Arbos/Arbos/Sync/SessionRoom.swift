@@ -373,6 +373,10 @@ final class SessionRoom {
             do {
                 // Parked (dependencies missing): the session keeps the persisted cursor
                 // below this row so a relaunch re-requests it (#1540 follow-up).
+                #if DEBUG
+                let t0 = Date()
+                defer { PerfCounters.time("import.room", ms: Date().timeIntervalSince(t0) * 1000) }
+                #endif
                 if try doc.importUpdateReportingPending(bytes) {
                     session.applyPending()
                 }

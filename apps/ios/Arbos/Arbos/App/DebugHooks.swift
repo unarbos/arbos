@@ -108,6 +108,26 @@ enum DebugHooks {
     static let perfLog: Bool = value("ARBOS_PERF_LOG") == "1"
     /// Seed the fixture group from a Loro snapshot file (a relay export of a real chat).
     static var fixtureDoc: String? { value("ARBOS_FIXTURE_DOC") }
+    /// Live-path replay (iphone-open-scroll-block): `<checkpoint path>|<rows.hex path>`. The
+    /// fixture group gets a real room (`ensureRoom`, store-restore shape) from the checkpoint,
+    /// then the rows are imported one by one on the main actor the way the relay socket
+    /// delivers them — the production doc → messages → rows path, without a network.
+    static var perfReplay: (checkpoint: String, rows: String)? {
+        guard let v = value("ARBOS_PERF_REPLAY"), let bar = v.firstIndex(of: "|") else { return nil }
+        return (String(v[..<bar]), String(v[v.index(after: bar)...]))
+    }
+    /// How many rooms replay at once (the same doc under different chat ids): a launch
+    /// with many busy chats catching up together.
+    static var perfReplayRooms: Int { Int(value("ARBOS_PERF_REPLAY_ROOMS") ?? "") ?? 1 }
+    /// Milliseconds between replayed rows (0 = as fast as the run loop allows).
+    static var perfReplayGapMs: Int { Int(value("ARBOS_PERF_REPLAY_GAP_MS") ?? "") ?? 5 }
+    /// Replay as live rows (room caught up) rather than as a catch-up.
+    static var perfReplayLive: Bool { value("ARBOS_PERF_REPLAY_LIVE") == "1" }
+    /// Delay before the replay starts, after the chat screen appears (ms).
+    static var perfReplayAfterMs: Int { Int(value("ARBOS_PERF_REPLAY_AFTER_MS") ?? "") ?? 1500 }
+    /// Print SwiftUI's change reasons (`_printChanges`) for the chat screen, the row
+    /// list and each bubble (stdout; launch with `--stdout`).
+    static let perfChanges: Bool = value("ARBOS_PERF_CHANGES") == "1"
     /// Perf rig drivers, run a few seconds after the chat opens: `scroll` pages the
     /// transcript to its top and back, `type` appends 40 keystrokes to the composer,
     /// `typing` fakes a member's typing presence every second. Comma-separated.
