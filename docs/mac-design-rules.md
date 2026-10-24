@@ -212,10 +212,43 @@ after the text) and v0.6.203 (#1496, a tester's request for an always-visible
 bottom-right footer time). The sent/seen label on my own bubbles is a separate
 element and may stay in the footer.
 
-Code: `transcript.rs` `hover_time()` (returns nothing at opacity 0) and
-`bubble_footer()` (receipt only), pinned by
+Code: `transcript.rs` `hover_time()` (returns nothing at opacity 0), pinned by
 `layout_tests::the_time_is_hidden_at_rest_and_beside_the_bubble_on_hover`;
 iPhone `Transcript.swift` `RowView` + `SenderNameRowTests`.
+
+## Own-bubble delivery (Jacob 2026-10-24, [feedback sent-state-opacity-2026-10-24])
+
+**No "sent" / "seen" caption on my bubbles — the bubble's opacity is the
+state.** Grok Bot's user bubble carries no delivery label (refs 03/web-01), and
+Jacob asked for "coloring" only: "remove these 'sent' items, just use coloring
+to make it clear, make the bubble less opaque."
+
+| State | Meaning | Whole-bubble alpha | Extra |
+|---|---|---|---|
+| Pending | not yet ACKed by the relay | **0.50** (`BUBBLE_ALPHA_PENDING`) | — |
+| Failed | the relay refused it | 1.00 | red ⓘ-style `exclamation` glyph (16 pt, `danger`) on the bubble's outer edge, always visible |
+| Sent | ACKed, nobody opened past it yet | **0.72** (`BUBBLE_ALPHA_SENT`) | — |
+| Seen | a peer's read watermark covers it, an agent answered after it, or read receipts are off | 1.00 | — |
+
+Why 0.72 and not a lighter fill: whole-bubble alpha dims the text with the fill,
+which is what makes the difference read in dark mode (fill L* 39 → 30, text
+L* 100 → 76). Measured contrast of the composited text on its composited fill:
+dark 4.9 : 1, light 7.7 : 1 (≥ 4.5 AA); pending 3.4 : 1 / 3.6 : 1 (transient).
+The fill alone at 0.72 would move dark only 8 L* and read as "slightly
+different grey". Same values on the iPhone (`Delivery.sentAlpha` /
+`pendingAlpha`); its own bubble colours are the Mac's (`#5C5C5C` / `#111111`,
+white text).
+
+The "seen" caption from #1496 went with the "sent" one (same component); full
+opacity carries it. With read receipts **off** every ACKed bubble is full at
+once — there is nothing to wait for, and a transcript that is lighter forever
+would read as broken.
+
+Code: `transcript.rs` `Delivery` + `delivery_state()` + `own_bubble()` +
+`failed_glyph()`, pinned by `delivery_tests`; iPhone `Transcript.swift`
+`Delivery` / `ReadReceipts` / `DeliveryFade` + `DeliveryStateTests`. The iPhone
+also sends the `seen` watermark in its presence header now (`SessionRoom
+.newestMessageId`), so a Mac bubble read on a phone goes full.
 
 ## iPhone bubble gestures (Jacob 2026-10-24, [feedback iphone-open-scroll-block-2026-10-24] #1645 + #1629)
 

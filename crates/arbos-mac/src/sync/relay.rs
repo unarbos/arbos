@@ -6330,8 +6330,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     }
                     Err(err) => {
                         // Nobody asked for this fetch: no toast, no bubble. The card shows
-                        // "No preview"; the error goes to the log and the silent report.
-                        shared.diagnostic("thumbnail", format!("{key}: {err:#}"));
+                        // "No preview". A missing blob (deleted, never uploaded, stale ref)
+                        // is not a Mac bug — same quiet 404 treatment as routines / voices.
+                        // Other failures still go to the silent weekly report.
+                        let detail = format!("{key}: {err:#}");
+                        if detail.to_ascii_lowercase().contains("http 404") {
+                            log::warn!(target: "arbos_mac::diagnostic", "thumbnail: {detail}");
+                        } else {
+                            shared.diagnostic("thumbnail", detail);
+                        }
                         let _ = shared.events.send(SyncEvent::ThumbnailFailed { key });
                     }
                 }
