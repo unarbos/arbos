@@ -49,6 +49,17 @@ pub fn label(tool_name: &str, args: &Value) -> Option<String> {
     out.map(|l| trim_to(&l, MAX_CHARS))
 }
 
+/// The line when nothing concrete fits but the agent is at work (never leave the presence row
+/// empty mid-turn, #1657).
+pub fn generic_label(tool_name: &str) -> String {
+    match tool_name {
+        "bash" | "shell" | "execute" | "run_command" | "execute_command" | "codemode" => {
+            "Running a command".to_owned()
+        }
+        _ => "Working on it".to_owned(),
+    }
+}
+
 /// A shell command head → label. Compound commands (`&&`, `;`, `|`) are judged by their first
 /// recognisable step.
 fn command_label(cmd: &str) -> Option<String> {

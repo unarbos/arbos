@@ -1434,6 +1434,63 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// #1657: a tool with no plain-words label (`sleep 25 && echo ok`) must not clear the working
+    /// row — the act ack stays as the activity; with no ack, a generic line is posted.
+    #[tokio::test]
+    async fn unlabelled_tool_keeps_the_working_row_activity() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000009";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.ack_text.clear();
+            t.activity = None;
+            agent.test_open_row(&host, t).await;
+        }
+        agent
+            .hook_route(&json!({ "action": "act", "ack": "Waiting 25 seconds, then checking.", "plan": "sleep" }))
+            .await
+            .unwrap();
+        let ev = arbos_core::rpc::Event::ToolExecutionStart {
+            tool_call_id: "c1".into(),
+            tool_name: "bash".into(),
+            args: json!({ "command": "sleep 25 && echo ok" }),
+            parent_tool_call_id: None,
+        };
+        agent.test_fold(chat, &host, &ev).await;
+        assert_eq!(
+            agent
+                .turn
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .activity
+                .as_deref(),
+            Some("Waiting 25 seconds, then checking.")
+        );
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.activity = None;
+        }
+        agent.test_fold(chat, &host, &ev).await;
+        assert_eq!(
+            agent
+                .turn
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .activity
+                .as_deref(),
+            Some("Running a command")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[tokio::test]
     async fn idle_agent_takes_the_normal_path() {
         let (agent, root) = test_agent().await;
