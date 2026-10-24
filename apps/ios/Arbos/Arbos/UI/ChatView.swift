@@ -172,7 +172,13 @@ struct ChatView: View {
     private var hasInCallBar: Bool {
         calls.isActive && !calls.isPresented && calls.call?.kind == .voice && calls.call?.chatId == chatId
     }
-    private var headerExtra: CGFloat { (hasCallBar ? 52 : 0) + (hasInCallBar ? 56 : 0) + (showSearch ? 46 : 0) }
+    /// A pinned message strip under the header in group chats.
+    private var hasPinBar: Bool {
+        people?.isGroup == true && model.pinnedMessageId(in: chatId) != nil
+    }
+    private var headerExtra: CGFloat {
+        (hasCallBar ? 52 : 0) + (hasInCallBar ? 56 : 0) + (showSearch ? 46 : 0) + (hasPinBar ? 40 : 0)
+    }
     /// Member chips under the header: groups only. A 1:1 DM already names the peer in the pill.
     private var showsMemberChips: Bool { people?.isGroup == true }
 
@@ -395,6 +401,9 @@ struct ChatView: View {
                         .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
                         .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
                         .padding(.horizontal, 16)
+                    }
+                    if hasPinBar, let pinId = model.pinnedMessageId(in: chatId) {
+                        pinnedMessageBar(messageId: pinId)
                     }
                     if hasInCallBar, let c = calls.call {
                         InCallOverlay(expected: model.expectedCallPeople(c), inline: true)
@@ -1047,6 +1056,8 @@ struct ChatView: View {
                         highlightedMessage: highlightedMessage,
                         rowsCount: rows.count,
                         messagesCount: messages.count,
+                        canPin: canPinInThisChat,
+                        pinnedMessageId: model.pinnedMessageId(in: chatId),
                         replySwipeActive: $replySwipeActive,
                         canReply: { isMessageRow($0) },
                         onQuoteTap: { revealQuoted($0) },
@@ -1191,8 +1202,8 @@ struct ChatView: View {
     }
 
     /// A real message in the shared chat doc (the full menu: Copy, Reply,
-    /// Forward, Reply in DM, Delete) — not a date / join / system line.
-    /// Channels carry no replies or deletes yet (C1 scope): Copy only.
+    /// Forward, Reply in DM, Pin when allowed, Delete) — not a date / join /
+    /// system line. Channels carry no replies or deletes yet (C1 scope): Copy only.
     private func isMessageRow(_ row: Row) -> Bool {
         if isChannel { return false }
         switch row.kind {
@@ -1203,10 +1214,61 @@ struct ChatView: View {
         }
     }
 
+    /// Pin / Unpin only in people group chats when the admin's policy allows it.
+    private var canPinInThisChat: Bool {
+        guard let people, people.isGroup else { return false }
+        return model.canPinMessages(in: people)
+    }
+
+    /// Quiet strip under the header: the pinned message's text; tap jumps to it.
+    private func pinnedMessageBar(messageId: Id) -> some View {
+        let preview = messageById[messageId]?.plainText
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "Pinned message"
+        let canUnpin = canPinInThisChat
+        return HStack(spacing: 10) {
+            Button {
+                revealQuoted(messageId)
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "pin.fill")
+                        .font(theme.font(12, weight: .semibold))
+                        .foregroundStyle(theme.muted)
+                    Text(preview.isEmpty ? "Pinned message" : preview)
+                        .font(theme.font(Theme.small))
+                        .foregroundStyle(theme.text)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Pinned message")
+            .accessibilityHint("Jumps to the pinned message")
+            if canUnpin {
+                Button {
+                    model.unpinMessage(chatId: chatId, messageId: messageId)
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(theme.font(12, weight: .semibold))
+                        .foregroundStyle(theme.muted)
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Unpin message")
+            }
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 36)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+        .padding(.horizontal, 16)
+    }
+
     /// The long-press menu's actions (`MessageMenu`): Copy the text, Reply
     /// (in a people chat the agent that wrote it becomes the recipient),
     /// Forward to another chat, Reply in DM (open a private chat with the human
-    /// who wrote it), Delete for everyone.
+    /// who wrote it), Pin / Unpin in a group when allowed, Delete for everyone.
     private func runMessageMenu(_ item: MessageMenuItem, row: Row) {
         switch item {
         case .copy:
@@ -1225,6 +1287,10 @@ struct ChatView: View {
                   m.sender != model.myUserId
             else { return }
             Task { _ = await model.openDM(handle: handle) }
+        case .pin:
+            model.pinMessage(chatId: chatId, messageId: row.messageId)
+        case .unpin:
+            model.unpinMessage(chatId: chatId, messageId: row.messageId)
         case .delete:
             model.deleteMessage(chatId: chatId, messageId: row.messageId)
         }
@@ -2212,6 +2278,8 @@ private struct TranscriptRows: View, Equatable {
     let highlightedMessage: Id?
     let rowsCount: Int
     let messagesCount: Int
+    let canPin: Bool
+    let pinnedMessageId: Id?
     var replySwipeActive: Binding<Bool>
     let canReply: (Row) -> Bool
     let onQuoteTap: (Id) -> Void
@@ -2228,6 +2296,8 @@ private struct TranscriptRows: View, Equatable {
             && lhs.mentions === rhs.mentions
             && lhs.rowsCount == rhs.rowsCount
             && lhs.messagesCount == rhs.messagesCount
+            && lhs.canPin == rhs.canPin
+            && lhs.pinnedMessageId == rhs.pinnedMessageId
     }
 
     var body: some View {
@@ -2249,7 +2319,11 @@ private struct TranscriptRows: View, Equatable {
                     }
                 }
                 .contextMenu {
-                    MessageMenuContent(items: MessageMenu.items(forMessage: reply)) { item in
+                    MessageMenuContent(items: MessageMenu.items(
+                        forMessage: reply,
+                        canPin: canPin,
+                        isPinned: pinnedMessageId == row.messageId
+                    )) { item in
                         onMenu(item, row)
                     }
                 }

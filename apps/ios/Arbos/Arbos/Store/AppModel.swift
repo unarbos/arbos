@@ -433,6 +433,74 @@ final class AppModel: ObservableObject {
         UserDefaults.standard.set(Array(pinnedHomeIds), forKey: "pinnedHome")
     }
 
+    // MARK: Group message pins (device-local)
+
+    /// Who may pin a message in a group chat. Default is admins (owner + admin).
+    enum GroupPinPolicy: String {
+        case admins
+        case everyone
+    }
+
+    /// One pinned message per group chat (`chatId` → `messageId`).
+    @Published private(set) var pinnedMessagesByChat: [String: String] = {
+        (UserDefaults.standard.dictionary(forKey: "groupPinnedMessages") as? [String: String]) ?? [:]
+    }()
+
+    /// Per-group pin policy (`chatId` → `admins` | `everyone`). Missing → admins.
+    @Published private(set) var pinPolicyByChat: [String: String] = {
+        (UserDefaults.standard.dictionary(forKey: "groupPinPolicy") as? [String: String]) ?? [:]
+    }()
+
+    func pinnedMessageId(in chatId: Id) -> Id? {
+        pinnedMessagesByChat[chatId]
+    }
+
+    func isMessagePinned(chatId: Id, messageId: Id) -> Bool {
+        pinnedMessagesByChat[chatId] == messageId
+    }
+
+    func pinPolicy(for chatId: Id) -> GroupPinPolicy {
+        GroupPinPolicy(rawValue: pinPolicyByChat[chatId] ?? "") ?? .admins
+    }
+
+    /// Owner/admin may change who can pin in this group.
+    func setPinPolicy(_ policy: GroupPinPolicy, chatId: Id) {
+        var next = pinPolicyByChat
+        next[chatId] = policy.rawValue
+        pinPolicyByChat = next
+        UserDefaults.standard.set(next, forKey: "groupPinPolicy")
+    }
+
+    /// Whether the signed-in user may pin messages in this people group.
+    func canPinMessages(in chat: PeopleChat) -> Bool {
+        guard chat.isGroup else { return false }
+        switch pinPolicy(for: chat.id) {
+        case .everyone:
+            return true
+        case .admins:
+            return ownsGroup(chat)
+        }
+    }
+
+    /// Pin one message in a group (replaces any previous pin). No-op when not allowed.
+    func pinMessage(chatId: Id, messageId: Id) {
+        guard let chat = peopleChat(chatId), canPinMessages(in: chat) else { return }
+        var next = pinnedMessagesByChat
+        next[chatId] = messageId
+        pinnedMessagesByChat = next
+        UserDefaults.standard.set(next, forKey: "groupPinnedMessages")
+    }
+
+    /// Clear the pin for this chat, or only if it still matches `messageId`.
+    func unpinMessage(chatId: Id, messageId: Id? = nil) {
+        guard let chat = peopleChat(chatId), canPinMessages(in: chat) else { return }
+        if let messageId, pinnedMessagesByChat[chatId] != messageId { return }
+        var next = pinnedMessagesByChat
+        next.removeValue(forKey: chatId)
+        pinnedMessagesByChat = next
+        UserDefaults.standard.set(next, forKey: "groupPinnedMessages")
+    }
+
     @Published private(set) var machineError: String?
     @Published var notice: Notice?
     @Published private(set) var pairingBusy = false
@@ -2755,6 +2823,16 @@ final class AppModel: ObservableObject {
         roomLinks[chatId] = nil
         unacked[chatId] = nil
         forgetDoc(chatId)
+        if pinnedMessagesByChat[chatId] != nil || pinPolicyByChat[chatId] != nil {
+            var pins = pinnedMessagesByChat
+            pins.removeValue(forKey: chatId)
+            pinnedMessagesByChat = pins
+            UserDefaults.standard.set(pins, forKey: "groupPinnedMessages")
+            var policies = pinPolicyByChat
+            policies.removeValue(forKey: chatId)
+            pinPolicyByChat = policies
+            UserDefaults.standard.set(policies, forKey: "groupPinPolicy")
+        }
         path = []
         Task { try? await api.leaveChat(chatId) }
     }
@@ -2908,6 +2986,16 @@ final class AppModel: ObservableObject {
             UserDefaults.standard.set(Array(archivedPeopleChatIds), forKey: "archivedPeopleChats")
         }
         unpinHome(peopleChatId: chatId)
+        if pinnedMessagesByChat[chatId] != nil || pinPolicyByChat[chatId] != nil {
+            var pins = pinnedMessagesByChat
+            pins.removeValue(forKey: chatId)
+            pinnedMessagesByChat = pins
+            UserDefaults.standard.set(pins, forKey: "groupPinnedMessages")
+            var policies = pinPolicyByChat
+            policies.removeValue(forKey: chatId)
+            pinPolicyByChat = policies
+            UserDefaults.standard.set(policies, forKey: "groupPinPolicy")
+        }
         path = []
         Task {
             do { try await api.deleteChat(chatId) } catch { notice = Notice(text: "Delete failed: \(error.localizedDescription)") }

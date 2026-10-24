@@ -987,8 +987,8 @@ struct GroupProfileView: View {
         }
     }
 
-    /// Members: Add members, then every person (name, @handle) and agent
-    /// ("Agent · run by …") as kit rows — the Mac group pane's list.
+    /// Members: Add members, then (owners/admins) who may pin messages, then
+    /// every person (name, @handle) and agent ("Agent · run by …") as kit rows.
     private var membersSections: [PaneSection] {
         var list: [AnyView] = [
             AnyView(Button { showAdd = true } label: {
@@ -996,6 +996,31 @@ struct GroupProfileView: View {
             }
             .buttonStyle(.plain)),
         ]
+        // Group only: the admin picks who may pin a message (admins or everyone).
+        if people != nil, canManageMembers {
+            let policy = model.pinPolicy(for: chatId)
+            list.append(AnyView(
+                Menu {
+                    Button {
+                        model.setPinPolicy(.admins, chatId: chatId)
+                    } label: {
+                        Label("Admins", systemImage: policy == .admins ? "checkmark" : "")
+                    }
+                    Button {
+                        model.setPinPolicy(.everyone, chatId: chatId)
+                    } label: {
+                        Label("Everyone", systemImage: policy == .everyone ? "checkmark" : "")
+                    }
+                } label: {
+                    PaneRow(
+                        title: "Who can pin",
+                        subtitle: "Messages in this group",
+                        value: policy == .everyone ? "Everyone" : "Admins",
+                        chevron: true
+                    )
+                }
+            ))
+        }
         list += rows.map { r in AnyView(memberRow(r)) }
         return [.card(list, separatorInset: PaneKit.separatorInset(.glyph("")))]
     }

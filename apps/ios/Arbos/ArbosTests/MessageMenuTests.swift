@@ -2,8 +2,8 @@ import XCTest
 @testable import Arbos
 
 /// The bubble's long-press menu is Copy / Reply / Forward / Reply in DM /
-/// Delete (#1370, #1472, forward feedback) — no emoji row, no Mention; a
-/// non-message row copies only.
+/// Delete (#1370, #1472, forward feedback) — Pin / Unpin only when a group
+/// member may pin; a non-message row copies only.
 final class MessageMenuTests: XCTestCase {
     func testItemsAreExactlyCopyReplyForwardReplyInDMDelete() {
         XCTAssertEqual(MessageMenu.items, [.copy, .reply, .forward, .replyInDM, .delete])
@@ -11,12 +11,24 @@ final class MessageMenuTests: XCTestCase {
         XCTAssertEqual(MessageMenu.items(forMessage: true), MessageMenu.items)
     }
 
+    func testPinAppearsWhenAllowed() {
+        XCTAssertEqual(
+            MessageMenu.items(forMessage: true, canPin: true, isPinned: false),
+            [.copy, .reply, .forward, .replyInDM, .pin, .delete]
+        )
+        XCTAssertEqual(
+            MessageMenu.items(forMessage: true, canPin: true, isPinned: true),
+            [.copy, .reply, .forward, .replyInDM, .unpin, .delete]
+        )
+        XCTAssertEqual(MessageMenu.items(forMessage: true, canPin: false), MessageMenu.items)
+    }
+
     func testNoEmojiOrExtraItems() {
         for item in MessageMenuItem.allCases {
             XCTAssertTrue(item.label.unicodeScalars.allSatisfy { $0.isASCII }, "\(item) label carries non-ASCII text")
             XCTAssertFalse(MessageReaction.palette.contains(item.label))
         }
-        XCTAssertEqual(MessageMenuItem.allCases.count, 5)
+        XCTAssertEqual(MessageMenuItem.allCases.count, 7)
     }
 
     func testOnlyDeleteIsDestructive() {
@@ -25,6 +37,7 @@ final class MessageMenuTests: XCTestCase {
 
     func testNonMessageRowsCopyOnly() {
         XCTAssertEqual(MessageMenu.items(forMessage: false), [.copy])
+        XCTAssertEqual(MessageMenu.items(forMessage: false, canPin: true, isPinned: true), [.copy])
     }
 
     /// #1389: a long-press on any block of a bubble reaches the one menu, and

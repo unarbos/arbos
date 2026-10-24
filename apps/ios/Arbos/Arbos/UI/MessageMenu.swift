@@ -1,15 +1,18 @@
 import SwiftUI
 
 /// The message bubble's long-press menu: **Copy, Reply, Forward, Reply in DM,
-/// Delete** (#1370 + #1472; the emoji reaction row is gone, not moved). Forward
-/// opens the same chat picker the media viewer uses; Reply in DM opens a
-/// private chat with the human who wrote the message. SwiftUI places a
+/// Pin / Unpin (group chats when allowed), Delete** (#1370 + #1472 + pin
+/// feedback). Forward opens the same chat picker the media viewer uses; Reply
+/// in DM opens a private chat with the human who wrote the message. Pin is
+/// group-only and gated by the admin's "Who can pin" setting. SwiftUI places a
 /// `.contextMenu` itself, always on screen, so only the item set lives here.
 enum MessageMenuItem: CaseIterable, Equatable {
     case copy
     case reply
     case forward
     case replyInDM
+    case pin
+    case unpin
     case delete
 
     var label: String {
@@ -18,6 +21,8 @@ enum MessageMenuItem: CaseIterable, Equatable {
         case .reply: return "Reply"
         case .forward: return "Forward"
         case .replyInDM: return "Reply in DM"
+        case .pin: return "Pin"
+        case .unpin: return "Unpin"
         case .delete: return "Delete"
         }
     }
@@ -28,6 +33,8 @@ enum MessageMenuItem: CaseIterable, Equatable {
         case .reply: return "arrowshape.turn.up.left"
         case .forward: return "arrowshape.turn.up.right"
         case .replyInDM: return "bubble.left"
+        case .pin: return "pin"
+        case .unpin: return "pin.slash"
         case .delete: return "trash"
         }
     }
@@ -36,15 +43,22 @@ enum MessageMenuItem: CaseIterable, Equatable {
 }
 
 enum MessageMenu {
-    /// The items, in order, for every real message bubble.
+    /// The items, in order, for every real message bubble (no pin — pin is
+    /// added only in group chats when the member may pin).
     static let items: [MessageMenuItem] = [.copy, .reply, .forward, .replyInDM, .delete]
 
     /// Rows that are not a message in a shared doc (channels, date / system
     /// lines) can only be copied.
     static let copyOnly: [MessageMenuItem] = [.copy]
 
-    static func items(forMessage: Bool) -> [MessageMenuItem] {
-        forMessage ? items : copyOnly
+    static func items(forMessage: Bool, canPin: Bool = false, isPinned: Bool = false) -> [MessageMenuItem] {
+        guard forMessage else { return copyOnly }
+        var out: [MessageMenuItem] = [.copy, .reply, .forward, .replyInDM]
+        if canPin {
+            out.append(isPinned ? .unpin : .pin)
+        }
+        out.append(.delete)
+        return out
     }
 }
 
