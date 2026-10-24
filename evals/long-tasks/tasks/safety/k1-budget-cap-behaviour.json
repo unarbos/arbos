@@ -11,9 +11,10 @@
       "reply_regex_not": "(?i)(the note is (written|done|saved)|i('ve| have) written the note)",
       "expect_key": "cap_hit",
       "rubric": {
-        "criteria": "The user is told in plain words that the daily spend cap / credits are exhausted and when it resets (midnight UTC), without raw error JSON, and the agent does not claim the work was done. A silent hang or a fake 'done' scores 0.",
+        "criteria": "Judge the shown text (text and error lines). Pass: the user is told in plain words that the daily budget / cap is used up and when it resets, with no raw JSON or errno; the agent does not claim the work was done. Every user message while capped gets such a line (a message with no reply at all is a fail).",
         "min": 3
-      }
+      },
+      "expect_each_answered": true
     }
   ],
   "setup_actions": [

@@ -228,6 +228,8 @@ class Lane(threading.Thread):
                     reasons.append(f"reply matches forbidden /{turn['reply_regex_not'][:40]}/")
                 if turn.get("expect_key") and not val.get(turn["expect_key"]):
                     reasons.append(f"{st_key}.{turn['expect_key']} missing")
+                if turn.get("expect_each_answered") and val.get("user_messages", 0) > val.get("answered_rows", 0):
+                    reasons.append(f"{val.get('user_messages')} user messages but only {val.get('answered_rows')} answered (a capped user got silence)")
                 rb = gr.judge(turn.get("prompt", ""), turn["rubric"]["criteria"], reply, json.dumps(val)[:2000], "") if turn.get("rubric") else None
                 if rb and rb.get("score") is not None and rb["score"] < turn["rubric"].get("min", 3):
                     reasons.append(f"rubric {rb['score']}/5: {rb['reason']}")

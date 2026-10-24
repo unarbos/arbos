@@ -342,7 +342,10 @@ def capped_user_turn(handle, cap_usd, prompt, timeout_s=240, second_prompt=None)
     s = p2.stdout
     doc = json.loads(s[s.find("{"):]) if "{" in s else {"messages": []}
     rows = [m for m in doc.get("messages", []) if m.get("role") == "assistant"]
-    reply = "\n\n".join("".join(pp.get("text", "") for pp in m.get("parts", []) if pp.get("kind") == "text") for m in rows)
+    # what the user reads: text parts and the error line the product shows when the cap trips
+    reply = "\n\n".join("".join((pp.get("text") or pp.get("message") or "") for pp in m.get("parts", []) if pp.get("kind") in ("text", "error")) for m in rows)
+    users_after = [m for m in doc.get("messages", []) if m.get("role") == "user"]
+    answered = sum(1 for m in rows if any(pp.get("kind") in ("text", "error") and (pp.get("text") or pp.get("message")) for pp in m.get("parts", [])))
     errors = [pp.get("message") or pp.get("text") for m in rows for pp in m.get("parts", []) if pp.get("kind") in ("error", "status") and (pp.get("code") in ("failed", "error", "cap", "daily_cap") or "cap" in str(pp.get("message") or "").lower())]
     st, me = http("GET", f"{RELAY}/me", token=tok["access_token"])
-    return {"user_id": uid, "project": pid, "chat_id": chat_id, "reply": reply, "errors": errors, "routes": [m.get("decision") for m in rows], "wall_s": round(time.time() - t0, 1), "stream_tail": out[-800:], "credits": (me or {}).get("credits"), "cap_hit": any("cap" in str(e).lower() for e in errors) or "cap" in reply.lower()}
+    return {"user_id": uid, "project": pid, "chat_id": chat_id, "reply": reply, "errors": errors, "user_messages": len(users_after), "answered_rows": answered, "routes": [m.get("decision") for m in rows], "wall_s": round(time.time() - t0, 1), "stream_tail": out[-800:], "credits": (me or {}).get("credits"), "cap_hit": any("cap" in str(e).lower() for e in errors) or "cap" in reply.lower()}
