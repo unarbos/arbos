@@ -31,13 +31,17 @@ Code: `sidebar.rs` module docs and `strip_controls()` (pinned by
 `strip_tests::the_strip_holds_exactly_search_plus_collapse`); the right pane's
 shared layout is `profiles/pane.rs` (`layout()` + every kind's `TABS`).
 
-## Chat-list top strip (approved mock 2026-10-24, [feedback sidebar-strip-filter-2026-10-24]; sized to Grok Bot [feedback search-palette-2026-10-24])
+## Chat-list top strip (approved mock 2026-10-24, [feedback sidebar-strip-filter-2026-10-24]; sized to Grok Bot [feedback search-palette-2026-10-24]; placed like Grok Bot [feedback topbar-grok-parity-2026-10-24])
 
-Points at 1×; the Mac draws at 2 px/pt.
+Points at 1×; the Mac draws at 2 px/pt. Vertical numbers are from the
+window's top edge.
 
 | Item | Value |
 |---|---|
-| Strip height | 44 (`HEADER_HEIGHT`), controls centred on the traffic lights' line (20.75) |
+| Strip height | **60** (`HEADER_HEIGHT` = 2 × `CONTROL_LINE`); the chat header and the right pane's header are the same band |
+| Traffic lights | macOS's own, at `TRAFFIC_LIGHT_POSITION` 15 / 15: 14 pt discs centred **22** from the top (position + 7, measured), 23 apart — Grok's spot (was 14 / 21) |
+| Discs' line | centred **30** (`CONTROL_LINE`): disc top 12, bottom 48 — Grok's; 8 pt under the lights' line (they are not one line in Grok either; Jacob's "too high" was the discs centred at 21 in a 44 band) |
+| Under the strip | the filter capsules start at **64** (`FILTER_TOP` 4 after the 60 strip) — where Grok's first chat card starts, 16 under the discs; the capsule row ends at 104 (`FILTER_BOTTOM` 8) |
 | Buttons, left to right | search · + · collapse — three round discs, right-aligned |
 | Disc | **36** (`STRIP_BUTTON` = `theme::CONTROL`), fill `surface_2`, glyph in `text` |
 | Glyphs | `CONTROL_GLYPH` 19 for search and + (visible marks 14.3 / 12.7 at a 1.6 stroke); `CONTROL_GLYPH_WIDE` 17 for the collapse rect (visible box 14.2) |
@@ -52,14 +56,21 @@ The sidebar's three discs, the folded-sidebar toggle in the chat header **and
 the chat header's pill** (avatar + name, every chat kind) are one family at
 Grok Bot's size: all `theme::CONTROL` = 36 tall (`header::metrics::PILL_HEIGHT`
 = `CONTROL`, picture `AVATAR_HEADER` = `CONTROL − 8` = 28, pill and toggle
-centred on the same line, `PILL_TOP` = 3). Pinned by
-`sidebar::strip_tests::the_three_discs_are_groks_size` and
+centred on the same line, `PILL_TOP` = 12 = Grok's disc top). Pinned by
+`sidebar::strip_tests::the_three_discs_are_groks_size`,
+`sidebar::strip_tests::the_strip_is_groks_height_and_the_discs_sit_on_groks_line`,
+`sidebar::strip_tests::the_discs_and_the_filter_land_on_groks_pixels` and
 `header::tests::every_kind_has_the_same_bar_height_and_pill_position`.
 
 Measured on `media/feedback/search-palette/ref-grok-round-search-plus.png`
-(project store, 2 px/pt): disc 72 px, glyph stroke 3 px, magnifier box 28 px,
-plus box 26 px, 16 px between discs, disc fill `#1F1F1F` on `#0E0E0E`, glyph
-`#E0E0E0`. The before shot (v0.6.206) had 64 px discs 20 px apart.
+(project store, 2 px/pt, window top at image row 2): disc 72 px, glyph stroke
+3 px, magnifier box 28 px, plus box 26 px, 16 px between discs, disc fill
+`#1F1F1F` on `#0E0E0E`, glyph `#E0E0E0`; discs at rows 24–96 px (12–48 pt),
+lights at rows 32–59 px (centre 22 pt, red at x 30–57 px → left edge 15),
+first chat card at row 130 px (64 pt). The before shots: v0.6.206 had 64 px
+discs 20 px apart; v0.6.212–0.6.214 had the right discs centred at 21 pt
+(top 3) in a 44 pt band with the filter capsules at 50 — 9 pt too high
+against Grok, Jacob's "the top bar on mac is now too high".
 
 ## Command palette ([feedback search-palette-2026-10-24], Grok Bot's)
 
@@ -113,8 +124,9 @@ Server rows draw their picture as a rounded square (corner 11/36 of the size,
 **Chat header: one centred pill (avatar + name) for every chat kind — #1130/#1336;
 tester preference does not override.** The pill sits on the chat column's
 centre line at the button family's size ([feedback search-palette-2026-10-24],
-Jacob 13:52): **36 tall** (`PILL_HEIGHT` = `CONTROL`), its top 3 pt under the
-window edge so it shares the sidebar toggle's line, picture **28**
+Jacob 13:52): **36 tall** (`PILL_HEIGHT` = `CONTROL`), its top **12** pt under
+the window edge so it shares the sidebar discs' line (`CONTROL_LINE` 30, in
+the 60 pt band — [feedback topbar-grok-parity-2026-10-24]), picture **28**
 (`AVATAR_HEADER` = `CONTROL − 8`), name 13 pt semibold (`TEXT_SMALL`); the only other things
 in the bar are the sidebar expand disc (folded sidebar) and the connection
 capsule under the pill. #1493 moved it top-left on a tester's "personal
@@ -163,22 +175,26 @@ does not re-create the window of bubbles (#1645; first-scrollable after open
 Code: `MessageActions.swift` `messageRowGestures`, `Transcript.swift` `RowView`,
 `AppModel.swift` `requestSnapshot` / `applySnapshot`.
 
-## Full screen (Jacob 2026-10-24, [feedback fullscreen-traffic-lights-2026-10-24])
+## Full screen (Jacob 2026-10-24, [feedback fullscreen-traffic-lights-2026-10-24] → [feedback topbar-grok-parity-2026-10-24])
 
-Native full screen looks like Chrome's: the window just grows to the screen.
+**The traffic lights are macOS's own standard window buttons, always. The
+app never draws, imitates or re-parents them** (Jacob, 18:3x UTC: "this
+should be real mac os feature not custom buttons"; private-API tricks such
+as Chrome's `NSThemeFrame` overrides count as custom).
 
 | Item | Rule |
 |---|---|
-| Traffic lights | Stay visible, top left, on the strip's line (centre 21 pt from the top, close at x 14 — the windowed position) |
-| Strip and filter | Exactly where they are in windowed mode: no band above, no layout jump |
-| Hover at the top edge | macOS still slides its own title bar in with the menu bar; that is the system's, we add nothing |
+| Windowed | The real buttons at `TRAFFIC_LIGHT_POSITION` (centre 22 from the top, Grok's spot) |
+| Full screen | Stock macOS: the window grows to the screen, the lights hide with the title bar and come back — real buttons, in macOS's own bar — when the pointer reaches the top edge |
+| Strip and filter | Exactly where they are in windowed mode: no band above, no layout jump (`top_strip(true) == top_strip(false)`, pinned by `sidebar::strip_tests::full_screen_adds_no_band_above_the_strip`) |
 
-macOS hides a full-screen window's real buttons and shows them only in that
-slide-in bar, so in full screen the shell paints its own three lights
-(`ui/traffic_lights.rs`, `LightsGeometry`) in the 72 pt the strip already
-keeps clear for them (`TRAFFIC_LIGHTS_INSET`), wired to close / leave full
-screen (minimise is disabled in full screen, as AppKit disables it). Pinned by
-`traffic_lights::tests` (`full_screen_adds_no_band_above_the_strip`).
+v0.6.213 painted three lights of its own in full screen (`ui/traffic_lights.rs`,
+#1637); they changed shape and glyphs against the real ones and were removed
+on Jacob's ask. Supported AppKit has no way to keep the real buttons on
+screen in full screen: an `NSToolbar` keeps the title bar on screen but the
+buttons in it at alpha 0, an `NSTitlebarAccessoryViewController` shows its
+own view there but not the buttons, and the AppKit-owned alpha / view tree is
+reset on every reveal (the #1637 probes, `media/feedback/fullscreen-traffic-lights/appkit-probes/`).
 
 ## Delete is immediate — no confirm (Jacob 2026-10-24, [feedback remove-delete-confirms-2026-10-24])
 

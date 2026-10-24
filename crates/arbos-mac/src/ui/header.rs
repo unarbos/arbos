@@ -251,7 +251,7 @@ pub fn render(
 /// relay down > reconnecting > syncing > restart soon), nothing when it is
 /// fine. It replaced the full-width "Reconnecting…" strip and the composer's
 /// "messages queue locally" line. It is an absolute child of the pill slot,
-/// so it takes no room in `bar_frame`: the bar stays 44 pt, the pill stays at
+/// so it takes no room in `bar_frame`: the bar keeps `metrics::HEIGHT`, the pill stays at
 /// `metrics::PILL_TOP`, the drag catchment and the fade band are unchanged,
 /// and it floats over the list like the bar itself.
 fn with_link_pill(pill: Stateful<Div>, shell: &Shell, cx: &mut Context<Shell>) -> AnyElement {
@@ -366,11 +366,13 @@ fn sidebar_toggle(shell: &Shell, theme: &Theme, cx: &mut Context<Shell>) -> Stat
 /// Geometry every chat header shares — one number each, read by the tests.
 pub mod metrics {
     use crate::ui::theme::{CONTROL, HEADER_HEIGHT};
-    /// The bar: Grok's 44 pt.
+    /// The bar: the top band shared with the sidebar strip (Grok Bot's 60 —
+    /// the family's discs centred at 30; [feedback topbar-grok-parity-2026-10-24],
+    /// was 44 with a 2 pt bottom pad to sit on the lights' line).
     pub const HEIGHT: f32 = HEADER_HEIGHT;
-    /// The bar's content box is centred on the traffic lights' line (20.75 pt
-    /// in this window): 2 pt off the bottom.
-    pub const BOTTOM_PAD: f32 = 2.0;
+    /// The bar's content box is the whole bar: the pill is centred on
+    /// `CONTROL_LINE`, not on the traffic lights' line any more.
+    pub const BOTTOM_PAD: f32 = 0.0;
     /// The pill is as tall as the sidebar's collapse / search discs — one
     /// button family at Grok Bot's size (Jacob 2026-10-24, [feedback
     /// search-palette-2026-10-24]; was 34 with its top 7 pt under the window
@@ -379,7 +381,7 @@ pub mod metrics {
     /// header-pill-restore-2026-10-24] after #1493 moved it top-left.
     pub const PILL_HEIGHT: f32 = CONTROL;
     /// The pill shares the sidebar toggle's line: both are centred in the
-    /// bar's content box (3 pt from the top at 44 / 2 / 36).
+    /// bar's content box (12 pt from the top at 60 / 0 / 36 — Grok's disc top).
     pub const PILL_TOP: f32 = (HEIGHT - BOTTOM_PAD - PILL_HEIGHT) / 2.0;
     /// Top margin inside the bar that lands the pill at `PILL_TOP`. The bar
     /// packs from the top (`items_start`): a centred cross-axis would drop the
@@ -398,9 +400,9 @@ pub mod metrics {
     pub const LINK_PILL_GAP: f32 = 3.0;
 }
 
-/// The frame of every chat header — agent, DM, group, server channel: 44 pt,
-/// equal side slots (the sidebar toggle left when the sidebar is hidden), the
-/// pill centred with its top 7 pt under the window edge, the whole bar a
+/// The frame of every chat header — agent, DM, group, server channel: the top
+/// band (`metrics::HEIGHT`), equal side slots (the sidebar toggle left when the
+/// sidebar is hidden), the pill centred on the family's line, the whole bar a
 /// window-drag region (the pill and the toggle stop the drag themselves). The
 /// list runs under it and fades (`metrics::FADE_BAND`), so there is no hairline.
 pub(crate) fn bar_frame(left: Option<AnyElement>, pill: AnyElement) -> Div {
@@ -1287,7 +1289,8 @@ mod header_tests {
         assert_eq!(overhang, 24.0);
         // One button family (Jacob 2026-10-24): the pill is a CONTROL tall,
         // like the strip discs and the sidebar toggle, and sits on their line —
-        // centred in the bar's content box (44 − 2 pad − 36) / 2 = 3.
+        // centred in the bar's content box (60 − 0 pad − 36) / 2 = 12, Grok's
+        // disc top ([feedback topbar-grok-parity-2026-10-24]).
         assert_eq!(pill_h, CONTROL, "pill height is the button family's");
         assert_eq!(pill_h, crate::ui::sidebar::STRIP_BUTTON);
         assert_eq!(
@@ -1296,6 +1299,12 @@ mod header_tests {
             "the pill is centred on the toggle's line"
         );
         assert!(pill_top + pill_h <= height - metrics::BOTTOM_PAD);
+        assert_eq!(pill_top, 12.0, "Grok's disc top");
+        assert_eq!(
+            pill_top + pill_h / 2.0,
+            crate::ui::theme::CONTROL_LINE,
+            "the pill is centred on the family's line"
+        );
         assert_eq!(AVATAR_HEADER, CONTROL - 8.0, "picture 4 pt inside the pill");
     }
 }

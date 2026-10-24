@@ -57,12 +57,27 @@ impl SidebarWidth {
         );
     }
 }
-/// The conversation header (the centred title pill) — also the window-drag
-/// catchment at the top of the chat pane. Grok Mac, measured on the real app
-/// (ref 57, 2 px/pt): the hairline sits at 44 pt and the title row is centred
-/// at 22 pt, on the traffic lights' line. The doubling to 88 (#1226) made the
-/// header itself too big ([feedback mac-header-height-grok]).
-pub const HEADER_HEIGHT: f32 = 44.0;
+/// Where GPUI puts the close button's frame (`traffic_light_position`, x and
+/// y from the window's top-left). macOS 26 draws a 14 pt disc in that frame,
+/// so the lights are centred `TRAFFIC_LIGHT_POSITION + 7` pt from the top and
+/// follow at a 23 pt pitch. Grok Bot's lights: red disc at x 30–57 / y 32–59
+/// px on `ref-grok-round-search-plus.png` (2 px/pt, window top at row 2) —
+/// left edge 15, centre 22. We were at 14 / 21 ([feedback
+/// topbar-grok-parity-2026-10-24]).
+pub const TRAFFIC_LIGHT_POSITION: f32 = 15.0;
+/// The button family's centre line, from the window's top edge: Grok Bot's
+/// round discs are centred 60 px = **30 pt** under it (same shot: disc rows
+/// 24–96 px → top 12, bottom 48), 8 pt below the lights' line. Jacob
+/// (2026-10-24): "the top bar on mac is now too high" — ours were centred at
+/// 21, in a 44 band ([feedback topbar-grok-parity-2026-10-24]).
+pub const CONTROL_LINE: f32 = 30.0;
+/// The top band of every pane — the sidebar's strip, the chat header (the
+/// centred title pill, also the window-drag catchment) and the right pane's
+/// header: the button family centred on [`CONTROL_LINE`], so twice it. Grok's
+/// first chat card starts at 64; the sidebar filter row fills the 4 between.
+/// History: 44 from Grok's older title row (ref 57: hairline at 44, title at
+/// 22); the doubling to 88 (#1226) was too big ([feedback mac-header-height-grok]).
+pub const HEADER_HEIGHT: f32 = 2.0 * CONTROL_LINE;
 pub const TAB_BAR_HEIGHT: f32 = HEADER_HEIGHT;
 /// Composer: one pill with the "+" circle inside left and mic / send inside right.
 pub const COMPOSER_WIDTH: f32 = 820.0;
