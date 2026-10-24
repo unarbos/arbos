@@ -1069,8 +1069,10 @@ struct RowView: View, Equatable {
     private var bubble: some View {
         switch row.kind {
         case .user(let text, let pending, let quote):
-            HStack {
-                Spacer(minLength: 0)
+            // My bubble: its delivery state is its opacity (pending < sent < seen), a
+            // failed one is full with a red mark on its outer edge; no caption
+            // (Jacob, 2026-10-24, feedback sent-state-opacity-2026-10-24).
+            DeliveryFade(model: model, chatId: chatId, messageId: row.messageId, pending: pending) {
                 VStack(alignment: .leading, spacing: 6) {
                     if let quote {
                         quoteHeader(quote, color: theme.userText)
@@ -1088,7 +1090,6 @@ struct RowView: View, Equatable {
                 .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleUser))
                 .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: true) }
                 .frame(maxWidth: maxBubble, alignment: .trailing)
-                .opacity(pending ? 0.6 : 1)
             }
         case .other(let text, let handle, let avatar, let named, let quote):
             let openPerson = { model.openPersonProfile(handle: handle, avatarUrl: avatar, chatId: chatId) }
@@ -1527,15 +1528,93 @@ struct BlockView: View {
                 .padding(10)
             }
             .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.bg.opacity(0.6)))
-        case .code(_, let code):
+        case .code(let lang, let code):
+            CodeCard(lang: lang, code: code)
+        }
+    }
+}
+
+/// A fenced ``` block: the language and a Copy pill in the header (the Mac's
+/// code card), the mono body under it. Copy puts the block on the pasteboard,
+/// tints while pressed and reads "Copied" for 1.5 s (Jacob 2026-10-24: the
+/// Mac pill showed no click effect; the iPhone card had no Copy at all).
+struct CodeCard: View {
+    @Environment(\.theme) private var theme
+    let lang: String
+    let code: String
+    /// Screenshot rig (`ARBOS_RIG_CODE_COPY=pressed|copied`): the simulator
+    /// cannot hold a touch through a capture, and "Copied" lasts 1.5 s.
+    private static let rig = ProcessInfo.processInfo.environment["ARBOS_RIG_CODE_COPY"]
+    @State private var copied = CodeCard.rig == "copied"
+
+    static let copiedFor: Duration = .seconds(1.5)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text(lang.isEmpty ? "code" : lang)
+                    .font(theme.font(Theme.tiny))
+                    .foregroundStyle(theme.muted)
+                Spacer(minLength: 8)
+                Button {
+                    UIPasteboard.general.string = code
+                    Haptics.pick()
+                    copied = true
+                    Task { @MainActor in
+                        try? await Task.sleep(for: Self.copiedFor)
+                        copied = false
+                    }
+                } label: {
+                    HStack(spacing: 3) {
+                        if copied {
+                            Image(systemName: "checkmark").font(theme.font(11, weight: .semibold))
+                        }
+                        Text(copied ? "Copied" : "Copy")
+                            .font(theme.font(Theme.tiny, weight: .medium))
+                    }
+                    .foregroundStyle(copied ? theme.online : theme.muted)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(copied ? theme.online.opacity(0.14) : .clear)
+                    )
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(CopyPillPress(tint: theme.accent, forced: CodeCard.rig == "pressed"))
+                .accessibilityLabel(copied ? "Copied" : "Copy code")
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .overlay(alignment: .bottom) { Rectangle().fill(theme.separator).frame(height: 0.5) }
             ScrollView(.horizontal, showsIndicators: false) {
                 Text(code)
                     .font(theme.font(14, design: .monospaced))
                     .foregroundStyle(theme.text)
                     .padding(10)
             }
-            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.bg.opacity(0.6)))
         }
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.bg.opacity(0.6)))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
+/// The Copy pill while the finger is down: the chips' pressed tint (Mac
+/// `mention::PILL_ALPHA_PRESSED`, accent at 30 %) and the label in the accent.
+struct CopyPillPress: ButtonStyle {
+    let tint: Color
+    var forced = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        let pressed = configuration.isPressed || forced
+        configuration.label
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(pressed ? tint.opacity(0.30) : .clear)
+            )
+            .foregroundStyle(pressed ? tint : Color.primary)
+            .scaleEffect(pressed ? 0.96 : 1.0)
+            .animation(.easeOut(duration: 0.12), value: pressed)
     }
 }
 
@@ -1547,6 +1626,100 @@ private extension View {
             Rectangle().fill(color.opacity(0.7)).frame(width: 2)
         }
         .clipShape(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous))
+    }
+}
+
+/// Where one of my own bubbles is on its way. No caption says it (Jacob,
+/// 2026-10-24: "remove these 'sent' items, just use coloring"): the bubble's
+/// opacity does — the same values as the Mac (`transcript.rs` `Delivery`,
+/// docs/mac-design-rules.md § Own-bubble delivery).
+enum Delivery: Equatable {
+    /// Not yet acknowledged by the relay.
+    case pending
+    /// The relay refused it: full opacity plus a red mark.
+    case failed
+    /// Acknowledged, nobody has opened past it yet.
+    case sent
+    /// A peer's read watermark covers it, or an agent answered after it.
+    case seen
+
+    /// Whole-bubble alpha. 0.72 keeps white text at 4.9 : 1 (dark) / 7.7 : 1 (light) on
+    /// its fill while the bubble reads clearly lighter than a seen one; pending sits lower.
+    static let sentAlpha: CGFloat = 0.72
+    static let pendingAlpha: CGFloat = 0.5
+
+    var opacity: CGFloat {
+        switch self {
+        case .pending: return Delivery.pendingAlpha
+        case .sent: return Delivery.sentAlpha
+        case .failed, .seen: return 1
+        }
+    }
+
+    /// `receipts`: peer handle → newest message id that peer has opened past (presence `seen`).
+    /// Seen when any watermark is at or after `message`, or an agent / project answered after it.
+    static func of(_ message: Message, in messages: [Message], receipts: [String: Id]) -> Delivery {
+        if message.pending { return .pending }
+        if message.status == .error { return .failed }
+        guard let ix = messages.lastIndex(where: { $0.id == message.id }) else { return .sent }
+        for seenId in receipts.values {
+            if seenId == message.id { return .seen }
+            if let six = messages.lastIndex(where: { $0.id == seenId }), six >= ix { return .seen }
+        }
+        if messages[(ix + 1)...].contains(where: { $0.role == .assistant || $0.role == .project }) { return .seen }
+        return .sent
+    }
+}
+
+/// Peers' read watermarks per people chat (presence `seen`, the Mac's `message_receipts`).
+/// Observed only by [`DeliveryFade`] on my own bubbles, like [`SenderAccents`], so a presence
+/// tick never invalidates every row.
+final class ReadReceipts: ObservableObject {
+    static let shared = ReadReceipts()
+
+    /// chat id → peer handle → newest message id that peer has opened past.
+    @Published private(set) var seen: [Id: [String: Id]] = [:]
+
+    func note(_ header: [String: Any], chatId: Id) {
+        guard let handle = header["handle"] as? String, !handle.isEmpty,
+              let id = header["seen"] as? String, !id.isEmpty else { return }
+        if seen[chatId]?[handle] == id { return }
+        seen[chatId, default: [:]][handle] = id
+    }
+
+    func clear() { seen = [:] }
+}
+
+/// My bubble at its delivery opacity, with the red mark beside a failed one.
+private struct DeliveryFade<Content: View>: View {
+    @ObservedObject private var receipts = ReadReceipts.shared
+    let model: AppModel
+    let chatId: Id
+    let messageId: Id
+    let pending: Bool
+    @ViewBuilder let content: () -> Content
+
+    private var delivery: Delivery {
+        if pending { return .pending }
+        let list = model.messages[chatId] ?? []
+        guard let message = list.last(where: { $0.id == messageId }) else { return .seen }
+        return Delivery.of(message, in: list, receipts: receipts.seen[chatId] ?? [:])
+    }
+
+    var body: some View {
+        let state = delivery
+        HStack(spacing: 8) {
+            Spacer(minLength: 0)
+            if state == .failed {
+                Image(systemName: "exclamationmark.circle.fill")
+                    .font(.system(size: 16))
+                    .foregroundStyle(.red)
+                    .accessibilityLabel("Not sent")
+            }
+            content()
+                .opacity(state.opacity)
+                .accessibilityIdentifier("own-bubble-\(state)")
+        }
     }
 }
 

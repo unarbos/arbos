@@ -1012,6 +1012,14 @@ private struct ChatSession: View {
                             composerFocused = true
                         }
                         #endif
+                    case "code-block":
+                        // Rig: a finished reply with a fenced ```rust block, for the code
+                        // card's Copy pill shots (fixture only).
+                        #if DEBUG
+                        if model.isFixture {
+                            model.fixtureAppendAssistant(chatId: chatId, text: AppModel.codeReply)
+                        }
+                        #endif
                     case "agent-message", "agent-message-received":
                         // Rig: agent-to-agent messaging rows (fixture only) — the sender's
                         // hand-off + confirm + relayed reply, or the receiver's labelled row.

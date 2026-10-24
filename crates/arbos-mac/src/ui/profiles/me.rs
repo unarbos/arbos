@@ -585,9 +585,9 @@ impl Shell {
                 .child(group)
                 .child(footnote(
                 "A banner with the sender's picture when an agent finishes or a person writes, \
-                     only while you are not looking. Read receipts show sent/seen on your \
-                     messages and tell others when you open theirs — turn them off to stop \
-                     sending and seeing that mark."
+                     only while you are not looking. Read receipts keep your bubbles lighter \
+                     until the other side has opened them, and tell others when you open \
+                     theirs — turn them off to stop sending and seeing that."
                     .into(),
                 &theme,
             ))

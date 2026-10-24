@@ -7690,13 +7690,16 @@ impl AppState {
     }
 
     fn request_thumbnails_for(&mut self, chat_id: &Id, messages: &[Message]) {
-        let project_id = self
+        // Only the chat's own space: guessing `selected_project` for a background
+        // upsert (or a chat not yet in the map) hits the wrong blob slot → HTTP 404
+        // and a weekly `mac:thumbnail:* http 404` diagnostic. Snapshot / open retries
+        // once the chat is listed.
+        let Some(project_id) = self
             .chats
             .iter()
             .find(|(_, tabs)| tabs.iter().any(|c| &c.id == chat_id))
             .map(|(pid, _)| pid.clone())
-            .or_else(|| self.selected_project.clone());
-        let Some(project_id) = project_id else {
+        else {
             return;
         };
         for message in messages {
