@@ -89,16 +89,27 @@ Esc, a click outside, or opening a row closes it. Send Feedback moved from
 | Shortcut badge | ⌘1–⌘9 on the first nine rows: 27 × 19, radius 6, 8 from the row's right edge |
 | Keys | ↑↓ move the highlight (`ComposerInput::on_arrow`), ⏎ opens, ⌘1–9 open that row, Esc closes |
 
-Results (`crate::palette`, matching through #1477's `search` module — display
-name, @handle, title, member, message; case and diacritics folded): **People &
-agents** (DM or agent by name) → **Chats** (groups; member, chat-title and
-message hits with the reason as subtitle) → **Servers & channels** (a server
-and each matching channel as its own row) → **Files, media & links** (every
-attachment and `http(s)` link in loaded chats, "Kind · size · who in where").
-Newest first inside a section, name hits before indirect ones, 8 per section.
-Empty query: **Recent** — chats and servers by activity, no files — with the
-⌘ badges. Rig hooks: `ARBOS_SEARCH=<text>`, `ARBOS_PALETTE=1`,
-`ARBOS_PALETTE_SELECT=<n>`.
+Results are **app-wide whatever chat is open** ([feedback
+search-palette-app-wide-2026-10-24], Jacob): `crate::palette`, matching through
+#1477's `search` module (display name, @handle, title, member, chat title; case
+and diacritics folded) plus the local **`crate::search_index`** — every chat doc
+on this Mac (agent chats, DMs, groups, server channels) indexed as it arrives
+and re-indexed on every snapshot, upsert and channel page: message text,
+attachments (name + title) and `http(s)` links, folded once and scanned in
+memory on each keystroke, never a relay round trip.
+
+**People & agents** (DMs and agents by name; people met in a group, a shared
+project or the directory who have no DM yet — opening one starts the DM) →
+**Chats** (groups; member and chat-title hits with the reason as subtitle) →
+**Servers & channels** (a server and each matching channel as its own row) →
+**Messages** (message text anywhere; row = the chat's name over "who · …snippet…";
+opening it jumps to the message in its chat or channel) → **Files, media &
+links** ("Kind · size · who in where"). Inside a section: a name that starts
+with the query, then one that contains it, then indirect hits; newest first;
+8 per section. Empty query: **Recent** — chats and servers by activity, no
+files or messages — with the ⌘ badges. Rig hooks: `ARBOS_SEARCH=<text>`,
+`ARBOS_PALETTE=1`, `ARBOS_PALETTE_SELECT=<n>`, `ARBOS_PALETTE_OPEN=1` (open
+the highlighted row once the rows are there).
 
 ## Chat-list filter (the iPhone home's `PaneTabs`)
 

@@ -27,6 +27,7 @@ use crate::model::{
 };
 use crate::palette;
 use crate::search;
+use crate::search_index::{self, SearchIndex};
 use crate::sign_in;
 use crate::sync::{ClientCommand, SyncEvent, SyncSource};
 use crate::ui::notify::{self, Gate, Notifier, NotifyEvent, NotifyKind};
@@ -455,6 +456,10 @@ pub struct AppState {
     pub blobs: HashMap<String, BlobView>,
     /// Decoded inline thumbnails of image attachments, by blob key (F10).
     pub thumbnails: HashMap<String, Arc<RenderImage>>,
+    /// The command palette's local index over every chat doc on this Mac
+    /// ([feedback search-palette-app-wide-2026-10-24]); kept current on each
+    /// snapshot, upsert and channel page.
+    pub search_index: SearchIndex,
     /// The same pictures with a uniform border trimmed (a screenshot's white
     /// page margin), for the chat's picture bubbles; absent when nothing to trim.
     pub thumbnails_trimmed: HashMap<String, Arc<RenderImage>>,
@@ -846,6 +851,7 @@ impl AppState {
             chat_ui: HashMap::new(),
             blobs: HashMap::new(),
             thumbnails: HashMap::new(),
+            search_index: SearchIndex::default(),
             thumbnails_trimmed: HashMap::new(),
             thumbnails_requested: HashSet::new(),
             thumbnails_failed: HashSet::new(),
@@ -1458,6 +1464,8 @@ impl AppState {
                 }
                 if let Some(msgs) = self.messages.remove(&local_id) {
                     self.messages.insert(chat.id.clone(), msgs);
+                    self.search_index.remove_chat(&local_id);
+                    self.index_chat(&chat.id.clone());
                 }
                 if let Some(ui) = self.chat_ui.remove(&local_id) {
                     self.chat_ui.insert(chat.id.clone(), ui);
@@ -2062,6 +2070,7 @@ impl AppState {
                     .cloned()
                     .collect();
                 self.messages.insert(chat_id.clone(), messages);
+                self.index_chat(&chat_id);
                 // Message counts decide an agent's primary chat (single-chat mode).
                 if let Some(project_id) = self.project_of_chat(&chat_id).map(|p| p.id.clone()) {
                     self.enforce_tab(&project_id);
@@ -2123,6 +2132,7 @@ impl AppState {
                         list.push(message.clone());
                     }
                 }
+                self.index_message(&chat_id, &message);
                 self.notify_for_message(
                     &chat_id,
                     &message,
@@ -2840,29 +2850,98 @@ impl AppState {
     }
 
     /// Everything the command palette can find for `query` (already
-    /// `search::normalize_query`'d; empty = recents): chat rows through the
-    /// #1477 matcher, servers and their channels by name, and the files,
-    /// pictures and links shared in loaded chats ([feedback
-    /// search-palette-2026-10-24]). Ordering and grouping is `palette::arrange`.
+    /// `search::normalize_query`'d; empty = recents), app-wide whatever chat is
+    /// open ([feedback search-palette-2026-10-24], [feedback
+    /// search-palette-app-wide-2026-10-24]): every chat row through the #1477
+    /// matcher (name, @handle, title, member, chat title — never a message
+    /// here), people met in groups and shared projects who have no DM yet,
+    /// servers and their channels by name, and — from the local
+    /// [`SearchIndex`] — message text, attachments and links in every chat
+    /// doc on this Mac. Ordering and grouping is `palette::arrange`.
     pub fn palette_entries(&self, query: &str) -> Vec<palette::Entry> {
-        use crate::palette::{Entry, Kind, Target};
+        use crate::palette::{Entry, Kind, Rank, Target};
+        let me = self.me_handle();
         let mut out = Vec::new();
         for space in &self.projects {
-            let Some(hit) = self.space_search_hit(space, query) else {
+            let Some(hit) = search::space_hit(
+                space,
+                &me,
+                self.tabs(&space.id)
+                    .iter()
+                    .filter(|c| !c.is_system)
+                    .map(|c| (c.id.as_str(), c.title.as_str())),
+                Vec::new,
+                query,
+            ) else {
                 continue;
             };
             let when = crate::ui::sidebar::last_activity(self, space);
             out.push(palette::space_entry(space, hit, when, query));
         }
+        if !query.is_empty() {
+            // People without a DM: members of my groups and shared projects,
+            // the other side's owner, the last directory search. Opening one
+            // starts the DM (`start_dm`).
+            let dm_handles: HashSet<String> = self
+                .people_spaces()
+                .filter(|p| !p.is_people_group())
+                .filter_map(|p| p.person().map(|x| x.handle.clone()))
+                .collect();
+            let mut seen: HashSet<String> = HashSet::new();
+            let mut met: Vec<(Person, String)> = Vec::new();
+            for space in &self.projects {
+                let where_ = space.name.clone();
+                for p in space.people.iter().chain(space.owner_person.iter()) {
+                    if p.handle.is_empty() || p.handle == me || dm_handles.contains(&p.handle) {
+                        continue;
+                    }
+                    if seen.insert(p.handle.clone()) {
+                        met.push((p.clone(), where_.clone()));
+                    }
+                }
+            }
+            for p in &self.people_results {
+                if p.handle.is_empty() || p.handle == me || dm_handles.contains(&p.handle) {
+                    continue;
+                }
+                if seen.insert(p.handle.clone()) {
+                    met.push((p.clone(), String::new()));
+                }
+            }
+            for (p, where_) in met {
+                let name = p.display_name();
+                let rank = Rank::best([name.as_str(), p.handle.as_str()], query);
+                if rank == Rank::Indirect {
+                    continue;
+                }
+                let mut subtitle = format!("@{}", p.handle);
+                if !where_.is_empty() {
+                    subtitle.push_str(&format!(" · in {where_}"));
+                }
+                out.push(Entry {
+                    kind: Kind::Person,
+                    title: name,
+                    subtitle,
+                    when: 0,
+                    rank,
+                    target: Target::Person(p.handle.clone()),
+                });
+            }
+        }
         for server in &self.servers {
             let when = self.server_last_activity(server);
-            if query.is_empty() || search::fold(&server.name).contains(query) {
+            let rank = if query.is_empty() {
+                Rank::Prefix
+            } else {
+                Rank::of(&server.name, query)
+            };
+            if rank != Rank::Indirect {
                 out.push(Entry {
                     kind: Kind::Server,
                     title: server.name.clone(),
                     subtitle: palette::server_subtitle(server.channels.len(), server.member_count),
                     when,
-                    indirect: false,
+                    rank,
                     target: Target::Server(server.id.clone()),
                 });
             }
@@ -2870,7 +2949,8 @@ impl AppState {
                 continue;
             }
             for channel in &server.channels {
-                if !search::fold(&channel.name).contains(query) {
+                let rank = Rank::of(&channel.name, query);
+                if rank == Rank::Indirect {
                     continue;
                 }
                 let when = self
@@ -2883,7 +2963,7 @@ impl AppState {
                     title: format!("#{}", channel.name),
                     subtitle: server.name.clone(),
                     when,
-                    indirect: false,
+                    rank,
                     target: Target::Channel {
                         server_id: server.id.clone(),
                         channel_id: channel.id.clone(),
@@ -2894,91 +2974,128 @@ impl AppState {
         if query.is_empty() {
             return out;
         }
-        for space in &self.projects {
-            for chat in self.tabs(&space.id) {
-                for m in self.messages_of(&chat.id) {
-                    let by = m
-                        .sender_name
-                        .clone()
-                        .filter(|n| !n.is_empty())
-                        .or_else(|| m.sender_handle.clone().map(|h| format!("@{h}")))
-                        .unwrap_or_else(|| {
-                            if self.is_mine(m) {
-                                "You".into()
-                            } else {
-                                space.name.clone()
-                            }
-                        });
-                    let where_ = if space.is_people() {
-                        if let Some(p) = space.person().filter(|_| !space.is_people_group()) {
-                            p.display_name()
-                        } else {
-                            space.name.clone()
-                        }
-                    } else {
-                        space.name.clone()
-                    };
-                    for part in &m.parts {
-                        match part {
-                            Part::Attachment { id, attachment } => {
-                                let name = attachment.title();
-                                if !search::fold(name).contains(query)
-                                    && !search::fold(&attachment.name).contains(query)
-                                {
-                                    continue;
-                                }
-                                let kind = match attachment.kind() {
-                                    AttachmentKind::Image | AttachmentKind::Video => Kind::Media,
-                                    _ => Kind::File,
-                                };
-                                let mut meta = attachment.kind().label().to_string();
-                                let size = attachment.size_label();
-                                if !size.is_empty() {
-                                    meta.push_str(" · ");
-                                    meta.push_str(&size);
-                                }
-                                out.push(Entry {
-                                    kind,
-                                    title: name.to_string(),
-                                    subtitle: format!("{meta} · {by} in {where_}"),
-                                    when: m.created_at,
-                                    indirect: false,
-                                    target: Target::Media {
-                                        chat_id: chat.id.clone(),
-                                        message_id: m.id.clone(),
-                                        part_id: id.clone(),
-                                    },
-                                });
-                            }
-                            Part::Text { text, .. } => {
-                                for url in crate::ui::profiles::urls_in(text) {
-                                    if !search::fold(&url).contains(query) {
-                                        continue;
-                                    }
-                                    out.push(Entry {
-                                        kind: Kind::Link,
-                                        title: url
-                                            .trim_start_matches("https://")
-                                            .trim_start_matches("http://")
-                                            .to_string(),
-                                        subtitle: format!(
-                                            "{} · {by} in {where_}",
-                                            palette::link_host(&url)
-                                        ),
-                                        when: m.created_at,
-                                        indirect: false,
-                                        target: Target::Link(url),
-                                    });
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
+        // Message text, attachments and links from the local index. A hit's
+        // chat is an agent / people chat (by chat id) or a channel (by room id).
+        let cap = palette::SECTION_CAP * 2;
+        for hit in self.search_index.messages(query, cap) {
+            let Some((title, target)) = self.palette_place(&hit.chat_id, &hit.message_id) else {
+                continue;
+            };
+            out.push(Entry {
+                kind: Kind::Message,
+                title,
+                subtitle: format!("{} · {}", hit.sender, hit.snippet),
+                when: hit.created_at,
+                rank: Rank::Contains,
+                target,
+            });
+        }
+        for hit in self.search_index.attachments(query, cap) {
+            let Some((where_, _)) = self.palette_place(&hit.chat_id, &hit.message_id) else {
+                continue;
+            };
+            let kind = match hit.kind {
+                AttachmentKind::Image | AttachmentKind::Video => Kind::Media,
+                _ => Kind::File,
+            };
+            let mut meta = hit.kind.label().to_string();
+            if !hit.size_label.is_empty() {
+                meta.push_str(" · ");
+                meta.push_str(&hit.size_label);
+            }
+            out.push(Entry {
+                kind,
+                title: hit.name,
+                subtitle: format!("{meta} · {} in {where_}", hit.sender),
+                when: hit.created_at,
+                rank: Rank::Contains,
+                target: Target::Media {
+                    chat_id: hit.chat_id,
+                    message_id: hit.message_id,
+                    part_id: hit.part_id,
+                },
+            });
+        }
+        for hit in self.search_index.links(query, cap) {
+            let Some((where_, _)) = self.palette_place(&hit.chat_id, &hit.message_id) else {
+                continue;
+            };
+            out.push(Entry {
+                kind: Kind::Link,
+                title: hit
+                    .url
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .to_string(),
+                subtitle: format!(
+                    "{} · {} in {where_}",
+                    palette::link_host(&hit.url),
+                    hit.sender
+                ),
+                when: hit.created_at,
+                rank: Rank::Contains,
+                target: Target::Link(hit.url),
+            });
+        }
+        out
+    }
+
+    /// Where an indexed message lives, for the palette: the chat's display
+    /// name (the person for a DM, the agent / group otherwise, `#channel ·
+    /// Server` for a channel room) and the target that opens it there.
+    fn palette_place(&self, chat_id: &str, message_id: &str) -> Option<(String, palette::Target)> {
+        use crate::palette::Target;
+        if let Some(space) = self.project_of_chat(chat_id) {
+            let name = match space
+                .person()
+                .filter(|_| space.is_people() && !space.is_people_group())
+            {
+                Some(p) => p.display_name(),
+                None => space.name.clone(),
+            };
+            return Some((
+                name,
+                Target::Message {
+                    space_id: space.id.clone(),
+                    chat_id: chat_id.to_string(),
+                    message_id: message_id.to_string(),
+                },
+            ));
+        }
+        for server in &self.servers {
+            for channel in &server.channels {
+                let room = channel
+                    .room_id
+                    .clone()
+                    .or_else(|| self.channel_row(channel).map(|r| r.room_id.clone()));
+                if room.as_deref() == Some(chat_id) {
+                    return Some((
+                        format!("#{} · {}", channel.name, server.name),
+                        Target::ChannelMessage {
+                            server_id: server.id.clone(),
+                            channel_id: channel.id.clone(),
+                            message_id: message_id.to_string(),
+                        },
+                    ));
                 }
             }
         }
-        out.dedup_by(|a, b| a.kind == Kind::Link && b.kind == Kind::Link && a.target == b.target);
-        out
+        None
+    }
+
+    /// Re-index one chat doc for the palette (a snapshot, a channel page).
+    fn index_chat(&mut self, chat_id: &str) {
+        let mut index = std::mem::take(&mut self.search_index);
+        let messages = self.messages_of(chat_id);
+        index.replace_chat(chat_id, messages, self);
+        self.search_index = index;
+    }
+
+    /// Re-index one message for the palette (an upsert, a streaming delta).
+    fn index_message(&mut self, chat_id: &str, message: &Message) {
+        let mut index = std::mem::take(&mut self.search_index);
+        index.upsert(chat_id, message, self);
+        self.search_index = index;
     }
 
     /// Open what a palette row points at ([feedback search-palette-2026-10-24]).
@@ -3005,6 +3122,25 @@ impl AppState {
                 self.open_server = Some(server_id.clone());
                 self.select_channel(server_id, channel_id, cx);
             }
+            Target::ChannelMessage {
+                server_id,
+                channel_id,
+                message_id,
+            } => {
+                self.open_server = Some(server_id.clone());
+                self.select_channel(server_id.clone(), channel_id.clone(), cx);
+                if let Some(room) = self
+                    .server(&server_id)
+                    .and_then(|s| s.channel(&channel_id))
+                    .and_then(|c| self.room_of_channel(c))
+                {
+                    self.highlight_message = Some(message_id.clone());
+                    self.reveal_message = Some((room, message_id));
+                    self.reveal_nonce += 1;
+                    cx.notify();
+                }
+            }
+            Target::Person(handle) => self.start_dm(handle, cx),
             Target::Media {
                 chat_id,
                 message_id,
@@ -4340,6 +4476,7 @@ impl AppState {
         }
         let count = decoded.len();
         self.channel_rows.insert(room_id.clone(), decoded);
+        self.index_chat(&room_id);
         // A full first page means there is more above: fetch one more page so the room opens
         // with a comfortable scrollback (one extra page per session; the rest on demand later).
         if count >= CHANNEL_PAGE && self.channel_paged.insert(room_id.clone()) {
@@ -7171,6 +7308,7 @@ impl AppState {
             self.selected_project = None;
         }
         self.messages.remove(&chat_id);
+        self.search_index.remove_chat(&chat_id);
         self.chat_ui.remove(&chat_id);
         self.chats.remove(&chat_id);
         self.archived_chats.remove(&chat_id);
@@ -7394,6 +7532,7 @@ impl AppState {
         if let Some(tabs) = self.chats.remove(&project_id) {
             for c in tabs {
                 self.messages.remove(&c.id);
+                self.search_index.remove_chat(&c.id);
                 self.chat_ui.remove(&c.id);
                 self.archived_chats.remove(&c.id);
             }
@@ -7415,6 +7554,7 @@ impl AppState {
             self.selected_project = None;
         }
         self.messages.remove(&chat_id);
+        self.search_index.remove_chat(&chat_id);
         self.chat_ui.remove(&chat_id);
         self.chats.remove(&chat_id);
         self.archived_chats.remove(&chat_id);
@@ -7445,6 +7585,7 @@ impl AppState {
             tabs.retain(|c| c.id != chat_id);
         }
         self.messages.remove(&chat_id);
+        self.search_index.remove_chat(&chat_id);
         self.chat_ui.remove(&chat_id);
         if self.active_tab.get(&project_id) == Some(&chat_id) {
             let pick = self
@@ -9482,5 +9623,11 @@ mod forward_filter_tests {
         );
         assert_eq!(names(&filter_forward_targets(all(), "agent")), ["Arbos"]);
         assert!(filter_forward_targets(all(), "zzz").is_empty());
+    }
+}
+
+impl search_index::SenderName for AppState {
+    fn sender_name(&self, _chat_id: &str, message: &Message) -> String {
+        self.viewer_sender_name(message)
     }
 }

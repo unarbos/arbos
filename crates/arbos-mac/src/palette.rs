@@ -6,11 +6,16 @@
 //! ([`crate::search`]) stays the matcher for chat rows; this module decides
 //! what the rows are, how they group and in what order they come.
 //!
-//! Sections, top to bottom: **People & agents** (a DM or agent found by its
-//! name / handle), **Chats** (groups, a member, a chat title, a message),
-//! **Servers & channels**, **Files, media & links**. Inside a section newest
-//! activity first. With no query the palette shows **Recent** — every chat
-//! and server by activity — and the first nine rows carry ⌘1–⌘9, like Grok's.
+//! Sections, top to bottom: **People & agents** (a DM, a person met in a group
+//! or a shared project, an agent — found by name / handle), **Chats** (groups;
+//! a member, a chat title), **Servers & channels**, **Messages** (message text
+//! anywhere on this Mac, from the `crate::search_index`; a row jumps to the
+//! message in its chat), **Files, media & links**. Inside a section: a name
+//! that starts with the query, then one that contains it, then indirect hits,
+//! newest activity first. With no query the palette shows **Recent** — every
+//! chat and server by activity — and the first nine rows carry ⌘1–⌘9, like
+//! Grok's. App-wide whatever chat is open ([feedback
+//! search-palette-app-wide-2026-10-24]).
 
 use crate::model::{Id, Project};
 use crate::search::{HitKind, SearchHit};
@@ -23,6 +28,8 @@ pub enum Kind {
     Group,
     Server,
     Channel,
+    /// A message whose text matched (any chat or channel).
+    Message,
     Media,
     File,
     Link,
@@ -35,18 +42,62 @@ pub enum Section {
     People,
     Chats,
     Servers,
+    Messages,
     Content,
 }
 
 impl Section {
+    pub const WITH_QUERY: [Section; 5] = [
+        Section::People,
+        Section::Chats,
+        Section::Servers,
+        Section::Messages,
+        Section::Content,
+    ];
+
     pub fn label(self) -> &'static str {
         match self {
             Section::Recent => "Recent",
             Section::People => "People & agents",
             Section::Chats => "Chats",
             Section::Servers => "Servers & channels",
+            Section::Messages => "Messages",
             Section::Content => "Files, media & links",
         }
+    }
+}
+
+/// How well a row's own name matched: decides the order inside a section.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Rank {
+    /// The name (or handle) starts with the query.
+    Prefix,
+    /// The name contains the query.
+    Contains,
+    /// Something other than the name matched: a member, a chat title.
+    Indirect,
+}
+
+impl Rank {
+    /// Rank a name against the folded query.
+    pub fn of(name: &str, q: &str) -> Rank {
+        let folded = crate::search::fold(name);
+        if folded.starts_with(q) {
+            Rank::Prefix
+        } else if folded.contains(q) {
+            Rank::Contains
+        } else {
+            Rank::Indirect
+        }
+    }
+
+    /// The best of several names (display name and @handle).
+    pub fn best<'a>(names: impl IntoIterator<Item = &'a str>, q: &str) -> Rank {
+        names
+            .into_iter()
+            .map(|n| Rank::of(n, q))
+            .min()
+            .unwrap_or(Rank::Indirect)
     }
 }
 
@@ -65,6 +116,14 @@ pub enum Target {
     Server(Id),
     /// Open one channel of a server.
     Channel { server_id: Id, channel_id: Id },
+    /// Open one channel scrolled to a message.
+    ChannelMessage {
+        server_id: Id,
+        channel_id: Id,
+        message_id: Id,
+    },
+    /// Start (or open) the DM with a person met in a group or a shared project.
+    Person(String),
     /// Open a picture / video / file in the media viewer.
     Media {
         chat_id: Id,
@@ -83,20 +142,21 @@ pub struct Entry {
     pub subtitle: String,
     /// Newest activity (ms); orders rows inside a section.
     pub when: u64,
-    /// Whether the row matched by something other than its own name — a
-    /// member, a chat title, a message. Name hits come first in a section.
-    pub indirect: bool,
+    /// How the row matched: by its name (prefix / contains) or indirectly (a
+    /// member, a chat title). Name hits come first in a section.
+    pub rank: Rank,
     pub target: Target,
 }
 
 impl Entry {
     /// Which section this row lists under when a query is typed.
     pub fn section(&self) -> Section {
-        match (self.kind, self.indirect) {
-            (Kind::Agent | Kind::Person, false) => Section::People,
-            (Kind::Agent | Kind::Person, true) => Section::Chats,
+        match (self.kind, self.rank) {
+            (Kind::Agent | Kind::Person, Rank::Indirect) => Section::Chats,
+            (Kind::Agent | Kind::Person, _) => Section::People,
             (Kind::Group, _) => Section::Chats,
             (Kind::Server | Kind::Channel, _) => Section::Servers,
+            (Kind::Message, _) => Section::Messages,
             (Kind::Media | Kind::File | Kind::Link, _) => Section::Content,
         }
     }
@@ -128,11 +188,21 @@ pub fn space_entry(space: &Project, hit: SearchHit, when: u64, query: &str) -> E
             .filter(|d| !d.trim().is_empty())
             .unwrap_or_else(|| "Agent".into()),
     };
-    let indirect = (!query.is_empty() && matches!(hit.kind, HitKind::Member | HitKind::Message))
+    let rank = if query.is_empty() {
+        Rank::Prefix
+    } else if matches!(hit.kind, HitKind::Member | HitKind::Message)
         || hit
             .reason
             .as_deref()
-            .is_some_and(|r| r.starts_with("Chat · "));
+            .is_some_and(|r| r.starts_with("Chat · "))
+    {
+        Rank::Indirect
+    } else {
+        match person {
+            Some(p) => Rank::best([p.display_name().as_str(), p.handle.as_str()], query),
+            None => Rank::of(&space.name, query),
+        }
+    };
     let target = match &hit.message {
         Some((chat_id, message_id)) => Target::Message {
             space_id: space.id.clone(),
@@ -146,7 +216,7 @@ pub fn space_entry(space: &Project, hit: SearchHit, when: u64, query: &str) -> E
         title,
         subtitle: hit.reason.unwrap_or(own_line),
         when,
-        indirect,
+        rank,
         target,
     }
 }
@@ -168,7 +238,7 @@ pub fn arrange(mut entries: Vec<Entry>, query_is_empty: bool) -> Vec<(Section, V
             matches!(
                 e.kind,
                 Kind::Agent | Kind::Person | Kind::Group | Kind::Server
-            )
+            ) && !matches!(e.target, Target::Person(_))
         });
         entries.sort_by_key(|e| std::cmp::Reverse(e.when));
         entries.truncate(RECENT_CAP);
@@ -179,12 +249,7 @@ pub fn arrange(mut entries: Vec<Entry>, query_is_empty: bool) -> Vec<(Section, V
         };
     }
     let mut out: Vec<(Section, Vec<Entry>)> = Vec::new();
-    for section in [
-        Section::People,
-        Section::Chats,
-        Section::Servers,
-        Section::Content,
-    ] {
+    for section in Section::WITH_QUERY {
         let mut rows: Vec<Entry> = entries
             .iter()
             .filter(|e| e.section() == section)
@@ -193,7 +258,7 @@ pub fn arrange(mut entries: Vec<Entry>, query_is_empty: bool) -> Vec<(Section, V
         if rows.is_empty() {
             continue;
         }
-        rows.sort_by_key(|e| (e.indirect, std::cmp::Reverse(e.when)));
+        rows.sort_by_key(|e| (e.rank, std::cmp::Reverse(e.when)));
         rows.truncate(SECTION_CAP);
         out.push((section, rows));
     }
@@ -287,7 +352,11 @@ mod tests {
             title: title.into(),
             subtitle: String::new(),
             when,
-            indirect,
+            rank: if indirect {
+                Rank::Indirect
+            } else {
+                Rank::Contains
+            },
             target: Target::Space(format!("id-{title}")),
         }
     }
@@ -319,6 +388,20 @@ mod tests {
                 target: Target::Link("https://www.github.com/unarbos/arbos".into()),
                 ..entry(Kind::Link, "github.com/unarbos/arbos", 20, false)
             },
+            // A message-text hit from a chat that is not open: its own section.
+            Entry {
+                target: Target::Message {
+                    space_id: "g".into(),
+                    chat_id: "c".into(),
+                    message_id: "m9".into(),
+                },
+                ..entry(Kind::Message, "Arbonites", 85, false)
+            },
+            // A person met in a group, no DM yet: People, opens a DM.
+            Entry {
+                target: Target::Person("dawizzaa".into()),
+                ..entry(Kind::Person, "@DaWizzaa", 15, false)
+            },
         ]
     }
 
@@ -334,6 +417,7 @@ mod tests {
                 Section::People,
                 Section::Chats,
                 Section::Servers,
+                Section::Messages,
                 Section::Content
             ]
         );
@@ -344,8 +428,9 @@ mod tests {
                 .map(|(_, rows)| rows.iter().map(|r| r.title.clone()).collect())
                 .unwrap_or_default()
         };
-        assert_eq!(titles(Section::People), ["Arbos", "Carro"]);
+        assert_eq!(titles(Section::People), ["Arbos", "Carro", "@DaWizzaa"]);
         assert_eq!(titles(Section::Chats), ["Testing", "Sam"]);
+        assert_eq!(titles(Section::Messages), ["Arbonites"]);
         assert_eq!(titles(Section::Servers), ["#general", "Launch Crew"]);
         assert_eq!(
             titles(Section::Content),
@@ -359,8 +444,8 @@ mod tests {
             .any(|e| matches!(e.target, Target::Media { .. })));
     }
 
-    /// Empty query: recent chats and servers by activity, no files or links,
-    /// ⌘1–⌘9 on the first nine rows and nothing after.
+    /// Empty query: recent chats and servers by activity — no files, links,
+    /// messages or DM-less people —, ⌘1–⌘9 on the first nine rows and nothing after.
     #[test]
     fn the_empty_query_shows_recents_with_shortcuts() {
         let arranged = arrange(fixture(), true);
@@ -440,7 +525,7 @@ mod tests {
         assert_eq!(entry.kind, Kind::Person);
         assert_eq!(entry.title, "Carro");
         assert_eq!(entry.subtitle, "@robertalanm");
-        assert!(!entry.indirect);
+        assert_eq!(entry.rank, Rank::Prefix, "\"carro\" starts the name");
         assert_eq!(entry.section(), Section::People);
         assert_eq!(entry.target, Target::Space("dm-1".into()));
 
@@ -457,7 +542,7 @@ mod tests {
             .expect("found by member");
         let entry = space_entry(&testing, hit, 9, &q);
         assert_eq!(entry.kind, Kind::Group);
-        assert!(entry.indirect);
+        assert_eq!(entry.rank, Rank::Indirect);
         assert_eq!(entry.section(), Section::Chats);
         assert_eq!(entry.subtitle, "Member · Carro @robertalanm");
 
@@ -492,7 +577,30 @@ mod tests {
         // No query: a plain recent row, never indirect.
         let hit = space_hit(&testing, "jacob", Vec::<(&str, &str)>::new(), Vec::new, "")
             .expect("everything matches the empty query");
-        assert!(!space_entry(&testing, hit, 1, "").indirect);
+        assert_eq!(space_entry(&testing, hit, 1, "").rank, Rank::Prefix);
+    }
+
+    /// Rank per type (Jacob): a name that starts with the query beats one
+    /// that merely contains it, whatever their age; indirect hits last.
+    #[test]
+    fn prefix_beats_contains_beats_indirect() {
+        assert_eq!(Rank::of("Scout", "sc"), Rank::Prefix);
+        assert_eq!(Rank::of("Affinity Scout", "sc"), Rank::Contains);
+        assert_eq!(Rank::of("Doug", "sc"), Rank::Indirect);
+        assert_eq!(Rank::best(["Carro", "robertalanm"], "rob"), Rank::Prefix);
+        let rows = vec![
+            Entry {
+                rank: Rank::Contains,
+                ..entry(Kind::Agent, "Affinity Scout", 99, false)
+            },
+            Entry {
+                rank: Rank::Prefix,
+                ..entry(Kind::Agent, "Scout", 1, false)
+            },
+        ];
+        let arranged = arrange(rows, false);
+        let titles: Vec<&str> = arranged[0].1.iter().map(|r| r.title.as_str()).collect();
+        assert_eq!(titles, ["Scout", "Affinity Scout"]);
     }
 
     #[test]
