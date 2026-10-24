@@ -1264,6 +1264,19 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
                     let _ = shared.events.send(SyncEvent::CallStarted { call, sender });
                 }
             }
+            PushEventDto::SpaceArchived(payload) => {
+                let at = payload.archived_at.filter(|t| *t > 0).map(|t| t as u64);
+                if payload.kind != "server" {
+                    let mut projects = shared.projects.lock().unwrap();
+                    if let Some(p) = projects.iter_mut().find(|p| p.id == payload.space_id) {
+                        p.archived_at = at;
+                    }
+                }
+                let _ = shared.events.send(SyncEvent::SpaceArchived {
+                    space_id: payload.space_id.clone(),
+                    archived_at: at,
+                });
+            }
             PushEventDto::ChatArchived(payload) => {
                 let chat_id = payload.chat_id.clone();
                 if chat_id.is_empty() {
@@ -5651,6 +5664,37 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .await
                 {
                     shared.notice(format!("Rename: {err:#}"));
+                }
+            });
+        }
+        ClientCommand::ArchiveSpace {
+            space_id,
+            server,
+            archived,
+        } => {
+            // Optimistic in the project cache the next refresh is built from
+            // (servers come straight from `GET /servers`, which carries the flag).
+            if !server {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == space_id) {
+                    p.archived_at = archived.then(now_ms);
+                }
+            }
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let path = if server {
+                    format!("/servers/{space_id}/archive")
+                } else {
+                    format!("/projects/{space_id}/archive")
+                };
+                if let Err(err) = shared
+                    .put_json(&path, json!({ "archived": archived }))
+                    .await
+                {
+                    // Older relay: the Mac keeps its local state until the next refresh.
+                    if !err.to_string().contains("HTTP 404") {
+                        shared.notice(format!("Archive: {}", people_error(&err)));
+                    }
                 }
             });
         }

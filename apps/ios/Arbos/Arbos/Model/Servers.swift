@@ -144,6 +144,8 @@ struct Server: Identifiable, Equatable {
     var invites: [ServerInviteLink] = []
     /// Only from `GET /servers/{id}` / `POST /servers`.
     var members: [ServerMember]
+    /// Per-user sidebar archive (`archived_at` on `GET /servers`); nil = in the list.
+    var archivedAt: Int64? = nil
 
     var isOwner: Bool { myRole == "owner" }
     var isAdmin: Bool { myRole == "owner" || myRole == "admin" }
@@ -181,7 +183,8 @@ struct Server: Identifiable, Equatable {
             isOpen: (d["open"] as? Bool) ?? (d["open"] as? NSNumber)?.boolValue ?? false,
             invite: ServerInvite.parse(d["invite"]),
             invites: ((d["invites"] as? [Any]) ?? []).compactMap(ServerInviteLink.parse),
-            members: ((d["members"] as? [Any]) ?? []).compactMap(ServerMember.parse)
+            members: ((d["members"] as? [Any]) ?? []).compactMap(ServerMember.parse),
+            archivedAt: (d["archived_at"] as? NSNumber)?.int64Value
         )
     }
 }

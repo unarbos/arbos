@@ -190,6 +190,8 @@ struct ChatView: View {
     @State private var pulsePhase = false
     /// The original a quote tap scrolled to; tinted until the fade timer clears it.
     @State private var highlightedMessage: Id?
+    /// The bubble whose long-press actions (reaction capsule + menu) are open.
+    @State private var actionsRow: Row?
     @State private var mentionQuery: String?
     /// Chip-picked addressees in a people chat: `agent:…` and/or `user:…` member ids.
     /// Empty means no chip: agent-only DMs may still infer the last agent; human-peer DMs stay
@@ -463,6 +465,42 @@ struct ChatView: View {
                     .offset(y: -24)
             }
             .background(theme.bg)
+        }
+        .overlayPreferenceValue(RowFrameKey.self) { anchors in
+            GeometryReader { geo in
+                if let row = actionsRow, let anchor = anchors[row.id] {
+                    let frame = geo[anchor]
+                    MessageActionsOverlay(
+                        row: row,
+                        frame: frame,
+                        width: geo.size.width,
+                        height: geo.size.height,
+                        safeTop: geo.safeAreaInsets.top,
+                        safeBottom: geo.safeAreaInsets.bottom,
+                        held: heldReactions(row),
+                        items: MessageMenu.items(
+                            forMessage: true,
+                            canPin: canPinInThisChat,
+                            isPinned: model.isMessagePinned(chatId: chatId, messageId: row.messageId)
+                        ),
+                        onReact: { emoji in
+                            closeActions()
+                            model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: emoji)
+                        },
+                        onMenu: { item in
+                            closeActions()
+                            runMessageMenu(item, row: row)
+                        },
+                        onDismiss: { closeActions() },
+                        bubble: {
+                            RowView(model: model, row: row, chatId: chatId, width: geo.size.width, timeReveal: 0,
+                                    mentions: MentionTable.Cache.shared.table(model: model, theme: theme))
+                                .padding(.horizontal, 16)
+                        }
+                    )
+                }
+            }
+            .ignoresSafeArea()
         }
         .toolbar(.hidden, for: .navigationBar)
         .toolbar(.hidden, for: .tabBar)
@@ -1056,13 +1094,16 @@ struct ChatView: View {
                         highlightedMessage: highlightedMessage,
                         rowsCount: rows.count,
                         messagesCount: messages.count,
-                        canPin: canPinInThisChat,
-                        pinnedMessageId: model.pinnedMessageId(in: chatId),
                         replySwipeActive: $replySwipeActive,
                         canReply: { isMessageRow($0) },
                         onQuoteTap: { revealQuoted($0) },
                         onReply: { beginReply(to: $0) },
                         onMenu: { runMessageMenu($0, row: $1) },
+                        actionsRowId: actionsRow?.id,
+                        onLongPress: { row in
+                            Haptics.pick()
+                            withAnimation(.easeOut(duration: 0.18)) { actionsRow = row }
+                        },
                         gapBefore: { gap(before: $0, in: $1) }
                     )
                     .equatable()
@@ -1263,6 +1304,16 @@ struct ChatView: View {
         .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
         .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
         .padding(.horizontal, 16)
+    }
+
+    private func closeActions() {
+        withAnimation(.easeOut(duration: 0.15)) { actionsRow = nil }
+    }
+
+    /// Emoji I already put on this message (tinted in the capsule).
+    private func heldReactions(_ row: Row) -> Set<String> {
+        guard let me = model.myUserId, let m = messageById[row.messageId] else { return [] }
+        return Set(m.reactions.filter { $0.senders.contains(me) }.map(\.emoji))
     }
 
     /// The long-press menu's actions (`MessageMenu`): Copy the text, Reply
@@ -2278,17 +2329,19 @@ private struct TranscriptRows: View, Equatable {
     let highlightedMessage: Id?
     let rowsCount: Int
     let messagesCount: Int
-    let canPin: Bool
-    let pinnedMessageId: Id?
     var replySwipeActive: Binding<Bool>
     let canReply: (Row) -> Bool
     let onQuoteTap: (Id) -> Void
     let onReply: (Row) -> Void
     let onMenu: (MessageMenuItem, Row) -> Void
+    /// The bubble whose long-press actions are open (it alone reports its frame).
+    let actionsRowId: String?
+    let onLongPress: (Row) -> Void
     let gapBefore: (Int, [Row]) -> CGFloat
 
     static func == (lhs: TranscriptRows, rhs: TranscriptRows) -> Bool {
         lhs.shown == rhs.shown
+            && lhs.actionsRowId == rhs.actionsRowId
             && lhs.chatId == rhs.chatId
             && lhs.width == rhs.width
             && lhs.timeReveal == rhs.timeReveal
@@ -2296,8 +2349,6 @@ private struct TranscriptRows: View, Equatable {
             && lhs.mentions === rhs.mentions
             && lhs.rowsCount == rhs.rowsCount
             && lhs.messagesCount == rhs.messagesCount
-            && lhs.canPin == rhs.canPin
-            && lhs.pinnedMessageId == rhs.pinnedMessageId
     }
 
     var body: some View {
@@ -2318,15 +2369,13 @@ private struct TranscriptRows: View, Equatable {
                         LaunchClock.mark("chat-first-row", detail: "shown=\(shown.count) rows=\(rowsCount) messages=\(messagesCount)")
                     }
                 }
-                .contextMenu {
-                    MessageMenuContent(items: MessageMenu.items(
-                        forMessage: reply,
-                        canPin: canPin,
-                        isPinned: pinnedMessageId == row.messageId
-                    )) { item in
-                        onMenu(item, row)
-                    }
+                // A message bubble: long-press → the reaction capsule + menu overlay
+                // (`MessageActionsOverlay`). Other rows keep the plain Copy menu.
+                .anchorPreference(key: RowFrameKey.self, value: .bounds) { anchor in
+                    actionsRowId == row.id ? [row.id: anchor] : [:]
                 }
+                .messageRowGestures(isMessage: reply, onLongPress: { onLongPress(row) },
+                                    onCopyMenu: { onMenu($0, row) })
         }
     }
 }

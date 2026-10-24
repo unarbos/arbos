@@ -761,11 +761,14 @@ public struct ProjectDto: Codable {
 	public let my_role: String?
 	/// `list_projects` shared rows only; `None` omits, `Some(None)` is JSON null.
 	public let owner_handle: String??
+	/// `list_projects` for a signed-in device only: archived for this user (sidebar row hidden on
+	/// every device; the agent keeps running). `None` omits, `Some(None)` is JSON null.
+	public let archived_at: Int64??
 	/// "Who may message X" (agent-to-agent messaging): other owners' people / agents the
 	/// owner allowed; empty for everyone but the owner's own clients.
 	public let message_grants: [MessageGrantDto]?
 
-	public init(id: String, name: String, icon: String, color: String, instructions: String, avatar: String, avatar_color: String, state: String, box: String, box_since: Int64, spend_today_usd: Double, spend_cap_usd: Double, created_at: Int64, last_active_at: Int64, description: String, voice: String?, vision_enabled: Bool, avatar_color_index: Int64?, avatar_color_index_effective: Int64, avatar_leaf: Int64?, avatar_leaf_color: Int64?, avatar_leaf_effective: Int64?, avatar_leaf_color_effective: Int64?, image_key: String?, primary_chat_id: String?, owner: ProjectOwnerDto, model: String?, machine: MachineDto, shared: Bool?, my_role: String?, owner_handle: String??, message_grants: [MessageGrantDto]?) {
+	public init(id: String, name: String, icon: String, color: String, instructions: String, avatar: String, avatar_color: String, state: String, box: String, box_since: Int64, spend_today_usd: Double, spend_cap_usd: Double, created_at: Int64, last_active_at: Int64, description: String, voice: String?, vision_enabled: Bool, avatar_color_index: Int64?, avatar_color_index_effective: Int64, avatar_leaf: Int64?, avatar_leaf_color: Int64?, avatar_leaf_effective: Int64?, avatar_leaf_color_effective: Int64?, image_key: String?, primary_chat_id: String?, owner: ProjectOwnerDto, model: String?, machine: MachineDto, shared: Bool?, my_role: String?, owner_handle: String??, archived_at: Int64??, message_grants: [MessageGrantDto]?) {
 		self.id = id
 		self.name = name
 		self.icon = icon
@@ -797,6 +800,7 @@ public struct ProjectDto: Codable {
 		self.shared = shared
 		self.my_role = my_role
 		self.owner_handle = owner_handle
+		self.archived_at = archived_at
 		self.message_grants = message_grants
 	}
 }
@@ -2336,6 +2340,21 @@ public struct SkillDto: Codable {
 	}
 }
 
+/// `space_archived` payload: a sidebar space (agent `project` or `server`) archived for this
+/// user on another device (`archived_at` is null when un-archiving).
+public struct SpaceArchivedPayloadDto: Codable {
+	public let space_id: String
+	/// `project` or `server`.
+	public let kind: String
+	public let archived_at: Int64?
+
+	public init(space_id: String, kind: String, archived_at: Int64?) {
+		self.space_id = space_id
+		self.kind = kind
+		self.archived_at = archived_at
+	}
+}
+
 /// `POST …/calls` success: new call (201) or join the live one (200).
 public struct StartCallResponseDto: Codable {
 	public let call: CallDto
@@ -2532,6 +2551,7 @@ public enum PushEventDto: Codable {
 	case peopleProjectShared(PeopleProjectSharedPayloadDto)
 	case projectMemberRemoved(ProjectMemberRemovedPayloadDto)
 	case chatArchived(ChatArchivedPayloadDto)
+	case spaceArchived(SpaceArchivedPayloadDto)
 	case peopleInviteAccepted(PeopleInviteAcceptedPayloadDto)
 	case feedbackCapture(FeedbackCapturePayloadDto)
 	case serverMemberRemoved(ServerMemberRemovedPayloadDto)
@@ -2559,6 +2579,7 @@ public enum PushEventDto: Codable {
 			peopleProjectShared = "people_project_shared",
 			projectMemberRemoved = "project_member_removed",
 			chatArchived = "chat_archived",
+			spaceArchived = "space_archived",
 			peopleInviteAccepted = "people_invite_accepted",
 			feedbackCapture = "feedback_capture",
 			serverMemberRemoved = "server_member_removed",
@@ -2636,6 +2657,11 @@ public enum PushEventDto: Codable {
 			case .chatArchived:
 				if let content = try? container.decode(ChatArchivedPayloadDto.self, forKey: .payload) {
 					self = .chatArchived(content)
+					return
+				}
+			case .spaceArchived:
+				if let content = try? container.decode(SpaceArchivedPayloadDto.self, forKey: .payload) {
+					self = .spaceArchived(content)
 					return
 				}
 			case .peopleInviteAccepted:
@@ -2748,6 +2774,9 @@ public enum PushEventDto: Codable {
 			try container.encode(content, forKey: .payload)
 		case .chatArchived(let content):
 			try container.encode(CodingKeys.chatArchived, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .spaceArchived(let content):
+			try container.encode(CodingKeys.spaceArchived, forKey: .kind)
 			try container.encode(content, forKey: .payload)
 		case .peopleInviteAccepted(let content):
 			try container.encode(CodingKeys.peopleInviteAccepted, forKey: .kind)

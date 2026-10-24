@@ -184,6 +184,7 @@ extension AppModel {
                 if let prev = server(list[i].id) { list[i].members = prev.members }
             }
             servers = list
+            reconcileArchivedServers(list)
             serversAvailable = true
             rememberServersAvailable(true)
             applyOpenServerHook()

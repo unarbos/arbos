@@ -178,6 +178,8 @@ struct PeopleChat: Identifiable, Equatable {
     var lastActivityAt: Int64
     var myRole: String
     var muted: Bool
+    /// Per-user sidebar archive (`archived_at` on the relay); nil = in the list.
+    var archivedAt: Int64? = nil
 
     var humans: [ChatMember] { members.filter { !$0.isAgent } }
     var agents: [ChatMember] { members.filter { $0.isAgent } }
@@ -216,6 +218,7 @@ extension PeopleChat {
         self.lastActivityAt = dto.last_activity_at
         self.myRole = dto.me.role.flatMap { $0 } ?? "member"
         self.muted = dto.me.muted ?? false
+        self.archivedAt = dto.archived_at.flatMap { $0 > 0 ? $0 : nil }
     }
 
     /// Is this person already in the chat? Me (`meId`) counts as in. A handle

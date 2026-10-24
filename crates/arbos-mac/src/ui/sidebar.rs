@@ -269,11 +269,19 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     let open_server_admin = open_server.as_ref().is_some_and(ServerInfo::can_admin);
     let waitlist_position = state.machine.waitlist_position;
 
+    // Sidebar archive (Jacob 2026-10-23): archived spaces leave the list and
+    // sit behind the "Hidden chats · N" footer; a search still finds them.
+    let hidden_mode = shell.hidden_open && query.is_empty();
+    let hidden_count = state.archived_space_count();
+    let shows = |archived: bool| hidden_mode == archived || !query.is_empty();
     let mut rows: Vec<(RowKey, ListEntry)> = Vec::new();
     for s in state.servers.iter() {
         let Some(hit) = search::server_hit(s, &query) else {
             continue;
         };
+        if !shows(s.archived_at.is_some()) {
+            continue;
+        }
         let selected = state.open_server.as_deref() == Some(s.id.as_str())
             || state
                 .selected_channel
@@ -298,6 +306,9 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         let Some(hit) = state.space_search_hit(p, &query) else {
             continue;
         };
+        if !shows(p.archived_at.is_some()) {
+            continue;
+        }
         let streaming = state.project_is_streaming(&p.id);
         // Shared projects badge the disc with the other side; a group is one
         // plain disc (redesign 2026-10-20).
@@ -565,11 +576,76 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
                 .child(format!("Nothing matches “{typed}”.")),
         );
     }
+    if hidden_mode {
+        // "Hidden chats ‹ back": the hidden rows stand in for the list.
+        list = list.child(
+            div()
+                .id("sidebar-hidden-head")
+                .flex()
+                .items_center()
+                .justify_between()
+                .h(px(28.0))
+                .px(px(12.0))
+                .mb(px(4.0))
+                .text_size(px(TEXT_TINY))
+                .text_color(theme.text_muted)
+                .child("Hidden chats")
+                .child(
+                    div()
+                        .id("sidebar-hidden-back")
+                        .cursor_pointer()
+                        .hover(|s| s.text_color(theme.text))
+                        .child("‹ back")
+                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.hidden_open = false;
+                            cx.notify();
+                        })),
+                ),
+        );
+        if rows.is_empty() {
+            list = list.child(
+                div()
+                    .pt(px(40.0))
+                    .text_center()
+                    .text_size(px(TEXT_SMALL))
+                    .text_color(theme.text_muted)
+                    .child("Nothing hidden."),
+            );
+        }
+    }
     for (_, entry) in rows {
         list = match entry {
             ListEntry::Chat(row) => list.child(render_row(*row, shell, &theme, cx)),
             ListEntry::Server(row) => list.child(render_server_row(*row, &theme, cx)),
         };
+    }
+    if !hidden_mode && query.is_empty() && hidden_count > 0 {
+        // Grok Bot's footer: muted "Hidden chats · N ›" under the list.
+        list = list.child(
+            div()
+                .id("sidebar-hidden-footer")
+                .flex()
+                .items_center()
+                .justify_between()
+                .mt(px(8.0))
+                .h(px(32.0))
+                .px(px(12.0))
+                .rounded(px(PANEL_RADIUS - 4.0))
+                .text_size(px(TEXT_SMALL))
+                .text_color(theme.text_muted)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.surface_2))
+                .child(format!("Hidden chats · {hidden_count}"))
+                .child(icon("chevron-right", 12.0, theme.text_faint))
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.hidden_open = true;
+                    this.menu_open = false;
+                    this.row_menu = None;
+                    cx.notify();
+                })),
+        );
     }
 
     // ----- bottom: Update pill (only when a newer build exists) and the account row --
@@ -772,6 +848,8 @@ fn render_server_row(
         time,
     } = row;
     let id: Id = server.id.clone();
+    let menu_id: Id = server.id.clone();
+    let ctrl_menu_id: Id = server.id.clone();
     div()
         .id(ElementId::Name(SharedString::from(format!(
             "row-server-{}",
@@ -796,14 +874,46 @@ fn render_server_row(
             })
         })
         .cursor_pointer()
-        .on_click(cx.listener(move |this, _, window, cx| {
-            this.menu_open = false;
-            this.row_menu = None;
-            this.chat_menu = None;
-            this.state
-                .update(cx, |s, cx| s.enter_server(id.clone(), cx));
-            Composer::focus(&this.composer, window, cx);
-        }))
+        .on_click(
+            cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                if is_control_click(event) {
+                    return;
+                }
+                this.menu_open = false;
+                this.row_menu = None;
+                this.chat_menu = None;
+                this.state
+                    .update(cx, |s, cx| s.enter_server(id.clone(), cx));
+                Composer::focus(&this.composer, window, cx);
+            }),
+        )
+        // Right-click / control-click: Archive (2026-10-23) — the server's own
+        // page holds Leave and Delete.
+        .on_mouse_down(
+            gpui::MouseButton::Right,
+            cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.menu_open = false;
+                this.chat_menu = None;
+                this.row_menu = Some((menu_id.clone(), event.position));
+                this.row_delete_armed = false;
+                cx.notify();
+            }),
+        )
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                if !event.modifiers.control {
+                    return;
+                }
+                cx.stop_propagation();
+                this.menu_open = false;
+                this.chat_menu = None;
+                this.row_menu = Some((ctrl_menu_id.clone(), event.position));
+                this.row_delete_armed = false;
+                cx.notify();
+            }),
+        )
         .child(
             div()
                 .relative()
@@ -1503,6 +1613,39 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     let (space_id, at) = shell.row_menu.clone()?;
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);
+    let archived = state.is_space_archived(&space_id);
+    let archive_row = |theme: &Theme, cx: &mut Context<Shell>| {
+        let id = space_id.clone();
+        glass::menu_row(
+            "row-menu-archive",
+            if archived { "tray-up" } else { "archive" },
+            if archived { "Unarchive" } else { "Archive" },
+            false,
+            theme,
+        )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.row_menu = None;
+            let id = id.clone();
+            this.state
+                .update(cx, |s, cx| s.set_space_archived(id, !archived, cx));
+        }))
+    };
+    // A server row (D88): Archive / Unarchive only — Leave and Delete live on its page.
+    if state.servers.iter().any(|s| s.id == space_id) {
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap(px(1.0))
+            .child(archive_row(&theme, cx));
+        return Some(
+            div()
+                .absolute()
+                .left(at.x)
+                .top(at.y)
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(glass::frosted_menu(200.0, &theme, body)),
+        );
+    }
     let space = state.projects.iter().find(|p| p.id == space_id)?.clone();
     let muted = state.is_muted(&space.id);
     let is_people = space.is_people();
@@ -1625,7 +1768,10 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
 
     let mut body = div().flex().flex_col().gap(px(1.0));
     if is_group {
-        // Mockup f: the group row's menu is "Delete group" and nothing else.
+        // Mockup f: the group row's menu is "Delete group" — plus Archive (2026-10-23).
+        body = body
+            .child(archive_row(&theme, cx))
+            .child(glass::menu_divider(&theme));
         body = body.child(
             glass::menu_row("row-menu-delete", "trash", "Delete group", true, &theme).on_click(
                 cx.listener(|this, _, _, cx| {
@@ -1686,6 +1832,7 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
             ),
         );
     }
+    body = body.child(archive_row(&theme, cx));
     if can_delete {
         body = body.child(glass::menu_divider(&theme));
         body = body.child(

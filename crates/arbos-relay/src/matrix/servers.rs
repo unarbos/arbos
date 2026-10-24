@@ -24,7 +24,7 @@ use std::collections::HashMap;
 
 use arbos_core::api::{
     PushEventDto, ServerDeletedPayloadDto, ServerMemberJoinedPayloadDto,
-    ServerMemberRemovedPayloadDto, ServerUpdatedPayloadDto,
+    ServerMemberRemovedPayloadDto, ServerUpdatedPayloadDto, SpaceArchivedPayloadDto,
 };
 use arbos_core::ids::{now_ms, ulid};
 
@@ -203,6 +203,7 @@ fn server_json(state: &AppState, s: &Server, me: &ServerMember, detail: bool) ->
         "avatar_color_index_effective": crate::avatar::effective_color_index(&s.id, None),
         "avatar_leaf": s.avatar_leaf,
         "avatar_leaf_color": s.avatar_leaf_color,
+        "archived_at": state.db.space_archived_at(&me.user_id, &s.id).ok().flatten(),
     });
     // Invite links are the owner's fallback (Jacob 2026-10-22: demoted; Add members by name is
     // the main way in). Admins no longer see them.
@@ -400,6 +401,42 @@ pub async fn get(
         Ok((s, m)) => Json(server_json(&state, &s, &m, true)).into_response(),
         Err(r) => *r,
     }
+}
+
+#[derive(Deserialize)]
+pub struct SpaceArchiveBody {
+    pub archived: bool,
+}
+
+/// `PUT /servers/{id}/archive {"archived": bool}` — hide (or show again) this server's sidebar
+/// row for me on every device; membership is untouched.
+pub async fn archive(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Json(b): Json<SpaceArchiveBody>,
+) -> Response {
+    let me = match user_of(&principal) {
+        Ok(u) => u,
+        Err(r) => return *r,
+    };
+    if let Err(r) = load(&state, &me, &id) {
+        return *r;
+    }
+    let at = match state.db.set_space_archived(&me, &id, "server", b.archived) {
+        Ok(at) => at,
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    };
+    let _ = state.db.push_user_except_event(
+        &me,
+        &device_of(&principal).unwrap_or_default(),
+        &PushEventDto::SpaceArchived(SpaceArchivedPayloadDto {
+            space_id: id.clone(),
+            kind: "server".into(),
+            archived_at: at,
+        }),
+    );
+    Json(json!({ "id": id, "archived_at": at })).into_response()
 }
 
 #[derive(Deserialize)]

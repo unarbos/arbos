@@ -11,7 +11,7 @@ use arbos_core::api::{
     ChatDto, ChatMeDto, CreateChatResponseDto, CreateProjectResponseDto, CreateProjectRoomsDto,
     CreateProjectSandboxDto, GetProjectResponseDto, HealthDto, HealthProvidersDto, MachineDto,
     MachineImageDto, MachineSpecDto, MachineStateDto, MachineStatusDto, MachineWorkspaceDto,
-    PairResponseDto, ProjectDto, ProjectOwnerDto,
+    PairResponseDto, ProjectDto, ProjectOwnerDto, PushEventDto, SpaceArchivedPayloadDto,
 };
 use arbos_core::auth::{hash, mint, pairing_code, TokenKind};
 use arbos_core::ids::{now_ms, ulid};
@@ -446,10 +446,15 @@ pub async fn list_projects(State(state): State<AppState>, principal: Principal) 
             }
         }
         Principal::Device { user_id, .. } | Principal::Box { user_id } => {
+            let device = matches!(principal, Principal::Device { .. });
             for p in state.db.projects_of_user(user_id).map_err(internal)? {
                 let mut dto = project_dto(&state, &p).await;
                 dto.shared = Some(false);
                 dto.my_role = Some("owner".into());
+                if device {
+                    dto.archived_at =
+                        Some(state.db.space_archived_at(user_id, &p.id).ok().flatten());
+                }
                 // Wire: list overwrites the owner card with the user id string.
                 let mut v = serde_json::to_value(dto).expect("ProjectDto");
                 v["owner"] = json!(p.user_id);
@@ -461,6 +466,8 @@ pub async fn list_projects(State(state): State<AppState>, principal: Principal) 
                         let mut dto = project_dto(&state, &p).await;
                         dto.shared = Some(true);
                         dto.my_role = Some("member".into());
+                        dto.archived_at =
+                            Some(state.db.space_archived_at(user_id, &p.id).ok().flatten());
                         dto.owner_handle = Some(
                             state
                                 .db
@@ -791,6 +798,49 @@ pub async fn patch_project(
 }
 
 #[derive(Deserialize)]
+pub struct ArchiveBody {
+    pub archived: bool,
+}
+
+/// `PUT /projects/{id}/archive {"archived": bool}` — hide (or show again) this agent's sidebar
+/// row for me on every device. Nothing is deleted and the agent keeps running its routines.
+/// Other devices learn through the `space_archived` push.
+pub async fn archive_project(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Json(b): Json<ArchiveBody>,
+) -> ApiResult {
+    let Principal::Device {
+        user_id, id: dev, ..
+    } = &principal
+    else {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "a signed-in device is required".into(),
+        ));
+    };
+    let id = resolve_project_id(&state, &id)?;
+    if !state.allows(&principal, &id) {
+        return Err((StatusCode::FORBIDDEN, "not your project".into()));
+    }
+    let at = state
+        .db
+        .set_space_archived(user_id, &id, "project", b.archived)
+        .map_err(internal)?;
+    let _ = state.db.push_user_except_event(
+        user_id,
+        dev,
+        &PushEventDto::SpaceArchived(SpaceArchivedPayloadDto {
+            space_id: id.clone(),
+            kind: "project".into(),
+            archived_at: at,
+        }),
+    );
+    Ok(Json(json!({ "id": id, "archived_at": at })).into_response())
+}
+
+#[derive(Deserialize)]
 pub struct PatchChatBody {
     pub title: String,
 }
@@ -963,6 +1013,7 @@ pub(crate) async fn project_dto(state: &AppState, p: &Project) -> ProjectDto {
         shared: None,
         my_role: None,
         owner_handle: None,
+        archived_at: None,
         message_grants: crate::agent_messages::grants_dto(state, p).grants,
     }
 }
@@ -2177,6 +2228,60 @@ mod primary_chat_tests {
         )
         .await;
         assert_eq!(missing.err().map(|(s, _)| s), Some(StatusCode::NOT_FOUND));
+    }
+
+    /// Sidebar archive (Jacob 2026-10-23): per user, hides the row, never deletes.
+    #[tokio::test]
+    async fn archive_project_is_per_user_and_reversible() {
+        let state = test_state(AuthMode::Github);
+        let (alice, dev) = person(&state, 1);
+        let (_bob, bob_dev) = person(&state, 2);
+        let project = project_of(&state, &alice, "Bob");
+        let r = archive_project(
+            State(state.clone()),
+            dev.clone(),
+            Path(project.clone()),
+            Json(ArchiveBody { archived: true }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let at = state.db.space_archived_at(&alice, &project).unwrap();
+        assert!(at.is_some());
+        // The project row is still there, flagged for alice only.
+        let listed = list_projects(State(state.clone()), dev.clone())
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(listed.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let row = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == json!(project))
+            .unwrap();
+        assert_eq!(row["archived_at"], json!(at));
+        assert!(state.db.project(&project).unwrap().is_some());
+        // Bob's device cannot touch alice's project; alice unarchives and the flag is gone.
+        let denied = archive_project(
+            State(state.clone()),
+            bob_dev,
+            Path(project.clone()),
+            Json(ArchiveBody { archived: true }),
+        )
+        .await;
+        assert_eq!(denied.err().map(|(s, _)| s), Some(StatusCode::FORBIDDEN));
+        archive_project(
+            State(state.clone()),
+            dev,
+            Path(project.clone()),
+            Json(ArchiveBody { archived: false }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.db.space_archived_at(&alice, &project).unwrap(), None);
     }
 
     #[tokio::test]

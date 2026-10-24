@@ -1964,6 +1964,18 @@ impl AppState {
                 }
                 cx.notify();
             }
+            SyncEvent::SpaceArchived {
+                space_id,
+                archived_at,
+            } => {
+                // Another device archived / unarchived a sidebar space for me.
+                if let Some(p) = self.projects.iter_mut().find(|p| p.id == space_id) {
+                    p.archived_at = archived_at;
+                } else if let Some(s) = self.servers.iter_mut().find(|s| s.id == space_id) {
+                    s.archived_at = archived_at;
+                }
+                cx.notify();
+            }
             SyncEvent::ChatArchived {
                 chat_id,
                 archived_at,
@@ -2025,6 +2037,9 @@ impl AppState {
                     .map(|m| arrival_read(chat_visible, self.is_mine(m), m.role == Role::System))
                     .collect();
                 self.apply_arrival_read(&chat_id, &effects);
+                if effects.contains(&ArrivalRead::MarkUnread) {
+                    self.unarchive_on_activity(&chat_id, cx);
+                }
                 self.request_thumbnails(&chat_id);
                 if self.onboarding.is_some() {
                     self.onboarding_tick(cx);
@@ -2084,6 +2099,9 @@ impl AppState {
                         message.role == Role::System,
                     );
                     self.apply_arrival_read(&chat_id, &[effect]);
+                    if effect == ArrivalRead::MarkUnread {
+                        self.unarchive_on_activity(&chat_id, cx);
+                    }
                 }
                 if text_only && appended > 0 {
                     cx.emit(AppEvent::TranscriptText { chat_id });
@@ -4940,6 +4958,88 @@ impl AppState {
     /// else the local list (projects have no relay-side setting yet).
     pub fn is_muted(&self, space_id: &str) -> bool {
         self.project(space_id).is_some_and(|p| p.muted) || self.muted.contains(space_id)
+    }
+
+    /// Sidebar archive (Jacob 2026-10-23): is this space (agent, people chat
+    /// or server) hidden from my list?
+    pub fn is_space_archived(&self, space_id: &str) -> bool {
+        self.project(space_id)
+            .map(|p| p.archived_at.is_some())
+            .or_else(|| {
+                self.servers
+                    .iter()
+                    .find(|s| s.id == space_id)
+                    .map(|s| s.archived_at.is_some())
+            })
+            .unwrap_or(false)
+    }
+
+    /// Hidden spaces, newest first; what the "Hidden chats · N" footer counts.
+    pub fn archived_space_count(&self) -> usize {
+        self.projects
+            .iter()
+            .filter(|p| p.archived_at.is_some())
+            .count()
+            + self
+                .servers
+                .iter()
+                .filter(|s| s.archived_at.is_some())
+                .count()
+    }
+
+    /// Archive (hide) or unarchive a sidebar space for me, on every device.
+    /// Nothing is deleted; an archived agent keeps running its routines. A
+    /// people chat goes through the chat archive the relay already has.
+    pub fn set_space_archived(&mut self, space_id: Id, archived: bool, cx: &mut Context<Self>) {
+        let at = archived.then(now_ms);
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == space_id) {
+            p.archived_at = at;
+            let people = p.is_people();
+            if archived && self.selected_project.as_deref() == Some(space_id.as_str()) {
+                self.selected_project = None;
+                self.select_next_if_none(cx);
+            }
+            if people {
+                self.command(ClientCommand::ArchiveChat {
+                    chat_id: space_id,
+                    archived,
+                });
+            } else {
+                self.command(ClientCommand::ArchiveSpace {
+                    space_id,
+                    server: false,
+                    archived,
+                });
+            }
+            cx.notify();
+            return;
+        }
+        if let Some(s) = self.servers.iter_mut().find(|s| s.id == space_id) {
+            s.archived_at = at;
+            if archived && self.open_server.as_deref() == Some(space_id.as_str()) {
+                self.open_server = None;
+                self.selected_channel = None;
+                self.select_next_if_none(cx);
+            }
+            self.command(ClientCommand::ArchiveSpace {
+                space_id,
+                server: true,
+                archived,
+            });
+            cx.notify();
+        }
+    }
+
+    /// A hidden space comes back when something new arrives in it (Telegram).
+    fn unarchive_on_activity(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        let Some(space_id) = self
+            .project_of_chat(chat_id)
+            .filter(|p| p.archived_at.is_some())
+            .map(|p| p.id.clone())
+        else {
+            return;
+        };
+        self.set_space_archived(space_id, false, cx);
     }
 
     pub fn toggle_mute(&mut self, space_id: Id, cx: &mut Context<Self>) {

@@ -199,8 +199,11 @@ final class RelayAPI {
                 continue
             }
             let id: String
+            // The per-user archive flag rides on the list only; the detail is shared.
+            var listArchivedAt: Int64? = nil
             if let dto = try? decoder.decode(ProjectDto.self, from: itemData) {
                 id = dto.id
+                listArchivedAt = dto.archived_at.flatMap { $0 }
             } else if let bare = try? decoder.decode(ProjectListId.self, from: itemData) {
                 id = bare.id
             } else {
@@ -230,6 +233,7 @@ final class RelayAPI {
                 continue
             }
             var project = Arbos.Project(dto: detail.project)
+            project.archivedAt = listArchivedAt
             if let key = project.imageKey {
                 project.imageURL = "\(endpoint.httpUrl)/blob/\(id)/\(key)?token=\(token())"
             }
@@ -303,6 +307,16 @@ final class RelayAPI {
     /// Soft-delete an owned agent (`DELETE /projects/{id}`).
     func deleteProject(_ projectId: Id) async throws {
         _ = try await request("DELETE", "/projects/\(projectId)")
+    }
+
+    /// `PUT /projects/{id}/archive {archived}` — this user's sidebar archive, synced across devices.
+    func setProjectArchived(_ projectId: Id, archived: Bool) async throws {
+        _ = try await request("PUT", "/projects/\(projectId)/archive", body: ["archived": archived])
+    }
+
+    /// `PUT /servers/{id}/archive {archived}` — same flag for a server row.
+    func setServerArchived(_ serverId: String, archived: Bool) async throws {
+        _ = try await request("PUT", "/servers/\(serverId)/archive", body: ["archived": archived])
     }
 
     func setModel(projectId: Id, model: String, effort: Effort) async throws {
@@ -1003,11 +1017,12 @@ final class RelayAPI {
         _ = try await request("DELETE", "/chats/\(chatId)/members/\(userId)")
     }
 
-    /// `PUT /chats/{id}/settings {read_receipts?, muted?}` per member.
-    func chatSettings(chatId: String, muted: Bool? = nil, readReceipts: Bool? = nil) async throws {
+    /// `PUT /chats/{id}/settings {read_receipts?, muted?, archived?}` per member.
+    func chatSettings(chatId: String, muted: Bool? = nil, readReceipts: Bool? = nil, archived: Bool? = nil) async throws {
         var body: [String: Any] = [:]
         if let muted { body["muted"] = muted }
         if let readReceipts { body["read_receipts"] = readReceipts }
+        if let archived { body["archived"] = archived }
         _ = try await request("PUT", "/chats/\(chatId)/settings", body: body)
     }
 

@@ -1241,8 +1241,111 @@ class Loop:
             except Exception as e:  # noqa: BLE001
                 log(f"[{fid}] step failed: {e}")
 
+    # ---- feedback freeze (owner switch, 2026-10-24 00:23) -------------------------------------------
+    # `arbos-feedback freeze --allow unarbos,arbos,const` / `unfreeze`. While frozen, only items whose reporter is
+    # on the allow list (or Jacob's own) move: everyone else's queued items are not launched, gating items are
+    # pulled from batching, finished agent runs are parked instead of gated — all as `parked` with the previous
+    # status kept, so `unfreeze` restores them in their original order. Merged items keep shipping. Gate, kill
+    # switch and intent screen are untouched.
+    FREEZE_FILE = "freeze.json"
+
+    def freeze_state(self) -> dict | None:
+        p = self.cfg.state_dir / self.FREEZE_FILE
+        if not p.is_file():
+            return None
+        with contextlib.suppress(Exception):
+            return json.loads(p.read_text())
+        return None
+
+    def freeze_allows(self, fid: str, st: dict, fz: dict) -> bool:
+        allow = {a.lower().lstrip("@") for a in fz.get("allow", []) if a}
+        # Structural exemptions (owner scope, 2026-10-24 00:35): the freeze is for tester-filed reports whose
+        # reporter is not on the allow list. Anything owned by a coordinator worker (`handed_off_to` bc-…; loop
+        # agents are `agent_id`, not owners), anything tracked/registered by the coordinator (`track_commit`,
+        # inbox / track submissions) and anything labelled "Jacob (owner)" is Jacob's and keeps moving.
+        # `freeze_exempt` is the by-hand switch for an item the owner adopted during a freeze (#1510).
+        if st.get("freeze_exempt") or (st.get("tester") or "") == "Jacob (owner)":
+            return True
+        if str(st.get("handed_off_to") or "").startswith("bc-") or st.get("track_commit"):
+            return True
+        with contextlib.suppress(Exception):
+            if self.store.submission(fid).get("source") in ("inbox", "track"):
+                return True
+        keys = {(st.get("tester_key") or "").lower().lstrip("@")}
+        info: dict = {}
+        with contextlib.suppress(Exception):
+            info = self.store.submission(fid)
+        for k in ("handle", "login", "github_login", "user", "reporter", "submitted_by_handle"):
+            if info.get(k):
+                keys.add(str(info[k]).lower().lstrip("@"))
+        if info.get("email"):
+            keys.add(info["email"].lower())
+        keys.discard("")
+        return bool(keys & allow) or "jake@bittensor.com" in keys
+
+    def freeze_park(self, fid: str, st: dict, fz: dict) -> None:
+        st["parked_from"] = st["status"]
+        st["parked_at"] = iso()
+        st["status"] = "parked"
+        self.store.save_state(fid, st)
+        self.store.event(fid, "parked", was=st["parked_from"], freeze_since=fz.get("since"))
+        log(f"[{fid}] parked by the feedback freeze (was {st['parked_from']}; reporter {st.get('tester') or st.get('tester_key') or '?'})")
+        if st.get("issue"):
+            with contextlib.suppress(HttpError):
+                self.gh.ensure_label("frozen", "BFD4F2", "Held by the feedback freeze (owner decision); resumes when the freeze is lifted")
+                self.gh.set_labels(st["issue"], ["frozen"], [])
+
+    def apply_freeze(self) -> int:
+        """Park every queued / gating item of a non-allowed reporter. Runs after the agent checks (a run that
+        just finished and became `gating` is parked here before the batcher sees it) and before the batcher."""
+        fz = self.freeze_state()
+        if not fz:
+            return 0
+        n = 0
+        for fid in self.store.items():
+            st = self.store.state(fid)
+            allowed = self.freeze_allows(fid, st, fz)
+            if st.get("status") in ("queued", "gating") and not allowed:
+                self.freeze_park(fid, st, fz)
+                n += 1
+            elif st.get("status") == "parked" and allowed:
+                # The scope changed (allow list edited, item adopted, owner rule): back to where it was.
+                st["status"] = st.pop("parked_from", "queued")
+                st.pop("parked_at", None)
+                self.store.save_state(fid, st)
+                self.store.event(fid, "unparked", to=st["status"], why="now within the freeze's allow scope")
+                log(f"[{fid}] unparked: within the freeze's allow scope now ({st['status']})")
+                if st.get("issue"):
+                    with contextlib.suppress(HttpError):
+                        self.gh.set_labels(st["issue"], [], ["frozen"])
+        return n
+
+    def lift_freeze(self) -> int:
+        n = 0
+        for fid in self.store.items():
+            st = self.store.state(fid)
+            if st.get("status") != "parked":
+                continue
+            st["status"] = st.pop("parked_from", "queued")
+            st.pop("parked_at", None)
+            self.store.save_state(fid, st)
+            self.store.event(fid, "unparked", to=st["status"])
+            if st.get("issue"):
+                with contextlib.suppress(HttpError):
+                    self.gh.set_labels(st["issue"], [], ["frozen"])
+            n += 1
+        (self.cfg.state_dir / self.FREEZE_FILE).unlink(missing_ok=True)
+        return n
+
     def advance(self, fid: str, st: dict) -> None:
         status = st["status"]
+        if status == "parked":
+            return
+        if status in ("queued", "gating"):
+            fz = self.freeze_state()
+            if fz and not self.freeze_allows(fid, st, fz):
+                self.freeze_park(fid, st, fz)
+                return
         if status == "queued":
             self.launch(fid, st)
         elif status == "running":
@@ -3118,6 +3221,10 @@ class Loop:
         self.intake()
         self.advance_all()
         try:
+            self.apply_freeze()
+        except Exception as e:  # noqa: BLE001
+            log(f"freeze sweep failed: {e}")
+        try:
             self.rust_gate_tick()
         except Exception as e:  # noqa: BLE001
             log(f"Rust gate scheduler failed: {e}")
@@ -3624,6 +3731,15 @@ class Loop:
         print(f"cursor since={cur.get('since')} checked={cur.get('checked')} seen={len(cur.get('seen', []))}")
         print(f"launches today={self.store.launches_today()}/{self.cfg.max_per_day} last={self.store.last_launch()}")
         print(f"kill file: {'PRESENT' if self.cfg.kill_file.exists() else 'absent'} ({self.cfg.kill_file})")
+        fz = self.freeze_state()
+        if fz:
+            parked = [self.store.state(f) for f in self.store.items()]
+            parked = [p for p in parked if p.get("status") == "parked"]
+            by = {}
+            for p in parked:
+                by[p.get("parked_from", "?")] = by.get(p.get("parked_from", "?"), 0) + 1
+            print(f"FEEDBACK FREEZE since {fz.get('since')} (allow: {', '.join(fz.get('allow', []))}); parked {len(parked)}: "
+                  + ", ".join(f"{k} {v}" for k, v in sorted(by.items())) + " — `arbos-feedback unfreeze` lifts it")
         self.print_gate_queue(cur)
         for fid in self.store.items():
             st = self.store.state(fid)
@@ -4114,6 +4230,30 @@ def main(argv: list[str]) -> int:
                     loop.gh.comment(st["issue"], f"Not a failure after all: the fix `{st['commit'][:8]}` is on `main`; the build that carries it was still in the runner queue ({why.rstrip('.')}). Back to tracking the builds.")
                     loop.gh.set_labels(st["issue"], [], ["needs-human"])
             print(f"{fid}: back to pushed")
+        return 0
+    if cmd == "freeze":
+        # `freeze --allow unarbos,arbos,const [--by <who>]`: owner switch — only the listed reporters' items move;
+        # everything else is parked (see apply_freeze). Idempotent; re-running updates the allow list.
+        args = argv[2:]
+        allow = [a.strip() for a in (args[args.index("--allow") + 1] if "--allow" in args else "").split(",") if a.strip()]
+        if not allow:
+            print("freeze needs --allow <reporter,...>"); return 2
+        by = args[args.index("--by") + 1] if "--by" in args else "operator"
+        fz = {"allow": allow, "since": iso(), "by": by}
+        (cfg.state_dir / Loop.FREEZE_FILE).write_text(json.dumps(fz))
+        with (cfg.state_dir / ".lock").open("w") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                print(f"freeze on (allow: {', '.join(allow)}); a tick is in flight — it parks the rest at its next step"); return 0
+            n = loop.apply_freeze()
+        print(f"freeze on (allow: {', '.join(allow)}); parked {n} item(s) now; new reports from other reporters park on intake")
+        return 0
+    if cmd == "unfreeze":
+        with (cfg.state_dir / ".lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            n = loop.lift_freeze()
+        print(f"freeze lifted; {n} item(s) restored to their previous state and order")
         return 0
     if cmd == "gate-note":
         # `gate-note <text>` / `gate-note --clear`: one operator line shown on top of `status`'s gate queue

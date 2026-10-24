@@ -477,8 +477,13 @@ pub const STICK_THRESHOLD_PX: f32 = 70.0;
 /// How far above the end the user must be before the ↓ button shows.
 const JUMP_BUTTON_AFTER_PX: f32 = 160.0;
 
-/// Right-click on a bubble: the shell opens the message menu there.
-/// Hover face-smile: the shell opens the quick-react emoji bar there.
+/// The hover rail's buttons: Grok Mac's 24 pt hit target, 16 pt glyph, 2 pt apart.
+pub const RAIL_BUTTON: f32 = 24.0;
+pub const RAIL_GLYPH: f32 = 16.0;
+pub const RAIL_GAP: f32 = 2.0;
+
+/// Right-click or the rail's ⋯: the shell opens the message menu there.
+/// The rail's smiley: the shell opens the reaction capsule there.
 /// Hover reply: the shell sets the composer's reply target.
 pub enum TranscriptEvent {
     MessageMenu {
@@ -486,8 +491,7 @@ pub enum TranscriptEvent {
         message_id: Id,
         position: gpui::Point<gpui::Pixels>,
     },
-    /// Hover react glyph → the six-emoji bar (`react_menu`).
-    ReactMenu {
+    ReactionCapsule {
         chat_id: Id,
         message_id: Id,
         position: gpui::Point<gpui::Pixels>,
@@ -1108,10 +1112,11 @@ impl Transcript {
             })
     }
 
-    /// Hover-only reply · copy · react glyphs beside a bubble (fade with the
-    /// row). After a successful copy the glyph becomes a checkmark for a
-    /// moment. The face-smile opens the six-emoji bar (`react_menu`).
-    fn hover_reply_copy(
+    /// The hover rail beside a bubble (fades with the row), in Grok's order:
+    /// smiley (the reaction capsule) · reply · ⋯ (the message menu: Copy,
+    /// Reply, Delete). After a copy from the menu the ⋯ shows a checkmark
+    /// for a moment.
+    fn hover_rail(
         &self,
         row_id: &str,
         message_id: &Id,
@@ -1120,17 +1125,16 @@ impl Transcript {
         cx: &mut Context<Self>,
     ) -> Div {
         let chat_id = self.chat_id.clone();
+        let (react_chat, react_msg) = (chat_id.clone(), message_id.clone());
+        let (more_chat, more_msg) = (chat_id.clone(), message_id.clone());
         let reply_msg = message_id.clone();
-        let copy_msg = message_id.clone();
-        let react_chat = self.chat_id.clone();
-        let react_msg = message_id.clone();
         let just_copied = self.copied_feedback.as_ref().is_some_and(|(id, at)| {
             id == message_id && at.elapsed() < Duration::from_millis(COPY_FEEDBACK_MS)
         });
         // Keep the checkmark readable even if the pointer leaves mid-feedback.
-        let copy_opacity = if just_copied { 1.0 } else { opacity };
-        let copy_glyph = if just_copied { "check" } else { "copy" };
-        let copy_color = if just_copied {
+        let more_opacity = if just_copied { 1.0 } else { opacity };
+        let more_glyph = if just_copied { "check" } else { "ellipsis" };
+        let more_color = if just_copied {
             theme.online
         } else {
             theme.text_muted
@@ -1138,7 +1142,7 @@ impl Transcript {
         let btn = |id: SharedString, glyph: &'static str, opacity: f32, color: gpui::Hsla| {
             div()
                 .id(id)
-                .size(px(24.0))
+                .size(px(RAIL_BUTTON))
                 .flex_shrink_0()
                 .flex()
                 .items_center()
@@ -1147,12 +1151,31 @@ impl Transcript {
                 .cursor_pointer()
                 .opacity(opacity)
                 .hover(|s| s.bg(theme.surface_2))
-                .child(icon(glyph, 16.0, color))
+                .child(icon(glyph, RAIL_GLYPH, color))
         };
         div()
             .flex()
             .items_center()
-            .gap(px(2.0))
+            .gap(px(RAIL_GAP))
+            .child(
+                btn(
+                    SharedString::from(format!("{row_id}#react")),
+                    "face-smile",
+                    opacity,
+                    theme.text_muted,
+                )
+                .on_click(cx.listener(
+                    move |_, event: &gpui::ClickEvent, _, cx| {
+                        if let Some(chat_id) = react_chat.clone() {
+                            cx.emit(TranscriptEvent::ReactionCapsule {
+                                chat_id,
+                                message_id: react_msg.clone(),
+                                position: event.position(),
+                            });
+                        }
+                    },
+                )),
+            )
             .child(
                 btn(
                     SharedString::from(format!("{row_id}#reply")),
@@ -1171,26 +1194,17 @@ impl Transcript {
             )
             .child(
                 btn(
-                    SharedString::from(format!("{row_id}#copy")),
-                    copy_glyph,
-                    copy_opacity,
-                    copy_color,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| this.copy_message(&copy_msg, cx))),
-            )
-            .child(
-                btn(
-                    SharedString::from(format!("{row_id}#react")),
-                    "face-smile",
-                    opacity,
-                    theme.text_muted,
+                    SharedString::from(format!("{row_id}#more")),
+                    more_glyph,
+                    more_opacity,
+                    more_color,
                 )
                 .on_click(cx.listener(
                     move |_, event: &gpui::ClickEvent, _, cx| {
-                        if let Some(chat_id) = react_chat.clone() {
-                            cx.emit(TranscriptEvent::ReactMenu {
+                        if let Some(chat_id) = more_chat.clone() {
+                            cx.emit(TranscriptEvent::MessageMenu {
                                 chat_id,
-                                message_id: react_msg.clone(),
+                                message_id: more_msg.clone(),
                                 position: event.position(),
                             });
                         }
@@ -1517,11 +1531,9 @@ impl Transcript {
                 time_el,
             ));
         let (row_el, reveal) = self.hover_row(row_id, now, window, cx);
-        // Hover: reply · copy · react (face-smile opens the emoji bar).
-        let hover_actions = (last && !live).then(|| {
-            let actions = self.hover_reply_copy(row_id, message_id, reveal, theme, cx);
-            div().flex().items_center().gap(px(2.0)).child(actions)
-        });
+        // Hover: the rail (smiley · reply · ⋯) on the last block of a finished reply.
+        let hover_actions =
+            (last && !live).then(|| self.hover_rail(row_id, message_id, reveal, theme, cx));
         // Messages for Mac: the bubble's time shows beside the glyph on hover
         // (1:1 chats; a group / channel bubble already carries it after the text).
         let hover_time = (last && !live && !inline_time)
@@ -1709,7 +1721,7 @@ impl Transcript {
                         .child({
                             let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
                             let actions =
-                                self.hover_reply_copy(&row.id, &row.message_id, reveal, &theme, cx);
+                                self.hover_rail(&row.id, &row.message_id, reveal, &theme, cx);
                             row_el
                                 .justify_start()
                                 .items_end()
@@ -1771,7 +1783,7 @@ impl Transcript {
                             // My bubble sits right, so its outer edge (and time) is on the left.
                             let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
                             let actions =
-                                self.hover_reply_copy(&row.id, &row.message_id, reveal, &theme, cx);
+                                self.hover_rail(&row.id, &row.message_id, reveal, &theme, cx);
                             row_el
                                 .justify_end()
                                 .children(hover_time(time, reveal, &theme).map(|t| t.mr(px(8.0))))
@@ -2008,7 +2020,7 @@ impl Transcript {
                         &theme,
                     ));
                 let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
-                let actions = self.hover_reply_copy(&row.id, &row.message_id, reveal, &theme, cx);
+                let actions = self.hover_rail(&row.id, &row.message_id, reveal, &theme, cx);
                 if mine {
                     // My media sits right; the rail is on its outer (left) edge.
                     div()

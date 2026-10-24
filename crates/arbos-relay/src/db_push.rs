@@ -31,6 +31,10 @@ CREATE TABLE IF NOT EXISTS chat_user_archive (
   user_id TEXT NOT NULL, chat_id TEXT NOT NULL, archived_at INTEGER NOT NULL,
   PRIMARY KEY (user_id, chat_id)
 );
+CREATE TABLE IF NOT EXISTS space_user_archive (
+  user_id TEXT NOT NULL, space_id TEXT NOT NULL, kind TEXT NOT NULL, archived_at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, space_id)
+);
 CREATE TABLE IF NOT EXISTS chat_user_cursor (
   user_id TEXT NOT NULL, chat_id TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL,
   PRIMARY KEY (user_id, chat_id)
@@ -227,6 +231,53 @@ impl Db {
                 )?;
                 Ok(None)
             }
+        })
+    }
+
+    // ---- archive of a sidebar space (an agent / project or a server), per user --------------
+    // Hides the row on every device of the user; never deletes anything. An archived agent
+    // keeps running its routines.
+
+    /// Archive or unarchive a space for a user; `kind` is `project` or `server`. Returns the new
+    /// `archived_at` (`None` = not archived).
+    pub fn set_space_archived(
+        &self,
+        user_id: &str,
+        space_id: &str,
+        kind: &str,
+        archived: bool,
+    ) -> Result<Option<i64>> {
+        self.with(|c| {
+            if archived {
+                c.execute(
+                    "INSERT INTO space_user_archive(user_id, space_id, kind, archived_at) VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(user_id, space_id) DO NOTHING",
+                    params![user_id, space_id, kind, now_ms()],
+                )?;
+                c.query_row(
+                    "SELECT archived_at FROM space_user_archive WHERE user_id = ?1 AND space_id = ?2",
+                    params![user_id, space_id],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map(Some)
+            } else {
+                c.execute(
+                    "DELETE FROM space_user_archive WHERE user_id = ?1 AND space_id = ?2",
+                    params![user_id, space_id],
+                )?;
+                Ok(None)
+            }
+        })
+    }
+
+    pub fn space_archived_at(&self, user_id: &str, space_id: &str) -> Result<Option<i64>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT archived_at FROM space_user_archive WHERE user_id = ?1 AND space_id = ?2",
+                params![user_id, space_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()
         })
     }
 

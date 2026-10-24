@@ -39,7 +39,11 @@ struct HomeView: View {
             .sorted { peopleActivity($0) > peopleActivity($1) }
     }
 
-    private var hiddenCount: Int { hiddenProjects.count + hiddenPeople.count }
+    private var hiddenServers: [Server] {
+        model.servers.filter { model.isArchived(serverId: $0.id) }
+    }
+
+    private var hiddenCount: Int { hiddenProjects.count + hiddenPeople.count + hiddenServers.count }
     @FocusState private var searchFocused: Bool
 
     /// Selection above the home list (All | Agents | People).
@@ -119,9 +123,9 @@ struct HomeView: View {
                                 }
                                 .buttonStyle(.borderless)
                                 .contextMenu {
-                                    // Long-press: Pin (also on leading swipe), then Fork /
-                                    // Delete for owned agents. Archive stays on the trailing
-                                    // swipe; Profile is the chat header.
+                                    // Long-press: Pin (also on leading swipe), Fork (owned),
+                                    // Archive (also on the trailing swipe), then Delete for
+                                    // owned agents. Profile is the chat header.
                                     Button {
                                         withAnimation {
                                             if pinned { model.unpinHome(projectId: project.id) }
@@ -134,6 +138,13 @@ struct HomeView: View {
                                         Button { model.duplicateProject(project) } label: {
                                             Label("Fork", systemImage: "arrow.triangle.branch")
                                         }
+                                    }
+                                    Button {
+                                        withAnimation { model.archive(project.id) }
+                                    } label: {
+                                        Label("Archive", systemImage: "archivebox")
+                                    }
+                                    if !project.shared {
                                         Divider()
                                         Button(role: .destructive) { deleteProject = project } label: {
                                             Label("Delete", systemImage: "trash")
@@ -234,6 +245,11 @@ struct HomeView: View {
                                 .contextMenu {
                                     Button { model.showProfile(.server(serverId: server.id)) } label: {
                                         Label("Server info", systemImage: "person.2")
+                                    }
+                                    Button {
+                                        withAnimation { model.archive(serverId: server.id) }
+                                    } label: {
+                                        Label("Archive", systemImage: "archivebox")
                                     }
                                 }
                                 .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
@@ -700,6 +716,8 @@ struct HomeView: View {
         if listFilter == .all {
             // D88: servers sort among the chats by last activity (rule 1).
             for s in model.servers {
+                // Archived servers stay out of the home list until search (or Unarchive).
+                if q.isEmpty && model.isArchived(serverId: s.id) { continue }
                 guard let hit = HomeSearch.serverHit(name: s.name, channels: s.channels.map(\.name), q: q) else { continue }
                 rows.append((hit.kind, false, model.serverActivity(s), HomeEntry(row: .server(s), hit: hit)))
             }
@@ -935,8 +953,8 @@ struct WaitlistCard: View {
     }
 }
 
-/// Archived ("hidden") chats, Grok's "Hidden chats" page: agents and people,
-/// tap opens, swipe/long-press Unhide, Delete removes for good.
+/// Archived ("hidden") chats, Grok's "Hidden chats" page: agents, people and servers;
+/// tap opens, swipe/long-press Unarchive, Delete removes for good.
 struct HiddenChatsView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -947,10 +965,12 @@ struct HiddenChatsView: View {
     private enum HiddenRow: Identifiable {
         case project(Project)
         case people(PeopleChat)
+        case server(Server)
         var id: String {
             switch self {
             case .project(let p): return "p:" + p.id
             case .people(let c): return "c:" + c.id
+            case .server(let s): return "s:" + s.id
             }
         }
     }
@@ -962,7 +982,10 @@ struct HiddenChatsView: View {
         let people = model.peopleChats.filter { model.isArchived(peopleChatId: $0.id) }
             .sorted { peopleTitle($0) < peopleTitle($1) }
             .map { HiddenRow.people($0) }
-        return projects + people
+        let servers = model.servers.filter { model.isArchived(serverId: $0.id) }
+            .sorted { $0.name < $1.name }
+            .map { HiddenRow.server($0) }
+        return projects + people + servers
     }
 
     var body: some View {
@@ -994,7 +1017,7 @@ struct HiddenChatsView: View {
                         .buttonStyle(.borderless)
                         .contextMenu {
                             Button { withAnimation { model.unarchive(project.id) } } label: {
-                                Label("Unhide", systemImage: "eye")
+                                Label("Unarchive", systemImage: "tray.and.arrow.up")
                             }
                             if !project.shared {
                                 Button(role: .destructive) { deleteProject = project } label: {
@@ -1005,10 +1028,10 @@ struct HiddenChatsView: View {
                         .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
                         .listRowSeparator(.hidden)
                         .listRowBackground(theme.bg)
-                        // Unhide first = full-swipe restores; Delete needs a tap.
+                        // Unarchive first = full-swipe restores; Delete needs a tap.
                         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                             Button { withAnimation { model.unarchive(project.id) } } label: {
-                                Label("Unhide", systemImage: "eye")
+                                Label("Unarchive", systemImage: "tray.and.arrow.up")
                             }
                             .tint(theme.unread)
                             if !project.shared {
@@ -1025,7 +1048,7 @@ struct HiddenChatsView: View {
                         .buttonStyle(.borderless)
                         .contextMenu {
                             Button { withAnimation { model.unarchive(peopleChatId: chat.id) } } label: {
-                                Label("Unhide", systemImage: "eye")
+                                Label("Unarchive", systemImage: "tray.and.arrow.up")
                             }
                             Button(role: .destructive) { deletePeople = chat } label: {
                                 Label("Delete", systemImage: "trash")
@@ -1034,15 +1057,34 @@ struct HiddenChatsView: View {
                         .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
                         .listRowSeparator(.hidden)
                         .listRowBackground(theme.bg)
-                        // Unhide first = full-swipe restores; Delete needs a tap.
+                        // Unarchive first = full-swipe restores; Delete needs a tap.
                         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                             Button { withAnimation { model.unarchive(peopleChatId: chat.id) } } label: {
-                                Label("Unhide", systemImage: "eye")
+                                Label("Unarchive", systemImage: "tray.and.arrow.up")
                             }
                             .tint(theme.unread)
                             Button(role: .destructive) { deletePeople = chat } label: {
                                 Label("Delete", systemImage: "trash")
                             }
+                        }
+                    case .server(let server):
+                        Button { model.open(server: server) } label: {
+                            ServerRow(server: server, preview: model.serverPreview(server), time: "", unread: false)
+                        }
+                        .buttonStyle(.borderless)
+                        .contextMenu {
+                            Button { withAnimation { model.unarchive(serverId: server.id) } } label: {
+                                Label("Unarchive", systemImage: "tray.and.arrow.up")
+                            }
+                        }
+                        .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(theme.bg)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                            Button { withAnimation { model.unarchive(serverId: server.id) } } label: {
+                                Label("Unarchive", systemImage: "tray.and.arrow.up")
+                            }
+                            .tint(theme.unread)
                         }
                     }
                 }

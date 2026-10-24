@@ -1,10 +1,10 @@
-//! The message bubble's menu — right-click on the Mac, the iPhone's
-//! long-press (`MessageMenu.swift`): **Copy, Reply, Delete** and nothing else
-//! (Jacob, #1370). Emoji reactions live on the hover face-smile glyph
-//! (`react_menu`), not in this menu. One builder for every bubble, and one
-//! placement rule: the menu always sits fully inside the window — flipped to
-//! the other side of the click near the right or bottom edge, clamped to the
-//! edge margin when neither side fits.
+//! The message bubble's menu — right-click or the hover rail's ⋯ on the Mac,
+//! under the capsule on the iPhone's long-press (`MessageMenu.swift`):
+//! **Copy, Reply, Delete** and nothing else (Jacob, #1370). Reactions live in
+//! the capsule (`reactions.rs`), never in this menu. One builder for every
+//! bubble, and one placement rule: the menu always sits fully inside the
+//! window — flipped to the other side of the click near the right or bottom
+//! edge, clamped to the edge margin when neither side fits.
 
 use gpui::{div, point, prelude::*, px, size, Div, Pixels, Point, Size, Window};
 

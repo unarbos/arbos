@@ -301,6 +301,8 @@ struct Project: Identifiable, Equatable, Codable {
     var machineClass: String? = nil
     var machineSnapshot: String? = nil
     var machineAlwaysOn: Bool = false
+    /// Per-user sidebar archive (`archived_at` on `GET /projects`); nil = in the list.
+    var archivedAt: Int64? = nil
     /// "Who may message X" (agent-to-agent messaging): other owners' people / agents the
     /// owner allowed to message this agent. Empty unless I own it.
     var messageGrants: [MessageGrant] = []
@@ -350,6 +352,7 @@ extension Project {
         self.machineClass = dto.machine.`class`
         self.machineSnapshot = dto.machine.snapshot
         self.machineAlwaysOn = dto.machine.always_on
+        self.archivedAt = dto.archived_at.flatMap { $0 }
         self.messageGrants = (dto.message_grants ?? []).map(MessageGrant.init(dto:))
     }
 }
@@ -592,8 +595,9 @@ struct MessageReaction: Equatable, Hashable {
     var emoji: String
     var senders: [String]
 
-    /// iMessage-style set that renders cleanly in SwiftUI context menus.
-    static let palette: [String] = ["👍", "❤️", "😂", "😮", "😢", "🙏"]
+    /// The reaction capsule's set, in Grok Bot's order (the Mac's `REACTION_PALETTE`);
+    /// any other emoji comes from the emoji keyboard.
+    static let palette: [String] = ["😂", "👍", "👎", "❤️", "🎉"]
 
     /// Toggle `sender` on/off for `emoji`, keeping other emoji reactions intact.
     static func toggling(_ list: [MessageReaction], emoji: String, sender: String) -> [MessageReaction] {

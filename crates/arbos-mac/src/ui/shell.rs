@@ -38,7 +38,7 @@ use crate::ui::motion::{ease_out_cubic, PulseClock, COMPOSER_DROP_MS, SHAKE_MS};
 use crate::ui::onboarding;
 use crate::ui::people;
 use crate::ui::profiles;
-use crate::ui::react_menu;
+use crate::ui::reactions;
 use crate::ui::routines::{RoutinesEvent, RoutinesPanel};
 use crate::ui::secrets::{SecretsEvent, SecretsPanel};
 use crate::ui::servers;
@@ -210,15 +210,21 @@ pub struct Shell {
         crate::model::Id,
         gpui::Point<gpui::Pixels>,
     )>,
-    /// The quick-react emoji bar (`react_menu`): (chat, message, the click).
-    pub(crate) react_menu: Option<(
+    /// `ARBOS_RIG_MESSAGE_MENU=x,y` (screenshot rig): opens the menu once the
+    /// open chat has a message; cleared when it has.
+    rig_message_menu: Option<gpui::Point<gpui::Pixels>>,
+    /// The reaction capsule over a bubble (`reactions`): (chat, message, the smiley's click).
+    pub(crate) reaction_capsule: Option<(
         crate::model::Id,
         crate::model::Id,
         gpui::Point<gpui::Pixels>,
     )>,
-    /// `ARBOS_RIG_MESSAGE_MENU=x,y` (screenshot rig): opens the menu once the
-    /// open chat has a message; cleared when it has.
-    rig_message_menu: Option<gpui::Point<gpui::Pixels>>,
+    /// The capsule's "pick any emoji" field is showing (system picker open).
+    pub(crate) reaction_pick_open: bool,
+    pub(crate) reaction_pick: Entity<ComposerInput>,
+    /// `ARBOS_RIG_REACTION_CAPSULE=x,y` (screenshot rig): opens the capsule for
+    /// the newest message of the open chat at that window position.
+    rig_reaction_capsule: Option<gpui::Point<gpui::Pixels>>,
     pub(crate) settings_scroll: ScrollHandle,
     pub(crate) routines: Entity<RoutinesPanel>,
     pub(crate) routines_open: bool,
@@ -238,6 +244,9 @@ pub struct Shell {
     /// app-01M5ATBWSY9E1HHBKH2QQVDEZX). Nothing renders it; escapes and
     /// click-outside still clear it so leftover true never sticks.
     pub(crate) menu_open: bool,
+    /// Sidebar: the "Hidden chats" list is showing instead of the chat list
+    /// (Jacob 2026-10-23; the footer opens it, ‹ back returns).
+    pub(crate) hidden_open: bool,
     /// D88: the name/invite/channel field of the server sheets and the inline channel rename
     /// on the server page; `channel_rename` is the channel being renamed there.
     pub(crate) server_input: Entity<ComposerInput>,
@@ -348,6 +357,7 @@ impl Shell {
         });
         let settings_scroll = ScrollHandle::new();
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        let reaction_pick = reactions::new_pick_input(cx);
         cx.subscribe(
             &transcript,
             |this, _, event: &TranscriptEvent, cx| match event {
@@ -360,14 +370,12 @@ impl Shell {
                     this.message_menu = Some((chat_id.clone(), message_id.clone(), *position));
                     cx.notify();
                 }
-                TranscriptEvent::ReactMenu {
+                TranscriptEvent::ReactionCapsule {
                     chat_id,
                     message_id,
                     position,
                 } => {
-                    this.close_popovers(cx);
-                    this.react_menu = Some((chat_id.clone(), message_id.clone(), *position));
-                    cx.notify();
+                    this.open_reaction_capsule(chat_id.clone(), message_id.clone(), *position, cx);
                 }
                 TranscriptEvent::Reply {
                     chat_id,
@@ -802,8 +810,11 @@ impl Shell {
             chat_menu: None,
             chat_delete_armed: false,
             message_menu: None,
-            react_menu: None,
             rig_message_menu: message_menu::rig_anchor(),
+            reaction_capsule: None,
+            reaction_pick_open: false,
+            reaction_pick,
+            rig_reaction_capsule: reactions::rig_anchor(),
             renaming_tab: None,
             tab_rename_input,
             tab_menu_open: false,
@@ -820,6 +831,7 @@ impl Shell {
             fixture_drag_over: std::env::var("ARBOS_FIXTURE_DRAG_OVER").is_ok_and(|v| v == "1"),
             signing_in: false,
             menu_open: false,
+            hidden_open: false,
             server_input,
             channel_rename: None,
             invite_expires: false,
@@ -1971,7 +1983,7 @@ impl Shell {
             || self.row_menu.is_some()
             || self.chat_menu.is_some()
             || self.message_menu.is_some()
-            || self.react_menu.is_some();
+            || self.reaction_capsule.is_some();
         self.close_popovers(cx);
         if floating {
             return;
@@ -2127,7 +2139,7 @@ impl Shell {
         self.channel_menu = None;
         self.chat_menu = None;
         self.message_menu = None;
-        self.react_menu = None;
+        self.close_reaction_capsule(cx);
         self.member_remove_armed = None;
         self.member_menu = Some(member_menu::MemberMenu { space_id, key, at });
         cx.notify();
@@ -2144,8 +2156,8 @@ impl Shell {
             || self.channel_menu.is_some()
             || self.chat_menu.is_some()
             || self.message_menu.is_some()
-            || self.react_menu.is_some()
             || self.member_menu.is_some()
+            || self.reaction_capsule.is_some()
         {
             self.menu_open = false;
             self.member_menu = None;
@@ -2161,7 +2173,7 @@ impl Shell {
             self.chat_menu = None;
             self.chat_delete_armed = false;
             self.message_menu = None;
-            self.react_menu = None;
+            self.close_reaction_capsule(cx);
             cx.notify();
         }
     }
@@ -3689,8 +3701,19 @@ impl Render for Shell {
         if let Some(menu) = message_menu::render(self, window, cx) {
             root = root.child(menu);
         }
-        if let Some(menu) = react_menu::render(self, window, cx) {
-            root = root.child(menu);
+        if let Some(at) = self.rig_reaction_capsule {
+            let target = self.state.read(cx).active_chat_id().and_then(|chat| {
+                let state = self.state.read(cx);
+                let last = state.messages.get(&chat)?.last()?.id.clone();
+                Some((chat, last))
+            });
+            if let Some((chat, message)) = target {
+                self.rig_reaction_capsule = None;
+                self.reaction_capsule = Some((chat, message, at));
+            }
+        }
+        if let Some(capsule) = reactions::render(self, window, cx) {
+            root = root.child(capsule);
         }
         // Rig: the hook asked for the first other member's row menu on the group pane.
         if let Some(armed) = self.state.update(cx, |s, _| s.rig_member_menu.take()) {
