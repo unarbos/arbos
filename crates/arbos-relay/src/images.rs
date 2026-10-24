@@ -36,6 +36,16 @@ pub fn price(model: &str, size: &str, quality: &str) -> f64 {
             (_, true) => 0.08,
         };
     }
+    if m.contains("gpt-image-1-mini") {
+        return match (quality, tall_or_wide) {
+            ("low", false) => 0.005,
+            ("low", true) => 0.006,
+            ("high", false) => 0.036,
+            ("high", true) => 0.052,
+            (_, false) => 0.011,
+            (_, true) => 0.015,
+        };
+    }
     match (quality, tall_or_wide) {
         ("low", false) => 0.011,
         ("low", true) => 0.016,
@@ -403,9 +413,87 @@ fn avatar_gen_daily_cap() -> i64 {
         .unwrap_or(20)
 }
 
-const AVATAR_GEN_MODEL: &str = "gpt-image-1";
+/// Models tried in order for an avatar (`ARBOS_AVATAR_GEN_MODELS`, comma-separated, overrides).
+/// Production hits api.openai.com directly with the relay's `OPENAI_API_KEY`; on 2026-10-24
+/// that key listed `gpt-image-1` in `/models` but `/images/generations` answered 400 "The model
+/// 'gpt-image-1' does not exist" (#1456 follow-up), while `gpt-image-1-mini` (≈ $0.005 a square at
+/// low) and `gpt-image-2` both generated. A model the provider rejects as unknown falls through to
+/// the next one; any other failure stops with the friendly error.
+const AVATAR_GEN_MODELS: &str = "gpt-image-1-mini,gpt-image-2";
 const AVATAR_GEN_SIZE: &str = "1024x1024";
 const AVATAR_GEN_QUALITY: &str = "low";
+/// What the apps show when generation fails for any reason (the provider's text goes to the log
+/// and the JSON `detail`, never to the user).
+pub const AVATAR_GEN_FRIENDLY: &str =
+    "Couldn't generate an avatar right now — try again or upload one.";
+
+fn avatar_gen_models() -> Vec<String> {
+    let spec =
+        std::env::var("ARBOS_AVATAR_GEN_MODELS").unwrap_or_else(|_| AVATAR_GEN_MODELS.into());
+    let list: Vec<String> = spec
+        .split(',')
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if list.is_empty() {
+        AVATAR_GEN_MODELS.split(',').map(str::to_owned).collect()
+    } else {
+        list
+    }
+}
+
+/// The OpenAI Images request for one avatar: one square at low quality, the prompt framed as a
+/// profile picture.
+pub fn avatar_request(model: &str, prompt: &str) -> Value {
+    json!({
+        "model": model,
+        "prompt": format!("A profile picture for an assistant: {prompt}. Centred subject, simple background, no text."),
+        "size": AVATAR_GEN_SIZE,
+        "quality": AVATAR_GEN_QUALITY,
+        "n": 1,
+    })
+}
+
+/// Did the provider reject the *model* (unknown / retired / not enabled for this key)? Those
+/// answers are worth trying the next model on; anything else is not.
+pub fn is_unknown_model_error(status: u16, body: &[u8]) -> bool {
+    if !(400..500).contains(&status) {
+        return false;
+    }
+    let v: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let param = v
+        .pointer("/error/param")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let code = v
+        .pointer("/error/code")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let message = v
+        .pointer("/error/message")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    param == "model"
+        || code == "model_not_found"
+        || (message.contains("model")
+            && (message.contains("does not exist") || message.contains("not found")))
+}
+
+/// The friendly failure: the user-facing line, the provider's words under `detail`, one log line.
+fn avatar_unavailable(project_id: &str, detail: impl Into<String>) -> Response {
+    let detail = detail.into();
+    tracing::warn!(project = %project_id, %detail, "avatar generation failed");
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(json!({ "error": { "type": "avatar_unavailable", "message": AVATAR_GEN_FRIENDLY, "detail": detail } })),
+    )
+        .into_response()
+}
 /// The stored picture: a 512 px JPEG, like the pictures the apps upload themselves.
 const AVATAR_SIDE: u32 = 512;
 
@@ -474,7 +562,8 @@ pub async fn avatar_generate(
             ),
         );
     }
-    let model = format!("avatar:{AVATAR_GEN_MODEL}");
+    let models = avatar_gen_models();
+    let mut model = format!("avatar:{}", models[0]);
     let t0 = Instant::now();
     let png: Vec<u8> = if state.cfg.image_mock {
         let _ = state.db.record_usage(
@@ -517,33 +606,27 @@ pub async fn avatar_generate(
             "{}/images/generations",
             state.cfg.openai_images_base.trim_end_matches('/')
         );
-        let request = json!({
-            "model": AVATAR_GEN_MODEL,
-            "prompt": format!("A profile picture for an assistant: {prompt}. Centred subject, simple background, no text."),
-            "size": AVATAR_GEN_SIZE,
-            "quality": AVATAR_GEN_QUALITY,
-            "n": 1,
-        });
-        let upstream = match state
-            .http
-            .post(&url)
-            .bearer_auth(&key)
-            .json(&request)
-            .send()
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                return avatar_error(
-                    StatusCode::BAD_GATEWAY,
-                    "upstream",
-                    format!("upstream: {e}"),
-                )
+        let mut picked: Option<(String, Value)> = None;
+        let mut last_detail = String::from("no model answered");
+        for candidate in &models {
+            let upstream = match state
+                .http
+                .post(&url)
+                .bearer_auth(&key)
+                .json(&avatar_request(candidate, &prompt))
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => return avatar_unavailable(&project.id, format!("{candidate}: {e}")),
+            };
+            let status = upstream.status();
+            let bytes = upstream.bytes().await.unwrap_or_default();
+            if status.is_success() {
+                let parsed: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+                picked = Some((candidate.clone(), parsed));
+                break;
             }
-        };
-        let status = upstream.status();
-        let bytes = upstream.bytes().await.unwrap_or_default();
-        if !status.is_success() {
             let message = serde_json::from_slice::<Value>(&bytes)
                 .ok()
                 .and_then(|v| {
@@ -551,23 +634,23 @@ pub async fn avatar_generate(
                         .and_then(Value::as_str)
                         .map(str::to_owned)
                 })
-                .unwrap_or_else(|| format!("upstream HTTP {status}"));
-            return avatar_error(StatusCode::BAD_GATEWAY, "upstream", message);
+                .unwrap_or_else(|| format!("HTTP {status}"));
+            last_detail = format!("{candidate}: {message}");
+            if is_unknown_model_error(status.as_u16(), &bytes) {
+                tracing::info!(project = %project.id, model = %candidate, %message, "avatar model rejected; trying the next");
+                continue;
+            }
+            return avatar_unavailable(&project.id, last_detail);
         }
-        let parsed: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        let Some((used, parsed)) = picked else {
+            return avatar_unavailable(&project.id, last_detail);
+        };
+        model = format!("avatar:{used}");
         let Some(b64) = parsed.pointer("/data/0/b64_json").and_then(Value::as_str) else {
-            return avatar_error(
-                StatusCode::BAD_GATEWAY,
-                "upstream",
-                "no picture in the answer",
-            );
+            return avatar_unavailable(&project.id, format!("{used}: no picture in the answer"));
         };
         let Ok(png) = base64::engine::general_purpose::STANDARD.decode(b64) else {
-            return avatar_error(
-                StatusCode::BAD_GATEWAY,
-                "upstream",
-                "picture was not base64",
-            );
+            return avatar_unavailable(&project.id, format!("{used}: picture was not base64"));
         };
         let (input, output) = parsed
             .get("usage")
@@ -578,7 +661,7 @@ pub async fn avatar_generate(
                 )
             })
             .unwrap_or((0, 0));
-        let usd = price(AVATAR_GEN_MODEL, AVATAR_GEN_SIZE, AVATAR_GEN_QUALITY);
+        let usd = price(&used, AVATAR_GEN_SIZE, AVATAR_GEN_QUALITY);
         let _ = state.db.record_usage(
             &project.id,
             "openai-images",
@@ -603,7 +686,7 @@ pub async fn avatar_generate(
     };
     let jpeg = match avatar_jpeg(&png) {
         Ok(j) => j,
-        Err(e) => return avatar_error(StatusCode::BAD_GATEWAY, "upstream", e),
+        Err(e) => return avatar_unavailable(&project.id, e),
     };
     let image_key = format!("avatar-gen-{}.jpg", arbos_core::ids::ulid().to_lowercase());
     if let Err(e) = crate::blobs::store(&state, &project.id, &image_key, "image/jpeg", &jpeg).await
@@ -612,9 +695,191 @@ pub async fn avatar_generate(
     }
     Json(json!({
         "image_key": image_key,
+        "model": model.trim_start_matches("avatar:"),
         "mock": state.cfg.image_mock,
         "made_today": made_today + 1,
         "daily_cap": avatar_gen_daily_cap(),
     }))
     .into_response()
+}
+
+#[cfg(test)]
+mod avatar_generate_tests {
+    //! The avatar picker's Generate tab against a stub OpenAI: the request shape, the fall-through
+    //! from a model the provider rejects to the next one, and the friendly error.
+
+    use std::sync::{Arc, Mutex};
+
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use axum::routing::post;
+    use axum::{Json, Router};
+
+    use super::*;
+    use crate::people::tests_support::{person, project_of};
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    /// A stub `/images/generations`: records every request, rejects models in `unknown` the way
+    /// OpenAI does, answers a 1 × 1 PNG for the rest.
+    async fn stub(unknown: &'static [&'static str]) -> (String, Arc<Mutex<Vec<Value>>>) {
+        let seen: Arc<Mutex<Vec<Value>>> = Arc::default();
+        let seen_in = seen.clone();
+        let app = Router::new().route(
+            "/images/generations",
+            post(move |Json(body): Json<Value>| {
+                let seen = seen_in.clone();
+                async move {
+                    seen.lock().unwrap().push(body.clone());
+                    let model = body["model"].as_str().unwrap_or("");
+                    if unknown.contains(&model) {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({ "error": {
+                                "message": format!("The model '{model}' does not exist."),
+                                "type": "image_generation_user_error", "param": "model", "code": "invalid_value" } })),
+                        );
+                    }
+                    let png = mock_png("stub", "64x64");
+                    (
+                        StatusCode::OK,
+                        Json(json!({ "created": 1, "data": [{ "b64_json": base64::engine::general_purpose::STANDARD.encode(png) }],
+                            "usage": { "input_tokens": 8, "output_tokens": 272 } })),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), seen)
+    }
+
+    fn state_against(base: &str) -> AppState {
+        let mut state = test_state(AuthMode::Github);
+        let cfg = Arc::get_mut(&mut state.cfg).unwrap();
+        cfg.openai_key = Some("sk-test".into());
+        cfg.openai_images_base = base.to_owned();
+        state
+    }
+
+    /// A funded owner and one of their agents (GitHub mode meters credits).
+    fn funded_agent(state: &AppState, n: i64) -> (Principal, String) {
+        let (alice, alice_dev) = person(state, n);
+        state.db.grant_credits(&alice, 5.0, "test", "test").unwrap();
+        (alice_dev, project_of(state, &alice, "Bob"))
+    }
+
+    async fn generate(state: &AppState, who: &Principal, pid: &str) -> (StatusCode, Value) {
+        let r = avatar_generate(
+            State(state.clone()),
+            who.clone(),
+            Path(pid.to_owned()),
+            Json(AvatarGenerateBody {
+                prompt: "a cat".into(),
+            }),
+        )
+        .await;
+        let status = r.status();
+        let bytes = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    #[test]
+    fn request_is_one_low_square_with_the_framed_prompt() {
+        let r = avatar_request("gpt-image-1-mini", "a cat");
+        assert_eq!(r["model"], "gpt-image-1-mini");
+        assert_eq!(r["size"], "1024x1024");
+        assert_eq!(r["quality"], "low");
+        assert_eq!(r["n"], 1);
+        let prompt = r["prompt"].as_str().unwrap();
+        assert!(prompt.contains("a cat") && prompt.starts_with("A profile picture"));
+        assert!(
+            r.get("response_format").is_none(),
+            "gpt-image-* return b64 without it"
+        );
+        // Jacob's report, verbatim from api.openai.com: a model rejection, not a transient.
+        let body = br#"{"error":{"message":"The model 'gpt-image-1' does not exist.","type":"image_generation_user_error","param":"model","code":"invalid_value"}}"#;
+        assert!(is_unknown_model_error(400, body));
+        assert!(!is_unknown_model_error(500, body));
+        assert!(!is_unknown_model_error(
+            429,
+            br#"{"error":{"message":"Rate limit reached"}}"#
+        ));
+    }
+
+    #[tokio::test]
+    async fn falls_through_to_the_next_model_and_stores_a_jpeg() {
+        // The default list is tried in order; the stub rejects the first the way OpenAI rejected
+        // gpt-image-1 (no env override: these tests run in parallel threads).
+        let (base, seen) = stub(&["gpt-image-1-mini"]).await;
+        let state = state_against(&base);
+        let (alice_dev, pid) = funded_agent(&state, 81);
+        let (status, v) = generate(&state, &alice_dev, &pid).await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        assert_eq!(v["model"], "gpt-image-2");
+        let key = v["image_key"].as_str().unwrap();
+        assert!(matches!(
+            crate::blobs::stored_image(&state, &pid, key).await,
+            crate::blobs::StoredImage::Image(crate::image_sniff::ImageKind::Jpeg)
+        ));
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0]["model"], "gpt-image-1-mini");
+        assert_eq!(seen[1]["model"], "gpt-image-2");
+        assert_eq!(seen[1]["quality"], "low");
+        // Metered under the model that answered.
+        assert_eq!(
+            state
+                .db
+                .usage_count_since(&pid, "openai-images", "avatar:gpt-image-2", 0)
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn every_model_unknown_is_the_friendly_error_with_the_detail_kept() {
+        let (base, _) = stub(&["gpt-image-1-mini", "gpt-image-2"]).await;
+        let state = state_against(&base);
+        let (alice_dev, pid) = funded_agent(&state, 82);
+        let (status, v) = generate(&state, &alice_dev, &pid).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(v["error"]["type"], "avatar_unavailable");
+        assert_eq!(v["error"]["message"], AVATAR_GEN_FRIENDLY);
+        assert!(v["error"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("does not exist"));
+    }
+
+    /// One REAL generation against api.openai.com with `OPENAI_API_KEY` (≈ $0.005). Off unless
+    /// `ARBOS_AVATAR_SMOKE=1`, so CI stays offline; `scripts/avatars/smoke-avatar-generate.sh`
+    /// runs it (or the production relay) end to end.
+    #[tokio::test]
+    async fn smoke_real_generation_when_asked() {
+        if std::env::var("ARBOS_AVATAR_SMOKE").ok().as_deref() != Some("1") {
+            return;
+        }
+        let key = std::env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY for the smoke test");
+        let mut state = test_state(AuthMode::Github);
+        {
+            let cfg = Arc::get_mut(&mut state.cfg).unwrap();
+            cfg.openai_key = Some(key);
+            cfg.openai_images_base = std::env::var("ARBOS_OPENAI_IMAGES_BASE")
+                .unwrap_or_else(|_| "https://api.openai.com/v1".into());
+        }
+        let (alice_dev, pid) = funded_agent(&state, 83);
+        let (status, v) = generate(&state, &alice_dev, &pid).await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        let key = v["image_key"].as_str().unwrap();
+        assert!(matches!(
+            crate::blobs::stored_image(&state, &pid, key).await,
+            crate::blobs::StoredImage::Image(crate::image_sniff::ImageKind::Jpeg)
+        ));
+        eprintln!("smoke: {} generated {key}", v["model"]);
+    }
 }
