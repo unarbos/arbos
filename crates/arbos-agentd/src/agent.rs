@@ -948,6 +948,11 @@ impl ProseFilter {
         out
     }
 
+    /// Text is held back, not yet judged.
+    pub fn has_pending(&self) -> bool {
+        !self.pending.trim().is_empty()
+    }
+
     /// End of a text run (tool call or turn end): judge what is still held back.
     pub fn flush(&mut self) -> String {
         let rest = std::mem::take(&mut self.pending);
@@ -1212,6 +1217,10 @@ pub struct TurnState {
     /// The `reply` text of a `route reply` call, written at turn end when it never streamed
     /// (#1355; a second `route` of an act turn, or a provider sending no argument deltas).
     pub route_reply_text: Option<String>,
+    /// pi re-prompted the model for the missing `route` call (route-first rule). The prose of
+    /// the first attempt is the answer; the corrective `route reply` must add nothing (#1446:
+    /// a second, contradictory answer glued on; #1648: the same answer twice after a restart).
+    pub route_correcting: bool,
 }
 
 /// How the model call failed, as pi reported it.
@@ -1279,6 +1288,13 @@ impl ModelError {
 }
 
 impl TurnState {
+    /// The turn already holds an answer for the user: written, staged, or held by the filter.
+    pub fn has_prose(&self) -> bool {
+        !self.streamed_text.trim().is_empty()
+            || !self.act_buffer.trim().is_empty()
+            || self.prose.has_pending()
+    }
+
     /// Placeholder installed as soon as `handle_send` takes `turn_lock`, before attachments /
     /// `tree_pack` / `drive_turn`. `voice_cancel` and typed-send preempt need a real `TurnState`
     /// in that window — without it they no-op and the lock is held forever
@@ -1322,6 +1338,7 @@ impl TurnState {
             notices: Vec::new(),
             relay_fallback: String::new(),
             route_reply_text: None,
+            route_correcting: false,
         }
     }
 }
@@ -1954,11 +1971,28 @@ impl Agent {
                 tracing::info!(
                     chat_id,
                     code = refusal.code(),
-                    "send skipped: budget block active"
+                    "send answered without a model call: budget block active"
                 );
-                if self.budget.notice_due(chat_id) {
-                    self.write_budget_line(chat_id, refusal, "block active")
-                        .await;
+                // Every message while capped gets the one line as its own answer, with the
+                // countdown as of now (#1649: the second message used to get silence).
+                let user_msg_id = cmd
+                    .payload
+                    .get("messageId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+                if !user_msg_id.is_empty() {
+                    let line = refusal
+                        .chat_line(&self.budget_owner_label(chat_id, &host, &user_msg_id).await);
+                    let h = host.lock().await;
+                    let id = ulid();
+                    h.doc
+                        .start_assistant_message(&id, &user_msg_id, &self.cfg.device_id);
+                    if let Some(attr) = self.people_reply_fields(chat_id) {
+                        h.doc.set_message_fields(&id, &attr.fields);
+                    }
+                    h.doc.add_error_part(&id, refusal.code(), &line);
+                    h.doc.finish_message(&id, MessageStatus::Error);
                 }
                 let _ = self.store.t3_append(
                     chat_id,
@@ -3323,6 +3357,7 @@ impl Agent {
             notices: Vec::new(),
             relay_fallback: relay_fallback_line(&kind),
             route_reply_text: None,
+            route_correcting: false,
         });
         self.turn_running.store(true, Ordering::SeqCst);
         let keepalive = self.spawn_keepalive();
@@ -3406,7 +3441,7 @@ impl Agent {
             final_status = MessageStatus::Error;
         }
         let (talking_model, _) = self.live_models().await;
-        let owner_label = self.owner_label(chat_id);
+        let owner_label = self.budget_owner_label(chat_id, host, user_msg_id).await;
         // A budget refusal arms the block (`budget.rs`); the line goes in this bubble below.
         if let Some(m) = &model_failed {
             self.note_budget_refusal(chat_id, &m.detail, true).await;
@@ -4049,7 +4084,10 @@ impl Agent {
                         delta,
                         content_index: _,
                     } => {
-                        if t.route_call_id.is_some() && t.route.is_none() {
+                        // After a route-first correction the `reply` argument repeats (or
+                        // contradicts) prose the first attempt already streamed: not fed in.
+                        let answered_already = t.route_correcting && t.has_prose();
+                        if t.route_call_id.is_some() && t.route.is_none() && !answered_already {
                             // The ack buffers first (schema order) and becomes its own bubble;
                             // a short `reply` lands as one complete block when the string closes.
                             let ack = t.ack_extractor.feed(delta);
@@ -4634,7 +4672,7 @@ impl Agent {
                 // (#1373: deciding here wrote the reply twice).
                 if let Some(ValidRoute::Reply { reply: Some(text) }) = &t.route {
                     let text = text.trim();
-                    if !text.is_empty() {
+                    if !text.is_empty() && !(t.route_correcting && t.has_prose()) {
                         t.route_reply_text = Some(text.to_owned());
                     }
                 }
@@ -4852,6 +4890,11 @@ impl Agent {
             return;
         };
         t.metrics.route_missing = true;
+        // A corrective continuation follows: whatever the model already said is the answer;
+        // the `route reply` it is about to make must not write a second one.
+        if corrected {
+            t.route_correcting = true;
+        }
         // No further corrective prompt: treat the turn as a reply (harness contract).
         if !corrected && t.route.is_none() {
             t.route = Some(ValidRoute::Reply { reply: None });
@@ -6403,6 +6446,12 @@ impl Agent {
     /// Test seam: give the held turn a live assistant row to write into.
     pub(crate) async fn test_open_row(&self, host: &SharedHost, t: &mut TurnState) {
         self.open_row(host, t, "result").await;
+    }
+
+    /// Test seam: the end-of-turn text writers (staged prose, then the route's reply text).
+    pub(crate) async fn test_finish_text(&self, host: &SharedHost, t: &mut TurnState) {
+        self.flush_staged_text(host, t).await;
+        self.write_route_reply_if_missing(host, t).await;
     }
 
     /// Test seam: fold one pi event into the held turn.

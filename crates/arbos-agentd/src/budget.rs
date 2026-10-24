@@ -6,9 +6,10 @@
 //! owner's $20/day cap, 6,344 calls, agents mute for half an hour).
 //!
 //! Now a refusal arms a short **block** per chat: one visible line says whose budget is used up
-//! and when it resets; while the block holds, further sends in that chat are marked done without
-//! a model call; when it lapses the next send probes normally (one cheap 402 re-arms it, the
-//! notice repeats at most every `NOTICE_EVERY`).
+//! and when it resets; while the block holds, every further send in that chat gets that same
+//! line as its own answer (countdown as of now) without a model call (#1649: the second message
+//! used to get silence); when it lapses the next send probes normally (one cheap 402 re-arms it;
+//! the centred system line repeats at most every `NOTICE_EVERY`).
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -64,7 +65,7 @@ impl Refusal {
         (left / 3_600_000, (left % 3_600_000) / 60_000)
     }
 
-    /// The one line for the chat. `owner` is "Jacob's" / "my owner's".
+    /// The one line for the chat. `owner` is "Your" / "Jacob's" / "my owner's".
     pub fn chat_line(self, owner: &str) -> String {
         match self {
             Self::DailyCap => {
@@ -130,24 +131,6 @@ impl BudgetState {
         due
     }
 
-    /// Inside a block, a send arrived: is the chat line due again (`NOTICE_EVERY` since the
-    /// last)? Does not extend the block, so a stream of sends still lets the next probe happen.
-    pub fn notice_due(&self, chat_id: &str) -> bool {
-        let mut m = self.blocks.lock().expect("budget");
-        let now = Instant::now();
-        let Some(b) = m.get_mut(chat_id) else {
-            return false;
-        };
-        let due = b
-            .last_notice
-            .map(|t| now.duration_since(t) >= NOTICE_EVERY)
-            .unwrap_or(true);
-        if due {
-            b.last_notice = Some(now);
-        }
-        due
-    }
-
     /// Is the chat inside a block right now?
     pub fn active(&self, chat_id: &str) -> Option<Refusal> {
         let m = self.blocks.lock().expect("budget");
@@ -169,6 +152,28 @@ impl Agent {
             .info(chat_id)
             .map(|i| i.owner_spoken_possessive())
             .unwrap_or_else(|| "my owner's".to_owned())
+    }
+
+    /// The label as the reader of `user_msg_id` should hear it: "Your" when the reader is the
+    /// owner (every 1:1 project chat, or the owner asking in a people chat), else the owner's
+    /// name (#1649: "my owner's budget" read oddly to the owner).
+    pub async fn budget_owner_label(
+        &self,
+        chat_id: &str,
+        host: &crate::sync::SharedHost,
+        user_msg_id: &str,
+    ) -> String {
+        let Some(info) = self.people.info(chat_id) else {
+            return "Your".to_owned();
+        };
+        let Some(msg) = host.lock().await.doc.message(user_msg_id) else {
+            return "Your".to_owned();
+        };
+        // Same author rule as the asker prelude (#1580): an unidentified author is a guest.
+        match info.author_of(&msg).as_deref() {
+            Some(uid) if uid == info.owner_user => "Your".to_owned(),
+            _ => info.owner_spoken_possessive(),
+        }
     }
 
     /// A model call was refused for budget reasons in `chat_id`: arm the block and write the
@@ -260,6 +265,17 @@ mod tests {
         assert_eq!((h, m), (24, 0));
         let (h, m) = Refusal::until_reset(23 * 3_600_000 + 30 * 60_000);
         assert_eq!((h, m), (0, 30));
+    }
+
+    /// #1649: the line speaks to its reader — "Your" for the owner, the owner's name for guests.
+    #[test]
+    fn chat_line_addresses_the_reader() {
+        assert!(Refusal::DailyCap
+            .chat_line("Your")
+            .starts_with("Your daily Arbos budget is used up"));
+        assert!(Refusal::CreditsExhausted
+            .chat_line("Jacob's")
+            .starts_with("Jacob's Arbos credits are used up"));
     }
 
     #[test]

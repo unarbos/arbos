@@ -169,7 +169,7 @@ impl PeopleChatInfo {
     /// roster; else the one human in the chat (a DM with only the owner and agents). `None` means
     /// the author is unknown — never assume the owner (#1580: a guest's note was read back as
     /// the owner's).
-    fn author_of(&self, msg: &MessageView) -> Option<String> {
+    pub(crate) fn author_of(&self, msg: &MessageView) -> Option<String> {
         let sender = msg.rest.get("sender").and_then(Value::as_str).unwrap_or("");
         if let Some(uid) = sender.strip_prefix("user:") {
             if !uid.is_empty() {

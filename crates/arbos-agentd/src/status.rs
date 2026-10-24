@@ -1353,6 +1353,87 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// #1648 / #1446: the model answered in plain text without `route`; pi re-prompts and the
+    /// model calls `route reply` with the same (or a different) text. The first answer is the
+    /// answer — the corrective route's `reply` adds nothing, streamed or from the call.
+    #[tokio::test]
+    async fn route_first_correction_does_not_write_a_second_answer() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000008";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.ack_text.clear();
+            agent.test_open_row(&host, t).await;
+        }
+        let answer =
+            "Staging host: stag-07. Release freeze starts 3 December. The on-call phone is Lena's.";
+        // First attempt: plain prose, no route.
+        agent
+            .test_fold(
+                chat,
+                &host,
+                &arbos_core::rpc::Event::MessageUpdate {
+                    assistant_message_event: arbos_core::rpc::AssistantEvent::TextDelta {
+                        delta: answer.to_owned(),
+                        content_index: 0,
+                    },
+                    usage: None,
+                },
+            )
+            .await;
+        agent.hook_turn_without_route(chat, true).await;
+        // Correction: `route reply` streamed as arguments and then run.
+        agent
+            .test_fold(
+                chat,
+                &host,
+                &arbos_core::rpc::Event::MessageUpdate {
+                    assistant_message_event: arbos_core::rpc::AssistantEvent::ToolcallStart {
+                        id: "r1".into(),
+                        tool_name: "route".into(),
+                        content_index: 1,
+                    },
+                    usage: None,
+                },
+            )
+            .await;
+        agent
+            .test_fold(
+                chat,
+                &host,
+                &arbos_core::rpc::Event::MessageUpdate {
+                    assistant_message_event: arbos_core::rpc::AssistantEvent::ToolcallDelta {
+                        delta: format!("{{\"action\":\"reply\",\"reply\":\"{answer}\"}}"),
+                        content_index: 1,
+                    },
+                    usage: None,
+                },
+            )
+            .await;
+        agent
+            .hook_route(&json!({ "action": "reply", "reply": answer }))
+            .await
+            .unwrap();
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            agent.test_finish_text(&host, t).await;
+            assert_eq!(
+                t.streamed_text.matches("Staging host").count(),
+                1,
+                "{}",
+                t.streamed_text
+            );
+        }
+        let rows = reply_rows(&host, "m-busy");
+        let text: String = rows.iter().map(|r| r.text()).collect();
+        assert_eq!(text.matches("Staging host").count(), 1, "{text}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[tokio::test]
     async fn idle_agent_takes_the_normal_path() {
         let (agent, root) = test_agent().await;
