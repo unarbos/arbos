@@ -385,6 +385,17 @@ fn fixture_foreign_agent() -> bool {
     std::env::var("ARBOS_FIXTURE_FOREIGN_AGENT").is_ok_and(|v| v.trim() == "1")
 }
 
+/// `ARBOS_FIXTURE_LONG_ROWS=<n>` (screenshot / perf rig): pad the Launch week
+/// group with this many synthetic rows — only the message list grows; the chat
+/// header pill stays in the header row ([feedback
+/// local-relay-unarbos-20261024065516774-20261024065609], iPhone twin).
+fn fixture_long_rows() -> Option<usize> {
+    std::env::var("ARBOS_FIXTURE_LONG_ROWS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+}
+
 pub const PROJECT_TESTAGENT: &str = "01J9PROJTESTAGENT000000000";
 
 fn testagent_member() -> AgentMember {
@@ -741,6 +752,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             text,
             attachments,
             reply_to,
+            mentions,
         } => {
             let attachments: Vec<Attachment> = attachments
                 .iter()
@@ -765,6 +777,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 attachments,
                 reply_to,
                 None,
+                mentions,
             );
         }
         ClientCommand::Forward {
@@ -784,6 +797,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 vec![attachment],
                 None,
                 None,
+                Vec::new(),
             );
         }
         ClientCommand::OpenAttachment {
@@ -824,6 +838,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 Vec::new(),
                 None,
                 Some(forwarded_from),
+                Vec::new(),
             );
         }
         ClientCommand::Steer {
@@ -841,6 +856,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 Vec::new(),
                 reply_to,
                 None,
+                Vec::new(),
             );
         }
         ClientCommand::SendVoice {
@@ -860,7 +876,16 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 kind: Some(AttachmentKind::Audio),
                 title: None,
             }];
-            send_user(shared, chat_id, message_id, text, attachments, None, None);
+            send_user(
+                shared,
+                chat_id,
+                message_id,
+                text,
+                attachments,
+                None,
+                None,
+                Vec::new(),
+            );
         }
         ClientCommand::Transcribe {
             request_id, wav, ..
@@ -2008,6 +2033,7 @@ fn seed_local() -> LocalView {
 }
 
 /// The user row (attachments first, then the text), its `send` command, and the scripted turn.
+#[allow(clippy::too_many_arguments)]
 fn send_user(
     shared: &Arc<Shared>,
     chat_id: Id,
@@ -2016,10 +2042,15 @@ fn send_user(
     attachments: Vec<Attachment>,
     reply_to: Option<String>,
     forwarded_from: Option<String>,
+    tokens: Vec<String>,
 ) {
     let project_id = project_of(shared, &chat_id);
     if let Some(space) = people_space_of(shared, &chat_id) {
-        let mentions = mentions_in(&space, &text);
+        let mentions = mentions_in(&space, &text, &tokens);
+        // Rig (#1596): `ARBOS_FIXTURE_TRACE_SENDS=1` prints what the row carries.
+        if std::env::var_os("ARBOS_FIXTURE_TRACE_SENDS").is_some() {
+            eprintln!("fixture send: text={text:?} chips={tokens:?} mentions={mentions:?}");
+        }
         let me = me();
         let opts = UserMessageOpts {
             attachments: user_attachments(&attachments),
@@ -5531,6 +5562,106 @@ fn text_part(text: &str) -> Part {
     }
 }
 
+/// `ARBOS_FIXTURE_LONG_ROWS`: a long group history shaped like the iPhone
+/// rig's "Testing" group — four people and one agent talking, a reply every
+/// tenth row, a markdown answer every seventh, a relay membership line every
+/// fortieth, an image or file every twenty-fifth, a date break every three
+/// hundredth. Deterministic ids so two launches render the same rows. Ends
+/// `before`; rows sit 40 s apart. Only lengthens the message list.
+fn long_group_transcript(rows: usize, before: u64) -> Vec<Message> {
+    let people: [Person; 4] = [
+        person("fx-u3", "mira-k", Some("Mira Kaplan"), "member"),
+        sam(),
+        me(),
+        person("gh_32490803", "unconst", Some("Unconst"), "member"),
+    ];
+    let lines = [
+        "Can we move the launch call to 10 am? The press embargo lifts at noon.",
+        "Done — calendar updated. I also pinged the design channel about the hero asset.",
+        "The signup form drops the handle field on iOS 27 when autofill fires. Repro in 2 of 5 tries.",
+        "Looks related to the keyboard inset change. Checking the TestFlight build from last night.",
+        "Shipping notes are in the shared doc. Shout if the pricing table reads wrong.",
+        "Also: the relay restarted twice this morning, both clean 1012 closes. Nothing lost.",
+        "https://arbos.life/i/launch is live behind the flag. Please smoke it on a phone.",
+        "Agreed. Let's keep the group to launch chatter until Friday.",
+    ];
+    let markdown = [
+        "Three things to check before the embargo lifts:\n\n- the **hero** video loops without a black frame\n- `/download/mac` resolves to the new build\n- the status page shows green for the relay\n\nI'll take the first two.",
+        "## Launch day timeline\n\n1. 09:30 final smoke on TestFlight\n2. 10:00 call\n3. 12:00 embargo lifts, post goes out\n4. 13:00 watch the relay dashboard\n\nCode to flip the flag: `arbosctl admin flags set launch on`.",
+        "| Step | Owner | State |\n| --- | --- | --- |\n| Hero asset | Mira | done |\n| Pricing copy | Sam | review |\n| Relay deploy | Jacob | queued |",
+    ];
+    let mut out = Vec::with_capacity(rows);
+    let start = before.saturating_sub(rows as u64 * 40_000);
+    for i in 0..rows {
+        let id = format!("long-{i}");
+        let mut at = start + i as u64 * 40_000;
+        if i > 0 && i % 300 == 0 {
+            at = at.saturating_add(2 * 3_600_000);
+        }
+        if i % 40 == 39 {
+            let who = &people[i % people.len()];
+            let name = who.name.as_deref().unwrap_or(who.handle.as_str());
+            let mut msg = human_message(GROUP_LAUNCH, who, &format!("Jacob added {name}"), at);
+            msg.id = id;
+            msg.role = Role::System;
+            msg.sender = "system".into();
+            msg.sender_name = None;
+            msg.sender_handle = None;
+            msg.sender_avatar = None;
+            out.push(msg);
+            continue;
+        }
+        if i % 7 == 6 {
+            let text = markdown[(i / 7) % markdown.len()];
+            let mut msg = human_message(GROUP_LAUNCH, &me(), text, at);
+            msg.id = id;
+            msg.role = Role::Assistant;
+            msg.sender = format!("agent:{PROJECT_ARBOS}");
+            msg.sender_name = Some("Arbos".into());
+            msg.sender_handle = Some("arbos".into());
+            msg.sender_avatar = None;
+            msg.turn = Some(TurnKind::Reply);
+            msg.decision = Some("reply".into());
+            msg.completed_at = Some(at.saturating_add(3_000));
+            out.push(msg);
+            continue;
+        }
+        let who = &people[(i / 3) % people.len()];
+        if i % 25 == 24 {
+            let image = i % 50 == 24;
+            let part = if image {
+                attachment(
+                    &format!("IMG_{}.jpg", 1000 + i),
+                    "image/jpeg",
+                    AttachmentKind::Image,
+                    "Launch photo",
+                    212_000,
+                )
+            } else {
+                attachment(
+                    &format!("launch-notes-{i}.pdf"),
+                    "application/pdf",
+                    AttachmentKind::Pdf,
+                    "Launch notes",
+                    1_840_000,
+                )
+            };
+            let mut msg = human_message(GROUP_LAUNCH, who, "", at);
+            msg.id = id;
+            msg.parts = vec![part];
+            out.push(msg);
+            continue;
+        }
+        let mut msg = human_message(GROUP_LAUNCH, who, lines[i % lines.len()], at);
+        msg.id = id;
+        if i % 10 == 5 && i >= 5 {
+            msg.reply_to = Some(format!("long-{}", i - 5));
+        }
+        out.push(msg);
+    }
+    out
+}
+
 fn seed_people_chat_docs() -> Vec<ChatDoc> {
     let mut out = Vec::new();
     let base = now_ms().saturating_sub(40 * 60_000);
@@ -5594,6 +5725,14 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
     let group = ChatDoc::new(GROUP_LAUNCH, GROUP_LAUNCH);
     let samir = person("gh_457", "samir", Some("Samir Haddad"), "member");
     let sara = person("gh_458", "sara", Some("Sara Lind"), "member");
+    // `ARBOS_FIXTURE_LONG_ROWS=<n>`: older synthetic history first — the list
+    // only; header geometry is unchanged.
+    if let Some(rows) = fixture_long_rows() {
+        let before = base.saturating_sub(4 * 3_600_000);
+        for msg in long_group_transcript(rows, before) {
+            insert_message_via_core(&group, &msg);
+        }
+    }
     insert_message_via_core(&group, &human_message(
         GROUP_LAUNCH,
         &samir,
@@ -5843,9 +5982,15 @@ fn text_has_at_token(lower: &str, token: &str) -> bool {
 
 /// `@slug` / `@handle` tokens in the text, resolved to member ids.
 /// Group owners may also use `@here` (every human) and `@agents` (every agent).
-fn mentions_in(space: &Project, text: &str) -> Vec<String> {
+fn mentions_in(space: &Project, text: &str, tokens: &[String]) -> Vec<String> {
     let lower = text.to_lowercase();
-    let mut out = Vec::new();
+    let mut out: Vec<String> = Vec::new();
+    for t in tokens {
+        if !out.contains(t) {
+            out.push(t.clone());
+        }
+    }
+    let claimed = crate::sync::claimed_handles(space, tokens);
     let i_own_group =
         space.is_people_group() && space.owner_handle.as_deref().is_none_or(|o| o == ME_HANDLE);
     if i_own_group {
@@ -5869,6 +6014,9 @@ fn mentions_in(space: &Project, text: &str) -> Vec<String> {
     for a in &space.agents {
         let handle = a.handle.to_lowercase();
         let slug = Project::mention_slug(&a.name);
+        if claimed.contains(&handle) || claimed.contains(&slug) {
+            continue;
+        }
         if (!handle.is_empty() && text_has_at_token(&lower, &handle))
             || (!slug.is_empty() && text_has_at_token(&lower, &slug))
         {
@@ -5879,7 +6027,11 @@ fn mentions_in(space: &Project, text: &str) -> Vec<String> {
         }
     }
     for p in &space.people {
-        if lower.contains(&format!("@{}", p.handle.to_lowercase())) {
+        let handle = p.handle.to_lowercase();
+        if claimed.contains(&handle) {
+            continue;
+        }
+        if lower.contains(&format!("@{handle}")) {
             let id = format!("user:{}", p.id);
             if !out.iter().any(|x| x == &id) {
                 out.push(id);

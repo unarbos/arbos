@@ -189,11 +189,15 @@ impl DocHost {
                 eligible = true;
             }
             if eligible && self.seen_commands.insert(c.id.clone()) {
-                if recovering && c.status == "taken" {
-                    self.mark_interrupted(&c);
-                }
-                if people && c.kind == "send" && c.status == "pending" {
+                // People chats: `taken` is not "mine, interrupted" — any agent of the chat
+                // marks a send taken, and at boot every one of the day's commands reads as
+                // recovery (2026-10-24 02:23: 189 of them re-gated, oldest 12 h). Same rule for
+                // pending and taken: named → first; stale and unaddressed → not even gated.
+                if people && c.kind == "send" {
                     if let Some(sender) = self.names_me(&c) {
+                        if recovering && c.status == "taken" {
+                            self.mark_interrupted(&c);
+                        }
                         addressed.push((c, sender));
                         continue;
                     }
@@ -201,6 +205,9 @@ impl DocHost {
                         skipped += 1;
                         continue;
                     }
+                }
+                if recovering && c.status == "taken" {
+                    self.mark_interrupted(&c);
                 }
                 rest.push(c);
             }
@@ -272,6 +279,9 @@ impl DocHost {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_owned();
+        // Only this agent's own streaming rows: in a people chat another agent may be mid-reply
+        // to the same message on its own box, and that reply is not ours to cancel.
+        let me = self.me.as_str();
         let stale: Vec<String> = self
             .doc
             .messages()
@@ -280,6 +290,10 @@ impl DocHost {
                 m.role == "assistant"
                     && m.status == "streaming"
                     && m.rest.get("inReplyTo").and_then(|v| v.as_str()) == Some(user_msg.as_str())
+                    && m.rest
+                        .get("sender")
+                        .and_then(|v| v.as_str())
+                        .is_none_or(|s| s == me)
             })
             .map(|m| m.id)
             .collect();
@@ -1292,5 +1306,89 @@ mod tests {
         );
         hub.close_all().await;
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 2026-10-24 02:23 (image 0.1.106): after the roll TestAgent re-gated 189 Arbonites
+    /// sends, the oldest 12 h old — all `taken` (by whichever agent answered), which boot read
+    /// as its own interrupted turns. In a people chat a stale taken send is history like a
+    /// stale pending one; a stale taken send that names me still runs.
+    #[test]
+    fn stale_taken_people_sends_are_not_recovered() {
+        let doc = ChatDoc::new(Some(7), true);
+        let now = now_ms();
+        let hour_ago = now - 60 * 60 * 1000;
+        let msg = |id: &str, text: &str, mentions: Vec<&str>| {
+            doc.append_user_message(
+                id,
+                text,
+                "mac",
+                &arbos_core::doc::UserMessageOpts {
+                    mentions: mentions.into_iter().map(str::to_owned).collect(),
+                    sender: Some("user:sam".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        };
+        msg("old-chat", "lfg", vec![]);
+        msg("old-ping", "@testagent try again", vec!["agent:ME"]);
+        msg("fresh", "gm", vec![]);
+        let old_chat = doc.push_command_at(
+            "send",
+            serde_json::json!({ "messageId": "old-chat" }),
+            "mac",
+            hour_ago,
+        );
+        let old_ping = doc.push_command_at(
+            "send",
+            serde_json::json!({ "messageId": "old-ping" }),
+            "mac",
+            hour_ago + 1,
+        );
+        let fresh = doc.push_command_at(
+            "send",
+            serde_json::json!({ "messageId": "fresh" }),
+            "mac",
+            now - 30_000,
+        );
+        for id in [&old_chat, &old_ping, &fresh] {
+            doc.set_command_status(id, CommandStatus::Taken, None);
+        }
+        let mut host = host_with(doc);
+        let ids: Vec<String> = host.new_pending().into_iter().map(|c| c.id).collect();
+        assert_eq!(
+            ids,
+            vec![old_ping, fresh],
+            "stale taken chatter is not recovered; a stale ping that names me and a fresh taken send are"
+        );
+        assert!(!ids.contains(&old_chat));
+    }
+
+    /// A box restart must not cancel another agent's live reply in a shared chat.
+    #[test]
+    fn recovery_cancels_only_my_own_streaming_rows() {
+        let doc = ChatDoc::new(Some(7), true);
+        doc.append_user_message(
+            "q",
+            "@testagent @doug hi",
+            "mac",
+            &arbos_core::doc::UserMessageOpts::default(),
+        )
+        .unwrap();
+        doc.start_assistant_message("mine", "q", "box:test");
+        doc.set_message_fields("mine", &[("sender", serde_json::json!("agent:ME"))]);
+        doc.start_assistant_message("theirs", "q", "box:other");
+        doc.set_message_fields("theirs", &[("sender", serde_json::json!("agent:DOUG"))]);
+        let cmd = doc.push_command("send", serde_json::json!({ "messageId": "q" }), "mac");
+        doc.set_command_status(&cmd, CommandStatus::Taken, None);
+        let mut host = host_with(doc);
+        let _ = host.new_pending();
+        let status = |id: &str| host.doc.message(id).map(|m| m.status).unwrap_or_default();
+        assert_eq!(status("mine"), "cancelled", "my interrupted row is closed");
+        assert_eq!(
+            status("theirs"),
+            "streaming",
+            "the other agent's live row is left alone"
+        );
     }
 }

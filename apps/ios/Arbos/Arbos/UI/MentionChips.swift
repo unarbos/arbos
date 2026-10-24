@@ -30,6 +30,9 @@ struct MentionEntry {
 /// evaluation walked projects, people chats, the directory and servers.
 @MainActor
 final class MentionTable {
+    /// Identity of the table's inputs (the cache's hash); views compare this, not
+    /// the instance, so a rebuilt-but-equal table does not redraw every bubble.
+    var stamp = 0
     private var byHandle: [String: MentionEntry] = [:]
     /// Display names, longest first, so `@Launch week` beats `@Launch`.
     private var names: [(String, MentionEntry)] = []
@@ -119,6 +122,7 @@ final class MentionTable {
             if next != stamp {
                 stamp = next
                 table = MentionTable(model: model, theme: theme)
+                table.stamp = next
             }
             return table
         }

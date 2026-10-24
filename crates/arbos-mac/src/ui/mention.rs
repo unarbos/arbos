@@ -13,7 +13,7 @@
 //! the pill behind the run, hides the `@` glyph and paints the picture in its
 //! cell, and routes a plain click inside the run to [`Mention::page`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -44,7 +44,7 @@ pub const PICTURE_GAP: f32 = 3.0;
 pub const CELL: &str = "@\u{2004}";
 
 /// What the chip paints in the `@` cell.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Picture {
     Image(Arc<RenderImage>),
     /// D79 initials disc: two letters on the id's gradient.
@@ -63,12 +63,42 @@ pub struct Mention {
     /// The display name the chip shows (and the text carries after `@`).
     pub name: String,
     pub picture: Picture,
+    /// The member id a sent row carries for this entity (`user:<id>` /
+    /// `agent:<project-id>`); `None` for groups, servers and the collective
+    /// `@here` / `@agents` (those expand at send time).
+    pub id: Option<String>,
+}
+
+/// A committed mention in the composer (#1596): the chip stands for one
+/// entity, picked from the menu or resolved from an exact `@handle`. Its text
+/// in the field is [`CELL`] + `name` at `range`; the sent row carries
+/// `@handle` in the text and `id` in `mentions`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MentionToken {
+    pub range: Range<usize>,
+    pub handle: String,
+    pub name: String,
+    pub id: Option<String>,
+}
+
+impl MentionToken {
+    /// What the token reads as in the sent text.
+    pub fn plain(&self) -> String {
+        format!("@{}", self.handle)
+    }
 }
 
 /// Everyone a bubble can mention, keyed by handle (lower-case), plus the
 /// state handle a click updates.
 pub struct Mentions {
     by_handle: HashMap<String, Rc<Mention>>,
+    /// The same entities by member id, for a composer token that knows who
+    /// it is even when its handle is shared (#1538).
+    by_id: HashMap<String, Rc<Mention>>,
+    /// Handles two different entities carry (an agent and a person, #1538):
+    /// a typed exact handle is not auto-resolved for these — the picker or
+    /// the send-time tie rule decides.
+    ambiguous: HashSet<String>,
     /// Display names, longest first, so `@Launch week` beats `@Launch`.
     names: Vec<(String, Rc<Mention>)>,
     /// What a click does with the page: open the right pane (the app), or
@@ -83,6 +113,8 @@ impl Mentions {
     pub fn empty() -> Rc<Self> {
         Rc::new(Self {
             by_handle: HashMap::new(),
+            by_id: HashMap::new(),
+            ambiguous: HashSet::new(),
             names: Vec::new(),
             opener: None,
         })
@@ -94,27 +126,18 @@ impl Mentions {
         entries: Vec<(&str, Mention)>,
         opener: impl Fn(&ProfilePage, &mut App) + 'static,
     ) -> Rc<Self> {
-        let mut by_handle = HashMap::new();
+        let mut table = Table::default();
         for (handle, m) in entries {
-            by_handle.insert(handle.to_lowercase(), Rc::new(m));
+            table.add(handle.to_string(), m);
         }
-        let names = sorted_names(&by_handle);
-        Rc::new(Self {
-            by_handle,
-            names,
-            opener: Some(Rc::new(opener)),
-        })
+        Rc::new(table.finish(Some(Rc::new(opener))))
     }
 
     /// People, agents, groups and servers the app knows right now.
     pub fn from_state(state: &Entity<AppState>, theme: &Theme, cx: &App) -> Rc<Self> {
         let s = state.read(cx);
-        let mut by_handle: HashMap<String, Rc<Mention>> = HashMap::new();
-        let mut add = |handle: String, m: Mention| {
-            by_handle
-                .entry(handle.to_lowercase())
-                .or_insert_with(|| Rc::new(m));
-        };
+        let mut table = Table::default();
+        let mut add = |handle: String, m: Mention| table.add(handle, m);
         // Collective pings first so a rare handle collision cannot steal them.
         add(
             "here".into(),
@@ -122,6 +145,7 @@ impl Mentions {
                 page: None,
                 name: "here".into(),
                 picture: initials("here", "here", None, theme),
+                id: None,
             },
         );
         add(
@@ -130,6 +154,7 @@ impl Mentions {
                 page: None,
                 name: "agents".into(),
                 picture: initials("agents", "agents", None, theme),
+                id: None,
             },
         );
         for p in &s.projects {
@@ -145,6 +170,7 @@ impl Mentions {
                             }),
                             name: person.display_name(),
                             picture: person_picture(s, person, theme),
+                            id: Some(format!("user:{}", person.id)),
                         },
                     );
                 }
@@ -154,14 +180,20 @@ impl Mentions {
             if slug.is_empty() {
                 continue;
             }
-            let page = if p.is_people_group() {
-                ProfilePage::Group {
-                    space_id: p.id.clone(),
-                }
+            let (page, id) = if p.is_people_group() {
+                (
+                    ProfilePage::Group {
+                        space_id: p.id.clone(),
+                    },
+                    None,
+                )
             } else {
-                ProfilePage::Agent {
-                    project_id: p.id.clone(),
-                }
+                (
+                    ProfilePage::Agent {
+                        project_id: p.id.clone(),
+                    },
+                    Some(format!("agent:{}", p.id)),
+                )
             };
             add(
                 slug,
@@ -169,6 +201,7 @@ impl Mentions {
                     page: Some(page),
                     name: p.name.trim().to_string(),
                     picture: project_picture(s, p, theme),
+                    id,
                 },
             );
         }
@@ -188,6 +221,7 @@ impl Mentions {
                         }),
                         name: ident.name.clone(),
                         picture: identity_picture(s, &ident, theme),
+                        id: Some(format!("agent:{}", ident.id)),
                     },
                 );
             }
@@ -208,6 +242,7 @@ impl Mentions {
                     }),
                     name: person.display_name(),
                     picture: person_picture(s, person, theme),
+                    id: Some(format!("user:{}", person.id)),
                 },
             );
         }
@@ -237,19 +272,44 @@ impl Mentions {
                     }),
                     name: server.name.trim().to_string(),
                     picture,
+                    id: None,
                 },
             );
         }
-        let names = sorted_names(&by_handle);
         let state = state.clone();
-        Rc::new(Self {
-            by_handle,
-            names,
-            opener: Some(Rc::new(move |page: &ProfilePage, cx: &mut App| {
+        Rc::new(
+            table.finish(Some(Rc::new(move |page: &ProfilePage, cx: &mut App| {
                 let page = page.clone();
                 state.update(cx, |s, cx| s.open_profile(page, cx));
-            })),
-        })
+            }))),
+        )
+    }
+
+    /// The entity behind a handle (case-insensitive), if known.
+    pub fn by_handle(&self, handle: &str) -> Option<&Rc<Mention>> {
+        self.by_handle.get(&handle.to_lowercase())
+    }
+
+    /// The entity behind a member id (`user:<id>` / `agent:<project-id>`).
+    pub fn by_id(&self, id: &str) -> Option<&Rc<Mention>> {
+        self.by_id.get(id)
+    }
+
+    /// True when two different entities carry `handle` (#1538): a typed exact
+    /// handle stays plain text until the picker or the send-time rule decides.
+    pub fn is_ambiguous(&self, handle: &str) -> bool {
+        self.ambiguous.contains(&handle.to_lowercase())
+    }
+
+    /// The picture a composer token paints: by id first (exact entity), else
+    /// by handle.
+    pub fn picture_for(&self, token: &MentionToken) -> Option<&Picture> {
+        token
+            .id
+            .as_deref()
+            .and_then(|id| self.by_id(id))
+            .or_else(|| self.by_handle(&token.handle))
+            .map(|m| &m.picture)
     }
 
     /// `@handle` → `@Display Name` for every handle we know; anything else is
@@ -364,6 +424,51 @@ impl Mentions {
     }
 }
 
+/// The table under construction: first entity per handle wins (bubbles), every
+/// entity is reachable by id (composer tokens), and a handle two kinds of
+/// entity share is remembered as ambiguous (#1538).
+#[derive(Default)]
+struct Table {
+    by_handle: HashMap<String, Rc<Mention>>,
+    by_id: HashMap<String, Rc<Mention>>,
+    ambiguous: HashSet<String>,
+}
+
+impl Table {
+    fn add(&mut self, handle: String, m: Mention) {
+        let key = handle.to_lowercase();
+        let m = Rc::new(m);
+        if let Some(id) = m.id.as_deref() {
+            self.by_id
+                .entry(id.to_string())
+                .or_insert_with(|| m.clone());
+        }
+        match self.by_handle.get(&key) {
+            None => {
+                self.by_handle.insert(key, m);
+            }
+            Some(first) => {
+                let first_is_agent = first.id.as_deref().is_some_and(|i| i.starts_with("agent:"));
+                let this_is_agent = m.id.as_deref().is_some_and(|i| i.starts_with("agent:"));
+                if first.id.is_some() && m.id.is_some() && first_is_agent != this_is_agent {
+                    self.ambiguous.insert(key);
+                }
+            }
+        }
+    }
+
+    fn finish(self, opener: Option<Opener>) -> Mentions {
+        let names = sorted_names(&self.by_handle);
+        Mentions {
+            by_handle: self.by_handle,
+            by_id: self.by_id,
+            ambiguous: self.ambiguous,
+            names,
+            opener,
+        }
+    }
+}
+
 /// Display names, longest first (so `@Launch week` beats `@Launch`), one
 /// entry per name.
 fn sorted_names(by_handle: &HashMap<String, Rc<Mention>>) -> Vec<(String, Rc<Mention>)> {
@@ -392,6 +497,11 @@ fn handle_len(s: &str) -> usize {
     len
 }
 
+/// A D79 initials disc for `name`, coloured from `seed` (or `index`).
+pub fn initials_picture(seed: &str, name: &str, index: Option<u8>, theme: &Theme) -> Picture {
+    initials(seed, name, index, theme)
+}
+
 fn initials(seed: &str, name: &str, index: Option<u8>, theme: &Theme) -> Picture {
     let (top, bottom) = avatars::gradient(avatars::index_for(seed, index), theme);
     Picture::Initials {
@@ -401,7 +511,19 @@ fn initials(seed: &str, name: &str, index: Option<u8>, theme: &Theme) -> Picture
     }
 }
 
-fn person_picture(s: &AppState, person: &crate::model::Person, theme: &Theme) -> Picture {
+/// An agent member of a people chat (`space`), through the same identity rule
+/// its bubbles and the presence row use (#1592).
+pub fn agent_member_picture(
+    s: &AppState,
+    space: Option<&Project>,
+    a: &crate::model::AgentMember,
+    theme: &Theme,
+) -> Picture {
+    let ident = avatars::member_identity(space, &s.projects, a);
+    identity_picture(s, &ident, theme)
+}
+
+pub fn person_picture(s: &AppState, person: &crate::model::Person, theme: &Theme) -> Picture {
     match s.avatar(&person.avatar_url) {
         Some(image) => Picture::Image(image),
         None => initials(
@@ -452,6 +574,11 @@ pub(crate) mod tests {
     use super::*;
 
     pub(crate) fn stub(name: &str, page: ProfilePage) -> Mention {
+        let id = match &page {
+            ProfilePage::Agent { project_id } => Some(format!("agent:{project_id}")),
+            ProfilePage::User { handle, .. } => Some(format!("user:gh_{handle}")),
+            _ => None,
+        };
         Mention {
             page: Some(page),
             name: name.to_string(),
@@ -460,6 +587,7 @@ pub(crate) mod tests {
                 top: Hsla::default(),
                 bottom: Hsla::default(),
             },
+            id,
         }
     }
 
@@ -542,6 +670,7 @@ pub(crate) mod tests {
                             top: Hsla::default(),
                             bottom: Hsla::default(),
                         },
+                        id: None,
                     },
                 ),
                 (
@@ -554,6 +683,7 @@ pub(crate) mod tests {
                             top: Hsla::default(),
                             bottom: Hsla::default(),
                         },
+                        id: None,
                     },
                 ),
             ],
@@ -619,6 +749,54 @@ pub(crate) mod tests {
         assert_eq!(chips.len(), 2);
         assert_eq!(&text[chips[0].0.clone()], format!("{CELL}Launch week"));
         assert_eq!(&text[chips[1].0.clone()], format!("{CELL}Launch"));
+    }
+
+    #[test]
+    fn ids_index_every_entity_and_a_shared_handle_is_ambiguous() {
+        // `@arbos` is both an agent and a person (#1538): the bubble keeps the
+        // first (the agent), a composer token can still name the person by id,
+        // and a typed exact `@arbos` is not auto-resolved.
+        let m = mentions(&[
+            (
+                "arbos",
+                "Arbos",
+                ProfilePage::Agent {
+                    project_id: "p-arbos".into(),
+                },
+            ),
+            (
+                "arbos",
+                "Jacob",
+                ProfilePage::User {
+                    handle: "arbos".into(),
+                    space_id: None,
+                },
+            ),
+            (
+                "sam",
+                "Sam Rivera",
+                ProfilePage::User {
+                    handle: "sam".into(),
+                    space_id: None,
+                },
+            ),
+        ]);
+        assert_eq!(m.by_handle("ARBOS").unwrap().name, "Arbos");
+        assert_eq!(m.by_id("user:gh_arbos").unwrap().name, "Jacob");
+        assert_eq!(m.by_id("agent:p-arbos").unwrap().name, "Arbos");
+        assert!(m.is_ambiguous("arbos"));
+        assert!(!m.is_ambiguous("sam"));
+        let token = MentionToken {
+            range: 0..0,
+            handle: "arbos".into(),
+            name: "Jacob".into(),
+            id: Some("user:gh_arbos".into()),
+        };
+        assert!(matches!(
+            m.picture_for(&token),
+            Some(Picture::Initials { .. })
+        ));
+        assert_eq!(token.plain(), "@arbos");
     }
 
     #[test]

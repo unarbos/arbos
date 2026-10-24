@@ -20,7 +20,7 @@ use crate::ui::groups;
 use crate::ui::icons::icon;
 use crate::ui::people;
 use crate::ui::shell::Shell;
-use crate::ui::theme::Theme;
+use crate::ui::theme::{Theme, TEXT_BODY};
 
 use super::pane::{self, Hero, Picture, ProfilePane, Section};
 use super::{
@@ -357,6 +357,22 @@ pub(super) fn page(
                 );
             }
             let mut out = Vec::new();
+            if is_people {
+                if let Some(desc) = space
+                    .description
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                {
+                    out.push(Section::Card(vec![div()
+                        .px(px(kit::INSET))
+                        .py(px(12.0))
+                        .text_size(px(TEXT_BODY))
+                        .text_color(theme.text)
+                        .child(desc.to_owned())
+                        .into_any_element()]));
+                }
+            }
             // Owner: whether members can see who has read messages (iPhone twin).
             if is_people && i_own_group {
                 let sid = space.id.clone();

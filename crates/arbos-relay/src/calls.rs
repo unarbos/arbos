@@ -1372,6 +1372,7 @@ mod tests {
                 title: Some("Arbonites".into()),
                 avatar_leaf: None,
                 avatar_leaf_color: None,
+                description: None,
             }),
         )
         .await;
@@ -1491,6 +1492,7 @@ mod tests {
                 title: Some("Pick some".into()),
                 avatar_leaf: None,
                 avatar_leaf_color: None,
+                description: None,
             }),
         )
         .await;
@@ -1703,6 +1705,7 @@ mod tests {
                 title: Some("Speakers".into()),
                 avatar_leaf: None,
                 avatar_leaf_color: None,
+                description: None,
             }),
         )
         .await;
@@ -2207,6 +2210,7 @@ mod tests {
             image_key: None,
             avatar_leaf: None,
             avatar_leaf_color: None,
+            description: None,
             members_see_reads: true,
         };
         state.db.insert_people_chat(&chat).unwrap();

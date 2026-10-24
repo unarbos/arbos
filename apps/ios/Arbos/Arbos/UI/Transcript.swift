@@ -126,10 +126,13 @@ enum RowKind: Equatable {
     /// belongs to (#1440 follow-up: the card must share the bubble's left edge and cap width).
     case question(questionId: String?, text: String, options: [ChoiceOption], multi: Bool, picked: [String], open: Bool, lane: Bool)
     /// A file card; tap opens the media viewer on it (Open → Quick Look).
-    case file(item: MediaItem, subtitle: String)
+    /// `caption` is an optional description bar under a video when the sender typed
+    /// one with the attachment — not a separate text bubble.
+    case file(item: MediaItem, subtitle: String, caption: String?)
     case voiceMemo(name: String, projectId: Id, ref: String?, fromUser: Bool)
     /// A picture; tap opens the media viewer at its place in the chat's album.
-    case image(item: MediaItem, fromUser: Bool)
+    /// `caption` is the description bar under the picture when the send carried text.
+    case image(item: MediaItem, fromUser: Bool, caption: String?)
     /// "Forwarded from <name>" under a forwarded attachment (media-viewer-2026-10-23).
     case forwardHint(text: String, fromUser: Bool)
     case error(code: String, message: String)
@@ -142,8 +145,14 @@ struct Row: Identifiable, Equatable {
     var kind: RowKind
     /// Emoji reactions shown under this bubble (stamped on the last prose/media row of a message).
     var reactions: [MessageReaction] = []
+    /// How many messages reply to this one via `replyTo` (swipe / long-press Reply); shown top-right when > 0.
+    var replyCount: Int = 0
     /// The message's `createdAt` (ms), so the swipe-revealed time needs no lookup.
     var createdAt: Int64 = 0
+    /// Space above this row (8 pt within a run, 24 pt at a sender / turn change,
+    /// 20 pt around system lines), fixed at build time so a row's layout does not
+    /// depend on its position in the visible window.
+    var gapBefore: CGFloat = 0
 }
 
 enum Transcript {
@@ -177,6 +186,7 @@ enum Transcript {
         var prevSender: String? = nil
         /// Hand-off rows by id (name, messages exchanged), merged into one line when consecutive.
         var handoffs: [String: (String, Int)] = [:]
+        let replyCounts = Self.replyCounts(in: messages)
         for message in messages {
             // Voice-call transcript lines stay in the doc for the agent; they are not
             // chat bubbles (Grok: typed prose, attachments, and call start/end notes only).
@@ -197,25 +207,43 @@ enum Transcript {
                 var hasImage = false
                 var hasAttachment = false
                 let mine = !people || me == nil || message.sender == me || message.sender == "user"
+                // Collect picture / video attachments first so a typed description can sit
+                // as a caption bar on the last one instead of a second bubble.
+                var mediaParts: [(id: String, a: Attachment)] = []
                 for part in message.parts {
                     if case .attachment(let id, let a) = part {
                         if a.isImage { hasImage = true }
                         hasAttachment = true
-                        // Another person's picture / file sits left like their bubble.
-                        chunk.append(attachmentRow(id: "\(message.id)#\(id)", message: message, a: a, projectId: projectId, fromUser: mine, agentNames: agentNames))
+                        mediaParts.append((id, a))
                     }
                 }
                 let text = message.plainText
                 // A forwarded attachment's "Forwarded from …" line is a hint under
                 // the card, not a bubble of its own.
                 let forwarded = hasAttachment ? MediaAlbum.forwardedFrom(text) : nil
+                // Only pictures and videos take a description bar; a PDF + note
+                // still uses a normal text bubble.
+                let lastCaptionable = mediaParts.lastIndex { Self.isCaptionableMedia($0.a) }
+                let mediaCaption: String? = {
+                    guard forwarded == nil, lastCaptionable != nil, !text.isEmpty,
+                          !Self.isGenericMediaLabel(text) else { return nil }
+                    return text
+                }()
+                for (i, part) in mediaParts.enumerated() {
+                    let cap = (i == lastCaptionable) ? mediaCaption : nil
+                    // Another person's picture / file sits left like their bubble.
+                    chunk.append(attachmentRow(id: "\(message.id)#\(part.id)", message: message, a: part.a,
+                                               projectId: projectId, fromUser: mine, agentNames: agentNames,
+                                               caption: cap))
+                }
                 if let forwarded {
                     chunk.append(Row(id: "\(message.id)#forwarded", messageId: message.id, role: mine ? .user : .project,
                                      kind: .forwardHint(text: forwarded, fromUser: mine)))
                 }
                 // Generic labels ("Image", "Photo", …) are not prose — the attachment
                 // row already carries the media. Showing them as a bubble is noise.
-                if !text.isEmpty, forwarded == nil, !(hasImage && Self.isGenericMediaLabel(text)) {
+                // A real description on a picture/video is the caption bar on that row.
+                if !text.isEmpty, forwarded == nil, mediaCaption == nil, !(hasImage && Self.isGenericMediaLabel(text)) {
                     // A forward carries its "Forwarded from" header where a reply carries its quote.
                     let quote: Quote?
                     if let by = message.forwardedFrom?.trimmingCharacters(in: .whitespacesAndNewlines), !by.isEmpty {
@@ -233,8 +261,9 @@ enum Transcript {
                 }
             case .system:
                 // Call lines and other system notes: one muted centred line.
+                // Admin deletion audits stay out of the chat (GroupActivity screen only).
                 let text = message.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !text.isEmpty {
+                if !text.isEmpty, !GroupActivity.isAuditLine(text) {
                     let icon = text.hasPrefix("Call ended") ? "phone.down.fill" : (text.contains(" call") ? "phone.fill" : nil)
                     chunk.append(Row(id: "\(message.id)#system", messageId: message.id, role: .system,
                                      kind: .system(icon: icon, text: text, avatarProject: nil)))
@@ -383,6 +412,16 @@ enum Transcript {
                }) {
                 chunk[ix].reactions = message.reactions
             }
+            // Reply count on the first prose/media row so the badge sits on the message's top bubble.
+            if let count = replyCounts[message.id], count > 0,
+               let ix = chunk.firstIndex(where: {
+                   switch $0.kind {
+                   case .user, .other, .member, .assistant, .image, .file, .voiceMemo: return true
+                   default: return false
+                   }
+               }) {
+                chunk[ix].replyCount = count
+            }
             // Date separators when the gap is over an hour (Grok: "Today 8:00 AM").
             if dateBreak {
                 rows.append(Row(id: "\(message.id)#date", messageId: message.id, role: .system,
@@ -393,7 +432,63 @@ enum Transcript {
             rows.append(contentsOf: chunk)
             prevSender = message.sender
         }
-        return Self.mergeHandoffs(rows, handoffs)
+        return Self.withGaps(Self.mergeHandoffs(rows, handoffs))
+    }
+
+    /// Spacing between neighbours (measured on the Grok Bot references).
+    static func gap(from prev: Row, to cur: Row) -> CGFloat {
+        if case .system = prev.kind { return 20 }
+        if case .system = cur.kind { return 20 }
+        if prev.role != cur.role { return 24 }
+        // Same role: still open the turn gap when an agent starts a new message.
+        if prev.messageId != cur.messageId && (cur.role == .assistant || cur.role == .project) {
+            return 24
+        }
+        return 8
+    }
+
+    private static func withGaps(_ rows: [Row]) -> [Row] {
+        var out = rows
+        for i in out.indices.dropFirst() { out[i].gapBefore = gap(from: out[i - 1], to: out[i]) }
+        return out
+    }
+
+    /// Parent message id for an explicit reply (`replyTo` from swipe / long-press Reply).
+    /// Agent turn links (`inReplyTo`) are not comment-thread parents — counting them would
+    /// put a badge on every answered user message in a 1:1 agent chat.
+    static func replyParentId(of message: Message) -> Id? {
+        if let p = message.replyTo, !p.isEmpty { return p }
+        return nil
+    }
+
+    /// How many messages point at each parent via `replyTo`.
+    static func replyCounts(in messages: [Message]) -> [Id: Int] {
+        var counts: [Id: Int] = [:]
+        for message in messages {
+            guard let parent = replyParentId(of: message) else { continue }
+            counts[parent, default: 0] += 1
+        }
+        return counts
+    }
+
+    /// Direct and nested `replyTo` replies to `rootId`, in transcript order (root itself excluded).
+    static func threadReplies(rootId: Id, in messages: [Message]) -> [Message] {
+        var parentOf: [Id: Id] = [:]
+        parentOf.reserveCapacity(messages.count)
+        for message in messages {
+            if let parent = replyParentId(of: message) { parentOf[message.id] = parent }
+        }
+        func inThread(_ id: Id) -> Bool {
+            var cur: Id? = id
+            var guardCount = 0
+            while let c = cur, guardCount < 64 {
+                if c == rootId { return true }
+                cur = parentOf[c]
+                guardCount += 1
+            }
+            return false
+        }
+        return messages.filter { $0.id != rootId && inThread($0.id) }
     }
 
     /// Blocks for one text part — polished, split, JSON dropped. Cached by text: a rebuild
@@ -402,8 +497,27 @@ enum Transcript {
     /// "8:05 AM" for the time after a group / channel bubble's text.
     static func clockLabel(_ ms: Int64) -> String? {
         guard ms > 0 else { return nil }
-        return Date(timeIntervalSince1970: Double(ms) / 1000).formatted(date: .omitted, time: .shortened)
+        // One label per minute, through a reused formatter: `Date.formatted` per row made
+        // every rebuild of a long group cost ~50 µs × rows (5 000 rows: 14 s in Debug).
+        let minute = ms / 60_000
+        if let hit = clockLabels.object(forKey: NSNumber(value: minute)) { return hit as String }
+        let label = clockFormatter.string(from: Date(timeIntervalSince1970: Double(minute * 60)))
+        clockLabels.setObject(label as NSString, forKey: NSNumber(value: minute))
+        return label
     }
+
+    private static let clockFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .none
+        f.timeStyle = .short
+        return f
+    }()
+
+    private static let clockLabels: NSCache<NSNumber, NSString> = {
+        let cache = NSCache<NSNumber, NSString>()
+        cache.countLimit = 20_000
+        return cache
+    }()
 
     static func proseBlocks(_ text: String, people: Bool) -> [Block] {
         let key = (people ? "p\u{1}" : "a\u{1}") + text
@@ -488,7 +602,7 @@ enum Transcript {
     }
 
     private static func attachmentRow(id: String, message: Message, a: Attachment, projectId: Id, fromUser: Bool,
-                                      agentNames: [String: String]) -> Row {
+                                      agentNames: [String: String], caption: String? = nil) -> Row {
         guard let kind = MediaAlbum.kind(of: a) else {
             return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
                        kind: .voiceMemo(name: a.name, projectId: projectId, ref: a.blobRef, fromUser: fromUser))
@@ -497,11 +611,21 @@ enum Transcript {
                                    projectName: { agentNames[$0] })
         if kind == .image {
             return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
-                       kind: .image(item: item, fromUser: fromUser))
+                       kind: .image(item: item, fromUser: fromUser, caption: caption))
         }
         // Video shows as a file card in the bubble (poster + Play live in the viewer).
+        // A typed description rides the card as a caption bar (pictures/videos only).
         return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
-                   kind: .file(item: item, subtitle: subtitle(for: a)))
+                   kind: .file(item: item, subtitle: subtitle(for: a),
+                               caption: kind == .video ? caption : nil))
+    }
+
+    /// Picture or video — the kinds that take a description bar with the send.
+    private static func isCaptionableMedia(_ a: Attachment) -> Bool {
+        switch MediaAlbum.kind(of: a) {
+        case .image, .video: return true
+        case .file, .none: return false
+        }
     }
 
     /// UTType-style labels some clients leave as the only text on a media-only send.
@@ -740,6 +864,28 @@ enum Markdown {
     /// accent + underline on links; monospaced (a point under body) on a soft
     /// wash for ``code``. Bare `http(s)://` URLs are linked too.
     static func inline(_ text: String, color: Color, link: Color, codeChip: Color) -> AttributedString {
+        // Parsed once per text and palette: the markdown parse and the link detector
+        // ran on every bubble body, and a long group re-evaluates many bodies at once
+        // (arbonites-chat-lag). NSCache: bounded, dropped under memory pressure.
+        let key = "\(text)\u{1}\(color)\u{1}\(link)\u{1}\(codeChip)" as NSString
+        if let hit = inlineCache.object(forKey: key) { return hit.value }
+        let attr = inlineUncached(text, color: color, link: link, codeChip: codeChip)
+        inlineCache.setObject(AttributedBox(attr), forKey: key)
+        return attr
+    }
+
+    private final class AttributedBox {
+        let value: AttributedString
+        init(_ value: AttributedString) { self.value = value }
+    }
+
+    private static let inlineCache: NSCache<NSString, AttributedBox> = {
+        let cache = NSCache<NSString, AttributedBox>()
+        cache.countLimit = 4_000
+        return cache
+    }()
+
+    private static func inlineUncached(_ text: String, color: Color, link: Color, codeChip: Color) -> AttributedString {
         var attr = (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
             ?? AttributedString(text)
         linkBareURLs(&attr)
@@ -818,12 +964,16 @@ struct RowView: View, Equatable {
     /// (composer keystrokes, presence ticks). Closures / the swipe binding are
     /// not compared — they stay valid for the open chat.
     static func == (lhs: RowView, rhs: RowView) -> Bool {
-        lhs.row == rhs.row
+        let same = lhs.row == rhs.row
             && lhs.chatId == rhs.chatId
             && lhs.width == rhs.width
             && lhs.timeReveal == rhs.timeReveal
             && lhs.highlighted == rhs.highlighted
-            && lhs.mentions === rhs.mentions
+            && lhs.mentions.stamp == rhs.mentions.stamp
+        #if DEBUG
+        PerfCounters.bump(same ? "rowEqTrue" : "rowEqFalse")
+        #endif
+        return same
     }
 
     private var maxBubble: CGFloat { max(200, width - Theme.bubbleInset) }
@@ -849,6 +999,9 @@ struct RowView: View, Equatable {
     }
 
     var body: some View {
+        #if DEBUG
+        let _ = PerfCounters.bump("rowBody")
+        #endif
         VStack(spacing: 4) {
             bubble
             if !row.reactions.isEmpty {
@@ -950,6 +1103,7 @@ struct RowView: View, Equatable {
                 .padding(.horizontal, Theme.bubbleHPad)
                 .padding(.vertical, Theme.bubbleVPad)
                 .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleUser))
+                .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: true) }
                 .frame(maxWidth: maxBubble, alignment: .trailing)
                 .opacity(pending ? 0.6 : 1)
             }
@@ -987,6 +1141,7 @@ struct RowView: View, Equatable {
                 .padding(.horizontal, Theme.bubbleHPad)
                 .padding(.vertical, Theme.bubbleVPad)
                 .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
+                .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: false) }
                 .modifier(LiveSenderBar(url: avatar, seed: model.personId(handle: handle) ?? handle))
                 .frame(maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset), alignment: .leading)
                 Spacer(minLength: 0)
@@ -1044,6 +1199,7 @@ struct RowView: View, Equatable {
                         }
                     }
                 )
+                .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: false) }
                 .frame(maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset), alignment: .leading)
                 Spacer(minLength: 0)
             }
@@ -1065,6 +1221,7 @@ struct RowView: View, Equatable {
                 .padding(.horizontal, Theme.bubbleHPad)
                 .padding(.vertical, Theme.bubbleVPad)
                 .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
+                .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: false) }
                 .background {
                     // D82: while the first-login terminal morphs into this bubble it
                     // needs the bubble's exact frame; only the greeting row reports.
@@ -1100,10 +1257,11 @@ struct RowView: View, Equatable {
                     .frame(maxWidth: lane ? maxBubble - Theme.memberLane(composerInset: composerInset) : maxBubble, alignment: .leading)
                 Spacer(minLength: 0)
             }
-        case .file(let item, let subtitle):
+        case .file(let item, let subtitle, let caption):
             HStack {
                 if row.role == .user { Spacer(minLength: 0) }
-                FileCard(item: item, subtitle: subtitle, chatId: chatId, fromUser: row.role == .user)
+                FileCard(item: item, subtitle: subtitle, chatId: chatId, fromUser: row.role == .user, caption: caption)
+                    .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: row.role == .user) }
                     .frame(maxWidth: maxBubble, alignment: row.role == .user ? .trailing : .leading)
                 if row.role != .user { Spacer(minLength: 0) }
             }
@@ -1118,13 +1276,15 @@ struct RowView: View, Equatable {
             HStack {
                 if fromUser { Spacer(minLength: 0) }
                 VoiceMemoBubble(name: name, projectId: projectId, blobRef: ref, fromUser: fromUser)
+                    .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: fromUser) }
                     .frame(maxWidth: maxBubble, alignment: fromUser ? .trailing : .leading)
                 if !fromUser { Spacer(minLength: 0) }
             }
-        case .image(let item, let fromUser):
+        case .image(let item, let fromUser, let caption):
             HStack {
                 if fromUser { Spacer(minLength: 0) }
-                ImageBubble(item: item, chatId: chatId, fromUser: fromUser, maxWidth: maxBubble)
+                ImageBubble(item: item, chatId: chatId, fromUser: fromUser, maxWidth: maxBubble, caption: caption)
+                    .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: fromUser) }
                 if !fromUser { Spacer(minLength: 0) }
             }
         case .error(let code, let message):
@@ -1139,6 +1299,19 @@ struct RowView: View, Equatable {
             }
             .padding(.horizontal, Theme.bubbleHPad).padding(.vertical, 10)
             .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.dangerSoft))
+        }
+    }
+
+    /// Reply count in the bubble's top-right corner when this message has replies.
+    @ViewBuilder
+    private func replyCountBadge(userBubble: Bool) -> some View {
+        if row.replyCount > 0 {
+            Text("\(row.replyCount)")
+                .font(theme.font(11, weight: .semibold))
+                .foregroundStyle(userBubble ? theme.userText.opacity(0.7) : theme.muted)
+                .padding(.top, 6)
+                .padding(.trailing, 8)
+                .accessibilityLabel("\(row.replyCount) \(row.replyCount == 1 ? "reply" : "replies")")
         }
     }
 
@@ -1346,6 +1519,9 @@ struct BlockView: View {
     let mentions: MentionTable
 
     var body: some View {
+        #if DEBUG
+        let _ = PerfCounters.bump("blockBody")
+        #endif
         switch block {
         case .paragraph(let text):
             if live {
@@ -1716,6 +1892,8 @@ struct AvatarCluster: View {
 /// picture is its own bubble — uniform margins trimmed, aspect-fit at the
 /// bubble radius, no frame and no footer (Download / Forward live in the viewer
 /// it opens). Loaded with the device bearer (same as voice memos).
+/// When the send carried a description, a caption bar sits under the picture
+/// in the same bubble so the note is not a second message.
 struct ImageBubble: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -1723,6 +1901,7 @@ struct ImageBubble: View {
     let chatId: Id
     let fromUser: Bool
     let maxWidth: CGFloat
+    var caption: String? = nil
 
     @State private var image: UIImage?
     @State private var failed = false
@@ -1735,6 +1914,11 @@ struct ImageBubble: View {
 
     private var bubbleWidth: CGFloat { min(280, maxWidth) }
     private var fill: Color { fromUser ? theme.bubbleUser : theme.bubbleAssistant }
+    private var captionText: String? {
+        guard let caption else { return nil }
+        let t = caption.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty ? nil : t
+    }
 
     private var size: CGSize {
         guard let image, image.size.width > 0, image.size.height > 0 else { return Self.placeholder }
@@ -1754,25 +1938,37 @@ struct ImageBubble: View {
 
     var body: some View {
         Button { viewer = MediaOpen.state(for: item, chatId: chatId, model: model) } label: {
-            ZStack {
-                fill
-                if let image {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFit()
-                } else if failed || item.blobRef == nil {
-                    Image(systemName: "photo")
-                        .font(theme.font(28))
-                        .foregroundStyle(fromUser ? theme.userText.opacity(0.7) : theme.muted)
-                } else {
-                    ProgressView().tint(fromUser ? theme.userText.opacity(0.7) : theme.muted)
+            VStack(alignment: .leading, spacing: 0) {
+                ZStack {
+                    fill
+                    if let image {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFit()
+                    } else if failed || item.blobRef == nil {
+                        Image(systemName: "photo")
+                            .font(theme.font(28))
+                            .foregroundStyle(fromUser ? theme.userText.opacity(0.7) : theme.muted)
+                    } else {
+                        ProgressView().tint(fromUser ? theme.userText.opacity(0.7) : theme.muted)
+                    }
+                }
+                .frame(width: size.width, height: size.height)
+                if let captionText {
+                    Text(captionText)
+                        .font(theme.font(Theme.body))
+                        .foregroundStyle(fromUser ? theme.userText : theme.text)
+                        .multilineTextAlignment(.leading)
+                        .padding(.horizontal, Theme.bubbleHPad)
+                        .padding(.vertical, Theme.bubbleVPad)
+                        .frame(width: size.width, alignment: .leading)
+                        .background(fill)
                 }
             }
-            .frame(width: size.width, height: size.height)
             .clipShape(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Image, tap to view")
+        .accessibilityLabel(captionText == nil ? "Image, tap to view" : "Image with description, tap to view")
         .task(id: item.blobRef) { await load() }
         .fullScreenCover(item: $viewer) { v in
             MediaViewer(album: v.items, index: v.index, onClose: { viewer = nil })
@@ -1900,6 +2096,7 @@ enum MediaOpen {
 
 /// Document card (Grok: icon, title, domain) for a non-audio attachment.
 /// Tap opens the media viewer on it (Open there = Quick Look, plus Download / Forward).
+/// A video's typed description sits as a caption bar under the card.
 struct FileCard: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -1907,8 +2104,15 @@ struct FileCard: View {
     let subtitle: String
     let chatId: Id
     let fromUser: Bool
+    var caption: String? = nil
 
     @State private var viewer: MediaViewerState?
+
+    private var captionText: String? {
+        guard let caption else { return nil }
+        let t = caption.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty ? nil : t
+    }
 
     var body: some View {
         Button {
@@ -1916,19 +2120,31 @@ struct FileCard: View {
         } label: {
             // Grok's file card (web-08, measured): 61 pt tall, 20×27 icon at 15 pt,
             // text 16 pt after the icon, 17 pt title over a 15 pt muted subtitle.
-            HStack(spacing: 14) {
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .fill(FileCard.kindColor(item, theme: theme))
-                    .frame(width: 21, height: 27)
-                    .overlay(Image(systemName: item.kind == .video ? "play.fill" : "doc.text").font(.system(size: 12, weight: .bold)).foregroundStyle(.black))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(item.name).font(theme.font(Theme.body)).foregroundStyle(fromUser ? theme.userText : theme.text).lineLimit(1)
-                    Text(subtitle).font(theme.font(Theme.small)).foregroundStyle(fromUser ? theme.userText.opacity(0.7) : theme.muted).lineLimit(1)
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 14) {
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(FileCard.kindColor(item, theme: theme))
+                        .frame(width: 21, height: 27)
+                        .overlay(Image(systemName: item.kind == .video ? "play.fill" : "doc.text").font(.system(size: 12, weight: .bold)).foregroundStyle(.black))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(item.name).font(theme.font(Theme.body)).foregroundStyle(fromUser ? theme.userText : theme.text).lineLimit(1)
+                        Text(subtitle).font(theme.font(Theme.small)).foregroundStyle(fromUser ? theme.userText.opacity(0.7) : theme.muted).lineLimit(1)
+                    }
+                }
+                .padding(.leading, 15)
+                .padding(.trailing, Theme.bubbleHPad + 4)
+                .padding(.vertical, 13)
+                if let captionText {
+                    Text(captionText)
+                        .font(theme.font(Theme.body))
+                        .foregroundStyle(fromUser ? theme.userText : theme.text)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, Theme.bubbleHPad)
+                        .padding(.bottom, Theme.bubbleVPad)
+                        .padding(.top, 2)
                 }
             }
-            .padding(.leading, 15)
-            .padding(.trailing, Theme.bubbleHPad + 4)
-            .padding(.vertical, 13)
             .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(fromUser ? theme.bubbleUser : theme.bubbleAssistant))
             .contentShape(Rectangle())
         }

@@ -24,6 +24,10 @@ final class MessageDeleteRuleTests: XCTestCase {
     func testMenuHidesDeleteWhenNotAllowed() {
         XCTAssertEqual(MessageMenu.items(forMessage: true, canDelete: true), [.copy, .reply, .forward, .replyInDM, .delete])
         XCTAssertEqual(MessageMenu.items(forMessage: true, canDelete: false), [.copy, .reply, .forward, .replyInDM])
+        XCTAssertEqual(MessageMenu.items(forMessage: true, canDelete: true, hasReplies: true),
+                       [.copy, .reply, .viewThread, .forward, .replyInDM, .delete])
+        XCTAssertEqual(MessageMenu.items(forMessage: true, canDelete: false, hasReplies: true),
+                       [.copy, .reply, .viewThread, .forward, .replyInDM])
         XCTAssertEqual(MessageMenu.items(forMessage: false, canDelete: true), [.copy])
     }
 }

@@ -41,6 +41,22 @@ use serde_json::Value;
 
 actions!(transcript, [Copy]);
 
+/// Delivery label inside my bubble footer: plain text only (not ticks).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ReceiptStatus {
+    Sent,
+    Seen,
+}
+
+impl ReceiptStatus {
+    fn label(self) -> &'static str {
+        match self {
+            ReceiptStatus::Sent => "sent",
+            ReceiptStatus::Seen => "seen",
+        }
+    }
+}
+
 const OVERDRAW_PX: f32 = 320.0;
 /// One column for every chat kind: the rows and the composer are centred
 /// in the pane with the same side margin ([`COLUMN_MARGIN`]) and the same
@@ -54,8 +70,9 @@ pub const COLUMN_MAX_WIDTH: f32 = COMPOSER_WIDTH + 2.0 * PLUS_BUTTON;
 /// Agent bubble cap, measured from Grok Mac on two pane widths (ref 57:
 /// 728 pt pane, 612 pt bubble; ref 58: 424 pt pane, 310 pt bubble): the
 /// bubble ends a fixed 84 pt before the column's right edge (100 pt from
-/// the pane), not at a fixed width. The hover rail (reply · copy · react ·
-/// time) lives in that gap, so hovering never re-wraps the text.
+/// the pane), not at a fixed width. The hover rail (reply · copy · react)
+/// lives in that gap, so hovering never re-wraps the text. Time and
+/// sent/seen sit inside the bubble.
 pub const ASSISTANT_RIGHT_GAP: f32 = 84.0;
 /// A new time stamp line whenever messages are this far apart.
 const STAMP_GAP_MS: u64 = 60 * 60 * 1000;
@@ -125,6 +142,15 @@ struct ReplySwipe {
     /// How far the row has been pulled right (px).
     drag: f32,
     /// True once the pan is clearly horizontal-right (scroll / select stay free until then).
+    locked: bool,
+}
+
+/// Click-drag vertical pan that scrolls the list (iPhone ScrollView parity).
+/// Armed on press; locks once the pan is clearly vertical so text selection
+/// and reply-swipe stay free for horizontal / select gestures.
+struct DragScroll {
+    start: Point<Pixels>,
+    last: Point<Pixels>,
     locked: bool,
 }
 
@@ -314,8 +340,11 @@ pub enum RowKind {
         /// Another person in a people chat (D72): left bubble with their
         /// avatar and handle instead of my right bubble.
         from: Option<Person>,
-        /// "9:41 PM", revealed at the bubble's outer edge on hover.
+        /// "9:41 PM" at the bottom-right inside the bubble (always visible).
         time: Option<String>,
+        /// My own messages: "sent" after the relay ACKs, "seen" when a peer
+        /// opened the chat (or an agent answered). Never set on others' bubbles.
+        receipt: Option<ReceiptStatus>,
         /// Set when this message replies to another: Grok's quote header
         /// sits inside the bubble above the text.
         quote: Option<Quote>,
@@ -336,7 +365,7 @@ pub enum RowKind {
         first: bool,
         last: bool,
         fill: bool,
-        /// "9:41 PM", revealed next to the react glyph on hover.
+        /// "9:41 PM" at the bottom-right inside the last block (always visible).
         time: Option<String>,
         /// In a people chat the message has a sender row above it: every block
         /// leaves the avatar lane free and the last one draws the sender's disc
@@ -372,10 +401,6 @@ pub enum RowKind {
         mine: bool,
         /// Under another person's bubble (chips clear the avatar column).
         indent: bool,
-    },
-    /// Optional read receipt under my last outbound bubble ("Seen").
-    Seen {
-        label: String,
     },
     /// Grok's hand-off line: "Messaged ◉ A" / "N messages with ◉ A, ◉ B and ◉ C".
     Handoff {
@@ -571,6 +596,8 @@ pub struct Transcript {
     rig_select: Option<(String, Instant)>,
     /// Swipe-right-to-reply in progress (Telegram / iPhone parity).
     reply_swipe: Option<ReplySwipe>,
+    /// Vertical click-drag scroll over bubbles / empty rows.
+    drag_scroll: Option<DragScroll>,
 }
 
 impl Transcript {
@@ -627,6 +654,7 @@ impl Transcript {
                 (spec, Instant::now() + Duration::from_millis(after))
             }),
             reply_swipe: None,
+            drag_scroll: None,
         }
     }
 
@@ -830,6 +858,101 @@ impl Transcript {
         cx.notify();
     }
 
+    /// Wheel over the composer (sibling of this list): move the transcript
+    /// the same way a wheel over the bubbles would ([feedback
+    /// app-01M5PDB3QYAPBPA4FJXZE1FFD0]).
+    pub fn scroll_from_wheel(&mut self, event: &gpui::ScrollWheelEvent, cx: &mut Context<Self>) {
+        let dy = f32::from(event.delta.pixel_delta(px(20.0)).y);
+        // List::scroll uses `scroll_top - delta.y`; scroll_by adds to offset.
+        if dy != 0.0 {
+            self.list.scroll_by(px(-dy));
+        }
+        self.on_wheel(event, cx);
+    }
+
+    /// Arm a possible vertical drag-scroll (bubbles / empty rows).
+    fn begin_drag_scroll(&mut self, start: Point<Pixels>) {
+        self.drag_scroll = Some(DragScroll {
+            start,
+            last: start,
+            locked: false,
+        });
+    }
+
+    /// Trackpad / mouse move while a vertical drag-scroll may be in progress.
+    fn on_drag_scroll_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if self.drag_scroll.is_none() {
+            return;
+        }
+        if event.pressed_button != Some(MouseButton::Left) {
+            self.drag_scroll = None;
+            return;
+        }
+        // Text selection has committed: leave the pointer alone.
+        if self.selection.read(cx).is_selecting() {
+            self.drag_scroll = None;
+            return;
+        }
+        // Reply swipe has locked horizontal: leave it alone.
+        if self.reply_swipe.as_ref().is_some_and(|s| s.locked) {
+            self.drag_scroll = None;
+            return;
+        }
+
+        let (dx, dy_from_start, locked) = {
+            let drag = self.drag_scroll.as_ref().expect("checked above");
+            let dx: f32 = (event.position.x - drag.start.x).into();
+            let dy: f32 = (event.position.y - drag.start.y).into();
+            (dx, dy, drag.locked)
+        };
+        if !locked {
+            if dx.abs() + dy_from_start.abs() < REPLY_SWIPE_SLOP {
+                return;
+            }
+            // Horizontal-dominant: text selection / reply swipe own the gesture.
+            if dx.abs() > dy_from_start.abs() * 1.15 {
+                self.drag_scroll = None;
+                return;
+            }
+            // Vertical: take the gesture.
+            self.reply_swipe = None;
+            self.selection.update(cx, |s, cx| {
+                s.clear();
+                cx.notify();
+            });
+            if let Some(drag) = self.drag_scroll.as_mut() {
+                drag.locked = true;
+            }
+        }
+
+        let last = self
+            .drag_scroll
+            .as_ref()
+            .map(|d| d.last)
+            .expect("drag_scroll still armed");
+        let step: f32 = (event.position.y - last.y).into();
+        if let Some(drag) = self.drag_scroll.as_mut() {
+            drag.last = event.position;
+        }
+        if step.abs() < 0.5 {
+            return;
+        }
+        // Finger down → content follows → older messages (lower scroll offset).
+        self.list.scroll_by(px(-step));
+        if step > 0.0 {
+            self.pinned_to_bottom = false;
+            self.spring.velocity = 0.0;
+            self.repin_check_pending = false;
+        } else {
+            self.repin_check_pending = true;
+        }
+        cx.notify();
+    }
+
+    fn end_drag_scroll(&mut self) {
+        self.drag_scroll = None;
+    }
+
     /// One spring step per frame while pinned and not yet at the end.
     fn step_spring(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
         if self.repin_check_pending {
@@ -874,6 +997,7 @@ impl Transcript {
         self.pane_open = pane_open;
         if chat_changed {
             self.reply_swipe = None;
+            self.drag_scroll = None;
         }
         let messages: Vec<Message> = chat_id
             .as_deref()
@@ -893,13 +1017,30 @@ impl Transcript {
             state.active_chat(),
             state.selected_channel.is_some(),
         );
-        // Optional Seen under my last outbound bubble (Settings → Notifications).
-        let seen_label = if state.read_receipts {
-            chat_id
-                .as_deref()
-                .and_then(|id| seen_label_for(state, id, &messages, &me_id))
-        } else {
-            None
+        // Per-handle read watermarks for this chat (Settings → Notifications).
+        let receipts = chat_id
+            .as_deref()
+            .and_then(|id| state.message_receipts.get(id));
+        // Group policy `members_see_reads`: non-owners hide "Seen" when the admin turned it off.
+        let read_receipts = {
+            let mut on = state.read_receipts;
+            if on {
+                if let Some(id) = chat_id.as_deref() {
+                    if let Some(space) = state.project(id) {
+                        if space.is_people_group() && !space.members_see_reads {
+                            let me_handle = state.me_handle();
+                            let i_own = space
+                                .owner_handle
+                                .as_deref()
+                                .is_some_and(|o| o == me_handle);
+                            if !i_own {
+                                on = false;
+                            }
+                        }
+                    }
+                }
+            }
+            on
         };
         self.chat_id = chat_id;
         let new_rows = build_rows(
@@ -910,7 +1051,8 @@ impl Transcript {
             &thumb_keys,
             &self.mentions,
             multi_party,
-            seen_label,
+            receipts,
+            read_receipts,
         );
         self.multi_party = multi_party;
         // A sender change opens the turn gap. So does every new assistant /
@@ -1450,7 +1592,8 @@ impl Transcript {
             .as_ref()
             .map(|a| avatars::agent_accent(&a.seed, a.color_index, a.leaf.0, a.leaf.1, theme));
         // Group / channel: the agent's name inside its first bubble, in its
-        // colour, with the `agent` tag; the time after the last block's text.
+        // colour, with the `agent` tag; the time at the bottom-right of the
+        // last block (always visible — not on hover).
         let name_el = match (&identity, agent_accent) {
             (Some(a), Some(color)) if named => {
                 let open_state = self.state.clone();
@@ -1473,13 +1616,6 @@ impl Transcript {
             }
             _ => None,
         };
-        let inline_time = self.multi_party && lane.is_some() && last && !live;
-        let time_el = inline_time
-            .then(|| {
-                time.clone()
-                    .map(|t| inline_time_label(t, theme).into_any_element())
-            })
-            .flatten();
         let r = px(BUBBLE_RADIUS);
         let quote_header = quote
             .filter(|_| first)
@@ -1521,20 +1657,20 @@ impl Transcript {
                     theme,
                     &selectable.bubble(format!("{message_id}#text"), bubble_text.text),
                 ),
-                time_el,
-            ));
+                None,
+            ))
+            // Timestamp stays inside the last finished block at the bottom-right.
+            .when(last && !live, |el| {
+                el.children(bubble_footer(time, None, theme.text_muted))
+            });
         let (row_el, reveal) = self.hover_row(row_id, now, window, cx);
         // Hover: the rail (smiley · reply · ⋯) on the last block of a finished reply.
+        // Time lives inside the bubble now.
         let hover_actions =
             (last && !live).then(|| self.hover_rail(row_id, message_id, reveal, theme, cx));
-        // Messages for Mac: the bubble's time shows beside the glyph on hover
-        // (1:1 chats; a group / channel bubble already carries it after the text).
-        let hover_time = (last && !live && !inline_time)
-            .then(|| hover_time(time, reveal, theme).map(|t| t.ml(px(8.0))))
-            .flatten();
         // The rail hangs off the bubble's right edge, out of the flow: it
         // lives in the column's 84 pt gap and never narrows the bubble.
-        let hover_rail = (hover_actions.is_some() || hover_time.is_some()).then(|| {
+        let hover_rail = hover_actions.map(|actions| {
             div()
                 .absolute()
                 .left(relative_width(1.0))
@@ -1543,8 +1679,7 @@ impl Transcript {
                 .pl(px(6.0))
                 .flex()
                 .items_center()
-                .children(hover_actions)
-                .children(hover_time)
+                .child(actions)
         });
         let bubble = bubble.children(hover_rail);
         // People chats: the sender's disc at the bubble's bottom-left on
@@ -1610,6 +1745,7 @@ impl Transcript {
                 from,
                 named,
                 time,
+                receipt,
                 quote,
                 forwarded_from,
             } => {
@@ -1623,6 +1759,11 @@ impl Transcript {
                         selectable.with_color(Theme::with_alpha(theme.accent, 0.45)),
                     )
                 };
+                let meta_color = if from.is_some() {
+                    theme.text_muted
+                } else {
+                    Theme::with_alpha(theme.bubble_text(), 0.55)
+                };
                 // A forward carries its "Forwarded from" header where a reply
                 // would carry its quote (a forward never quotes).
                 let quote_header = match forwarded_from {
@@ -1635,7 +1776,7 @@ impl Transcript {
                 let body =
                     user_message_body(&row.id, &text, text_color, &theme, &bubble_selectable);
                 // Someone else's bubble in a group / channel: their name inside
-                // it (their colour), the time after the text (`multi_party`).
+                // it (their colour); time and sent/seen sit in the bubble footer.
                 let (image, color) = match &from {
                     Some(person) => {
                         let state = self.state.read(cx);
@@ -1676,13 +1817,6 @@ impl Transcript {
                     ),
                     _ => None,
                 };
-                let inline_time = self.multi_party && from.is_some();
-                let time_el = inline_time
-                    .then(|| {
-                        time.clone()
-                            .map(|t| inline_time_label(t, &theme).into_any_element())
-                    })
-                    .flatten();
                 let bubble = self
                     .menu_target(
                         div().id(SharedString::from(format!("{}#bubble", row.id))),
@@ -1701,8 +1835,9 @@ impl Transcript {
                         name_el,
                         quote_header.map(|q| q.into_any_element()),
                         body,
-                        time_el,
-                    ));
+                        None,
+                    ))
+                    .children(bubble_footer(time, receipt, meta_color));
                 if let Some(person) = from {
                     // Someone else: left-aligned, their avatar beside the bubble on
                     // the avatar column. A small coloured left-edge sliver marks a
@@ -1749,15 +1884,7 @@ impl Transcript {
                                                 .border_color(Theme::with_alpha(color, 0.7))
                                                 .when(pending, |el| el.opacity(0.6)),
                                         )
-                                        .child(actions.ml(px(6.0)))
-                                        .children(
-                                            (!inline_time)
-                                                .then(|| {
-                                                    hover_time(time, reveal, &theme)
-                                                        .map(|t| t.ml(px(8.0)))
-                                                })
-                                                .flatten(),
-                                        ),
+                                        .child(actions.ml(px(6.0))),
                                 )
                         })
                         .into_any_element()
@@ -1779,13 +1906,12 @@ impl Transcript {
                             )
                         })
                         .child({
-                            // My bubble sits right, so its outer edge (and time) is on the left.
+                            // My bubble sits right; time and sent/seen live inside it.
                             let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
                             let actions =
                                 self.hover_rail(&row.id, &row.message_id, reveal, &theme, cx);
                             row_el
                                 .justify_end()
-                                .children(hover_time(time, reveal, &theme).map(|t| t.mr(px(8.0))))
                                 .child(actions.mr(px(6.0)))
                                 .child(bubble.when(pending, |el| el.opacity(0.6)))
                         })
@@ -1948,17 +2074,6 @@ impl Transcript {
                     .child(chips)
                     .into_any_element()
             }
-            RowKind::Seen { label } => div()
-                .w_full()
-                .flex()
-                .justify_end()
-                .mt(px(-2.0))
-                .pb(px(ROW_GAP_HALF))
-                .pr(px(6.0))
-                .text_size(px(TEXT_TINY))
-                .text_color(theme.text_muted)
-                .child(label)
-                .into_any_element(),
             RowKind::Handoff { names, total } => {
                 // "Messaged ◉ A" while only the brief went out; "N messages with
                 // ◉ A, ◉ B and ◉ C" once replies came back (Grok refs 13/58).
@@ -2329,18 +2444,34 @@ impl Render for Transcript {
             .track_focus(&focus)
             .on_action(cx.listener(Self::copy_selection))
             .on_scroll_wheel(cx.listener(|this, event, _, cx| this.on_wheel(event, cx)))
-            // Swipe-right-to-reply: move/up live on the transcript so a drag
-            // that leaves the row still finishes (same as the iPhone gesture).
+            // Drag-scroll + swipe-right-to-reply: move/up live on the transcript
+            // so a drag that leaves the row still finishes (iPhone parity).
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _, _cx| {
+                    if event.modifiers.control || event.modifiers.shift {
+                        return;
+                    }
+                    this.begin_drag_scroll(event.position);
+                }),
+            )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                 this.on_reply_swipe_move(event, cx);
+                this.on_drag_scroll_move(event, cx);
             }))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _: &MouseUpEvent, _, cx| this.on_reply_swipe_up(cx)),
+                cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                    this.on_reply_swipe_up(cx);
+                    this.end_drag_scroll();
+                }),
             )
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(|this, _: &MouseUpEvent, _, cx| this.on_reply_swipe_up(cx)),
+                cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                    this.on_reply_swipe_up(cx);
+                    this.end_drag_scroll();
+                }),
             )
             // Grok's header band (Jacob, Oct 22 12:49 CR, superseding the opaque
             // band): the list runs up under the floating pill and fades out
@@ -2471,16 +2602,88 @@ fn clock_label(ms: u64) -> Option<String> {
         .map(|t| t.format("%-I:%M %p").to_string())
 }
 
-/// The 11 pt muted time beside a bubble, at the row's current hover opacity.
-fn hover_time(time: Option<String>, opacity: f32, theme: &Theme) -> Option<Div> {
-    time.map(|label| {
+/// My own bubble's sent/seen label. Pending sends have none; after ACK we show
+/// "sent", then "seen" when read receipts are on and a peer opened past this
+/// message (or an agent answered after it).
+fn receipt_status(
+    message: &Message,
+    messages: &[Message],
+    mix: usize,
+    is_mine: bool,
+    receipts: Option<&HashMap<String, Id>>,
+    read_receipts: bool,
+) -> Option<ReceiptStatus> {
+    if !is_mine || message.pending {
+        return None;
+    }
+    if read_receipts && message_is_seen(message, messages, mix, receipts) {
+        return Some(ReceiptStatus::Seen);
+    }
+    Some(ReceiptStatus::Sent)
+}
+
+/// True when a peer's read watermark covers this message, or an agent/project
+/// replied after it (the reply is the "opened" signal in agent chats).
+fn message_is_seen(
+    message: &Message,
+    messages: &[Message],
+    mix: usize,
+    receipts: Option<&HashMap<String, Id>>,
+) -> bool {
+    if let Some(receipts) = receipts {
+        if !receipts.is_empty() {
+            let any = receipts.values().any(|seen_id| {
+                messages
+                    .iter()
+                    .position(|m| &m.id == seen_id)
+                    .is_some_and(|ix| ix >= mix)
+                    || seen_id == &message.id
+            });
+            if any {
+                return true;
+            }
+        }
+    }
+    messages[mix + 1..]
+        .iter()
+        .any(|m| matches!(m.role, Role::Assistant | Role::Project))
+}
+
+/// Timestamp and optional sent/seen label at the bottom-right inside a bubble.
+fn bubble_footer(
+    time: Option<String>,
+    receipt: Option<ReceiptStatus>,
+    color: gpui::Hsla,
+) -> Option<Div> {
+    if time.is_none() && receipt.is_none() {
+        return None;
+    }
+    Some(
         div()
-            .flex_shrink_0()
+            .w_full()
+            .flex()
+            .justify_end()
+            .items_center()
+            .gap(px(6.0))
+            .pt(px(4.0))
             .text_size(px(11.0))
-            .text_color(theme.text_muted)
-            .opacity(opacity)
-            .child(label)
-    })
+            .line_height(px(14.0))
+            .text_color(color)
+            .children(time.map(|label| {
+                div()
+                    .flex_shrink_0()
+                    .whitespace_nowrap()
+                    .debug_selector(|| "bubble-time".into())
+                    .child(label)
+            }))
+            .children(receipt.map(|r| {
+                div()
+                    .flex_shrink_0()
+                    .whitespace_nowrap()
+                    .debug_selector(|| "bubble-receipt".into())
+                    .child(r.label())
+            })),
+    )
 }
 
 /// A text block that is really machine output (a JSON object/array) is not
@@ -2509,8 +2712,8 @@ fn is_json_block(block: &Block) -> bool {
 ///
 /// `thumb_keys` are blob refs that already have a decoded preview; they are
 /// mixed into row versions so a late thumbnail reloads the picture row.
-/// `names_senders` and `seen_label` landed from parallel feedbacks; keep them
-/// as plain args rather than a one-off options struct.
+/// `names_senders`, `receipts`, and `read_receipts` landed from parallel
+/// feedbacks; keep them as plain args rather than a one-off options struct.
 #[allow(clippy::too_many_arguments)]
 pub fn build_rows(
     messages: &[Message],
@@ -2520,7 +2723,8 @@ pub fn build_rows(
     thumb_keys: &HashSet<&str>,
     mentions: &Mentions,
     names_senders: bool,
-    seen_label: Option<String>,
+    receipts: Option<&HashMap<String, Id>>,
+    read_receipts: bool,
 ) -> Vec<Row> {
     let mine = |m: &Message| {
         m.sender == "user" || m.sender.is_empty() || m.sender == format!("user:{me_id}")
@@ -2534,11 +2738,6 @@ pub fn build_rows(
     let last_reply = messages
         .iter()
         .rposition(|m| m.role == Role::Assistant && !m.is_streaming());
-    // Last outbound message from me: optional Seen sits under it (and its reactions).
-    let last_mine_id = messages
-        .iter()
-        .rfind(|m| m.role == Role::User && mine(m))
-        .map(|m| m.id.clone());
     let mut last_stamp_at: u64 = 0;
     // Who spoke last in a people chat: a bubble carries its sender's name only when
     // the sender changed or a date stamp broke the run (Grok Bot's group style), and
@@ -2649,6 +2848,8 @@ pub fn build_rows(
                         .as_deref()
                         .filter(|id| !id.is_empty())
                         .map(|id| Quote::for_reply(id, messages));
+                    let receipt =
+                        receipt_status(message, messages, mix, is_mine, receipts, read_receipts);
                     let forwarded_from = message
                         .forwarded_from
                         .as_deref()
@@ -2663,6 +2864,7 @@ pub fn build_rows(
                                 &sender_label,
                                 from.as_ref().map(|p| &p.handle),
                                 &quote,
+                                receipt,
                                 &forwarded_from,
                             ),
                             false,
@@ -2676,6 +2878,7 @@ pub fn build_rows(
                             from,
                             named,
                             time: clock_label(message.created_at),
+                            receipt,
                             quote,
                             forwarded_from,
                         },
@@ -2685,16 +2888,6 @@ pub fn build_rows(
                     queued = true;
                 }
                 push_reactions(&mut rows, message, mine(message));
-                if last_mine_id.as_deref() == Some(message.id.as_str()) {
-                    if let Some(label) = seen_label.clone() {
-                        rows.push(Row {
-                            version: hash_version(&label, false),
-                            id: format!("{}#seen", message.id),
-                            message_id: message.id.clone(),
-                            kind: RowKind::Seen { label },
-                        });
-                    }
-                }
             }
             Role::System => {
                 // Call lines and membership notices ("Jacob added Home, hjkb and
@@ -3181,49 +3374,6 @@ pub fn build_rows(
         });
     }
     rows
-}
-
-/// "Seen" when at least one peer's Presence `seen` covers my last outbound
-/// message in this chat (Settings → Notifications read receipts on).
-/// Group policy `members_see_reads` hides it for non-owner members.
-fn seen_label_for(
-    state: &AppState,
-    chat_id: &str,
-    messages: &[Message],
-    me_id: &str,
-) -> Option<String> {
-    if let Some(space) = state.project(chat_id) {
-        if space.is_people_group() && !space.members_see_reads {
-            let me_handle = state.me_handle();
-            let i_own = space
-                .owner_handle
-                .as_deref()
-                .is_some_and(|o| o == me_handle);
-            if !i_own {
-                return None;
-            }
-        }
-    }
-    let mine = |m: &Message| {
-        m.sender == "user" || m.sender.is_empty() || m.sender == format!("user:{me_id}")
-    };
-    let last_mine = messages.iter().rfind(|m| m.role == Role::User && mine(m))?;
-    if last_mine.pending {
-        return None;
-    }
-    let receipts = state.message_receipts.get(chat_id)?;
-    if receipts.is_empty() {
-        return None;
-    }
-    let my_ix = messages.iter().position(|m| m.id == last_mine.id)?;
-    let any = receipts.values().any(|seen_id| {
-        messages
-            .iter()
-            .position(|m| &m.id == seen_id)
-            .is_some_and(|ix| ix >= my_ix)
-            || seen_id == &last_mine.id
-    });
-    any.then(|| "Seen".to_owned())
 }
 
 /// One chips row under a message that carries reactions.
@@ -3928,7 +4078,9 @@ fn sender_bubble_column(
         )
 }
 
-/// "8:05 AM" after a group / channel bubble's text.
+/// "8:05 AM" after a group / channel bubble's text. Layout tests still
+/// exercise this inline placement; the live transcript uses [`bubble_footer`].
+#[cfg(test)]
 fn inline_time_label(time: String, theme: &Theme) -> Div {
     div()
         .text_size(px(TEXT_TINY))
@@ -5167,6 +5319,7 @@ mod system_line_tests {
             &Mentions::empty(),
             true,
             None,
+            true,
         );
         let kinds: Vec<&RowKind> = rows.iter().map(|r| &r.kind).collect();
         // Date stamp, Bob (named), the notice, Bob again (named again).
@@ -5226,6 +5379,7 @@ mod system_line_tests {
             &Mentions::empty(),
             true,
             None,
+            true,
         );
         // The name sits inside each reply's first bubble (sender-name-in-bubble-2026-10-23).
         let named_bubbles: Vec<bool> = rows
@@ -5310,6 +5464,7 @@ mod system_line_tests {
             &Mentions::empty(),
             true,
             None,
+            true,
         );
         assert_eq!(
             names(&rows),
@@ -5342,6 +5497,7 @@ mod system_line_tests {
             &Mentions::empty(),
             false,
             None,
+            true,
         );
         let headers: Vec<(Option<String>, bool)> = rows
             .iter()
@@ -5381,6 +5537,7 @@ mod system_line_tests {
             &Mentions::empty(),
             false,
             None,
+            true,
         );
         assert_eq!(
             names(&rows),
@@ -5413,6 +5570,7 @@ mod system_line_tests {
             &Mentions::empty(),
             true,
             None,
+            true,
         );
         let solo = build_rows(
             &[agent],
@@ -5423,6 +5581,7 @@ mod system_line_tests {
             &Mentions::empty(),
             false,
             None,
+            true,
         );
         let group_lane: Vec<Option<&str>> = group
             .iter()
@@ -5562,6 +5721,7 @@ mod presence_rows_tests {
             &Mentions::empty(),
             true,
             None,
+            true,
         )
     }
 

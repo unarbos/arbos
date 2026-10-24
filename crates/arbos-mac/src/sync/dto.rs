@@ -989,7 +989,12 @@ pub(crate) fn people_space_from(
         },
         avatar: None,
         avatar_color: None,
-        description: None,
+        description: dto
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned),
         owner_person: None,
         machine_info: None,
         muted: dto.me.muted.unwrap_or(false),

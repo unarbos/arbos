@@ -3008,24 +3008,35 @@ impl AppState {
         cx.notify();
     }
 
+    /// A send from the composer. `mentions` are the member ids of its
+    /// committed mention chips (#1596); the source unions them with what the
+    /// text says.
     pub fn send(
         &mut self,
         text: String,
         attachments: Vec<PathBuf>,
         reply_to: Option<String>,
+        mentions: Vec<String>,
         cx: &mut Context<Self>,
     ) {
-        self.send_with(text, attachments, None, reply_to, false, cx);
+        self.send_with(text, attachments, None, reply_to, false, mentions, cx);
     }
 
-    /// Guide: inject `text` into the agent's running turn instead of queuing a follow-up.
-    pub fn guide(&mut self, text: String, reply_to: Option<String>, cx: &mut Context<Self>) {
-        self.send_with(text, Vec::new(), None, reply_to, true, cx);
+    /// Guide: inject `text` into the agent's running turn instead of queuing a
+    /// follow-up; `mentions` as for [`Self::send`].
+    pub fn guide(
+        &mut self,
+        text: String,
+        reply_to: Option<String>,
+        mentions: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.send_with(text, Vec::new(), None, reply_to, true, mentions, cx);
     }
 
     /// F11: a spoken message; `wav` is kept on the row as an `audio` attachment.
     pub fn send_voice(&mut self, text: String, wav: Arc<Vec<u8>>, cx: &mut Context<Self>) {
-        self.send_with(text, Vec::new(), Some(wav), None, false, cx);
+        self.send_with(text, Vec::new(), Some(wav), None, false, Vec::new(), cx);
     }
 
     /// Hover reply: the next send in this chat answers `message_id`.
@@ -3042,6 +3053,7 @@ impl AppState {
         cx.notify();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn send_with(
         &mut self,
         text: String,
@@ -3049,6 +3061,7 @@ impl AppState {
         voice_wav: Option<Arc<Vec<u8>>>,
         reply_to: Option<String>,
         steer: bool,
+        mentions: Vec<String>,
         cx: &mut Context<Self>,
     ) {
         let Some(chat_id) = self.active_chat_id() else {
@@ -3178,7 +3191,7 @@ impl AppState {
                 sender_handle: None,
                 sender_avatar: None,
                 sender_avatar_color: None,
-                mentions: Vec::new(),
+                mentions: mentions.clone(),
                 reply_to: reply_to.clone(),
                 forwarded_from: None,
                 asked_by_handle: None,
@@ -3234,6 +3247,7 @@ impl AppState {
                 text,
                 attachments,
                 reply_to,
+                mentions,
             });
         }
         cx.emit(AppEvent::TranscriptChanged { chat_id });

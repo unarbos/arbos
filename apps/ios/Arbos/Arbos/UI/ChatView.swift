@@ -17,6 +17,13 @@ private struct PendingForward: Identifiable, Equatable {
     let from: String
 }
 
+/// Long-press → View thread payload for the reply-chain sheet.
+private struct PendingThread: Identifiable, Equatable {
+    var id: Id { root.id }
+    let root: Message
+    let replies: [Message]
+}
+
 /// Long-press → Delete: the row waiting on "Delete message?" (feedback
 /// app-01M5MXQ90MEEWF6C8W090VCZHF). Nothing is deleted until the confirm.
 private struct PendingDelete: Identifiable, Equatable {
@@ -32,8 +39,18 @@ struct ChatView: View {
     let chatId: Id
     let projectId: Id
 
-    @State private var draft = ""
+    /// The composer text lives in its own observable so a keystroke re-renders the
+    /// field, not this 2 000-line screen (arbonites-chat-lag, 2026-10-24). Read it as
+    /// `composerDraft.text` for actions; the field observes it for display.
+    @State private var composerDraft = ComposerDraft()
+    /// `AppModel.addressesEveryone(text)` for the current draft, updated only when it flips.
+    @State private var draftAddressesEveryone = false
     @State private var rows: [Row] = []
+    /// The message list the current `rows` were built from (last id / count checks).
+    @State private var rowsSource: [Message] = []
+    /// Bumped by every `refreshRows`; with the window bounds it identifies `shown`
+    /// without comparing the row array (that compare ran once per row per change).
+    @State private var rowsVersion = 0
     /// id → message for the rows on screen (menus, search, replies); rebuilt with `rows`.
     @State private var messageById: [Id: Message] = [:]
     /// How many of the newest rows are in the view tree. The transcript is a plain
@@ -47,7 +64,18 @@ struct ChatView: View {
         if #available(iOS 18, *) { return 80 }
         return Int.max
     }()
-    static let windowStep = 60
+    /// Rows added per step. Small on purpose: a step builds and lays out this many
+    /// bubbles in one frame (≈4 ms each in a Debug simulator build).
+    static let windowStep = 30
+    /// Most rows the view tree holds while reading history. Past this, each step
+    /// that adds older rows at the top also drops the same number of newest rows
+    /// below the viewport, and the first row on screen is re-pinned, so the cost
+    /// of a page of history stays flat however far back the reader goes
+    /// (arbonites-chat-lag: 0.3–0.8 s frames and 600 MB at 600+ rows).
+    static let windowMax = 360
+    /// Newest rows dropped below the viewport while reading history; 0 when the
+    /// window is the tail of the transcript.
+    @State private var windowSkipEnd = 0
     @State private var showModelPicker = false
     /// Rig: the media viewer opened by `ARBOS_SHOW=media…` (media-viewer-2026-10-23).
     @State private var rigViewer: MediaViewerState?
@@ -87,7 +115,8 @@ struct ChatView: View {
     @State private var memoCancelArmed = false
     /// Hold-to-talk: horizontal drag (≤ 0) while the mic is pressed.
     @State private var memoDragX: CGFloat = 0
-    @FocusState private var composerFocused: Bool
+    /// The field (a `UITextView`, #1596) follows this both ways.
+    @State private var composerFocused = false
 
     /// Hold-to-talk: slide the mic this far left to discard instead of send.
     private static let memoCancelDistance: CGFloat = 56
@@ -107,6 +136,7 @@ struct ChatView: View {
     @State private var replySwipeActive = false
     /// Long-press → Forward: the text to send and who wrote it (Forward sheet).
     @State private var pendingForward: PendingForward?
+    @State private var pendingThread: PendingThread?
     @State private var pendingDelete: PendingDelete?
 
     /// Rows after the in-chat search filter (profile "search").
@@ -116,17 +146,57 @@ struct ChatView: View {
         return rows.filter { m_text($0).localizedCaseInsensitiveContains(q) }
     }
 
+    static func shownStamp(_ rowsVersion: Int, _ windowCount: Int, _ windowSkipEnd: Int, _ query: String, _ searching: Bool) -> Int {
+        var h = Hasher()
+        h.combine(rowsVersion); h.combine(windowCount); h.combine(windowSkipEnd)
+        if searching { h.combine(query) }
+        return h.finalize()
+    }
+
     /// The newest `windowCount` of `visibleRows`: what the VStack actually holds.
     private var windowedRows: [Row] {
         let all = visibleRows
-        return all.count > windowCount ? Array(all.suffix(windowCount)) : all
+        let kept = windowSkipEnd > 0 && windowSkipEnd < all.count ? all.dropLast(windowSkipEnd) : all[...]
+        return kept.count > windowCount ? Array(kept.suffix(windowCount)) : Array(kept)
     }
 
     /// Nearing the top: bring the next older slice into the view tree. The scroll view is
     /// anchored at the bottom, so the rows on screen stay put while the content grows above.
+    /// Never inside the caller's animation: an animated change to the row list makes
+    /// SwiftUI diff the whole window per frame.
     private func growWindow() {
-        guard windowCount < visibleRows.count else { return }
-        windowCount = min(visibleRows.count, windowCount + Self.windowStep)
+        let all = visibleRows
+        let available = all.count - windowSkipEnd
+        guard windowCount < available else { return }
+        let step = min(Self.windowStep, available - windowCount)
+        let firstShown = windowedRows.first?.id
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            if windowCount + step > Self.windowMax {
+                // Slide: the oldest shown rows stay, the same number of newest rows leave.
+                windowSkipEnd += step
+            } else {
+                windowCount += step
+            }
+        }
+        if windowCount + step > Self.windowMax, let firstShown, let proxy = scroller {
+            // Rows left below the viewport and the bottom anchor would shift what is on
+            // screen; put the row that was at the top back where it was.
+            DispatchQueue.main.async { proxy.scrollTo(firstShown, anchor: .top) }
+        }
+    }
+
+    /// Back at the tail (a send, the new-messages pill, settle): the window is the
+    /// newest rows again.
+    private func resetWindowToTail() {
+        guard windowSkipEnd > 0 || windowCount > Self.windowMax else { return }
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            windowSkipEnd = 0
+            windowCount = min(windowCount, Self.windowMax)
+        }
     }
 
     /// Make sure the row for `messageId` is in the window (quote taps into older history).
@@ -135,8 +205,13 @@ struct ChatView: View {
         let all = visibleRows
         guard let ix = all.firstIndex(where: { $0.messageId == messageId }) else { return false }
         let needed = all.count - ix + Self.windowStep / 2
-        guard needed > windowCount else { return false }
-        windowCount = min(all.count, needed)
+        guard needed > windowCount || windowSkipEnd > 0 else { return false }
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            windowSkipEnd = 0
+            windowCount = min(all.count, max(windowCount, needed))
+        }
         return true
     }
 
@@ -193,10 +268,6 @@ struct ChatView: View {
     private var headerExtra: CGFloat { (hasCallBar ? 52 : 0) + (hasInCallBar ? 56 : 0) + (showSearch ? 46 : 0) }
     /// Member chips under the header: groups only. A 1:1 DM already names the peer in the pill.
     private var showsMemberChips: Bool { people?.isGroup == true }
-    /// Header phone for groups: opens the pick-members / call-everyone sheet.
-    private var showsGroupCallButton: Bool {
-        people?.isGroup == true && !isChannel && !hasCallBar && !hasInCallBar && !calls.isActive
-    }
 
     private func startCall(_ kind: CallKind, ring: [String]? = nil) {
         Task { await calls.start(chatId: chatId, projectId: isPeople ? nil : projectId, kind: kind, title: callTitle, ring: ring) }
@@ -299,7 +370,7 @@ struct ChatView: View {
 
     /// True when every agent in the chat is selected (or the draft says "hey agents").
     private var talkingToEveryone: Bool {
-        if AppModel.addressesEveryone(draft) { return true }
+        if draftAddressesEveryone { return true }
         guard let agents = people?.agents, agents.count > 1 else { return false }
         return talkToAgents.count == agents.count
     }
@@ -327,7 +398,10 @@ struct ChatView: View {
     }
 
     /// Composer prompt that names the addressee so it is obvious who will answer.
-    private var composerPrompt: String {
+    /// With a picture or video staged, the field is the description bar for that
+    /// send — one message, not a follow-up text bubble.
+    private func composerPrompt(for draft: String) -> String {
+        if pending.contains(where: Self.isCaptionablePending) { return "Add a description…" }
         if transcribing { return "Transcribing…" }
         if let channel { return "Message #\(channel.name)" }
         if !isPeople { return needsAnswer ? "Answer \(name)" : "Ask \(name)" }
@@ -374,6 +448,10 @@ struct ChatView: View {
             if let name = m.project?.name ?? m.name, !name.isEmpty { agentNames[id] = name }
         }
         let list = messages
+        #if DEBUG
+        let refreshStarted = Date()
+        defer { PerfCounters.time("rows()", ms: Date().timeIntervalSince(refreshStarted) * 1000) }
+        #endif
         let byId = Transcript.index(list)
         // Sender names inside the bubbles: groups and channels only — never a 1:1 chat.
         let multiParty = isChannel || (people?.isGroup ?? false)
@@ -385,19 +463,30 @@ struct ChatView: View {
         // oldest row on screen does not fall out of the view tree when a new one lands.
         // History that arrives above it — the first snapshot, a backfill, an older
         // channel page — does not widen the window.
-        if windowCount < next.count, let lastId = rows.last?.id,
+        if windowSkipEnd == 0, windowCount < next.count, let lastId = rows.last?.id,
            let j = next.lastIndex(where: { $0.id == lastId }) {
             let appended = next.count - 1 - j
             if appended > 0 { windowCount = min(next.count, windowCount + appended) }
+        } else if windowSkipEnd > 0, next.count > rows.count {
+            // Reading history: rows that arrive below stay outside the window (the pill
+            // counts them) and must not push the shown slice.
+            windowSkipEnd += next.count - rows.count
         }
         messageById = byId
         rows = next
+        rowsVersion &+= 1
     }
 
     var body: some View {
-        GeometryReader { geo in
-            ZStack(alignment: .top) {
-                theme.bg.ignoresSafeArea()
+        #if DEBUG
+        let _ = PerfCounters.bump("chatBody")
+        #endif
+        // Header stays outside GeometryReader (same pattern as ServerChannelsView /
+        // HiddenChatsView). Nesting it inside the reader let iOS 26/27 vertically
+        // centre the glass bar over the transcript (feedback app-01M5P98RB40WKA70R70DMDN97E).
+        ZStack(alignment: .top) {
+            theme.bg.ignoresSafeArea()
+            GeometryReader { geo in
                 transcript(width: geo.size.width, height: geo.size.height)
                     // A tap on a mention chip (`arbos://mention/<kind>/<id>`, MentionChips.swift)
                     // opens that entity's page; every other link goes to the system.
@@ -406,41 +495,48 @@ struct ChatView: View {
                         model.showProfile(target)
                         return .handled
                     })
-                headerBlur
-                VStack(spacing: 8) {
-                    header
-                    linkPill.padding(.top, -5)
-                    if let people, showsMemberChips { memberChips(people).padding(.horizontal, 16) }
-                    if showSearch {
-                        HStack(spacing: 8) {
-                            Image(systemName: "magnifyingglass").font(.system(size: 15, weight: .medium)).foregroundStyle(theme.muted)
-                            TextField("", text: $searchText, prompt: Text("Search in chat").foregroundStyle(theme.placeholder))
-                                .font(theme.font(Theme.body)).foregroundStyle(theme.text)
-                                .focused($searchFocused)
-                                .autocorrectionDisabled()
-                            Button { showSearch = false; searchText = "" } label: {
-                                Image(systemName: "xmark.circle.fill").foregroundStyle(theme.muted)
-                            }
-                            .buttonStyle(.plain)
+            }
+            headerBlur
+            // Hug content height: a horizontal ScrollView (member chips) inside this
+            // stack is flexible on the vertical axis, so without fixedSize the VStack
+            // fills the proposed height and iOS 27 lays the back button / title mid-screen
+            // with the chips over the composer ([feedback APuu1qHpbKmmpqZeUusEi0Q]).
+            VStack(spacing: 8) {
+                header
+                linkPill.padding(.top, -5)
+                if let people, showsMemberChips { memberChips(people).padding(.horizontal, 16) }
+                if showSearch {
+                    HStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass").font(.system(size: 15, weight: .medium)).foregroundStyle(theme.muted)
+                        TextField("", text: $searchText, prompt: Text("Search in chat").foregroundStyle(theme.placeholder))
+                            .font(theme.font(Theme.body)).foregroundStyle(theme.text)
+                            .focused($searchFocused)
+                            .autocorrectionDisabled()
+                        Button { showSearch = false; searchText = "" } label: {
+                            Image(systemName: "xmark.circle.fill").foregroundStyle(theme.muted)
                         }
-                        .padding(.horizontal, 12).frame(height: 38)
-                        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
-                        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
-                        .padding(.horizontal, 16)
+                        .buttonStyle(.plain)
                     }
-                    if hasInCallBar, let c = calls.call {
-                        InCallOverlay(expected: model.expectedCallPeople(c), inline: true)
-                            .frame(height: 48)
+                    .padding(.horizontal, 12).frame(height: 38)
+                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
+                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                    .padding(.horizontal, 16)
+                }
+                if hasInCallBar, let c = calls.call {
+                    InCallOverlay(expected: model.expectedCallPeople(c), inline: true)
+                        .frame(height: 48)
+                }
+                if hasCallBar, let active = calls.activeByChat[chatId] {
+                    CallBar(call: active) {
+                        Task { await calls.join(active, title: callTitle) }
                     }
-                    if hasCallBar, let active = calls.activeByChat[chatId] {
-                        CallBar(call: active) {
-                            Task { await calls.join(active, title: callTitle) }
-                        }
-                        .padding(.horizontal, 16)
-                    }
+                    .padding(.horizontal, 16)
                 }
             }
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .top)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .overlay(alignment: .bottom) {
             if newBelowCount > 0 {
                 newMessagesPill
@@ -512,7 +608,10 @@ struct ChatView: View {
                         safeTop: geo.safeAreaInsets.top,
                         safeBottom: geo.safeAreaInsets.bottom,
                         held: heldReactions(row),
-                        items: MessageMenu.items(forMessage: true, canEdit: canEditMessage(row), canDelete: canDelete(row)),
+                        items: MessageMenu.items(forMessage: true,
+                                                canEdit: canEditMessage(row),
+                                                canDelete: canDelete(row),
+                                                hasReplies: row.replyCount > 0),
                         onReact: { emoji in
                             closeActions()
                             model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: emoji)
@@ -596,6 +695,10 @@ struct ChatView: View {
             .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
         }
+        .sheet(item: $pendingThread) { pending in
+            MessageThreadSheet(root: pending.root, replies: pending.replies)
+                .environment(\.theme, theme)
+        }
         .task {
             guard DebugHooks.liveDemo, !model.demoStarted, DebugHooks.openChat == chatId || DebugHooks.openChat == nil, let text = DebugHooks.autoSend else { return }
             model.demoStarted = true
@@ -603,7 +706,7 @@ struct ChatView: View {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             composerFocused = true
             try? await Task.sleep(nanoseconds: 800_000_000)
-            for ch in text { draft.append(ch); try? await Task.sleep(nanoseconds: 45_000_000) }
+            for ch in text { composerDraft.text.append(ch); try? await Task.sleep(nanoseconds: 45_000_000) }
             try? await Task.sleep(nanoseconds: 600_000_000)
             send()
             try? await Task.sleep(nanoseconds: 400_000_000)
@@ -629,7 +732,7 @@ struct ChatView: View {
             composerFocused = true
             try? await Task.sleep(nanoseconds: 900_000_000)
             for ch in "Also keep your replies short, please." {
-                draft.append(ch)
+                composerDraft.text.append(ch)
                 try? await Task.sleep(nanoseconds: 55_000_000)
             }
             try? await Task.sleep(nanoseconds: 500_000_000)
@@ -655,8 +758,35 @@ struct ChatView: View {
             model.markRead(chatId: chatId, force: true)
             model.visibleChatId = chatId
             // Restore unsent text left when the user backed out of this thread.
-            let saved = model.composerDraft(for: chatId)
-            if draft.isEmpty, !saved.isEmpty { draft = saved }
+            let saved = DebugHooks.composerDraft ?? model.composerDraft(for: chatId)
+            composerDraft.onChange = { [chatId] d in
+                // Keep the draft while the view is still up so a process kill mid-type
+                // is not required — leaving the thread saves on disappear too.
+                model.setComposerDraft(d, for: chatId)
+                // People chats (DM + group): tell the room we are typing so peers
+                // see names on the presence row ([feedback app-01M5N7WSA1VCYHE9BE3CX4V0R6]).
+                if isPeople, !d.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    model.typedIn(chatId: chatId)
+                }
+                let everyone = AppModel.addressesEveryone(d)
+                if everyone != draftAddressesEveryone { draftAddressesEveryone = everyone }
+                // `@handle` + a separator typed right after it: a chip, no picker (behaviour 5).
+                if isPeople, let m = MentionDraft.autoResolve(text: d, caret: composerDraft.caret, mentions: composerDraft.mentions,
+                                                              members: people?.members ?? [], me: model.user?.login) {
+                    var next = composerDraft.mentions
+                    next.append(m)
+                    next.sort { $0.range.lowerBound < $1.range.lowerBound }
+                    composerDraft.mentions = next
+                }
+                updateMentionQuery()
+            }
+            composerDraft.onCaretOrMentions = { updateMentionQuery() }
+            if composerDraft.text.isEmpty, !saved.isEmpty {
+                composerDraft.text = saved
+                composerDraft.caret = (saved as NSString).length
+                composerDraft.mentions = MentionDraft.resolveAll(text: saved, mentions: [], members: people?.members ?? [], me: model.user?.login)
+                if DebugHooks.composerDraft != nil { composerFocused = true }
+            }
             if isPeople { model.markPeopleRead(chatId, force: true) }
             if isChannel {
                 // The newest page now, live rows through the listener from here on.
@@ -671,6 +801,10 @@ struct ChatView: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(ms)) { model.setRoomLink(chatId, .live) }
                 }
             }
+            #if DEBUG
+            let drive = DebugHooks.perfDrive
+            if !drive.isEmpty { Task { @MainActor in await runPerfDrive(drive) } }
+            #endif
             if let show = DebugHooks.show {
                 DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(DebugHooks.showDelayMs)) {
                     switch show {
@@ -785,7 +919,7 @@ struct ChatView: View {
         }
         .onDisappear {
             // Keep the typed draft so coming back to this thread restores it.
-            model.setComposerDraft(draft, for: chatId)
+            model.setComposerDraft(composerDraft.text, for: chatId)
             // Catch notifies that landed after the last onChange mark-read while we were still in the chat
             // (including rows that arrived while the app was inactive on a call — isWatching was false).
             if isPeople { model.markPeopleRead(chatId) }
@@ -795,12 +929,19 @@ struct ChatView: View {
         // Profile "search" sets pendingSearchChat while this chat is already on screen
         // (sheet over us), so onAppear alone never sees it — watch the published flag.
         .onChange(of: model.pendingSearchChat) { _, _ in openPendingSearchIfNeeded() }
-        .onChange(of: messages, initial: true) { old, new in
+        // The per-chat version, not the array: comparing 1 000+ messages on every
+        // body (each keystroke, presence tick, publish) was a measurable share of
+        // the Arbonites lag (arbonites-chat-lag, 2026-10-24).
+        .onChange(of: model.messagesVersion[chatId] ?? 0, initial: true) { _, _ in
+            let old = rowsSource
+            let new = messages
+            let initial = old.isEmpty && rows.isEmpty
+            rowsSource = new
             refreshRows()
             // Streaming tokens reassign `messages` with the same last id — do not
             // mark-read on every delta. Initial call (`old == new`) and a new last
             // row still mark; AppModel also skips/throttles the PUT.
-            if old.last?.id != new.last?.id || old == new {
+            if old.last?.id != new.last?.id || initial {
                 model.markRead(chatId: chatId)
                 if isPeople { model.markPeopleRead(chatId) }
             }
@@ -816,13 +957,13 @@ struct ChatView: View {
                 // Several messages separated by " ||| " go out a few seconds apart
                 // (multitasking checks: the composer never waits for a reply).
                 let parts = text.components(separatedBy: " ||| ").filter { !$0.isEmpty }
-                draft = parts.first ?? text
+                composerDraft.text = parts.first ?? text
                 send()
                 if parts.count > 1 {
                     Task {
                         for p in parts.dropFirst() {
                             try? await Task.sleep(nanoseconds: 3_000_000_000)
-                            draft = p
+                            composerDraft.text = p
                             send()
                         }
                     }
@@ -886,10 +1027,6 @@ struct ChatView: View {
                 }
             }
             .buttonStyle(.plain)
-            // Groups put call + search on the right; this twin keeps the title centred.
-            if showsGroupCallButton {
-                Color.clear.frame(width: Theme.control + 8).allowsHitTesting(false)
-            }
             Spacer()
             GlassPill {
                 HStack(spacing: 6) {
@@ -974,39 +1111,28 @@ struct ChatView: View {
                 .contentShape(Capsule())
             }
             Spacer()
-            HStack(spacing: 8) {
-                if showsGroupCallButton {
-                    Button { showGroupCallPicker = true } label: {
-                        GlassCircle {
-                            Image(systemName: "phone.fill")
-                                .font(theme.font(16, weight: .semibold))
-                                .foregroundStyle(theme.text)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Start a call")
-                    .accessibilityIdentifier("chat-call-button")
+            // Same-size circle as the back button keeps the title pill centred.
+            // Call lives on the composer (phone when idle); a header phone here
+            // duplicated it in groups (#1625).
+            Button {
+                if showSearch {
+                    showSearch = false
+                    searchText = ""
+                    searchFocused = false
+                } else {
+                    withAnimation(.easeOut(duration: 0.18)) { showSearch = true }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { searchFocused = true }
                 }
-                Button {
-                    if showSearch {
-                        showSearch = false
-                        searchText = ""
-                        searchFocused = false
-                    } else {
-                        withAnimation(.easeOut(duration: 0.18)) { showSearch = true }
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { searchFocused = true }
-                    }
-                } label: {
-                    GlassCircle {
-                        Image(systemName: "magnifyingglass")
-                            .font(theme.font(17, weight: .medium))
-                            .foregroundStyle(theme.text)
-                    }
+            } label: {
+                GlassCircle {
+                    Image(systemName: "magnifyingglass")
+                        .font(theme.font(17, weight: .medium))
+                        .foregroundStyle(theme.text)
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Search in chat")
-                .accessibilityIdentifier("chat-search-button")
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Search in chat")
+            .accessibilityIdentifier("chat-search-button")
         }
         .padding(.horizontal, 16)
         .padding(.top, 6)
@@ -1021,6 +1147,7 @@ struct ChatView: View {
         pinnedToBottom = true
         awayFromBottom = false
         newBelowCount = 0
+        resetWindowToTail()
         withAnimation(.easeOut(duration: 0.3)) { scroller?.scrollTo("bottom", anchor: .bottom) }
     }
 
@@ -1182,6 +1309,7 @@ struct ChatView: View {
                         model: model,
                         mentions: mentions,
                         shown: shown,
+                        shownStamp: Self.shownStamp(rowsVersion, windowCount, windowSkipEnd, searchText, showSearch),
                         chatId: chatId,
                         width: width,
                         timeReveal: timeReveal,
@@ -1197,8 +1325,7 @@ struct ChatView: View {
                         onLongPress: { row in
                             Haptics.pick()
                             withAnimation(.easeOut(duration: 0.18)) { actionsRow = row }
-                        },
-                        gapBefore: { gap(before: $0, in: $1) }
+                        }
                     )
                     .equatable()
                     // Who is working is the presence row over the composer
@@ -1238,7 +1365,7 @@ struct ChatView: View {
             // Nearing the top: the next older slice of rows joins the view tree; a channel
             // also asks the server for one older page.
             .modifier(NearTopReporter(enabled: true) {
-                if windowCount < visibleRows.count {
+                if windowCount + windowSkipEnd < visibleRows.count {
                     growWindow()
                 } else if isChannel {
                     model.loadOlderChannel(chatId)
@@ -1291,11 +1418,73 @@ struct ChatView: View {
                 }
             }
             .onChange(of: awayFromBottom) { _, away in
-                // Reader scrolled back to the end by hand — clear the pill.
-                if !away { newBelowCount = 0 }
+                // Reader scrolled back to the end by hand — clear the pill; when the window
+                // had slid into history, its end is not the tail: jump to the real end.
+                if !away {
+                    newBelowCount = 0
+                    if windowSkipEnd > 0 { settleToBottom(proxy) }
+                }
             }
         }
     }
+
+    #if DEBUG
+    /// `ARBOS_PERF_DRIVE` (perf rig): scripted scroll / typing / typing-row load so the
+    /// frame log can be read per phase (`phase … begin/end` lines in the `perf` log).
+    private func runPerfDrive(_ drive: Set<String>) async {
+        try? await Task.sleep(for: .seconds(4))
+        if drive.contains("scroll") {
+            PerfLog.mark("phase scroll begin", ms: 0)
+            // Page up ~12 rows at a time to the oldest shown row (growing the window on
+            // the way), then page back down. Each hop is an animated scrollTo, so the
+            // rows between are laid out and drawn like a flick.
+            var hops = 0
+            while hops < 60 {
+                let shown = windowedRows
+                guard let proxy = scroller, let topId = shown.first?.id else { break }
+                let anchorIx = max(0, shown.count - 1 - (hops + 1) * 12)
+                let target = shown[anchorIx].id
+                withAnimation(.easeInOut(duration: 0.35)) { proxy.scrollTo(target, anchor: .top) }
+                try? await Task.sleep(for: .milliseconds(500))
+                hops += 1
+                if target == topId, windowCount + windowSkipEnd >= visibleRows.count { break }
+            }
+            PerfLog.mark("phase scroll top", ms: 0)
+            try? await Task.sleep(for: .seconds(1))
+            withAnimation(.easeInOut(duration: 0.6)) { scroller?.scrollTo("bottom", anchor: .bottom) }
+            try? await Task.sleep(for: .seconds(2))
+            PerfLog.mark("phase scroll end", ms: 0)
+        }
+        if drive.contains("type") {
+            PerfLog.mark("phase type begin", ms: 0)
+            composerFocused = true
+            try? await Task.sleep(for: .milliseconds(800))
+            for ch in "hey everyone, is the launch call still at ten?" {
+                let t = Date()
+                composerDraft.text.append(ch)
+                await Task.yield()
+                PerfCounters.time("keystroke", ms: Date().timeIntervalSince(t) * 1000)
+                try? await Task.sleep(for: .milliseconds(90))
+            }
+            try? await Task.sleep(for: .seconds(1))
+            PerfLog.mark("phase type end", ms: 0)
+            composerDraft.text = ""
+            composerFocused = false
+        }
+        if drive.contains("typing") {
+            PerfLog.mark("phase typing begin", ms: 0)
+            let handles = (people?.humans ?? []).map(\.handle).filter { $0 != model.user?.login }.prefix(3)
+            for i in 0..<8 {
+                for h in handles {
+                    model.noteTyping(["handle": h, "typing": i % 2 == 0], chatId: chatId)
+                }
+                try? await Task.sleep(for: .seconds(1))
+            }
+            PerfLog.mark("phase typing end", ms: 0)
+        }
+        PerfLog.mark("phase done", ms: 0)
+    }
+    #endif
 
     /// Pin the transcript to its end once the rows have a height: the first
     /// `scrollTo` runs before layout knows the content size, so repeat after
@@ -1304,6 +1493,7 @@ struct ChatView: View {
         pinnedToBottom = true
         awayFromBottom = false
         newBelowCount = 0
+        resetWindowToTail()
         proxy.scrollTo("bottom", anchor: .bottom)
         DispatchQueue.main.async { proxy.scrollTo("bottom", anchor: .bottom) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { proxy.scrollTo("bottom", anchor: .bottom) }
@@ -1382,14 +1572,17 @@ struct ChatView: View {
 
     /// The long-press menu's actions (`MessageMenu`): Copy the text, Reply
     /// (in a people chat the agent that wrote it becomes the recipient),
-    /// Forward to another chat, Reply in DM (open a private chat with the human
-    /// who wrote it), Edit (own text), Delete for everyone.
+    /// View thread (when the message has replies), Forward to another chat,
+    /// Reply in DM (open a private chat with the human who wrote it), Edit
+    /// (own text), Delete for everyone.
     private func runMessageMenu(_ item: MessageMenuItem, row: Row) {
         switch item {
         case .copy:
             UIPasteboard.general.string = m_text(row)
         case .reply:
             beginReply(to: row)
+        case .viewThread:
+            openThread(for: row)
         case .forward:
             beginForward(row)
         case .replyInDM:
@@ -1407,6 +1600,14 @@ struct ChatView: View {
         case .delete:
             beginDelete(row)
         }
+    }
+
+    /// Long-press → View thread: open the held message and every reply in its chain.
+    private func openThread(for row: Row) {
+        guard let root = messageById[row.messageId] else { return }
+        let replies = Transcript.threadReplies(rootId: root.id, in: messages)
+        guard !replies.isEmpty else { return }
+        pendingThread = PendingThread(root: root, replies: replies)
     }
 
     /// Own user text the long-press menu may offer Edit for.
@@ -1464,25 +1665,15 @@ struct ChatView: View {
         guard !text.isEmpty, isOwnMessage(m) else { return }
         replyTo = nil
         editing = m
-        draft = m.plainText
+        composerDraft.text = m.plainText
+        composerDraft.caret = (m.plainText as NSString).length
+        composerDraft.mentions = MentionDraft.resolveAll(text: m.plainText, mentions: [], members: people?.members ?? [], me: model.user?.login)
         composerFocused = true
     }
 
     /// Spacing: 8 pt between blocks of one message, 24 pt around sender changes,
     /// system lines, and each new agent reply (quick ack vs main answer must not
     /// look merged — #1447). Measured on the references.
-    private func gap(before i: Int, in shown: [Row]) -> CGFloat {
-        guard i > 0, i < shown.count else { return 0 }
-        let prev = shown[i - 1], cur = shown[i]
-        if case .system = prev.kind { return 20 }
-        if case .system = cur.kind { return 20 }
-        if prev.role != cur.role { return 24 }
-        // Same role: still open the turn gap when an agent starts a new message.
-        if prev.messageId != cur.messageId && (cur.role == .assistant || cur.role == .project) {
-            return 24
-        }
-        return 8
-    }
 
     /// The machine's notice (waking / can't reach). The link has no line here:
     /// the header's connection pill is its one place ([feedback connection-pill]).
@@ -1620,7 +1811,9 @@ struct ChatView: View {
             // Room for avatar + padding so a horizontal ScrollView does not clip chips.
             .padding(.vertical, 4)
         }
-        .fixedSize(horizontal: false, vertical: true)
+        // Cap height so the chip strip cannot expand vertically inside the header stack
+        // (horizontal ScrollView is flexible on both axes by default).
+        .frame(height: 36)
     }
 
     /// The presence row over the composer: ticks once a second so time-capped
@@ -1787,6 +1980,9 @@ struct ChatView: View {
                 if let data = try? Data(contentsOf: url) {
                     let mime = UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
                     pending.append(.init(name: url.lastPathComponent, mime: mime, data: data))
+                    if mime.hasPrefix("image/") || mime.hasPrefix("video/") {
+                        composerFocused = true
+                    }
                 }
             }
         }
@@ -1799,175 +1995,93 @@ struct ChatView: View {
                     // POSIX stamp (no locale letters, no `:` — voice memos use the same idea).
                     let stamp = ChatView.photoStamp.string(from: Date())
                     pending.append(.init(name: "Photo \(stamp).\(picked.ext)", mime: picked.mime, data: picked.data))
+                    composerFocused = true
                 }
                 photoItem = nil
             }
         }
     }
 
-    /// Max height for the growing composer field.
-    ///
-    /// A vertical `TextField` fills the height its parent proposes (up to
-    /// `lineLimit`), so an empty field inside `safeAreaInset` was stretching to
-    /// eight lines and covering the transcript. Hug content with `fixedSize`,
-    /// and still cap at 8 lines (Grok's 22 pt body pitch) for wrap glitches.
-    private var composerFieldMaxHeight: CGFloat {
-        Theme.fieldHeight + 7 * 22
+    /// Picture or video pending in the composer — the field is their description bar.
+    private static func isCaptionablePending(_ a: AppModel.PendingAttachment) -> Bool {
+        let mime = a.mime.lowercased()
+        return mime.hasPrefix("image/") || mime.hasPrefix("video/")
     }
+
 
     /// Composer field: type normally, or hold the mic to dictate. The mic stays
     /// mounted while recording so release can finish and send without a second tap.
     private var textField: some View {
-        HStack(spacing: 8) {
-            if recorder.recording {
-                // Visible discard control (tap) — also used after a short tap that
-                // left recording on; hold-to-talk can slide left instead.
-                Button(action: cancelMemoRecording) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(theme.danger)
-                        .frame(width: 44, height: Theme.fieldHeight)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Cancel")
-                if memoCancelArmed {
-                    Text("Release to cancel")
-                        .font(theme.font(Theme.small))
-                        .foregroundStyle(theme.danger)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                } else if memoHoldActive && memoDragX < -12 {
-                    Text("Slide to cancel")
-                        .font(theme.font(Theme.small))
-                        .foregroundStyle(theme.muted)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .opacity(min(1, -memoDragX / Self.memoCancelDistance))
-                } else {
-                    HStack(spacing: 8) {
-                        Circle().fill(theme.danger).frame(width: 8, height: 8)
-                        // Level bars drawn into whatever width is left (newest on the right),
-                        // so the recorder row never pushes the composer past the screen edge.
-                        Canvas { ctx, size in
-                            let pitch: CGFloat = 5, w: CGFloat = 3
-                            let levels = recorder.levels
-                            let n = min(levels.count, max(0, Int(size.width / pitch)))
-                            for i in 0..<n {
-                                let l = CGFloat(levels[levels.count - n + i])
-                                let h = min(size.height, 4 + l * 20)
-                                let x = size.width - CGFloat(n - i) * pitch
-                                let rect = CGRect(x: x, y: (size.height - h) / 2, width: w, height: h)
-                                ctx.fill(Path(roundedRect: rect, cornerRadius: w / 2), with: .color(theme.text))
-                            }
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: 24)
-                        Text(recorder.timeLabel)
-                            .font(theme.font(Theme.small, design: .monospaced))
-                            .foregroundStyle(theme.text)
+        ComposerField(
+            draft: composerDraft,
+            recorder: recorder,
+            focus: $composerFocused,
+            chatId: chatId,
+            model: model,
+            isChannel: isChannel,
+            needsAnswer: needsAnswer,
+            hasPending: !pending.isEmpty,
+            memoHoldActive: memoHoldActive,
+            memoCancelArmed: memoCancelArmed,
+            memoDragX: memoDragX,
+            cancelDistance: Self.memoCancelDistance,
+            prompt: { composerPrompt(for: $0) },
+            onCancelRecording: cancelMemoRecording,
+            onMicDrag: { value in
+                if !memoHoldActive {
+                    memoHoldActive = true
+                    memoPressStartedAt = Date()
+                    memoFinishWhenPermission = false
+                    memoCancelArmed = false
+                    memoDragX = 0
+                    if recorder.recording {
+                        memoIgnoreRelease = true
+                        finishMemoHold()
+                    } else {
+                        memoIgnoreRelease = false
+                        Haptics.recordStart()
+                        recorder.start()
                     }
                 }
-            } else {
-                TextField("", text: $draft, prompt: Text(composerPrompt).foregroundStyle(theme.placeholder), axis: .vertical)
-                    .lineLimit(1...8)
-                    // Size to the typed text (one line when empty), not the offered height.
-                    .fixedSize(horizontal: false, vertical: true)
-                    .font(theme.font(Theme.body))
-                    .foregroundStyle(theme.text)
-                    .tint(Color(hex: "#1084FE")!)
-                    .focused($composerFocused)
-                    .padding(.leading, 16)
-                    .padding(.vertical, 10)
-                    .onChange(of: draft) { _, d in
-                        // Keep the draft while the view is still up so a process kill mid-type
-                        // is not required — leaving the thread saves on disappear too.
-                        model.setComposerDraft(d, for: chatId)
-                        // People chats (DM + group): tell the room we are typing so peers
-                        // see names on the presence row ([feedback app-01M5N7WSA1VCYHE9BE3CX4V0R6]).
-                        if isPeople, !d.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            model.typedIn(chatId: chatId)
-                        }
-                        // `@` completion: the token the caret is in (approximated by the last token).
-                        guard isPeople, let last = d.split(separator: " ", omittingEmptySubsequences: false).last, last.hasPrefix("@"), !d.hasSuffix(" ") else {
-                            mentionQuery = nil
-                            return
-                        }
-                        mentionQuery = String(last.dropFirst()).lowercased()
+                // Slide left while holding to arm cancel (hold-to-talk).
+                guard !memoIgnoreRelease else { return }
+                let dx = value.translation.width
+                memoDragX = min(0, dx)
+                let armed = dx < -Self.memoCancelDistance
+                if armed != memoCancelArmed {
+                    memoCancelArmed = armed
+                    if armed { Haptics.pick() }
+                }
+            },
+            onMicEnd: { value in
+                let held = Date().timeIntervalSince(memoPressStartedAt ?? Date())
+                let cancel = memoCancelArmed || value.translation.width < -Self.memoCancelDistance
+                memoHoldActive = false
+                memoPressStartedAt = nil
+                memoDragX = 0
+                memoCancelArmed = false
+                if memoIgnoreRelease {
+                    memoIgnoreRelease = false
+                    return
+                }
+                // Slide-left discard: drop the memo instead of sending.
+                if cancel {
+                    memoFinishWhenPermission = false
+                    if recorder.recording { recorder.cancel() }
+                    return
+                }
+                // Hold-to-talk: release after the threshold sends.
+                if held >= 0.25 {
+                    if recorder.recording {
+                        finishMemoHold()
+                    } else {
+                        // Permission still pending; finish when it starts.
+                        memoFinishWhenPermission = true
                     }
-            }
-            if draft.isEmpty || recorder.recording {
-                // Press/release like Mac: tap toggles recording on; hold ≥0.25s then
-                // release sends. Slide left while holding to discard (WhatsApp-style).
-                // highPriorityGesture so a focused TextField cannot steal the touch.
-                // The mic stays mounted while recording so release can finish without
-                // a second tap.
-                Image(systemName: memoCancelArmed ? "trash" : "mic")
-                    .font(theme.font(17))
-                    .foregroundStyle(recorder.recording ? theme.danger : theme.icon)
-                    .frame(width: 44, height: Theme.fieldHeight)
-                    .contentShape(Rectangle())
-                    .padding(.trailing, 2)
-                    .id("memo-mic")
-                    .highPriorityGesture(
-                        DragGesture(minimumDistance: 0)
-                            .onChanged { value in
-                                if !memoHoldActive {
-                                    memoHoldActive = true
-                                    memoPressStartedAt = Date()
-                                    memoFinishWhenPermission = false
-                                    memoCancelArmed = false
-                                    memoDragX = 0
-                                    if recorder.recording {
-                                        memoIgnoreRelease = true
-                                        finishMemoHold()
-                                    } else {
-                                        memoIgnoreRelease = false
-                                        Haptics.recordStart()
-                                        recorder.start()
-                                    }
-                                }
-                                // Slide left while holding to arm cancel (hold-to-talk).
-                                guard !memoIgnoreRelease else { return }
-                                let dx = value.translation.width
-                                memoDragX = min(0, dx)
-                                let armed = dx < -Self.memoCancelDistance
-                                if armed != memoCancelArmed {
-                                    memoCancelArmed = armed
-                                    if armed { Haptics.pick() }
-                                }
-                            }
-                            .onEnded { value in
-                                let held = Date().timeIntervalSince(memoPressStartedAt ?? Date())
-                                let cancel = memoCancelArmed || value.translation.width < -Self.memoCancelDistance
-                                memoHoldActive = false
-                                memoPressStartedAt = nil
-                                memoDragX = 0
-                                memoCancelArmed = false
-                                if memoIgnoreRelease {
-                                    memoIgnoreRelease = false
-                                    return
-                                }
-                                // Slide-left discard: drop the memo instead of sending.
-                                if cancel {
-                                    memoFinishWhenPermission = false
-                                    if recorder.recording { recorder.cancel() }
-                                    return
-                                }
-                                // Hold-to-talk: release after the threshold sends.
-                                if held >= 0.25 {
-                                    if recorder.recording {
-                                        finishMemoHold()
-                                    } else {
-                                        // Permission still pending; finish when it starts.
-                                        memoFinishWhenPermission = true
-                                    }
-                                }
-                                // Short tap: leave recording on (click-to-toggle).
-                            }
-                    )
-            }
-            // While recording: tap send also finishes (same as release). Otherwise
-            // Grok keeps the composer usable while the bot works: text sends, an
-            // empty field starts a voice call with the agent (phone icon next to mic).
-            Button(action: {
+                }
+                // Short tap: leave recording on (click-to-toggle).
+            },
+            onPrimary: {
                 if recorder.recording {
                     memoHoldActive = false
                     memoIgnoreRelease = false
@@ -1981,39 +2095,8 @@ struct ChatView: View {
                 } else if !isChannel {
                     requestCall(.voice)
                 }
-            }) {
-                Circle()
-                    .fill(theme.primary)
-                    .frame(width: Theme.voiceButton, height: Theme.voiceButton)
-                    .overlay(
-                        Image(systemName: (canSend || recorder.recording) ? "arrow.up" : idleButtonGlyph)
-                            .font(theme.font(16, weight: .bold))
-                            .foregroundStyle(theme.onPrimary)
-                    )
-                    .contentShape(Circle().inset(by: -(44 - Theme.voiceButton) / 2))
             }
-            .buttonStyle(.plain)
-            .opacity(isChannel && !canSend && !recorder.recording ? 0.45 : 1)
-            .accessibilityLabel((canSend || recorder.recording) ? "Send" : (isChannel ? "Send" : "Call"))
-            .padding(.trailing, 3)
-        }
-        // Hard max so a TextField layout glitch cannot paint over the transcript.
-        .frame(minHeight: Theme.fieldHeight, maxHeight: composerFieldMaxHeight, alignment: .bottom)
-        .fixedSize(horizontal: false, vertical: true)
-        .background(RoundedRectangle(cornerRadius: Theme.fieldHeight / 2, style: .continuous).fill(theme.field))
-        .overlay(
-            RoundedRectangle(cornerRadius: Theme.fieldHeight / 2, style: .continuous)
-                .strokeBorder(
-                    recorder.recording ? theme.danger.opacity(0.5)
-                        : (needsAnswer ? theme.warn.opacity(0.7) : theme.fieldBorder),
-                    lineWidth: 1
-                )
         )
-        .alert("Microphone access is off", isPresented: $recorder.permissionDenied) {
-            Button("OK", role: .cancel) { }
-        } message: {
-            Text("Allow the microphone in Settings to record a voice memo.")
-        }
         // Hold released before permission returned: finish once recording starts.
         // A short tap leaves recording on (click-to-toggle), so do not auto-finish then.
         .onChange(of: recorder.recording) { _, isOn in
@@ -2043,72 +2126,115 @@ struct ChatView: View {
         recorder.cancel()
     }
 
-    private var canSend: Bool {
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pending.isEmpty
+    /// Empty the field after a send (text, chips, caret, the saved draft).
+    private func clearDraft() {
+        composerDraft.text = ""
+        composerDraft.mentions = []
+        composerDraft.caret = 0
+        model.setComposerDraft("", for: chatId)
     }
 
-    /// Idle round button: phone — starts a voice call (agent or people chat).
-    /// Channels have no calls (C1): the arrow stays, dimmed until there is text.
-    private var idleButtonGlyph: String { isChannel ? "arrow.up" : "phone.fill" }
+    private var canSend: Bool {
+        !composerDraft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pending.isEmpty
+    }
 
-    /// Members whose handle/slug starts with the typed `@` prefix; agents first.
-    /// Agents without a live `project` (soft-deleted) are omitted — they cannot reply.
+
+    /// `@` completion: the `@token` the caret sits at the end of (nil closes the picker).
+    private func updateMentionQuery() {
+        // Set only on change: this runs per keystroke from the draft hook, and the
+        // screen must not re-render for a value that did not move.
+        let next: String? = isPeople ? MentionDraft.openToken(text: composerDraft.text, caret: composerDraft.caret, mentions: composerDraft.mentions)?.query : nil
+        if next != mentionQuery { mentionQuery = next }
+    }
+
+    /// The `@` picker (#1596, the approved mock): a card above the field inset
+    /// like it, one 44 pt row per entity — 28 pt picture · name · `@handle`,
+    /// hairlines between rows — people and agents in one list (behaviour 2).
+    /// Tap inserts the chip.
     private func mentionList(_ people: PeopleChat, query: String) -> some View {
-        let agents = people.agents.filter { $0.project != nil && (query.isEmpty || mentionSlug($0.project?.name ?? $0.handle).hasPrefix(query)) }
-        let humans = people.humans.filter { $0.id != model.user?.id && (query.isEmpty || $0.handle.lowercased().hasPrefix(query)) }
-        let items = agents + humans
-        // A slug both an agent and a person carry (#1538) gets a kind label on each chip.
-        let slugs = items.map { $0.isAgent ? mentionSlug($0.project?.name ?? $0.handle) : $0.handle.lowercased() }
-        func label(_ m: ChatMember) -> String {
-            let slug = m.isAgent ? mentionSlug(m.project?.name ?? m.handle) : m.handle.lowercased()
-            let shared = slugs.filter { $0 == slug }.count > 1 || slug == model.user?.login.lowercased()
-            return shared ? (m.isAgent ? "agent" : "person") : ""
-        }
+        let rows = MentionDraft.candidates(query: query, members: people.members, me: model.user?.login)
         return Group {
-            if !items.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(items) { m in
-                            Button { completeMention(m) } label: {
-                                HStack(spacing: 6) {
-                                    if m.isAgent { AgentAvatar(project: model.agent(member: m, chatId: chatId), theme: theme, size: 20, still: true) } else { PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 20, name: m.name, id: m.id, colorIndex: m.avatarColorIndex) }
-                                    Text("@\(m.isAgent ? mentionSlug(m.project?.name ?? m.handle) : m.handle)")
-                                        .font(theme.font(Theme.small, weight: .medium)).foregroundStyle(theme.text)
-                                    if !label(m).isEmpty {
-                                        Text(label(m)).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+            if !rows.isEmpty {
+                VStack(spacing: 0) {
+                    ForEach(Array(rows.enumerated()), id: \.element.id) { i, m in
+                        Button { completeMention(m) } label: {
+                            HStack(spacing: 12) {
+                                if m.isAgent {
+                                    AgentAvatar(project: model.agent(member: m, chatId: chatId), theme: theme, size: 28, still: true)
+                                } else {
+                                    PersonAvatar(url: m.avatarUrl, handle: m.handle, size: 28, name: m.name, id: m.id, colorIndex: m.avatarColorIndex)
+                                }
+                                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                    Text(m.isAgent ? (m.project?.name ?? m.handle) : (m.name?.isEmpty == false ? m.name! : m.handle))
+                                        .font(theme.font(Theme.body)).foregroundStyle(theme.text).lineLimit(1)
+                                    Text("@" + ComposerMention.handle(of: m))
+                                        .font(theme.font(Theme.small)).foregroundStyle(theme.muted).lineLimit(1)
+                                    if let tag = MentionDraft.tag(for: m, among: rows, me: model.user?.login) {
+                                        Text(tag).font(theme.font(Theme.tiny)).foregroundStyle(theme.placeholder)
                                     }
                                 }
-                                .padding(.leading, 6).padding(.trailing, 12).padding(.vertical, 7)
-                                .background(Capsule().fill(theme.bubbleAssistant))
+                                Spacer(minLength: 0)
                             }
-                            .buttonStyle(.plain)
+                            .padding(.horizontal, 12)
+                            .frame(height: 44)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        if i < rows.count - 1 {
+                            Rectangle().fill(theme.isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.08))
+                                .frame(height: 0.5)
+                                .padding(.leading, 12 + 28 + 12)
+                                .padding(.trailing, 12)
                         }
                     }
-                    .padding(.leading, Theme.plusButton + 12)
                 }
+                .padding(.vertical, 6)
+                .background(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(theme.card)
+                        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .stroke(theme.isDark ? Color.white.opacity(0.10) : Color.black.opacity(0.08), lineWidth: 0.5))
+                        .shadow(color: .black.opacity(theme.isDark ? 0.4 : 0.12), radius: 14, y: 8)
+                )
+                .padding(.horizontal, composerSideInset)
             }
         }
     }
 
+    /// The picked row becomes one chip over the open `@token` (behaviour 4).
     private func completeMention(_ m: ChatMember) {
         ensureMention(m)
         talkTo = [m.member]
         mentionQuery = nil
     }
 
-    /// Put `@slug` in the draft if it is not already there (multi-select agent chips).
+    /// Put `m`'s chip in the draft: over the open `@token` when there is one,
+    /// else at the end — unless the chip is already there (conversation chips).
     private func ensureMention(_ m: ChatMember) {
-        let slug = m.isAgent ? mentionSlug(m.project?.name ?? m.handle) : m.handle
-        let token = "@\(slug)"
-        let lower = draft.lowercased()
-        if lower.split(whereSeparator: { $0.isWhitespace }).contains(where: {
-            $0.trimmingCharacters(in: CharacterSet(charactersIn: ".,!?:;")).lowercased() == token.lowercased()
-        }) {
-            return
+        let handle = ComposerMention.handle(of: m).lowercased()
+        if composerDraft.mentions.contains(where: { $0.memberId == m.member }) { return }
+        var text = composerDraft.text
+        var mentions = composerDraft.mentions
+        let caret: Int
+        if let open = MentionDraft.openToken(text: text, caret: composerDraft.caret, mentions: mentions) {
+            caret = MentionDraft.insert(m, at: open.range, text: &text, mentions: &mentions)
+        } else {
+            let lower = text.lowercased()
+            let present = lower.split(whereSeparator: { $0.isWhitespace }).contains(where: {
+                $0.trimmingCharacters(in: CharacterSet(charactersIn: ".,!?:;")) == "@" + handle
+            })
+            if present {
+                // Typed by hand: just make it the chip.
+                composerDraft.mentions = MentionDraft.resolveAll(text: text, mentions: mentions, members: [m], me: nil)
+                return
+            }
+            if !text.isEmpty, !text.hasSuffix(" ") { text += " " }
+            let end = (text as NSString).length
+            caret = MentionDraft.insert(m, at: end..<end, text: &text, mentions: &mentions)
         }
-        var parts = draft.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
-        if let last = parts.last, last.hasPrefix("@") { parts[parts.count - 1] = token } else { parts.append(token) }
-        draft = parts.joined(separator: " ") + " "
+        composerDraft.mentions = mentions
+        composerDraft.text = text
+        composerDraft.caret = caret
     }
 
     /// Fixed-locale stamp for photo attachment names (relay blob keys must be ASCII).
@@ -2148,7 +2274,7 @@ struct ChatView: View {
         if talkingToEveryone || AppModel.addressesEveryone(text) { return "everyone" }
         if talkToAgents.count > 1 { return nil }
         let members = people?.members ?? []
-        if AppModel.mentions(in: text, members: members).contains(where: { $0.hasPrefix("agent:") }) {
+        if AppModel.mentions(in: text, members: members, chipTokens: MentionDraft.tokens(composerDraft.mentions)).contains(where: { $0.hasPrefix("agent:") }) {
             return effectiveTalkTo
         }
         // Person @handle wins; display-name-only people matches must not block agent slugs.
@@ -2174,14 +2300,14 @@ struct ChatView: View {
     /// Finish dictation and send: transcript (plus any typed draft) goes out as text.
     /// The audio is only used for STT — it is not attached to the chat.
     private func sendMemo(_ memo: AppModel.PendingAttachment) {
-        let typed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let typed = composerDraft.text.trimmingCharacters(in: .whitespacesAndNewlines)
         let extras = pending
         let reply = replyTo?.id
         let address = sendAddress(for: typed)
         let chips = chipMentions(for: typed)
+        let tokens = MentionDraft.tokens(composerDraft.mentions)
         pending.removeAll()
-        draft = ""
-        model.setComposerDraft("", for: chatId)
+        clearDraft()
         replyTo = nil
         editing = nil
         mentionQuery = nil
@@ -2198,7 +2324,7 @@ struct ChatView: View {
                 if !text.isEmpty { model.sendChannel(chatId: chatId, text: text) }
             } else if isPeople {
                 model.sendPeople(chatId: chatId, text: text, replyTo: reply, address: address,
-                                 chipMentions: chips, attachments: extras)
+                                 chipMentions: chips, attachments: extras, chipTokens: tokens)
             } else if needsAnswer && extras.isEmpty {
                 model.answer(chatId: chatId, text: text)
             } else {
@@ -2227,20 +2353,20 @@ struct ChatView: View {
     }
 
     private func send() {
-        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = composerDraft.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !pending.isEmpty else { return }
         Haptics.send()
         // A send means follow the reply: re-pin even if the reader had scrolled up.
         pinnedToBottom = true
         awayFromBottom = false
         newBelowCount = 0
+        resetWindowToTail()
         if let edit = editing {
             // Save the edit in place — no new bubble, no send command.
             guard !text.isEmpty else { return }
             model.editMessage(chatId: chatId, messageId: edit.id, text: text)
             pending.removeAll()
-            draft = ""
-            model.setComposerDraft("", for: chatId)
+            clearDraft()
             editing = nil
             replyTo = nil
             sentOnce = true
@@ -2251,8 +2377,7 @@ struct ChatView: View {
             guard !text.isEmpty else { return }
             model.sendChannel(chatId: chatId, text: text)
             pending.removeAll()
-            draft = ""
-            model.setComposerDraft("", for: chatId)
+            clearDraft()
             replyTo = nil
             sentOnce = true
             return
@@ -2261,10 +2386,10 @@ struct ChatView: View {
             let address = sendAddress(for: text)
             let chips = chipMentions(for: text)
             model.sendPeople(chatId: chatId, text: text, replyTo: replyTo?.id, address: address,
-                             chipMentions: chips, attachments: pending)
+                             chipMentions: chips, attachments: pending,
+                             chipTokens: MentionDraft.tokens(composerDraft.mentions))
             pending.removeAll()
-            draft = ""
-            model.setComposerDraft("", for: chatId)
+            clearDraft()
             replyTo = nil
             mentionQuery = nil
             pinTalkTo(afterSending: address, chipMentions: chips)
@@ -2277,8 +2402,7 @@ struct ChatView: View {
             model.send(chatId: chatId, text: text, attachments: pending, replyTo: replyTo?.id)
         }
         pending.removeAll()
-        draft = ""
-        model.setComposerDraft("", for: chatId)
+        clearDraft()
         replyTo = nil
         sentOnce = true
     }
@@ -2578,12 +2702,14 @@ struct ModelPickerView: View {
 }
 
 /// The visible transcript rows. Equatable so a composer keystroke (ChatView's
-/// `draft` `@State`) or an AppModel presence tick that re-evaluates ChatView
+/// composer draft) or an AppModel presence tick that re-evaluates ChatView
 /// does not rebuild every bubble when the row list is unchanged.
 private struct TranscriptRows: View, Equatable {
     let model: AppModel
     let mentions: MentionTable
     let shown: [Row]
+    /// Identity of `shown` (rows version + window bounds + search): compared instead of the array.
+    let shownStamp: Int
     let chatId: Id
     let width: CGFloat
     let timeReveal: CGFloat
@@ -2598,22 +2724,34 @@ private struct TranscriptRows: View, Equatable {
     /// The bubble whose long-press actions are open (it alone reports its frame).
     let actionsRowId: String?
     let onLongPress: (Row) -> Void
-    let gapBefore: (Int, [Row]) -> CGFloat
 
     static func == (lhs: TranscriptRows, rhs: TranscriptRows) -> Bool {
-        lhs.shown == rhs.shown
+        let same = lhs.shownStamp == rhs.shownStamp
             && lhs.actionsRowId == rhs.actionsRowId
             && lhs.chatId == rhs.chatId
             && lhs.width == rhs.width
             && lhs.timeReveal == rhs.timeReveal
             && lhs.highlightedMessage == rhs.highlightedMessage
-            && lhs.mentions === rhs.mentions
+            && lhs.mentions.stamp == rhs.mentions.stamp
             && lhs.rowsCount == rhs.rowsCount
             && lhs.messagesCount == rhs.messagesCount
+        #if DEBUG
+        PerfCounters.bump(same ? "rowsEqTrue" : "rowsEqFalse")
+        if !same {
+            PerfCounters.bump("rowsEq.\(lhs.shownStamp == rhs.shownStamp ? "" : "shown,")\(lhs.width == rhs.width ? "" : "width,")\(lhs.timeReveal == rhs.timeReveal ? "" : "reveal,")\(lhs.mentions.stamp == rhs.mentions.stamp ? "" : "stamp,")\(lhs.highlightedMessage == rhs.highlightedMessage ? "" : "hl,")")
+        }
+        #endif
+        return same
     }
 
     var body: some View {
-        ForEach(Array(shown.enumerated()), id: \.element.id) { i, row in
+        #if DEBUG
+        let _ = PerfCounters.bump("transcriptRowsBody")
+        #endif
+        // Rows keyed by id, never by position: a grow step prepends older rows and
+        // must not touch the ones already laid out (arbonites-chat-lag).
+        let firstId = shown.first?.id
+        ForEach(shown) { row in
             let reply = canReply(row)
             RowView(model: model, row: row, chatId: chatId, width: width, timeReveal: timeReveal,
                     onQuoteTap: onQuoteTap,
@@ -2622,11 +2760,11 @@ private struct TranscriptRows: View, Equatable {
                     replySwipeActive: replySwipeActive,
                     mentions: mentions)
                 .equatable()
-                .padding(.top, gapBefore(i, shown))
+                .padding(.top, row.id == firstId ? 0 : row.gapBefore)
                 .id(row.id)
                 .onAppear {
                     // Once per open — not on every row (group chats fire this dozens of times).
-                    if i == 0 {
+                    if row.id == firstId {
                         LaunchClock.mark("chat-first-row", detail: "shown=\(shown.count) rows=\(rowsCount) messages=\(messagesCount)")
                     }
                 }
@@ -2641,7 +2779,7 @@ private struct TranscriptRows: View, Equatable {
     }
 }
 
-/// Fires once each time the scroll view comes within 240 pt of its top (iOS 18+;
+/// Fires once each time the scroll view comes within 900 pt of its top (iOS 18+;
 /// a channel loads one older page then). Earlier systems keep the newest page.
 private struct NearTopReporter: ViewModifier {
     let enabled: Bool
@@ -2650,7 +2788,9 @@ private struct NearTopReporter: ViewModifier {
     func body(content: Content) -> some View {
         if #available(iOS 18, *), enabled {
             content.onScrollGeometryChange(for: Bool.self) { g in
-                g.contentSize.height > g.containerSize.height && g.contentOffset.y < 240
+                // About a screen ahead of the top edge, so the next slice is in place
+                // before the reader reaches it.
+                g.contentSize.height > g.containerSize.height && g.contentOffset.y < 900
             } action: { _, near in
                 if near { onNear() }
             }
@@ -2705,6 +2845,183 @@ private struct AwayFromBottomReporter: ViewModifier {
             }
         } else {
             content
+        }
+    }
+}
+
+/// The composer's text, observed by `ComposerField` alone. Typing re-renders the
+/// field; the chat screen reads `text` at action time and is told about the two
+/// things it shows elsewhere (the `@` picker, "everyone" chips) through `onChange`.
+@MainActor
+final class ComposerDraft: ObservableObject {
+    /// The plain draft: `@handle` where the mention chips are (#1596).
+    @Published var text = "" {
+        didSet { if text != oldValue { onChange?(text) } }
+    }
+    /// The committed mention chips in `text` (spans + members); the field draws
+    /// them as attachments and the send carries their member ids.
+    @Published var mentions: [ComposerMention] = [] {
+        didSet { if mentions != oldValue { onCaretOrMentions?() } }
+    }
+    /// Caret in `text` (UTF-16 offset), kept by the field.
+    @Published var caret = 0 {
+        didSet { if caret != oldValue { onCaretOrMentions?() } }
+    }
+    var onChange: ((String) -> Void)?
+    var onCaretOrMentions: (() -> Void)?
+}
+
+/// The field, mic and send / call button. Owns nothing: every action calls back
+/// into the chat screen, whose memo and send logic is unchanged.
+private struct ComposerField: View {
+    @Environment(\.theme) private var theme
+    @ObservedObject var draft: ComposerDraft
+    @ObservedObject var recorder: MemoRecorder
+    @Binding var focus: Bool
+    let chatId: Id
+    let model: AppModel
+    let isChannel: Bool
+    let needsAnswer: Bool
+    let hasPending: Bool
+    /// Hold-to-talk state owned by the chat screen (slide-to-cancel).
+    let memoHoldActive: Bool
+    let memoCancelArmed: Bool
+    let memoDragX: CGFloat
+    let cancelDistance: CGFloat
+    let prompt: (String) -> String
+    let onCancelRecording: () -> Void
+    let onMicDrag: (DragGesture.Value) -> Void
+    let onMicEnd: (DragGesture.Value) -> Void
+    let onPrimary: () -> Void
+
+    private var canSend: Bool {
+        !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasPending
+    }
+
+    /// Idle round button: phone — starts a voice call (agent or people chat).
+    /// Channels have no calls (C1): the arrow stays, dimmed until there is text.
+    private var idleButtonGlyph: String { isChannel ? "arrow.up" : "phone.fill" }
+
+    /// Max height for the growing composer field.
+    ///
+    /// A vertical `TextField` fills the height its parent proposes (up to
+    /// `lineLimit`), so an empty field inside `safeAreaInset` was stretching to
+    /// eight lines and covering the transcript. Hug content with `fixedSize`,
+    /// and still cap at 8 lines (Grok's 22 pt body pitch) for wrap glitches.
+    private var composerFieldMaxHeight: CGFloat {
+        Theme.fieldHeight + 7 * 22
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if recorder.recording {
+                // Visible discard control (tap) — also used after a short tap that
+                // left recording on; hold-to-talk can slide left instead.
+                Button(action: onCancelRecording) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(theme.danger)
+                        .frame(width: 44, height: Theme.fieldHeight)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Cancel")
+                if memoCancelArmed {
+                    Text("Release to cancel")
+                        .font(theme.font(Theme.small))
+                        .foregroundStyle(theme.danger)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                } else if memoHoldActive && memoDragX < -12 {
+                    Text("Slide to cancel")
+                        .font(theme.font(Theme.small))
+                        .foregroundStyle(theme.muted)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .opacity(min(1, -memoDragX / cancelDistance))
+                } else {
+                    HStack(spacing: 8) {
+                        Circle().fill(theme.danger).frame(width: 8, height: 8)
+                        // Level bars drawn into whatever width is left (newest on the right),
+                        // so the recorder row never pushes the composer past the screen edge.
+                        Canvas { ctx, size in
+                            let pitch: CGFloat = 5, w: CGFloat = 3
+                            let levels = recorder.levels
+                            let n = min(levels.count, max(0, Int(size.width / pitch)))
+                            for i in 0..<n {
+                                let l = CGFloat(levels[levels.count - n + i])
+                                let h = min(size.height, 4 + l * 20)
+                                let x = size.width - CGFloat(n - i) * pitch
+                                let rect = CGRect(x: x, y: (size.height - h) / 2, width: w, height: h)
+                                ctx.fill(Path(roundedRect: rect, cornerRadius: w / 2), with: .color(theme.text))
+                            }
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: 24)
+                        Text(recorder.timeLabel)
+                            .font(theme.font(Theme.small, design: .monospaced))
+                            .foregroundStyle(theme.text)
+                    }
+                }
+            } else {
+                // The field with mention chips (#1596): one to eight lines, the
+                // chips as attachments; `draft.text` stays the plain `@handle` text.
+                MentionTextView(text: $draft.text, mentions: $draft.mentions, caret: $draft.caret, isFocused: $focus,
+                                placeholder: prompt(draft.text), theme: theme,
+                                agentProject: { model.agent(member: $0, chatId: chatId) })
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if draft.text.isEmpty || recorder.recording {
+                // Press/release like Mac: tap toggles recording on; hold ≥0.25s then
+                // release sends. Slide left while holding to discard (WhatsApp-style).
+                // highPriorityGesture so a focused TextField cannot steal the touch.
+                // The mic stays mounted while recording so release can finish without
+                // a second tap.
+                Image(systemName: memoCancelArmed ? "trash" : "mic")
+                    .font(theme.font(17))
+                    .foregroundStyle(recorder.recording ? theme.danger : theme.icon)
+                    .frame(width: 44, height: Theme.fieldHeight)
+                    .contentShape(Rectangle())
+                    .padding(.trailing, 2)
+                    .id("memo-mic")
+                    .highPriorityGesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { onMicDrag($0) }
+                            .onEnded { onMicEnd($0) }
+                    )
+            }
+            // While recording: tap send also finishes (same as release). Otherwise
+            // Grok keeps the composer usable while the bot works: text sends, an
+            // empty field starts a voice call with the agent (phone icon next to mic).
+            Button(action: onPrimary) {
+                Circle()
+                    .fill(theme.primary)
+                    .frame(width: Theme.voiceButton, height: Theme.voiceButton)
+                    .overlay(
+                        Image(systemName: (canSend || recorder.recording) ? "arrow.up" : idleButtonGlyph)
+                            .font(theme.font(16, weight: .bold))
+                            .foregroundStyle(theme.onPrimary)
+                    )
+                    .contentShape(Circle().inset(by: -(44 - Theme.voiceButton) / 2))
+            }
+            .buttonStyle(.plain)
+            .opacity(isChannel && !canSend && !recorder.recording ? 0.45 : 1)
+            .accessibilityLabel((canSend || recorder.recording) ? "Send" : (isChannel ? "Send" : "Call"))
+            .padding(.trailing, 3)
+        }
+        // Hard max so a TextField layout glitch cannot paint over the transcript.
+        .frame(minHeight: Theme.fieldHeight, maxHeight: composerFieldMaxHeight, alignment: .bottom)
+        .fixedSize(horizontal: false, vertical: true)
+        .background(RoundedRectangle(cornerRadius: Theme.fieldHeight / 2, style: .continuous).fill(theme.field))
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.fieldHeight / 2, style: .continuous)
+                .strokeBorder(
+                    recorder.recording ? theme.danger.opacity(0.5)
+                        : (needsAnswer ? theme.warn.opacity(0.7) : theme.fieldBorder),
+                    lineWidth: 1
+                )
+        )
+        .alert("Microphone access is off", isPresented: $recorder.permissionDenied) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text("Allow the microphone in Settings to record a voice memo.")
         }
     }
 }

@@ -224,6 +224,7 @@ async fn member_json_matches_fixtures() {
         image_key: None,
         avatar_leaf: None,
         avatar_leaf_color: None,
+        description: None,
         members_see_reads: true,
     };
     state.db.insert_people_chat(&dm).unwrap();
@@ -261,6 +262,7 @@ async fn member_json_matches_fixtures() {
         image_key: None,
         avatar_leaf: None,
         avatar_leaf_color: None,
+        description: None,
         members_see_reads: true,
     };
     state.db.insert_people_chat(&agent_chat).unwrap();
@@ -308,6 +310,7 @@ async fn people_chat_json_matches_fixtures() {
         image_key: None,
         avatar_leaf: None,
         avatar_leaf_color: None,
+        description: None,
         members_see_reads: true,
     };
     state.db.insert_people_chat(&dm).unwrap();
@@ -533,6 +536,7 @@ async fn me_and_machine_unread_fixtures() {
         image_key: None,
         avatar_leaf: None,
         avatar_leaf_color: None,
+        description: None,
         members_see_reads: true,
     };
     state.db.insert_people_chat(&chat).unwrap();

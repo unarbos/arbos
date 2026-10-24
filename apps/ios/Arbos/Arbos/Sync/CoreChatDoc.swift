@@ -26,6 +26,12 @@ final class CoreChatDoc {
         self.doc = ArbosFFI.ChatDoc.open()
     }
 
+    /// A replica loaded from a full snapshot (the perf rig's exported chat).
+    init(key: Id, snapshot: Data) throws {
+        self.key = key
+        self.doc = try ArbosFFI.ChatDoc.openFromSnapshot(snapshot: snapshot)
+    }
+
     var count: Int { Int(doc.messageCount()) }
 
     /// Nothing imported or written yet (a fresh replica is not worth saving).

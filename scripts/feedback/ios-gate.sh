@@ -30,6 +30,7 @@ teardown() {
 }
 trap teardown EXIT
 cd ~/arbos-gate || exit 2
+ROOT=$(pwd)
 git fetch -q origin "+refs/heads/${branch}:refs/remotes/origin/${branch}" || { echo "fetch of ${branch} failed"; exit 2; }
 git checkout -q --detach "$sha" || { echo "checkout of ${sha} failed"; exit 2; }
 # Arbos depends on the local packages/ArbosFFI product, which links the gitignored
@@ -101,4 +102,40 @@ for config in Release Debug; do
     rc=1
   fi
 done
+# Unit-test target (ArbosTests) must still compile: the app build above does not compile tests, so
+# main's test target was broken from 4b193bfc (AgentIdentityTests missing a new `silenced:` argument)
+# without the gate noticing (2026-10-24 06:5x). build-for-testing compiles the tests without running
+# them (no simulator boot, ~1 min incremental). A failure that already exists on main (the base) is
+# reported but does not blame the branch — the owner of the test fixes it; the branch is not held hostage.
+if [[ "$rc" -eq 0 ]]; then
+  log=$(mktemp -t ios-gate)
+  xcodebuild -project Arbos.xcodeproj -scheme Arbos -configuration Debug \
+    -destination 'generic/platform=iOS Simulator' -derivedDataPath "$HOME/arbos-gate-dd-Debug" \
+    CODE_SIGNING_ALLOWED=NO build-for-testing >"$log" 2>&1
+  trc=$?
+  if [[ "$trc" -eq 0 ]]; then
+    echo "== tests: compile"
+  else
+    echo "== tests: FAIL to compile (ArbosTests)"
+    grep -E "error:" "$log" | grep -v "warning:" | sed 's#/Users/[^/]*/arbos-gate/##' | head -20
+    base_broken=0
+    GATE_BASE_SHA=${GATE_BASE_SHA:-$(git -C "$ROOT" rev-parse origin/main 2>/dev/null || true)}
+    if [[ -n "${GATE_BASE_SHA:-}" ]] && git -C "$ROOT" cat-file -e "$GATE_BASE_SHA^{commit}" 2>/dev/null; then
+      # Does main alone fail the same way? Then it is not this branch's regression.
+      cur=$(git -C "$ROOT" rev-parse HEAD)
+      git -C "$ROOT" checkout -q "$GATE_BASE_SHA" 2>/dev/null && {
+        xcodebuild -project Arbos.xcodeproj -scheme Arbos -configuration Debug \
+          -destination 'generic/platform=iOS Simulator' -derivedDataPath "$HOME/arbos-gate-dd-Debug" \
+          CODE_SIGNING_ALLOWED=NO build-for-testing >/dev/null 2>&1 || base_broken=1
+        git -C "$ROOT" checkout -q "$cur" 2>/dev/null
+      }
+    fi
+    if [[ "$base_broken" -eq 1 ]]; then
+      echo "== tests: the same failure exists on main (${GATE_BASE_SHA:0:8}); not this branch's regression — reported, not blamed"
+    else
+      rc=1
+    fi
+  fi
+  rm -f "$log"
+fi
 exit $rc

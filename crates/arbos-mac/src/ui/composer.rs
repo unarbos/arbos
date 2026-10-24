@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 use gpui::{
     actions, div, fill, img, point, prelude::*, px, relative, size, App, Bounds, ClipboardEntry,
-    ClipboardItem, Context, CursorStyle, Div, Element, ElementId, ElementInputHandler, Entity,
-    EntityInputHandler, EventEmitter, FocusHandle, Focusable, FontWeight, GlobalElementId,
+    ClipboardItem, Context, Corners, CursorStyle, Div, Element, ElementId, ElementInputHandler,
+    Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, FontWeight, GlobalElementId,
     InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, ObjectFit, PaintQuad, Pixels, Point, Render, RenderImage, SharedString, Style,
     TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine,
@@ -29,11 +29,11 @@ use crate::ui::callview;
 use crate::ui::frost::{frosted, PANEL_BLUR};
 use crate::ui::glass;
 use crate::ui::icons::icon;
-use crate::ui::mention::Mentions;
-use crate::ui::select::word_range;
+use crate::ui::mention::{self, MentionToken, Mentions};
+use crate::ui::select::{self, word_range};
 use crate::ui::theme::{
     Theme, COMPOSER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS, PLUS_BUTTON, SEND_BUTTON, TEXT_BODY,
-    TEXT_TINY,
+    TEXT_SMALL, TEXT_TINY,
 };
 use crate::ui::transcript;
 use crate::ui::voice::{render_recording_row, Voice, VoiceEvent};
@@ -81,6 +81,8 @@ struct EditSnapshot {
     content: String,
     selected_range: Range<usize>,
     selection_reversed: bool,
+    /// The mention chips (#1596) go with the text they sit in.
+    tokens: Vec<MentionToken>,
 }
 
 const UNDO_LIMIT: usize = 100;
@@ -175,11 +177,14 @@ pub enum ComposerEvent {
         text: String,
         attachments: Vec<PathBuf>,
         reply_to: Option<String>,
+        /// Member ids of the committed mention chips (#1596), in text order.
+        mentions: Vec<String>,
     },
     /// Inject `text` into the agent's currently running turn (Guide).
     Guide {
         text: String,
         reply_to: Option<String>,
+        mentions: Vec<String>,
     },
     Stop,
 }
@@ -213,6 +218,8 @@ pub struct ComposerInput {
     pub on_mention_prev: Option<MentionKeyHandler>,
     /// Enter while the `@` mention menu is open: accept the highlighted row.
     pub on_mention_accept: Option<MentionKeyHandler>,
+    /// Esc while the `@` mention menu is open: close it for this token.
+    pub on_mention_escape: Option<MentionKeyHandler>,
     /// ⌘V with files or an image on the clipboard: the owner stages them.
     pub on_paste_media: Option<PasteMediaHandler>,
     /// Multi-line editors (skill bodies): Enter inserts a newline instead of
@@ -227,6 +234,16 @@ pub struct ComposerInput {
     /// Known `@handle`s (people, agents, `@here`, `@agents`): paint them in the
     /// accent as soon as the full token is typed, same as bubble chips resolve.
     mentions: Rc<Mentions>,
+    /// Committed mention chips (#1596), by position. Each covers `CELL` +
+    /// display name in `content`; the caret never stops inside one, an edit
+    /// that touches one removes it whole, and the sent text reads `@handle`.
+    tokens: Vec<MentionToken>,
+}
+
+/// Separators that complete a typed `@handle` (#1596, behaviour 5): the token
+/// becomes a chip when one of these is typed right after it.
+fn completes_handle(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '.' | ',' | '!' | '?' | ':' | ';')
 }
 
 impl ComposerInput {
@@ -247,12 +264,14 @@ impl ComposerInput {
             on_mention_next: None,
             on_mention_prev: None,
             on_mention_accept: None,
+            on_mention_escape: None,
             on_paste_media: None,
             enter_inserts_newline: false,
             masked: false,
             text_center: false,
             font_size: INPUT_FONT_SIZE,
             mentions: Mentions::empty(),
+            tokens: Vec::new(),
         }
     }
 
@@ -277,19 +296,217 @@ impl ComposerInput {
         &self.content
     }
 
+    /// The committed mention chips, in text order.
+    pub fn tokens(&self) -> &[MentionToken] {
+        &self.tokens
+    }
+
+    /// The text a send carries: every chip reads as `@handle`.
+    pub fn sent_text(&self) -> String {
+        self.plain_slice(0..self.content.len())
+    }
+
+    /// The member ids the committed chips stand for, in text order, deduplicated.
+    pub fn token_ids(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for t in &self.tokens {
+            if let Some(id) = &t.id {
+                if !out.contains(id) {
+                    out.push(id.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// `content[range]` with each chip inside read as `@handle` (⌘C, the send).
+    fn plain_slice(&self, range: Range<usize>) -> String {
+        let mut out = String::with_capacity(range.len());
+        let mut pos = range.start;
+        for t in &self.tokens {
+            if t.range.end <= range.start || t.range.start >= range.end {
+                continue;
+            }
+            let start = t.range.start.max(range.start);
+            out.push_str(&self.content[pos..start]);
+            out.push_str(&t.plain());
+            pos = t.range.end.min(range.end);
+        }
+        out.push_str(&self.content[pos..range.end]);
+        out
+    }
+
+    /// Splice `new_text` over `range`, keeping the chips right: a chip the
+    /// range touches goes whole (the range grows to cover it), chips after it
+    /// shift. Returns the range actually replaced.
+    fn splice(&mut self, range: Range<usize>, new_text: &str) -> Range<usize> {
+        let mut range = range;
+        for t in &self.tokens {
+            if t.range.start < range.end && t.range.end > range.start {
+                range.start = range.start.min(t.range.start);
+                range.end = range.end.max(t.range.end);
+            }
+        }
+        let delta = new_text.len() as isize - range.len() as isize;
+        self.tokens
+            .retain(|t| t.range.end <= range.start || t.range.start >= range.end);
+        for t in &mut self.tokens {
+            if t.range.start >= range.end {
+                t.range = ((t.range.start as isize + delta) as usize)
+                    ..((t.range.end as isize + delta) as usize);
+            }
+        }
+        self.content =
+            self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
+        range
+    }
+
+    /// The chip containing `offset` strictly inside it, if any.
+    fn token_around(&self, offset: usize) -> Option<&MentionToken> {
+        self.tokens
+            .iter()
+            .find(|t| t.range.start < offset && offset < t.range.end)
+    }
+
+    /// Move an offset that fell inside a chip to its nearer edge (`forward`
+    /// picks the end on a tie).
+    fn snap(&self, offset: usize, forward: bool) -> usize {
+        match self.token_around(offset) {
+            Some(t) => {
+                let (a, b) = (offset - t.range.start, t.range.end - offset);
+                if a < b || (a == b && !forward) {
+                    t.range.start
+                } else {
+                    t.range.end
+                }
+            }
+            None => offset,
+        }
+    }
+
+    /// Put a chip for `name` (`@handle`, member `id`) where the open `@token`
+    /// is — or at the caret when none is open — followed by one space.
+    pub fn insert_mention(
+        &mut self,
+        handle: &str,
+        name: &str,
+        id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let range = match self.open_mention_range() {
+            Some(r) => r,
+            None => self.selected_range.clone(),
+        };
+        self.record_undo();
+        let chip = format!("{}{name}", mention::CELL);
+        let range = self.splice(range, &format!("{chip} "));
+        let token = MentionToken {
+            range: range.start..range.start + chip.len(),
+            handle: handle.to_string(),
+            name: name.to_string(),
+            id,
+        };
+        let at = self
+            .tokens
+            .partition_point(|t| t.range.start < token.range.start);
+        self.tokens.insert(at, token);
+        let caret = range.start + chip.len() + 1;
+        self.selected_range = caret..caret;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        cx.notify();
+    }
+
+    /// Every plain `@handle` the table knows (whole word, not shared by two
+    /// entities, not already a chip) becomes a chip. Runs on Enter and after a
+    /// separator is typed, so an exact handle resolves without the picker.
+    pub fn resolve_exact_handles(&mut self, cx: &mut Context<Self>) -> bool {
+        let found = self.mentions.find_raw(&self.content);
+        let mut changed = false;
+        for range in found.into_iter().rev() {
+            if self
+                .tokens
+                .iter()
+                .any(|t| t.range.start < range.end && t.range.end > range.start)
+            {
+                continue;
+            }
+            let handle = self.content[range.start + 1..range.end].to_string();
+            if self.mentions.is_ambiguous(&handle) {
+                continue;
+            }
+            let Some(m) = self.mentions.by_handle(&handle).cloned() else {
+                continue;
+            };
+            let chip = format!("{}{}", mention::CELL, m.name);
+            let caret = self.cursor_offset();
+            let delta = chip.len() as isize - range.len() as isize;
+            let replaced = self.splice(range.clone(), &chip);
+            let token = MentionToken {
+                range: replaced.start..replaced.start + chip.len(),
+                handle,
+                name: m.name.clone(),
+                id: m.id.clone(),
+            };
+            let at = self
+                .tokens
+                .partition_point(|t| t.range.start < token.range.start);
+            self.tokens.insert(at, token);
+            if caret >= range.end {
+                let c = (caret as isize + delta) as usize;
+                self.selected_range = c..c;
+            } else if caret > range.start {
+                let c = replaced.start + chip.len();
+                self.selected_range = c..c;
+            }
+            self.selection_reversed = false;
+            changed = true;
+        }
+        if changed {
+            cx.notify();
+        }
+        changed
+    }
+
     pub fn set_placeholder(&mut self, text: impl Into<SharedString>) {
         self.placeholder = text.into();
     }
 
     pub fn set_text(&mut self, text: String, cx: &mut Context<Self>) {
+        self.set_text_with_tokens(text, Vec::new(), cx);
+    }
+
+    /// A draft coming back with its chips (`tokens` are byte ranges in `text`).
+    pub fn set_text_with_tokens(
+        &mut self,
+        text: String,
+        tokens: Vec<MentionToken>,
+        cx: &mut Context<Self>,
+    ) {
         let len = text.len();
         self.content = text;
+        self.tokens = tokens
+            .into_iter()
+            .filter(|t| t.range.end <= len && t.range.start < t.range.end)
+            .collect();
+        self.tokens.sort_by_key(|t| t.range.start);
         self.selected_range = len..len;
         self.selection_reversed = false;
         self.marked_range = None;
         self.scroll_y = 0.0;
         self.undo_stack.clear();
         self.redo_stack.clear();
+        cx.notify();
+    }
+
+    /// Append plain text at the end (a dictated memo), keeping the chips.
+    pub fn append_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        let end = self.content.len();
+        self.splice(end..end, text);
+        let len = self.content.len();
+        self.selected_range = len..len;
+        self.selection_reversed = false;
+        self.marked_range = None;
         cx.notify();
     }
 
@@ -308,6 +525,7 @@ impl ComposerInput {
 
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.content.clear();
+        self.tokens.clear();
         self.selected_range = 0..0;
         self.selection_reversed = false;
         self.marked_range = None;
@@ -397,20 +615,46 @@ impl ComposerInput {
         self.defer_mention_key(self.on_mention_prev.clone(), window, cx);
     }
 
+    /// Esc closes an open `@` menu; with none open the key goes on to the
+    /// shell (stop a memo, close menus and sheets).
+    fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.defer_mention_key(self.on_mention_escape.clone(), window, cx) {
+            cx.propagate();
+        }
+    }
+
     /// The trailing `@token` the mention menu is open for (an `@` at a word start, no whitespace after
     /// it) — the same rule as `Composer::mention_query`, decided from our own text so no owner code
     /// runs while this entity is leased.
     pub fn open_mention_token(&self) -> Option<&str> {
-        let text = self.text();
-        let at = text.rfind('@')?;
-        let token = &text[at + 1..];
-        if token.contains(char::is_whitespace) {
+        let range = self.open_mention_range()?;
+        Some(&self.content[range.start + 1..range.end])
+    }
+
+    /// Bytes of the `@token` the caret sits at the end of: `@` at a word start
+    /// (start of text or after whitespace), no whitespace up to the caret, not
+    /// part of a chip. A chip's own `@` never counts — its cell holds a space.
+    fn open_mention_range(&self) -> Option<Range<usize>> {
+        if !self.selected_range.is_empty() {
             return None;
         }
-        if at > 0 && !text[..at].ends_with(char::is_whitespace) {
+        let caret = self.cursor_offset();
+        let before = &self.content[..caret];
+        let at = before.rfind('@')?;
+        if before[at + 1..].contains(char::is_whitespace) {
             return None;
         }
-        Some(token)
+        if at > 0 && !before[..at].ends_with(char::is_whitespace) {
+            return None;
+        }
+        if self
+            .tokens
+            .iter()
+            .any(|t| t.range.start <= at && at < t.range.end)
+        {
+            return None;
+        }
+        Some(at..caret)
     }
 
     /// Hand a mention-menu key to the owner, deferred (see `send`). True when a mention is open and the
@@ -433,21 +677,25 @@ impl ComposerInput {
         true
     }
 
-    /// Replace the trailing `@token` with `@handle ` (mention completion).
+    /// Complete the open `@token` with `handle`: a chip when the table knows
+    /// the handle, else the plain `@handle ` text. What `Composer` does through
+    /// `insert_mention` with a picker row; kept for the Enter tests.
+    #[cfg(test)]
     pub fn complete_mention(&mut self, handle: &str, cx: &mut Context<Self>) {
-        let Some(at) = self.content.rfind('@') else {
+        let Some(range) = self.open_mention_range() else {
             return;
         };
-        if self.content[at + 1..].contains(char::is_whitespace) {
+        if let Some(m) = self.mentions.by_handle(handle).cloned() {
+            self.insert_mention(handle, &m.name, m.id.clone(), cx);
             return;
         }
         self.record_undo();
-        self.content.truncate(at);
-        self.content.push('@');
-        self.content.push_str(handle);
-        self.content.push(' ');
-        let len = self.content.len();
-        self.selected_range = len..len;
+        let text = format!("@{handle} ");
+        let range = self.splice(range, &text);
+        let caret = range.start + text.len();
+        self.selected_range = caret..caret;
+        self.selection_reversed = false;
+        self.marked_range = None;
         cx.notify();
     }
 
@@ -456,6 +704,7 @@ impl ComposerInput {
             content: self.content.clone(),
             selected_range: self.selected_range.clone(),
             selection_reversed: self.selection_reversed,
+            tokens: self.tokens.clone(),
         }
     }
 
@@ -463,6 +712,7 @@ impl ComposerInput {
         self.content = snap.content;
         self.selected_range = snap.selected_range;
         self.selection_reversed = snap.selection_reversed;
+        self.tokens = snap.tokens;
         self.marked_range = None;
     }
 
@@ -678,7 +928,7 @@ impl ComposerInput {
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
         if !self.selected_range.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(
-                self.content[self.selected_range.clone()].to_string(),
+                self.plain_slice(self.selected_range.clone()),
             ));
         }
     }
@@ -686,7 +936,7 @@ impl ComposerInput {
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
         if !self.selected_range.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(
-                self.content[self.selected_range.clone()].to_string(),
+                self.plain_slice(self.selected_range.clone()),
             ));
             self.replace_text_in_range(None, "", window, cx)
         }
@@ -705,6 +955,15 @@ impl ComposerInput {
         let ix = self.index_for_mouse_position(event.position);
         if event.modifiers.shift {
             self.select_to(ix, cx);
+        } else if event.click_count == 2 && self.token_around(ix).is_some() {
+            // Double-click on a chip selects the chip.
+            let t = self
+                .token_around(ix)
+                .map(|t| t.range.clone())
+                .unwrap_or(ix..ix);
+            self.selected_range = t;
+            self.selection_reversed = false;
+            cx.notify();
         } else if event.click_count >= 3 {
             // Triple-click: select the entire chat input (macOS text-field
             // convention; matches ⌘A / select_all_text).
@@ -753,13 +1012,14 @@ impl ComposerInput {
         let Some(layout) = self.layout.as_ref() else {
             return 0;
         };
-        index_for_position(
+        let ix = index_for_position(
             &layout.lines,
             layout.bounds,
             position,
             self.content.len(),
             self.text_center,
-        )
+        );
+        self.snap(ix, true)
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -809,27 +1069,45 @@ impl ComposerInput {
         self.offset_from_utf16(range_utf16.start)..self.offset_from_utf16(range_utf16.end)
     }
 
+    /// One step left: a whole chip when the caret sits at its end.
     fn previous_boundary(&self, offset: usize) -> usize {
-        self.content
+        if let Some(t) = self.tokens.iter().find(|t| t.range.end == offset) {
+            return t.range.start;
+        }
+        let prev = self
+            .content
             .grapheme_indices(true)
             .rev()
             .find_map(|(idx, _)| (idx < offset).then_some(idx))
-            .unwrap_or(0)
+            .unwrap_or(0);
+        self.snap(prev, false)
     }
 
+    /// One step right: a whole chip when the caret sits at its start.
     fn next_boundary(&self, offset: usize) -> usize {
-        self.content
+        if let Some(t) = self.tokens.iter().find(|t| t.range.start == offset) {
+            return t.range.end;
+        }
+        let next = self
+            .content
             .grapheme_indices(true)
             .find_map(|(idx, _)| (idx > offset).then_some(idx))
-            .unwrap_or(self.content.len())
+            .unwrap_or(self.content.len());
+        self.snap(next, true)
     }
 
     fn previous_word_boundary(&self, offset: usize) -> usize {
-        previous_word_boundary(&self.content, offset)
+        if let Some(t) = self.tokens.iter().find(|t| t.range.end == offset) {
+            return t.range.start;
+        }
+        self.snap(previous_word_boundary(&self.content, offset), false)
     }
 
     fn next_word_boundary(&self, offset: usize) -> usize {
-        next_word_boundary(&self.content, offset)
+        if let Some(t) = self.tokens.iter().find(|t| t.range.start == offset) {
+            return t.range.end;
+        }
+        self.snap(next_word_boundary(&self.content, offset), true)
     }
 
     fn line_start(&self, offset: usize) -> usize {
@@ -877,13 +1155,14 @@ impl ComposerInput {
             return self.content.len();
         }
         let window_pos = point(layout.bounds.left() + pos.x, layout.bounds.top() + target_y);
-        index_for_position(
+        let ix = index_for_position(
             &layout.lines,
             layout.bounds,
             window_pos,
             self.content.len(),
             self.text_center,
-        )
+        );
+        self.snap(ix, !up)
     }
 
     fn offset_for_hard_line_move(&self, up: bool) -> usize {
@@ -1100,10 +1379,18 @@ impl EntityInputHandler for ComposerInput {
         if self.marked_range.is_none() {
             self.record_undo();
         }
-        self.content =
-            self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
+        let was_marked = self.marked_range.take().is_some();
+        let range = self.splice(range, new_text);
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
-        self.marked_range.take();
+        self.selection_reversed = false;
+        // `@handle` + a separator typed right after it: the handle becomes a chip
+        // without the picker (behaviour 5).
+        let mut chars = new_text.chars();
+        if !was_marked
+            && matches!((chars.next(), chars.next()), (Some(c), None) if completes_handle(c))
+        {
+            self.resolve_exact_handles(cx);
+        }
         cx.notify();
     }
 
@@ -1124,8 +1411,7 @@ impl EntityInputHandler for ComposerInput {
         if self.marked_range.is_none() {
             self.record_undo();
         }
-        self.content =
-            self.content[0..range.start].to_owned() + new_text + &self.content[range.end..];
+        let range = self.splice(range, new_text);
         if !new_text.is_empty() {
             self.marked_range = Some(range.start..range.start + new_text.len());
         } else {
@@ -1178,6 +1464,9 @@ struct Prepaint {
     lines: Vec<(usize, WrappedLine)>,
     cursor: Option<PaintQuad>,
     selections: Vec<PaintQuad>,
+    /// Mention chips (#1596): pills under the text, pictures over it.
+    pills: Vec<PaintQuad>,
+    pictures: Vec<(Bounds<Pixels>, mention::Picture)>,
     scroll_y: f32,
 }
 
@@ -1252,6 +1541,16 @@ impl Element for InputElement {
             input.mentions.find_raw(&display_text)
         };
         let mention_accent = theme.accent;
+        let tokens: Vec<MentionToken> = if content.is_empty() || input.masked {
+            Vec::new()
+        } else {
+            input.tokens.clone()
+        };
+        let pill_color = Theme::with_alpha(theme.accent, 0.14);
+        let token_pictures: Vec<Option<mention::Picture>> = tokens
+            .iter()
+            .map(|t| input.mentions.picture_for(t).cloned())
+            .collect();
 
         let mut font = style.font();
         font.family = theme.font_sans.into();
@@ -1277,6 +1576,15 @@ impl Element for InputElement {
                 let local_start = range.start.saturating_sub(start);
                 let local_end = range.end.min(para_end).saturating_sub(start);
                 runs = accent_runs(runs, local_start..local_end, mention_accent);
+            }
+            // Chips: the `@` cell transparent (the picture goes there), the name
+            // in the accent — the same recolouring as bubble chips.
+            for t in &tokens {
+                if t.range.end <= start || t.range.start >= para_end {
+                    continue;
+                }
+                let local = t.range.start - start..t.range.end.min(para_end) - start;
+                runs = select::chip_runs(runs, local, mention::CELL.len(), mention_accent);
             }
             let shaped = window
                 .text_system()
@@ -1328,6 +1636,73 @@ impl Element for InputElement {
         }
         scroll_y = scroll_y.clamp(0.0, (total_h - visible_h).max(0.0));
         let dy = px(scroll_y);
+
+        // Chip pills (one per wrapped-line fragment) and pictures, in element
+        // coordinates shifted by the scroll.
+        let mut pills = Vec::new();
+        let mut pictures = Vec::new();
+        for (t, picture) in tokens.iter().zip(token_pictures) {
+            let (Some(a), Some(b)) = (
+                position_for_index(&lines, t.range.start, bounds.size.width, text_center),
+                position_for_index(&lines, t.range.end, bounds.size.width, text_center),
+            ) else {
+                continue;
+            };
+            let fragments: Vec<(Pixels, Pixels, Pixels)> = if a.y == b.y {
+                vec![(a.x, b.x, a.y)]
+            } else {
+                vec![(a.x, bounds.size.width, a.y), (px(0.0), b.x, b.y)]
+            };
+            for (x0, x1, top) in fragments {
+                pills.push(
+                    fill(
+                        Bounds::new(
+                            point(
+                                bounds.left() + x0 - px(mention::PILL_PAD_X),
+                                bounds.top() + top - dy - px(mention::PILL_PAD_Y),
+                            ),
+                            size(
+                                x1 - x0 + px(mention::PILL_PAD_X * 2.0),
+                                lh + px(mention::PILL_PAD_Y * 2.0),
+                            ),
+                        ),
+                        pill_color,
+                    )
+                    .corner_radii(Corners::all(px(mention::PILL_RADIUS))),
+                );
+            }
+            let Some(picture) = picture else {
+                continue;
+            };
+            let Some(after_cell) = position_for_index(
+                &lines,
+                t.range.start + mention::CELL.len(),
+                bounds.size.width,
+                text_center,
+            ) else {
+                continue;
+            };
+            if after_cell.y != a.y {
+                continue;
+            }
+            let cell_w = after_cell.x - a.x;
+            let d = px(mention::PICTURE)
+                .min(lh)
+                .min(cell_w - px(mention::PICTURE_GAP));
+            if d <= px(4.0) {
+                continue;
+            }
+            pictures.push((
+                Bounds::new(
+                    point(
+                        bounds.left() + a.x,
+                        bounds.top() + a.y - dy + (lh - d) / 2.0,
+                    ),
+                    size(d, d),
+                ),
+                picture,
+            ));
+        }
 
         let mut cursor_quad = None;
         let mut selections = Vec::new();
@@ -1386,6 +1761,8 @@ impl Element for InputElement {
             lines,
             cursor: cursor_quad,
             selections,
+            pills,
+            pictures,
             scroll_y,
         }
     }
@@ -1410,6 +1787,9 @@ impl Element for InputElement {
         let scroll_y = prepaint.scroll_y;
         let focused = focus_handle.is_focused(window);
         window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+            for pill in prepaint.pills.drain(..) {
+                window.paint_quad(pill);
+            }
             for sel in prepaint.selections.drain(..) {
                 window.paint_quad(sel);
             }
@@ -1428,6 +1808,9 @@ impl Element for InputElement {
                         line.paint(point(bounds.left(), y), lh, align, align_bounds, window, cx);
                 }
                 y += h;
+            }
+            for (bounds, picture) in prepaint.pictures.drain(..) {
+                select::paint_picture(&picture, bounds, window, cx);
             }
             if focused {
                 if let Some(cursor) = prepaint.cursor.take() {
@@ -1543,6 +1926,7 @@ impl Render for ComposerInput {
             .on_action(cx.listener(Self::send))
             .on_action(cx.listener(Self::accept_mention))
             .on_action(cx.listener(Self::prev_mention))
+            .on_action(cx.listener(Self::escape))
             .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
@@ -1636,7 +2020,7 @@ pub struct Composer {
     attachments: Vec<StagedAttachment>,
     /// Which chat the input text belongs to; drafts are kept per chat.
     draft_chat: Option<crate::model::Id>,
-    drafts: std::collections::HashMap<crate::model::Id, String>,
+    drafts: std::collections::HashMap<crate::model::Id, (String, Vec<MentionToken>)>,
     /// The model / effort menu, opened from the sidebar row's control-click menu.
     /// S8 shake when the user hits Cmd+W on the pinned tab; also reused for
     /// the empty-send nudge.
@@ -1645,6 +2029,13 @@ pub struct Composer {
     mention_selected: usize,
     /// Last `@token` query; when it changes, selection resets to the first row.
     mention_query_seen: Option<String>,
+    /// The `@token` Esc closed the menu for; the menu stays closed until the
+    /// token changes (#1596, behaviour 3).
+    mention_dismissed: Option<String>,
+    /// Rig: `ARBOS_COMPOSER_DRAFT=…` is typed into the first open chat's
+    /// field once the mention table is known (`@s` leaves the picker open,
+    /// `@sam deck ready?` shows the resolved chip).
+    rig_draft: Option<String>,
 }
 
 impl EventEmitter<ComposerEvent> for Composer {}
@@ -1656,6 +2047,7 @@ impl Composer {
         let weak_next = weak.clone();
         let weak_prev = weak.clone();
         let weak_accept = weak.clone();
+        let weak_escape = weak.clone();
         let weak_paste = weak.clone();
         input.update(cx, |input, _| {
             input.on_submit = Some(Rc::new(move |window, cx| {
@@ -1681,6 +2073,11 @@ impl Composer {
                     .update(cx, |composer, cx| composer.accept_selected_mention(cx))
                     .unwrap_or(false)
             }));
+            input.on_mention_escape = Some(Rc::new(move |cx| {
+                weak_escape
+                    .update(cx, |composer, cx| composer.dismiss_mentions(cx))
+                    .unwrap_or(false)
+            }));
         });
         cx.observe(&state, |_, _, cx| cx.notify()).detach();
         cx.observe(&input, |_, _, cx| cx.notify()).detach();
@@ -1690,13 +2087,16 @@ impl Composer {
                 // The memo's words land in the input; Enter confirms (§F11).
                 let text = text.clone();
                 this.input.update(cx, |input, cx| {
-                    let existing = input.text().trim_end().to_string();
-                    let next = if existing.is_empty() {
-                        text
+                    if input.text().is_empty() {
+                        input.set_text(text, cx);
                     } else {
-                        format!("{existing} {text}")
-                    };
-                    input.set_text(next, cx);
+                        let sep = if input.text().ends_with(char::is_whitespace) {
+                            ""
+                        } else {
+                            " "
+                        };
+                        input.append_text(&format!("{sep}{text}"), cx);
+                    }
                 });
                 cx.notify();
             }
@@ -1724,6 +2124,10 @@ impl Composer {
             nudge_at: None,
             mention_selected: 0,
             mention_query_seen: None,
+            mention_dismissed: None,
+            rig_draft: std::env::var("ARBOS_COMPOSER_DRAFT")
+                .ok()
+                .filter(|v| !v.is_empty()),
         }
     }
 
@@ -1734,19 +2138,22 @@ impl Composer {
             return;
         }
         let text = self.input.read(cx).text().to_string();
+        let tokens = self.input.read(cx).tokens().to_vec();
         if let Some(prev) = self.draft_chat.take() {
             if text.is_empty() {
                 self.drafts.remove(&prev);
             } else {
-                self.drafts.insert(prev, text);
+                self.drafts.insert(prev, (text, tokens));
             }
         }
-        let next = active
+        let (next, tokens) = active
             .as_ref()
             .and_then(|id| self.drafts.get(id).cloned())
             .unwrap_or_default();
-        self.input.update(cx, |input, cx| input.set_text(next, cx));
+        self.input
+            .update(cx, |input, cx| input.set_text_with_tokens(next, tokens, cx));
         self.draft_chat = active;
+        self.mention_dismissed = None;
     }
 
     pub fn focus(this: &Entity<Self>, window: &mut Window, cx: &mut App) {
@@ -1767,7 +2174,11 @@ impl Composer {
             // S18: typing while a card is pending still sends (the agent multitasks); the
             // yellow frame and placeholder only point at the card.
             ComposerMode::Send | ComposerMode::Answer | ComposerMode::Approve => {
-                let text = self.input.read(cx).text().trim().to_string();
+                // `@handle` + Enter resolves like `@handle` + space (behaviour 5).
+                self.input
+                    .update(cx, |input, cx| input.resolve_exact_handles(cx));
+                let text = self.input.read(cx).sent_text().trim().to_string();
+                let mentions = self.input.read(cx).token_ids();
                 if text.is_empty() && self.attachments.is_empty() {
                     self.nudge_at = Some(crate::model::now_ms());
                     cx.notify();
@@ -1794,12 +2205,17 @@ impl Composer {
                 // Mid-task + typed text → Guide (steer into the live turn). Attachments still
                 // queue as a normal send so the box can fetch them for the next turn.
                 if running && !text.is_empty() && attachments.is_empty() {
-                    cx.emit(ComposerEvent::Guide { text, reply_to });
+                    cx.emit(ComposerEvent::Guide {
+                        text,
+                        reply_to,
+                        mentions,
+                    });
                 } else {
                     cx.emit(ComposerEvent::Send {
                         text,
                         attachments,
                         reply_to,
+                        mentions,
                     });
                 }
             }
@@ -1970,28 +2386,42 @@ impl Composer {
             .map(str::to_lowercase)
     }
 
-    /// People and agents of the current space matching the `@token`:
-    /// (handle, label, is_agent). Typing after `@` filters by handle or name.
-    /// Group/server owners also get `@here` (all humans) and `@agents` (all agents).
-    fn mention_candidates(&self, cx: &App) -> Vec<(String, String, bool)> {
+    /// Who the `@token` can mean here (#1596, behaviours 1–2): people and
+    /// agents of the current space, `@here` / `@agents` for the owner of a
+    /// group; a server channel keeps the owner-only collective pings (the
+    /// client has no member list for a server yet). Case-insensitive prefix on
+    /// the handle or on any word of the display name; handle matches first,
+    /// then name matches, alphabetical by handle; at most six rows. A handle
+    /// an agent and a person both carry (#1538) tags each of those two rows.
+    fn mention_candidates(&self, cx: &App) -> Vec<MentionCandidate> {
         let Some(query) = self.mention_query(cx) else {
             return Vec::new();
         };
+        if self.mention_dismissed.as_deref() == Some(query.as_str()) {
+            return Vec::new();
+        }
+        let theme = Theme::of(cx).clone();
         let state = self.state.read(cx);
         let me_handle = state.me_handle();
-        let mut out: Vec<(String, String, bool)> = Vec::new();
+        let mut out: Vec<MentionCandidate> = Vec::new();
+        let collective = |handle: &str, name: &str, is_agent: bool| MentionCandidate {
+            handle: handle.into(),
+            name: name.into(),
+            id: None,
+            is_agent,
+            picture: mention::initials_picture(handle, handle, None, &theme),
+            tag: None,
+        };
 
         if let Some((server, _)) = state.selected_channel_info() {
-            // Server channel: owner-only collective mentions (no per-member picker yet).
             if server.is_owner() {
-                if query.is_empty() || "here".starts_with(&query) {
-                    out.push(("here".into(), "notify all humans".into(), false));
+                if "here".starts_with(&query) {
+                    out.push(collective("here", "Everyone here", false));
                 }
-                if query.is_empty() || "agents".starts_with(&query) {
-                    out.push(("agents".into(), "notify all agents".into(), true));
+                if "agents".starts_with(&query) {
+                    out.push(collective("agents", "All agents", true));
                 }
             }
-            out.truncate(6);
             return out;
         }
 
@@ -2001,42 +2431,83 @@ impl Composer {
         if !space.is_people() && space.people.is_empty() {
             return Vec::new();
         }
-        // People group: owner-only `@here` / `@agents` at the top of the list.
         let i_own_group =
             space.is_people_group() && space.owner_handle.as_deref().is_none_or(|o| o == me_handle);
         if i_own_group {
-            if query.is_empty() || "here".starts_with(&query) {
-                out.push(("here".into(), "notify all humans".into(), false));
+            if "here".starts_with(&query) {
+                out.push(collective("here", "Everyone here", false));
             }
-            if query.is_empty() || "agents".starts_with(&query) {
-                out.push(("agents".into(), "notify all agents".into(), true));
+            if "agents".starts_with(&query) {
+                out.push(collective("agents", "All agents", true));
             }
         }
+        let mut members: Vec<(MentionCandidate, bool)> = Vec::new();
         for a in &space.agents {
-            let handle_l = a.handle.to_lowercase();
-            let name_l = a.name.to_lowercase();
-            if query.is_empty() || handle_l.starts_with(&query) || name_l.starts_with(&query) {
-                out.push((
-                    a.handle.clone(),
-                    format!("{} · owned by @{}", a.name, a.owner_handle),
-                    true,
-                ));
-            }
+            let Some(by_handle) = mention_match(&query, &a.handle, &a.name) else {
+                continue;
+            };
+            members.push((
+                MentionCandidate {
+                    handle: a.handle.clone(),
+                    name: a.name.trim().to_string(),
+                    id: Some(format!("agent:{}", a.project_id)),
+                    is_agent: true,
+                    picture: mention::agent_member_picture(state, Some(space), a, &theme),
+                    tag: None,
+                },
+                by_handle,
+            ));
         }
         for p in &space.people {
-            let handle_l = p.handle.to_lowercase();
-            let name_l = p.name.as_deref().unwrap_or("").to_lowercase();
-            if query.is_empty() || handle_l.starts_with(&query) || name_l.starts_with(&query) {
-                out.push((p.handle.clone(), p.name.clone().unwrap_or_default(), false));
+            if p.handle.eq_ignore_ascii_case(&me_handle) {
+                continue;
+            }
+            let Some(by_handle) = mention_match(&query, &p.handle, &p.display_name()) else {
+                continue;
+            };
+            members.push((
+                MentionCandidate {
+                    handle: p.handle.clone(),
+                    name: p.display_name(),
+                    id: Some(format!("user:{}", p.id)),
+                    is_agent: false,
+                    picture: mention::person_picture(state, p, &theme),
+                    tag: None,
+                },
+                by_handle,
+            ));
+        }
+        members.sort_by(|(a, a_handle), (b, b_handle)| {
+            b_handle
+                .cmp(a_handle)
+                .then_with(|| a.handle.to_lowercase().cmp(&b.handle.to_lowercase()))
+                .then_with(|| b.is_agent.cmp(&a.is_agent))
+        });
+        let mut members: Vec<MentionCandidate> = members.into_iter().map(|(c, _)| c).collect();
+        // Shared handle: say which is which.
+        let handles: Vec<String> = members.iter().map(|c| c.handle.to_lowercase()).collect();
+        for c in &mut members {
+            let h = c.handle.to_lowercase();
+            if handles.iter().filter(|x| **x == h).count() > 1 || h == me_handle.to_lowercase() {
+                c.tag = Some(if c.is_agent { "agent" } else { "person" });
             }
         }
+        out.extend(members);
         if space.agents.len() == 1
             && "arbos".starts_with(&query)
-            && !out.iter().any(|(h, _, _)| h == "arbos")
+            && !out.iter().any(|c| c.handle == "arbos")
         {
-            out.push(("arbos".into(), "the agent in this chat".into(), true));
+            let a = &space.agents[0];
+            out.push(MentionCandidate {
+                handle: "arbos".into(),
+                name: a.name.trim().to_string(),
+                id: Some(format!("agent:{}", a.project_id)),
+                is_agent: true,
+                picture: mention::agent_member_picture(state, Some(space), a, &theme),
+                tag: Some("the agent in this chat"),
+            });
         }
-        out.truncate(6);
+        out.truncate(MENTION_ROWS_MAX);
         out
     }
 
@@ -2079,21 +2550,49 @@ impl Composer {
             return false;
         }
         self.sync_mention_selection(candidates.len(), query.as_deref());
-        let Some((handle, _, _)) = candidates.get(self.mention_selected) else {
+        let Some(candidate) = candidates.get(self.mention_selected).cloned() else {
             return false;
         };
-        let handle = handle.clone();
-        self.input
-            .update(cx, |input, cx| input.complete_mention(&handle, cx));
+        self.commit_mention(&candidate, cx);
+        true
+    }
+
+    /// Put the picked row into the field as a chip (behaviour 4).
+    fn commit_mention(&mut self, candidate: &MentionCandidate, cx: &mut Context<Self>) {
+        let c = candidate.clone();
+        self.input.update(cx, |input, cx| {
+            input.insert_mention(&c.handle, &c.name, c.id.clone(), cx)
+        });
         self.mention_selected = 0;
         self.mention_query_seen = None;
+        self.mention_dismissed = None;
+        cx.notify();
+    }
+
+    /// Esc while the menu is open: close it for this `@token`; it comes back
+    /// when the token changes. Returns true when there was a menu to close.
+    fn dismiss_mentions(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(query) = self.mention_query(cx) else {
+            return false;
+        };
+        if self.mention_dismissed.as_deref() == Some(query.as_str()) {
+            return false;
+        }
+        if self.mention_candidates(cx).is_empty() {
+            return false;
+        }
+        self.mention_dismissed = Some(query);
         cx.notify();
         true
     }
 
+    /// The picker (#1596; Grok Bot's group @-mention picker, launch-trailer
+    /// frame 55, in the Arbos theme): a card above the pill, one row per
+    /// entity — picture · name · `@handle` — the highlighted row in
+    /// `surface_2`, keycap hints at the bottom.
     fn render_mentions(
         &self,
-        candidates: Vec<(String, String, bool)>,
+        candidates: Vec<MentionCandidate>,
         selected: usize,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -2102,68 +2601,140 @@ impl Composer {
             .id("mention-menu")
             .flex()
             .flex_col()
-            .min_w(px(260.0))
-            .p(px(6.0))
+            .w(px(MENTION_MENU_WIDTH))
+            .p(px(MENTION_MENU_PAD))
             .rounded(px(PANEL_RADIUS))
             .bg(theme.card())
             .border_1()
             .border_color(theme.border_strong)
             .shadow_lg();
-        for (i, (handle, label, is_agent)) in candidates.into_iter().enumerate() {
-            let h = handle.clone();
-            menu = menu.child(
-                div()
-                    .id(ElementId::NamedInteger("mention-item".into(), i as u64))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .px(px(8.0))
-                    .py(px(5.0))
-                    .rounded(px(6.0))
-                    .cursor_pointer()
-                    .when(i == selected, |el| el.bg(theme.surface_2))
-                    .hover(|s| s.bg(theme.surface_2))
-                    .child(
-                        div()
-                            .text_size(px(12.5))
-                            .text_color(theme.text)
-                            .child(format!("@{handle}")),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_size(px(11.0))
-                            .text_color(theme.text_faint)
-                            .child(label),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10.5))
-                            .text_color(theme.text_faint)
-                            .child(if is_agent { "agent" } else { "person" }),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.input
-                            .update(cx, |input, cx| input.complete_mention(&h, cx));
-                        this.mention_selected = 0;
-                        this.mention_query_seen = None;
-                        cx.notify();
-                    })),
-            );
+        for (i, c) in candidates.into_iter().enumerate() {
+            let picked = c.clone();
+            let mut row = div()
+                .id(ElementId::NamedInteger("mention-item".into(), i as u64))
+                .flex()
+                .items_center()
+                .h(px(MENTION_ROW_HEIGHT))
+                .gap(px(10.0))
+                .px(px(8.0))
+                .rounded(px(6.0))
+                .cursor_pointer()
+                .when(i == selected, |el| el.bg(theme.surface_2))
+                .hover(|s| s.bg(theme.surface_2))
+                .child(mention_picture(&c.picture, MENTION_ROW_PICTURE))
+                .child(
+                    div()
+                        .text_size(px(TEXT_SMALL))
+                        .text_color(theme.text)
+                        .whitespace_nowrap()
+                        .child(c.name.clone()),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(TEXT_SMALL))
+                        .text_color(theme.text_muted)
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .child(format!("@{}", c.handle)),
+                );
+            if let Some(tag) = c.tag {
+                row = row.child(
+                    div()
+                        .text_size(px(TEXT_TINY))
+                        .text_color(theme.text_faint)
+                        .whitespace_nowrap()
+                        .child(tag),
+                );
+            }
+            menu = menu.child(row.on_click(cx.listener(move |this, _, _, cx| {
+                this.commit_mention(&picked, cx);
+            })));
         }
         menu = menu.child(
             div()
+                .h(px(MENTION_MENU_FOOTER))
+                .flex()
+                .items_center()
                 .px(px(8.0))
-                .pt(px(2.0))
-                .text_size(px(10.5))
+                .text_size(px(TEXT_TINY - 1.0))
                 .text_color(theme.text_faint)
-                .child("↑↓ or Tab to move · Enter to select"),
+                .child("↑↓ move · Tab or ↵ insert · esc close"),
         );
         div()
             .absolute()
-            .bottom(px(COMPOSER_HEIGHT + 12.0))
-            .left(px(8.0))
+            .bottom(px(COMPOSER_HEIGHT + MENTION_MENU_GAP))
+            .left(px(0.0))
             .child(frosted(PANEL_RADIUS, PANEL_BLUR, menu))
+    }
+}
+
+/// One row of the `@` picker.
+#[derive(Clone, Debug)]
+pub struct MentionCandidate {
+    pub handle: String,
+    pub name: String,
+    /// `user:<id>` / `agent:<project-id>`; `None` for `@here` / `@agents`.
+    pub id: Option<String>,
+    pub is_agent: bool,
+    pub picture: mention::Picture,
+    /// `agent` / `person` when the handle is shared (#1538), or a note.
+    pub tag: Option<&'static str>,
+}
+
+/// Picker geometry (pt), the approved mock: a 320 pt card, 32 pt rows with a
+/// 22 pt picture, 8 pt above the pill.
+const MENTION_MENU_WIDTH: f32 = 320.0;
+const MENTION_MENU_PAD: f32 = 6.0;
+const MENTION_ROW_HEIGHT: f32 = 32.0;
+const MENTION_ROW_PICTURE: f32 = 22.0;
+const MENTION_MENU_FOOTER: f32 = 20.0;
+const MENTION_MENU_GAP: f32 = 8.0;
+const MENTION_ROWS_MAX: usize = 6;
+
+/// Does `query` (lower-case) match this entity? `Some(true)` on the handle,
+/// `Some(false)` on a word of the display name, `None` otherwise. An empty
+/// query matches everyone (by handle).
+fn mention_match(query: &str, handle: &str, name: &str) -> Option<bool> {
+    if query.is_empty() || handle.to_lowercase().starts_with(query) {
+        return Some(true);
+    }
+    let name = name.to_lowercase();
+    name.split(|c: char| !c.is_alphanumeric())
+        .any(|w| !w.is_empty() && w.starts_with(query))
+        .then_some(false)
+}
+
+/// A picker row's picture as an element: photo, D79 initials or D92 leaf.
+fn mention_picture(picture: &mention::Picture, size: f32) -> gpui::AnyElement {
+    match picture {
+        mention::Picture::Image(image) => img(image.clone())
+            .size(px(size))
+            .flex_shrink_0()
+            .rounded_full()
+            .object_fit(ObjectFit::Cover)
+            .into_any_element(),
+        mention::Picture::Initials { text, top, bottom } => div()
+            .size(px(size))
+            .flex_shrink_0()
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(gpui::linear_gradient(
+                180.0,
+                gpui::linear_color_stop(*top, 0.0),
+                gpui::linear_color_stop(*bottom, 1.0),
+            ))
+            .text_size(px(size * crate::ui::avatars::INITIALS_SCALE))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(gpui::white())
+            .child(text.clone())
+            .into_any_element(),
+        mention::Picture::Leaf(pick) => {
+            crate::ui::avatars::leaf_element(*pick, size).into_any_element()
+        }
     }
 }
 
@@ -2175,6 +2746,13 @@ impl Render for Composer {
         let mentions = Mentions::from_state(&self.state, &theme, cx);
         self.input
             .update(cx, |input, _| input.set_mentions(mentions));
+        if self.rig_draft.is_some() && self.draft_chat.is_some() {
+            let rig = self.rig_draft.take().unwrap_or_default();
+            self.input.update(cx, |input, cx| {
+                input.set_text(rig, cx);
+                input.resolve_exact_handles(cx);
+            });
+        }
         let mode = self.mode(cx);
         let state = self.state.read(cx);
         let space = state.selected().cloned();
@@ -2588,6 +3166,9 @@ impl Render for Composer {
         column = column.child(field_wrap.child(frosted(field_radius, PANEL_BLUR, field)));
 
         let query = self.mention_query(cx);
+        if query.is_none() {
+            self.mention_dismissed = None;
+        }
         let mentions = self.mention_candidates(cx);
         if mentions.is_empty() {
             self.sync_mention_selection(0, None);
@@ -3376,5 +3957,255 @@ mod enter_tests {
             cx.update(|_, cx| input.read(cx).text().to_string()),
             "plain text"
         );
+    }
+}
+
+#[cfg(test)]
+mod mention_token_tests {
+    //! Composer mention chips (#1596): a picked row or an exact `@handle` is
+    //! one token in the field — the caret skips it, ⌫ removes it whole, ⌘C and
+    //! the send read `@handle`, and the send carries its member id.
+    use super::*;
+    use crate::app::ProfilePage;
+    use crate::ui::mention::tests::stub;
+    use gpui::{TestAppContext, VisualTestContext};
+
+    fn table() -> Rc<Mentions> {
+        Mentions::with_table(
+            vec![
+                (
+                    "sam",
+                    stub(
+                        "Sam Rivera",
+                        ProfilePage::User {
+                            handle: "sam".into(),
+                            space_id: None,
+                        },
+                    ),
+                ),
+                (
+                    "studio",
+                    stub(
+                        "Studio",
+                        ProfilePage::Agent {
+                            project_id: "p-studio".into(),
+                        },
+                    ),
+                ),
+                // `@arbos` is an agent and a person (#1538).
+                (
+                    "arbos",
+                    stub(
+                        "Arbos",
+                        ProfilePage::Agent {
+                            project_id: "p-arbos".into(),
+                        },
+                    ),
+                ),
+                (
+                    "arbos",
+                    stub(
+                        "Jacob",
+                        ProfilePage::User {
+                            handle: "arbos".into(),
+                            space_id: None,
+                        },
+                    ),
+                ),
+            ],
+            |_, _| {},
+        )
+    }
+
+    fn input(cx: &mut TestAppContext) -> (Entity<ComposerInput>, &mut VisualTestContext) {
+        cx.update(|cx| {
+            let theme = crate::ui::theme::Theme::for_pref(
+                crate::ui::theme::AppearancePref::Dark,
+                crate::ui::theme::Surface::Matte,
+                cx,
+            );
+            cx.set_global(theme);
+            crate::ui::motion::PulseClock::init(cx);
+        });
+        let (input, vcx) = cx.add_window_view(|_, cx| ComposerInput::new(cx));
+        vcx.update(|_, cx| {
+            input.update(cx, |input, _| input.set_mentions(table()));
+        });
+        let handle = vcx.update(|_, cx| input.read(cx).focus_handle(cx));
+        vcx.update(|window, cx| window.focus(&handle, cx));
+        vcx.run_until_parked();
+        (input, vcx)
+    }
+
+    fn text(input: &Entity<ComposerInput>, cx: &mut VisualTestContext) -> String {
+        cx.update(|_, cx| input.read(cx).text().to_string())
+    }
+
+    fn sent(input: &Entity<ComposerInput>, cx: &mut VisualTestContext) -> (String, Vec<String>) {
+        cx.update(|_, cx| {
+            let i = input.read(cx);
+            (i.sent_text(), i.token_ids())
+        })
+    }
+
+    fn caret(input: &Entity<ComposerInput>, cx: &mut VisualTestContext) -> usize {
+        cx.update(|_, cx| input.read(cx).cursor_offset())
+    }
+
+    fn chip(name: &str) -> String {
+        format!("{}{name}", mention::CELL)
+    }
+
+    #[gpui::test]
+    fn a_picked_row_is_one_chip_and_the_send_carries_its_id(cx: &mut TestAppContext) {
+        let (input, cx) = input(cx);
+        cx.simulate_input("hi @sa");
+        assert_eq!(
+            cx.update(|_, cx| input.read(cx).open_mention_token().map(str::to_string)),
+            Some("sa".into())
+        );
+        cx.update(|_, cx| {
+            input.update(cx, |i, cx| {
+                i.insert_mention("sam", "Sam Rivera", Some("user:gh_sam".into()), cx)
+            })
+        });
+        assert_eq!(text(&input, cx), format!("hi {} ", chip("Sam Rivera")));
+        let tokens = cx.update(|_, cx| input.read(cx).tokens().to_vec());
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].range, 3..3 + chip("Sam Rivera").len());
+        assert_eq!(
+            sent(&input, cx),
+            ("hi @sam ".into(), vec!["user:gh_sam".into()])
+        );
+        // The menu is closed: the chip's own `@` is not an open token.
+        assert_eq!(
+            cx.update(|_, cx| input.read(cx).open_mention_token().map(str::to_string)),
+            None
+        );
+        // Typing goes on after the chip.
+        cx.simulate_input("ok?");
+        assert_eq!(sent(&input, cx).0, "hi @sam ok?");
+    }
+
+    #[gpui::test]
+    fn backspace_removes_the_whole_chip_and_arrows_skip_it(cx: &mut TestAppContext) {
+        let (input, cx) = input(cx);
+        cx.simulate_input("hi @s");
+        cx.update(|_, cx| {
+            input.update(cx, |i, cx| {
+                i.insert_mention("sam", "Sam Rivera", Some("user:gh_sam".into()), cx)
+            })
+        });
+        let end = text(&input, cx).len();
+        assert_eq!(caret(&input, cx), end);
+        // ← over the space, then ← jumps the whole chip.
+        cx.dispatch_action(Left);
+        cx.run_until_parked();
+        assert_eq!(caret(&input, cx), end - 1);
+        cx.dispatch_action(Left);
+        cx.run_until_parked();
+        assert_eq!(caret(&input, cx), 3, "the caret never stops inside a chip");
+        // → jumps back over it.
+        cx.dispatch_action(Right);
+        cx.run_until_parked();
+        assert_eq!(caret(&input, cx), end - 1);
+        // ⌫ at the chip's right edge removes the chip whole.
+        cx.dispatch_action(Backspace);
+        cx.run_until_parked();
+        assert_eq!(text(&input, cx), "hi  ");
+        assert!(cx.update(|_, cx| input.read(cx).tokens().is_empty()));
+    }
+
+    #[gpui::test]
+    fn an_exact_handle_and_a_separator_resolve_without_the_picker(cx: &mut TestAppContext) {
+        let (input, cx) = input(cx);
+        cx.simulate_input("ping @sam ");
+        assert_eq!(text(&input, cx), format!("ping {} ", chip("Sam Rivera")));
+        assert_eq!(
+            sent(&input, cx),
+            ("ping @sam ".into(), vec!["user:gh_sam".into()])
+        );
+        // Punctuation completes it too, and case does not matter.
+        cx.simulate_input("and @STUDIO?");
+        assert_eq!(
+            sent(&input, cx),
+            (
+                "ping @sam and @STUDIO?".into(),
+                vec!["user:gh_sam".into(), "agent:p-studio".into()]
+            )
+        );
+        assert!(text(&input, cx).ends_with(&format!("{}?", chip("Studio"))));
+    }
+
+    #[gpui::test]
+    fn a_shared_handle_stays_plain_until_picked(cx: &mut TestAppContext) {
+        let (input, cx) = input(cx);
+        cx.simulate_input("@arbos can you ");
+        assert_eq!(text(&input, cx), "@arbos can you ");
+        assert_eq!(sent(&input, cx), ("@arbos can you ".into(), Vec::new()));
+        // The picker names the person: the chip carries that id, not the agent's.
+        cx.simulate_input("@ar");
+        cx.update(|_, cx| {
+            input.update(cx, |i, cx| {
+                i.insert_mention("arbos", "Jacob", Some("user:gh_arbos".into()), cx)
+            })
+        });
+        let (plain, ids) = sent(&input, cx);
+        assert_eq!(plain, "@arbos can you @arbos ");
+        assert_eq!(ids, vec!["user:gh_arbos".to_string()]);
+    }
+
+    #[gpui::test]
+    fn enter_resolves_a_trailing_handle_and_unknown_handles_stay_plain(cx: &mut TestAppContext) {
+        let (input, cx) = input(cx);
+        cx.simulate_input("@nobody and @sam");
+        let changed = cx.update(|_, cx| input.update(cx, |i, cx| i.resolve_exact_handles(cx)));
+        assert!(changed);
+        assert_eq!(
+            text(&input, cx),
+            format!("@nobody and {}", chip("Sam Rivera"))
+        );
+        assert_eq!(
+            sent(&input, cx),
+            ("@nobody and @sam".into(), vec!["user:gh_sam".into()])
+        );
+        assert_eq!(caret(&input, cx), text(&input, cx).len());
+    }
+
+    #[gpui::test]
+    fn copy_reads_the_handle_and_a_draft_round_trips(cx: &mut TestAppContext) {
+        let (input, cx) = input(cx);
+        cx.simulate_input("hi @sam ok");
+        cx.dispatch_action(SelectAll);
+        cx.dispatch_action(Copy);
+        cx.run_until_parked();
+        let copied = cx.update(|_, cx| {
+            cx.read_from_clipboard()
+                .and_then(|item| item.text())
+                .unwrap_or_default()
+        });
+        assert_eq!(copied, "hi @sam ok");
+        // The draft keeps the chip across a chat switch.
+        let (t, tokens) = cx.update(|_, cx| {
+            let i = input.read(cx);
+            (i.text().to_string(), i.tokens().to_vec())
+        });
+        cx.update(|_, cx| input.update(cx, |i, cx| i.clear(cx)));
+        assert_eq!(sent(&input, cx), (String::new(), Vec::new()));
+        cx.update(|_, cx| input.update(cx, |i, cx| i.set_text_with_tokens(t, tokens, cx)));
+        assert_eq!(
+            sent(&input, cx),
+            ("hi @sam ok".into(), vec!["user:gh_sam".into()])
+        );
+    }
+
+    #[test]
+    fn candidates_match_the_handle_or_a_word_of_the_name() {
+        assert_eq!(mention_match("", "sam", "Sam Rivera"), Some(true));
+        assert_eq!(mention_match("sa", "sam", "Sam Rivera"), Some(true));
+        assert_eq!(mention_match("riv", "sam", "Sam Rivera"), Some(false));
+        assert_eq!(mention_match("k", "mira-k", "Mira Kaplan"), Some(false));
+        assert_eq!(mention_match("x", "sam", "Sam Rivera"), None);
+        assert_eq!(mention_match("am", "sam", "Sam Rivera"), None);
     }
 }

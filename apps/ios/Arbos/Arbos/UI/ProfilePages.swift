@@ -770,6 +770,7 @@ struct GroupProfileView: View {
     @State private var projectMembers: [ProjectMember] = []
     @State private var showAdd = false
     @State private var showEdit = false
+    @State private var showActivity = false
     @State private var pendingRemoveId: String?
     @State private var pendingRemoveName: String?
     /// Ban confirm (remove and block rejoin), same shape as server member ban.
@@ -1059,6 +1060,13 @@ struct GroupProfileView: View {
         .sheet(isPresented: $showEdit) {
             GroupEditSheet(chatId: chatId).environmentObject(model).environment(\.theme, theme)
         }
+        .sheet(isPresented: $showActivity) {
+            // Admin-only activity log (joined / removed / left / deleted messages).
+            // A sheet over the profile sheet — no presentation modifiers here.
+            GroupActivityView(chatId: chatId)
+                .environmentObject(model)
+                .environment(\.theme, theme)
+        }
         .sheet(item: $shareInviteURL) { item in
             GroupInviteShareSheet(url: item.url)
         }
@@ -1174,12 +1182,12 @@ struct GroupProfileView: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Edit group name and picture")
+            .accessibilityLabel("Edit group name, description and picture")
         }
     }
 
-    /// Members: Add members, Share invite link (people groups), then every person
-    /// (name, @handle) and agent ("Agent · run by …") as kit rows — the Mac group pane's list.
+    /// Members: Add members, Share invite link (people groups), Activity for
+    /// owners/admins, then every person (name, @handle) and agent as kit rows.
     /// Owners/admins also get a read-receipts policy card (members see who read).
     private var membersSections: [PaneSection] {
         var list: [AnyView] = [
@@ -1188,6 +1196,20 @@ struct GroupProfileView: View {
             }
             .buttonStyle(.plain)),
         ]
+        // People groups: description lives in Edit group (same sheet as name + picture).
+        if projectId == nil, people?.isGroup == true {
+            let desc = people?.description ?? ""
+            list.append(AnyView(Button { showEdit = true } label: {
+                PaneRow(
+                    leading: .glyph("text.alignleft"),
+                    title: "Description",
+                    value: desc.isEmpty ? "Add a description" : desc,
+                    chevron: true
+                )
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(desc.isEmpty ? "Add a description" : "Edit description")))
+        }
         // People groups only (not a shared project): one-tap share of the invite link.
         if project == nil, people?.kind == "group" {
             list.append(AnyView(Button {
@@ -1201,6 +1223,14 @@ struct GroupProfileView: View {
             .buttonStyle(.plain)
             .disabled(sharingInvite)
             .accessibilityLabel("Share invite link")))
+        }
+        // People groups only: the activity log is built from this chat's system lines.
+        if projectId == nil, people?.isGroup == true, canManageMembers {
+            list.append(AnyView(Button { showActivity = true } label: {
+                PaneRow(leading: .glyph("list.bullet.rectangle"), title: "Activity", chevron: true)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Group activity")))
         }
         list += rows.map { r in AnyView(memberRow(r)) }
         var out: [PaneSection] = [.card(list, separatorInset: PaneKit.separatorInset(.glyph("")))]
@@ -1472,6 +1502,155 @@ struct GroupProfileView: View {
         return out
     }
 
+}
+
+// MARK: - Group activity (admins)
+
+/// Admin-only log of a people group's membership and deletion events.
+/// Membership lines come from the relay (#1349). Deletion lines are written by
+/// the deleting device with a private marker so the main transcript stays calm.
+enum GroupActivity {
+    /// Invisible separator — Transcript skips these; Activity keeps them.
+    static let auditPrefix = "\u{2063}"
+
+    enum Kind: String, CaseIterable {
+        case deleted
+        case joined
+        case removed
+        case left
+
+        var title: String {
+            switch self {
+            case .deleted: return "Deleted messages"
+            case .joined: return "Joined"
+            case .removed: return "Removed"
+            case .left: return "Left"
+            }
+        }
+    }
+
+    struct Event: Identifiable, Equatable {
+        var id: String
+        var kind: Kind
+        var text: String
+        var at: Int64
+    }
+
+    /// System-line text for a message deleted in a people group (hidden in the chat).
+    static func deletionNotice(who: String) -> String {
+        "\(auditPrefix)\(who) deleted a message"
+    }
+
+    static func isAuditLine(_ text: String) -> Bool {
+        text.hasPrefix(auditPrefix)
+    }
+
+    static func displayText(_ raw: String) -> String {
+        isAuditLine(raw) ? String(raw.dropFirst()) : raw
+    }
+
+    /// Newest first. Only membership notices and deletion audits — not call lines.
+    static func events(from messages: [Message]) -> [Event] {
+        var out: [Event] = []
+        out.reserveCapacity(messages.count / 8)
+        for m in messages where m.role == .system {
+            let raw = m.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !raw.isEmpty, let kind = classify(raw) else { continue }
+            out.append(Event(id: m.id, kind: kind, text: displayText(raw), at: m.createdAt))
+        }
+        out.sort { $0.at > $1.at }
+        return out
+    }
+
+    static func classify(_ text: String) -> Kind? {
+        if isAuditLine(text) { return .deleted }
+        // Relay membership notices (#1349): "A added B", "A removed B", "A left".
+        if text.hasSuffix(" left"), !text.contains(" added "), !text.contains(" removed ") {
+            return .left
+        }
+        if text.contains(" removed ") { return .removed }
+        if text.contains(" added ") { return .joined }
+        return nil
+    }
+
+    static func whenLabel(_ at: Int64, now: Int64 = nowMs()) -> String {
+        guard at > 0 else { return "" }
+        let date = Date(timeIntervalSince1970: Double(at) / 1000)
+        let age = max(0, now - at)
+        if age < 86_400_000 {
+            return date.formatted(date: .omitted, time: .shortened)
+        }
+        return date.formatted(date: .abbreviated, time: .shortened)
+    }
+}
+
+/// Owners and admins: deleted messages, joins, removes, and leaves for one group.
+struct GroupActivityView: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    let chatId: String
+
+    private var events: [GroupActivity.Event] {
+        GroupActivity.events(from: model.messages(of: chatId))
+    }
+
+    var body: some View {
+        SettingsPage(title: "Activity") {
+            if events.isEmpty {
+                SettingsGroup {
+                    Text("Joins, removals, leaves and deleted messages will show up here.")
+                        .font(theme.font(Theme.small))
+                        .foregroundStyle(theme.muted)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
+                }
+            } else {
+                ForEach(GroupActivity.Kind.allCases, id: \.self) { kind in
+                    GroupActivitySection(kind: kind, events: events.filter { $0.kind == kind })
+                }
+            }
+        }
+    }
+}
+
+private struct GroupActivitySection: View {
+    let kind: GroupActivity.Kind
+    let events: [GroupActivity.Event]
+
+    var body: some View {
+        if !events.isEmpty {
+            SettingsGroup(header: kind.title) {
+                ForEach(events) { event in
+                    GroupActivityRow(event: event)
+                }
+            }
+        }
+    }
+}
+
+private struct GroupActivityRow: View {
+    @Environment(\.theme) private var theme
+    let event: GroupActivity.Event
+
+    private var when: String { GroupActivity.whenLabel(event.at) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(event.text)
+                .font(theme.font(Theme.small))
+                .foregroundStyle(theme.text)
+                .lineLimit(2)
+            if !when.isEmpty {
+                Text(when)
+                    .font(theme.font(Theme.tiny))
+                    .foregroundStyle(theme.muted)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 9)
+    }
 }
 
 // MARK: - Server page (D88)
@@ -2025,13 +2204,15 @@ private struct SelectAllOnDoubleTap: UIViewRepresentable {
     }
 }
 
-/// Name the group and optionally pick a picture. Saves with `PATCH /chats/{id}`.
+/// Name the group, set an optional description, and optionally pick a picture.
+/// Saves with `PATCH /chats/{id}`.
 struct GroupEditSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
     let chatId: String
     @State private var name = ""
+    @State private var descriptionText = ""
     @State private var showAvatarPicker = false
     @State private var saving = false
     @FocusState private var nameFocused: Bool
@@ -2084,7 +2265,20 @@ struct GroupEditSheet: View {
                     }
                     .padding(.horizontal, 16)
 
-                    Text("A name and picture help everyone recognise this chat. Leave the name blank to use member handles.")
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Description").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                        TextField("", text: $descriptionText, prompt: Text("What this group is for").foregroundStyle(theme.placeholder), axis: .vertical)
+                            .font(theme.font(Theme.body))
+                            .foregroundStyle(theme.text)
+                            .lineLimit(3...6)
+                            .padding(.horizontal, 14).padding(.vertical, 12)
+                            .frame(minHeight: Theme.fieldHeight, alignment: .topLeading)
+                            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
+                            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                    }
+                    .padding(.horizontal, 16)
+
+                    Text("A name, description and picture help everyone recognise this chat. Leave the name blank to use member handles.")
                         .font(theme.font(Theme.tiny))
                         .foregroundStyle(theme.muted)
                         .multilineTextAlignment(.center)
@@ -2118,6 +2312,7 @@ struct GroupEditSheet: View {
             }
             .onAppear {
                 name = people?.title ?? ""
+                descriptionText = people?.description ?? ""
                 nameFocused = true
             }
             .sheet(isPresented: $showAvatarPicker) {
@@ -2129,7 +2324,8 @@ struct GroupEditSheet: View {
     private func save() async {
         saving = true
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let ok = await model.patchPeopleChat(chatId, title: trimmed)
+        let desc = String(descriptionText.trimmingCharacters(in: .whitespacesAndNewlines).prefix(200))
+        let ok = await model.patchPeopleChat(chatId, title: trimmed, description: desc)
         saving = false
         if ok { dismiss() }
     }

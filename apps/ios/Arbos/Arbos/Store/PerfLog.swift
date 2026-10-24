@@ -50,12 +50,18 @@ final class PerfLog {
         }
         worstMs = max(worstMs, frameMs)
         guard now - windowStart >= 2 else { return }
-        Self.log.notice("frames=\(self.frames) dropped=\(self.dropped) worst=\(Int(self.worstMs))ms over_budget=\(Int(self.overBudgetMs))ms rss=\(Self.footprintMB())MB t=\(LaunchClock.msSinceLaunch())ms")
+        let counts = PerfCounters.drain()
+        Self.log.notice("frames=\(self.frames) dropped=\(self.dropped) worst=\(Int(self.worstMs))ms over_budget=\(Int(self.overBudgetMs))ms rss=\(Self.footprintMB())MB t=\(LaunchClock.msSinceLaunch())ms \(counts, privacy: .public)")
         frames = 0
         dropped = 0
         worstMs = 0
         overBudgetMs = 0
         windowStart = now
+    }
+
+    /// Milestone with a duration, same log stream as the frame windows.
+    static func mark(_ what: String, ms: Double) {
+        log.notice("\(what, privacy: .public) \(Int(ms))ms t=\(LaunchClock.msSinceLaunch())ms")
     }
 
     /// Physical footprint (what Xcode's memory gauge shows), in MB.
@@ -69,6 +75,34 @@ final class PerfLog {
         }
         guard kr == KERN_SUCCESS else { return 0 }
         return Int(info.phys_footprint / (1024 * 1024))
+    }
+}
+
+/// Body-evaluation and work counters, drained into each 2 s perf line
+/// (`rowBody=… blockBody=… chatBody=… rows()=…/…ms`). Any thread.
+final class PerfCounters {
+    private static let lock = NSLock()
+    private static var counts: [String: Int] = [:]
+    private static var millis: [String: Double] = [:]
+
+    static func bump(_ key: String) {
+        guard DebugHooks.perfLog else { return }
+        lock.lock(); counts[key, default: 0] += 1; lock.unlock()
+    }
+
+    static func time(_ key: String, ms: Double) {
+        guard DebugHooks.perfLog else { return }
+        lock.lock(); counts[key, default: 0] += 1; millis[key, default: 0] += ms; lock.unlock()
+    }
+
+    static func drain() -> String {
+        lock.lock(); defer { lock.unlock() }
+        let out = counts.keys.sorted().map { k -> String in
+            if let ms = millis[k] { return "\(k)=\(counts[k]!)/\(Int(ms))ms" }
+            return "\(k)=\(counts[k]!)"
+        }.joined(separator: " ")
+        counts = [:]; millis = [:]
+        return out
     }
 }
 #endif

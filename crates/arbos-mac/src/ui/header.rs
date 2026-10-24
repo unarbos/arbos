@@ -375,8 +375,11 @@ pub mod metrics {
     /// app-01M5MX8XS2BS7KZCNAS12BXNKD]; was 7 pt).
     pub const PILL_HEIGHT: f32 = 34.0;
     pub const PILL_TOP: f32 = 10.0;
-    /// Top margin inside the content box that lands the pill at `PILL_TOP`.
-    pub const PILL_MT: f32 = PILL_TOP * 2.0 - (HEIGHT - BOTTOM_PAD - PILL_HEIGHT);
+    /// Top margin inside the bar that lands the pill at `PILL_TOP`. The bar
+    /// packs from the top (`items_start`): a centred cross-axis would drop the
+    /// pill mid-pane if the floating overlay ever stretched taller than
+    /// `HEIGHT` ([feedback local-relay-unarbos-20261024065516774-20261024065609]).
+    pub const PILL_MT: f32 = PILL_TOP;
     /// The list fades out under the floating bar over this band (Grok: text
     /// gone at the edge, full ~50 pt down).
     pub const FADE_BAND: f32 = HEADER_HEIGHT + 6.0;
@@ -399,22 +402,30 @@ pub mod metrics {
 /// list runs under it and fades (`metrics::FADE_BAND`), so there is no hairline.
 pub(crate) fn bar_frame(left: Option<AnyElement>, pill: AnyElement) -> Div {
     let side = px(CONTROL + 8.0);
+    // Content box under the bottom pad — side slots centre their control in it.
+    let content_h = px(metrics::HEIGHT - metrics::BOTTOM_PAD);
     div()
         .h(px(metrics::HEIGHT))
+        .max_h(px(metrics::HEIGHT))
         .flex_shrink_0()
         .w_full()
         .flex()
-        .items_center()
+        // Top-pack, not cross-axis centre: if this bar's box is ever taller
+        // than `HEIGHT` (a stretched absolute overlay over a long transcript),
+        // centre would park the pill mid-screen.
+        .items_start()
         .justify_between()
         .gap(px(10.0))
         .pl(px(metrics::PILL_LEADING))
         .pr(px(10.0))
         .pb(px(metrics::BOTTOM_PAD))
+        .overflow_hidden()
         .window_drag()
         .debug_selector(|| "chat-header-bar".into())
         .children(left.map(|el| {
             div()
                 .w(side)
+                .h(content_h)
                 .flex_shrink_0()
                 .flex()
                 .items_center()
@@ -435,7 +446,7 @@ pub(crate) fn bar_frame(left: Option<AnyElement>, pill: AnyElement) -> Div {
                         .child(pill),
                 ),
         )
-        .child(div().w(side).flex_shrink_0())
+        .child(div().w(side).h(content_h).flex_shrink_0())
 }
 
 /// The same bar for a channel (D88 rule 3): the pill carries the server's disc, the `#`
@@ -1114,6 +1125,68 @@ mod header_tests {
                 );
             }
         }
+    }
+
+    /// Floating header over a tall pane (the long-rows screenshot rig): the
+    /// pill stays in the header row at the window top, not mid-screen.
+    struct FloatingOverTall;
+
+    impl gpui::Render for FloatingOverTall {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let pill = div()
+                .id("pill")
+                .h(px(metrics::PILL_HEIGHT))
+                .w(px(130.0))
+                .into_any_element();
+            div()
+                .w(px(WIDTH))
+                .h(px(800.0))
+                .relative()
+                .flex()
+                .flex_col()
+                .child(div().flex_1().min_h_0())
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .h(px(metrics::HEIGHT))
+                        .max_h(px(metrics::HEIGHT))
+                        .overflow_hidden()
+                        .child(bar_frame(None, pill)),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn floating_header_pill_stays_in_the_header_row_over_a_tall_pane(cx: &mut TestAppContext) {
+        let (_view, vcx) = cx.add_window_view(|_, _| FloatingOverTall);
+        vcx.run_until_parked();
+        let bar = vcx.debug_bounds("chat-header-bar").expect("bar drawn");
+        let pill = vcx.debug_bounds("chat-header-pill").expect("pill drawn");
+        let bar_top: f32 = bar.origin.y.into();
+        let bar_h: f32 = bar.size.height.into();
+        let pill_top: f32 = pill.origin.y.into();
+        assert!(
+            bar_top.abs() <= 1.0,
+            "bar at pane top, not mid-screen: y={bar_top}"
+        );
+        assert_eq!(
+            bar_h,
+            metrics::HEIGHT,
+            "bar stays {} pt tall",
+            metrics::HEIGHT
+        );
+        assert!(
+            (pill_top - (bar_top + metrics::PILL_TOP)).abs() <= 1.0,
+            "pill in the header row: y={pill_top} want {}",
+            bar_top + metrics::PILL_TOP
+        );
     }
 
     #[gpui::test]

@@ -247,6 +247,8 @@ struct PeopleChat: Identifiable, Equatable {
         guard let l = avatarLeaf, let c = avatarLeafColor else { return nil }
         return LeafPick(leaf: UInt8(clamping: l), color: UInt8(clamping: c))
     }
+    /// Optional about text for a people group (≤200 chars).
+    var description: String = ""
     var pending: Bool
     var members: [ChatMember]
     var headSeq: Int64
@@ -303,6 +305,7 @@ extension PeopleChat {
         self.imageKey = dto.image_key.flatMap { $0.isEmpty ? nil : $0 }
         self.avatarLeaf = dto.avatar_leaf.map(Int.init)
         self.avatarLeafColor = dto.avatar_leaf_color.map(Int.init)
+        self.description = dto.description?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         self.pending = dto.pending
         self.members = dto.members.map { ChatMember(dto: $0) }
         self.headSeq = dto.head_seq

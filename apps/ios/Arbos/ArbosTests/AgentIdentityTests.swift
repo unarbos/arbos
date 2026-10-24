@@ -27,7 +27,7 @@ final class AgentIdentityTests: XCTestCase {
         PeopleChat(
             id: "chat_arbonites", kind: "group", createdBy: "gh_jacob", createdAt: 0, title: "Arbonites",
             pending: false, members: agents, headSeq: 0, readSeq: 0, unread: false, lockState: "open",
-            lastActivityAt: 0, myRole: "owner", muted: false
+            lastActivityAt: 0, myRole: "owner", muted: false, silenced: false
         )
     }
 

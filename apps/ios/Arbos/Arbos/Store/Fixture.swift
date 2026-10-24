@@ -219,6 +219,37 @@ extension AppModel {
             messages["fx-group-launch"] = Self.longGroupTranscript(rows: rows, before: now - 4 * 3_600_000)
                 + (messages["fx-group-launch"] ?? [])
         }
+        // `ARBOS_FIXTURE_DOC=<path>`: the fixture group becomes a real chat doc (a Loro
+        // snapshot exported from the relay), so the transcript has the true shape —
+        // members, avatars, mentions, replies, media, system rows (long-chat perf rig).
+        if let path = DebugHooks.fixtureDoc, let data = FileManager.default.contents(atPath: path) {
+            let started = Date()
+            if let doc = try? CoreChatDoc(key: "fx-group-launch", snapshot: data) {
+                let list = doc.readAll()
+                LaunchClock.mark("fixture-doc", detail: "messages=\(list.count) bytes=\(data.count) in \(Int(Date().timeIntervalSince(started) * 1000)) ms")
+                var seen = Set<String>()
+                var members: [ChatMember] = [meOwner]
+                for m in list where m.sender.hasPrefix("user:") && m.sender != "user:fx-me" {
+                    let id = String(m.sender.dropFirst(5))
+                    guard seen.insert(id).inserted, let handle = m.senderHandle else { continue }
+                    members.append(ChatMember(id: id, kind: .user, member: m.sender, role: "member", handle: handle, avatarUrl: m.senderAvatar,
+                                              name: m.senderName, status: "member", joinedAt: now - 3 * 86_400_000, project: nil, ownerId: nil,
+                                              ownerHandle: nil, replyPolicy: nil, lastSeenAt: now - 30_000, online: true))
+                }
+                for m in list where m.sender.hasPrefix("agent:") {
+                    let id = String(m.sender.dropFirst(6))
+                    guard seen.insert(id).inserted, let handle = m.senderHandle else { continue }
+                    members.append(ChatMember(id: id, kind: .agent, member: m.sender, role: "agent", handle: handle, avatarUrl: m.senderAvatar,
+                                              name: m.senderName, status: "member", joinedAt: now - 86_400_000, project: nil, ownerId: nil,
+                                              ownerHandle: nil, replyPolicy: "mention"))
+                }
+                if let i = peopleChats.firstIndex(where: { $0.id == "fx-group-launch" }) {
+                    peopleChats[i].members = members
+                    peopleChats[i].title = "Arbonites (export)"
+                }
+                messages["fx-group-launch"] = list
+            }
+        }
         // `ARBOS_FIXTURE_WORKING=<n>`: the first n agents of the group (and the opened
         // agent chat's one agent) stream a row with no words yet — "<name> is working".
         if DebugHooks.fixtureWorking > 0 {

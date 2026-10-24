@@ -15,7 +15,7 @@ pub mod fixture;
 pub mod relay;
 pub mod store;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -492,6 +492,9 @@ pub enum ClientCommand {
         attachments: Vec<PathBuf>,
         /// People-chat / hover-reply: the message this send answers (`replyTo`).
         reply_to: Option<String>,
+        /// Member ids of the composer's committed mention chips (#1596); the
+        /// source unions them with the `@handle`s the text names.
+        mentions: Vec<String>,
     },
     /// Guide: inject `text` into the agent's currently running turn (`steer` command).
     /// Same message shape as `Send`; the box calls pi/Prime `Steer` instead of queuing.
@@ -1040,6 +1043,29 @@ pub enum ClientCommand {
     ChannelMarkRead {
         room_id: String,
     },
+}
+
+/// The handles (and name slugs) the composer's mention chips already account
+/// for (#1596): the text scan skips these so a chip for one of two entities
+/// sharing a handle (#1538) is the one and only answer for that handle.
+pub fn claimed_handles(space: &Project, tokens: &[String]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for t in tokens {
+        if let Some(pid) = t.strip_prefix("agent:") {
+            for a in space.agents.iter().filter(|a| a.project_id == pid) {
+                out.insert(a.handle.to_lowercase());
+                let slug = Project::mention_slug(&a.name);
+                if !slug.is_empty() {
+                    out.insert(slug);
+                }
+            }
+        } else if let Some(uid) = t.strip_prefix("user:") {
+            for p in space.people.iter().filter(|p| p.id == uid) {
+                out.insert(p.handle.to_lowercase());
+            }
+        }
+    }
+    out
 }
 
 pub trait SyncSource: Send + 'static {

@@ -17,6 +17,11 @@ enum DebugHooks {
     /// With `ARBOS_OPEN_SERVER=…:panel`: the server page's tab to land on (Channels | Members | Settings).
     static var panelTab: String? { value("ARBOS_PANEL_TAB") }
     static var autoSend: String? { value("ARBOS_AUTO_SEND") }
+    /// Rig (#1596): text put in the composer of the opened chat at appear, caret at the end —
+    /// `@s` leaves the mention picker open, `@sam deck ready?` shows the resolved chip.
+    static var composerDraft: String? { value("ARBOS_COMPOSER_DRAFT").flatMap { $0.isEmpty ? nil : $0 } }
+    /// Rig (#1596): print each people-chat send's text and `mentions` ids to the console.
+    static var traceSends: Bool { value("ARBOS_TRACE_SENDS") == "1" }
     static var pairCode: String? { value("ARBOS_PAIR_CODE") }
     static var fixture: Bool { value("ARBOS_FIXTURE") == "1" }
     /// D89 waitlist card and Machine rows: the fixture account's place in line.
@@ -100,7 +105,13 @@ enum DebugHooks {
     static var fixtureLongRows: Int? { value("ARBOS_FIXTURE_LONG_ROWS").flatMap { Int($0) } }
     /// Log frame pacing (dropped frames, worst frame, time over budget) and memory every
     /// 2 s to `com.unarbos.arbos.ios` / `perf` for the duration of the launch.
-    static var perfLog: Bool { value("ARBOS_PERF_LOG") == "1" }
+    static let perfLog: Bool = value("ARBOS_PERF_LOG") == "1"
+    /// Seed the fixture group from a Loro snapshot file (a relay export of a real chat).
+    static var fixtureDoc: String? { value("ARBOS_FIXTURE_DOC") }
+    /// Perf rig drivers, run a few seconds after the chat opens: `scroll` pages the
+    /// transcript to its top and back, `type` appends 40 keystrokes to the composer,
+    /// `typing` fakes a member's typing presence every second. Comma-separated.
+    static var perfDrive: Set<String> { Set((value("ARBOS_PERF_DRIVE") ?? "").split(separator: ",").map(String.init)) }
     /// Scripted tour for the screen recording (fixture only).
     static var demo: Bool { value("ARBOS_DEMO") == "1" }
     /// Scripted tour against the live relay: sends ARBOS_AUTO_SEND, waits for the reply, tours the sheets.

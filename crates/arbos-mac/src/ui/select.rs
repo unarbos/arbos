@@ -26,6 +26,10 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::ui::avatars;
 use crate::ui::mention::{self, Mention, Mentions};
 
+/// Ignore pointer noise until the drag travels this far before choosing
+/// text selection vs. vertical scroll (same idea as reply-swipe slop).
+const SELECTION_DRAG_SLOP: f32 = 12.0;
+
 /// What one click, two clicks or three clicks select, and what a drag that
 /// started with them extends by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,6 +97,15 @@ impl TextSelection {
     pub fn clear(&mut self) {
         self.model.active = None;
         self.model.proposal = None;
+    }
+
+    /// `true` while a drag has committed to a non-empty text range (so the
+    /// transcript must not steal the pointer for drag-scroll).
+    pub fn is_selecting(&self) -> bool {
+        self.model
+            .active
+            .as_ref()
+            .is_some_and(|a| a.dragging && !a.range().is_empty())
     }
 
     /// Screenshot rig (`ARBOS_RIG_SELECT`): select part of bubble `key` as a
@@ -687,6 +700,10 @@ impl Element for SelectableText {
             hitbox,
         );
 
+        // Press origin for axis lock: a vertical pan with no range yet yields
+        // to transcript drag-scroll instead of selecting across lines.
+        let press_at = Rc::new(std::cell::Cell::new(Point::default()));
+
         window.on_mouse_event({
             let (hitbox, layout, selection, focus_handle) = (
                 hitbox.clone(),
@@ -695,6 +712,7 @@ impl Element for SelectableText {
                 focus_handle.clone(),
             );
             let (key, bubble_text) = (key.clone(), bubble_text.clone());
+            let press_at = press_at.clone();
             move |event: &MouseDownEvent, phase, window, cx| {
                 // Control-click is the bubble's copy; right-click its menu.
                 if phase != DispatchPhase::Bubble
@@ -704,6 +722,7 @@ impl Element for SelectableText {
                 {
                     return;
                 }
+                press_at.set(event.position);
                 let index = at + closest_index(&layout, event.position);
                 let selected = selection.update(cx, |s, cx| {
                     s.model.begin(
@@ -743,6 +762,24 @@ impl Element for SelectableText {
                         cx.notify();
                     });
                     return;
+                }
+                // Vertical-dominant pan with no range yet: yield so the
+                // transcript can drag-scroll ([feedback app-01M5PDB3QYAPBPA4FJXZE1FFD0]).
+                // Double/triple-click already has a range and keeps selecting.
+                if !selection.read(cx).model.has_range() {
+                    let start = press_at.get();
+                    let dx: f32 = (event.position.x - start.x).into();
+                    let dy: f32 = (event.position.y - start.y).into();
+                    if dx.abs() + dy.abs() < SELECTION_DRAG_SLOP {
+                        return;
+                    }
+                    if dy.abs() > dx.abs() * 1.15 {
+                        selection.update(cx, |s, cx| {
+                            s.clear();
+                            cx.notify();
+                        });
+                        return;
+                    }
                 }
                 let distance = distance_to(&layout.bounds(), event.position);
                 let index = at + drag_index(&layout, event.position, distance);
@@ -837,9 +874,26 @@ fn paint_chip_picture(layout: &TextLayout, chip: &Chip, window: &mut Window, cx:
         return;
     }
     let origin = point(at.x, at.y + (line_h - d) / 2.0);
-    let bounds = Bounds::new(origin, size(d, d));
+    paint_picture(
+        &chip.mention.picture,
+        Bounds::new(origin, size(d, d)),
+        window,
+        cx,
+    );
+}
+
+/// The disc a chip's `@` cell holds — a photo, D79 initials or a D92 leaf —
+/// filling `bounds` (square). Shared by bubble chips and composer tokens.
+pub fn paint_picture(
+    picture: &mention::Picture,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let origin = bounds.origin;
+    let d = bounds.size.width;
     let radii = Corners::all(d / 2.0);
-    match &chip.mention.picture {
+    match picture {
         mention::Picture::Image(image) => {
             let _ = window.paint_image(bounds, radii, image.clone(), 0, false);
         }

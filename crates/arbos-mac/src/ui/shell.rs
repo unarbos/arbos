@@ -497,17 +497,26 @@ impl Shell {
                     text,
                     attachments,
                     reply_to,
+                    mentions,
                 } => {
                     let text = text.clone();
                     let attachments = attachments.clone();
                     let reply_to = reply_to.clone();
-                    this.state
-                        .update(cx, |s, cx| s.send(text, attachments, reply_to, cx));
+                    let mentions = mentions.clone();
+                    this.state.update(cx, |s, cx| {
+                        s.send(text, attachments, reply_to, mentions, cx)
+                    });
                 }
-                ComposerEvent::Guide { text, reply_to } => {
+                ComposerEvent::Guide {
+                    text,
+                    reply_to,
+                    mentions,
+                } => {
                     let text = text.clone();
                     let reply_to = reply_to.clone();
-                    this.state.update(cx, |s, cx| s.guide(text, reply_to, cx));
+                    let mentions = mentions.clone();
+                    this.state
+                        .update(cx, |s, cx| s.guide(text, reply_to, mentions, cx));
                 }
                 ComposerEvent::Stop => this.state.update(cx, |s, cx| s.stop(cx)),
             },
@@ -2504,6 +2513,10 @@ impl Shell {
                 .h(px(header::metrics::DRAG_OVERHANG))
                 .window_drag(),
         );
+        // Cap height and clip: a stretched overlay over a long transcript would
+        // otherwise centre the pill mid-pane ([feedback
+        // local-relay-unarbos-20261024065516774-20261024065609]; iPhone twin
+        // APuu1qHpbKmmpqZeUusEi0Q).
         column.child(body).children(bottom).child(
             div()
                 .absolute()
@@ -2511,6 +2524,8 @@ impl Shell {
                 .left_0()
                 .right_0()
                 .h(px(header::metrics::HEIGHT))
+                .max_h(px(header::metrics::HEIGHT))
+                .overflow_hidden()
                 .child(header_bar),
         )
     }
@@ -2573,10 +2588,16 @@ impl Shell {
         // 876, which put the bubble 21–28 pt right of the pill's edge
         // ([feedback agent-bubble-inset-2026-10-22]). The pill itself has
         // not moved.
+        // Wheel over the input (sibling of the list) still scrolls the chat —
+        // same as dragging over a bubble ([feedback app-01M5PDB3QYAPBPA4FJXZE1FFD0]).
         let composer_block = column_row(
             div()
                 .w_full()
                 .debug_selector(|| "chat-composer-block".into())
+                .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
+                    this.transcript
+                        .update(cx, |t, cx| t.scroll_from_wheel(event, cx));
+                }))
                 .child(self.composer.clone())
                 .into_any_element(),
         );

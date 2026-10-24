@@ -246,7 +246,36 @@ final class AppModel: ObservableObject {
         }
     }
     @Published var chats: [Id: [Chat]] = [:]
-    @Published var messages: [Id: [Message]] = [:]
+    @Published var messages: [Id: [Message]] = [:] {
+        didSet { bumpVersions(from: oldValue, to: messages) }
+    }
+    /// Bumped whenever a chat's list (`messages` or `channelRows`) is replaced; views
+    /// watch this instead of comparing the whole message array on every body.
+    @Published private(set) var messagesVersion: [Id: Int] = [:]
+    /// One pass over a chat's list, kept until that list changes.
+    private var activityCache: [Id: ChatActivity] = [:]
+
+    /// A chat's scan results (streaming / open hand-off / awaiting) and the view's
+    /// change detection must not cost a pass over the list per screen body: both key
+    /// off the version. Arrays are COW, so unchanged chats share storage with the old
+    /// dictionary and keep their version (arbonites-chat-lag, 2026-10-24).
+    private func bumpVersions(from old: [Id: [Message]], to new: [Id: [Message]]) {
+        for (id, list) in new where !Self.sameStorage(list, old[id]) {
+            messagesVersion[id, default: 0] &+= 1
+            activityCache[id] = nil
+        }
+        for id in old.keys where new[id] == nil {
+            messagesVersion[id, default: 0] &+= 1
+            activityCache[id] = nil
+        }
+    }
+
+    /// Same array buffer (an unchanged value carried over by copy-on-write).
+    private static func sameStorage(_ a: [Message], _ b: [Message]?) -> Bool {
+        guard let b, a.count == b.count else { return false }
+        if a.isEmpty { return true }
+        return a.withUnsafeBufferPointer { pa in b.withUnsafeBufferPointer { pb in pa.baseAddress == pb.baseAddress } }
+    }
     @Published var caughtUp: Set<Id> = []
     @Published var link: Link = .connecting
     /// Per-room link, for the chat header's connection pill. The pill must not
@@ -331,7 +360,9 @@ final class AppModel: ObservableObject {
     @Published var matrixConnected = true
     var matrixDisconnectedSince: Date?
     /// Decoded channel timelines by relay channel id — the rows ChatView renders for a channel.
-    @Published var channelRows: [Id: [Message]] = [:]
+    @Published var channelRows: [Id: [Message]] = [:] {
+        didSet { bumpVersions(from: oldValue, to: channelRows) }
+    }
     /// Channels whose room reached the beginning of its history (`loadOlder` → nil).
     var channelAtStart: Set<Id> = []
     /// Channels with an `openRoom` / `loadOlder` in flight.
@@ -2573,11 +2604,13 @@ final class AppModel: ObservableObject {
     /// "hey everyone" can reach every agent, without typing `@`.
     /// `chipMentions` are extra agent member ids from a multi-select on the conversation
     /// selector (any combination of agents that should all reply).
+    /// `chipTokens` (#1596) are the composer's committed mention chips, lower-case handle →
+    /// member id: an `@handle` in the text that has a chip means exactly that member.
     func sendPeople(chatId: String, text: String, replyTo: String?, address: String? = nil,
                     chipMentions: [String] = [], attachments: [PendingAttachment] = [],
-                    forwardedFrom: String? = nil) {
+                    forwardedFrom: String? = nil, chipTokens: [String: String] = [:]) {
         guard let doc = docs[chatId], let chat = peopleChat(chatId), let me = user else { return }
-        var mentions = AppModel.mentions(in: text, members: chat.members, senderHandle: me.login)
+        var mentions = AppModel.mentions(in: text, members: chat.members, senderHandle: me.login, chipTokens: chipTokens)
         // Leading bare agent names ("Bob?", "hey Bob …", "Arbos what is your name") count as
         // addressing that agent — same as typing @bob — so the box wakes without `@`.
         // Resolve agents before people so a human display-name collision (e.g. @unarbos
@@ -2672,6 +2705,10 @@ final class AppModel: ObservableObject {
                               attachments: [Attachment], alreadyUnacked: Bool = false,
                               forwardedFrom: String? = nil) {
         if !alreadyUnacked { markUnacked(chatId: chatId, messageId: messageId) }
+        // Rig (#1596): `ARBOS_TRACE_SENDS=1` prints what the row carries.
+        if DebugHooks.traceSends {
+            print("[arbos send] text=\(text.debugDescription) mentions=\(mentions)")
+        }
         do {
             try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments,
                                       author: author, mentions: mentions, replyTo: reply, forwardedFrom: forwardedFrom)
@@ -2693,18 +2730,24 @@ final class AppModel: ObservableObject {
     /// `@slug` → member. Typed resolution (#1538): when a person and an agent share a slug, the
     /// slug means the AGENT if it is the sender's own handle (nobody @-mentions themselves) and
     /// the person otherwise; the autocomplete labels both so the typist can pick.
-    static func mentions(in text: String, members: [ChatMember], senderHandle: String? = nil) -> [String] {
+    static func mentions(in text: String, members: [ChatMember], senderHandle: String? = nil,
+                         chipTokens: [String: String] = [:]) -> [String] {
         var out: [String] = []
         let agents = members.filter { $0.isAgent && $0.project != nil }
         let mine = senderHandle?.lowercased()
         func appendAgents() {
             for a in agents where !out.contains(a.member) { out.append(a.member) }
         }
-        let tokens = text.split(whereSeparator: { $0.isWhitespace })
-        for t in tokens where t.hasPrefix("@") {
+        let words = text.split(whereSeparator: { $0.isWhitespace })
+        for t in words where t.hasPrefix("@") {
             let slug = t.dropFirst().trimmingCharacters(in: CharacterSet(charactersIn: ".,!?:;")).lowercased()
             if slug == "everyone" || slug == "all" {
                 appendAgents()
+                continue
+            }
+            // A committed chip says who this is (#1596) — no tie rule needed.
+            if let member = chipTokens[slug] {
+                if !out.contains(member) { out.append(member) }
                 continue
             }
             if slug == "arbos", agents.count == 1, let a = agents.first {
@@ -3084,11 +3127,12 @@ final class AppModel: ObservableObject {
         Task { try? await api.leaveChat(chatId) }
     }
 
-    /// Rename a people group and/or set its picture blob key (`PATCH /chats/{id}`).
+    /// Rename a people group and/or set its picture blob key, description, or read-receipt policy (`PATCH /chats/{id}`).
     func patchPeopleChat(
         _ chatId: String,
         title: String? = nil,
         imageKey: String? = nil,
+        description: String? = nil,
         membersSeeReads: Bool? = nil
     ) async -> Bool {
         do {
@@ -3096,6 +3140,7 @@ final class AppModel: ObservableObject {
                 chatId,
                 title: title,
                 imageKey: imageKey,
+                description: description,
                 membersSeeReads: membersSeeReads
             )
             if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
@@ -3788,19 +3833,35 @@ final class AppModel: ObservableObject {
 
     /// Delete a message for everyone. The relay decides (`DELETE /room/…/messages/{id}`,
     /// 403 `not_yours` otherwise) and writes the deletion into the doc; it comes back as a
-    /// relay-signed row. No push notification.
+    /// relay-signed row. No push notification. In a people group, this device also writes a
+    /// hidden admin audit line for the Activity screen before asking the relay.
     func deleteMessage(chatId: Id, messageId: Id, projectId: Id? = nil) {
         guard !messageId.isEmpty else { return }
+        let audit = groupDeletionAuditLine(chatId: chatId)
         #if DEBUG
         if isFixture {
             guard var list = messages[chatId] else { return }
             list.removeAll { $0.id == messageId }
+            if let audit {
+                let m = Message(id: newId(), chatId: chatId, role: .system, sender: "system", status: .done, turn: nil, decision: nil,
+                                subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: nowMs(),
+                                completedAt: nowMs(), pending: false, parts: [.text(id: newId(), text: audit)], hiddenCount: 0)
+                list.append(m)
+            }
             messages[chatId] = list
             clearUnacked(chatId: chatId, messageId: messageId)
             Haptics.pick()
             return
         }
         #endif
+        if let audit, let doc = docs[chatId] {
+            do {
+                try doc.insertSystemLine(id: newId(), text: audit, deviceId: deviceId)
+                doc.commit()
+            } catch {
+                // Activity can miss this delete; the relay delete still runs.
+            }
+        }
         let room: String
         if peopleChat(chatId) != nil {
             room = "people/\(chatId)"
@@ -3856,6 +3917,19 @@ final class AppModel: ObservableObject {
         } catch {
             notice = Notice(text: "Could not edit the message: \(error.localizedDescription)")
         }
+    }
+
+    /// Text for a people-group deletion audit, or nil when this chat is not a group.
+    private func groupDeletionAuditLine(chatId: Id) -> String? {
+        guard let people = peopleChat(chatId), people.isGroup else { return nil }
+        let who: String = {
+            if let name = user?.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+                return name
+            }
+            if let login = user?.login, !login.isEmpty { return "@\(login)" }
+            return "Someone"
+        }()
+        return GroupActivity.deletionNotice(who: who)
     }
 
     /// Paint any room doc that already has rows but no published transcript yet
@@ -3915,14 +3989,41 @@ final class AppModel: ObservableObject {
     /// by a box that died (or a leftover stream under a later user message)
     /// must not pin the indicator forever — every streaming row uses the
     /// same 15-minute freshness window (including the last assistant message).
-    func isStreaming(_ chatId: Id) -> Bool {
+    /// What the working-state checks need from a chat's list, gathered in one pass
+    /// and cached until the list changes. The time windows are applied at read time.
+    struct ChatActivity {
+        /// `createdAt` of the newest assistant row still streaming with no user line after it.
+        var liveStreamAt: Int64?
+        /// Open hand-off rows: (streaming, createdAt, completedAt ?? createdAt).
+        var openHandoffs: [(streaming: Bool, createdAt: Int64, finishedAt: Int64)] = []
+        /// `createdAt` of the last row when it is the user's.
+        var lastUserAt: Int64?
+    }
+
+    private func activity(_ chatId: Id) -> ChatActivity {
+        if let hit = activityCache[chatId] { return hit }
         let list = messages(of: chatId)
-        let recent = nowMs() - 15 * 60 * 1000
-        guard let idx = list.lastIndex(where: {
-            $0.role == .assistant && $0.isStreaming && $0.createdAt >= recent
-        }) else { return false }
-        // A later user line means this stream is leftover from a prior turn.
-        return !list.suffix(from: idx + 1).contains { $0.role == .user }
+        var out = ChatActivity()
+        var userAfter = false
+        for m in list.reversed() {
+            if out.liveStreamAt == nil {
+                if m.role == .user { userAfter = true }
+                if m.role == .assistant, m.isStreaming, !userAfter { out.liveStreamAt = m.createdAt }
+            }
+            if m.role == .assistant, m.subagentId != nil || m.subagentName != nil,
+               m.turn == .new || m.turn == .spawn || m.turn == .wake,
+               (m.handoffMessages ?? 1) < 2 {
+                out.openHandoffs.append((m.isStreaming, m.createdAt, m.completedAt ?? m.createdAt))
+            }
+        }
+        if let last = list.last, last.role == .user { out.lastUserAt = last.createdAt }
+        activityCache[chatId] = out
+        return out
+    }
+
+    func isStreaming(_ chatId: Id) -> Bool {
+        guard let at = activity(chatId).liveStreamAt else { return false }
+        return at >= nowMs() - 15 * 60 * 1000
     }
 
     func isStreaming(project projectId: Id) -> Bool {
@@ -3934,18 +4035,14 @@ final class AppModel: ObservableObject {
     /// `done` while the child still runs, so `isStreaming` alone misses it —
     /// show the faded working line until the hand-off closes.
     func hasOpenSubagent(_ chatId: Id) -> Bool {
-        let recent = nowMs() - 15 * 60 * 1000
-        return messages(of: chatId).contains { m in
-            guard m.role == .assistant else { return false }
-            guard m.subagentId != nil || m.subagentName != nil else { return false }
-            guard m.turn == .new || m.turn == .spawn || m.turn == .wake else { return false }
-            guard (m.handoffMessages ?? 1) < 2 else { return false }
+        let now = nowMs()
+        let recent = now - 15 * 60 * 1000
+        return activity(chatId).openHandoffs.contains { h in
             // Streaming hand-off rows (the normal case while the child runs).
             // Same freshness window as `isStreaming` so a dead box cannot pin forever.
-            if m.isStreaming { return m.createdAt >= recent }
+            if h.streaming { return h.createdAt >= recent }
             // Brief race after `finish_message` before `handoffMessages` flips to 2.
-            let t = m.completedAt ?? m.createdAt
-            return nowMs() - t < 60_000
+            return now - h.finishedAt < 60_000
         }
     }
 
@@ -3958,11 +4055,10 @@ final class AppModel: ObservableObject {
         if peopleChat(chatId) != nil { return false }
         // Nobody "works" in a server channel; a sent line is just a line.
         if channel(chatId) != nil { return false }
-        let list = messages(of: chatId)
-        guard let last = list.last, last.role == .user else { return false }
+        guard let at = activity(chatId).lastUserAt else { return false }
         // Short bridge until the agent opens a streaming row (cold wake).
         // ChatView ticks this once a second so it can expire cleanly.
-        return nowMs() - last.createdAt < 15_000
+        return nowMs() - at < 15_000
     }
 
     // MARK: Commands (crdt-sync §6.2: the client writes rows and commands)

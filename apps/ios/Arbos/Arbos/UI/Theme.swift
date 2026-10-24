@@ -48,7 +48,12 @@ enum TextScale {
     }
 }
 
-struct Theme {
+/// Equatable on purpose: the app root re-applies `.environment(\.theme, …)` on every
+/// AppModel publish; SwiftUI only propagates an environment value when it differs,
+/// and only for Equatable values — without this every `@Environment(\.theme)` reader
+/// (every bubble) was re-evaluated on each publish, bypassing the rows' Equatable
+/// guards (arbonites-chat-lag, 2026-10-24).
+struct Theme: Equatable {
     let isDark: Bool
     var surface: Surface
     /// Q6 text size: one factor over every point size that goes through `font(_:)`

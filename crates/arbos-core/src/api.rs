@@ -295,6 +295,9 @@ pub struct PeopleChatDto {
     #[serde(default)]
     #[typeshare(serialized_as = "Option<I54>")]
     pub avatar_leaf_color: Option<i64>,
+    /// Optional about text for a people group (≤200 chars). Absent or empty = none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// Group policy: when false, members (non-owner/admin) do not see who has
     /// read messages. Owners and admins still can. Absent → on (default).
     #[serde(default, skip_serializing_if = "Option::is_none")]

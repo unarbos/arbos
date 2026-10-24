@@ -203,6 +203,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-enter", composer::Newline, input),
         KeyBinding::new("tab", composer::AcceptMention, input),
         KeyBinding::new("shift-tab", composer::PrevMention, input),
+        KeyBinding::new("escape", composer::Escape, input),
         KeyBinding::new("backspace", composer::Backspace, input),
         KeyBinding::new("delete", composer::Delete, input),
         KeyBinding::new("alt-backspace", composer::DeleteWordBackward, input),
