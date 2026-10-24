@@ -3258,7 +3258,22 @@ impl Agent {
                     }
                     h.doc.finish_message(&assistant_msg_id, status);
                 }
-                let _ = self.turn.lock().await.take();
+                let taken = self.turn.lock().await.take();
+                if status == MessageStatus::Done {
+                    // The clean-up answered the user: a finished turn, not a failed command.
+                    let mut turn =
+                        taken.unwrap_or_else(|| TurnState::claim(chat_id, user_msg_id, false));
+                    turn.assistant_msg_id = assistant_msg_id.clone();
+                    turn.text_part_id = text_part_id.clone();
+                    turn.row_closed = true;
+                    turn.streamed_text = line;
+                    return Ok(TurnOutcome {
+                        assistant_msg_id,
+                        route_name: "disk_cleanup",
+                        turn,
+                        result: Ok(()),
+                    });
+                }
                 return Err(anyhow!("workspace disk full ({})", st.human()));
             }
         }

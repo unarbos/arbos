@@ -150,7 +150,7 @@ impl Session {
                 .filter(|p| {
                     matches!(
                         p.get("kind").and_then(|k| k.as_str()),
-                        Some("status") | Some("question")
+                        Some("status") | Some("question") | Some("error")
                     ) && p.get("hidden").and_then(|h| h.as_bool()) != Some(true)
                 })
                 .collect();
