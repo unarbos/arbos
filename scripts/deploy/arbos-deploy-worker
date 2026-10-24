@@ -332,13 +332,22 @@ image_run_state() {
   id="$(printf '%s' "$runs" | python3 -c 'import json,sys; r=json.load(sys.stdin).get("workflow_runs",[]); print(r[0]["id"] if r else "")' 2>/dev/null || true)"
   [[ -n "$id" ]] || { echo none; return; }
   jobs="$(gh_api "/actions/runs/$id/jobs" 2>/dev/null || true)"
-  printf '%s' "$jobs" | python3 -c '
+  local verdict
+  verdict="$(printf '%s' "$jobs" | python3 -c '
 import json, sys
 jobs = json.load(sys.stdin).get("jobs", [])
 steps = {s["name"]: s for j in jobs for s in j.get("steps", [])}
 want = [n for n in steps if n.startswith("Build and push") or n.startswith("Local smoke")]
 if len(want) < 2:
-    print("pending" if any(j.get("status") != "completed" for j in jobs) or not jobs else "failed"); sys.exit()
+    if any(j.get("status") != "completed" for j in jobs) or not jobs:
+        print("pending")
+    elif not steps:
+        # GitHub sometimes answers a completed job with an empty steps list (2026-10-24,
+        # image-v0.1.114): decide from the job log instead of calling the build failed.
+        print("nosteps " + str(jobs[0]["id"]))
+    else:
+        print("failed")
+    sys.exit()
 st = [steps[n] for n in want]
 if any(s.get("status") != "completed" for s in st):
     print("pending")
@@ -346,7 +355,21 @@ elif all(s.get("conclusion") == "success" for s in st):
     print("ok")
 else:
     print("failed")
-' 2>/dev/null || echo pending
+' 2>/dev/null || echo pending)"
+  case "$verdict" in
+    nosteps\ *)
+      # The steps run in order and the job stops at the first failure, so a log that reaches
+      # the register step (the one that always fails in CI) means build + smoke passed.
+      local job_id="${verdict#nosteps }" logtxt
+      logtxt="$(gh_api "/actions/jobs/$job_id/logs" -L 2>/dev/null | tail -c 400000 || true)"
+      if printf '%s' "$logtxt" | grep -q 'Run image/register-snapshot.sh'; then
+        log "agentd: $1 — jobs API returned no steps; the log reached the register step, treating build + smoke as ok" >&2
+        echo ok
+      else
+        echo failed
+      fi ;;
+    *) echo "$verdict" ;;
+  esac
 }
 
 relay_db() { sudo -u arbos sqlite3 /var/lib/arbos-relay/relay.db "$@"; }
