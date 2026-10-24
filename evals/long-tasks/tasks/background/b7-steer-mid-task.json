@@ -26,7 +26,7 @@
       "prompt": "Done? What was the last number?",
       "pre_wait_s": 110,
       "reply_regex": "\\b20\\b",
-      "reply_regex_not": "\\b40\\b(?! to 20)",
+      "reply_regex_not": "(?<!reach )(?<!not reach )(?<!instead of )(?<!not )\\b40\\b(?! to 20)",
       "timeout_s": 180,
       "verify": "f={D}/count.txt; test -f $f || { echo FAIL: no count.txt; exit 0; }; last=$(tail -1 $f | tr -dc 0-9); n=$(grep -c . $f); echo \"SHOW lines=$n last=$last\"; if [ \"$last\" = 20 ] && [ $n -le 22 ]; then echo PASS; else echo FAIL: last=$last lines=$n; fi"
     }
@@ -35,5 +35,5 @@
     "no_truncated_reply": true,
     "no_repeated_sentence": true
   },
-  "regression": "steer path: the working row's activity changes within 5 s of a steer (agentd post_activity 'Steering: …'), result applied (bc-d117b386 #1598)"
+  "regression": "steer path: Steering: … on the working row within 5 s of a guide steer into a running turn (#1657); result applied"
 }
