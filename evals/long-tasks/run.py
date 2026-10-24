@@ -29,6 +29,9 @@ from lib import relay as rl  # noqa: E402
 HERE = Path(__file__).resolve().parent
 TEST_HANDLE = os.environ.get("LT_TEST_HANDLE", "lt-eval")
 LANES = ["a", "b", "c", "d"]
+# lane "e" runs after every other lane has finished: tasks that disturb the whole box (a machine
+# restart kills every lane's background jobs — run 5 lost l1 that way)
+LATE_LANES = ["e"]
 # Named subsets: `--subset regression` is the cheap check after an agentd/prompt change (≈ 40 min, ≈ $0.10).
 SUBSETS = {
     "regression": ["b4-teardown-after-handoff", "b5-busy-agent-probes", "b6-subagent-failed-start", "m1-todos-roundtrip", "m6-preference-applied-cross-chat", "l1-slow-pipeline", "c1-fix-bug", "c2-add-feature", "c3-rename-refactor", "c4-fix-and-commit", "c5-make-ci-check-pass", "p1-self-reference-cite-file"],
@@ -594,7 +597,11 @@ def main():
     run_state = {"run_id": args.run_id, "budget": args.budget_usd, "spent_at_start": spent, "lock": threading.Lock()}
     projects = {ln: rl.ensure_project(f"lane-{ln}") for ln in LANES}
     run_state["projects"] = projects
-    projects = {ln: pid for ln, pid in projects.items() if any(t["lane"] == ln for t in tasks)}
+    late = [t for t in tasks if t["lane"] in LATE_LANES]
+    for t in late:
+        t["lane"] = "a"  # late tasks run on lane a's project, after the parallel lanes
+    tasks = [t for t in tasks if t["lane"] not in LATE_LANES]
+    projects = {ln: pid for ln, pid in projects.items() if any(t["lane"] == ln for t in tasks + late)}
     meta = {
         "run_id": args.run_id,
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -615,6 +622,11 @@ def main():
     for l in lanes_t:
         l.join()
     results = [r for l in lanes_t for r in l.results]
+    if late:
+        late_lane = Lane("a", projects["a"], late, box, run_state, out_dir, log)
+        late_lane.start()
+        late_lane.join()
+        results += late_lane.results
     spent_end, _ = rl.spent_today()
     meta["ended_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     meta["spent_today_at_end"] = spent_end
