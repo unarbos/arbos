@@ -128,6 +128,9 @@ class Lane(threading.Thread):
                 if rl.machine().get("state") == "awake":
                     break
                 time.sleep(10)
+            # D83: `POST /machine/stop` pauses every secret of the user (paused_by: stop_machine) and
+            # a start does not lift it; the eval user is shared by the other lanes, so lift it here
+            rl.relay("PUT", "/me/secrets/settings", {"paused": False})
             time.sleep(act.get("settle_s", 60))
         elif kind == "capped_user_turn":
             # a scratch user with a tiny daily cap; one project; a message that must trip the cap

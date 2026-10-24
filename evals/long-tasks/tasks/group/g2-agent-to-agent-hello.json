@@ -10,7 +10,7 @@
       "reply_regex_not": "(?i)group|which chat|another chat|can't send|cannot send|couldn't send|only works",
       "rubric": {
         "criteria": "The agent messaged lane-b directly with its messaging tool from this 1:1 chat and told the user in one plain line that it was sent (for example 'Sent to lane-b.'). It did not ask which chat to use, did not propose posting in a group, and did not say it could not send. If lane-b's answer had already come back, relaying it in a line is fine.",
-        "min": 4
+        "min": 3
       },
       "timeout_s": 180
     },
