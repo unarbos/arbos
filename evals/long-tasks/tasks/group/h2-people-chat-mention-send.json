@@ -11,7 +11,7 @@
       "timeout_s": 180
     },
     {
-      "prompt": "just chatting with my colleague here, no need to answer",
+      "prompt": "Priya — see you at the 3 pm sync, bring the Q4 numbers.",
       "chat": "dm",
       "expect_no_reply_s": 25,
       "timeout_s": 40
