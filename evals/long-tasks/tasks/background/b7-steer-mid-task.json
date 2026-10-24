@@ -5,7 +5,7 @@
   "title": "Steer a running task mid-way: the agent takes the correction into the work that is running",
   "turns": [
     {
-      "prompt": "Write the numbers 1 to 40 to {D}/count.txt, one per line, one number every 3 seconds (so it takes about two minutes). Then tell me the last number written.",
+      "prompt": "Write the numbers 1 to 40 to {D}/count.txt, one per line, one number every 3 seconds (so it takes about two minutes), as a detached background job. Do not delete or overwrite anything; the folder is empty. Then tell me the last number written.",
       "seed": "mkdir -p {D}",
       "background": true,
       "latency_max_s": 10,

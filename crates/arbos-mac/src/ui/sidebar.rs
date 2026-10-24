@@ -57,18 +57,20 @@ impl Render for SidebarResizeDragGhost {
     }
 }
 
-/// The drag strip beside the traffic lights: Grok Mac's 44 pt top band, the
-/// same height as the chat header ([feedback mac-header-height-grok]). Its
-/// three round buttons (search · + · collapse, [`STRIP_BUTTON`] discs,
-/// [`STRIP_GAP`] apart, [`STRIP_INSET`] from the right edge) are centred on
-/// the lights' line: macOS draws them at 20.75 pt in this window, so the 44
-/// band is centred 1 pt high (Grok: 21.75 / 21.75). The collapse toggle keeps
-/// the right end so folding the pane stays intuitive (#1491).
+/// The drag strip beside the traffic lights: Grok Bot's top band, the same
+/// height as the chat header (`HEADER_HEIGHT`). Its three round buttons
+/// (search · + · collapse, [`STRIP_BUTTON`] discs, [`STRIP_GAP`] apart,
+/// [`STRIP_INSET`] from the right edge) are centred in it, on the family's
+/// line `CONTROL_LINE` = 30 — Grok's discs span 12–48 pt while its lights are
+/// centred at 22 ([feedback topbar-grok-parity-2026-10-24]; the 44 band with
+/// the discs on the lights' line read "too high" to Jacob). The collapse
+/// toggle keeps the right end so folding the pane stays intuitive (#1491).
 ///
-/// Native full screen keeps this exact band: the shell paints the traffic
-/// lights into it (`traffic_lights::overlay`) and nothing is added above the
-/// strip ([feedback fullscreen-traffic-lights-2026-10-24]; pinned by
-/// `traffic_lights::tests::full_screen_adds_no_band_above_the_strip`).
+/// Native full screen keeps this exact band: nothing is added above the
+/// strip and nothing moves; the lights are macOS's own and follow its
+/// full-screen rules ([feedback fullscreen-traffic-lights-2026-10-24], then
+/// Jacob 2026-10-24 18:3x: real buttons only; pinned by
+/// `strip_tests::full_screen_adds_no_band_above_the_strip`).
 pub(crate) fn top_strip(_fullscreen: bool) -> f32 {
     if cfg!(target_os = "macos") {
         HEADER_HEIGHT
@@ -92,6 +94,12 @@ pub(crate) const STRIP_INSET: f32 = 12.0;
 pub(crate) const FILTER_HEIGHT: f32 = 32.0;
 pub(crate) const FILTER_GAP: f32 = 4.0;
 pub(crate) const FILTER_PAD_X: f32 = 10.0;
+/// Space between the strip's bottom edge and the capsules: Grok Bot's first
+/// chat card starts 64 pt under the window top, 16 under its discs (bottom
+/// 48). The filter is the first thing under our strip, so its capsules start
+/// there: 60 + 4 ([feedback topbar-grok-parity-2026-10-24]; was 44 + 6 = 50).
+pub(crate) const FILTER_TOP: f32 = 4.0;
+pub(crate) const FILTER_BOTTOM: f32 = 8.0;
 /// Server rows draw their picture as a rounded square (corner = this fraction
 /// of the size) so they read apart from the agent and people discs.
 pub(crate) const SERVER_PICTURE_CORNER: f32 = 11.0 / 36.0;
@@ -609,7 +617,6 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .gap(px(STRIP_GAP))
         .pl(px(TRAFFIC_LIGHTS_INSET + STRIP_INSET))
         .pr(px(STRIP_INSET))
-        .pb(px(2.0))
         .when(open_server.is_some(), |el| el.child(div().flex_1()));
     for control in controls {
         strip = match control {
@@ -628,8 +635,8 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .items_center()
         .justify_center()
         .gap(px(FILTER_GAP))
-        .pt(px(6.0))
-        .pb(px(8.0))
+        .pt(px(FILTER_TOP))
+        .pb(px(FILTER_BOTTOM))
         .px(px(8.0))
         .children(ListFilter::ALL.into_iter().map(|f| {
             let on = f == filter;
@@ -2257,9 +2264,188 @@ mod row_menu_tests {
 
 #[cfg(test)]
 mod strip_tests {
-    use super::{strip_controls, ListFilter, StripControl, STRIP_BUTTON, STRIP_GAP, STRIP_INSET};
+    use gpui::{div, prelude::*, px, TestAppContext};
+
+    use super::{
+        strip_controls, top_strip, ListFilter, StripControl, FILTER_HEIGHT, FILTER_TOP,
+        STRIP_BUTTON, STRIP_GAP, STRIP_INSET,
+    };
     use crate::model::{Project, SpaceKind};
-    use crate::ui::theme::{CONTROL, CONTROL_GAP, CONTROL_GLYPH, CONTROL_GLYPH_WIDE};
+    use crate::ui::shell::TRAFFIC_LIGHTS_INSET;
+    use crate::ui::theme::{
+        CONTROL, CONTROL_GAP, CONTROL_GLYPH, CONTROL_GLYPH_WIDE, CONTROL_LINE, HEADER_HEIGHT,
+        TRAFFIC_LIGHT_POSITION,
+    };
+
+    /// The real lights' centre line: macOS 26 draws a 14 pt disc in the frame
+    /// GPUI places at `TRAFFIC_LIGHT_POSITION` (measured on the v0.6.213
+    /// build: position 14 → centre 21).
+    const TRAFFIC_LIGHT_LINE: f32 = TRAFFIC_LIGHT_POSITION + 7.0;
+
+    /// Grok Bot's strip, measured on `ref-grok-round-search-plus.png` (project
+    /// store, 2 px/pt, window top at image row 2) — Jacob 2026-10-24: "the
+    /// top bar on mac is now too high. Make it identical to the size and
+    /// positioning on grokbot" ([feedback topbar-grok-parity-2026-10-24]).
+    /// Points from the window's top edge.
+    mod grok {
+        /// Red light: x 30–57, y 32–59 px → 14 pt disc, left edge 15, centre 22.
+        pub const LIGHT_LEFT: f32 = 15.0;
+        pub const LIGHT_LINE: f32 = 22.0;
+        /// Yellow centre x 90 px, green 136 px → 23 pt pitch.
+        pub const LIGHT_PITCH: f32 = 23.0;
+        /// Discs: rows 24–96 px → 36 pt, top 12, centre 30, bottom 48.
+        pub const DISC_TOP: f32 = 12.0;
+        pub const DISC_LINE: f32 = 30.0;
+        /// First chat card at row 130 px → 64 pt: 16 under the discs.
+        pub const NEXT_CONTENT_TOP: f32 = 64.0;
+    }
+
+    /// The lights sit where Grok's do, the discs are centred on Grok's line
+    /// (8 pt under the lights' — they are not one line in Grok either), and
+    /// the first thing under the strip starts at Grok's 64. (`HEADER_HEIGHT`
+    /// is the Mac strip; `top_strip` returns it on macOS and 40 elsewhere.)
+    #[test]
+    fn the_strip_is_groks_height_and_the_discs_sit_on_groks_line() {
+        assert_eq!(
+            TRAFFIC_LIGHT_POSITION,
+            grok::LIGHT_LEFT,
+            "close frame x = y"
+        );
+        assert_eq!(TRAFFIC_LIGHT_LINE, grok::LIGHT_LINE, "lights' centre line");
+        assert_eq!(CONTROL_LINE, grok::DISC_LINE, "discs' centre line");
+        assert_eq!(
+            CONTROL_LINE - TRAFFIC_LIGHT_LINE,
+            8.0,
+            "discs 8 under the lights"
+        );
+        if cfg!(target_os = "macos") {
+            assert_eq!(top_strip(false), HEADER_HEIGHT, "the strip is the top band");
+        }
+        assert_eq!(
+            HEADER_HEIGHT,
+            2.0 * CONTROL_LINE,
+            "discs centred in the band"
+        );
+        let disc_top = (HEADER_HEIGHT - STRIP_BUTTON) / 2.0;
+        assert_eq!(disc_top, grok::DISC_TOP);
+        assert_eq!(disc_top + STRIP_BUTTON, 48.0, "disc bottom");
+        assert_eq!(
+            HEADER_HEIGHT + FILTER_TOP,
+            grok::NEXT_CONTENT_TOP,
+            "filter capsules start where Grok's first card does"
+        );
+        assert_eq!(
+            HEADER_HEIGHT + FILTER_TOP - (disc_top + STRIP_BUTTON),
+            16.0,
+            "gap from the discs down to the filter: Grok's 16"
+        );
+        // The three lights (frame right edge 15 + 2 × 23 + 14 = 75) end inside
+        // the band the strip keeps clear for them.
+        let lights_right = TRAFFIC_LIGHT_POSITION + 2.0 * grok::LIGHT_PITCH + 14.0;
+        assert!(lights_right <= TRAFFIC_LIGHTS_INSET + STRIP_INSET);
+    }
+
+    /// Native full screen: the strip is laid out exactly as in windowed mode —
+    /// no band above it, nothing pushed down. The traffic lights are macOS's
+    /// own, so they follow macOS's full-screen rules (hidden until the pointer
+    /// reaches the top edge); the app paints none of its own (Jacob
+    /// 2026-10-24: "this should be real mac os feature not custom buttons").
+    #[test]
+    fn full_screen_adds_no_band_above_the_strip() {
+        assert_eq!(top_strip(true), top_strip(false));
+    }
+
+    /// The strip and filter rows as `render` composes them (same div shape),
+    /// laid out for real: a disc's box lands at 12–48 and the first capsule
+    /// at 64, Grok's numbers.
+    struct StripAndFilter;
+
+    impl gpui::Render for StripAndFilter {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let strip = div()
+                .h(px(HEADER_HEIGHT))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_end()
+                .gap(px(STRIP_GAP))
+                .pl(px(TRAFFIC_LIGHTS_INSET + STRIP_INSET))
+                .pr(px(STRIP_INSET))
+                .debug_selector(|| "strip".into())
+                .children(strip_controls(false, true).into_iter().map(|c| {
+                    let sel: &'static str = match c {
+                        StripControl::Search => "disc-search",
+                        StripControl::New => "disc-new",
+                        StripControl::Collapse => "disc-collapse",
+                    };
+                    div()
+                        .size(px(c.size()))
+                        .flex_shrink_0()
+                        .debug_selector(move || sel.into())
+                }));
+            let filter = div()
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(px(super::FILTER_GAP))
+                .pt(px(FILTER_TOP))
+                .pb(px(super::FILTER_BOTTOM))
+                .px(px(8.0))
+                .children(ListFilter::ALL.into_iter().map(|f| {
+                    let sel: &'static str =
+                        Box::leak(format!("capsule-{}", f.label()).into_boxed_str());
+                    div()
+                        .h(px(FILTER_HEIGHT))
+                        .px(px(super::FILTER_PAD_X))
+                        .debug_selector(move || sel.into())
+                        .child(f.label())
+                }));
+            div()
+                .w(px(296.0))
+                .h(px(400.0))
+                .flex()
+                .flex_col()
+                .child(strip)
+                .child(filter)
+        }
+    }
+
+    #[gpui::test]
+    fn the_discs_and_the_filter_land_on_groks_pixels(cx: &mut TestAppContext) {
+        let (_view, vcx) = cx.add_window_view(|_, _| StripAndFilter);
+        vcx.run_until_parked();
+        let strip = vcx.debug_bounds("strip").expect("strip drawn");
+        assert_eq!(f32::from(strip.size.height), HEADER_HEIGHT);
+        let mut right_edges = Vec::new();
+        for sel in ["disc-search", "disc-new", "disc-collapse"] {
+            let disc = vcx.debug_bounds(sel).expect(sel);
+            let top: f32 = disc.origin.y.into();
+            let h: f32 = disc.size.height.into();
+            assert_eq!(top, grok::DISC_TOP, "{sel} top");
+            assert_eq!(top + h / 2.0, grok::DISC_LINE, "{sel} centre");
+            assert_eq!(h, STRIP_BUTTON, "{sel} size");
+            right_edges.push(f32::from(disc.right()));
+        }
+        assert_eq!(
+            right_edges[2],
+            296.0 - STRIP_INSET,
+            "collapse at the right inset"
+        );
+        assert_eq!(
+            right_edges[1] + STRIP_GAP + STRIP_BUTTON,
+            right_edges[2],
+            "discs 8 apart"
+        );
+        let capsule = vcx.debug_bounds("capsule-All").expect("first capsule");
+        let cap_top: f32 = capsule.origin.y.into();
+        assert_eq!(cap_top, grok::NEXT_CONTENT_TOP, "capsule row at Grok's 64");
+        assert_eq!(f32::from(capsule.size.height), FILTER_HEIGHT);
+    }
 
     /// Three-pane rule: the chat list's strip holds exactly three controls —
     /// search, +, collapse, in that order — and nothing else (#1134; the
