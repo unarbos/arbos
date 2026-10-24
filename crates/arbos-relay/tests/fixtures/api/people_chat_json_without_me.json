@@ -51,6 +51,7 @@
       "user_id": "gh_102"
     }
   ],
+  "members_see_reads": true,
   "pending": false,
   "read_seq": 0,
   "room": "/room/people/people_dm",
