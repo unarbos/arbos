@@ -15,7 +15,6 @@ use crate::app::ProfilePage;
 use crate::model::{now_ms, MachineState};
 use crate::ui::devices;
 use crate::ui::glass;
-use crate::ui::icons::icon;
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::profiles::pane::{self, Hero, Picture, ProfilePane, Section};
@@ -868,9 +867,13 @@ impl Shell {
 
         // ----- a pushed page: `‹ Title` in the header, the page fills the pane ----
         if page != SettingsPage::Root {
-            let back = glass::circle("settings-back", 30.0, &theme)
-                .child(icon("chevron-left", 14.0, theme.text))
-                .on_click(cx.listener(|this, _, _, cx| this.settings_back(cx)));
+            let back = glass::control_disc(
+                "settings-back",
+                "chevron-left",
+                crate::ui::theme::CONTROL_GLYPH,
+                &theme,
+            )
+            .on_click(cx.listener(|this, _, _, cx| this.settings_back(cx)));
             let body: Div = if page.is_content() {
                 let content = match page {
                     SettingsPage::Credits => credits_body,
@@ -924,6 +927,7 @@ impl Shell {
                 Some((page.title(), back)),
                 None,
                 body,
+                None,
                 None,
                 Some(&self.settings_scroll),
                 &theme,
@@ -1196,6 +1200,7 @@ impl Shell {
                 body,
                 footer,
                 done: None,
+                share: None,
             },
             self,
             cx,

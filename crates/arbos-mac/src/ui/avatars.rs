@@ -213,11 +213,10 @@ pub fn leaf_element(pick: LeafPick, size: f32) -> Div {
 /// One-shot hover gust: the leaf's committed gust Lottie while the flag is
 /// on (one play, settles on the rest pose), else the native spring (≈9° peak,
 /// settled in 1 s).
-fn ruffle_glyph(pick: LeafPick, size: f32, tick: u64) -> AnyElement {
+fn ruffle_glyph(pick: LeafPick, size: f32, tick: u64, ink: Hsla) -> AnyElement {
     if leaf_lottie_on() {
         if let Some(comp) = lottie::composition(pick.leaf, lottie::Clip::Gust) {
             let secs = lottie::duration_secs(&comp);
-            let ink = leaf_ink(pick.color);
             return div()
                 .size(px(size * leaf::LEAF_SCALE))
                 .flex_shrink_0()
@@ -240,7 +239,7 @@ fn ruffle_glyph(pick: LeafPick, size: f32, tick: u64) -> AnyElement {
         }
     }
     let side = size * leaf::LEAF_SCALE;
-    leaf_glyph(pick, size, 0.0)
+    leaf_glyph_inked(pick.leaf, size, 0.0, ink)
         .with_animation(
             ElementId::NamedInteger(
                 SharedString::from(format!("leaf-gust-{}-{}", pick.leaf, pick.color)),
@@ -257,11 +256,10 @@ fn ruffle_glyph(pick: LeafPick, size: f32, tick: u64) -> AnyElement {
 /// Idle sway, profile hero only: the leaf's committed idle Lottie, looping
 /// (each leaf its own 2.3–2.8 s length), while the flag is on; else the
 /// native sway of a few degrees about the stem.
-fn sway_glyph(pick: LeafPick, size: f32) -> AnyElement {
+fn sway_glyph(pick: LeafPick, size: f32, ink: Hsla) -> AnyElement {
     if leaf_lottie_on() {
         if let Some(comp) = lottie::composition(pick.leaf, lottie::Clip::Idle) {
             let secs = lottie::duration_secs(&comp);
-            let ink = leaf_ink(pick.color);
             return div()
                 .size(px(size * leaf::LEAF_SCALE))
                 .flex_shrink_0()
@@ -285,7 +283,7 @@ fn sway_glyph(pick: LeafPick, size: f32) -> AnyElement {
     }
     let side = size * leaf::LEAF_SCALE;
     let period = leaf::LEAVES[(pick.leaf % leaf::LEAF_COUNT) as usize].idle_secs;
-    leaf_glyph(pick, size, 0.0)
+    leaf_glyph_inked(pick.leaf, size, 0.0, ink)
         .with_animation(
             ElementId::Name(SharedString::from(format!(
                 "leaf-sway-{}-{}",
@@ -312,7 +310,7 @@ pub fn leaf_hover(pick: LeafPick, size: f32, key: u64) -> Div {
     }
     let (hovered, tick) = hover_state(key);
     let glyph = if hovered {
-        ruffle_glyph(pick, size, tick)
+        ruffle_glyph(pick, size, tick, leaf_ink(pick.color))
     } else {
         leaf_glyph(pick, size, 0.0).into_any_element()
     };
@@ -334,16 +332,40 @@ pub fn leaf_hover(pick: LeafPick, size: f32, key: u64) -> Div {
 /// The profile hero: idle sway, and the ruffle when the pointer is over it.
 /// Still under Reduce Motion.
 pub fn leaf_hero(pick: LeafPick, size: f32, key: u64) -> Div {
+    leaf_hero_in(disc(pick, size), pick, size, key, leaf_ink(pick.color))
+}
+
+/// The profile hero with no disc behind the leaf (Jacob, [feedback
+/// info-pane-chrome-2026-10-24]: "drop the pale disc behind the leaf", as
+/// Grok Bot's plain bot mark): the leaf alone, the same sway and ruffle. The
+/// ink is the hue's pastel on a dark pane and its darker ink on a light one,
+/// so the bare leaf reads on either (the dark ink on the dark pane did not).
+pub fn leaf_hero_bare(pick: LeafPick, size: f32, key: u64, theme: &Theme) -> Div {
+    let ink = if theme.is_light() {
+        leaf_ink(pick.color)
+    } else {
+        leaf_disc(pick.color)
+    };
+    let slot = div()
+        .size(px(size))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center();
+    leaf_hero_in(slot, pick, size, key, ink)
+}
+
+fn leaf_hero_in(container: Div, pick: LeafPick, size: f32, key: u64, ink: Hsla) -> Div {
     if reduce_motion() {
-        return leaf_element(pick, size);
+        return container.child(leaf_glyph_inked(pick.leaf, size, 0.0, ink));
     }
     let (hovered, tick) = hover_state(key);
     let glyph = if hovered {
-        ruffle_glyph(pick, size, tick)
+        ruffle_glyph(pick, size, tick, ink)
     } else {
-        sway_glyph(pick, size)
+        sway_glyph(pick, size, ink)
     };
-    disc(pick, size).child(
+    container.child(
         div()
             .id(ElementId::NamedInteger("leaf-hero".into(), key))
             .size_full()
@@ -381,10 +403,12 @@ pub fn agent(
     }
 }
 
-/// The agent's profile hero (D92: swaying leaf; D79 disc when the flag is off).
-pub fn project_hero(p: &Project, size: f32, theme: &Theme) -> Div {
+/// The agent pane's hero (Grok Bot's plain mark, [feedback
+/// info-pane-chrome-2026-10-24]): the swaying leaf with no disc behind it;
+/// the D79 initials disc stays when the leaf flag is off (initials need a fill).
+pub fn project_hero_bare(p: &Project, size: f32, theme: &Theme) -> Div {
     if leaf_avatars_on() && !p.is_people() {
-        leaf_hero(project_leaf(p), size, hover_key(&p.id, size))
+        leaf_hero_bare(project_leaf(p), size, hover_key(&p.id, size), theme)
     } else {
         element(&p.id, &p.name, p.avatar_color_index, size, theme)
     }

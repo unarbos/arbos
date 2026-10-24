@@ -334,18 +334,7 @@ fn link_pill(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
 /// ([feedback mac-collapsed-toggle-inline], [feedback sidebar-strip-filter-2026-10-24]).
 fn sidebar_toggle(shell: &Shell, theme: &Theme, cx: &mut Context<Shell>) -> Stateful<Div> {
     let _ = shell.state.read(cx).sidebar_overlay;
-    div()
-        .id("header-sidebar")
-        .size(px(crate::ui::sidebar::STRIP_BUTTON))
-        .flex_shrink_0()
-        .rounded_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor_pointer()
-        .bg(theme.surface_2)
-        .hover(|s| s.bg(Theme::with_alpha(theme.text, 0.14)))
-        .child(icon("sidebar-left", CONTROL_GLYPH_WIDE, theme.text))
+    glass::control_disc("header-sidebar", "sidebar-left", CONTROL_GLYPH_WIDE, theme)
         // The bar is a window-drag region; a control is not part of it.
         .on_mouse_down(
             gpui::MouseButton::Left,

@@ -158,6 +158,7 @@ pub(super) fn page(
             body,
             footer,
             done: None,
+            share: None,
         },
         shell,
         cx,

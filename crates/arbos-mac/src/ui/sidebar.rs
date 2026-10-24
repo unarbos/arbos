@@ -647,19 +647,9 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     let controls = strip_controls(open_server.is_some(), show_plus);
     let round = |id: &'static str, control: StripControl, theme: &Theme| {
         let (glyph, size) = control.glyph();
-        div()
-            .id(id)
-            .size(px(control.size()))
-            .flex_shrink_0()
-            .rounded_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            .bg(theme.surface_2)
-            .hover(|s| s.bg(Theme::with_alpha(theme.text, 0.14)))
+        debug_assert_eq!(control.size(), crate::ui::theme::CONTROL);
+        glass::control_disc(id, glyph, size, theme)
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .child(icon(glyph, size, theme.text))
     };
     let collapse = |cx: &mut Context<Shell>| {
         round("sidebar-collapse", StripControl::Collapse, &theme)
