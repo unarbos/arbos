@@ -258,6 +258,40 @@ buttons in it at alpha 0, an `NSTitlebarAccessoryViewController` shows its
 own view there but not the buttons, and the AppKit-owned alpha / view tree is
 reset on every reveal (the #1637 probes, `media/feedback/fullscreen-traffic-lights/appkit-probes/`).
 
+## Pane animations (Jacob 2026-10-24, [feedback right-pane-slide-2026-10-24], [feedback sidebar-slide-2026-10-24])
+
+**The right info pane and the left chat sidebar slide; they never pop.**
+Jacob: "on the mac the side bar appears when you click the top button. I
+want it to slide animate out like it does on grok. Same for the left bar
+when you click the close side bar button." Grok Bot's desktop app could not
+be run on the rig (no install), so its right pane was measured frame by
+frame on xAI's own 30 fps screen recording (the "How I run multiple teams
+of Grok Bots" guide video, t = 51.8 s open / 55.1 s close; strips and CSV in
+the project store's `media/feedback/pane-slide/grok-reference/`): open
+≈ 200 ms (6 moving frames, soft start, long tail — ease-out cubic RMS 0.022,
+a 0.21 s / 0.9 spring 0.015), close ≈ 150–175 ms (4 frames, no slow start —
+ease-out quad RMS 0.008), the pane **translates** with its content. Its
+sidebar toggle is in no public video; it gets the same motion. Numbers,
+recorded here so they do not drift:
+
+| Item | Value |
+|---|---|
+| Duration | **200 ms open, 170 ms close** (`slide::OPEN_MS` / `CLOSE_MS`); a click mid-slide turns round from where the pane is, in the time the remaining distance deserves |
+| Curve | open **ease-out cubic** (`motion::ease_out_cubic`, the composer drop's curve), close **ease-out quad** (`slide::Motion::ease`): fast off the mark, soft landing, never symmetric ease-in-out |
+| Right pane | its left edge comes in from the window's right edge and goes back out the same way; the pane keeps its layout and moves with its edge (not a reveal, not a fade) |
+| Left sidebar | its right edge slides to the window's left edge and back; the strip's discs leave with it, and the header's expand disc appears at its resting spot (72 + 12) as soon as the sidebar no longer covers it — never two discs at once |
+| Chat column | a flex sibling, so its slot follows every frame: the header pill and the composer re-centre live. The **transcript keeps the width it had when the slide began** and is clipped/offset — centred when the rows are capped at both widths (`COLUMN_MAX_WIDTH`: then nothing moves at the end), else pinned to the edge away from the moving pane — and is laid out once more at the end. Never re-measure every bubble per frame. (Grok re-lays its list out every frame; its list is short rows, ours is a markdown transcript whose `list()` drops every item height on a width change — the one deliberate difference) |
+| Frame rate | one redraw per display refresh (`request_animation_frame`), 12 / 10 frames at 60 Hz |
+| Reduce Motion | macOS Accessibility → Display → Reduce motion (`cx.reduce_motion()`): no slide, both panes snap as before |
+| At rest | the layout is today's static layout — the clips exist only while a slide runs (`slide::layout_tests::at_rest_the_clipped_layout_is_the_static_layout`); strip, filter, folded toggle and header pill geometry unchanged |
+
+Code: `ui/slide.rs` (`PaneSlides::step` derives the motion from
+`AppState::profile` / `rail_collapsed` each frame; `sidebar_clip`,
+`pane_clip`, `transcript_clip`), wired in `Shell::render` and
+`Shell::chat_frame`; pinned by `slide::tests` (state machine, reduce-motion
+snap, mid-slide reversal, no slide on a page swap or a width drag) and
+`slide::layout_tests`.
+
 ## Delete is immediate — no confirm (Jacob 2026-10-24, [feedback remove-delete-confirms-2026-10-24])
 
 **Delete in the message menu and Delete in the chat-list row menu act at

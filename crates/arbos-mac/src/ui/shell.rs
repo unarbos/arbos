@@ -46,6 +46,7 @@ use crate::ui::secrets::{SecretsEvent, SecretsPanel};
 use crate::ui::servers;
 use crate::ui::sidebar;
 use crate::ui::skills::{self, SkillsPanel};
+use crate::ui::slide::{self, ChatSlide, PaneSlides};
 use crate::ui::theme::{
     reapply_window_background, AppearancePref, GlassOpacity, Surface, Theme, COLUMN_MARGIN,
     COMPOSER_BOTTOM, COMPOSER_WIDTH, DRAWER_WIDTH, GLASS_OPACITY_MAX, GLASS_OPACITY_MIN,
@@ -178,6 +179,22 @@ impl SettingsPage {
             SettingsPage::Skills => skills::CARD_WIDTH + 32.0,
         }
     }
+}
+
+/// What the chat column needs to know about its neighbours this frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CenterGeometry {
+    /// Left padding on the header bar: the traffic lights' band
+    /// (`TRAFFIC_LIGHTS_INSET`) while the sidebar is hidden, the part of it
+    /// the sidebar no longer covers while it slides, 0 while it is docked.
+    header_inset: f32,
+    /// Show the folded-sidebar expand disc in the header. During the collapse
+    /// slide it appears once the inset puts it at its resting spot (72 + 12
+    /// from the window edge), after the sidebar's own disc has left the frame.
+    show_sidebar_toggle: bool,
+    /// A slide is running: the transcript keeps `ChatSlide::start_width`
+    /// inside the live slot width (`ui::slide`).
+    chat_slide: Option<(ChatSlide, f32)>,
 }
 
 pub struct Shell {
@@ -339,6 +356,12 @@ pub struct Shell {
     /// `profile_scroll_epoch` mirrors `AppState::profile_opened`.
     pub(crate) profile_scroll: ScrollHandle,
     profile_scroll_epoch: u64,
+    /// The pane slides ([feedback right-pane-slide-2026-10-24], [feedback
+    /// sidebar-slide-2026-10-24]): derived each frame from `profile` and
+    /// `rail_collapsed`; `pane_page_drawn` is the page the right pane showed
+    /// last, so a closing pane can keep drawing it while it slides out.
+    slides: PaneSlides,
+    pane_page_drawn: Option<ProfilePage>,
     pub(crate) agent_pick_reveal: bool,
     /// Rig: `ARBOS_OPEN_SETTINGS=bottom` — my pane opens scrolled to its end
     /// (Sign out) each time it fills the pane.
@@ -932,6 +955,8 @@ impl Shell {
             model_search_input,
             profile_scroll: ScrollHandle::new(),
             profile_scroll_epoch: 0,
+            slides: PaneSlides::default(),
+            pane_page_drawn: None,
             agent_pick_reveal: false,
             // `ARBOS_OPEN_SETTINGS_BOTTOM=1` does the same for any Settings page (a Secret
             // page's People / Activity cards sit below the fold on the rig).
@@ -1873,6 +1898,15 @@ impl Shell {
 
     /// Close the profile page (back button, click outside); the composer takes
     /// the keyboard back.
+    /// The right pane's width for `page`: `profiles::SHEET_WIDTH`, wider for
+    /// the two settings pages laid out past the card list (`sheet_width`).
+    fn pane_width(&self, page: &ProfilePage) -> f32 {
+        match page {
+            ProfilePage::Me => profiles::SHEET_WIDTH.max(self.settings_page.sheet_width()),
+            _ => profiles::SHEET_WIDTH,
+        }
+    }
+
     pub(crate) fn close_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.hide_settings_page(cx);
         self.profile_edit_open = false;
@@ -2650,11 +2684,19 @@ impl Shell {
         pre: Vec<AnyElement>,
         transcript: AnyElement,
         bottom: Vec<AnyElement>,
+        chat_slide: Option<(ChatSlide, f32)>,
     ) -> Stateful<Div> {
         let has_pre = !pre.is_empty();
         if has_pre {
             column = column.child(div().pt(px(header::metrics::HEIGHT)).children(pre));
         }
+        // While a neighbouring pane slides, the transcript keeps the width it
+        // had and is clipped/offset instead of re-measured per frame
+        // (`ui::slide`); the header and composer follow the live width.
+        let transcript = match chat_slide {
+            Some((slide, live_width)) => slide::transcript_clip(slide, live_width, transcript),
+            None => transcript,
+        };
         let body = div().flex_1().min_h_0().relative().child(transcript).child(
             div()
                 .absolute()
@@ -2685,7 +2727,12 @@ impl Shell {
         )
     }
 
-    fn render_center(&self, sidebar_hidden: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn render_center(&self, geometry: CenterGeometry, cx: &mut Context<Self>) -> Stateful<Div> {
+        let CenterGeometry {
+            header_inset,
+            show_sidebar_toggle,
+            chat_slide,
+        } = geometry;
         let theme = Theme::of(cx).clone();
         let state = self.state.read(cx);
         let project = state.selected().cloned();
@@ -2773,12 +2820,12 @@ impl Shell {
             // floating header, fade band and drag catchment (`chat_frame`).
             let header_bar = div()
                 .relative()
-                .when(sidebar_hidden, |el| el.pl(px(TRAFFIC_LIGHTS_INSET)))
+                .when(header_inset > 0.0, |el| el.pl(px(header_inset)))
                 .child(header::render_channel(
                     self,
                     &server,
                     &ch,
-                    sidebar_hidden,
+                    show_sidebar_toggle,
                     cx,
                 ));
             let pre: Vec<AnyElement> = self
@@ -2809,6 +2856,7 @@ impl Shell {
                 pre,
                 self.transcript.clone().into_any_element(),
                 vec![bottom.into_any_element()],
+                chat_slide,
             );
             return self.file_drop_target(column, &theme, cx);
         }
@@ -2861,9 +2909,11 @@ impl Shell {
             .relative()
             .left(px(shake_offset))
             // Without the sidebar the traffic lights sit over this header:
-            // clear them (14 pt in, three 12 pt lights, 8 pt gaps).
-            .when(sidebar_hidden, |el| el.pl(px(TRAFFIC_LIGHTS_INSET)))
-            .child(header::render(self, &space, sidebar_hidden, cx));
+            // clear them (14 pt in, three 12 pt lights, 8 pt gaps). While the
+            // sidebar slides the inset is whatever of the lights' band the
+            // sidebar no longer covers (`CenterGeometry`).
+            .when(header_inset > 0.0, |el| el.pl(px(header_inset)))
+            .child(header::render(self, &space, show_sidebar_toggle, cx));
         let floating_header = dropped;
         let mut pre: Vec<AnyElement> = Vec::new();
         let mut header_bar = Some(header_bar);
@@ -3007,6 +3057,7 @@ impl Shell {
                 pre,
                 self.transcript.clone().into_any_element(),
                 vec![self.voice.clone().into_any_element(), composer_row],
+                chat_slide,
             );
         }
         self.file_drop_target(column, &theme, cx)
@@ -3807,8 +3858,10 @@ impl Render for Shell {
         let width: f32 = window.viewport_size().width.into();
         self.fullscreen = window.is_fullscreen();
         let state = self.state.read(cx);
-        let sidebar_hidden = state.rail_collapsed || state.window_is_narrow(width);
+        let narrow = state.window_is_narrow(width);
+        let sidebar_hidden = state.rail_collapsed || narrow;
         let sidebar_overlay = sidebar_hidden && state.sidebar_overlay;
+        let sidebar_width = state.sidebar_width;
         let details = state.details_open.clone();
         let viewer_open = state.media_viewer.is_some();
         let viewer_forward_open = state.media_viewer.as_ref().is_some_and(|v| v.forward_open);
@@ -3910,14 +3963,58 @@ impl Render for Shell {
             Composer::focus(&self.composer, window, cx);
         }
 
-        if !sidebar_hidden {
-            root = root.child(frosted(0.0, PANEL_BLUR, sidebar::render(self, cx)));
-            if self.state.read(cx).sidebar_overlay {
-                // Widened back past the band with the overlay up: it has docked.
-                self.state.update(cx, |s, _| s.sidebar_overlay = false);
-            }
+        // The pane slides ([feedback right-pane-slide-2026-10-24], [feedback
+        // sidebar-slide-2026-10-24]): the tracker turns this frame's logical
+        // state into visible widths; while one runs, every frame is redrawn.
+        let (profile, opened) = {
+            let state = self.state.read(cx);
+            (state.profile.clone(), state.profile_opened)
+        };
+        let pane_width = profile
+            .as_ref()
+            .or(self.pane_page_drawn.as_ref())
+            .map_or(profiles::SHEET_WIDTH, |page| self.pane_width(page));
+        let frame = self.slides.step(
+            slide::Want {
+                viewport_width: width,
+                sidebar_shown: !sidebar_hidden,
+                sidebar_width,
+                narrow,
+                pane_shown: profile.is_some(),
+                pane_width,
+                reduce_motion: cx.reduce_motion(),
+            },
+            std::time::Instant::now(),
+        );
+        if frame.animating() {
+            window.request_animation_frame();
         }
-        root = root.child(self.render_center(sidebar_hidden, cx));
+        let live_center = width - frame.sidebar_visible - frame.pane_visible;
+        // The header clears whatever of the traffic lights' band the sidebar
+        // does not cover, and shows the expand disc while that band is free:
+        // at rest that is 72 + the disc with the sidebar hidden, nothing with
+        // it docked; mid-slide the disc holds its spot (72 + 12) from the
+        // moment the sidebar's own disc has left until the sidebar is back.
+        let geometry = CenterGeometry {
+            header_inset: (TRAFFIC_LIGHTS_INSET - frame.sidebar_visible).max(0.0),
+            show_sidebar_toggle: frame.sidebar_visible <= TRAFFIC_LIGHTS_INSET,
+            chat_slide: frame.chat.map(|c| (c, live_center)),
+        };
+
+        if frame.sidebar_sliding {
+            root = root.child(slide::sidebar_clip(
+                frame.sidebar_visible,
+                sidebar_width,
+                frosted(0.0, PANEL_BLUR, sidebar::render(self, cx)),
+            ));
+        } else if !sidebar_hidden {
+            root = root.child(frosted(0.0, PANEL_BLUR, sidebar::render(self, cx)));
+        }
+        if !sidebar_hidden && self.state.read(cx).sidebar_overlay {
+            // Widened back past the band with the overlay up: it has docked.
+            self.state.update(cx, |s, _| s.sidebar_overlay = false);
+        }
+        root = root.child(self.render_center(geometry, cx));
         if sidebar_overlay {
             root = root.child(self.render_sidebar_overlay(&theme, cx));
         }
@@ -3925,12 +4022,23 @@ impl Render for Shell {
             root = root.child(self.render_details(&target, cx));
         }
         // The right pane (three-pane rule): a flex sibling beside the chat, so
-        // it never covers it; the floating menus below paint over both.
-        let (profile, opened) = {
-            let state = self.state.read(cx);
-            (state.profile.clone(), state.profile_opened)
-        };
-        if let Some(page) = profile {
+        // it never covers it; the floating menus below paint over both. A
+        // pane on its way out keeps drawing the page it showed.
+        let page_to_draw = profile.clone().or_else(|| {
+            frame
+                .pane_sliding
+                .then(|| self.pane_page_drawn.clone())
+                .flatten()
+        });
+        if profile.is_some() {
+            self.pane_page_drawn = profile.clone();
+        }
+        if let Some(page) = page_to_draw {
+            let opened = if profile.is_some() {
+                opened
+            } else {
+                self.profile_scroll_epoch
+            };
             // A page that just filled the pane starts at the top; a popped
             // one already carries its restored offset (see `back_profile`).
             if self.profile_scroll_epoch != opened {
@@ -3950,8 +4058,26 @@ impl Render for Shell {
             if page == ProfilePage::Me && !self.settings_page_alive(cx) {
                 self.settings_page = SettingsPage::Root;
             }
-            if let Some(pane) = profiles::pane(&page, self, cx) {
-                root = root.child(pane);
+            let pane_width = self.pane_width(&page);
+            match (profiles::pane(&page, self, cx), frame.pane_sliding) {
+                (Some(pane), true) => {
+                    root = root.child(slide::pane_clip(frame.pane_visible, pane));
+                }
+                (Some(pane), false) => root = root.child(pane),
+                (None, true) => {
+                    // The page's subject is gone mid-slide: an empty pane of
+                    // the same width finishes the motion.
+                    let blank = div()
+                        .id("profile-pane")
+                        .w(px(pane_width))
+                        .flex_shrink_0()
+                        .h_full()
+                        .border_l_1()
+                        .border_color(theme.border)
+                        .bg(theme.pane());
+                    root = root.child(slide::pane_clip(frame.pane_visible, blank));
+                }
+                (None, false) => {}
             }
         }
         if let Some(menu) = sidebar::row_menu(self, cx) {
