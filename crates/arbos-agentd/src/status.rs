@@ -1830,6 +1830,96 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Jacob, "run bubble sort" (Mac, 2026-10-25 18:08 UTC, image 0.1.132): the answer went out as
+    /// a `send_message` bubble, the fresh result row it opened ended wordless, and the Mac drew
+    /// "The agent didn't answer. Ask again." under the answer. The trailing wordless row is
+    /// deleted when it holds nothing, hidden when it carries tool detail.
+    #[tokio::test]
+    async fn wordless_row_after_a_bubble_is_removed_or_hidden() {
+        use crate::agent::trim_wordless_result_row;
+        use crate::config::SendTool;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000014";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.ack_text.clear();
+            t.activity = None;
+            t.send_tool = SendTool::On;
+            agent.test_open_row(&host, t).await;
+        }
+        agent
+            .hook_send_message("Sorted: 1, 2, 3, 5, 8.", None, None)
+            .await
+            .unwrap();
+        let trailing = agent
+            .turn
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .assistant_msg_id
+            .clone();
+        assert_eq!(
+            reply_rows(&host, "m-busy").len(),
+            2,
+            "bubble + the fresh result row"
+        );
+        {
+            let h = host.lock().await;
+            h.doc.finish_message(&trailing, MessageStatus::Done);
+            assert_eq!(trim_wordless_result_row(&h.doc, &trailing), "deleted");
+        }
+        let rows = reply_rows(&host, "m-busy");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text().trim(), "Sorted: 1, 2, 3, 5, 8.");
+        // with hidden tool detail on the trailing row: kept, but hidden
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            agent.test_open_row(&host, t).await;
+        }
+        let trailing = agent
+            .turn
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .assistant_msg_id
+            .clone();
+        {
+            let h = host.lock().await;
+            h.doc.add_tool_part(
+                &trailing,
+                "c1",
+                "bash",
+                &json!({"command": "ls"}),
+                "a b",
+                None,
+                Some(3),
+                false,
+            );
+            h.doc.finish_message(&trailing, MessageStatus::Done);
+            assert_eq!(trim_wordless_result_row(&h.doc, &trailing), "hidden");
+            let m = h.doc.message(&trailing).unwrap();
+            assert_eq!(m.rest.get("hidden").and_then(Value::as_bool), Some(true));
+        }
+        // a row with words is never touched
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            agent.test_open_row(&host, t).await;
+            let id = t.assistant_msg_id.clone();
+            let h = host.lock().await;
+            h.doc.append_text(&id, &t.text_part_id, "Done.");
+            h.doc.finish_message(&id, MessageStatus::Done);
+            assert_eq!(trim_wordless_result_row(&h.doc, &id), "kept");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The send-tool switch: default on, `off` restores streamed prose, `strict` drops the fallback.
     #[test]
     fn send_tool_switch_parses() {
