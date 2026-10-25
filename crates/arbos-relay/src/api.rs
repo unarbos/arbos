@@ -2032,6 +2032,9 @@ pub struct ActivityBody {
     pub chat_id: String,
     #[serde(default)]
     pub text: Option<String>,
+    /// Jobs in flight for the chip (duplex §2.4); `null` or missing when none.
+    #[serde(default)]
+    pub jobs: Option<serde_json::Value>,
 }
 
 /// `POST /projects/{id}/activity` (box): what the agent is doing right now, in plain words
@@ -2047,6 +2050,9 @@ pub async fn set_activity(
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     let mut map = state.activity.lock().await;
+    let jobs = b
+        .jobs
+        .filter(|j| j.as_array().is_some_and(|a| !a.is_empty()));
     match b.text.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
         Some(text) => {
             map.insert(
@@ -2055,6 +2061,7 @@ pub async fn set_activity(
                     chat_id: b.chat_id,
                     text: text.chars().take(80).collect(),
                     at: arbos_core::ids::now_ms(),
+                    jobs,
                 },
             );
         }

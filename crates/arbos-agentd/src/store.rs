@@ -670,6 +670,17 @@ impl Store {
         })
     }
 
+    pub fn job(&self, id: &str) -> Result<Option<JobRow>> {
+        self.with(|c| {
+            c.query_row(
+                &format!("SELECT {} FROM jobs WHERE id = ?1", Self::JOB_COLS),
+                params![id],
+                Self::row_to_job,
+            )
+            .optional()
+        })
+    }
+
     /// Jobs of one chat, newest first.
     pub fn jobs_for_chat(&self, chat_id: &str) -> Result<Vec<JobRow>> {
         self.with(|c| {

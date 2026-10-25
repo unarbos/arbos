@@ -695,6 +695,9 @@ final class AppModel: ObservableObject {
     /// Client-minted message ids whose push the relay has not `ACK`ed (S3),
     /// keyed by chat id so one room's ACK cannot leave another chat's bubble faint.
     private var unacked: [Id: Set<Id>] = [:]
+    /// Rooms whose pushes were refused with `not_available` on the live connection.
+    /// Cleared by that room's next ACK (not by another room's ACK).
+    private var pushRefused: Set<Id> = []
     /// Rooms with a full re-read scheduled by `requestSnapshot` (one per coalesce window).
     private var snapshotPending: Set<Id> = []
     /// When each room's transcript was last re-read from its doc (`Date` seconds).
@@ -1968,6 +1971,11 @@ final class AppModel: ObservableObject {
             // Project-doc writes are not user bubbles; clearing a global set here
             // used to leave people-chat messages stuck at pending opacity.
             guard let self, !isProjectDoc else { return }
+            if self.pushRefused.remove(key) != nil {
+                if self.notice?.text == "Messages in this chat are not being delivered" {
+                    self.notice = nil
+                }
+            }
             guard self.unacked[key] != nil else { return }
             self.unacked[key] = nil
             #if DEBUG
@@ -1986,6 +1994,12 @@ final class AppModel: ObservableObject {
         }
         room.onUnavailable = { [weak self] in
             Task { @MainActor in self?.handleRoomUnavailable(key: key) }
+        }
+        room.onPushRefused = { [weak self] in
+            guard let self, !isProjectDoc else { return }
+            if self.pushRefused.insert(key).inserted {
+                self.notice = Notice(text: "Messages in this chat are not being delivered")
+            }
         }
         rooms[key] = room
         roomCreatedAt[key] = Date()
@@ -2040,6 +2054,7 @@ final class AppModel: ObservableObject {
         roomLinks[key] = nil
         roomLinkSince[key] = nil
         unacked[key] = nil
+        pushRefused.remove(key)
         roomCreatedAt[key] = nil
         roomRestoredCursors[key] = nil
         roomUnavailableFailures[key] = nil

@@ -1396,6 +1396,110 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Duplex D5 / D7: two jobs on the same path queue behind each other and the second runs
+    /// once the first releases; a `stop` with no job id cancels every open job of the chat and
+    /// the chat gets one plain "Stopped: …" line.
+    #[tokio::test]
+    async fn job_locks_queue_and_stop_all_cancels_the_chat_jobs() {
+        use crate::agent::JobSpec;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000009";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let a = JobSpec {
+            id: "job-a".into(),
+            title: "Fixing the tests".into(),
+            kind: "code".into(),
+            touches: vec!["path:/work/p/src".into()],
+        };
+        let b = JobSpec {
+            id: "job-b".into(),
+            title: "Renaming a symbol".into(),
+            kind: "code".into(),
+            touches: vec!["path:/work/p".into()],
+        };
+        let c = JobSpec {
+            id: "job-c".into(),
+            title: "Searching the web".into(),
+            kind: "research".into(),
+            touches: vec![],
+        };
+        agent
+            .store
+            .insert_job(
+                "job-a",
+                chat,
+                "m-busy",
+                &a.title,
+                "code",
+                "brief enough for the worker",
+                &a.touches,
+            )
+            .unwrap();
+        agent
+            .store
+            .insert_job(
+                "job-b",
+                chat,
+                "m-busy",
+                &b.title,
+                "code",
+                "brief enough for the worker",
+                &b.touches,
+            )
+            .unwrap();
+        let held = agent.acquire_job_locks(&a).await;
+        assert_eq!(held, vec!["path:/work/p/src".to_owned()]);
+        // c touches nothing: never waits
+        assert!(agent.acquire_job_locks(&c).await.is_empty());
+        // b conflicts with a (parent path): blocked until a releases
+        let a2 = agent.clone();
+        let b2 = b.clone();
+        let waiter = tokio::spawn(async move { a2.acquire_job_locks(&b2).await });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(!waiter.is_finished(), "b must wait for a");
+        assert_eq!(
+            agent
+                .store
+                .jobs_for_chat(chat)
+                .unwrap()
+                .iter()
+                .find(|j| j.id == "job-b")
+                .unwrap()
+                .last_step,
+            "Waiting for Fixing the tests"
+        );
+        agent.release_job_locks("job-a").await;
+        let got = tokio::time::timeout(Duration::from_secs(3), waiter)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got, vec!["path:/work/p".to_owned()]);
+        agent.release_job_locks("job-b").await;
+        // stop-all: both jobs (queued / running, no worker yet) are cancelled; one plain line
+        agent.store.set_job_state("job-a", "running", None).unwrap();
+        let (msg_id, _cmd) = send_cmd(&host, "stop");
+        let stop = CommandView {
+            id: ulid(),
+            kind: "stop".into(),
+            payload: json!({ "messageId": msg_id }),
+            issued_by: "dev-mac".into(),
+            issued_at: arbos_core::ids::now_ms(),
+            status: "pending".into(),
+        };
+        agent.handle_command(chat, stop).await.unwrap();
+        let jobs = agent.store.jobs_for_chat(chat).unwrap();
+        assert!(jobs.iter().all(|j| j.state == "cancelled"), "{jobs:?}");
+        let rows = reply_rows(&host, &msg_id);
+        assert_eq!(rows.len(), 1, "one stop line");
+        let text = rows[0].text();
+        assert!(text.starts_with("Stopped: "), "{text}");
+        assert!(
+            text.contains("fixing the tests") && text.contains("renaming a symbol"),
+            "{text}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The send-tool switch: default on, `off` restores streamed prose, `strict` drops the fallback.
     #[test]
     fn send_tool_switch_parses() {

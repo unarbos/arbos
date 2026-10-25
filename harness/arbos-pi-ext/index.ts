@@ -40,7 +40,7 @@ const CODE_MODE = (process.env.ARBOS_CODE_MODE ?? "off").trim().toLowerCase() ==
 // Default deadline of a `codemode` script when the model sets none (code mode on): the turn deadline.
 const SCRIPT_TIMEOUT_MS = Number(process.env.ARBOS_SCRIPT_TIMEOUT_MS ?? 15 * 60 * 1000);
 // Tools that talk to the user or to agentd's turn state: direct calls only, never from a script.
-const DIRECT_ONLY_TOOLS = new Set(["route", "ask_user", "send_message", "start_job", "list_jobs", "mcp__arbos__ask_user"]);
+const DIRECT_ONLY_TOOLS = new Set(["route", "ask_user", "send_message", "start_job", "list_jobs", "steer_job", "stop_job", "mcp__arbos__ask_user"]);
 // pi's built-in tools inside a `codemode` script: these keep their plain `tools.<name>`.
 const PI_BUILTIN_TOOLS = new Set(["read", "bash", "edit", "write", "grep", "find", "ls", "codemode"]);
 // Stable prefix (D87): with it on, the working set, the per-turn skills and project memory are
@@ -518,6 +518,47 @@ export default function arbosPiExt(pi: ExtensionAPI) {
       }
       const jobs = (res as { jobs?: unknown[] } | undefined)?.jobs ?? [];
       return { content: [{ type: "text", text: jobs.length ? JSON.stringify(jobs) : "No jobs in this chat." }], details: undefined };
+    },
+  });
+
+  if (SESSION_ROLE === "main") pi.registerTool({
+    name: "steer_job",
+    label: "Steer job",
+    description: "Send a correction into a running job (\"only group lessons under $70\"). `job_id` from list_jobs, or \"latest\" for the newest running job. Ack to the user yourself in one line.",
+    promptSnippet: "steer_job: a mid-flight correction to a running job",
+    parameters: Type.Object({
+      job_id: Type.String({ description: "Job id, or \"latest\"" }),
+      text: Type.String({ description: "The correction, as an instruction to the worker" }),
+    }),
+    exposure: "model-only",
+    executionMode: "sequential",
+    async execute(_toolCallId, params) {
+      const res = await hook("/hook/steer_job", { session_id: sessionId, job_id: params.job_id, text: params.text });
+      if (res && !res.ok) {
+        return { content: [{ type: "text", text: `Not steered (${res.error ?? "unknown"}). Start a new job for it, or tell the user.` }], details: undefined };
+      }
+      const job = (res as { job?: { job_id?: string; title?: string } } | undefined)?.job;
+      return { content: [{ type: "text", text: `Steered job ${job?.job_id ?? "?"} (${job?.title ?? ""}). Tell the user in one line what changed, then end the turn.` }], details: undefined };
+    },
+  });
+
+  if (SESSION_ROLE === "main") pi.registerTool({
+    name: "stop_job",
+    label: "Stop job",
+    description: "Stop a running job: `job_id` from list_jobs, \"latest\" for the newest running job, or \"all\" for every job of this chat. Confirm to the user yourself in one line; no result will follow.",
+    promptSnippet: "stop_job: stop one job (id | latest) or all",
+    parameters: Type.Object({
+      job_id: Type.String({ description: "Job id, \"latest\" or \"all\"" }),
+    }),
+    exposure: "model-only",
+    executionMode: "sequential",
+    async execute(_toolCallId, params) {
+      const res = await hook("/hook/stop_job", { session_id: sessionId, job_id: params.job_id });
+      if (res && !res.ok) {
+        return { content: [{ type: "text", text: `Nothing stopped (${res.error ?? "unknown"}).` }], details: undefined };
+      }
+      const stopped = ((res as { result?: { stopped?: string[] } } | undefined)?.result?.stopped) ?? [];
+      return { content: [{ type: "text", text: `Stopped: ${stopped.join(", ") || "nothing"}. Confirm to the user in one line.` }], details: undefined };
     },
   });
 
