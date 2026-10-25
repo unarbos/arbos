@@ -8,8 +8,8 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    actions, div, list, prelude::*, px, Animation, AnimationExt, AnyElement, App, Bounds, Context,
-    Div, Entity, FontWeight, ListAlignment, ListScrollEvent, ListState, MouseButton,
+    actions, canvas, div, list, prelude::*, px, Animation, AnimationExt, AnyElement, App, Bounds,
+    Context, Div, Entity, FontWeight, ListAlignment, ListScrollEvent, ListState, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, SharedString, Stateful,
     TextRun, Window,
 };
@@ -657,6 +657,20 @@ pub struct Transcript {
     rig_select: Option<(String, Instant)>,
     /// Vertical click-drag scroll over bubbles / empty rows.
     drag_scroll: Option<DragScroll>,
+    /// Where every painted row and the list's viewport were in the last
+    /// frame, recorded during prepaint. The rail of a multi-row bubble is
+    /// placed from these: the list's own state cannot be queried from inside
+    /// its render (`ListState::bounds_for_item` borrows the `RefCell` the
+    /// list holds while it lays its items out — v0.6.224 crashed on launch,
+    /// [feedback bubble-rail-crash-hotfix-2026-10-25]).
+    measured: Rc<std::cell::RefCell<Measured>>,
+}
+
+/// Last-frame geometry, by row id, plus the transcript's viewport.
+#[derive(Default)]
+struct Measured {
+    rows: HashMap<String, Bounds<Pixels>>,
+    viewport: Bounds<Pixels>,
 }
 
 impl Transcript {
@@ -714,6 +728,7 @@ impl Transcript {
                 (spec, Instant::now() + Duration::from_millis(after))
             }),
             drag_scroll: None,
+            measured: Rc::default(),
         }
     }
 
@@ -905,9 +920,11 @@ impl Transcript {
         if first == ix {
             return None;
         }
-        let last = self.list.bounds_for_item(ix)?;
-        let rows: Vec<Option<Bounds<Pixels>>> =
-            (first..ix).map(|i| self.list.bounds_for_item(i)).collect();
+        let measured = self.measured.borrow();
+        let last = *measured.rows.get(&self.rows[ix].id)?;
+        let rows: Vec<Option<Bounds<Pixels>>> = (first..ix)
+            .map(|i| measured.rows.get(&self.rows[i].id).copied())
+            .collect();
         let top_inset = ROW_GAP_HALF
             + if self.is_turn_start(first) {
                 TURN_GAP_EXTRA
@@ -917,9 +934,33 @@ impl Transcript {
         Some(rail_centre(
             &rows,
             last,
-            self.list.viewport_bounds(),
+            measured.viewport,
             (px(top_inset), px(ROW_GAP_HALF)),
         ))
+    }
+
+    /// An invisible, out-of-flow child that records where its parent was
+    /// painted this frame (runs in prepaint with the parent's bounds): a row
+    /// under `Some(row id)`, the transcript's viewport under `None`.
+    fn measure_into(
+        measured: &Rc<std::cell::RefCell<Measured>>,
+        key: Option<String>,
+    ) -> impl IntoElement {
+        let measured = measured.clone();
+        canvas(
+            move |bounds, _, _| {
+                let mut m = measured.borrow_mut();
+                match key {
+                    Some(id) => {
+                        m.rows.insert(id, bounds);
+                    }
+                    None => m.viewport = bounds,
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full()
     }
 
     /// The first row of a message from a new sender opens the turn gap; a
@@ -2454,10 +2495,12 @@ impl Transcript {
         let highlighted =
             self.state.read(cx).highlight_message.as_deref() == Some(row.message_id.as_str());
         let turn_start = self.is_turn_start(ix);
+        let measure = Self::measure_into(&self.measured, Some(row_frame_id.clone()));
         div()
             .id(SharedString::from(format!("{row_frame_id}#frame")))
             .relative()
             .w_full()
+            .child(measure)
             .child(
                 column_row(inner)
                     .when(turn_start, |el| el.pt(px(TURN_GAP_EXTRA)))
@@ -2556,6 +2599,7 @@ impl Render for Transcript {
             .size_full()
             .key_context("Transcript")
             .track_focus(&focus)
+            .child(Self::measure_into(&self.measured, None))
             .on_action(cx.listener(Self::copy_selection))
             .on_scroll_wheel(cx.listener(|this, event, _, cx| this.on_wheel(event, cx)))
             // Drag-scroll: move/up live on the transcript so a drag that
@@ -5823,6 +5867,194 @@ mod layout_tests {
         assert_eq!(margin, composer_margin, "one side margin");
         assert_eq!(margin, 16.0, "Grok: 16 pt from the pane");
         assert_eq!(cap, input + 2.0 * circle, "the pill at its widest");
+    }
+}
+
+#[cfg(test)]
+mod transcript_smoke_tests {
+    //! The real `Transcript` — the entity the shell mounts, with a real
+    //! `AppState` — rendered in a headless GPUI window, with a multi-block
+    //! agent reply, hovered. The guard that would have caught v0.6.224's
+    //! launch crash ([feedback bubble-rail-crash-hotfix-2026-10-25]:
+    //! `ListState::bounds_for_item` called from inside the list's render →
+    //! "RefCell already mutably borrowed"): every other transcript test
+    //! renders rows or blocks on their own, never the list.
+    use futures::future::BoxFuture;
+    use gpui::{point, Modifiers, TestAppContext};
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::sync::{ClientCommand, SyncEvent, SyncSource};
+
+    /// A source that never speaks: the test seeds the state by hand.
+    struct Idle;
+
+    impl SyncSource for Idle {
+        fn name(&self) -> &'static str {
+            "idle"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            _commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    struct Host {
+        transcript: Entity<Transcript>,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .bg(gpui::black())
+                .child(self.transcript.clone())
+        }
+    }
+
+    const LONG_REPLY: &str = "Arbos, from where I sat:\n\n**What worked**\n- Authority held: three guest agents deferred to the owner's call every time.\n- The handoff lines read cleanly; nobody asked who was speaking.\n\n**What did not**\n- The group lost the thread twice when two agents answered at once.\n- One attachment never rendered on the phone.\n\nTell me which of these you want first.";
+
+    fn message(id: &str, role: &str, text: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "chatId": "c1",
+            "role": role,
+            "sender": if role == "user" { "user" } else { "box:1" },
+            "status": "done",
+            "createdAt": at,
+            "completedAt": at + 1_000,
+            "parts": [{ "id": format!("{id}-t"), "kind": "text", "text": text }],
+        }))
+        .expect("message")
+    }
+
+    /// A transcript over a seeded state: one agent chat with a user line and
+    /// a five-block reply. Returns the runtime (kept alive for the state's
+    /// tokio workers), the state and the transcript; the caller opens the window.
+    fn mount(
+        cx: &mut TestAppContext,
+    ) -> (
+        tokio::runtime::Runtime,
+        Entity<AppState>,
+        Entity<Transcript>,
+    ) {
+        // A runtime nobody drives: the state's tokio workers (source, updater,
+        // calls) are parked for good, so no other thread ever touches gpui's
+        // deterministic test scheduler.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| {
+            gpui_tokio::init_from_handle(cx, handle);
+            cx.set_global(Theme::dark(crate::ui::theme::Surface::Matte));
+            if !cx.has_global::<PulseClock>() {
+                PulseClock::init(cx);
+            }
+        });
+        let state = cx.new(|cx| AppState::new(Box::new(Idle), cx));
+        let t = 1_700_000_000_000u64;
+        state.update(cx, |s, cx| {
+            s.projects.push(Project {
+                id: "p1".into(),
+                name: "Arbos".into(),
+                kind: SpaceKind::Project,
+                ..Project::default()
+            });
+            let chat: Chat = serde_json::from_value(serde_json::json!({
+                "id": "c1", "project_id": "p1", "title": "Main", "is_pinned": true,
+                "is_system": false, "unread": false, "last_message_at": t,
+            }))
+            .expect("chat");
+            s.chats.insert("p1".into(), vec![chat]);
+            s.messages.insert(
+                "c1".into(),
+                vec![
+                    message("m1", "user", "How did the review go?", t),
+                    message("m2", "assistant", LONG_REPLY, t + 2_000),
+                ],
+            );
+            s.selected_project = Some("p1".into());
+            s.active_tab.insert("p1".into(), "c1".into());
+            cx.notify();
+        });
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        transcript.update(cx, |t, cx| t.sync(cx));
+        (rt, state, transcript)
+    }
+
+    /// The list renders the reply as block rows (no panic, every block drawn),
+    /// and hovering the middle of the bubble shows the rail at the bubble's
+    /// vertical centre — the whole of #1674 on the real transcript.
+    #[gpui::test]
+    fn a_multi_block_reply_renders_and_its_rail_sits_at_the_bubbles_centre(
+        cx: &mut TestAppContext,
+    ) {
+        let (_rt, _state, transcript) = mount(cx);
+        let (_host, vcx) = cx.add_window_view(|_, _| Host {
+            transcript: transcript.clone(),
+        });
+        vcx.run_until_parked();
+        let rows: Vec<(String, bool)> = transcript.read_with(&*vcx, |t, _| {
+            t.rows
+                .iter()
+                .filter(|r| r.message_id == "m2")
+                .map(|r| (r.id.clone(), matches!(r.kind, RowKind::Markdown { .. })))
+                .collect()
+        });
+        let block_rows: Vec<String> = rows
+            .iter()
+            .filter(|(_, md)| *md)
+            .map(|(id, _)| id.clone())
+            .collect();
+        assert_eq!(block_rows.len(), 6, "six markdown blocks: {rows:?}");
+        let bubble = vcx
+            .debug_bounds("chat-bubble-assistant")
+            .expect("the reply's bubble is drawn");
+        // Every block row was measured by the frame.
+        let measured: Vec<Option<Bounds<Pixels>>> = transcript.read_with(&*vcx, |t, _| {
+            let m = t.measured.borrow();
+            block_rows
+                .iter()
+                .map(|id| m.rows.get(id).copied())
+                .collect()
+        });
+        assert!(measured.iter().all(Option::is_some), "{measured:?}");
+        let top = measured.iter().flatten().map(|b| b.top()).min().unwrap();
+        let bottom = measured.iter().flatten().map(|b| b.bottom()).max().unwrap();
+        assert!(
+            bottom - top > px(150.0),
+            "the bubble is tall: {top:?}..{bottom:?}"
+        );
+        // Hover the middle block: the rail shows, centred on the whole bubble.
+        let middle = point(bubble.left() + px(40.0), (top + bottom) / 2.0);
+        vcx.simulate_mouse_move(middle, None, Modifiers::default());
+        vcx.run_until_parked();
+        for _ in 0..3 {
+            transcript.update(vcx, |_, cx| cx.notify());
+            vcx.run_until_parked();
+        }
+        let rail = vcx.debug_bounds("bubble-rail").expect("rail frame drawn");
+        let rail_centre = f32::from(rail.top() + rail.bottom()) / 2.0;
+        let bubble_centre = f32::from(top + bottom) / 2.0;
+        assert!(
+            (rail_centre - bubble_centre).abs() <= RAIL_BUTTON,
+            "rail centre {rail_centre} vs bubble centre {bubble_centre} (rows {top:?}..{bottom:?})"
+        );
+        assert!(
+            f32::from(rail.left()) >= f32::from(bubble.right()) - 1.0,
+            "the rail hangs off the bubble's right edge"
+        );
+        let hovered = transcript.read_with(&*vcx, |t, _| t.hover.over.clone());
+        assert!(
+            hovered.as_ref().is_some_and(|(k, _)| k == "m2#bubble"),
+            "the bubble is the hovered key: {hovered:?}"
+        );
     }
 }
 
