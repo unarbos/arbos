@@ -149,6 +149,15 @@ pub async fn get(
     serve(&state, &project_id, &key).await
 }
 
+/// The whole stored blob in memory (access already checked by the caller); `None` when there is
+/// no such blob. For small things only — the avatar setter copying a 512 px preview.
+pub async fn read(state: &AppState, slot: &str, key: &str) -> Option<Vec<u8>> {
+    if !safe_key(key) || !safe_key(slot) {
+        return None;
+    }
+    tokio::fs::read(blob_path(state, slot, key)).await.ok()
+}
+
 /// Stream one stored blob (access already checked by the caller).
 pub async fn serve(state: &AppState, slot: &str, key: &str) -> Response {
     if !safe_key(key) || !safe_key(slot) {
