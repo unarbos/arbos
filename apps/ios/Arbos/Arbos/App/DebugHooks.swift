@@ -43,6 +43,8 @@ enum DebugHooks {
     /// Tasks-chip rig (duplex §2.4): the first n of three background jobs open in the opened
     /// agent chat — 1 running with a step, 2 running with no step yet, 3 queued behind a lock.
     static var fixtureJobs: Int { min(3, value("ARBOS_FIXTURE_JOBS").flatMap { Int($0) } ?? 0) }
+    /// Job-tab rig: the first seeded job's document is finished (result delivered).
+    static var fixtureRolloutDone: Bool { value("ARBOS_FIXTURE_ROLLOUT_DONE") == "1" }
     /// #1592 rig: the fixture group holds someone else's agent ("TestAgent", run by @sami —
     /// in the roster, not in my projects) with one bubble; with `ARBOS_FIXTURE_WORKING` it works.
     static var fixtureForeignAgent: Bool { value("ARBOS_FIXTURE_FOREIGN_AGENT") == "1" }

@@ -304,7 +304,7 @@ extension AppModel {
                 list.append(Job(id: seed.id, title: seed.title, state: seed.state, step: seed.step, elapsedS: seed.elapsed,
                                 askMessageId: ask, chatId: c))
             }
-            jobs[projectId] = list
+            applyJobs(projectId: projectId, list)
         }
         // `ARBOS_FIXTURE_TYPING=1|<handle>[,<handle>…]`: those people type in every fixture
         // people chat for the whole launch (`1` = the DM's other person / the group's first).
