@@ -1503,6 +1503,7 @@ private struct ChatSession: View {
                         messagesCount: messages.count,
                         canReply: { isMessageRow($0) },
                         onQuoteTap: { revealQuoted($0) },
+                        onReplyCountTap: { openThread(for: $0) },
                         onMenu: { runMessageMenu($0, row: $1) },
                         actionsRowId: actionsRow?.id,
                         onLongPress: { row in
@@ -2936,6 +2937,8 @@ private struct TranscriptRows: View, Equatable {
     let messagesCount: Int
     let canReply: (Row) -> Bool
     let onQuoteTap: (Id) -> Void
+    /// Tap the reply-count badge → same thread sheet as long-press View thread.
+    let onReplyCountTap: (Row) -> Void
     let onMenu: (MessageMenuItem, Row) -> Void
     /// The bubble whose long-press actions are open (it alone reports its frame).
     let actionsRowId: String?
@@ -2972,6 +2975,7 @@ private struct TranscriptRows: View, Equatable {
             let reply = canReply(row)
             RowView(model: model, theme: theme, composerInset: composerInset, row: row, chatId: chatId, width: width, timeReveal: timeReveal,
                     onQuoteTap: onQuoteTap,
+                    onReplyCountTap: { onReplyCountTap(row) },
                     highlighted: highlightedMessage == row.messageId,
                     mentions: mentions)
                 .equatable()

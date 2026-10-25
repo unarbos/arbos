@@ -928,6 +928,8 @@ struct RowView: View, Equatable {
     var timeReveal: CGFloat = 0
     /// A tap on a reply bubble's quote header: the chat scrolls to this message id.
     var onQuoteTap: ((Id) -> Void)? = nil
+    /// A tap on the reply-count badge: opens this message's reply thread.
+    var onReplyCountTap: (() -> Void)? = nil
     /// Briefly tinted after a quote tap landed on this row's message.
     var highlighted: Bool = false
     /// Shared mention table from ChatView (built once per directory sync).
@@ -1214,15 +1216,24 @@ struct RowView: View, Equatable {
     }
 
     /// Reply count in the bubble's top-right corner when this message has replies.
+    /// Tap opens the same thread sheet as long-press → View thread.
     @ViewBuilder
     private func replyCountBadge(userBubble: Bool) -> some View {
         if row.replyCount > 0 {
-            Text("\(row.replyCount)")
-                .font(theme.font(11, weight: .semibold))
-                .foregroundStyle(userBubble ? theme.userText.opacity(0.7) : theme.muted)
-                .padding(.top, 6)
-                .padding(.trailing, 8)
-                .accessibilityLabel("\(row.replyCount) \(row.replyCount == 1 ? "reply" : "replies")")
+            let label = "\(row.replyCount) \(row.replyCount == 1 ? "reply" : "replies")"
+            Button {
+                onReplyCountTap?()
+            } label: {
+                Text("\(row.replyCount)")
+                    .font(theme.font(11, weight: .semibold))
+                    .foregroundStyle(userBubble ? theme.userText.opacity(0.7) : theme.muted)
+                    .padding(.top, 6)
+                    .padding(.trailing, 8)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(label)
+            .accessibilityHint("Opens the reply thread")
         }
     }
 
