@@ -3419,10 +3419,22 @@ final class AppModel: ObservableObject {
         Task { try? await api.leaveChat(chatId) }
     }
 
-    /// Rename a people group and/or set its picture blob key or description (`PATCH /chats/{id}`).
-    func patchPeopleChat(_ chatId: String, title: String? = nil, imageKey: String? = nil, description: String? = nil) async -> Bool {
+    /// Rename a people group and/or set its picture blob key, description, or read-receipt policy (`PATCH /chats/{id}`).
+    func patchPeopleChat(
+        _ chatId: String,
+        title: String? = nil,
+        imageKey: String? = nil,
+        description: String? = nil,
+        membersSeeReads: Bool? = nil
+    ) async -> Bool {
         do {
-            let chat = try await api.patchPeopleChat(chatId, title: title, imageKey: imageKey, description: description)
+            let chat = try await api.patchPeopleChat(
+                chatId,
+                title: title,
+                imageKey: imageKey,
+                description: description,
+                membersSeeReads: membersSeeReads
+            )
             if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
                 peopleChats[i] = chat
             } else {
@@ -3432,6 +3444,18 @@ final class AppModel: ObservableObject {
         } catch {
             notice = Notice(text: "Could not update group: \(error.localizedDescription)")
             return false
+        }
+    }
+
+    /// Owner/admin: whether members can see who has read messages in this group.
+    func setMembersSeeReads(_ chatId: String, _ on: Bool) async {
+        if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+            peopleChats[i].membersSeeReads = on
+        }
+        guard !isFixture else { return }
+        let ok = await patchPeopleChat(chatId, membersSeeReads: on)
+        if !ok, let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+            peopleChats[i].membersSeeReads = !on
         }
     }
 

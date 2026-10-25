@@ -721,6 +721,7 @@ mod tests {
             avatar_leaf: None,
             avatar_leaf_color: None,
             description: None,
+            members_see_reads: true,
         };
         state.db.insert_people_chat(&chat).unwrap();
         state
