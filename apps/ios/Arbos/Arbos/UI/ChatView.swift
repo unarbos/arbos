@@ -341,8 +341,8 @@ private struct ChatSession: View {
         calls.isActive && !calls.isPresented && calls.call?.kind == .voice && calls.call?.chatId == chatId
     }
     private var headerExtra: CGFloat { (hasCallBar ? 52 : 0) + (hasInCallBar ? 56 : 0) + (showSearch ? 46 : 0) }
-    /// Member chips under the header: groups only. A 1:1 DM already names the peer in the pill.
-    private var showsMemberChips: Bool { people?.isGroup == true }
+    /// Member chips under the header — off on iPhone (feedback ABDgl8tFlqeUlwP4DihfYhk).
+    private var showsMemberChips: Bool { false }
 
     private func startCall(_ kind: CallKind, ring: [String]? = nil) {
         Task { await calls.start(chatId: chatId, projectId: isPeople ? nil : projectId, kind: kind, title: callTitle, ring: ring) }
