@@ -18,6 +18,92 @@ use arbos_core::ids::{now_ms, ulid};
 
 use crate::agent::{Agent, TurnKind};
 
+/// The `[Arbos] … replied` notice the main agent turns into one plain answer for the user.
+pub(crate) fn agent_reply_prompt(
+    from_name: &str,
+    status: &str,
+    original: &str,
+    text: &str,
+) -> String {
+    match status {
+        "done" => format!(
+            "[Arbos] {from_name} replied to the message you sent (\"{}\"):\n<<<\n{}\n>>>\n\nRoute `reply` and pass {from_name}'s answer on to the user in one to three plain sentences, as a colleague would (\"{from_name} says …\"). Quote only what matters. Do not message {from_name} again unless the user asks.",
+            clip(original, 400),
+            clip(text, 4000)
+        ),
+        "empty" => format!(
+            "[Arbos] {from_name} received your message (\"{}\") but wrote nothing back. Route `reply` and tell the user in one sentence.",
+            clip(original, 400)
+        ),
+        _ => format!(
+            "[Arbos] {from_name} could not answer your message (\"{}\"): its turn failed. Route `reply` and tell the user in one sentence; offer to try again.",
+            clip(original, 400)
+        ),
+    }
+}
+
+/// Hand-off rows whose reply arrived but was not yet told to the user (#1780), oldest first:
+/// `(row id, from, status, original, text)`.
+pub(crate) fn pending_agent_replies(
+    rows: &[arbos_core::doc::MessageView],
+) -> Vec<(String, String, String, String, String)> {
+    rows.iter()
+        .filter_map(|m| {
+            let r = m.rest.get("agentReply")?;
+            if r.get("relayed").and_then(Value::as_bool) == Some(true) {
+                return None;
+            }
+            Some((
+                m.id.clone(),
+                str_field(r, "from").unwrap_or_else(|| "the agent".into()),
+                str_field(r, "status").unwrap_or_else(|| "done".into()),
+                str_field(r, "original").unwrap_or_default(),
+                str_field(r, "text").unwrap_or_default(),
+            ))
+        })
+        .collect()
+}
+
+pub(crate) fn mark_agent_reply_relayed(doc: &arbos_core::doc::ChatDoc, row_id: &str) {
+    if let Some(mut r) = doc
+        .message(row_id)
+        .and_then(|m| m.rest.get("agentReply").cloned())
+    {
+        r["relayed"] = json!(true);
+        doc.set_message_fields(row_id, &[("agentReply", r)]);
+    }
+}
+
+/// The note a user turn carries for replies that arrived before it ran (#1780): the user's
+/// question about them is answered from here, once, instead of "nothing yet" plus a second bubble.
+pub(crate) fn pending_replies_note(pending: &[(String, String, String, String, String)]) -> String {
+    if pending.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from(
+        "[Replies that already arrived from other agents — not yet told to the user; if the user asks about them, this is the answer (one answer, never \"nothing yet\"):]\n",
+    );
+    for (_, from, status, original, text) in pending {
+        match status.as_str() {
+            "done" => s.push_str(&format!(
+                "- {from} replied to \"{}\": {}\n",
+                clip(original, 200),
+                clip(text, 1500)
+            )),
+            "empty" => s.push_str(&format!(
+                "- {from} received \"{}\" and wrote nothing back.\n",
+                clip(original, 200)
+            )),
+            _ => s.push_str(&format!(
+                "- {from} could not answer \"{}\" (its turn failed).\n",
+                clip(original, 200)
+            )),
+        }
+    }
+    s.push_str("[End of arrived replies]\n\n");
+    s
+}
+
 fn str_field(v: &Value, k: &str) -> Option<String> {
     v.get(k).and_then(Value::as_str).map(str::to_owned)
 }
@@ -459,28 +545,56 @@ impl Agent {
             &text,
             Some(&json!({ "from_name": from_name, "id": mid, "status": status })),
         );
-        let prompt = match status.as_str() {
-            "done" => format!(
-                "[Arbos] {from_name} replied to the message you sent (\"{}\"):\n<<<\n{}\n>>>\n\nRoute `reply` and pass {from_name}'s answer on to the user in one to three plain sentences, as a colleague would (\"{from_name} says …\"). Quote only what matters. Do not message {from_name} again unless the user asks.",
-                clip(&original, 400),
-                clip(&text, 4000)
-            ),
-            "empty" => format!(
-                "[Arbos] {from_name} received your message (\"{}\") but wrote nothing back. Route `reply` and tell the user in one sentence.",
-                clip(&original, 400)
-            ),
-            _ => format!(
-                "[Arbos] {from_name} could not answer your message (\"{}\"): its turn failed. Route `reply` and tell the user in one sentence; offer to try again.",
-                clip(&original, 400)
-            ),
+        // #1780: the reply is pinned on the hand-off row until one turn has told the user. A
+        // user turn that starts (or runs) meanwhile folds it in and marks it relayed, so the
+        // notice turn behind it never posts a second answer ("nothing yet" + the reply).
+        if let Some(id) = &row_id {
+            let h = host.lock().await;
+            h.doc.set_message_fields(
+                id,
+                &[(
+                    "agentReply",
+                    json!({ "from": from_name, "status": status, "original": clip(&original, 400), "text": clip(&text, 4000), "relayed": false }),
+                )],
+            );
+        }
+        let prompt = agent_reply_prompt(&from_name, &status, &original, &text);
+        // A user turn is running in this chat: steer it with the reply instead of answering
+        // after it (the user may be asking about this very reply).
+        let running_user_turn_here = {
+            let tl = self.turn.lock().await;
+            matches!(tl.as_ref(), Some(t) if t.chat_id == chat_id && !t.reply_only && !t.stopped)
         };
+        if running_user_turn_here {
+            if let Ok(pi) = self.pi_child().await {
+                if let Some(id) = &row_id {
+                    let h = host.lock().await;
+                    mark_agent_reply_relayed(&h.doc, id);
+                }
+                tracing::info!(chat = %chat_id, from = %from_name, "agent reply steered into the running user turn");
+                return self
+                    .steer_running_turn(
+                        &chat_id,
+                        &pi,
+                        &format!("{prompt}\n\nThis arrived while you were answering: if the user asked about it, answer with it — one answer, never \"nothing yet\" followed by the reply."),
+                    )
+                    .await;
+            }
+        }
         let kind = TurnKind::SubagentResult {
             subagent_id: format!("agent-message:{mid}"),
             name: from_name.clone(),
             status: status.clone(),
         };
-        self.run_notice_turn(&chat_id, &host, &in_reply_to, &prompt, kind)
-            .await
+        self.run_notice_turn_unless_relayed(
+            &chat_id,
+            &host,
+            &in_reply_to,
+            &prompt,
+            kind,
+            row_id.as_deref(),
+        )
+        .await
     }
 
     /// `agent_message_paused` push: the other side hit the per-pair cap; one muted line here too.
@@ -542,7 +656,11 @@ pub fn mention_address(text: &str) -> Option<(String, String)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{clip, mention_address};
+    use super::{
+        agent_reply_prompt, clip, mark_agent_reply_relayed, mention_address, pending_agent_replies,
+        pending_replies_note,
+    };
+    use serde_json::json;
 
     #[test]
     fn clip_keeps_short_text_and_marks_long() {
@@ -564,5 +682,55 @@ mod tests {
         assert_eq!(mention_address("@testagent"), None);
         assert_eq!(mention_address("Waiting on @testagent's reply"), None);
         assert_eq!(mention_address(&format!("@x {}", "a".repeat(200))), None);
+    }
+
+    /// #1780 (eval g2 turn 2): "What did lane-b say back?" got "Nothing has come back yet" and
+    /// then the relayed reply. A reply that arrived is pinned on the hand-off row until one turn
+    /// has told the user: a user turn folds it into its prompt and marks it, the notice turn
+    /// behind it finds the mark and skips.
+    #[test]
+    fn arrived_reply_is_told_once() {
+        let doc = arbos_core::doc::ChatDoc::new(None, false);
+        doc.transact(|d| {
+            d.append_user_message("u1", "say hello to lane-b", "dev", &Default::default())
+                .unwrap();
+            d.start_assistant_message("h1", "u1", "box:1");
+            d.set_message_fields(
+                "h1",
+                &[
+                    ("subagentName", json!("lane-b")),
+                    ("handoffMessages", json!(2)),
+                    (
+                        "agentReply",
+                        json!({ "from": "lane-b", "status": "done", "original": "hello, how is your day?", "text": "My day is fine, thanks.", "relayed": false }),
+                    ),
+                ],
+            );
+            d.append_user_message("u2", "What did lane-b say back?", "dev", &Default::default())
+                .unwrap();
+        });
+        let pending = pending_agent_replies(&doc.messages());
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].1, "lane-b");
+        let note = pending_replies_note(&pending);
+        assert!(note.starts_with("[Replies that already arrived from other agents"));
+        assert!(note
+            .contains("- lane-b replied to \"hello, how is your day?\": My day is fine, thanks."));
+        assert!(note.contains("never \"nothing yet\""));
+        assert!(note.ends_with("[End of arrived replies]\n\n"));
+        mark_agent_reply_relayed(&doc, "h1");
+        assert!(
+            pending_agent_replies(&doc.messages()).is_empty(),
+            "told once: nothing pending"
+        );
+        assert_eq!(
+            doc.message("h1").unwrap().rest["agentReply"]["relayed"],
+            json!(true)
+        );
+        assert_eq!(pending_replies_note(&[]), "");
+        // The notice prompt and the router agree on one answer per ask.
+        assert!(agent_reply_prompt("lane-b", "done", "hello", "fine")
+            .contains("[Arbos] lane-b replied"));
+        assert!(agent_reply_prompt("lane-b", "empty", "hello", "").contains("wrote nothing back"));
     }
 }
