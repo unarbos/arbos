@@ -191,11 +191,18 @@ paths_of() {
 }
 
 # ci_state <sha> → success | pending | failed | none
+# ci_state answers are final once a run completed (success/failure): cache them on disk so newest_green does
+# not re-ask GitHub for the same 25 commits every minute (2026-10-25 15:1x: the shared PAT was dry and this was
+# the biggest steady consumer on the relay host, up to 25 billed calls per tick while main's recent CI was
+# pending or red). Only `pending`/`none` are re-asked.
+CI_STATE_CACHE="$STATE/ci-state.cache"
 ci_state() {
-  local runs
+  local runs cached state
+  cached="$(grep -m1 "^$1 " "$CI_STATE_CACHE" 2>/dev/null | cut -d' ' -f2)"
+  if [[ "$cached" == "success" || "$cached" == "failed" ]]; then echo "$cached"; return; fi
   runs="$(gh_api "/actions/workflows/ci.yml/runs?head_sha=$1&per_page=5" 2>/dev/null || true)"
   [[ -n "$runs" ]] || { echo none; return; }
-  python3 - "$runs" <<'EOF'
+  state="$(python3 - "$runs" <<'EOF'
 import json, sys
 runs = json.loads(sys.argv[1]).get("workflow_runs", [])
 runs = [r for r in runs if r.get("event") == "push"] or runs
@@ -209,6 +216,11 @@ elif r.get("conclusion") == "success":
 else:
     print("failed")
 EOF
+)"
+  if [[ "$state" == "success" || "$state" == "failed" ]]; then
+    mkdir -p "$STATE"; { grep -v "^$1 " "$CI_STATE_CACHE" 2>/dev/null; echo "$1 $state"; } | tail -n 400 > "$CI_STATE_CACHE.tmp" && mv "$CI_STATE_CACHE.tmp" "$CI_STATE_CACHE"
+  fi
+  echo "$state"
 }
 
 commit_age_s() {
@@ -527,6 +539,85 @@ box_quiet() {
   [[ "$q" == "0" ]]
 }
 
+# A box that is never silent for 5 minutes (two users ran inference without a break 22:03–23:05 Oct 25
+# and kept 0.1.138 from finishing) is upgraded in an idle WINDOW instead: after BUSY_PASSES_BEFORE_PROBE
+# not-quiet passes the worker asks the box's own agentd (`GET {box_url}/box/state`, the mcp bearer the
+# relay uses) every IDLE_PROBE_EVERY_S whether any workspace has a turn or a job in flight, and upgrades
+# at the first window that stays idle for IDLE_SUSTAIN_S. A gap between two inference debits is NOT such
+# a window (mid-turn between tool calls); only agentd's own "no turn running, nothing waiting" is. A box
+# never idle within BUSY_SKIP_AFTER_S (summed over passes) is logged `box_busy_skipped` and left to the
+# next roll pass / the next roll.
+BUSY_PASSES_BEFORE_PROBE="${BUSY_PASSES_BEFORE_PROBE:-3}"
+IDLE_PROBE_EVERY_S="${IDLE_PROBE_EVERY_S:-15}"
+IDLE_SUSTAIN_S="${IDLE_SUSTAIN_S:-20}"
+IDLE_POLL_PER_PASS_S="${IDLE_POLL_PER_PASS_S:-600}"
+BUSY_SKIP_AFTER_S="${BUSY_SKIP_AFTER_S:-1800}"
+
+# box_idle_probe <uid> → idle | busy | unknown (asleep, no url, unreachable, unexpected body).
+box_idle_probe() {
+  local row url token preview body
+  row="$(relay_db -separator $'\t' "select coalesce(box_url,''), coalesce(mcp_token,''), coalesce(preview_token,'') from boxes where user_id='$1' limit 1" 2>/dev/null)"
+  url="${row%%$'\t'*}"; row="${row#*$'\t'}"; token="${row%%$'\t'*}"; preview="${row#*$'\t'}"
+  [[ -n "$url" && -n "$token" ]] || { echo unknown; return 0; }
+  body="$(curl -fsS --max-time 8 -H "Authorization: Bearer $token" ${preview:+-H "x-daytona-preview-token: $preview"} "$url/box/state" 2>/dev/null)" || { echo unknown; return 0; }
+  python3 -c '
+import sys, json
+try:
+    d = json.loads(sys.stdin.read())
+except Exception:
+    print("unknown"); sys.exit(0)
+ws = d.get("workspaces")
+if not isinstance(ws, list):
+    print("unknown"); sys.exit(0)
+busy = any((w.get("turn") or {}).get("running") or ((w.get("turn") or {}).get("sends_waiting") or 0) > 0 for w in ws)
+print("busy" if busy else "idle")' <<< "$body"
+}
+
+# busy_counter <uid> <target> [bump|waited <s>|reset] → prints "<passes> <waited_s>" (per box per target).
+busy_counter() {
+  local f="$STATE/roll-busy/${2//\//_}.${1//\//_}" passes=0 waited=0
+  mkdir -p "$STATE/roll-busy"
+  [[ -f "$f" ]] && read -r passes waited < "$f"
+  case "${3:-}" in
+    bump) passes=$((passes + 1)) ;;
+    waited) waited=$((waited + ${4:-0})) ;;
+    reset) rm -f "$f"; echo "0 0"; return 0 ;;
+  esac
+  echo "$passes $waited" > "$f"
+  echo "$passes $waited"
+}
+
+# wait_idle_window <uid> <target> → 0 when the box stayed idle for IDLE_SUSTAIN_S (upgrade now),
+# 1 when the per-pass budget ran out (try next pass), 2 when the box used up BUSY_SKIP_AFTER_S (skip).
+wait_idle_window() {
+  local uid="$1" target="$2" t0 idle_since=0 now state counts waited
+  t0=$(date +%s)
+  while :; do
+    now=$(date +%s)
+    counts="$(busy_counter "$uid" "$target")"; waited=${counts#* }
+    if (( waited + now - t0 >= BUSY_SKIP_AFTER_S )); then
+      busy_counter "$uid" "$target" waited $((now - t0)) >/dev/null
+      return 2
+    fi
+    if (( now - t0 >= IDLE_POLL_PER_PASS_S )); then
+      busy_counter "$uid" "$target" waited $((now - t0)) >/dev/null
+      return 1
+    fi
+    state="$(box_idle_probe "$uid")"
+    if [[ "$state" == "idle" ]]; then
+      (( idle_since == 0 )) && idle_since=$now
+      if (( now - idle_since >= IDLE_SUSTAIN_S )) && [[ "$(box_idle_probe "$uid")" == "idle" ]]; then
+        busy_counter "$uid" "$target" waited $((now - t0)) >/dev/null
+        return 0
+      fi
+    else
+      # busy, or unknown (unreachable / no url): never cut a turn on a guess — keep polling, the caps decide.
+      idle_since=0
+    fi
+    sleep "$IDLE_PROBE_EVERY_S"
+  done
+}
+
 upgrade_box() {
   ARBOS_RELAY_ADMIN_TOKEN="$(secret_from "$RELAY_ENV" ARBOS_RELAY_ADMIN_TOKEN)" ARBOSCTL_CONFIG=/tmp/none.json \
     /usr/local/bin/arbosctl --relay "$RELAY_URL" admin upgrade-box "$1" 2>&1 | tr -d '\n' | cut -c1-200
@@ -561,10 +652,28 @@ ROLL_FAILURES=0
 roll_pass() {
   # roll_pass <target> — one pass over every pending box (real first, then test), quiet ones only.
   # Returns 2 when the consecutive-failure limit stopped the roll.
-  local target="$1" uid tier outcome
+  local target="$1" uid tier outcome go counts passes
   for tier in real test; do
     for uid in $(pending_boxes "$target" "$tier" || true); do
+      go=0
       if box_quiet "$uid"; then
+        go=1
+      else
+        counts="$(busy_counter "$uid" "$target" bump)"; passes=${counts%% *}
+        if (( passes >= BUSY_PASSES_BEFORE_PROBE )); then
+          log "agentd: $uid not quiet for $passes passes; polling its agentd for an idle window (every ${IDLE_PROBE_EVERY_S}s, idle ${IDLE_SUSTAIN_S}s, up to ${BUSY_SKIP_AFTER_S}s in all)"
+          wait_idle_window "$uid" "$target"
+          case $? in
+            0) go=1; log "agentd: $uid idle (no turn or job in flight for ${IDLE_SUSTAIN_S}s); upgrading in the window" ;;
+            1) log "agentd: $uid still busy after this pass's idle poll; later" ;;
+            2) log "agentd: $uid box_busy_skipped — never idle for ${IDLE_SUSTAIN_S}s within ${BUSY_SKIP_AFTER_S}s; left on its image, the next roll retries"
+               event agentd "$(cat "$STATE/agentd.rolling.sha" 2>/dev/null || echo unknown)" box_busy_skipped "$uid never idle within ${BUSY_SKIP_AFTER_S}s; stays on its image until the next roll"
+               busy_counter "$uid" "$target" reset >/dev/null ;;
+          esac
+        fi
+      fi
+      if (( go )); then
+        busy_counter "$uid" "$target" reset >/dev/null
         log "agentd: upgrading box of $uid → $target: $(upgrade_box "$uid")"
         # One at a time: give it up to 4 minutes before the next box.
         outcome=pending
@@ -585,8 +694,8 @@ roll_pass() {
         elif [[ "$outcome" == "ok" ]]; then
           ROLL_FAILURES=0
         fi
-      else
-        log "agentd: $uid not quiet (inference in the last 5 min), later"
+      elif (( ${passes:-0} < BUSY_PASSES_BEFORE_PROBE )); then
+        log "agentd: $uid not quiet (inference in the last 5 min), later (pass ${passes:-0}/${BUSY_PASSES_BEFORE_PROBE} before the idle-window probe)"
       fi
     done
   done

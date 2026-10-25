@@ -162,6 +162,30 @@ files or messages — with the ⌘ badges. Rig hooks: `ARBOS_SEARCH=<text>`,
 `ARBOS_PALETTE=1`, `ARBOS_PALETTE_SELECT=<n>`, `ARBOS_PALETTE_OPEN=1` (open
 the highlighted row once the rows are there).
 
+### iPhone: one bottom search bar, nothing else (Jacob 2026-10-25, [feedback iphone-bottom-search-bar-2026-10-25])
+
+The iPhone's bottom tab bar (Contacts · Calls · Chats · Settings, a tester item
+of 2026-10-23) is gone. Home's bottom edge is **one search capsule and no other
+control** — no grid/+ button, no tabs, no Cancel beside it (`HomeChrome.bottom
+== [.searchBar]`, pinned by `BottomSearchBarTests`). It sits in the bottom
+safe-area inset (rides the keyboard, clears the home indicator); the × inside
+the capsule clears and closes, dragging the results drops the keyboard, opening
+a row closes it. The header keeps the account circle (→ Settings sheet) and the
+`+` circle only — the search disc moved to the bar.
+
+Results are the palette's, app-wide (`GlobalSearch` = `palette.rs`, `SearchIndex` =
+`search_index.rs`, lazy against `messagesVersion`): the same five sections in the
+same order with the same headings and the 8-per-section cap, Recent on the empty
+query; a message row opens its chat scrolled to that row (`pendingReveal`), a
+file row opens the Library item in the viewer, a DM-less person starts the DM.
+The home list is no longer narrowed by typed text (as on the Mac).
+
+Where the four tabs' destinations live now: Settings → the account circle;
+Contacts → `+` (New message: people + directory) and the bar's People & agents;
+Calls → a chat's header call buttons (no call-history list existed; the tab was
+empty); the unread count → the app icon badge and each row's dot / count pill;
+new chat → `+`.
+
 ## Chat-list filter (the iPhone home's `PaneTabs`)
 
 Directly under the strip: **All · Agents · People · Servers** — the iPhone
@@ -321,195 +345,35 @@ a_drag_across_bubbles_spans_them_in_transcript_order`,
 drag straight up from one rendered bubble into the one above), and
 `transcript::cross_bubble_copy_tests`.
 
-## Own-bubble delivery (Jacob 2026-10-24, [feedback sent-state-opacity-2026-10-24])
+## Own-bubble delivery (Jacob 2026-10-24 + 2026-10-25, [feedback sent-state-opacity-2026-10-24], [feedback sent-full-when-delivered-2026-10-25])
 
-**No "sent" / "seen" caption on my bubbles — the bubble's opacity is the
-state.** Grok Bot's user bubble carries no delivery label (refs 03/web-01), and
-Jacob asked for "coloring" only: "remove these 'sent' items, just use coloring
-to make it clear, make the bubble less opaque."
+**No "sent" / "seen" caption on my bubbles, and no dimming after delivery.** A
+delivered bubble is the full own-bubble style the moment the relay ACKs it;
+only a pending bubble is dimmed; a failed one is full with a red "! Retry".
+Grok Bot's user bubble carries no delivery label and no delivery dimming beyond
+pending (refs 03 / web-01).
 
 | State | Meaning | Whole-bubble alpha | Extra |
 |---|---|---|---|
 | Pending | not yet ACKed by the relay | **0.50** (`BUBBLE_ALPHA_PENDING`) | — |
-| Failed | the relay refused it | 1.00 | red ⓘ-style `exclamation` glyph (16 pt, `danger`) on the bubble's outer edge, always visible |
-| Sent | ACKed, nobody opened past it yet | **0.72** (`BUBBLE_ALPHA_SENT`) | — |
-| Seen | a peer's read watermark covers it, an agent answered after it, or read receipts are off | 1.00 | — |
+| Failed | the relay refused it | 1.00 | red `exclamation` glyph + "Retry" (`danger`) on the bubble's outer edge, always visible; click re-sends the text |
+| Delivered | ACKed | 1.00 | — |
 
-Why 0.72 and not a lighter fill: whole-bubble alpha dims the text with the fill,
-which is what makes the difference read in dark mode (fill L* 39 → 30, text
-L* 100 → 76). Measured contrast of the composited text on its composited fill:
-dark 4.9 : 1, light 7.7 : 1 (≥ 4.5 AA); pending 3.4 : 1 / 3.6 : 1 (transient).
-The fill alone at 0.72 would move dark only 8 L* and read as "slightly
-different grey". Same values on the iPhone (`Delivery.sentAlpha` /
-`pendingAlpha`); its own bubble colours are the Mac's (`#5C5C5C` / `#111111`,
-white text).
+Why no "sent-but-unseen" state (the 0.72 of v0.6.223–v0.6.226, #1667): read
+receipts cannot be expected — agents never send one, members on older builds
+never send one, a member who has not opened the chat sends none, and the relay
+stores none — so in a group a delivered bubble sat at 0.72 indefinitely and
+Jacob read it as "not sent" (Arbonites, 2026-10-25 22:17: fill measured
+`#484848` = 0.72 × `#5c5c5c`, with an agent reply already under it). A 1:1-only
+variant would still dim forever against a peer on an older build, so the state
+is gone on both platforms. Read receipts are still *sent* (Settings →
+Notifications on the Mac; the iPhone sends `seen` while a people chat is
+focused) but nothing is drawn from them.
 
-The "seen" caption from #1496 went with the "sent" one (same component); full
-opacity carries it. With read receipts **off** every ACKed bubble is full at
-once — there is nothing to wait for, and a transcript that is lighter forever
-would read as broken.
+Pending at 0.5: white text on the composited fill 3.4 : 1 dark / 3.6 : 1 light,
+transient until the ACK. Same values on the iPhone (`Delivery.pendingAlpha`).
 
 Code: `transcript.rs` `Delivery` + `delivery_state()` + `own_bubble()` +
-`failed_glyph()`, pinned by `delivery_tests`; iPhone `Transcript.swift`
-`Delivery` / `ReadReceipts` / `DeliveryFade` + `DeliveryStateTests`. The iPhone
-also sends the `seen` watermark in its presence header now (`SessionRoom
-.newestMessageId`), so a Mac bubble read on a phone goes full.
-
-## iPhone bubble gestures (Jacob 2026-10-24, [feedback iphone-open-scroll-block-2026-10-24] #1645 + #1629)
-
-**A pan that starts on a bubble always scrolls the chat.** Bubble gestures are
-`simultaneousGesture`s, never exclusive: the long-press (reactions + menu) must
-not delay or swallow a vertical drag. **Bubble text is not selectable on the
-iPhone** — `.textSelection(.enabled)` stays off in every bubble (user, other
-person, agent, code); Copy is on the long-press menu. Approved by Jacob as the
-trade-off in #1629 (@allan), which supersedes #1389's drag-to-select on the
-iPhone. The Mac keeps selection (`select.rs`, mention chips included).
-
-The other half of the same P0 is performance: while a room catches up or a
-burst of live rows lands, the transcript is re-read at most once per window
-(600 ms catching up, 150 ms live), off the main actor, and a bubble never reads
-`theme` or `composerInset` from the environment (plain inputs), so a publish
-does not re-create the window of bubbles (#1645; first-scrollable after open
-+7.8 s → +0.74 s with a 72-row catch-up on Arbonites).
-
-Code: `MessageActions.swift` `messageRowGestures`, `Transcript.swift` `RowView`,
-`AppModel.swift` `requestSnapshot` / `applySnapshot`.
-
-## Full screen (Jacob 2026-10-24, [feedback fullscreen-traffic-lights-2026-10-24] → [feedback topbar-grok-parity-2026-10-24])
-
-**The traffic lights are macOS's own standard window buttons, always. The
-app never draws, imitates or re-parents them** (Jacob, 18:3x UTC: "this
-should be real mac os feature not custom buttons"; private-API tricks such
-as Chrome's `NSThemeFrame` overrides count as custom).
-
-| Item | Rule |
-|---|---|
-| Windowed | The real buttons at `TRAFFIC_LIGHT_POSITION` (centre 22 from the top, Grok's spot) |
-| Full screen | Stock macOS: the window grows to the screen, the lights hide with the title bar and come back — real buttons, in macOS's own bar — when the pointer reaches the top edge |
-| Strip and filter | Exactly where they are in windowed mode: no band above, no layout jump (`top_strip(true) == top_strip(false)`, pinned by `sidebar::strip_tests::full_screen_adds_no_band_above_the_strip`) |
-
-v0.6.213 painted three lights of its own in full screen (`ui/traffic_lights.rs`,
-#1637); they changed shape and glyphs against the real ones and were removed
-on Jacob's ask. Supported AppKit has no way to keep the real buttons on
-screen in full screen: an `NSToolbar` keeps the title bar on screen but the
-buttons in it at alpha 0, an `NSTitlebarAccessoryViewController` shows its
-own view there but not the buttons, and the AppKit-owned alpha / view tree is
-reset on every reveal (the #1637 probes, `media/feedback/fullscreen-traffic-lights/appkit-probes/`).
-
-## Right info pane chrome (Jacob 2026-10-24, [feedback info-pane-chrome-2026-10-24])
-
-**The right pane is the window, not a panel: the chat's surface on both sides
-of the join, no hairline between them, Grok Bot's two round discs (share ·
-close) at its top right, a plain hero picture, inset cards under section
-labels, and no "Delete agent" button.** Jacob's side-by-side of a fresh Grok
-Bot and a fresh Arbos agent (2026-10-24, `media/feedback/grok-parity-test/` in
-the project store; items 19–22, 26–27 of `docs/arbos-vs-grok-traits.md`).
-
-Measured on `grok-right-pane-details.png` and `grok-chat-1.png` (2 px/pt,
-window top at row 0; pane 639 px = 319.5 pt wide). Points.
-
-| Item | Grok Bot | Arbos (`profiles/mod.rs`, `profiles/kit.rs`, `theme.rs`) |
-|---|---|---|
-| Pane fill | `#121212` — the chat's own colour; sidebar `#0E0E0E` | `Theme::pane()` = `chat_wash()` (nothing on matte / dark glass, the white wash on light glass); `theme.pane` is gone |
-| Join | a half-point `#1F1F1F` line (+13) that reads as none | **no border** (`border_l_1` removed from the pane and the mid-slide blank) |
-| Cards | `#1F1F1F` on `#121212` (+13), inset **16 / 16**, radius **12** | `pane_card` `#232323` on `#141414` (+15), `kit::INSET` 16, `kit::CARD_RADIUS` 12 (was `PANEL_RADIUS` 14); light: `#F2F2F2` on `#FCFCFC` (white on white was no card) |
-| Rows | one-line **41**, two-line **51**, 13 pt title / 13 pt muted subtitle | `kit::ROW_MIN_H` 41 (was 48); a title + subtitle row lands on 51–52 by its own padding; row type unchanged (`TEXT_BODY` / `TEXT_SMALL`) |
-| Section label | "Coding" / "Routines": text **28** from the pane edge, 13.5 pt `#A5A5A5`; glyphs 24 under the pill, 26 under the card before, 10 over the card after | `kit::section_title`: `INSET + SECTION_TITLE_INDENT` 28, `TEXT_SMALL` muted on a 16 pt line, padding 10 / 8 over `CARD_GAP` 14; a leading label pulls the fade spacer in by `pane::FIRST_TITLE_PULL` 7 |
-| Share · close discs | **36** each, fill `#1F1F1F`, glyph `#E0E0E0`; **8** apart, **12** from the pane edge, centred on the strip discs' line (top 12 in the 60 band; `grok-chat-1.png` rows 28–99 for both sets) | `glass::control_disc` — the strip's disc (`CONTROL` 36, `surface_2`, `text`); `top_bar()` pads `PANE_DISC_INSET` 12, gaps `CONTROL_GAP` 8; close `xmark` at `PANE_CLOSE_GLYPH` 22 → 11 pt mark (Grok 11); share `share` at `PANE_SHARE_GLYPH` 21 → 14 pt (Grok 14). Before: a 30 pt `glass::circle` with a 6.5 pt × at top 17, inset 10 |
-| Share disc action | — | the invite sheet (agent: let a person in on this agent; group: Add members). Pages with nothing to share (person, channel, server, own profile) draw the × alone |
-| Top bar fill | none | none (was `card()`); the body still fades under the pinned hero + pill |
-| Hero picture | plain bot mark, 58 pt, 73.5 under the window top | `HERO_TOP` 14 under the 60 band (was 4); the agent's leaf **without its pastel disc** (`avatars::project_hero_bare`: the hue's pastel as ink on dark, its ink on light) and **no presence dot** — presence stays on the sidebar row; `HERO_AVATAR` 72 kept (Jacob's mock b) |
-| Delete agent | — | **gone from the pane** (footer and `Shell.agent_delete_armed` removed). Deleting an agent is the sidebar row's menu → Delete, at once (`sidebar::row_menu`, the Delete-is-immediate rule below) |
-
-Pinned by `profiles::chrome_tests` (`the_pane_is_the_chats_surface_in_both_appearances`,
-`the_constants_are_groks`, `the_share_and_close_discs_land_on_groks_pixels`,
-`cards_are_inset_and_labelled_at_groks_margins`) and `pane::tests::every_kind_lays_out_hero_then_pill_then_options`.
-
-### Agent pane: Details · Library · Computer (Jacob 2026-10-24, [feedback agent-pane-details-tab-2026-10-24])
-
-**The agent pane's tabs are Grok Bot's — Details · Library · Computer — and
-the first tab shows live content first.** Items 23–25 of Jacob's list:
-Grok shows the name over "Add a label"; its Details tab opens with the
-coding project (spinner while the bot works) and the routines with their
-switches; ours opened with Name / Handle / Description rows and fine print.
-This supersedes the 2026-10-22 tab names (Profile · Settings · Library) for
-the Mac agent pane; the structure every pane shares — hero, then the tab
-pill, then the options — is unchanged, and every option the old tabs held is
-still on the pane. The iPhone agent pane has the same three tabs and the same
-content model since [feedback iphone-agent-pane-tabs-2026-10-25] (#1694:
-`PaneKinds.agent`, `AgentProfileView`, `Model/AgentPane.swift` — the pure
-order / copy twins of this file's functions, pinned by
-`ProfilePaneStructureTests`); where the Mac geometry does not translate it
-keeps the iPhone's shared pill and 48 pt rows, uses the system spinner, and
-edits the label in place but the name through an alert.
-
-| Item | Grok Bot (measured, `grok-right-pane-details.png`) | Arbos (`profiles/agent.rs`) |
-|---|---|---|
-| Subtitle | "Add a label", 12 pt muted, under the name | the agent's **description is its label**: shown under the name (`HERO_SUBTITLE` 12, `text_muted`), `LABEL_PLACEHOLDER` "Add a label" in `text_faint` while empty (owner); a click edits it in place (the hero's `label_editor`, Done / Return commits). Someone else's agent: its label, else "Run by @owner". "working" is no longer a subtitle — the Coding row spins |
-| Tab pill | capsule **26** tall, label **13** pt, 9 pt beside it, 2 between capsules | `TAB_HEIGHT` 26 / `TEXT_SMALL` / `TAB_PAD_X` 9 / `TAB_GAP` 2 (shared `tab_bar`; was 30 / body / 14 / 4) |
-| Details, first | "Coding": the project with a 15 pt blue spinner, 41 pt row | **Coding** card: the agent's workspace — `cards::activity_spinner` (`CODING_SPINNER` 15, `accent`, eight spokes stepping every 100 ms) while a turn runs, the `code` glyph when idle; subtitle "Working · 42 s · 7 tool calls" / "Idle" / "Machine asleep" (`coding_status`); a click opens the Computer tab |
-| Details, second | "Routines": name over schedule, a 32 × 20 switch | **Routines** card (own agents): one `kit::row` per routine, subtitle "trigger · next in …" / "Paused" (`routine_status`), a `glass::switch` that flips `routine_set_enabled`; "No routines yet" when empty. Routines load when the pane opens (`RoutinesRefresh`) |
-| Details, then | — | **Settings** (Model · Reasoning · Voice, the hoverpick rows; Model alone on someone else's agent) → **Who may message X** (the grant rows + "Give a person access…") → **Profile**: one "Edit profile" row (pencil tile) that unfolds Name · Handle · Description (`Shell.agent_edit_open`); someone else's agent shows the three rows plain. No footnotes |
-| Library | Grok's second tab | unchanged (images · files · links) |
-| Computer | Grok's third tab (the bot's computer) | the agent's **box**: **Machine** card — Status (dot + "Awake · 5 h 12 m"), Where it runs, Machine spec, Image, Spend today (`GET /machine`); **Resources** — Disk / Memory "x free of y", Load, Up for; **Running now** — every workspace with a turn running (spinner, name, "42 s · 7 tool calls") or "Nothing running · N workspaces". The last two come from the box's own `/box/state` through **`GET /machine/debug`** (`ClientCommand::MachineDebugRefresh` → `SyncEvent::BoxReport` → `AppState.box_report`), fetched when the pane opens and when the tab is picked; an asleep box says "The machine did not answer · <reason>". Someone else's agent: Status + Machine class from its project |
-| Delete agent | — | not on the pane (see above) |
-
-Order pinned by `agent::tests` (`details_puts_live_content_first_and_the_edit_fields_last`,
-`computer_order_follows_the_report`, `coding_status_…`, `routine_status_…`,
-`box_report_reads_the_relay_and_the_box`) and `pane::tests::kinds_keep_their_own_tab_sets`.
-Rig: `ARBOS_OPEN_PROFILE=agent` (Details), `agent:library`, `agent:computer`;
-the fixture answers `MachineDebugRefresh` with an awake 4-core box and one
-workspace per agent (the streaming one mid-turn).
-
-## Pane animations (Jacob 2026-10-24, [feedback right-pane-slide-2026-10-24], [feedback sidebar-slide-2026-10-24])
-
-**The right info pane and the left chat sidebar slide; they never pop.**
-Jacob: "on the mac the side bar appears when you click the top button. I
-want it to slide animate out like it does on grok. Same for the left bar
-when you click the close side bar button." Grok Bot's desktop app could not
-be run on the rig (no install), so its right pane was measured frame by
-frame on xAI's own 30 fps screen recording (the "How I run multiple teams
-of Grok Bots" guide video, t = 51.8 s open / 55.1 s close; strips and CSV in
-the project store's `media/feedback/pane-slide/grok-reference/`): open
-≈ 200 ms (6 moving frames, soft start, long tail — ease-out cubic RMS 0.022,
-a 0.21 s / 0.9 spring 0.015), close ≈ 150–175 ms (4 frames, no slow start —
-ease-out quad RMS 0.008), the pane **translates** with its content. Its
-sidebar toggle is in no public video; it gets the same motion. Numbers,
-recorded here so they do not drift:
-
-| Item | Value |
-|---|---|
-| Duration | **200 ms open, 170 ms close** (`slide::OPEN_MS` / `CLOSE_MS`); a click mid-slide turns round from where the pane is, in the time the remaining distance deserves |
-| Curve | open **ease-out cubic** (`motion::ease_out_cubic`, the composer drop's curve), close **ease-out quad** (`slide::Motion::ease`): fast off the mark, soft landing, never symmetric ease-in-out |
-| Right pane | its left edge comes in from the window's right edge and goes back out the same way; the pane keeps its layout and moves with its edge (not a reveal, not a fade) |
-| Left sidebar | its right edge slides to the window's left edge and back; the strip's discs leave with it, and the header's expand disc appears at its resting spot (72 + 12) as soon as the sidebar no longer covers it — never two discs at once |
-| Chat column | a flex sibling, so its slot follows every frame: the header pill and the composer re-centre live. The **transcript keeps the width it had when the slide began** and is clipped/offset — centred when the rows are capped at both widths (`COLUMN_MAX_WIDTH`: then nothing moves at the end), else pinned to the edge away from the moving pane — and is laid out once more at the end. Never re-measure every bubble per frame. (Grok re-lays its list out every frame; its list is short rows, ours is a markdown transcript whose `list()` drops every item height on a width change — the one deliberate difference) |
-| Frame rate | one redraw per display refresh (`request_animation_frame`), 12 / 10 frames at 60 Hz |
-| Reduce Motion | macOS Accessibility → Display → Reduce motion (`cx.reduce_motion()`): no slide, both panes snap as before |
-| At rest | the layout is today's static layout — the clips exist only while a slide runs (`slide::layout_tests::at_rest_the_clipped_layout_is_the_static_layout`); strip, filter, folded toggle and header pill geometry unchanged |
-
-Code: `ui/slide.rs` (`PaneSlides::step` derives the motion from
-`AppState::profile` / `rail_collapsed` each frame; `sidebar_clip`,
-`pane_clip`, `transcript_clip`), wired in `Shell::render` and
-`Shell::chat_frame`; pinned by `slide::tests` (state machine, reduce-motion
-snap, mid-slide reversal, no slide on a page swap or a width drag) and
-`slide::layout_tests`.
-
-## Delete is immediate — no confirm (Jacob 2026-10-24, [feedback remove-delete-confirms-2026-10-24])
-
-**Delete in the message menu and Delete in the chat-list row menu act at
-once; neither opens a "Delete …?" card, sheet or inline Cancel / Delete
-step.** The guard is *who sees the item*, not a second click: a bubble's
-Delete appears only on your own messages or where you moderate (#1526's
-relay rule, `model::may_delete_message`), and still deletes for everyone;
-a row's Delete removes a DM or an agent (with its chats) from your list,
-deletes a group you own for everyone, and leaves a group you do not own.
-The "Delete message?" card from #1502 and the row menu's "Delete “Name”?"
-prompt (#1532) were removed on Jacob's ask; the iPhone's long-press Delete
-and home-list Delete behave the same. Other sheets keep the shared modal
-layer (`ui::modal`) — this rule is about these two deletes only.
-
-Code: `message_menu::run` (Delete → `AppState::delete_message`),
-`sidebar::row_menu` (Delete → `delete_project` / `delete_people_chat` /
-`leave_group`); pinned by `message_menu::tests::delete_is_offered_only_when_allowed`
-and `sidebar::row_menu_tests::delete_fires_at_once`.
+`failed_glyph()` / `Transcript::failed_retry` → `AppState::resend_failed`,
+pinned by `delivery_tests`; iPhone `Transcript.swift` `Delivery` (`.user(text:,
+delivery:, quote:)`) + `AppModel.resendFailed`, pinned by `DeliveryStateTests`.

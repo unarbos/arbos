@@ -304,7 +304,7 @@ extension AppModel {
                 list.append(Job(id: seed.id, title: seed.title, state: seed.state, step: seed.step, elapsedS: seed.elapsed,
                                 askMessageId: ask, chatId: c))
             }
-            jobs[projectId] = list
+            applyJobs(projectId: projectId, list)
         }
         // `ARBOS_FIXTURE_TYPING=1|<handle>[,<handle>…]`: those people type in every fixture
         // people chat for the whole launch (`1` = the DM's other person / the group's first).
@@ -333,22 +333,12 @@ extension AppModel {
                     subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 7 * 60_000, completedAt: nil, pending: false,
                     parts: [.text(id: "d3t", text: "Sending in a sec. Also: can we add your Arbos agent here so it can pull the numbers while we talk?")], hiddenCount: 0,
                     senderHandle: "unconst", senderName: "Unconst"),
-            // A second line of mine after unconst's last one: with `ARBOS_FIXTURE_SEEN=unconst:d2`
-            // (rig, sent-state-opacity-2026-10-24) d2 is seen (full) and this one is still only sent (lighter).
+            // A second line of mine after unconst's last one (rig: two own bubbles in a 1:1 shot).
             Message(id: "d4", chatId: "fx-dm-unconst", role: .user, sender: "user:fx-me", status: .done, turn: nil, decision: nil, subagentId: nil,
                     subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 6 * 60_000, completedAt: nil, pending: false,
                     parts: [.text(id: "d4t", text: "Sure — add it, and send the copy whenever you're ready.")], hiddenCount: 0, senderHandle: "jacob", senderName: "Jacob Steeves"),
         ]
         caughtUp.insert("fx-dm-unconst")
-        // `ARBOS_FIXTURE_SEEN=<handle>:<messageId>[,…]` seeds peers' read watermarks for the DM
-        // (what a presence frame with `seen` would do), so a rig can show seen next to sent.
-        if let seeds = DebugHooks.fixtureSeen {
-            for pair in seeds.split(separator: ",") {
-                let bits = pair.split(separator: ":", maxSplits: 1).map(String.init)
-                guard bits.count == 2 else { continue }
-                ReadReceipts.shared.note(["handle": bits[0], "seen": bits[1]], chatId: "fx-dm-unconst")
-            }
-        }
         directory = [
             Person(id: "fx-u1", handle: "alex-rivera", avatarUrl: nil, name: "Alex Rivera", status: "member"),
             Person(id: "fx-u2", handle: "jen", avatarUrl: nil, name: "Jen Park", status: "member"),

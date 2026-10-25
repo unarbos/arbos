@@ -1,6 +1,7 @@
 // Standing shell approvals (#1544): the owner chose "Always allow <agent> in /tmp" on a
-// destructive-shell card. The relay holds them (`/projects/{id}/shell-grants`); the agent pane
-// › Settings › Shell approvals lists them with one switch each — off revokes.
+// destructive-shell card. The relay holds them (`/projects/{id}/shell-grants`) and the box
+// applies them; the agent pane's Permissions card that listed them left on 2026-10-25
+// ([feedback agent-details-remove-sections-ios-2026-10-25]) — the calls stay.
 
 import Foundation
 

@@ -105,7 +105,8 @@ struct Quote: Equatable, Hashable {
 }
 
 enum RowKind: Equatable {
-    case user(text: String, pending: Bool, quote: Quote?)
+    /// My bubble; `delivery` is its opacity (pending dimmed, delivered / failed full).
+    case user(text: String, delivery: Delivery, quote: Quote?)
     /// Another person's message in a people chat: left bubble with avatar; the name above
     /// only when the sender changed (`named`, Grok Bot's group style) and the chat names its
     /// senders at all (group / channel, `rows(multiParty:)`); the name sits inside the bubble
@@ -258,7 +259,7 @@ enum Transcript {
                     }
                     if mine {
                         chunk.append(Row(id: "\(message.id)#user", messageId: message.id, role: .user,
-                                         kind: .user(text: text, pending: message.pending, quote: quote)))
+                                         kind: .user(text: text, delivery: Delivery.of(message), quote: quote)))
                     } else {
                         chunk.append(Row(id: "\(message.id)#other", messageId: message.id, role: .project,
                                          kind: .other(text: text, handle: message.senderHandle ?? "someone", avatar: message.senderAvatar, named: named, quote: quote)))
@@ -375,7 +376,25 @@ enum Transcript {
                 // A hand-off row (a subagent brief, an agent-to-agent send) is its own line
                 // ("Messaged ◉ X"); it never gets the stock line, even with no parts (#1466).
                 let handoffRow = handoffName != nil
-                if showsNothing, finished, !streaming, !handoffRow, failed || onlyEmpty {
+                // The stock line is for a turn that said NOTHING. A turn that answered with a
+                // `send_message` bubble and ended on the fresh result row that bubble opened
+                // (wordless, "Working…") must not get "didn't answer" under its own answer
+                // (Jacob, "run bubble sort", 2026-10-25). Another visible row of the same turn
+                // = an assistant row answering the same user message with words or a card.
+                let turnAnsweredElsewhere: Bool = {
+                    guard !failed, let ask = message.inReplyTo else { return false }
+                    return messages.contains { other in
+                        other.id != message.id && other.role == .assistant && other.inReplyTo == ask
+                            && (!other.plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                || other.parts.contains { part in
+                                    switch part {
+                                    case .question, .attachment: return true
+                                    default: return false
+                                    }
+                                })
+                    }
+                }()
+                if showsNothing, finished, !streaming, !handoffRow, !turnAnsweredElsewhere, failed || onlyEmpty {
                     let line: String = {
                         if let first = errors.first?.text.trimmingCharacters(in: .whitespacesAndNewlines), !first.isEmpty {
                             return first
@@ -1020,11 +1039,29 @@ struct RowView: View, Equatable {
     @ViewBuilder
     private var bubble: some View {
         switch row.kind {
-        case .user(let text, let pending, let quote):
-            // My bubble: its delivery state is its opacity (pending < sent < seen), a
-            // failed one is full with a red mark on its outer edge; no caption
-            // (Jacob, 2026-10-24, feedback sent-state-opacity-2026-10-24).
-            DeliveryFade(model: model, chatId: chatId, messageId: row.messageId, pending: pending) {
+        case .user(let text, let delivery, let quote):
+            // My bubble: delivered is the full style at once; only pending is dimmed; a
+            // failed one is full with a red "! Retry" on its outer edge. No caption, no
+            // read-receipt dimming (Jacob, 2026-10-24 / 2026-10-25; docs/mac-design-rules.md).
+            HStack(spacing: 8) {
+                Spacer(minLength: 0)
+                if delivery == .failed {
+                    Button {
+                        model.resendFailed(chatId: chatId, messageId: row.messageId)
+                    } label: {
+                        Label("Retry", systemImage: "exclamationmark.circle.fill")
+                            .font(theme.font(Theme.tiny))
+                            .foregroundStyle(.red)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Not sent. Retry")
+                }
+                if delivery == .pending {
+                    Image(systemName: "clock")
+                        .font(.system(size: 12))
+                        .foregroundStyle(theme.muted)
+                        .accessibilityLabel("Sending")
+                }
                 VStack(alignment: .leading, spacing: 6) {
                     if let quote {
                         quoteHeader(quote, color: theme.userText)
@@ -1042,6 +1079,8 @@ struct RowView: View, Equatable {
                 .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleUser))
                 .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: true) }
                 .frame(maxWidth: maxBubble, alignment: .trailing)
+                .opacity(delivery.opacity)
+                .accessibilityIdentifier("own-bubble-\(delivery)")
             }
         case .other(let text, let handle, let avatar, let named, let quote):
             let openPerson = { model.openPersonProfile(handle: handle, avatarUrl: avatar, chatId: chatId) }
@@ -1628,97 +1667,36 @@ private extension View {
     }
 }
 
-/// Where one of my own bubbles is on its way. No caption says it (Jacob,
-/// 2026-10-24: "remove these 'sent' items, just use coloring"): the bubble's
-/// opacity does — the same values as the Mac (`transcript.rs` `Delivery`,
+/// Where one of my own bubbles is on its way. No caption says it (Jacob, 2026-10-24:
+/// "remove these 'sent' items, just use coloring"), and nothing after delivery dims it
+/// (Jacob, 2026-10-25: delivered bubbles that waited for a read receipt "show up too dim,
+/// I think they have not been sent"). Same values as the Mac (`transcript.rs` `Delivery`,
 /// docs/mac-design-rules.md § Own-bubble delivery).
 enum Delivery: Equatable {
-    /// Not yet acknowledged by the relay.
+    /// Not yet acknowledged by the relay: the only dimmed state.
     case pending
-    /// The relay refused it: full opacity plus a red mark.
+    /// The relay refused it: full opacity plus a red "! Retry".
     case failed
-    /// Acknowledged, nobody has opened past it yet.
-    case sent
-    /// A peer's read watermark covers it, or an agent answered after it.
-    case seen
+    /// Acknowledged by the relay: the full own-bubble style, at once. Read receipts never
+    /// change how my bubble looks — agents send none, members on older builds send none, a
+    /// member who has not opened the chat sends none, and a bubble waiting for one reads as unsent.
+    case delivered
 
-    /// Whole-bubble alpha. 0.72 keeps white text at 4.9 : 1 (dark) / 7.7 : 1 (light) on
-    /// its fill while the bubble reads clearly lighter than a seen one; pending sits lower.
-    static let sentAlpha: CGFloat = 0.72
+    /// Whole-bubble alpha of a pending bubble (3.4 : 1 dark / 3.6 : 1 light text contrast,
+    /// transient until the relay's ACK).
     static let pendingAlpha: CGFloat = 0.5
 
     var opacity: CGFloat {
         switch self {
         case .pending: return Delivery.pendingAlpha
-        case .sent: return Delivery.sentAlpha
-        case .failed, .seen: return 1
+        case .failed, .delivered: return 1
         }
     }
 
-    /// `receipts`: peer handle → newest message id that peer has opened past (presence `seen`).
-    /// Seen when any watermark is at or after `message`, or an agent / project answered after it.
-    static func of(_ message: Message, in messages: [Message], receipts: [String: Id]) -> Delivery {
+    static func of(_ message: Message) -> Delivery {
         if message.pending { return .pending }
         if message.status == .error { return .failed }
-        guard let ix = messages.lastIndex(where: { $0.id == message.id }) else { return .sent }
-        for seenId in receipts.values {
-            if seenId == message.id { return .seen }
-            if let six = messages.lastIndex(where: { $0.id == seenId }), six >= ix { return .seen }
-        }
-        if messages[(ix + 1)...].contains(where: { $0.role == .assistant || $0.role == .project }) { return .seen }
-        return .sent
-    }
-}
-
-/// Peers' read watermarks per people chat (presence `seen`, the Mac's `message_receipts`).
-/// Observed only by [`DeliveryFade`] on my own bubbles, like [`SenderAccents`], so a presence
-/// tick never invalidates every row.
-final class ReadReceipts: ObservableObject {
-    static let shared = ReadReceipts()
-
-    /// chat id → peer handle → newest message id that peer has opened past.
-    @Published private(set) var seen: [Id: [String: Id]] = [:]
-
-    func note(_ header: [String: Any], chatId: Id) {
-        guard let handle = header["handle"] as? String, !handle.isEmpty,
-              let id = header["seen"] as? String, !id.isEmpty else { return }
-        if seen[chatId]?[handle] == id { return }
-        seen[chatId, default: [:]][handle] = id
-    }
-
-    func clear() { seen = [:] }
-}
-
-/// My bubble at its delivery opacity, with the red mark beside a failed one.
-private struct DeliveryFade<Content: View>: View {
-    @ObservedObject private var receipts = ReadReceipts.shared
-    let model: AppModel
-    let chatId: Id
-    let messageId: Id
-    let pending: Bool
-    @ViewBuilder let content: () -> Content
-
-    private var delivery: Delivery {
-        if pending { return .pending }
-        let list = model.messages[chatId] ?? []
-        guard let message = list.last(where: { $0.id == messageId }) else { return .seen }
-        return Delivery.of(message, in: list, receipts: receipts.seen[chatId] ?? [:])
-    }
-
-    var body: some View {
-        let state = delivery
-        HStack(spacing: 8) {
-            Spacer(minLength: 0)
-            if state == .failed {
-                Image(systemName: "exclamationmark.circle.fill")
-                    .font(.system(size: 16))
-                    .foregroundStyle(.red)
-                    .accessibilityLabel("Not sent")
-            }
-            content()
-                .opacity(state.opacity)
-                .accessibilityIdentifier("own-bubble-\(state)")
-        }
+        return .delivered
     }
 }
 
@@ -1956,12 +1934,16 @@ struct AvatarCluster: View {
     var imageUrl: String? = nil
     /// D92 amendment: the group's leaf picture from the Create screen (a custom picture wins).
     var leaf: LeafPick? = nil
+    /// Jacob, 2026-10-25: a group created with no leaf shows its title's initial on grey.
+    var neutralName: String? = nil
 
     private var shown: [ChatMember] { Array(members.prefix(maxVisible)) }
     private var hasMore: Bool { members.count > maxVisible }
 
     var body: some View {
-        if let leaf, imageUrl?.isEmpty ?? true, LeafAvatarsFlag.shared.on {
+        if let neutralName, imageUrl?.isEmpty ?? true {
+            NeutralAvatar(name: neutralName, size: size * 1.12)
+        } else if let leaf, imageUrl?.isEmpty ?? true, LeafAvatarsFlag.shared.on {
             LeafAvatar(pick: leaf, size: size * 1.12)
         } else if let imageUrl, !imageUrl.isEmpty {
             // Keep the group silhouette under the picture until it arrives so we

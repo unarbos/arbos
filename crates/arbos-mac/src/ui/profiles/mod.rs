@@ -12,12 +12,12 @@ pub(crate) mod agent;
 mod channel;
 mod group;
 pub(crate) mod kit;
+pub(crate) mod library;
 mod me;
 pub(crate) mod pane;
 mod server;
 pub(crate) mod user;
 
-use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
@@ -25,7 +25,7 @@ use gpui::{
     ScrollHandle, SharedString, Stateful,
 };
 
-use crate::app::{AppState, ProfilePage, ViewerItem};
+use crate::app::{AppState, ProfilePage};
 use crate::model::{now_ms, Attachment, AttachmentKind, Chat, Id, Message, Part};
 use crate::ui::glass;
 use crate::ui::icons::icon;
@@ -40,6 +40,12 @@ pub(super) const HERO_AVATAR: f32 = 72.0;
 /// strip's `STRIP_INSET`: Grok's close disc ends 24 px = 12 pt before the
 /// window edge (`grok-right-pane-details.png`).
 pub(crate) const PANE_DISC_INSET: f32 = crate::ui::sidebar::STRIP_INSET;
+/// The hairline on the pane's left edge: Grok's is one device pixel (1 px at
+/// 2 px/pt in `grok-chat-1.png` / `grok-chat-2-research.png`, column 2816 /
+/// 2814, rows 4–2171), so half a point — a 1 pt line would be twice Grok's.
+/// Jacob 2026-10-25 ([feedback info-pane-left-hairline-2026-10-25]): "a thin
+/// 1 px divider … matching Grok Bot"; reverses #1675's reading of trait 20.
+pub(crate) const PANE_EDGE: f32 = 0.5;
 /// Top bar → hero picture: Grok's avatar starts 73.5 pt under the window edge
 /// (rows 147–264 at 2 px/pt), 13.5 under its 60 pt band → 14.
 pub(crate) const HERO_TOP: f32 = 14.0;
@@ -222,10 +228,10 @@ pub(crate) fn pane_frame(
     }
     let header = header.children(right).children(share).child(close);
     let has_pinned = pinned.is_some();
-    // No hairline between the pane and the chat, and the chat's own surface:
-    // Grok's pane is the window (`#121212` on both sides of the join, a
-    // half-point `#1F1F1F` line that reads as nothing); ours was a lighter
-    // panel (`#1E1E1E` on `#141414`) behind a 1 pt `border` line.
+    // The chat's own surface on both sides of the join (Grok's pane is the
+    // window, `#121212` either side), with Grok's hairline on the edge: one
+    // device pixel, `pane_edge` (+13 over the page) — not the 1 pt `border`
+    // line of the old lighter panel (`#1E1E1E` on `#141414`).
     div()
         .id("profile-pane")
         .w(px(width))
@@ -233,6 +239,8 @@ pub(crate) fn pane_frame(
         .h_full()
         .flex()
         .flex_col()
+        .border_l(px(PANE_EDGE))
+        .border_color(theme.pane_edge)
         .bg(theme.pane())
         .child(header)
         .children(pinned.map(|p| p.flex_shrink_0()))
@@ -309,6 +317,7 @@ pub(super) fn editable_picture(
     let editable = on_click.is_some();
     div()
         .id(id)
+        .debug_selector(move || id.to_owned())
         .group("hero-picture")
         .relative()
         .size(px(HERO_AVATAR))
@@ -462,11 +471,48 @@ pub(super) fn list_row(
 
 // ----- content from the chat docs ----------------------------------------------
 
+/// Who shared something, for a picture beside their name (the Library's
+/// preview card): a person as the message carries them, an agent by its
+/// project, or me.
+#[derive(Clone, Debug)]
+pub(crate) enum Sender {
+    Person(crate::model::Person),
+    Agent(Id),
+    Me,
+}
+
+impl Sender {
+    fn of(state: &AppState, m: &Message) -> Self {
+        if let Some(pid) = m
+            .sender
+            .strip_prefix("agent:")
+            .or_else(|| m.sender.strip_prefix("project:"))
+        {
+            return Sender::Agent(pid.to_string());
+        }
+        if state.is_mine(m) {
+            return Sender::Me;
+        }
+        Sender::Person(crate::model::Person {
+            id: m.sender.trim_start_matches("user:").to_string(),
+            handle: m.sender_handle.clone().unwrap_or_default(),
+            name: m.sender_name.clone(),
+            avatar_url: m.sender_avatar.clone().unwrap_or_default(),
+            status: "member".into(),
+            role: String::new(),
+            last_seen_at: None,
+            online: false,
+            avatar_color_index: None,
+        })
+    }
+}
+
 /// One attachment found in a chat, with where it came from.
 pub(crate) struct Found {
     pub attachment: Attachment,
     /// Who shared it ("Mira", "@sam", "You", the agent's name).
     pub by: String,
+    pub sender: Sender,
     pub when: u64,
     pub thumbnail: Option<Arc<RenderImage>>,
     /// The chat and `parts[]` id it sits in (the viewer's album entry).
@@ -478,6 +524,7 @@ pub(crate) struct Found {
 pub(crate) struct Link {
     pub url: String,
     pub by: String,
+    pub sender: Sender,
     pub chat: String,
     pub when: u64,
 }
@@ -500,6 +547,7 @@ pub(super) fn collect(state: &AppState, chats: &[&Chat]) -> Content {
     for chat in chats {
         for m in state.messages_of(&chat.id) {
             let by = sender_label(state, m);
+            let sender = Sender::of(state, m);
             for part in &m.parts {
                 match part {
                     Part::Attachment { id, attachment } => {
@@ -510,6 +558,7 @@ pub(super) fn collect(state: &AppState, chats: &[&Chat]) -> Content {
                         let found = Found {
                             attachment: attachment.clone(),
                             by: sender_name(state, m),
+                            sender: sender.clone(),
                             when: m.created_at,
                             thumbnail,
                             chat_id: chat.id.clone(),
@@ -526,6 +575,7 @@ pub(super) fn collect(state: &AppState, chats: &[&Chat]) -> Content {
                             out.links.push(Link {
                                 url,
                                 by: by.clone(),
+                                sender: sender.clone(),
                                 chat: chat.title.clone(),
                                 when: m.created_at,
                             });
@@ -598,146 +648,6 @@ pub(super) fn when_text(at: u64) -> String {
     } else {
         crate::app::ago_text(ago)
     }
-}
-
-fn size_text(bytes: Option<u64>) -> Option<String> {
-    let b = bytes?;
-    Some(if b < 1024 {
-        format!("{b} B")
-    } else if b < 1024 * 1024 {
-        format!("{} KB", b / 1024)
-    } else {
-        format!("{:.1} MB", b as f64 / (1024.0 * 1024.0))
-    })
-}
-
-/// Gutter between media tiles.
-const MEDIA_GAP: f32 = 3.0;
-
-/// Media tab: three square tiles per row (aspect-fill crop), small even
-/// gutters; a photo / video glyph while a thumbnail loads. The cell is
-/// floored against the pane's inner width (the 1 pt left border counts) —
-/// at exactly a third the last tile used to wrap and leave two per row.
-pub(super) fn media_grid(items: Vec<Found>, theme: &Theme, cx: &mut Context<Shell>) -> Div {
-    if items.is_empty() {
-        return empty("No photos or videos yet", theme);
-    }
-    let cell = ((SHEET_WIDTH - 1.0 - 2.0 * kit::INSET - 2.0 * MEDIA_GAP) / 3.0).floor();
-    let mut grid = div()
-        .flex_shrink_0()
-        .flex()
-        .flex_wrap()
-        .gap(px(MEDIA_GAP))
-        .px(px(kit::INSET))
-        .pb(px(16.0));
-    // The grid is newest first; the viewer's album runs in chat order, so a
-    // tile opens the viewer at its own place in that order (media-viewer-2026-10-23).
-    let album: Rc<Vec<ViewerItem>> = Rc::new(
-        items
-            .iter()
-            .rev()
-            .map(|f| ViewerItem {
-                attachment: f.attachment.clone(),
-                by: f.by.clone(),
-                when: f.when,
-                chat_id: f.chat_id.clone(),
-                part_id: f.part_id.clone(),
-            })
-            .collect(),
-    );
-    let n = items.len();
-    for (i, f) in items.iter().enumerate() {
-        let album = album.clone();
-        let tile = div()
-            .id(ElementId::Name(SharedString::from(format!(
-                "profile-media-{i}"
-            ))))
-            .size(px(cell))
-            .rounded(px(8.0))
-            .overflow_hidden()
-            .bg(theme.surface_1)
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            .on_click(cx.listener(move |this, _, _, cx| {
-                let album = album.as_ref().clone();
-                this.state
-                    .update(cx, |s, cx| s.open_media_viewer(album, n - 1 - i, cx));
-            }));
-        grid = grid.child(match &f.thumbnail {
-            // The tile's overflow clip is rectangular, so the picture rounds itself.
-            Some(img) => tile.child(
-                gpui::img(img.clone())
-                    .size(px(cell))
-                    .rounded(px(8.0))
-                    .object_fit(gpui::ObjectFit::Cover),
-            ),
-            None => tile.child(icon(
-                if f.attachment.kind() == AttachmentKind::Video {
-                    "video"
-                } else {
-                    "photo"
-                },
-                22.0,
-                theme.text_faint,
-            )),
-        });
-    }
-    grid
-}
-
-/// Files / Voice tabs: one row per attachment.
-pub(super) fn file_list(items: &[Found], glyph: &'static str, none: &str, theme: &Theme) -> Div {
-    if items.is_empty() {
-        return empty(none, theme);
-    }
-    let mut list = card(theme);
-    for (i, f) in items.iter().enumerate() {
-        // Redesign mock d: the file name, then "212 kB · Mira · Today" — size,
-        // who shared it, when.
-        let title = if f.attachment.name.is_empty() {
-            f.attachment.title.clone().unwrap_or_default()
-        } else {
-            f.attachment.name.clone()
-        };
-        let mut sub = vec![f.by.clone(), when_text(f.when)];
-        if let Some(size) = size_text(f.attachment.bytes) {
-            sub.insert(0, size);
-        }
-        // The tile names the type (PDF, XLS, ZIP …) when the extension says so.
-        let ext = f
-            .attachment
-            .name
-            .rsplit_once('.')
-            .map(|(_, e)| e.to_ascii_uppercase())
-            .filter(|e| (2..=4).contains(&e.len()) && e.chars().all(|c| c.is_ascii_alphanumeric()));
-        let tile = div()
-            .size(px(kit::AVATAR))
-            .rounded(px(10.0))
-            .bg(theme.surface_2)
-            .flex()
-            .items_center()
-            .justify_center();
-        let tile = match ext {
-            Some(e) => tile
-                .text_size(px(11.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(theme.text_muted)
-                .child(e),
-            None => tile.child(icon(glyph, 18.0, theme.text_muted)),
-        };
-        list = list.child(list_row(
-            ElementId::Name(SharedString::from(format!("profile-file-{i}"))),
-            tile.into_any_element(),
-            title,
-            sub.join(" · "),
-            theme.text_muted,
-            None,
-            theme,
-        ));
-    }
-    list
 }
 
 /// Host for a link row (no scheme, path, or leading `www.`).
@@ -1016,6 +926,32 @@ mod chrome_tests {
                     );
                 }
             }
+        }
+    }
+
+    /// Grok's pane edge: one device pixel, ≈ 5 % of the way from the page
+    /// toward the text colour (`#1F1F1F` on `#121212` = +13/255 = 0.051 in
+    /// lightness). Dark: lighter than `bg`; light: darker.
+    #[test]
+    fn the_pane_edge_is_groks_hairline() {
+        assert_eq!(super::PANE_EDGE, 0.5, "one device pixel at 2 px/pt");
+        let grok_step = 13.0 / 255.0;
+        for pref in [AppearancePref::Dark, AppearancePref::Light] {
+            let theme = Theme::with(pref.resolve(gpui::WindowAppearance::Dark), Surface::Matte);
+            let step = theme.pane_edge.l - theme.bg.l;
+            let expect = if theme.is_light() {
+                -grok_step
+            } else {
+                grok_step
+            };
+            assert!(
+                (step - expect).abs() < 0.006,
+                "{pref:?}: edge {step:.3} vs Grok's {expect:.3}"
+            );
+            assert!(
+                theme.pane_edge.l < theme.pane_card.l || theme.is_light(),
+                "{pref:?}: the edge is quieter than a card"
+            );
         }
     }
 

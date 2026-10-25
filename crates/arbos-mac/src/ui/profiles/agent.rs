@@ -1,12 +1,14 @@
 //! An agent's page on the shared profile pane (D93): one [`ProfilePane`]
-//! spec — hero (the plain leaf / photo with the owner's crayon, editable name,
-//! "working" or "Agent · run by @owner"), the tabs **Profile** (name, handle,
-//! description) | **Settings** (model, reasoning, call voice) | **Library**
-//! (images, files, links from the agent's chats). The same three tabs as the
+//! spec — hero (the plain leaf / photo with the owner's crayon, the name and
+//! the label, both edited in place), the tabs **Details** (Settings: model,
+//! reasoning, call voice) | **Library** (images, files, links from the
+//! agent's chats) | **Computer** (the agent's box). The same three tabs as the
 //! iPhone's agent page. Share project and Add to this chat left the pane on
 //! 2026-10-22 (Jacob: simple, consistent, powerful); the Voice row came back
 //! on 2026-10-23 (the call voice — spoken replies stay behind the voice-mode
-//! switch); the avatar picker opens from the hero while the pane is up.
+//! switch); the avatar picker opens from the hero while the pane is up. The
+//! "Who may message", "Permissions" and "Profile" cards left Details on
+//! 2026-10-25 ([feedback agent-details-remove-sections-mac-2026-10-25]).
 //!
 //! Grok Bot parity ([feedback info-pane-chrome-2026-10-24], Jacob 2026-10-24):
 //! no "Delete agent" button on the pane — deleting an agent is the sidebar
@@ -33,17 +35,20 @@ use crate::ui::theme::{Theme, TEXT_SMALL};
 
 use super::kit::{self, Leading};
 use super::pane::{self, Hero, Picture, ProfilePane, Section};
-use super::{
-    chats_of, collect, editable_name, editable_picture, file_list, link_list, HeroClick,
-    HERO_AVATAR,
-};
+use super::{chats_of, collect, editable_name, editable_picture, HeroClick, HERO_AVATAR};
 
 /// The agent pane's tabs — Grok Bot's ([feedback agent-pane-details-tab-2026-10-24],
 /// Jacob 2026-10-24; supersedes Profile · Settings · Library of 2026-10-22):
-/// **Details** (live first: Coding, Routines; then Settings, Access, the
-/// folded Profile fields), **Library**, **Computer** (the agent's box). Every
-/// pane keeps the structure (hero, pill, options), not a tab count.
+/// **Details** (Settings; Coding and Routines ahead of it while
+/// [`AGENT_DETAILS_SHOW_CODING_ROUTINES`] is on), **Library**, **Computer**
+/// (the agent's box). Every pane keeps the structure (hero, pill, options),
+/// not a tab count.
 pub(super) const TABS: [&str; 3] = ["Details", "Library", "Computer"];
+/// Jacob 2026-10-25 ([feedback agent-details-remove-sections-mac-2026-10-25]):
+/// the Details tab hides its Coding and Routines cards for now. Temporary —
+/// flip this to bring them back; the Computer tab, the routines calls and the
+/// status line are untouched. Off by default.
+pub(crate) const AGENT_DETAILS_SHOW_CODING_ROUTINES: bool = false;
 /// Details is tab 0 — the pane's default and where any stale index lands.
 pub(crate) const TAB_LIBRARY: usize = 1;
 pub(crate) const TAB_COMPUTER: usize = 2;
@@ -286,7 +291,6 @@ pub(super) fn page(
                         .into_any_element(),
                 ]
             };
-            let access_rows = mine.then(|| message_grant_rows(shell, &project, &theme, cx));
             details_sections(
                 &project,
                 mine,
@@ -303,10 +307,6 @@ pub(super) fn page(
                 },
                 model_rows,
                 pick,
-                access_rows,
-                shell.agent_edit_open,
-                editing_description,
-                shell,
                 &theme,
                 cx,
             )
@@ -386,9 +386,13 @@ struct DetailsLive {
 }
 
 /// The order of the Details tab, top to bottom — live content first, the
-/// options after it, the edit fields last and folded (Jacob 2026-10-24: "the
-/// first tab shows live content first … move the edit fields behind an edit
-/// affordance"). Pure, so the order is testable without a window.
+/// options after it (Jacob 2026-10-24). Jacob 2026-10-25 ([feedback
+/// agent-details-remove-sections-mac-2026-10-25]) took "Who may message X",
+/// "Permissions" and "Profile" off the pane for good (the access list, the
+/// standing shell answers and the relay calls behind them are unchanged; the
+/// name and the label are edited in the hero) and parked Coding and Routines
+/// behind [`AGENT_DETAILS_SHOW_CODING_ROUTINES`]. Pure, so the order is
+/// testable without a window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DetailsBlock {
     /// "Coding": the agent's workspace, spinning while a turn runs.
@@ -397,32 +401,18 @@ pub(crate) enum DetailsBlock {
     Routines,
     /// "Settings": Model · Reasoning · Voice (Model alone on someone else's agent).
     Settings,
-    /// "Access": who may message this agent (owner only).
-    Access,
-    /// "Permissions": Shell approvals — the standing grants from destructive-shell cards
-    /// (#1544), one switch each (owner only).
-    Permissions,
-    /// "Profile": the Edit profile row; Name · Handle · Description under it when open.
-    Profile,
 }
 
-pub(crate) fn details_order(mine: bool) -> Vec<DetailsBlock> {
-    if mine {
-        vec![
-            DetailsBlock::Coding,
-            DetailsBlock::Routines,
-            DetailsBlock::Settings,
-            DetailsBlock::Access,
-            DetailsBlock::Permissions,
-            DetailsBlock::Profile,
-        ]
-    } else {
-        vec![
-            DetailsBlock::Coding,
-            DetailsBlock::Settings,
-            DetailsBlock::Profile,
-        ]
+pub(crate) fn details_order(mine: bool, show_coding_routines: bool) -> Vec<DetailsBlock> {
+    let mut order = Vec::new();
+    if show_coding_routines {
+        order.push(DetailsBlock::Coding);
+        if mine {
+            order.push(DetailsBlock::Routines);
+        }
     }
+    order.push(DetailsBlock::Settings);
+    order
 }
 
 /// The Coding row's subtitle: what the agent is doing right now.
@@ -468,25 +458,18 @@ pub(crate) fn routine_status(r: &Routine, now: i64) -> String {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn details_sections(
     project: &Project,
     mine: bool,
     live: DetailsLive,
     model_rows: Vec<gpui::AnyElement>,
     pick: Option<AgentPick>,
-    access_rows: Option<Vec<gpui::AnyElement>>,
-    edit_open: bool,
-    editing_description: bool,
-    shell: &Shell,
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> Vec<Section> {
     let mut body: Vec<Section> = Vec::new();
-    let pid = project.id.clone();
     let mut model_rows = Some(model_rows);
-    let mut access_rows = access_rows;
-    for block in details_order(mine) {
+    for block in details_order(mine, AGENT_DETAILS_SHOW_CODING_ROUTINES) {
         match block {
             DetailsBlock::Coding => {
                 let working = live.streaming || live.workspace.as_ref().is_some_and(|w| w.running);
@@ -605,138 +588,9 @@ fn details_sections(
                     None => Section::Card(rows),
                 });
             }
-            DetailsBlock::Access => {
-                if let Some(rows) = access_rows.take() {
-                    body.push(Section::Title(
-                        format!("Who may message {}", project.name).into(),
-                    ));
-                    body.push(Section::Card(rows));
-                }
-            }
-            DetailsBlock::Permissions => {
-                body.extend(shell_grant_sections(shell, project, theme, cx));
-            }
-            DetailsBlock::Profile => {
-                body.push(Section::Title("Profile".into()));
-                let mut rows: Vec<gpui::AnyElement> = Vec::new();
-                if mine {
-                    rows.push(
-                        kit::row(
-                            "agent-edit-profile",
-                            Leading::Tile("pencil"),
-                            "Edit profile",
-                            None,
-                            None,
-                            Some(
-                                icon(
-                                    if edit_open {
-                                        "chevron-up"
-                                    } else {
-                                        "chevron-down"
-                                    },
-                                    13.0,
-                                    theme.text_faint,
-                                )
-                                .into_any_element(),
-                            ),
-                            false,
-                            theme,
-                        )
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.surface_2))
-                        .debug_selector(|| "agent-edit-profile".into())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.agent_edit_open = !this.agent_edit_open;
-                            cx.notify();
-                        }))
-                        .into_any_element(),
-                    );
-                }
-                if !mine || edit_open {
-                    rows.extend(profile_rows(
-                        project,
-                        mine,
-                        editing_description,
-                        &pid,
-                        shell,
-                        theme,
-                        cx,
-                    ));
-                }
-                body.push(Section::Card(rows));
-            }
         }
     }
     body
-}
-
-/// Name · Handle · Description — the edit fields, under the Edit profile row.
-fn profile_rows(
-    project: &Project,
-    mine: bool,
-    editing_description: bool,
-    pid: &Id,
-    _shell: &Shell,
-    theme: &Theme,
-    cx: &mut Context<Shell>,
-) -> Vec<gpui::AnyElement> {
-    let mut rows: Vec<gpui::AnyElement> = Vec::new();
-    let name_row = kit::row(
-        "agent-name-row",
-        Leading::None,
-        "Name",
-        None,
-        Some(project.name.clone().into()),
-        None,
-        mine,
-        theme,
-    );
-    rows.push(if mine {
-        let p = pid.clone();
-        name_row
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.start_edit_agent(p.clone(), false, window, cx);
-            }))
-            .into_any_element()
-    } else {
-        name_row.into_any_element()
-    });
-    let slug = format!("@{}", Project::mention_slug(&project.name));
-    rows.push(kit::value_row("agent-handle-row", "Handle", slug, theme).into_any_element());
-    let description = project.description.clone().unwrap_or_default();
-    let shown = if description.trim().is_empty() {
-        if mine {
-            "Add a description".to_string()
-        } else {
-            "—".to_string()
-        }
-    } else {
-        description
-    };
-    let row = kit::row(
-        "agent-description-row",
-        Leading::None,
-        "Description",
-        Some(shown.into()),
-        None,
-        None,
-        mine && !editing_description,
-        theme,
-    );
-    rows.push(if mine {
-        let p = pid.clone();
-        row.cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.start_edit_agent(p.clone(), true, window, cx);
-            }))
-            .into_any_element()
-    } else {
-        row.into_any_element()
-    });
-    rows
 }
 
 fn library_sections(
@@ -745,36 +599,9 @@ fn library_sections(
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> Vec<Section> {
-    // ----- Library: everything the agent's chats hold ----------------------------
-    let mut body: Vec<Section> = Vec::new();
-    if content.media.is_empty() && content.files.is_empty() && content.links.is_empty() {
-        body.push(Section::Empty("Nothing shared here yet".into()));
-        return body;
-    }
-    if !content.media.is_empty() {
-        body.push(Section::Title(
-            format!("Images · {}", content.media.len()).into(),
-        ));
-        body.push(Section::Grid(content.media));
-    }
-    if !content.files.is_empty() {
-        body.push(Section::Title(
-            format!("Files · {}", content.files.len()).into(),
-        ));
-        // Custom: the kit's file list is a list of its own rows (noted on #1330).
-        body.push(Section::Custom(
-            file_list(&content.files, "doc", "", theme).into_any_element(),
-        ));
-    }
-    if !content.links.is_empty() {
-        body.push(Section::Title(
-            format!("Links · {}", content.links.len()).into(),
-        ));
-        body.push(Section::Custom(
-            link_list(&content.links, shell, theme, cx).into_any_element(),
-        ));
-    }
-    body
+    // ----- Library: everything the agent's chats hold, one list by day ------------
+    // ([feedback library-list-hover-mac-2026-10-25], `profiles/library.rs`).
+    super::library::sections(content, shell, theme, cx)
 }
 
 /// The Computer tab's blocks, in order. Pure, for the test.
@@ -1061,219 +888,35 @@ fn capitalise(s: &str) -> String {
     }
 }
 
-/// "Permissions" (#1544): the Shell approvals row (value = the active grants), then one switch
-/// per standing grant made on a destructive-shell card; off = revoked, the agent asks again.
-fn shell_grant_sections(
-    shell: &Shell,
-    project: &Project,
-    theme: &Theme,
-    cx: &mut Context<Shell>,
-) -> Vec<Section> {
-    let grants: Vec<crate::model::ShellGrant> = shell
-        .state
-        .read(cx)
-        .shell_grants
-        .get(&project.id)
-        .cloned()
-        .unwrap_or_default();
-    let mut body = vec![
-        Section::Title("Permissions".into()),
-        Section::Card(vec![kit::row(
-            "agent-shell-approvals-row",
-            Leading::Tile("terminal"),
-            "Shell approvals",
-            None,
-            Some(crate::model::ShellGrant::summary(&grants).into()),
-            None,
-            false,
-            theme,
-        )
-        .into_any_element()]),
-        Section::Footnote(
-            format!(
-                "{} asks before destructive shell commands outside /work/tmp. Standing answers from the cards land here.",
-                project.name
-            )
-            .into(),
-        ),
-    ];
-    if grants.is_empty() {
-        return body;
-    }
-    body.push(Section::Title(
-        format!("Shell approvals · {}", project.name).into(),
-    ));
-    let mut rows: Vec<gpui::AnyElement> = Vec::new();
-    for g in &grants {
-        let pid = project.id.clone();
-        let gid = g.id.clone();
-        let mut sub = format!("{} · {}", g.rule_class, g.detail);
-        if g.chat_id.is_some() {
-            sub.push_str(" · this chat only");
-        }
-        rows.push(
-            kit::row(
-                gpui::ElementId::Name(format!("shell-grant-{}", g.id).into()),
-                Leading::Glyph("terminal"),
-                g.label.clone(),
-                Some(sub.into()),
-                None,
-                Some(glass::switch(true, theme).into_any_element()),
-                false,
-                theme,
-            )
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                let (pid, gid) = (pid.clone(), gid.clone());
-                this.state
-                    .update(cx, |s, cx| s.shell_grant_revoke(pid, gid, cx));
-            }))
-            .into_any_element(),
-        );
-    }
-    body.push(Section::Card(rows));
-    body.push(Section::Footnote(
-        format!(
-            "Turn one off and {} asks again next time. Every allowed run is in Activity.",
-            project.name
-        )
-        .into(),
-    ));
-    body
-}
-
-/// The rows of "Who may message X": one per grant (person or agent of another owner) with a
-/// switch, then "Give a person access…" → the people picker.
-fn message_grant_rows(
-    shell: &Shell,
-    project: &Project,
-    theme: &Theme,
-    cx: &mut Context<Shell>,
-) -> Vec<gpui::AnyElement> {
-    let state = shell.state.read(cx);
-    let mut rows: Vec<gpui::AnyElement> = Vec::new();
-    for g in &project.message_grants {
-        let person = crate::model::Person {
-            id: g.id.clone(),
-            handle: g.handle.clone().unwrap_or_else(|| g.id.clone()),
-            name: g.name.clone(),
-            avatar_url: g.avatar_url.clone(),
-            ..Default::default()
-        };
-        let title = g
-            .name
-            .clone()
-            .or_else(|| g.handle.clone().map(|h| format!("@{h}")))
-            .unwrap_or_else(|| g.id.clone());
-        let mut subtitle = match (&g.handle, g.kind.as_str()) {
-            (Some(h), "person") => format!("@{h}"),
-            (Some(h), _) => format!("@{h} · agent"),
-            (None, k) => k.to_owned(),
-        };
-        if let Some(at) = g.last_at {
-            subtitle = format!("{subtitle} · messaged {}", crate::model::ago(at));
-        } else if !g.note.is_empty() {
-            subtitle = format!("{subtitle} · {}", g.note);
-        }
-        let (pid, grantee, on) = (project.id.clone(), g.grantee.clone(), g.enabled);
-        let avatar = if g.kind == "agent" {
-            avatars::element(&g.id, &title, None, kit::AVATAR, theme).into_any_element()
-        } else {
-            crate::ui::people::avatar(state.avatar(&g.avatar_url), &person, kit::AVATAR, theme)
-                .into_any_element()
-        };
-        let switch = div()
-            .id(ElementId::Name(SharedString::from(format!(
-                "message-grant-switch-{}",
-                g.grantee
-            ))))
-            .cursor_pointer()
-            .child(glass::switch(on, theme))
-            .on_click(cx.listener({
-                let (pid, grantee) = (pid.clone(), grantee.clone());
-                move |this, _, _, cx| {
-                    let (pid, grantee) = (pid.clone(), grantee.clone());
-                    this.state
-                        .update(cx, |s, cx| s.set_message_grant(pid, grantee, !on, cx));
-                }
-            }))
-            .into_any_element();
-        rows.push(
-            kit::row(
-                ElementId::Name(SharedString::from(format!("message-grant-{}", g.grantee))),
-                Leading::Avatar(avatar),
-                title,
-                Some(subtitle.into()),
-                None,
-                Some(switch),
-                false,
-                theme,
-            )
-            // Right-click removes the row (the switch only pauses it).
-            .on_mouse_down(gpui::MouseButton::Right, {
-                cx.listener(move |this, _: &gpui::MouseDownEvent, _, cx| {
-                    cx.stop_propagation();
-                    let (pid, grantee) = (pid.clone(), grantee.clone());
-                    this.state
-                        .update(cx, |s, cx| s.remove_message_grant(pid, grantee, cx));
-                })
-            })
-            .into_any_element(),
-        );
-    }
-    let pid = project.id.clone();
-    rows.push(
-        kit::row(
-            "message-grant-add",
-            Leading::Glyph("person-plus"),
-            "Give a person access…",
-            None,
-            None,
-            None,
-            false,
-            theme,
-        )
-        .text_color(theme.accent)
-        .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
-        .on_click(cx.listener(move |this, _, window, cx| {
-            let id = pid.clone();
-            this.state
-                .update(cx, |s, cx| s.open_message_grant_picker(id, cx));
-            let handle = this.people_input.read(cx).focus_handle(cx);
-            window.focus(&handle, cx);
-        }))
-        .into_any_element(),
-    );
-    rows
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::RoutineTrigger;
 
-    /// Live content first, the options after, the edit fields last and folded
-    /// (Jacob 2026-10-24); someone else's agent has no routines or access card.
+    /// Jacob 2026-10-25 ([feedback agent-details-remove-sections-mac-2026-10-25]):
+    /// Details is the Settings card alone — no "Who may message", no
+    /// "Permissions", no "Profile" — and Coding / Routines come back ahead of it
+    /// only while the flag is on (routines for the owner alone).
     #[test]
-    fn details_puts_live_content_first_and_the_edit_fields_last() {
-        let mine = details_order(true);
-        assert_eq!(mine[0], DetailsBlock::Coding);
-        assert_eq!(mine[1], DetailsBlock::Routines);
-        assert_eq!(*mine.last().unwrap(), DetailsBlock::Profile);
-        assert!(
-            mine.iter().position(|b| *b == DetailsBlock::Settings)
-                > mine.iter().position(|b| *b == DetailsBlock::Routines)
-        );
-        let theirs = details_order(false);
+    fn details_is_settings_alone_until_the_live_cards_are_switched_back_on() {
+        // The shipped default: Coding and Routines stay hidden.
         assert_eq!(
-            theirs,
+            details_order(true, AGENT_DETAILS_SHOW_CODING_ROUTINES),
+            [DetailsBlock::Settings]
+        );
+        assert_eq!(details_order(true, false), [DetailsBlock::Settings]);
+        assert_eq!(details_order(false, false), [DetailsBlock::Settings]);
+        assert_eq!(
+            details_order(true, true),
             [
                 DetailsBlock::Coding,
-                DetailsBlock::Settings,
-                DetailsBlock::Profile
+                DetailsBlock::Routines,
+                DetailsBlock::Settings
             ]
+        );
+        assert_eq!(
+            details_order(false, true),
+            [DetailsBlock::Coding, DetailsBlock::Settings]
         );
     }
 

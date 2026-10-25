@@ -2824,7 +2824,7 @@ impl Composer {
                 .cursor_pointer()
                 .when(i == selected, |el| el.bg(theme.surface_2))
                 .hover(|s| s.bg(theme.surface_2))
-                .child(mention_picture(&c.picture, MENTION_ROW_PICTURE))
+                .child(mention_picture(&c.picture, MENTION_ROW_PICTURE, &theme))
                 .child(
                     div()
                         .text_size(px(TEXT_SMALL))
@@ -2919,8 +2919,8 @@ fn mention_match(query: &str, handle: &str, name: &str) -> Option<bool> {
         .then_some(false)
 }
 
-/// A picker row's picture as an element: photo, D79 initials or D92 leaf.
-fn mention_picture(picture: &mention::Picture, size: f32) -> gpui::AnyElement {
+/// A picker row's picture as an element: photo, D79 initials, D92 leaf or the neutral disc.
+fn mention_picture(picture: &mention::Picture, size: f32, theme: &Theme) -> gpui::AnyElement {
     match picture {
         mention::Picture::Image(image) => img(image.clone())
             .size(px(size))
@@ -2947,6 +2947,9 @@ fn mention_picture(picture: &mention::Picture, size: f32) -> gpui::AnyElement {
             .into_any_element(),
         mention::Picture::Leaf(pick) => {
             crate::ui::avatars::leaf_element(*pick, size).into_any_element()
+        }
+        mention::Picture::Neutral { name } => {
+            crate::ui::avatars::neutral_element(name, size, theme).into_any_element()
         }
     }
 }
@@ -3012,6 +3015,10 @@ impl Render for Composer {
             .map(|_| "Messages in this chat are not being delivered".to_string());
         let in_livekit = state.my_call.is_some();
         let has_text = !self.input.read(cx).text().trim().is_empty();
+        // In a job tab (`jobtabs`) typing steers that job.
+        let job_tab = state
+            .active_chat_id()
+            .is_some_and(|id| crate::jobtabs::is_job_chat(&id));
 
         self.input.update(cx, |input, _| {
             input.set_placeholder(match mode {
@@ -3019,6 +3026,7 @@ impl Render for Composer {
                 ComposerMode::Approve => "Approve or reject the card above".to_string(),
                 ComposerMode::Send if transcribing => "Transcribing…".to_string(),
                 ComposerMode::Send if voice_mode => "Speak or type…".to_string(),
+                ComposerMode::Send if job_tab => "Steer this task".to_string(),
                 // Grok Mac says "Message <bot>" (the iPhone says "Ask <bot>").
                 ComposerMode::Send => format!("Message {name}"),
             });

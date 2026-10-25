@@ -70,6 +70,8 @@ struct AgentAvatar: View {
                 AsyncImage(url: url) { phase in
                     if let image = phase.image {
                         image.resizable().scaledToFill()
+                    } else if LeafArt.isNeutral(project.avatarLeaf) {
+                        NeutralAvatar(name: project.name, size: size)
                     } else if flag.on {
                         LeafAvatar(pick: LeafArt.pick(project), size: size)
                     } else {
@@ -78,6 +80,9 @@ struct AgentAvatar: View {
                 }
                 .frame(width: size, height: size)
                 .clipShape(Circle())
+            } else if LeafArt.isNeutral(project.avatarLeaf) {
+                // Jacob, 2026-10-25: created with no leaf — the name's initial on a neutral disc.
+                NeutralAvatar(name: project.name, size: size)
             } else if flag.on {
                 LeafAvatar(pick: LeafArt.pick(project), size: size, idle: idle && !still, gust: gust)
                     .onChange(of: working) { _, now in

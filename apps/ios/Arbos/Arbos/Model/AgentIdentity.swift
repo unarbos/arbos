@@ -74,6 +74,10 @@ extension AppModel {
     /// `AgentIdentity` → the `Project` the views draw. A known agent keeps its full record
     /// (model, state, owner…) with the identity's name, leaf and picture written over it.
     func agentProject(_ a: AgentIdentity, chatId: Id?) -> Project {
+        // The resolver's `leaf` is the pair in effect (the automatic one for a neutral card, so
+        // an older client still draws something); the stored neutral pair (Jacob, 2026-10-25)
+        // is read off the card itself, so the initial-on-grey survives the round trip.
+        let neutral = a.known && agentCards(chatId: chatId).first { $0.id == a.id }?.leaf == UInt8(clamping: LeafArt.neutral)
         var p = knownProject(a.id, chatId: chatId) ?? Project(
             id: a.id,
             name: a.name,
@@ -90,8 +94,10 @@ extension AppModel {
             avatarColor: nil
         )
         p.name = a.name
-        p.avatarLeaf = Int(a.leaf.leaf)
-        p.avatarLeafColor = Int(a.leaf.color)
+        // A neutral card (Create sheet, nothing picked — Jacob 2026-10-25) keeps its stored pair,
+        // so `AgentAvatar` draws the initial on grey, never the automatic leaf.
+        p.avatarLeaf = neutral ? LeafArt.neutral : Int(a.leaf.leaf)
+        p.avatarLeafColor = neutral ? LeafArt.neutral : Int(a.leaf.color)
         p.avatarColorIndexEffective = Int(a.colorIndex)
         p.imageKey = a.imageKey
         p.imageURL = a.imageKey.flatMap { blobURL(projectId: a.id, key: $0)?.absoluteString }

@@ -106,6 +106,13 @@ final class PerfLog {
     }
 }
 
+/// What the `ARBOS_PERF_DRIVE=jump` driver watches: when the transcript's scroll
+/// geometry last changed (stamped by the chat's bottom reporter).
+enum PerfDriveProbe {
+    /// Main thread only (the reporter writes, the driver reads).
+    nonisolated(unsafe) static var lastScrollGeometry = Date.distantPast
+}
+
 /// Body-evaluation and work counters, drained into each 2 s perf line
 /// (`rowBody=… blockBody=… chatBody=… rows()=…/…ms`). Any thread.
 final class PerfCounters {

@@ -47,6 +47,27 @@ sweep_deleting() {
 }
 sweep_deleting
 
+# `xcodebuild test` clones the destination simulator into ~/Library/Developer/XCTestDevices ("Clone N of
+# iPhone 17", 13 GB each on this box) and is meant to delete the clone afterwards; a killed or crashed test run
+# leaves it behind (5 clones = 61 GB on 2026-10-25 19:1x, free space 14 GB). A clone no process has open and
+# untouched for 30 min is garbage: delete it through simctl so the device set stays consistent, then its
+# Deleting-* residue goes on the next sweep_deleting pass. Runs in every pass.
+sweep_xctest_clones() {
+  local set n=0 d u
+  for set in /Users/ec2-user/Library/Developer/XCTestDevices /Users/arbosgui/Library/Developer/XCTestDevices; do
+    [ -d "$set" ] || continue
+    while read -r d; do
+      lsof +D "$d" >/dev/null 2>&1 && continue
+      u=$(basename "$d")
+      sudo -u "$(stat -f %Su "$set")" xcrun simctl --set "$set" delete "$u" >/dev/null 2>&1 || rm -rf "$d" 2>/dev/null
+      [ -d "$d" ] || n=$((n + 1))
+    done < <(find "$set" -mindepth 1 -maxdepth 1 -type d -mmin +30 2>/dev/null)
+  done
+  [ "$n" -gt 0 ] && say "removed $n idle XCTest simulator clone(s)"
+  return 0
+}
+sweep_xctest_clones
+
 if [ "${1:-}" = "--if-low" ]; then
   f=$(free_gb)
   [ "${f:-99}" -lt "$LOW_FREE_GB" ] || exit 0

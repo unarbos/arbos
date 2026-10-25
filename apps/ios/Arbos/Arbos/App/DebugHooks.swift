@@ -12,6 +12,8 @@ enum DebugHooks {
     static var openServer: String? { value("ARBOS_OPEN_SERVER") }
     /// Home search opened with this query (search-name-matching rig).
     static var search: String? { value("ARBOS_SEARCH").flatMap { $0.isEmpty ? nil : $0 } }
+    /// With `ARBOS_SEARCH`: open the n-th result row (1-based, list order) once the rows are up.
+    static var searchOpen: Int? { value("ARBOS_SEARCH_OPEN").flatMap { Int($0) } }
     /// Home list segment selected at launch: all | agents | people | servers (screenshot rig).
     static var homeFilter: String? { value("ARBOS_HOME_FILTER") }
     /// With `ARBOS_OPEN_SERVER=…:panel`: the server page's tab to land on (Channels | Members | Settings).
@@ -43,12 +45,11 @@ enum DebugHooks {
     /// Tasks-chip rig (duplex §2.4): the first n of three background jobs open in the opened
     /// agent chat — 1 running with a step, 2 running with no step yet, 3 queued behind a lock.
     static var fixtureJobs: Int { min(3, value("ARBOS_FIXTURE_JOBS").flatMap { Int($0) } ?? 0) }
+    /// Job-tab rig: the first seeded job's document is finished (result delivered).
+    static var fixtureRolloutDone: Bool { value("ARBOS_FIXTURE_ROLLOUT_DONE") == "1" }
     /// #1592 rig: the fixture group holds someone else's agent ("TestAgent", run by @sami —
     /// in the roster, not in my projects) with one bubble; with `ARBOS_FIXTURE_WORKING` it works.
     static var fixtureForeignAgent: Bool { value("ARBOS_FIXTURE_FOREIGN_AGENT") == "1" }
-    /// `ARBOS_FIXTURE_SEEN=<handle>:<messageId>[,…]`: peers' read watermarks in the fixture DM
-    /// (sent-state-opacity rig: a seen bubble at full opacity next to a sent one).
-    static var fixtureSeen: String? { value("ARBOS_FIXTURE_SEEN").flatMap { $0.isEmpty ? nil : $0 } }
     /// Presence-row rig: `1` (the chat's other person) or comma-separated handles typing.
     static var fixtureTyping: String? { value("ARBOS_FIXTURE_TYPING").flatMap { $0.isEmpty || $0 == "0" ? nil : $0 } }
     /// Join a call seen via presence automatically (two-simulator relay tests).
@@ -79,12 +80,19 @@ enum DebugHooks {
     static var showDelayMs: Int { value("ARBOS_SHOW_DELAY_MS").flatMap(Int.init) ?? 600 }
     /// With `ARBOS_SHOW=newagent`: prefill the Create agent name (the "named" state on the rig).
     static var newAgentName: String? { value("ARBOS_NEW_AGENT_NAME") }
+    /// With a Create screen open: `upload | generate[:<prompt>]` picks the picture option (and
+    /// types the prompt).
+    static var createPicture: String? { value("ARBOS_CREATE_PICTURE") }
     static var onboardingStage: String? { value("ARBOS_ONBOARDING_STAGE") }
     static var onboardingAutoplay: Bool { value("ARBOS_ONBOARDING_AUTOPLAY") == "1" }
     /// With `ARBOS_SHOW=onboarding`: also present the name/handle sheet over the terminal (rig).
     static var onboardingProfile: Bool { value("ARBOS_ONBOARDING_PROFILE") == "1" }
-    /// With `ARBOS_SHOW=settings`: the Settings page to land on — appearance, textsize, connectors, secrets, machine, credits, notifications, about, relay.
+    /// With `ARBOS_SHOW=settings`: the Settings page to land on — appearance, textsize, connectors, secrets, machine, credits, notifications, about, relay;
+    /// `avatar[-generate|-upload]` opens the avatar picker over my picture.
     static var settingsPage: String? { value("ARBOS_SETTINGS_PAGE") }
+    /// With the avatar picker open on Generate: type this prompt and press Generate (a shot
+    /// shows prompt → result).
+    static var avatarPrompt: String? { value("ARBOS_AVATAR_PROMPT") }
     /// With a Settings page open: scroll to the card with this id (e.g. `people` on a Secret page).
     static var settingsScroll: String? { value("ARBOS_SETTINGS_SCROLL") }
     /// On a Secret page: open a sheet at once — `people` (Give a person access), `person` (the

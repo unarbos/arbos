@@ -21,6 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib import box as bx  # noqa: E402
+from lib import convergence as cv  # noqa: E402
 from lib import driver as dr  # noqa: E402
 from lib import fixtures as fx  # noqa: E402
 from lib import grade as gr  # noqa: E402
@@ -40,6 +41,9 @@ SUBSETS = {
     # Grok parity (docs/duplex-agent-design.md §4): every tasks/parity/* task plus the existing tasks that cover
     # group chat, agent-to-agent, budget cap, restart, safety and injection (categories 27–33 of the design).
     "parity": [p.stem for p in sorted(HERE.glob("tasks/parity/*.json"))] + ["h2-people-chat-mention-send", "g3-here-collective-ask", "g2-agent-to-agent-hello", "k1-budget-cap-behaviour", "m7-long-chat-catchup-after-restart", "x1-delete-needs-confirmation", "x3-file-injection"],
+    # Grok convergence (docs/grok-convergence-loop.md): the corpus-derived replays under tasks/convergence/ plus the
+    # parity replays covering steer, stop, parallel asks and busy; ≈ 10 tasks, ≈ 15 min, ≈ $1.5. Owner bc-c608fb3e.
+    "convergence": cv.subset_ids(),
 }
 # fixtures the agent must fetch over the web live in the repo; main after the suite lands, else the branch
 FIXTURES = os.environ.get("LT_FIXTURE_BASE", "https://raw.githubusercontent.com/unarbos/arbos/main/evals/long-tasks/fixtures")
@@ -52,6 +56,8 @@ def load_tasks(only=None, lanes=None):
         d["_file"] = str(p.relative_to(HERE))
         if only and d["id"] not in only:
             continue
+        if d.get("replayable") is False:
+            continue  # a corpus prompt that needs the user's file or would send a real message outside
         if lanes and d["lane"] not in lanes:
             continue
         tasks.append(d)
@@ -736,6 +742,7 @@ def summarize(meta, results):
         "judge_cost_usd": meta.get("judge_cost_usd"),
         "categories": cats,
         "parity": py.summarize(results),
+        "convergence": cv.summarize(results),
     }
     return {"meta": meta, "summary": summary, "results": results}
 

@@ -257,24 +257,48 @@ pub fn gather(state: &AppState, chat_id: &str, space: &Project, theme: &Theme) -
 /// inside whatever frames it — the shell puts it through
 /// `transcript::column_row`, so its left edge is the composer's.
 pub fn row(presence: Presence, theme: &Theme, cx: &App) -> Div {
-    row_inner(presence, None, theme, cx)
+    row_inner(presence, None, None, theme, cx)
 }
 
 /// The row with the tasks chip after its line (`ui::tasks`, duplex §2.4):
 /// the box's "· N tasks" suffix leaves the words — the chip says the count —
 /// and the chip sits one row gap after the text, on the line's centre.
 pub fn row_with_chip(presence: Presence, chip: AnyElement, theme: &Theme, cx: &App) -> Div {
-    row_inner(presence, Some(chip), theme, cx)
+    row_inner(presence, Some(chip), None, theme, cx)
 }
 
-fn row_inner(presence: Presence, chip: Option<AnyElement>, theme: &Theme, cx: &App) -> Div {
-    let phase = PulseClock::phase(cx, 1100);
+/// The row with the chip and the words drawn by the caller (`ui::rollout::link`: the
+/// status line as a link to the newest job's rollout while jobs are open).
+pub fn row_with_chip_and_words(
+    presence: Presence,
+    chip: AnyElement,
+    words: AnyElement,
+    theme: &Theme,
+    cx: &App,
+) -> Div {
+    row_inner(presence, Some(chip), Some(words), theme, cx)
+}
+
+/// The words the row draws: the sentence, minus the box's "· N tasks" suffix when a
+/// chip carries the count.
+pub fn shown_text(presence: &Presence, with_chip: bool) -> String {
     let text = presence.text();
-    let text = if chip.is_some() {
+    if with_chip {
         crate::model::Job::strip_count_suffix(&text).to_string()
     } else {
         text
-    };
+    }
+}
+
+fn row_inner(
+    presence: Presence,
+    chip: Option<AnyElement>,
+    words: Option<AnyElement>,
+    theme: &Theme,
+    cx: &App,
+) -> Div {
+    let phase = PulseClock::phase(cx, 1100);
+    let text = shown_text(&presence, chip.is_some());
     let total = presence.participants.len();
     // Taffy reports a zero content width for a row whose children carry
     // negative margins, so the stack states its width: one picture plus
@@ -349,8 +373,9 @@ fn row_inner(presence: Presence, chip: Option<AnyElement>, theme: &Theme, cx: &A
         .gap(px(GAP))
         .debug_selector(|| "presence-row".into())
         .child(stack)
-        .child(
-            div()
+        .child(match words {
+            Some(words) => div().min_w_0().child(words),
+            None => div()
                 .min_w_0()
                 .truncate()
                 .text_size(px(TEXT_SMALL))
@@ -358,7 +383,7 @@ fn row_inner(presence: Presence, chip: Option<AnyElement>, theme: &Theme, cx: &A
                 .opacity(0.55 + 0.45 * phase)
                 .debug_selector(|| "presence-text".into())
                 .child(text),
-        )
+        })
         // The row's own gap (14, the disc → bubble gap) separates text and chip.
         .children(chip.map(|chip| div().flex_shrink_0().child(chip)))
 }

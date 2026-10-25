@@ -1029,6 +1029,8 @@ pub enum ChatKind {
     Chat,
     Group,
     Projects,
+    /// A background job's tab (`jobtabs`): client-side, never on the relay.
+    Job,
     #[serde(other)]
     Other,
 }
@@ -1653,6 +1655,209 @@ impl Job {
         } else {
             text
         }
+    }
+}
+
+/// One entry of a job's exchange (`GET /projects/{id}/jobs/{jobId}` → `entries[]`,
+/// `internal/duplex-rollout-client-contract.md`): the parent's prompt, the job's own
+/// words, a tool step (plain-words `label`, raw I/O stays in Details), a steer the
+/// user sent, the final result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RolloutKind {
+    Prompt,
+    Text,
+    Tool,
+    Steer,
+    Result,
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RolloutEntry {
+    pub seq: u64,
+    /// ms since the epoch.
+    #[serde(default)]
+    pub at: u64,
+    #[serde(default = "RolloutEntry::default_kind")]
+    pub kind: RolloutKind,
+    #[serde(default)]
+    pub text: Option<String>,
+    /// A tool step's words ("Reading tripadvisor.com").
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// `running` | `done` | `failed` on a tool step or the result.
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+}
+
+impl RolloutEntry {
+    fn default_kind() -> RolloutKind {
+        RolloutKind::Other
+    }
+
+    pub fn is_live(&self) -> bool {
+        self.status.as_deref() == Some("running")
+    }
+
+    /// "2.1 s" / "1:04" for a step's duration.
+    pub fn duration_label(&self) -> Option<String> {
+        let ms = self.duration_ms?;
+        Some(if ms < 60_000 {
+            format!("{:.1} s", ms as f64 / 1000.0)
+        } else {
+            format!("{}:{:02}", ms / 60_000, (ms / 1000) % 60)
+        })
+    }
+}
+
+/// The job's parent agent as the document names it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct RolloutParent {
+    #[serde(default)]
+    pub project_id: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+/// One job's full exchange — the rollout view's document.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct JobRollout {
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default = "Job::default_state")]
+    pub state: JobState,
+    #[serde(default)]
+    pub step: String,
+    #[serde(default)]
+    pub elapsed_s: u64,
+    #[serde(default)]
+    pub started_at: Option<u64>,
+    #[serde(default)]
+    pub ended_at: Option<u64>,
+    #[serde(default)]
+    pub chat_id: Option<String>,
+    #[serde(default)]
+    pub ask_message_id: Option<String>,
+    #[serde(default)]
+    pub parent: RolloutParent,
+    #[serde(default)]
+    pub brief: String,
+    #[serde(default)]
+    pub entries: Vec<RolloutEntry>,
+    #[serde(default)]
+    pub tool_calls: u64,
+    #[serde(default)]
+    pub next_seq: u64,
+    /// Client-only: the relay answered 404 — the server half is not live yet.
+    #[serde(default, skip_serializing)]
+    pub unavailable: bool,
+}
+
+impl JobRollout {
+    /// A rollout the client builds from the chip's `Job` while the document loads
+    /// (or when the relay has no endpoint yet): header only.
+    pub fn placeholder(job: &Job, parent_name: &str) -> Self {
+        Self {
+            id: job.id.clone(),
+            title: job.title.clone(),
+            kind: String::new(),
+            state: job.state,
+            step: job.step.clone(),
+            elapsed_s: job.elapsed_s,
+            started_at: None,
+            ended_at: None,
+            chat_id: job.chat_id.clone(),
+            ask_message_id: job.ask_message_id.clone(),
+            parent: RolloutParent {
+                project_id: String::new(),
+                name: parent_name.to_string(),
+            },
+            brief: String::new(),
+            entries: Vec::new(),
+            tool_calls: 0,
+            next_seq: 0,
+            unavailable: false,
+        }
+    }
+
+    /// The job is still running: the view polls and shows Steer / Stop.
+    pub fn is_running(&self) -> bool {
+        self.ended_at.is_none() && self.outcome().is_none()
+    }
+
+    /// The final entry's status once the job ended (`done` | `failed` | `cancelled`).
+    pub fn outcome(&self) -> Option<&str> {
+        self.entries
+            .iter()
+            .rev()
+            .find(|e| e.kind == RolloutKind::Result)
+            .and_then(|e| e.status.as_deref())
+    }
+
+    /// Merge an incremental answer (`?after=<seq>`): header fields follow the newer
+    /// document; entries are appended by `seq`, an entry already held is replaced
+    /// (a tool step goes `running` → `done`).
+    pub fn merge(&mut self, newer: JobRollout) {
+        let JobRollout {
+            entries, next_seq, ..
+        } = newer.clone();
+        let mut kept = self.entries.clone();
+        for e in entries {
+            match kept.iter_mut().find(|k| k.seq == e.seq) {
+                Some(slot) => *slot = e,
+                None => kept.push(e),
+            }
+        }
+        kept.sort_by_key(|e| e.seq);
+        *self = JobRollout {
+            entries: kept,
+            next_seq: next_seq.max(self.next_seq),
+            ..newer
+        };
+    }
+
+    /// "Running · 0:51" / "Finished · 6:12" — the tab dropdown's trailing words.
+    pub fn status_short(&self) -> String {
+        let full = self.status_line();
+        match full.rsplit_once(" · ") {
+            Some((head, _)) => head.to_string(),
+            None => full,
+        }
+    }
+
+    /// "Running · 0:51 · 4 tool calls" / "Finished · 6:12 · 11 tool calls".
+    pub fn status_line(&self) -> String {
+        let word = match (self.is_running(), self.state, self.outcome()) {
+            (true, JobState::Queued, _) => "Queued",
+            (true, JobState::Running, _) => "Running",
+            (false, _, Some("failed")) => "Failed",
+            (false, _, Some("cancelled")) => "Stopped",
+            (false, _, _) => "Finished",
+        };
+        let elapsed = Job {
+            id: String::new(),
+            title: String::new(),
+            state: self.state,
+            step: String::new(),
+            elapsed_s: self.elapsed_s,
+            ask_message_id: None,
+            chat_id: None,
+        }
+        .elapsed_label();
+        let calls = match self.tool_calls {
+            1 => "1 tool call".to_string(),
+            n => format!("{n} tool calls"),
+        };
+        format!("{word} · {elapsed} · {calls}")
     }
 }
 
@@ -2562,8 +2767,9 @@ impl SecretsView {
 }
 
 /// One standing shell approval (#1544, `GET /projects/{id}/shell-grants`): the owner chose
-/// "Always allow <agent> in /tmp" on a destructive-shell card. Shown and revoked in the agent
-/// pane › Settings › Shell approvals.
+/// "Always allow <agent> in /tmp" on a destructive-shell card. The relay holds them and the box
+/// applies them; the agent pane's Permissions card that listed them left on 2026-10-25
+/// ([feedback agent-details-remove-sections-mac-2026-10-25]) — the calls stay.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ShellGrant {
     pub id: String,
@@ -2583,25 +2789,6 @@ pub struct ShellGrant {
     /// "scratch only: /tmp and /work/tmp" (relay-rendered).
     #[serde(default)]
     pub detail: String,
-}
-
-impl ShellGrant {
-    /// The value of the Settings "Shell approvals" row: "Destructive · /tmp, anywhere" or
-    /// "Asks every time".
-    pub fn summary(grants: &[ShellGrant]) -> String {
-        if grants.is_empty() {
-            return "Asks every time".into();
-        }
-        let classes: Vec<&str> = grants
-            .iter()
-            .map(|g| match g.path_class.as_str() {
-                "scratch" => "/tmp",
-                "workspace" => "workspace",
-                other => other,
-            })
-            .collect();
-        format!("Destructive · {}", classes.join(", "))
-    }
 }
 
 /// `GET /projects/{id}/secrets`: what one agent may use, for its profile page.

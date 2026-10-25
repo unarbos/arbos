@@ -43,37 +43,32 @@ use serde_json::Value;
 actions!(transcript, [Copy]);
 
 /// Where one of my own bubbles is on its way. No caption says it (Jacob,
-/// 2026-10-24: "remove these 'sent' items, just use coloring"): the bubble's
-/// opacity does — see [`Delivery::opacity`] and docs/mac-design-rules.md.
+/// 2026-10-24: "remove these 'sent' items, just use coloring"), and nothing
+/// after delivery dims it (Jacob, 2026-10-25: delivered bubbles that waited
+/// for a read receipt "show up too dim, I think they have not been sent").
+/// See docs/mac-design-rules.md § Own-bubble delivery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Delivery {
-    /// Not yet acknowledged by the relay.
+    /// Not yet acknowledged by the relay: the only dimmed state.
     Pending,
-    /// The relay refused it; a red glyph marks it beside the bubble.
+    /// The relay refused it: full opacity, red mark + Retry beside the bubble.
     Failed,
-    /// Acknowledged, nobody has opened past it yet.
-    Sent,
-    /// A peer's read watermark covers it, an agent answered after it, or read
-    /// receipts are off (nothing to wait for).
-    Seen,
+    /// Acknowledged by the relay: the full own-bubble style, at once. Read
+    /// receipts never change how my bubble looks (agents send none, members
+    /// on older builds send none, a member who has not opened the chat sends
+    /// none — a bubble waiting for one reads as unsent).
+    Delivered,
 }
 
-/// Whole-bubble opacity of a sent-but-unseen bubble. Measured on both themes
-/// (white text, bubble `#5c5c5c` on `#141414` / `#111111` on `#fcfcfc`): the
-/// composited text keeps a 4.9 : 1 (dark) and 7.7 : 1 (light) contrast on its
-/// fill, while the fill drops to L* 30 from 39 (dark) and to `#535353` from
-/// `#111111` (light) — visibly lighter next to a seen bubble, still readable.
-pub const BUBBLE_ALPHA_SENT: f32 = 0.72;
-/// A pending bubble sits below a sent one (3.4 : 1 / 3.6 : 1 text contrast —
-/// transient, it lasts until the relay's ACK).
+/// Whole-bubble opacity of a pending bubble (white text on `#5c5c5c` /
+/// `#111111`: 3.4 : 1 dark, 3.6 : 1 light — transient, until the relay's ACK).
 pub const BUBBLE_ALPHA_PENDING: f32 = 0.5;
 
 impl Delivery {
     pub fn opacity(self) -> f32 {
         match self {
             Delivery::Pending => BUBBLE_ALPHA_PENDING,
-            Delivery::Sent => BUBBLE_ALPHA_SENT,
-            Delivery::Failed | Delivery::Seen => 1.0,
+            Delivery::Failed | Delivery::Delivered => 1.0,
         }
     }
 }
@@ -586,6 +581,16 @@ const SPRING_DAMPING: f32 = 0.55;
 pub const STICK_THRESHOLD_PX: f32 = 70.0;
 /// How far above the end the user must be before the ↓ button shows.
 const JUMP_BUTTON_AFTER_PX: f32 = 160.0;
+/// ↓ from this close to the end (in viewport heights), with every row between
+/// already laid out, glides on the spring; from further away it lands on the
+/// newest page at once ([`Transcript::jump_to_latest`]).
+const JUMP_GLIDE_MAX_VIEWPORTS: f32 = 2.5;
+/// The landing: the newest page settles in over this long, rising
+/// [`JUMP_ARRIVE_RISE_PX`] and fading from [`JUMP_ARRIVE_FROM_ALPHA`] — a
+/// short "arrived" cue instead of a crawl, Grok Mac's own timing class.
+const JUMP_ARRIVE_MS: u64 = 150;
+const JUMP_ARRIVE_RISE_PX: f32 = 24.0;
+const JUMP_ARRIVE_FROM_ALPHA: f32 = 0.35;
 
 /// The hover rail's buttons: Grok Mac's 24 pt hit target, 16 pt glyph, 2 pt apart.
 pub const RAIL_BUTTON: f32 = 24.0;
@@ -629,6 +634,12 @@ pub struct Transcript {
     /// One stateful card per typed question, keyed by question id; dropped with its row.
     cards: HashMap<String, Entity<QuestionCard>>,
     pinned_to_bottom: bool,
+    /// When ↓ last landed on the newest page from far away: drives the
+    /// [`JUMP_ARRIVE_MS`] settle of the list (rise + fade), then cleared.
+    arrived_at: Option<Instant>,
+    /// Row layouts the list has asked for, in total (every `render_row`
+    /// call: visible rows and the overdraw). The budget the jump test holds.
+    pub(crate) rows_laid_out: u64,
     /// Reveal request (`AppState::reveal_nonce`) we already scrolled for.
     revealed: Option<u64>,
     spring: StickSpring,
@@ -704,6 +715,8 @@ impl Transcript {
             veils: HashMap::new(),
             cards: HashMap::new(),
             pinned_to_bottom: true,
+            arrived_at: None,
+            rows_laid_out: 0,
             revealed: None,
             spring: StickSpring::default(),
             repin_check_pending: false,
@@ -1101,6 +1114,65 @@ impl Transcript {
         self.drag_scroll = None;
     }
 
+    /// The ↓ button (and anything else that wants "back to the newest row"):
+    /// re-pin, and land on the newest page.
+    ///
+    /// The stick spring moves a fraction of the *known* distance to the end
+    /// each frame, and the list only knows the height of rows it has laid
+    /// out — a row never scrolled past counts as zero. From deep in a long
+    /// chat the known distance is therefore never more than one overdraw
+    /// ahead, so the spring crawled through the whole history one page per
+    /// frame, laying out every row on the way (Jacob, 2026-10-25: 1 682 rows
+    /// took 11.8 s, [feedback jump-to-latest-instant-mac-2026-10-25]). Now the
+    /// spring only glides when the end is close and every row between is
+    /// already laid out; otherwise the list goes straight to its end — the
+    /// same path a chat opens on — so only the newest page is laid out, and a
+    /// [`JUMP_ARRIVE_MS`] settle marks the landing.
+    pub fn jump_to_latest(&mut self, cx: &mut Context<Self>) {
+        self.pinned_to_bottom = true;
+        self.repin_check_pending = false;
+        self.spring.velocity = 0.0;
+        if !self.end_is_near_and_laid_out() {
+            self.snap_to_end(!cx.reduce_motion());
+        }
+        cx.notify();
+    }
+
+    /// Whether the spring can glide to the end without laying out history:
+    /// the known distance is under [`JUMP_GLIDE_MAX_VIEWPORTS`] and no row
+    /// from the viewport to the end is still unmeasured.
+    fn end_is_near_and_laid_out(&self) -> bool {
+        let max = f32::from(self.list.max_offset_for_scrollbar().y);
+        let cur = -f32::from(self.list.scroll_px_offset_for_scrollbar().y);
+        let viewport = f32::from(self.list.viewport_bounds().size.height).max(1.0);
+        if max - cur > JUMP_GLIDE_MAX_VIEWPORTS * viewport {
+            return false;
+        }
+        let top = self.list.logical_scroll_top().item_ix;
+        // `bounds_for_item` answers only for rows the list has measured.
+        (top..self.rows.len()).all(|ix| self.list.bounds_for_item(ix).is_some())
+    }
+
+    /// Put the list at its end: the next layout walks back from the newest
+    /// row and measures one page, nothing above it. `settle` plays the
+    /// arrival cue (not on a chat open, not under Reduce Motion).
+    fn snap_to_end(&mut self, settle: bool) {
+        self.list.scroll_to_end();
+        self.spring.velocity = 0.0;
+        self.arrived_at = settle.then(Instant::now);
+    }
+
+    /// Progress of the landing cue, `None` once it is over (or never started).
+    fn arrive_progress(&mut self) -> Option<f32> {
+        let started = self.arrived_at?;
+        let t = started.elapsed().as_secs_f32() / (JUMP_ARRIVE_MS as f32 / 1000.0);
+        if t >= 1.0 {
+            self.arrived_at = None;
+            return None;
+        }
+        Some(crate::ui::motion::ease_out_cubic(t))
+    }
+
     /// One spring step per frame while pinned and not yet at the end.
     fn step_spring(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
         if self.repin_check_pending {
@@ -1117,7 +1189,9 @@ impl Transcript {
         let max = f32::from(self.list.max_offset_for_scrollbar().y);
         let cur = -f32::from(self.list.scroll_px_offset_for_scrollbar().y);
         let remaining = max - cur;
-        if remaining.abs() < 0.5 && self.spring.velocity.abs() < 0.5 {
+        // At the end (or anchored past it, the frame after `snap_to_end`
+        // before the list has laid that page out): nothing to glide.
+        if remaining <= 0.5 {
             self.spring.velocity = 0.0;
             return;
         }
@@ -1164,11 +1238,6 @@ impl Transcript {
             state.active_chat(),
             state.selected_channel.is_some(),
         );
-        // Per-handle read watermarks for this chat (Settings → Notifications).
-        let receipts = chat_id
-            .as_deref()
-            .and_then(|id| state.message_receipts.get(id));
-        let read_receipts = state.read_receipts;
         self.chat_id = chat_id;
         let new_rows = build_rows(
             &messages,
@@ -1178,8 +1247,6 @@ impl Transcript {
             &thumb_keys,
             &self.mentions,
             multi_party,
-            receipts,
-            read_receipts,
         );
         self.multi_party = multi_party;
         // A sender change opens the turn gap. So does every new assistant /
@@ -1222,7 +1289,8 @@ impl Transcript {
             self.list.reset(self.rows.len());
             self.pinned_to_bottom = true;
             self.revealed = None;
-            self.list.scroll_to_end();
+            // Open at the bottom: the same landing as ↓, without the cue.
+            self.snap_to_end(false);
             // `ARBOS_SCROLL_UP=1`: open at the top instead (screenshot rig; the
             // GUI session accepts no synthetic wheel events).
             if std::env::var("ARBOS_SCROLL_UP").is_ok_and(|v| v == "1")
@@ -1443,6 +1511,29 @@ impl Transcript {
     /// smiley (the reaction capsule) · reply · ⋯ (the message menu: Copy,
     /// Reply, Delete). After a copy from the menu the ⋯ shows a checkmark
     /// for a moment.
+    /// The red "! Retry" beside one of my bubbles the relay refused: a click
+    /// re-sends the text (and reply-to) as a new message and drops the failed row.
+    fn failed_retry(
+        &self,
+        row_id: &str,
+        message_id: &Id,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let state = self.state.clone();
+        let chat_id = self.chat_id.clone();
+        let message_id = message_id.clone();
+        failed_glyph(theme)
+            .id(SharedString::from(format!("{row_id}#retry")))
+            .cursor_pointer()
+            .on_click(cx.listener(move |_, _, _, cx| {
+                let (Some(chat_id), message_id) = (chat_id.clone(), message_id.clone()) else {
+                    return;
+                };
+                state.update(cx, |s, cx| s.resend_failed(chat_id, message_id, cx));
+            }))
+    }
+
     fn hover_rail(
         &self,
         row_id: &str,
@@ -1565,11 +1656,19 @@ impl Transcript {
         let had_id = seed.starts_with("agent:") || seed.starts_with("project:");
         // D92 amendment: the agent's uploaded / generated picture, once the loader has it.
         let image = a.image_key.as_deref().and_then(|url| state.avatar(url));
+        // A neutral agent (no leaf, Jacob 2026-10-25) carries the stored pair on, so every
+        // disc drawn from this identity goes through `avatars::agent`'s neutral branch.
+        let leaf = if a.neutral {
+            let n = avatars::neutral_pick();
+            (Some(n.leaf), Some(n.color))
+        } else {
+            (Some(a.leaf.leaf), Some(a.leaf.color))
+        };
         AgentIdentity {
             name: a.name,
             seed: a.id.clone(),
             color_index: Some(a.color_index),
-            leaf: (Some(a.leaf.leaf), Some(a.leaf.color)),
+            leaf,
             image,
             project_id: (a.known || had_id).then_some(a.id),
         }
@@ -1879,6 +1978,7 @@ impl Transcript {
     }
 
     fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        self.rows_laid_out += 1;
         let Some(row) = self.rows.get(ix).cloned() else {
             return div().into_any_element();
         };
@@ -2069,12 +2169,19 @@ impl Transcript {
                                 self.hover_row(&row.id, &row.id, now, window, cx);
                             let actions =
                                 self.hover_rail(&row.id, &row.message_id, reveal, &theme, cx);
-                            let delivery = delivery.unwrap_or(Delivery::Seen);
+                            let delivery = delivery.unwrap_or(Delivery::Delivered);
                             row_el
                                 .justify_end()
                                 .children(hover_time(time, reveal, &theme).map(|t| t.mr(px(8.0))))
                                 .child(actions.mr(px(6.0)))
-                                .children(failed_glyph(delivery, &theme).map(|g| g.mr(px(8.0))))
+                                .children((delivery == Delivery::Failed).then(|| {
+                                    self.failed_retry(&row.id, &row.message_id, &theme, cx)
+                                        .mr(px(8.0))
+                                }))
+                                .children(
+                                    (delivery == Delivery::Pending)
+                                        .then(|| pending_glyph(&theme).mr(px(8.0))),
+                                )
                                 .child(own_bubble(bubble, delivery))
                         })
                         .into_any_element()
@@ -2564,10 +2671,22 @@ impl Render for Transcript {
         self.step_spring(window, cx);
         let theme = Theme::of(cx).clone();
         // Grok Mac (ref 58): a 40 pt ↓ circle centred above the composer once
-        // the user has scrolled up; clicking re-pins and the spring glides down.
+        // the user has scrolled up; clicking re-pins and lands on the newest
+        // page (`jump_to_latest`).
         let max = f32::from(self.list.max_offset_for_scrollbar().y);
         let cur = -f32::from(self.list.scroll_px_offset_for_scrollbar().y);
         let show_jump = !self.pinned_to_bottom && max - cur > JUMP_BUTTON_AFTER_PX;
+        // The landing cue: the newest page rises into place and brightens.
+        let arrive = self.arrive_progress();
+        if arrive.is_some() {
+            window.request_animation_frame();
+        }
+        let (arrive_rise, arrive_alpha) = arrive.map_or((0.0, 1.0), |e| {
+            (
+                (1.0 - e) * JUMP_ARRIVE_RISE_PX,
+                JUMP_ARRIVE_FROM_ALPHA + (1.0 - JUMP_ARRIVE_FROM_ALPHA) * e,
+            )
+        });
         self.apply_rig_select(window, cx);
         // A selection lives as long as the transcript keeps keyboard focus:
         // clicking into the composer (or anywhere else) drops the highlight,
@@ -2624,12 +2743,19 @@ impl Render for Transcript {
             // band): the list runs up under the floating pill and fades out
             // over `HEADER_FADE_BAND` — Grok's text is gone at the window edge
             // and fully readable ~50 pt down ([feedback mac-header-fade-grok]).
-            .child(edge_faded(
-                HEADER_FADE_BAND,
-                true,
-                false,
-                list(self.list.clone(), cx.processor(Self::render_row)).size_full(),
-            ))
+            .child(
+                div()
+                    .relative()
+                    .size_full()
+                    .top(px(arrive_rise))
+                    .opacity(arrive_alpha)
+                    .child(edge_faded(
+                        HEADER_FADE_BAND,
+                        true,
+                        false,
+                        list(self.list.clone(), cx.processor(Self::render_row)).size_full(),
+                    )),
+            )
             .when(show_jump, |el| {
                 el.child(
                     div()
@@ -2654,11 +2780,7 @@ impl Render for Transcript {
                                 .cursor_pointer()
                                 .hover(|s| s.bg(theme.surface_2))
                                 .child(icon("arrow-down", 15.0, theme.text))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.pinned_to_bottom = true;
-                                    this.repin_check_pending = false;
-                                    cx.notify();
-                                }))
+                                .on_click(cx.listener(|this, _, _, cx| this.jump_to_latest(cx)))
                                 .with_animation(
                                     "jump-in",
                                     Animation::new(Duration::from_millis(180)),
@@ -2750,17 +2872,8 @@ fn clock_label(ms: u64) -> Option<String> {
 }
 
 /// Where my own bubble is: pending until the relay ACKs, failed when it
-/// refused, then sent until a peer opened past it (or an agent answered after
-/// it). With read receipts off there is nothing to wait for, so an ACKed
-/// bubble is `Seen` (full opacity) at once. `None` for someone else's bubble.
-pub fn delivery_state(
-    message: &Message,
-    messages: &[Message],
-    mix: usize,
-    is_mine: bool,
-    receipts: Option<&HashMap<String, Id>>,
-    read_receipts: bool,
-) -> Option<Delivery> {
+/// refused, delivered otherwise. `None` for someone else's bubble.
+pub fn delivery_state(message: &Message, is_mine: bool) -> Option<Delivery> {
     if !is_mine {
         return None;
     }
@@ -2770,37 +2883,7 @@ pub fn delivery_state(
     if message.status == MessageStatus::Error {
         return Some(Delivery::Failed);
     }
-    if !read_receipts || message_is_seen(message, messages, mix, receipts) {
-        return Some(Delivery::Seen);
-    }
-    Some(Delivery::Sent)
-}
-
-/// True when a peer's read watermark covers this message, or an agent/project
-/// replied after it (the reply is the "opened" signal in agent chats).
-fn message_is_seen(
-    message: &Message,
-    messages: &[Message],
-    mix: usize,
-    receipts: Option<&HashMap<String, Id>>,
-) -> bool {
-    if let Some(receipts) = receipts {
-        if !receipts.is_empty() {
-            let any = receipts.values().any(|seen_id| {
-                messages
-                    .iter()
-                    .position(|m| &m.id == seen_id)
-                    .is_some_and(|ix| ix >= mix)
-                    || seen_id == &message.id
-            });
-            if any {
-                return true;
-            }
-        }
-    }
-    messages[mix + 1..]
-        .iter()
-        .any(|m| matches!(m.role, Role::Assistant | Role::Project))
+    Some(Delivery::Delivered)
 }
 
 /// Grok keeps the rail inside the chat: a bubble taller than the pane gets
@@ -2897,20 +2980,33 @@ fn own_bubble<E: Styled>(bubble: E, delivery: Delivery) -> E {
     bubble.opacity(delivery.opacity())
 }
 
-/// The red mark beside a bubble the relay refused: always visible, outside
-/// the bubble on its outer edge. (There is no resend yet — the composer keeps
-/// the text, the mark says the row is not on the relay.)
-fn failed_glyph(delivery: Delivery, theme: &Theme) -> Option<Div> {
-    (delivery == Delivery::Failed).then(|| {
-        div()
-            .flex_shrink_0()
-            .size(px(RAIL_GLYPH))
-            .flex()
-            .items_center()
-            .justify_center()
-            .debug_selector(|| "own-bubble-failed-glyph".into())
-            .child(icon("exclamation", RAIL_GLYPH, theme.danger))
-    })
+/// The small clock beside a bubble the relay has not ACKed yet (with the
+/// 0.5 opacity): "on its way", never "not sent".
+fn pending_glyph(theme: &Theme) -> Div {
+    div()
+        .flex_shrink_0()
+        .size(px(RAIL_GLYPH))
+        .flex()
+        .items_center()
+        .justify_center()
+        .debug_selector(|| "own-bubble-pending-glyph".into())
+        .child(icon("hourglass", 12.0, theme.text_muted))
+}
+
+/// The mark beside a bubble the relay refused: red glyph + "Retry", always
+/// visible, outside the bubble on its outer edge. [`Transcript::failed_retry`]
+/// makes it clickable.
+fn failed_glyph(theme: &Theme) -> Div {
+    div()
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .text_size(px(TEXT_TINY))
+        .text_color(theme.danger)
+        .debug_selector(|| "own-bubble-failed-glyph".into())
+        .child(icon("exclamation", RAIL_GLYPH, theme.danger))
+        .child("Retry")
 }
 
 /// A text block that is really machine output (a JSON object/array) is not
@@ -2939,8 +3035,8 @@ fn is_json_block(block: &Block) -> bool {
 ///
 /// `thumb_keys` are blob refs that already have a decoded preview; they are
 /// mixed into row versions so a late thumbnail reloads the picture row.
-/// `names_senders`, `receipts`, and `read_receipts` landed from parallel
-/// feedbacks; keep them as plain args rather than a one-off options struct.
+/// `names_senders` landed from a parallel feedback; keep it a plain arg
+/// rather than a one-off options struct.
 #[allow(clippy::too_many_arguments)]
 pub fn build_rows(
     messages: &[Message],
@@ -2950,8 +3046,6 @@ pub fn build_rows(
     thumb_keys: &HashSet<&str>,
     mentions: &Mentions,
     names_senders: bool,
-    receipts: Option<&HashMap<String, Id>>,
-    read_receipts: bool,
 ) -> Vec<Row> {
     let mine = |m: &Message| {
         m.sender == "user" || m.sender.is_empty() || m.sender == format!("user:{me_id}")
@@ -3075,8 +3169,7 @@ pub fn build_rows(
                         .as_deref()
                         .filter(|id| !id.is_empty())
                         .map(|id| Quote::for_reply(id, messages));
-                    let delivery =
-                        delivery_state(message, messages, mix, is_mine, receipts, read_receipts);
+                    let delivery = delivery_state(message, is_mine);
                     let forwarded_from = message
                         .forwarded_from
                         .as_deref()
@@ -3477,7 +3570,35 @@ pub fn build_rows(
                         message.turn,
                         Some(TurnKind::New | TurnKind::Spawn | TurnKind::Wake)
                     );
-                if shows_nothing && finished && !streaming && !handoff_row && (failed || only_empty)
+                // The stock line is for a turn that said NOTHING. A turn that answered with a
+                // `send_message` bubble and ended on the fresh result row that bubble opened
+                // (wordless, "Working…") must not get "didn't answer" under its own answer
+                // (Jacob, "run bubble sort", 2026-10-25). Another visible row of the same turn
+                // = an assistant row answering the same user message with words or a card.
+                let turn_answered_elsewhere = !failed
+                    && message.in_reply_to.as_deref().is_some_and(|ask| {
+                        messages.iter().any(|m| {
+                            m.id != message.id
+                                && m.role == Role::Assistant
+                                && m.in_reply_to.as_deref() == Some(ask)
+                                && (!m.plain_text().trim().is_empty()
+                                    || m.parts.iter().any(|p| {
+                                        matches!(
+                                            p,
+                                            Part::Question { .. }
+                                                | Part::Approval { .. }
+                                                | Part::File { .. }
+                                                | Part::Attachment { .. }
+                                        )
+                                    }))
+                        })
+                    });
+                if shows_nothing
+                    && finished
+                    && !streaming
+                    && !handoff_row
+                    && !turn_answered_elsewhere
+                    && (failed || only_empty)
                 {
                     let line = errors
                         .first()
@@ -5649,7 +5770,7 @@ mod layout_tests {
                             .child(div().size(px(16.0)).mr(px(6.0)))
                             // Through the real delivery wrapper: a sent bubble must
                             // keep the same cap as a seen one (v0.6.223 regression).
-                            .child(own_bubble(bubble, Delivery::Sent))
+                            .child(own_bubble(bubble, Delivery::Delivered))
                     }
                 }
             };
@@ -5939,6 +6060,25 @@ mod transcript_smoke_tests {
         Entity<AppState>,
         Entity<Transcript>,
     ) {
+        let t = 1_700_000_000_000u64;
+        mount_with(
+            cx,
+            vec![
+                message("m1", "user", "How did the review go?", t),
+                message("m2", "assistant", LONG_REPLY, t + 2_000),
+            ],
+        )
+    }
+
+    /// `mount` over any message list (the long-chat tests).
+    fn mount_with(
+        cx: &mut TestAppContext,
+        messages: Vec<Message>,
+    ) -> (
+        tokio::runtime::Runtime,
+        Entity<AppState>,
+        Entity<Transcript>,
+    ) {
         // A runtime nobody drives: the state's tokio workers (source, updater,
         // calls) are parked for good, so no other thread ever touches gpui's
         // deterministic test scheduler.
@@ -5969,13 +6109,7 @@ mod transcript_smoke_tests {
             }))
             .expect("chat");
             s.chats.insert("p1".into(), vec![chat]);
-            s.messages.insert(
-                "c1".into(),
-                vec![
-                    message("m1", "user", "How did the review go?", t),
-                    message("m2", "assistant", LONG_REPLY, t + 2_000),
-                ],
-            );
+            s.messages.insert("c1".into(), messages);
             s.selected_project = Some("p1".into());
             s.active_tab.insert("p1".into(), "c1".into());
             cx.notify();
@@ -6051,6 +6185,160 @@ mod transcript_smoke_tests {
         assert!(
             hovered.as_ref().is_some_and(|(k, _)| k == "m2#bubble"),
             "the bubble is the hovered key: {hovered:?}"
+        );
+    }
+
+    /// Jacob, 2026-10-25 ([feedback jump-to-latest-instant-mac-2026-10-25]):
+    /// from the top of a 1 500-row chat, ↓ lands on the newest page in a
+    /// frame, and the history in between is never laid out — before, the
+    /// stick spring crawled through every row (11.8 s on 1 682 rows).
+    #[gpui::test]
+    fn jump_to_latest_from_deep_history_lays_out_only_the_newest_page(cx: &mut TestAppContext) {
+        const ROWS: usize = 1_500;
+        let t = 1_700_000_000_000u64;
+        let messages: Vec<Message> = (0..ROWS)
+            .map(|i| {
+                let role = if i % 3 == 0 { "user" } else { "assistant" };
+                let text =
+                    format!("synthetic history line {i} — lorem ipsum dolor sit amet, consectetur");
+                message(&format!("m{i}"), role, &text, t + i as u64 * 1_000)
+            })
+            .collect();
+        let (_rt, _state, transcript) = mount_with(cx, messages);
+        let (_host, vcx) = cx.add_window_view(|_, _| Host {
+            transcript: transcript.clone(),
+        });
+        vcx.run_until_parked();
+        // `measured` keeps every row it ever saw: forget them before a frame so
+        // `painted` speaks for that frame alone.
+        let frame = |vcx: &mut gpui::VisualTestContext| {
+            transcript.update(vcx, |t, cx| {
+                t.measured.borrow_mut().rows.clear();
+                cx.notify();
+            });
+            vcx.run_until_parked();
+        };
+        // Whether any row of the message with this id was painted last frame.
+        let painted = |vcx: &gpui::VisualTestContext, message_id: &str| {
+            transcript.read_with(vcx, |t, _| {
+                let m = t.measured.borrow();
+                t.rows
+                    .iter()
+                    .any(|r| r.message_id == message_id && m.rows.contains_key(&r.id))
+            })
+        };
+        // Opened at the bottom: the newest row is on screen and the open laid
+        // out one page, not the chat (the open shares the jump's landing).
+        assert!(
+            painted(vcx, &format!("m{}", ROWS - 1)),
+            "opens on the newest row"
+        );
+        let opened = transcript.read_with(&*vcx, |t, _| t.rows_laid_out);
+        assert!(
+            opened < 120,
+            "opening a {ROWS}-row chat laid out {opened} rows"
+        );
+
+        // Up to the very top, the way a search hit or scrollbar drag lands
+        // there: the rows between are unmeasured, as in a real long chat.
+        transcript.update(vcx, |t, _| {
+            t.pinned_to_bottom = false;
+            t.list.scroll_to(gpui::ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.0),
+            });
+        });
+        frame(vcx);
+        assert!(painted(vcx, "m0"), "at the top");
+        assert!(!painted(vcx, &format!("m{}", ROWS - 1)));
+        let middle = transcript.read_with(&*vcx, |t, _| t.list.bounds_for_item(ROWS / 2));
+        assert!(
+            middle.is_none(),
+            "the middle of the chat is not laid out yet"
+        );
+        let before_jump = transcript.read_with(&*vcx, |t, _| t.rows_laid_out);
+
+        // ↓ — one frame later the newest row is on screen.
+        transcript.update(vcx, |t, cx| t.jump_to_latest(cx));
+        frame(vcx);
+        assert!(
+            painted(vcx, &format!("m{}", ROWS - 1)),
+            "the newest row is on screen after one frame"
+        );
+        assert!(!painted(vcx, "m0"));
+        let landed = transcript.read_with(&*vcx, |t, _| t.rows_laid_out) - before_jump;
+        assert!(
+            landed < 120,
+            "the jump laid out {landed} rows, not one page"
+        );
+        // The landing cue runs its course without the position moving, and
+        // the history between was never laid out — no page-by-page crawl.
+        for _ in 0..12 {
+            std::thread::sleep(Duration::from_millis(20));
+            frame(vcx);
+            assert!(
+                painted(vcx, &format!("m{}", ROWS - 1)),
+                "stays on the newest row"
+            );
+        }
+        let settled = transcript.read_with(&*vcx, |t, _| {
+            (
+                t.arrived_at.is_none(),
+                t.pinned_to_bottom,
+                t.list.bounds_for_item(ROWS / 2).is_none(),
+                t.list.bounds_for_item(ROWS / 4).is_none(),
+                t.rows_laid_out - before_jump,
+            )
+        });
+        assert_eq!(
+            (settled.0, settled.1, settled.2, settled.3),
+            (true, true, true, true),
+            "cue over, pinned, middle rows still unmeasured: {settled:?}"
+        );
+        assert!(
+            settled.4 < ROWS as u64 / 4,
+            "the whole jump laid out {} row frames, a crawl would be ≥ {ROWS}",
+            settled.4
+        );
+    }
+
+    /// Close to the end with every row between already laid out, ↓ still
+    /// glides on the spring (no snap, no cue) — the short hop stays smooth.
+    #[gpui::test]
+    fn jump_to_latest_from_nearby_glides_instead_of_snapping(cx: &mut TestAppContext) {
+        let t = 1_700_000_000_000u64;
+        let messages: Vec<Message> = (0..12)
+            .map(|i| {
+                message(
+                    &format!("m{i}"),
+                    "assistant",
+                    &format!("line {i}"),
+                    t + i as u64 * 1_000,
+                )
+            })
+            .collect();
+        let (_rt, _state, transcript) = mount_with(cx, messages);
+        let (_host, vcx) = cx.add_window_view(|_, _| Host {
+            transcript: transcript.clone(),
+        });
+        vcx.run_until_parked();
+        // Every row is on screen (12 short lines fit a test window), so the end is near and measured.
+        transcript.update(vcx, |t, cx| {
+            t.pinned_to_bottom = false;
+            t.list.scroll_to(gpui::ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.0),
+            });
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        transcript.update(vcx, |t, cx| t.jump_to_latest(cx));
+        let (pinned, cue) =
+            transcript.read_with(&*vcx, |t, _| (t.pinned_to_bottom, t.arrived_at.is_some()));
+        assert!(pinned);
+        assert!(
+            !cue,
+            "a nearby jump glides; the landing cue is for the long way"
         );
     }
 }
@@ -6545,8 +6833,6 @@ mod system_line_tests {
             &HashSet::new(),
             &Mentions::empty(),
             false,
-            None,
-            true,
         );
         let handoffs: Vec<&Vec<String>> = rows
             .iter()
@@ -6594,8 +6880,6 @@ mod system_line_tests {
             "gh_me",
             &HashSet::new(),
             &Mentions::empty(),
-            true,
-            None,
             true,
         );
         let kinds: Vec<&RowKind> = rows.iter().map(|r| &r.kind).collect();
@@ -6654,8 +6938,6 @@ mod system_line_tests {
             "gh_jacob",
             &HashSet::new(),
             &Mentions::empty(),
-            true,
-            None,
             true,
         );
         // The name sits inside each reply's first bubble (sender-name-in-bubble-2026-10-23).
@@ -6740,8 +7022,6 @@ mod system_line_tests {
             &HashSet::new(),
             &Mentions::empty(),
             true,
-            None,
-            true,
         );
         assert_eq!(
             names(&rows),
@@ -6773,8 +7053,6 @@ mod system_line_tests {
             &HashSet::new(),
             &Mentions::empty(),
             false,
-            None,
-            true,
         );
         let headers: Vec<(Option<String>, bool)> = rows
             .iter()
@@ -6813,8 +7091,6 @@ mod system_line_tests {
             &HashSet::new(),
             &Mentions::empty(),
             false,
-            None,
-            true,
         );
         assert_eq!(
             names(&rows),
@@ -6846,8 +7122,6 @@ mod system_line_tests {
             &HashSet::new(),
             &Mentions::empty(),
             true,
-            None,
-            true,
         );
         let solo = build_rows(
             &[agent],
@@ -6857,8 +7131,6 @@ mod system_line_tests {
             &HashSet::new(),
             &Mentions::empty(),
             false,
-            None,
-            true,
         );
         let group_lane: Vec<Option<&str>> = group
             .iter()
@@ -6997,9 +7269,56 @@ mod presence_rows_tests {
             &HashSet::new(),
             &Mentions::empty(),
             true,
-            None,
-            true,
         )
+    }
+
+    fn reply_row(id: &str, ask: &str, status: &str, text: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "chatId": "chat_testing",
+            "role": "assistant",
+            "sender": "agent:01PROJGIGCHAD",
+            "senderName": "GigChadAgent",
+            "inReplyTo": ask,
+            "status": status,
+            "createdAt": at,
+            "parts": if text.is_empty() {
+                serde_json::json!([
+                    { "id": format!("t-{id}"), "kind": "text", "text": "" },
+                    { "id": format!("s-{id}"), "kind": "status", "code": "working", "message": "Working…" }
+                ])
+            } else {
+                serde_json::json!([{ "id": format!("p-{id}"), "kind": "text", "text": text }])
+            },
+        }))
+        .expect("message")
+    }
+
+    /// Jacob, "run bubble sort" (2026-10-25 18:08 UTC): the answer went out as a `send_message`
+    /// bubble, the fresh result row it opened ended wordless and Done, and the transcript drew
+    /// "The agent didn't answer. Ask again." under the answer. A turn that answered elsewhere
+    /// never gets the stock line; a turn that said nothing still does.
+    #[test]
+    fn no_stock_line_when_the_turn_answered_in_another_row() {
+        let now = now_ms();
+        let answered = [
+            reply_row("r1", "u1", "done", "Sorted: 1, 2, 3, 5, 8.", now),
+            reply_row("r2", "u1", "done", "", now + 1),
+        ];
+        let rows = rows_of(&answered);
+        assert!(
+            rows.iter()
+                .all(|r| !matches!(r.kind, RowKind::NoAnswer { .. })),
+            "no 'didn't answer' under an answer: {:?}",
+            rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
+        );
+        let silent = [reply_row("r3", "u2", "done", "", now + 2)];
+        let rows = rows_of(&silent);
+        assert!(
+            rows.iter()
+                .any(|r| matches!(r.kind, RowKind::NoAnswer { .. })),
+            "a turn that said nothing keeps the stock line"
+        );
     }
 
     #[test]
@@ -7040,10 +7359,11 @@ mod presence_rows_tests {
 
 #[cfg(test)]
 mod delivery_tests {
-    //! Jacob, 2026-10-24 ("remove these 'sent' items, just use coloring, make the
-    //! bubble less opaque"): no caption on my bubbles; a sent-but-unseen bubble is
-    //! lighter, a seen one is full; pending sits lower still and a failed one is
-    //! full with a red mark. Rule: docs/mac-design-rules.md.
+    //! Jacob, 2026-10-24 ("remove these 'sent' items, just use coloring") and
+    //! 2026-10-25 ("my messages show up too dim, I think they have not been
+    //! sent"): no caption on my bubbles; a delivered bubble is the full style
+    //! at once, whatever read receipts say; only pending is dimmed; a failed
+    //! one is full with a red "! Retry". Rule: docs/mac-design-rules.md.
     use std::collections::{HashMap, HashSet};
 
     use gpui::TestAppContext;
@@ -7060,14 +7380,14 @@ mod delivery_tests {
     ) -> Message {
         serde_json::from_value(serde_json::json!({
             "id": id,
-            "chatId": "chat_dm",
+            "chatId": "chat_group",
             "role": role,
             "sender": sender,
             "senderHandle": if sender.starts_with("user:") { "sam" } else { "" },
             "status": status,
             "pending": pending,
             "createdAt": at,
-            "parts": [{ "id": format!("p-{id}"), "kind": "text", "text": "fish?" }],
+            "parts": [{ "id": format!("p-{id}"), "kind": "text", "text": "I did lol" }],
         }))
         .expect("message")
     }
@@ -7077,81 +7397,50 @@ mod delivery_tests {
     }
 
     #[test]
-    fn opacity_is_the_state() {
-        assert_eq!(Delivery::Seen.opacity(), 1.0);
+    fn only_pending_is_dimmed() {
+        assert_eq!(Delivery::Delivered.opacity(), 1.0);
         assert_eq!(Delivery::Failed.opacity(), 1.0);
-        assert_eq!(Delivery::Sent.opacity(), BUBBLE_ALPHA_SENT);
         assert_eq!(Delivery::Pending.opacity(), BUBBLE_ALPHA_PENDING);
-        let order = [Delivery::Pending, Delivery::Sent, Delivery::Seen].map(Delivery::opacity);
-        assert!(
-            order.windows(2).all(|w| w[0] < w[1]),
-            "pending < sent < seen: {order:?}"
-        );
+        assert!(Delivery::Pending.opacity() < Delivery::Delivered.opacity());
     }
 
     #[test]
-    fn unseen_is_sent_and_a_watermark_or_a_reply_makes_it_seen() {
+    fn an_acked_bubble_is_delivered_with_or_without_receipts_or_replies() {
         let t = 1_700_000_000_000u64;
-        let messages = vec![mine("a", t), mine("b", t + 1_000), mine("c", t + 2_000)];
-        let no_receipts: HashMap<String, Id> = HashMap::new();
-        for ix in 0..3 {
-            assert_eq!(
-                delivery_state(&messages[ix], &messages, ix, true, Some(&no_receipts), true),
-                Some(Delivery::Sent),
-                "nobody opened the chat: lighter"
-            );
-        }
-        // Sam's watermark is "b": a and b are seen, c is still only sent.
-        let receipts: HashMap<String, Id> = HashMap::from([("sam".to_owned(), "b".to_owned())]);
-        let got: Vec<_> = (0..3)
-            .map(|ix| delivery_state(&messages[ix], &messages, ix, true, Some(&receipts), true))
-            .collect();
-        assert_eq!(
-            got,
-            vec![
-                Some(Delivery::Seen),
-                Some(Delivery::Seen),
-                Some(Delivery::Sent)
-            ]
-        );
-        // An agent's answer after my message is the "opened" signal in agent chats.
-        let with_reply = vec![
+        // Jacob's Arbonites shape (2026-10-25 22:11–22:17): two of mine, an
+        // agent reply after the second, nobody's read receipt anywhere.
+        let messages = vec![
             mine("a", t),
-            message("r", "assistant", "agent:arbos", "done", false, t + 500),
             mine("b", t + 1_000),
+            message("r", "assistant", "agent:hezbola", "done", false, t + 2_000),
+            mine("c", t + 3_000),
         ];
-        assert_eq!(
-            delivery_state(&with_reply[0], &with_reply, 0, true, None, true),
-            Some(Delivery::Seen)
-        );
-        assert_eq!(
-            delivery_state(&with_reply[2], &with_reply, 2, true, None, true),
-            Some(Delivery::Sent)
-        );
+        for m in &messages {
+            if m.role == Role::User {
+                assert_eq!(
+                    delivery_state(m, true),
+                    Some(Delivery::Delivered),
+                    "{}: delivered is the full style at once",
+                    m.id
+                );
+            }
+        }
     }
 
     #[test]
-    fn pending_failed_and_receipts_off_are_unchanged_states() {
+    fn pending_and_failed_are_the_only_other_states_and_others_have_none() {
         let t = 1_700_000_000_000u64;
         let pending = message("p", "user", "user:gh_me", "queued", true, t);
         let failed = message("f", "user", "user:gh_me", "error", false, t + 1);
         let sent = mine("s", t + 2);
-        let messages = vec![pending.clone(), failed.clone(), sent.clone()];
+        assert_eq!(delivery_state(&pending, true), Some(Delivery::Pending));
+        assert_eq!(delivery_state(&failed, true), Some(Delivery::Failed));
+        assert_eq!(delivery_state(&sent, true), Some(Delivery::Delivered));
         assert_eq!(
-            delivery_state(&pending, &messages, 0, true, None, true),
-            Some(Delivery::Pending)
+            delivery_state(&sent, false),
+            None,
+            "someone else's bubble: no state"
         );
-        assert_eq!(
-            delivery_state(&failed, &messages, 1, true, None, true),
-            Some(Delivery::Failed)
-        );
-        // Read receipts off: nothing to wait for, an ACKed bubble is full at once.
-        assert_eq!(
-            delivery_state(&sent, &messages, 2, true, None, false),
-            Some(Delivery::Seen)
-        );
-        // Someone else's bubble carries no delivery state at all.
-        assert_eq!(delivery_state(&sent, &messages, 2, false, None, true), None);
     }
 
     #[test]
@@ -7160,7 +7449,7 @@ mod delivery_tests {
         let messages = vec![
             mine("a", t),
             message("o", "user", "user:gh_sam", "done", false, t + 1_000),
-            mine("b", t + 2_000),
+            message("p", "user", "user:gh_me", "queued", true, t + 2_000),
         ];
         let spoken = HashSet::new();
         let failed = HashMap::new();
@@ -7170,7 +7459,6 @@ mod delivery_tests {
             failed: &failed,
             voice_mode: false,
         };
-        let receipts: HashMap<String, Id> = HashMap::from([("sam".to_owned(), "a".to_owned())]);
         let rows = build_rows(
             &messages,
             false,
@@ -7179,8 +7467,6 @@ mod delivery_tests {
             &HashSet::new(),
             &Mentions::empty(),
             false,
-            Some(&receipts),
-            true,
         );
         let states: Vec<Option<Delivery>> = rows
             .iter()
@@ -7191,13 +7477,13 @@ mod delivery_tests {
             .collect();
         assert_eq!(
             states,
-            vec![Some(Delivery::Seen), None, Some(Delivery::Sent)],
-            "mine: seen up to Sam's watermark, then sent; Sam's bubble: no state"
+            vec![Some(Delivery::Delivered), None, Some(Delivery::Pending)],
+            "mine: delivered / pending; Sam's bubble: no state"
         );
     }
 
-    /// The four states as the row draws them: one wrapper per own bubble named by
-    /// state, no caption anywhere, and the red mark only beside a failed bubble.
+    /// The three states as the row draws them: one bubble per state, no
+    /// caption anywhere, and the red "! Retry" only beside a failed bubble.
     struct OwnBubbles;
 
     impl gpui::Render for OwnBubbles {
@@ -7213,8 +7499,7 @@ mod delivery_tests {
                         match d {
                             Delivery::Pending => "own-bubble-pending",
                             Delivery::Failed => "own-bubble-failed",
-                            Delivery::Sent => "own-bubble-sent",
-                            Delivery::Seen => "own-bubble-seen",
+                            Delivery::Delivered => "own-bubble-delivered",
                         }
                         .into()
                     })
@@ -7232,34 +7517,35 @@ mod delivery_tests {
                 .flex_col()
                 .gap(px(8.0))
                 .children(
-                    [
-                        Delivery::Pending,
-                        Delivery::Failed,
-                        Delivery::Sent,
-                        Delivery::Seen,
-                    ]
-                    .into_iter()
-                    .map(|d| {
-                        div()
-                            .flex()
-                            .justify_end()
-                            .items_center()
-                            .children(failed_glyph(d, &theme).map(|g| g.mr(px(8.0))))
-                            .child(own_bubble(bubble("fish?", d), d))
-                    }),
+                    [Delivery::Pending, Delivery::Failed, Delivery::Delivered]
+                        .into_iter()
+                        .map(|d| {
+                            div()
+                                .flex()
+                                .justify_end()
+                                .items_center()
+                                .children(
+                                    (d == Delivery::Failed)
+                                        .then(|| failed_glyph(&theme).mr(px(8.0))),
+                                )
+                                .children(
+                                    (d == Delivery::Pending)
+                                        .then(|| pending_glyph(&theme).mr(px(8.0))),
+                                )
+                                .child(own_bubble(bubble("fish?", d), d))
+                        }),
                 )
         }
     }
 
     #[gpui::test]
-    fn every_state_draws_a_bubble_and_only_failed_gets_the_mark(cx: &mut TestAppContext) {
+    fn every_state_draws_a_bubble_and_only_failed_gets_the_retry(cx: &mut TestAppContext) {
         let (_view, vcx) = cx.add_window_view(|_, _| OwnBubbles);
         vcx.run_until_parked();
         for sel in [
             "own-bubble-pending",
             "own-bubble-failed",
-            "own-bubble-sent",
-            "own-bubble-seen",
+            "own-bubble-delivered",
         ] {
             vcx.debug_bounds(sel)
                 .unwrap_or_else(|| panic!("{sel} drawn"));
@@ -7270,13 +7556,23 @@ mod delivery_tests {
         );
         let glyph = vcx
             .debug_bounds("own-bubble-failed-glyph")
-            .expect("red mark beside the failed bubble");
+            .expect("red mark + Retry beside the failed bubble");
         let failed = vcx
             .debug_bounds("own-bubble-failed")
             .expect("failed bubble");
         assert!(
             f32::from(glyph.origin.x + glyph.size.width) <= f32::from(failed.origin.x),
             "the mark sits outside the bubble, on its outer edge"
+        );
+        let clock = vcx
+            .debug_bounds("own-bubble-pending-glyph")
+            .expect("clock beside the pending bubble");
+        let pending = vcx
+            .debug_bounds("own-bubble-pending")
+            .expect("pending bubble");
+        assert!(
+            f32::from(clock.origin.x + clock.size.width) <= f32::from(pending.origin.x),
+            "the clock sits outside the pending bubble"
         );
     }
 }

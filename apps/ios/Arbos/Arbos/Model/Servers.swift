@@ -129,13 +129,15 @@ struct Server: Identifiable, Equatable {
     var generalChannelId: String?
     /// D79 `avatar_color_index_effective` (nil → derived from `id`).
     var avatarColorIndex: Int?
-    /// D92 amendment: the server's leaf picture from the Create screen; nil → initials.
+    /// D92 amendment: the server's leaf picture from the Create screen; nil → initials (or the
+    /// neutral initial when `isNeutralAvatar`, Jacob 2026-10-25).
     var avatarLeaf: Int? = nil
     var avatarLeafColor: Int? = nil
     var leafPick: LeafPick? {
-        guard let l = avatarLeaf, let c = avatarLeafColor else { return nil }
+        guard let l = avatarLeaf, let c = avatarLeafColor, !LeafArt.isNeutral(l) else { return nil }
         return LeafPick(leaf: UInt8(clamping: l), color: UInt8(clamping: c))
     }
+    var isNeutralAvatar: Bool { LeafArt.isNeutral(avatarLeaf) }
     /// Anyone on Arbos can search and join without an invite link.
     var isOpen: Bool
     /// Only for owner/admin.
