@@ -80,7 +80,10 @@ launch() {
   # Not nohup: BSD nohup exits with "can't detach from console" when ssh gives it no tty. Job control
   # gives the run its own process group, so `abort` can kill cargo and every rustc under it.
   set -m
-  (trap '' HUP; exec bash "$0" _run "$id" "$@") >"$log" 2>&1 </dev/null &
+  # nice: the gate shares the 8 cores with the arbosgui Actions runner (Mac release + TestFlight builds).
+  # Both at once put the box at load 88–280 (2026-10-25 19:0x). The gate yields CPU to the release jobs:
+  # a gate verdict a few minutes later costs nothing, a Mac release or TF build a few minutes later does.
+  (trap '' HUP; exec nice -n 12 bash "$0" _run "$id" "$@") >"$log" 2>&1 </dev/null &
   echo "$!" >"$runs/$id.pid"
   disown
   set +m
