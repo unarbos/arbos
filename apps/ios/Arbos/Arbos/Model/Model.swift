@@ -742,6 +742,151 @@ struct Job: Identifiable, Equatable {
     }
 }
 
+/// One entry of a job's exchange (`GET /projects/{id}/jobs/{jobId}` → `entries[]`,
+/// `internal/duplex-rollout-client-contract.md`): the parent's prompt, the job's own words, a
+/// tool step (plain-words `label`; raw I/O stays in Details), a steer the user sent, the result.
+enum RolloutKind: String, Equatable {
+    case prompt, text, tool, steer, result, other
+}
+
+struct RolloutEntry: Equatable, Identifiable {
+    var seq: Int64
+    var id: Int64 { seq }
+    /// ms since the epoch.
+    var at: Int64
+    var kind: RolloutKind
+    var text: String?
+    var label: String?
+    var name: String?
+    /// `running` | `done` | `failed` on a tool step or the result.
+    var status: String?
+    var durationMs: Int64?
+
+    init(seq: Int64, at: Int64, kind: RolloutKind, text: String? = nil, label: String? = nil,
+         name: String? = nil, status: String? = nil, durationMs: Int64? = nil) {
+        self.seq = seq; self.at = at; self.kind = kind; self.text = text; self.label = label
+        self.name = name; self.status = status; self.durationMs = durationMs
+    }
+
+    init?(_ raw: Any) {
+        guard let m = raw as? [String: Any], let seq = (m["seq"] as? NSNumber)?.int64Value else { return nil }
+        self.seq = seq
+        self.at = (m["at"] as? NSNumber)?.int64Value ?? 0
+        self.kind = RolloutKind(rawValue: (m["kind"] as? String) ?? "") ?? .other
+        self.text = m["text"] as? String
+        self.label = m["label"] as? String
+        self.name = m["name"] as? String
+        self.status = m["status"] as? String
+        self.durationMs = (m["duration_ms"] as? NSNumber)?.int64Value
+    }
+
+    var isLive: Bool { status == "running" }
+
+    /// "2.1 s" / "1:04" for a step's duration.
+    var durationLabel: String? {
+        guard let ms = durationMs else { return nil }
+        if ms < 60_000 { return String(format: "%.1f s", Double(ms) / 1000) }
+        return String(format: "%d:%02d", ms / 60_000, (ms / 1000) % 60)
+    }
+}
+
+/// One job's full exchange — the job tab's document.
+struct JobRollout: Equatable {
+    var id: String
+    var title: String
+    var kind: String
+    var state: JobState
+    var step: String
+    var elapsedS: Int
+    var startedAt: Int64?
+    var endedAt: Int64?
+    var chatId: String?
+    var askMessageId: String?
+    var parentProjectId: String
+    var parentName: String
+    var brief: String
+    var entries: [RolloutEntry]
+    var toolCalls: Int
+    var nextSeq: Int64
+    /// Client-only: the relay answered 404 — the server half is not live yet.
+    var unavailable: Bool = false
+
+    init(id: String, title: String, kind: String = "", state: JobState = .running, step: String = "",
+         elapsedS: Int = 0, startedAt: Int64? = nil, endedAt: Int64? = nil, chatId: String? = nil,
+         askMessageId: String? = nil, parentProjectId: String = "", parentName: String = "",
+         brief: String = "", entries: [RolloutEntry] = [], toolCalls: Int = 0, nextSeq: Int64 = 0,
+         unavailable: Bool = false) {
+        self.id = id; self.title = title; self.kind = kind; self.state = state; self.step = step
+        self.elapsedS = elapsedS; self.startedAt = startedAt; self.endedAt = endedAt; self.chatId = chatId
+        self.askMessageId = askMessageId; self.parentProjectId = parentProjectId; self.parentName = parentName
+        self.brief = brief; self.entries = entries; self.toolCalls = toolCalls; self.nextSeq = nextSeq
+        self.unavailable = unavailable
+    }
+
+    /// The relay's document; nil when it has no id.
+    init?(_ raw: Any) {
+        guard let m = raw as? [String: Any], let id = m["id"] as? String, !id.isEmpty else { return nil }
+        let parent = m["parent"] as? [String: Any]
+        self.init(
+            id: id,
+            title: (m["title"] as? String) ?? "",
+            kind: (m["kind"] as? String) ?? "",
+            state: JobState(rawValue: (m["state"] as? String) ?? "") ?? .running,
+            step: (m["step"] as? String) ?? "",
+            elapsedS: Int((m["elapsed_s"] as? NSNumber)?.int64Value ?? 0),
+            startedAt: (m["started_at"] as? NSNumber)?.int64Value,
+            endedAt: (m["ended_at"] as? NSNumber)?.int64Value,
+            chatId: (m["chat_id"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+            askMessageId: (m["ask_message_id"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+            parentProjectId: (parent?["project_id"] as? String) ?? "",
+            parentName: (parent?["name"] as? String) ?? "",
+            brief: (m["brief"] as? String) ?? "",
+            entries: ((m["entries"] as? [Any]) ?? []).compactMap { RolloutEntry($0) }.sorted { $0.seq < $1.seq },
+            toolCalls: Int((m["tool_calls"] as? NSNumber)?.int64Value ?? 0),
+            nextSeq: (m["next_seq"] as? NSNumber)?.int64Value ?? 0
+        )
+    }
+
+    /// A header-only document from the chip's row while the real one loads.
+    static func placeholder(_ job: Job, parentName: String) -> JobRollout {
+        JobRollout(id: job.id, title: job.title, state: job.state, step: job.step, elapsedS: job.elapsedS,
+                   chatId: job.chatId, askMessageId: job.askMessageId, parentName: parentName)
+    }
+
+    /// The final entry's status once the job ended (`done` | `failed` | `cancelled`).
+    var outcome: String? { entries.last { $0.kind == .result }?.status }
+    /// The job is still running: the tab polls and shows Stop.
+    var isRunning: Bool { endedAt == nil && outcome == nil }
+
+    /// Merge an incremental answer (`?after=<seq>`): header fields follow the newer document;
+    /// entries are appended by `seq`, an entry already held is replaced (a step goes running → done).
+    mutating func merge(_ newer: JobRollout) {
+        var kept = entries
+        for e in newer.entries {
+            if let i = kept.firstIndex(where: { $0.seq == e.seq }) { kept[i] = e } else { kept.append(e) }
+        }
+        kept.sort { $0.seq < $1.seq }
+        var out = newer
+        out.entries = kept
+        out.nextSeq = max(newer.nextSeq, nextSeq)
+        out.unavailable = false
+        self = out
+    }
+
+    /// "Running · 0:51" / "Finished · 6:12" / "Stopped · 1:02".
+    var statusShort: String {
+        let word: String
+        if isRunning { word = state == .queued ? "Queued" : "Running" }
+        else if outcome == "failed" { word = "Failed" }
+        else if outcome == "cancelled" { word = "Stopped" }
+        else { word = "Finished" }
+        let s = max(0, elapsedS)
+        let clock = s >= 3600 ? String(format: "%d:%02d:%02d", s / 3600, (s / 60) % 60, s % 60)
+                              : String(format: "%d:%02d", s / 60, s % 60)
+        return "\(word) · \(clock)"
+    }
+}
+
 struct Message: Identifiable, Equatable {
     var id: Id
     var chatId: Id
@@ -1426,5 +1571,112 @@ enum ULID {
             out[i] = alphabet[Int(rng.next() % 32)]
         }
         return String(out)
+    }
+}
+
+// MARK: - Job tabs (feedback subagent-job-tabs-ios-2026-10-25)
+
+/// Sub-agent job tabs (Jacob, 2026-10-25 19:41 UTC): every background job an agent starts is
+/// its own chat screen next to the agent's chat — the brief as the first message, the job's words,
+/// its tool steps as system lines and the result as messages, live while it runs. Typing there
+/// steers the job (a reply under the job's ask in the parent chat, the wire the Steer button
+/// uses); Stop sends `stop { jobId }`. A finished job keeps its tab until closed. The chat
+/// itself still draws nothing for the job (the hidden `job` row). The Mac's `jobtabs`.
+enum JobTabs {
+    static let chatPrefix = "job:"
+
+    static func chatId(_ jobId: String) -> Id { chatPrefix + jobId }
+    static func jobId(_ chatId: String) -> String? {
+        chatId.hasPrefix(chatPrefix) ? String(chatId.dropFirst(chatPrefix.count)) : nil
+    }
+    static func isJobChat(_ chatId: String) -> Bool { chatId.hasPrefix(chatPrefix) }
+
+    /// The tab entry for a job under `projectId` (`kind: "job"`, client-side only).
+    static func tab(projectId: Id, jobId: String, title: String, at: Int64) -> Chat {
+        Chat(id: chatId(jobId), projectId: projectId,
+             title: title.trimmingCharacters(in: .whitespaces).isEmpty ? "Job" : title,
+             isPinned: false, unread: false, lastMessageAt: at, kind: "job")
+    }
+
+    /// "Read tripadvisor.com · 4.8 s" done, "Reading delsoulsurf.com…" live.
+    static func stepLine(_ e: RolloutEntry) -> String {
+        let words = e.label ?? e.text ?? ""
+        if e.isLive { return words + "…" }
+        if let d = e.durationLabel { return "\(words) · \(d)" }
+        return words
+    }
+
+    private static func base(_ chat: Id, id: String, role: Role, status: MessageStatus, at: Int64) -> Message {
+        Message(id: id, chatId: chat, role: role, sender: role == .user ? "user" : (role == .system ? "system" : "agent"),
+                status: status, turn: nil, decision: nil, subagentId: nil, subagentName: nil, inReplyTo: nil,
+                usage: [:], model: nil, createdAt: at, completedAt: at, pending: false, parts: [], hiddenCount: 0)
+    }
+
+    /// A steer typed in the tab, echoed at once (pending until the box's entry replaces it);
+    /// the same row, re-homed, is the parent chat's reply under the ask.
+    static func typedSteer(chat: Id, messageId: String, text: String, ask: String) -> Message {
+        var m = base(chat, id: messageId, role: .user, status: .done, at: nowMs())
+        m.replyTo = ask
+        m.pending = true
+        m.parts = [.text(id: "\(messageId)-t", text: text)]
+        return m
+    }
+
+    /// The tab's transcript from the job's exchange: the brief (and every steer) as a user
+    /// line, the job's words and its result as agent lines, each tool step as a system line,
+    /// and — while the job runs — a wordless streaming agent row whose `activity` is the live
+    /// step, so the presence row reads it and the composer shows Stop. `pending` are steers
+    /// typed in the tab the box has not echoed yet.
+    static func messages(_ r: JobRollout, pending: [Message] = []) -> [Message] {
+        let chat = chatId(r.id)
+        var out: [Message] = []
+        var liveStep: String? = nil
+        if r.unavailable {
+            let id = "\(chat):unavailable"
+            var m = base(chat, id: id, role: .system, status: .done, at: nowMs())
+            m.parts = [.text(id: "\(id)-t", text: "This task's transcript is not available on this relay yet.")]
+            out.append(m)
+        }
+        for e in r.entries {
+            let id = "\(chat):\(e.seq)"
+            let at = e.at > 0 ? e.at : (r.startedAt ?? 0)
+            switch e.kind {
+            case .prompt, .steer:
+                var m = base(chat, id: id, role: .user, status: .done, at: at)
+                m.parts = [.text(id: "\(id)-t", text: e.text ?? "")]
+                out.append(m)
+            case .text, .result:
+                var m = base(chat, id: id, role: .assistant, status: .done, at: at)
+                if let t = e.text, !t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    m.parts.append(.text(id: "\(id)-t", text: t))
+                }
+                if e.kind == .result {
+                    let (code, words): (StatusKind, String) = e.status == "failed" ? (.failed, "Failed")
+                        : (e.status == "cancelled" ? (.stopped, "Stopped") : (.done, "Done"))
+                    m.parts.append(.status(id: "\(id)-s", code: code, message: words))
+                    if e.status == "cancelled" { m.status = .cancelled }
+                }
+                out.append(m)
+            case .tool:
+                if e.isLive { liveStep = e.label ?? e.text }
+                var m = base(chat, id: id, role: .system, status: .done, at: at)
+                m.parts = [.text(id: "\(id)-t", text: stepLine(e))]
+                out.append(m)
+            case .other:
+                break
+            }
+        }
+        for p in pending {
+            let echoed = r.entries.contains { $0.kind == .steer && ($0.text ?? "").trimmingCharacters(in: .whitespaces) == p.plainText.trimmingCharacters(in: .whitespaces) }
+            if !echoed { out.append(p) }
+        }
+        if r.isRunning {
+            var live = base(chat, id: "\(chat):live", role: .assistant, status: .streaming, at: nowMs())
+            live.completedAt = nil
+            live.activity = liveStep ?? (r.step.trimmingCharacters(in: .whitespaces).isEmpty ? "\(r.title) is working" : r.step)
+            live.parts = [.status(id: "\(chat):live-s", code: .working, message: "Working…")]
+            out.append(live)
+        }
+        return out
     }
 }

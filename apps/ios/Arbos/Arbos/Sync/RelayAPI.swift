@@ -336,6 +336,19 @@ final class RelayAPI {
         return Job.list(fromActivity: detail["activity"])
     }
 
+    /// The job tab's document: `GET /projects/{id}/jobs/{jobId}[?after=<seq>]`
+    /// (`internal/duplex-rollout-client-contract.md`). nil when the relay has no such endpoint
+    /// (404) — the tab says so; other errors throw.
+    func jobRollout(projectId: Id, jobId: String, after: Int64?) async throws -> JobRollout? {
+        let path = after.map { "/projects/\(projectId)/jobs/\(jobId)?after=\($0)" } ?? "/projects/\(projectId)/jobs/\(jobId)"
+        do {
+            let raw = try await json("GET", path)
+            return JobRollout(raw)
+        } catch let e as RelayError where e.status == 404 {
+            return nil
+        }
+    }
+
     // MARK: Machine (D70: one box per user, projects are workspaces on it)
 
     /// `GET /machine` → the caller's one box and its workspaces.
