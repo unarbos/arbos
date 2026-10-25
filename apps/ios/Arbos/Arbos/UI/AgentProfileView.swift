@@ -253,23 +253,33 @@ struct AgentProfileView: View {
     var body: some View {
         ZStack(alignment: .top) {
             theme.bg.ignoresSafeArea()
-            ScrollView {
-                if let project {
-                    VStack(spacing: 18) {
-                        Color.clear.frame(height: 80)
-                        ProfilePane(
-                            hero: hero(project),
-                            tabs: PaneKinds.agent,
-                            selected: $tab,
-                            body: sections(project)
-                        )
-                        Color.clear.frame(height: 40)
+            ScrollViewReader { reader in
+                ScrollView {
+                    if let project {
+                        VStack(spacing: 18) {
+                            Color.clear.frame(height: 80)
+                            ProfilePane(
+                                hero: hero(project),
+                                tabs: PaneKinds.agent,
+                                selected: $tab,
+                                body: sections(project)
+                            )
+                            Color.clear.frame(height: 40).id("pane-end")
+                        }
+                    } else {
+                        Text("This agent is gone.").foregroundStyle(theme.muted).padding(.top, 120)
                     }
-                } else {
-                    Text("This agent is gone.").foregroundStyle(theme.muted).padding(.top, 120)
+                }
+                .scrollDismissesKeyboard(.interactively)
+                .onAppear {
+                    // Rig: `ARBOS_PANE_SCROLL=<block>` brings a Details block below the fold
+                    // into view (`permissions`, `profile`, or `end`).
+                    guard let anchor = DebugHooks.paneScroll else { return }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                        withAnimation(nil) { reader.scrollTo(anchor == "end" ? "pane-end" : "pane-\(anchor)", anchor: .top) }
+                    }
                 }
             }
-            .scrollDismissesKeyboard(.interactively)
             ProfileTopBar {
                 if editingLabel {
                     Button("Done") { commitLabel() }
@@ -456,7 +466,7 @@ struct AgentProfileView: View {
                 // Permissions · Shell approvals (#1544): the standing choices made on
                 // destructive-shell cards, one switch each; off = revoked, the agent asks again.
                 let grants = model.shellGrants[project.id] ?? []
-                out.append(.title("Permissions"))
+                out.append(.custom(AnyView(PaneSectionTitle("Permissions").padding(.bottom, -10).id("pane-permissions"))))
                 out.append(.card([AnyView(
                     PaneRow(leading: .tile("terminal"), title: "Shell approvals", value: ShellGrant.summary(grants))
                         .accessibilityIdentifier("shell-approvals-row")
@@ -484,7 +494,7 @@ struct AgentProfileView: View {
                     out.append(.footnote("Turn one off and \(project.name) asks again next time. Every allowed run is in Activity."))
                 }
             case .profile:
-                out.append(.title("Profile"))
+                out.append(.custom(AnyView(PaneSectionTitle("Profile").padding(.bottom, -10).id("pane-profile"))))
                 var rows: [AnyView] = []
                 if isMine {
                     rows.append(AnyView(Button {
