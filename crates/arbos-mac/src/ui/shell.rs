@@ -328,6 +328,9 @@ pub struct Shell {
     /// A member row's menu on the group pane (Shift-click / right-click): View
     /// profile, Remove from group → arms `member_remove_armed`.
     pub(crate) member_menu: Option<member_menu::MemberMenu>,
+    /// The Library tab's hover, unfolded days and ⋯ menu
+    /// ([feedback library-list-hover-mac-2026-10-25], `profiles/library.rs`).
+    pub(crate) library: crate::ui::profiles::library::LibraryUi,
     /// Right-click menu on a session row of the header's tab dropdown: the
     /// chat whose row carries it (#1256: anchored to the row, the dropdown
     /// stays open with the row highlighted).
@@ -909,6 +912,7 @@ impl Shell {
             member_remove_armed: None,
             device_revoke_armed: None,
             member_menu: None,
+            library: Default::default(),
             chat_menu: None,
             chat_delete_armed: false,
             message_menu: None,
@@ -1917,6 +1921,7 @@ impl Shell {
 
     pub(crate) fn close_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.hide_settings_page(cx);
+        self.library_reset();
         self.profile_edit_open = false;
         self.member_remove_armed = None;
         self.server_member_armed = None;
@@ -2454,10 +2459,12 @@ impl Shell {
             || self.chat_menu.is_some()
             || self.message_menu.is_some()
             || self.member_menu.is_some()
+            || self.library.menu.is_some()
             || self.reaction_capsule.is_some()
         {
             self.menu_open = false;
             self.member_menu = None;
+            self.library.menu = None;
             self.members_open = false;
             self.add_agent_open = false;
             self.tab_menu_open = false;
@@ -4210,6 +4217,9 @@ impl Render for Shell {
             }
         }
         if let Some(menu) = member_menu::render(self, window, cx) {
+            root = root.child(menu);
+        }
+        if let Some(menu) = crate::ui::profiles::library::menu(self, window, cx) {
             root = root.child(menu);
         }
         if let Some(space) = people_space {

@@ -660,6 +660,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/projects/{id}/archive", put(api::archive_project))
         .route("/projects/{id}/status", get(api::project_status))
         .route("/projects/{id}/inspect", get(inspect::project_inspect))
+        .route("/projects/{id}/jobs/{job_id}", get(inspect::project_job))
         // Read-only debugging for an account's own devices (debug_api.rs).
         .route("/me/devices", get(debug_api::me_devices))
         .route("/me/feedback", get(debug_api::me_feedback))

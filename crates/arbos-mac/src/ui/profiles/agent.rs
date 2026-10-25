@@ -35,10 +35,7 @@ use crate::ui::theme::{Theme, TEXT_SMALL};
 
 use super::kit::{self, Leading};
 use super::pane::{self, Hero, Picture, ProfilePane, Section};
-use super::{
-    chats_of, collect, editable_name, editable_picture, file_list, link_list, HeroClick,
-    HERO_AVATAR,
-};
+use super::{chats_of, collect, editable_name, editable_picture, HeroClick, HERO_AVATAR};
 
 /// The agent pane's tabs — Grok Bot's ([feedback agent-pane-details-tab-2026-10-24],
 /// Jacob 2026-10-24; supersedes Profile · Settings · Library of 2026-10-22):
@@ -602,36 +599,9 @@ fn library_sections(
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> Vec<Section> {
-    // ----- Library: everything the agent's chats hold ----------------------------
-    let mut body: Vec<Section> = Vec::new();
-    if content.media.is_empty() && content.files.is_empty() && content.links.is_empty() {
-        body.push(Section::Empty("Nothing shared here yet".into()));
-        return body;
-    }
-    if !content.media.is_empty() {
-        body.push(Section::Title(
-            format!("Images · {}", content.media.len()).into(),
-        ));
-        body.push(Section::Grid(content.media));
-    }
-    if !content.files.is_empty() {
-        body.push(Section::Title(
-            format!("Files · {}", content.files.len()).into(),
-        ));
-        // Custom: the kit's file list is a list of its own rows (noted on #1330).
-        body.push(Section::Custom(
-            file_list(&content.files, "doc", "", theme).into_any_element(),
-        ));
-    }
-    if !content.links.is_empty() {
-        body.push(Section::Title(
-            format!("Links · {}", content.links.len()).into(),
-        ));
-        body.push(Section::Custom(
-            link_list(&content.links, shell, theme, cx).into_any_element(),
-        ));
-    }
-    body
+    // ----- Library: everything the agent's chats hold, one list by day ------------
+    // ([feedback library-list-hover-mac-2026-10-25], `profiles/library.rs`).
+    super::library::sections(content, shell, theme, cx)
 }
 
 /// The Computer tab's blocks, in order. Pure, for the test.

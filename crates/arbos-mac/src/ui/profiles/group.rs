@@ -23,8 +23,7 @@ use crate::ui::theme::{Theme, TEXT_BODY};
 
 use super::pane::{self, Hero, Picture, ProfilePane, Section};
 use super::{
-    chats_of, collect, editable_name, editable_picture, kit, link_list, list_row, HeroClick,
-    HERO_AVATAR,
+    chats_of, collect, editable_name, editable_picture, kit, list_row, HeroClick, HERO_AVATAR,
 };
 
 pub(super) const TABS: [&str; 2] = ["Members", "Library"];
@@ -385,35 +384,10 @@ pub(super) fn page(
             out
         }
         _ => {
-            // Library: images, then files, then links — one place for everything
-            // shared (links as in the agent pane; DaWizzaa's ask,
-            // [feedback group-library-links-2026-10-23]).
-            let mut out = Vec::new();
-            if content.media.is_empty() && content.files.is_empty() && content.links.is_empty() {
-                out.push(Section::Empty("Nothing shared here yet".into()));
-            } else {
-                if !content.media.is_empty() {
-                    out.push(Section::Title(
-                        format!("Images · {}", content.media.len()).into(),
-                    ));
-                    out.push(Section::Grid(content.media));
-                }
-                if !content.files.is_empty() {
-                    out.push(Section::Title(
-                        format!("Files · {}", content.files.len()).into(),
-                    ));
-                    out.push(Section::Files(content.files));
-                }
-                if !content.links.is_empty() {
-                    out.push(Section::Title(
-                        format!("Links · {}", content.links.len()).into(),
-                    ));
-                    out.push(Section::Custom(
-                        link_list(&content.links, shell, &theme, cx).into_any_element(),
-                    ));
-                }
-            }
-            out
+            // Library: one list of everything shared — images, files and links by
+            // day ([feedback library-list-hover-mac-2026-10-25], `profiles/library.rs`;
+            // links as in the agent pane, [feedback group-library-links-2026-10-23]).
+            super::library::sections(content, shell, &theme, cx)
         }
     };
 

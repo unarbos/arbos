@@ -17,10 +17,7 @@ use crate::ui::icons::icon;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, TEXT_TINY};
 
-use super::{
-    file_list, hero, kit, link_list, media_grid, pushed_frame, tab_bar, Found, HeroClick, Link,
-    HERO_AVATAR, PANE_FADE_BAND,
-};
+use super::{hero, kit, pushed_frame, tab_bar, HeroClick, HERO_AVATAR, PANE_FADE_BAND};
 
 /// Everything a page declares. The component renders it.
 pub struct ProfilePane {
@@ -80,12 +77,6 @@ pub enum Section {
         rows: Vec<AnyElement>,
         open: usize,
     },
-    /// Media thumbnails, three square tiles per row.
-    Grid(Vec<Found>),
-    /// The Library's file rows: name, then "212 kB · Mira · Today".
-    Files(Vec<Found>),
-    /// The Library's link rows with favicons.
-    Links(Vec<Link>),
     /// A picker card: a `kit` row that opens and closes it, the swatch grid
     /// under it (leaves, colours), a small note under the grid.
     Picker {
@@ -176,7 +167,7 @@ fn kit_card(rows: Vec<AnyElement>, theme: &Theme) -> Div {
     kit::card(theme).children(rows)
 }
 
-fn section(part: Section, shell: &Shell, theme: &Theme, cx: &mut Context<Shell>) -> AnyElement {
+fn section(part: Section, theme: &Theme, cx: &mut Context<Shell>) -> AnyElement {
     match part {
         Section::Title(t) => kit::section_title(t, theme).into_any_element(),
         Section::Card(rows) => kit_card(rows, theme).into_any_element(),
@@ -197,9 +188,6 @@ fn section(part: Section, shell: &Shell, theme: &Theme, cx: &mut Context<Shell>)
                 None => card.into_any_element(),
             }
         }
-        Section::Grid(items) => media_grid(items, theme, cx).into_any_element(),
-        Section::Files(items) => file_list(&items, "doc", "", theme).into_any_element(),
-        Section::Links(items) => link_list(&items, shell, theme, cx).into_any_element(),
         Section::Picker {
             header,
             swatches,
@@ -300,12 +288,12 @@ pub fn render(pane: ProfilePane, shell: &Shell, cx: &mut Context<Shell>) -> Stat
         .pb(px(16.0))
         .child(div().h(px(spacer)).flex_shrink_0());
     for part in pane.body {
-        body = body.child(section(part, shell, &theme, cx));
+        body = body.child(section(part, &theme, cx));
     }
     if blocks.contains(&Block::Footer) {
         body = body.child(div().h(px(14.0)));
         for part in pane.footer {
-            body = body.child(section(part, shell, &theme, cx));
+            body = body.child(section(part, &theme, cx));
         }
     }
     let share = pane.share.filter(|_| share_disc_allowed(&pane.page));
