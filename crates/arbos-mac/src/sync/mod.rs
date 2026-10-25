@@ -292,6 +292,13 @@ pub enum SyncEvent {
     },
     /// The box as `GET /machine/debug` reports it (the agent pane's Computer tab).
     BoxReport(BoxReport),
+    /// The agent's open background jobs as the relay's activity record lists them
+    /// (`GET /projects/{id}` → `activity.jobs[]`, duplex §2.4) — the tasks chip and
+    /// drawer. Empty when nothing runs or the relay predates the field.
+    ProjectJobs {
+        project_id: Id,
+        jobs: Vec<crate::model::Job>,
+    },
     /// Run history of one routine, newest first.
     RoutineRuns {
         routine_id: Id,
@@ -540,6 +547,19 @@ pub enum ClientCommand {
     },
     Stop {
         chat_id: Id,
+    },
+    /// The tasks drawer's per-job Stop (duplex D7): `stop { jobId, messageId }` halts
+    /// that job only; the running turn and the other jobs go on.
+    StopJob {
+        chat_id: Id,
+        job_id: String,
+        /// The newest user message of the chat, or empty — what the box binds the
+        /// command to, as the Stop button's `stop` does.
+        message_id: String,
+    },
+    /// Poll the agent's open jobs (`GET /projects/{id}` → `activity.jobs[]`).
+    JobsRefresh {
+        project_id: Id,
     },
     /// Toggle my emoji reaction on a message (written into the chat doc).
     React {

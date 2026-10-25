@@ -32,9 +32,9 @@ use crate::model::{
     new_id, now_ms, ApprovalRisk, ApprovalState, Attachment, AttachmentKind, BoxReport, BoxState,
     BoxWorkspace, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelPlatformState,
     ChannelsView, Chat, ChatKind, ChoiceOption, Connector, ConnectorAction, ConnectorProvider,
-    ConnectorStatus, ConnectorsView, DeviceView, Effort, FieldKind, FormField, Id, Link,
-    LocalDevice, LocalView, Message, MessageStatus, Part, Project, QuestionState, Role, Routine,
-    RoutineRun, RoutineRunStatus, RoutineTrigger, Secret, SecretActivity, SecretAgent,
+    ConnectorStatus, ConnectorsView, DeviceView, Effort, FieldKind, FormField, Id, Job, JobState,
+    Link, LocalDevice, LocalView, Message, MessageStatus, Part, Project, QuestionState, Role,
+    Routine, RoutineRun, RoutineRunStatus, RoutineTrigger, Secret, SecretActivity, SecretAgent,
     SecretDirector, SecretRequest, SecretScope, SecretsView, ServerChannel, ServerInfo, Skill,
     StatusKind, ToolCall, ToolStatus, TurnKind, Widget,
 };
@@ -95,6 +95,18 @@ struct Shared {
     machine: Mutex<Machine>,
     /// People blocked in this session (the relay's `GET /blocks` stand-in, #1545).
     blocked: Mutex<Vec<Person>>,
+    /// `ARBOS_FIXTURE_JOBS=<n>`: the open background jobs the relay's activity
+    /// record would list (duplex §2.4), per chat, with their hidden rows' ids.
+    jobs: Mutex<Vec<FixtureJob>>,
+}
+
+/// One seeded job: the relay's row plus when it started (elapsed grows live)
+/// and the hidden transcript row that stands for it.
+#[derive(Clone, Debug)]
+struct FixtureJob {
+    job: Job,
+    started_at: u64,
+    row_id: Id,
 }
 
 /// What the offline STT "hears" (the bundled test clip says this).
@@ -140,6 +152,7 @@ impl SyncSource for FixtureSource {
                 local: Mutex::new(seed_local()),
                 voice_blobs: Mutex::new(HashMap::new()),
                 blocked: Mutex::new(Vec::new()),
+                jobs: Mutex::new(Vec::new()),
                 machine: Mutex::new(Machine {
                     // `ARBOS_FIXTURE_MACHINE=error|waking` seeds a banner state (screenshot rig).
                     state: match std::env::var("ARBOS_FIXTURE_MACHINE").as_deref() {
@@ -219,6 +232,7 @@ impl SyncSource for FixtureSource {
             emit_link_hook(&shared);
             emit_typing_hook(&shared);
             emit_working_hook(&shared);
+            emit_jobs_hook(&shared);
 
             loop {
                 tokio::select! {
@@ -489,6 +503,170 @@ fn emit_working_hook(shared: &Arc<Shared>) {
                 });
             }
         }
+    }
+}
+
+/// `ARBOS_FIXTURE_JOBS=<n>` (screenshot rig, duplex §2.4): the first n of three
+/// background jobs are open in every agent chat — each with its hidden `job` row
+/// (what agentd writes) and its entry in the relay's `activity.jobs[]` (what
+/// `JobsRefresh` answers): 1 running with a step, 2 running with no step yet,
+/// 3 queued behind a lock — the three drawer states. Elapsed grows live; the
+/// drawer's Stop removes a job, the Stop button removes them all.
+fn fixture_jobs_count() -> usize {
+    std::env::var("ARBOS_FIXTURE_JOBS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(0)
+        .min(3)
+}
+
+const FIXTURE_JOBS: [(&str, &str, JobState, &str, u64); 3] = [
+    (
+        "01J9JOBSURF000000000000000",
+        "Searching for surf schools",
+        JobState::Running,
+        "Reading tripadvisor.com",
+        41,
+    ),
+    (
+        "01J9JOBTESTS00000000000000",
+        "Fixing the flaky tests",
+        JobState::Running,
+        "",
+        125,
+    ),
+    (
+        "01J9JOBRENAME0000000000000",
+        "Renaming the config module",
+        JobState::Queued,
+        "Waiting for Fixing the flaky tests",
+        12,
+    ),
+];
+
+fn emit_jobs_hook(shared: &Arc<Shared>) {
+    let n = fixture_jobs_count();
+    if n == 0 {
+        return;
+    }
+    let spaces: Vec<Project> = shared.projects.lock().unwrap().clone();
+    let now = now_ms();
+    for space in spaces.iter().filter(|s| !s.is_people()) {
+        let chats: Vec<Id> = shared
+            .chats
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.project_id == space.id)
+            .map(|c| c.id.clone())
+            .collect();
+        for chat_id in chats {
+            // The ask the jobs answer: the newest user line of the chat.
+            let ask = with_doc(shared, &chat_id, |doc| {
+                doc.read_all()
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == Role::User)
+                    .map(|m| m.id.clone())
+            })
+            .flatten();
+            for (id, title, state, step, elapsed) in FIXTURE_JOBS.iter().take(n) {
+                let job_id = format!("{id}{}", &chat_id[chat_id.len().saturating_sub(4)..]);
+                let row_id = new_id();
+                let activity = if step.is_empty() { *title } else { step };
+                let shown = if n > 1 {
+                    format!("{activity} · {n} tasks")
+                } else {
+                    activity.to_string()
+                };
+                let fields = [
+                    (
+                        "job",
+                        json!({ "id": job_id, "title": title, "kind": "research" }),
+                    ),
+                    ("worker", json!(true)),
+                    ("hidden", json!(true)),
+                    ("inReplyTo", json!(ask.clone().unwrap_or_default())),
+                ];
+                with_doc(shared, &chat_id, |doc| {
+                    doc.core.transact(|d| {
+                        begin_assistant_row(
+                            d,
+                            &row_id,
+                            "agent",
+                            &fields,
+                            StatusKind::Working,
+                            "Working…",
+                        );
+                        d.set_activity(&row_id, Some(&shown));
+                    })
+                });
+                shared.jobs.lock().unwrap().push(FixtureJob {
+                    job: Job {
+                        id: job_id,
+                        title: (*title).to_string(),
+                        state: *state,
+                        step: (*step).to_string(),
+                        elapsed_s: *elapsed,
+                        ask_message_id: ask.clone(),
+                        chat_id: Some(chat_id.clone()),
+                    },
+                    started_at: now.saturating_sub(elapsed * 1000),
+                    row_id,
+                });
+            }
+        }
+    }
+}
+
+/// `JobsRefresh`: the relay's `activity.jobs[]` for one project — the seeded
+/// jobs of its chats with their elapsed clocks moved on.
+fn emit_project_jobs(shared: &Arc<Shared>, project_id: &str) {
+    let chats: Vec<Id> = shared
+        .chats
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|c| c.project_id == project_id)
+        .map(|c| c.id.clone())
+        .collect();
+    let now = now_ms();
+    let jobs: Vec<Job> = shared
+        .jobs
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|f| f.job.chat_id.as_ref().is_some_and(|c| chats.contains(c)))
+        .map(|f| Job {
+            elapsed_s: now.saturating_sub(f.started_at) / 1000,
+            ..f.job.clone()
+        })
+        .collect();
+    let _ = shared.events.send(SyncEvent::ProjectJobs {
+        project_id: project_id.to_string(),
+        jobs,
+    });
+}
+
+/// A job ends (Stop in the drawer, or the Stop button for every job of the
+/// chat): its hidden row closes as agentd closes it and the list forgets it.
+fn fixture_stop_jobs(shared: &Arc<Shared>, chat_id: &str, only: Option<&str>) {
+    let ended: Vec<FixtureJob> = {
+        let mut jobs = shared.jobs.lock().unwrap();
+        let (gone, kept): (Vec<FixtureJob>, Vec<FixtureJob>) = jobs.drain(..).partition(|f| {
+            f.job.chat_id.as_deref() == Some(chat_id) && only.is_none_or(|id| f.job.id == id)
+        });
+        *jobs = kept;
+        gone
+    };
+    for f in ended {
+        with_doc(shared, chat_id, |doc| {
+            doc.core.transact(|d| {
+                d.set_activity(&f.row_id, None);
+                let _ = d.add_status_part(&f.row_id, "stopped", "Stopped");
+                d.finish_message(&f.row_id, CoreStatus::Cancelled);
+            })
+        });
     }
 }
 
@@ -964,7 +1142,25 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     d.push_command("stop", json!({}), DEVICE);
                 });
             });
+            fixture_stop_jobs(shared, &chat_id, None);
         }
+        ClientCommand::StopJob {
+            chat_id,
+            job_id,
+            message_id,
+        } => {
+            with_doc(shared, &chat_id, |doc| {
+                doc.core.transact(|d| {
+                    d.push_command(
+                        "stop",
+                        json!({ "jobId": job_id, "messageId": message_id }),
+                        DEVICE,
+                    );
+                });
+            });
+            fixture_stop_jobs(shared, &chat_id, Some(&job_id));
+        }
+        ClientCommand::JobsRefresh { project_id } => emit_project_jobs(shared, &project_id),
         ClientCommand::React {
             chat_id,
             message_id,
@@ -5600,6 +5796,8 @@ fn human_message(chat_id: &str, who: &Person, text: &str, at: u64) -> Message {
         subagent_name: None,
         handoff_messages: None,
         worker: false,
+        job: None,
+        hidden: false,
         agent_reply_to: None,
         reactions: Default::default(),
         in_reply_to: None,

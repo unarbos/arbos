@@ -97,6 +97,7 @@ private struct ChatSessionHost: View {
             .onReceive(model.$models) { _ in tick &+= 1 }
             .onReceive(model.$notice) { _ in tick &+= 1 }
             .onReceive(model.$lastSeen) { _ in tick &+= 1 }
+            .onReceive(model.$jobs) { _ in tick &+= 1 }
     }
 }
 
@@ -211,6 +212,8 @@ private struct ChatSession: View {
     @State private var replySwipeActive = false
     /// Long-press → Forward: the text to send and who wrote it (Forward sheet).
     @State private var pendingForward: PendingForward?
+    /// The tasks sheet (duplex §2.4): open while the user looks at the agent's jobs.
+    @State private var showTasks = false
     @State private var pendingThread: PendingThread?
 
     /// Rows after the in-chat search filter (profile "search").
@@ -831,6 +834,28 @@ private struct ChatSession: View {
             MessageThreadSheet(root: pending.root, replies: pending.replies)
                 .environment(\.theme, theme)
         }
+        .sheet(isPresented: $showTasks) {
+            TasksSheet(jobs: model.openJobs(chatId),
+                       onSteer: { job in steerJob(job) },
+                       onStop: { job in model.stopJob(chatId: chatId, jobId: job.id) },
+                       onStopAll: { showTasks = false; stop() })
+                .environment(\.theme, theme)
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+                .presentationBackground(theme.bg)
+                .preferredColorScheme(theme.isDark ? .dark : .light)
+        }
+        .task(id: chatId) {
+            // Polls the open chat's jobs while one is live (`AppModel.pollJobsIfNeeded`);
+            // cancelled with the view. The sheet lists live work only: nothing open → it
+            // closes itself.
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(AppModel.jobsPollMs))
+                guard !Task.isCancelled else { break }
+                model.pollJobsIfNeeded(chatId: chatId)
+                if showTasks, model.openJobs(chatId).isEmpty { showTasks = false }
+            }
+        }
         .task {
             guard DebugHooks.liveDemo, !model.demoStarted, DebugHooks.openChat == chatId || DebugHooks.openChat == nil, let text = DebugHooks.autoSend else { return }
             model.demoStarted = true
@@ -946,10 +971,14 @@ private struct ChatSession: View {
                     case "agentsecrets": showAgentSecrets = true
                     case "voice": startCall(.voice)
                     case "model": showModelPicker = true
-                    case "profile": openHeaderProfile()
+                    // `agentvoice | agentlabel | agentedit`: the agent pane, which opens the Voice
+                    // picker / edits the label / unfolds Edit profile on appear.
+                    case "profile", "agentvoice", "agentlabel", "agentedit": openHeaderProfile()
                     // `avatarpicker[-generate|-upload]`: the agent pane, which opens the sheet on that tab.
                     case let s where s.hasPrefix("avatarpicker"): openHeaderProfile()
                     case "edit": showProfile = true
+                    // `tasks`: the tasks sheet over the presence row (needs `ARBOS_FIXTURE_JOBS`).
+                    case "tasks": if !model.openJobs(chatId).isEmpty { showTasks = true }
                     case "userprofile": if let c = counterpart { model.showProfile(.user(ProfilePerson(c))) }
                     // `addmembers`: the group pane opens its Add members sheet on appear.
                     case "groupprofile", "addmembers", "removemember": model.showProfile(.group(chatId: chatId, projectId: isPeople ? nil : projectId))
@@ -1973,13 +2002,33 @@ private struct ChatSession: View {
         TimelineView(.periodic(from: .now, by: 1)) { _ in
             let participants = presenceParticipants
             if !participants.isEmpty {
+                // The tasks chip rides on the row while the agent has background jobs
+                // open in this chat (duplex §2.4); a tap opens the sheet.
+                let jobs = model.openJobs(chatId)
+                let openTasks: (() -> Void)? = jobs.isEmpty ? nil : { showTasks = true }
                 PresenceRow(participants: participants,
                             detail: model.currentActivity(chatId),
-                            queued: false)
+                            queued: false,
+                            taskCount: jobs.count,
+                            onTasks: openTasks)
                     .padding(.horizontal, 16)
                     .padding(.bottom, 4)
             }
         }
+    }
+
+    /// Steer a job (contract: no command of its own): the composer becomes a reply to
+    /// the job's ask and the user types the correction; the agent binds a correction
+    /// that quotes the ask to that job.
+    private func steerJob(_ job: Job) {
+        guard let askId = job.askMessageId, let ask = messageById[askId] ?? messages.first(where: { $0.id == askId }) else {
+            model.notice = Notice(text: "That task's request is not in this chat any more.")
+            return
+        }
+        showTasks = false
+        editing = nil
+        replyTo = ask
+        composerFocused = true
     }
 
     // MARK: Composer

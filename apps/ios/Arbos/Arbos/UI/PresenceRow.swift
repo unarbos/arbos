@@ -61,6 +61,11 @@ struct PresenceRow: View {
     let participants: [PresenceParticipant]
     var detail: String? = nil
     var queued: Bool = false
+    /// Duplex §2.4: open background jobs in the chat. With `onTasks` set the row carries
+    /// the tasks chip ("2 tasks") after its words, the box's "· N tasks" suffix leaves the
+    /// line (the chip says the count), and a tap on the row opens the tasks sheet.
+    var taskCount: Int = 0
+    var onTasks: (() -> Void)? = nil
 
     /// Round picture size: the avatar column's disc — the sender's picture beside a
     /// people-chat bubble, centred on the composer's `+` (`Theme.memberAvatar`).
@@ -89,6 +94,16 @@ struct PresenceRow: View {
             queued: queued
         )
     }
+
+    /// The words drawn: with a chip on the row the count moves into the chip.
+    var shownText: String { hasChip ? Job.stripCountSuffix(text) : text }
+    var hasChip: Bool { onTasks != nil && taskCount > 0 }
+
+    /// The chip: Grok has no counterpart (its status line is a plain shimmer); it follows
+    /// the mention chip — the accent on a 14 % accent capsule, the tiny type.
+    static let chipHeight: CGFloat = 20
+    static let chipPadX: CGFloat = 8
+    static let chipAlpha: Double = 0.14
 
     private var ring: some View {
         Circle().strokeBorder(theme.bg, lineWidth: 1).padding(-1)
@@ -122,16 +137,145 @@ struct PresenceRow: View {
                 }
             }
             .frame(height: Self.avatar)
-            WorkingStatusText(text: text, color: queued ? theme.warn : theme.muted)
+            WorkingStatusText(text: shownText, color: queued ? theme.warn : theme.muted)
                 .lineLimit(1)
-                .id(text)
+                .id(shownText)
+            if hasChip {
+                tasksChip
+            }
             Spacer(minLength: 0)
         }
         .padding(.leading, inset)
         .frame(height: Self.height)
+        .contentShape(Rectangle())
+        .onTapGesture { onTasks?() }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(text)
+        .accessibilityAddTraits(hasChip ? .isButton : [])
+        .accessibilityHint(hasChip ? "Opens the tasks" : "")
         .accessibilityIdentifier("presence-row")
-        .animation(.easeInOut(duration: 0.25), value: text)
+        .animation(.easeInOut(duration: 0.25), value: shownText)
+    }
+
+    private var tasksChip: some View {
+        HStack(spacing: 3) {
+            Text(Job.countLabel(taskCount))
+                .font(theme.font(11.5, weight: .medium))
+            Image(systemName: "chevron.up")
+                .font(.system(size: 9, weight: .semibold))
+        }
+        .foregroundStyle(theme.accent)
+        .padding(.horizontal, Self.chipPadX)
+        .frame(height: Self.chipHeight)
+        .background(Capsule().fill(theme.accent.opacity(Self.chipAlpha)))
+        .accessibilityIdentifier("tasks-chip")
+    }
+}
+
+// MARK: - Tasks sheet (duplex §2.4, D3 / D7; feedback tasks-chip-drawer-ios-2026-10-25)
+
+/// The agent's open background jobs, one card row each: title over "<step> · m:ss",
+/// **Steer** (running jobs: the composer becomes a reply to the job's ask — no command of
+/// its own) and **Stop** (`stop { jobId }`, that job only). **Stop all** in the bar is the
+/// Stop button's `stop {}`: the turn and every job of the chat. The Mac's `ui::tasks`
+/// drawer, as a bottom sheet. Finished jobs are not here — their outcome is a bubble.
+struct TasksSheet: View {
+    @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
+    let jobs: [Job]
+    let onSteer: (Job) -> Void
+    let onStop: (Job) -> Void
+    let onStopAll: () -> Void
+
+    /// A running row's spinner (the agent pane's Coding row, 15 pt) / a queued row's pause mark.
+    static let glyph: CGFloat = 15
+    static let rowPadY: CGFloat = 10
+    /// Steer / Stop capsules.
+    static let buttonHeight: CGFloat = 28
+    static let buttonPadX: CGFloat = 12
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 0) {
+                    ForEach(Array(jobs.enumerated()), id: \.element.id) { i, job in
+                        row(job)
+                        if i < jobs.count - 1 {
+                            Rectangle().fill(theme.separator).frame(height: 0.5)
+                                .padding(.leading, SheetRow.paddingX + Self.glyph + 12)
+                        }
+                    }
+                }
+                .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(theme.card))
+                .padding(.horizontal, SheetRow.cardInset)
+                .padding(.top, 8)
+                Color.clear.frame(height: 24)
+            }
+            .background(theme.bg)
+            .navigationTitle("Tasks")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(theme.bg, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Done") { dismiss() }.foregroundStyle(theme.text)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Stop all") { onStopAll() }
+                        .foregroundStyle(theme.danger)
+                        .accessibilityIdentifier("tasks-stop-all")
+                }
+            }
+        }
+        .accessibilityIdentifier("tasks-sheet")
+    }
+
+    private func row(_ job: Job) -> some View {
+        HStack(spacing: 12) {
+            Group {
+                switch job.state {
+                case .running:
+                    ProgressView().tint(theme.accent).controlSize(.small)
+                case .queued:
+                    Image(systemName: "pause.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(theme.placeholder)
+                }
+            }
+            .frame(width: Self.glyph, height: Self.glyph)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(job.title)
+                    .font(theme.font(Theme.small, weight: .medium))
+                    .foregroundStyle(theme.text)
+                    .lineLimit(1)
+                Text("\(job.statusLine) · \(job.elapsedLabel)")
+                    .font(theme.font(Theme.tiny))
+                    .foregroundStyle(job.state == .queued ? theme.placeholder : theme.muted)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            if job.canSteer {
+                capsule("Steer", color: theme.text) { onSteer(job) }
+                    .accessibilityIdentifier("tasks-steer")
+            }
+            capsule("Stop", color: theme.danger) { onStop(job) }
+                .accessibilityIdentifier("tasks-stop")
+        }
+        .padding(.horizontal, SheetRow.paddingX)
+        .padding(.vertical, Self.rowPadY)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(job.title), \(job.statusLine), \(job.elapsedLabel)")
+    }
+
+    private func capsule(_ label: String, color: Color, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(label)
+                .font(theme.font(Theme.tiny, weight: .medium))
+                .foregroundStyle(color)
+                .padding(.horizontal, Self.buttonPadX)
+                .frame(height: Self.buttonHeight)
+                .background(Capsule().fill(theme.bubbleAssistant))
+        }
+        .buttonStyle(.plain)
     }
 }

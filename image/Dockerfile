@@ -113,7 +113,11 @@ RUN if [ "$WITH_BROWSER" = "1" ]; then \
 
 # --- Arbos files last, so a code change rebuilds only these thin layers (heavy downloads stay cached)
 COPY image/pi-seed/ /etc/arbos/pi-seed/
-COPY harness/arbos-pi-ext/*.ts harness/arbos-pi-ext/package.json /etc/arbos/pi-seed/extensions/arbos-pi-ext/
+# The whole folder, not a `*.ts` glob: the glob COPY kept serving a layer from 2026-10-22 03:32 out of
+# the buildx cache while index.ts changed on main three times (seen on image 0.1.121: agentd binary of
+# 01:13 UTC next to a three-day-old extension), so no pi-ext change reached a box. A directory COPY is
+# keyed on the directory's content; `.dockerignore` keeps a local node_modules out.
+COPY harness/arbos-pi-ext/ /etc/arbos/pi-seed/extensions/arbos-pi-ext/
 # typebox resolves from pi's own node_modules; link it next to the extension so jiti finds it.
 RUN mkdir -p /etc/arbos/pi-seed/extensions/arbos-pi-ext/node_modules \
  && TB="$(dirname "$(find "$(npm root -g)/@earendil-works" -path '*/node_modules/typebox/package.json' | head -1)")" \

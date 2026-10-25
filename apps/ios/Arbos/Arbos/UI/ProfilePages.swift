@@ -350,6 +350,12 @@ struct PaneHeader<Avatar: View>: View {
     let subtitle: String
     /// SF Symbol after the name ("lock.fill" on a private channel).
     var badge: String? = nil
+    /// The subtitle's colour when it is not the muted default (a placeholder reads fainter).
+    var subtitleTint: Color? = nil
+    /// A tap on the subtitle (the agent pane's label: tap to edit it in place).
+    var subtitleAction: (() -> Void)? = nil
+    /// Drawn instead of the subtitle while it is being edited.
+    var subtitleEditor: AnyView? = nil
     @ViewBuilder var avatar: () -> Avatar
 
     var body: some View {
@@ -365,11 +371,25 @@ struct PaneHeader<Avatar: View>: View {
                 }
             }
             .padding(.horizontal, 24)
-            Text(subtitle)
-                .font(theme.font(Theme.small))
-                .foregroundStyle(theme.muted)
+            if let subtitleEditor {
+                subtitleEditor
+            } else if let subtitleAction {
+                Button(action: subtitleAction) { subtitleText }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Edits the label")
+            } else {
+                subtitleText
+            }
         }
         .frame(maxWidth: .infinity)
+    }
+
+    private var subtitleText: some View {
+        Text(subtitle)
+            .font(theme.font(Theme.small))
+            .foregroundStyle(subtitleTint ?? theme.muted)
+            .lineLimit(1)
+            .padding(.horizontal, 32)
     }
 }
 
@@ -2427,6 +2447,12 @@ struct PaneHero {
     /// SF Symbol after the name ("lock.fill" on a private channel).
     var badge: String? = nil
     let subtitle: String
+    /// The subtitle's colour when it is not the muted default (a placeholder reads fainter).
+    var subtitleTint: Color? = nil
+    /// A tap on the subtitle (the agent pane's label: tap to edit it in place).
+    var subtitleAction: (() -> Void)? = nil
+    /// Drawn instead of the subtitle while it is being edited.
+    var subtitleEditor: AnyView? = nil
 }
 
 /// One block of a tab's content, top to bottom.
@@ -2464,10 +2490,12 @@ enum PaneBlock: Equatable {
 
 /// The tab set of every kind, the same labels and order as the Mac page of
 /// that kind (`profiles/*.rs` `TABS`; the Mac's `pane::tests` holds the twin).
+/// Agent: Grok Bot's Details · Library · Computer (Jacob 2026-10-24, the Mac's #1679;
+/// iPhone [feedback iphone-agent-pane-tabs-2026-10-25]).
 enum PaneKinds {
     static let person = ["Links", "Groups"]
     static let ownProfile = ["Profile", "Settings"]
-    static let agent = ["Profile", "Settings", "Library"]
+    static let agent = ["Details", "Library", "Computer"]
     static let group = ["Members", "Library"]
     static let server = ["Channels", "Members", "Settings"]
     static let channel = ["Profile", "Settings"]
@@ -2524,7 +2552,8 @@ struct ProfilePane: View {
                 }
             } header: {
                 VStack(spacing: 18) {
-                    PaneHeader(name: hero.name, subtitle: hero.subtitle, badge: hero.badge) {
+                    PaneHeader(name: hero.name, subtitle: hero.subtitle, badge: hero.badge,
+                               subtitleTint: hero.subtitleTint, subtitleAction: hero.subtitleAction, subtitleEditor: hero.subtitleEditor) {
                         switch hero.picture {
                         case .image(let v): v
                         case .glyph(let glyph):

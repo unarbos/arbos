@@ -192,6 +192,10 @@ enum Transcript {
             // Voice-call transcript lines stay in the doc for the agent; they are not
             // chat bubbles (Grok: typed prose, attachments, and call start/end notes only).
             if message.voice { continue }
+            // A background job's row (duplex §2.3, `job` + `hidden`) is wordless by design:
+            // its status parts feed the presence line and the tasks sheet, never a bubble —
+            // not while it runs, not the "no answer" stock line when it ends.
+            if message.hidden || message.job != nil { continue }
             // Build this message's visible rows first. Date separators only land when
             // something actually renders — otherwise an empty/hidden-only message leaves
             // a lone "Today 5:45 PM" in a blank chat.
