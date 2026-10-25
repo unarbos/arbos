@@ -929,6 +929,8 @@ struct Message: Identifiable, Equatable {
     var model: String?
     var createdAt: Int64
     var completedAt: Int64?
+    /// When the message body was last edited (`editedAt` in the chat doc). Nil if never edited.
+    var editedAt: Int64? = nil
     /// True until the relay `ACK`s the client's push (S3 faint echo). Client-only.
     var pending: Bool
     var parts: [Part]
@@ -1106,6 +1108,7 @@ enum DocJSON {
             model: str(m["model"]),
             createdAt: int(m["createdAt"]) ?? 0,
             completedAt: int(m["completedAt"]),
+            editedAt: int(m["editedAt"]).flatMap { $0 > 0 ? $0 : nil },
             pending: false,
             parts: parts,
             hiddenCount: hidden,

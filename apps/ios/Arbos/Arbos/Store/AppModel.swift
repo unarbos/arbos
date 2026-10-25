@@ -4300,6 +4300,7 @@ final class AppModel: ObservableObject {
                 parts.append(.text(id: "\(messageId)-t", text: trimmed))
             }
             list[idx].parts = parts
+            list[idx].editedAt = nowMs()
             messages[chatId] = list
             Haptics.pick()
             return

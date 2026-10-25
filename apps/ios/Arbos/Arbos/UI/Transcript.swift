@@ -149,6 +149,8 @@ struct Row: Identifiable, Equatable {
     var reactions: [MessageReaction] = []
     /// How many messages reply to this one via `replyTo` (long-press Reply); shown top-right when > 0.
     var replyCount: Int = 0
+    /// True when the message body was edited (`editedAt` set); a small "Edited" mark sits in the text corner.
+    var edited: Bool = false
     /// The message's `createdAt` (ms), so the swipe-revealed time needs no lookup.
     var createdAt: Int64 = 0
     /// Space above this row (8 pt within a run, 24 pt at a sender / turn change,
@@ -446,6 +448,18 @@ enum Transcript {
                    }
                }) {
                 chunk[ix].replyCount = count
+            }
+            // "Edited" on the prose / caption row (the text that was changed).
+            if message.editedAt != nil,
+               let ix = chunk.lastIndex(where: {
+                   switch $0.kind {
+                   case .user, .other: return true
+                   case .image(_, _, let caption), .file(_, _, let caption):
+                       return caption?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                   default: return false
+                   }
+               }) {
+                chunk[ix].edited = true
             }
             // Date separators when the gap is over an hour (Grok: "Today 8:00 AM").
             if dateBreak {
@@ -1054,6 +1068,7 @@ struct RowView: View, Equatable {
                         .font(theme.font(Theme.body))
                         .lineSpacing(Theme.bodyLineSpacing)
                         .tint(theme.accent)
+                    editedCorner(userBubble: true)
                 }
                 .padding(.horizontal, Theme.bubbleHPad)
                 .padding(.vertical, Theme.bubbleVPad)
@@ -1090,6 +1105,8 @@ struct RowView: View, Equatable {
                         .font(theme.font(Theme.body))
                         .lineSpacing(Theme.bodyLineSpacing)
                         .tint(theme.accent)
+                    editedCorner(userBubble: false)
+                        .padding(.top, row.edited ? 6 : 0)
                 }
                 .padding(.horizontal, Theme.bubbleHPad)
                 .padding(.vertical, Theme.bubbleVPad)
@@ -1198,6 +1215,7 @@ struct RowView: View, Equatable {
                 if row.role == .user { Spacer(minLength: 0) }
                 FileCard(item: item, subtitle: subtitle, chatId: chatId, fromUser: row.role == .user, caption: caption)
                     .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: row.role == .user) }
+                    .overlay(alignment: .bottomTrailing) { editedCornerOverlay(userBubble: row.role == .user) }
                     .frame(maxWidth: maxBubble, alignment: row.role == .user ? .trailing : .leading)
                 if row.role != .user { Spacer(minLength: 0) }
             }
@@ -1221,6 +1239,7 @@ struct RowView: View, Equatable {
                 if fromUser { Spacer(minLength: 0) }
                 ImageBubble(item: item, chatId: chatId, fromUser: fromUser, maxWidth: maxBubble, caption: caption)
                     .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: fromUser) }
+                    .overlay(alignment: .bottomTrailing) { editedCornerOverlay(userBubble: fromUser) }
                 if !fromUser { Spacer(minLength: 0) }
             }
         case .error(let code, let message):
@@ -1248,6 +1267,33 @@ struct RowView: View, Equatable {
                 .padding(.top, 6)
                 .padding(.trailing, 8)
                 .accessibilityLabel("\(row.replyCount) \(row.replyCount == 1 ? "reply" : "replies")")
+        }
+    }
+
+    /// "Edited" in the bottom-right corner of the bubble text (or caption under media).
+    @ViewBuilder
+    private func editedCorner(userBubble: Bool) -> some View {
+        if row.edited {
+            HStack(spacing: 0) {
+                Spacer(minLength: 0)
+                Text("Edited")
+                    .font(theme.font(11))
+                    .foregroundStyle(userBubble ? theme.userText.opacity(0.55) : theme.muted)
+                    .accessibilityLabel("Edited")
+            }
+        }
+    }
+
+    /// Same mark as an overlay for media + caption cards (text sits under the picture).
+    @ViewBuilder
+    private func editedCornerOverlay(userBubble: Bool) -> some View {
+        if row.edited {
+            Text("Edited")
+                .font(theme.font(11))
+                .foregroundStyle(userBubble ? theme.userText.opacity(0.55) : theme.muted)
+                .padding(.bottom, 8)
+                .padding(.trailing, 10)
+                .accessibilityLabel("Edited")
         }
     }
 

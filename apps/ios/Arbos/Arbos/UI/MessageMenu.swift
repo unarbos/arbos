@@ -167,6 +167,15 @@ struct MessageThreadSheet: View {
                 .foregroundStyle(mine ? theme.userText : theme.text)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .textSelection(.enabled)
+            if message.editedAt != nil {
+                HStack(spacing: 0) {
+                    Spacer(minLength: 0)
+                    Text("Edited")
+                        .font(theme.font(11))
+                        .foregroundStyle(mine ? theme.userText.opacity(0.55) : theme.muted)
+                        .accessibilityLabel("Edited")
+                }
+            }
         }
         .padding(.horizontal, Theme.bubbleHPad)
         .padding(.vertical, Theme.bubbleVPad)
