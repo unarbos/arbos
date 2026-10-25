@@ -399,9 +399,10 @@ reset on every reveal (the #1637 probes, `media/feedback/fullscreen-traffic-ligh
 ## Right info pane chrome (Jacob 2026-10-24, [feedback info-pane-chrome-2026-10-24])
 
 **The right pane is the window, not a panel: the chat's surface on both sides
-of the join, no hairline between them, Grok Bot's two round discs (share ·
-close) at its top right, a plain hero picture, inset cards under section
-labels, and no "Delete agent" button.** Jacob's side-by-side of a fresh Grok
+of the join, Grok's one-device-pixel hairline on the pane's left edge, Grok
+Bot's round close disc (plus the share disc on the agent pane only) at its top
+right, a plain hero picture, inset cards under section labels, and no "Delete
+agent" button.** Jacob's side-by-side of a fresh Grok
 Bot and a fresh Arbos agent (2026-10-24, `media/feedback/grok-parity-test/` in
 the project store; items 19–22, 26–27 of `docs/arbos-vs-grok-traits.md`).
 
@@ -411,7 +412,7 @@ window top at row 0; pane 639 px = 319.5 pt wide). Points.
 | Item | Grok Bot | Arbos (`profiles/mod.rs`, `profiles/kit.rs`, `theme.rs`) |
 |---|---|---|
 | Pane fill | `#121212` — the chat's own colour; sidebar `#0E0E0E` | `Theme::pane()` = `chat_wash()` (nothing on matte / dark glass, the white wash on light glass); `theme.pane` is gone |
-| Join | a half-point `#1F1F1F` line (+13) that reads as none | **no border** (`border_l_1` removed from the pane and the mid-slide blank) |
+| Join | one device pixel (0.5 pt at 2 px/pt) of `#1F1F1F` on the `#121212` page (+13 ≈ 5 %), full height, in every Grok shot (`grok-chat-1/2`, column 2816 / 2814) | `border_l(PANE_EDGE)` 0.5 pt in `theme.pane_edge` — dark `#212121` on `#141414`, light `#EFEFEF` on `#FCFCFC` (the same 5 % step) — on the pane and the mid-slide blank. History: v0.6.224 (#1675) drew none, reading Jacob's trait 20 as "Grok has none"; Jacob re-checked Grok on 2026-10-25 and asked for the hairline ([feedback info-pane-left-hairline-2026-10-25]). It is a colour, not `border`'s alpha, so glass does not change it; never the 1 pt `border` line of the old panel |
 | Cards | `#1F1F1F` on `#121212` (+13), inset **16 / 16**, radius **12** | `pane_card` `#232323` on `#141414` (+15), `kit::INSET` 16, `kit::CARD_RADIUS` 12 (was `PANEL_RADIUS` 14); light: `#F2F2F2` on `#FCFCFC` (white on white was no card) |
 | Rows | one-line **41**, two-line **51**, 13 pt title / 13 pt muted subtitle | `kit::ROW_MIN_H` 41 (was 48); a title + subtitle row lands on 51–52 by its own padding; row type unchanged (`TEXT_BODY` / `TEXT_SMALL`) |
 | Section label | "Coding" / "Routines": text **28** from the pane edge, 13.5 pt `#A5A5A5`; glyphs 24 under the pill, 26 under the card before, 10 over the card after | `kit::section_title`: `INSET + SECTION_TITLE_INDENT` 28, `TEXT_SMALL` muted on a 16 pt line, padding 10 / 8 over `CARD_GAP` 14; a leading label pulls the fade spacer in by `pane::FIRST_TITLE_PULL` 7 |
@@ -423,8 +424,9 @@ window top at row 0; pane 639 px = 319.5 pt wide). Points.
 
 Pinned by `profiles::chrome_tests` (`the_pane_is_the_chats_surface_in_both_appearances`,
 `the_constants_are_groks`, `the_share_and_close_discs_land_on_groks_pixels`,
-`cards_are_inset_and_labelled_at_groks_margins`), `pane::tests::every_kind_lays_out_hero_then_pill_then_options`
-and `pane::tests::only_the_agent_pane_may_have_a_share_disc`.
+`cards_are_inset_and_labelled_at_groks_margins`, `the_pane_edge_is_groks_hairline`),
+`pane::tests::every_kind_lays_out_hero_then_pill_then_options` and
+`pane::tests::only_the_agent_pane_may_have_a_share_disc`.
 
 ### Agent pane: Details · Library · Computer (Jacob 2026-10-24, [feedback agent-pane-details-tab-2026-10-24])
 

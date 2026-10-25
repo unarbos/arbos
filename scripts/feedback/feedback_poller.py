@@ -295,10 +295,11 @@ class Config:
 
 
 class HttpError(Exception):
-    def __init__(self, status: int, body: str, url: str):
+    def __init__(self, status: int, body: str, url: str, headers: dict[str, str] | None = None):
         super().__init__(f"HTTP {status} for {url}: {body[:300]}")
         self.status = status
         self.body = body
+        self.headers = headers or {}
 
 
 def http(method: str, url: str, headers: dict[str, str] | None = None, data: bytes | None = None,
@@ -315,7 +316,7 @@ def http(method: str, url: str, headers: dict[str, str] | None = None, data: byt
             return resp.status, {k.lower(): v for k, v in resp.headers.items()}, resp.read()
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors="replace")
-        raise HttpError(e.code, body, url) from None
+        raise HttpError(e.code, body, url, {k.lower(): v for k, v in e.headers.items()}) from None
 
 
 def http_json(method: str, url: str, **kw: Any) -> Any:
@@ -433,6 +434,7 @@ class GitHub:
         # Per-tick ledger: calls billed / answered 304, by endpoint shape — logged at the end of the tick.
         self.ledger: dict[str, list[int]] = {}
         self.rate_remaining: int | None = None
+        self._feedback_refs: dict[str, str] | None = None
 
     @staticmethod
     def endpoint_shape(url: str) -> str:
@@ -462,9 +464,12 @@ class GitHub:
             raise HttpError(429, f"budget guard: {self.rate_remaining} remaining", url)
         if method != "GET":
             row[0] += 1
-            status, headers, body = http(method, url, headers=self.h, **kw)
-            with contextlib.suppress(ValueError, TypeError):
-                self.rate_remaining = int(headers.get("x-ratelimit-remaining", ""))
+            try:
+                status, headers, body = http(method, url, headers=self.h, **kw)
+            except HttpError as e:
+                self.note_remaining(e.headers)
+                raise
+            self.note_remaining(headers)
             if low:
                 log(f"GitHub call while low: {shape} → remaining {self.rate_remaining}")
             if status == 204 or not body:
@@ -482,10 +487,13 @@ class GitHub:
                 cached["at"] = time.time()
                 self.etags_dirty = True
                 return cached["body"]
+            # A 404 (missing branch) or 422 is billed like a 200 and has no ETag: it must show in the ledger.
+            # 17:5x Oct 25: ~200 unlisted 404 branch probes per tick were the "external" PAT drain.
+            row[0] += 1
+            self.note_remaining(e.headers)
             raise
         row[0] += 1
-        with contextlib.suppress(ValueError, TypeError):
-            self.rate_remaining = int(headers.get("x-ratelimit-remaining", ""))
+        self.note_remaining(headers)
         if self.rate_remaining is not None and self.rate_remaining < self.BUDGET_FLOOR * 2:
             log(f"GitHub call: {shape} → remaining {self.rate_remaining}")
         if status == 204 or not body:
@@ -499,6 +507,10 @@ class GitHub:
             self.etags.pop(url, None)
             self.etags_dirty = True
         return data
+
+    def note_remaining(self, headers: dict[str, str]) -> None:
+        with contextlib.suppress(ValueError, TypeError):
+            self.rate_remaining = int(headers.get("x-ratelimit-remaining", ""))
 
     def save_etags(self) -> None:
         if not self.etags_dirty:
@@ -593,6 +605,23 @@ class GitHub:
             if e.status == 404:
                 return None
             raise
+
+    def feedback_refs(self) -> dict[str, str]:
+        """Every `feedback/*` branch head in one listing (pages of 100), cached for this process (one tick).
+        The watches used to probe `/branches/feedback/<id>` per item; a deleted branch answers 404, which is
+        billed and never a 304 — ~200 such probes per tick (17:5x Oct 25) were the token's biggest consumer."""
+        if self._feedback_refs is None:
+            refs: dict[str, str] = {}
+            page = 1
+            while True:
+                batch = self.repo_api("GET", f"/git/matching-refs/heads/feedback/?per_page=100&page={page}") or []
+                for r in batch:
+                    refs[r["ref"].removeprefix("refs/heads/")] = r["object"]["sha"]
+                if len(batch) < 100:
+                    break
+                page += 1
+            self._feedback_refs = refs
+        return self._feedback_refs
 
     def compare(self, base: str, head: str) -> dict:
         return self.repo_api("GET", f"/compare/{base}...{head}")
@@ -3708,9 +3737,10 @@ class Loop:
         """A push to `feedback/<fid>` AFTER the item merged (the loop deleted the branch; the author's next push
         recreated it with the tail) used to be invisible — authors re-landed tails as new issues (#1684, #1721).
         For items merged in the last 3 days: a branch with commits not on main becomes `<fid>-followupN`, same
-        issue and owner, gated and shipped like any item; the issue gets one note. Cheap: one branch_head GET
-        per recently merged item per tick, ETag-cached."""
+        issue and owner, gated and shipped like any item; the issue gets one note. Cheap: the live `feedback/*`
+        heads come from one listing per tick (a per-item probe of a deleted branch is a billed 404, never a 304)."""
         cutoff = (utcnow() - dt.timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        refs = self.gh.feedback_refs()
         for fid in self.store.items():
             st = self.store.state(fid)
             if st.get("status") not in ("pushed", "shipped") or not st.get("commit") or (st.get("pushed_at") or "") < cutoff:
@@ -3718,7 +3748,7 @@ class Loop:
             if "-followup" in fid or st.get("late_push_followup"):
                 continue
             branch = f"feedback/{fid}"
-            head = self.gh.branch_head(branch)
+            head = refs.get(branch)
             if not head or head == st.get("commit"):
                 continue
             try:
@@ -3802,8 +3832,14 @@ class Loop:
         cur["closed_checked"] = closed[-1]["updated_at"] if len(closed) >= 100 else iso()
         if not numbers:
             return
-        for fid in self.store.items():
-            st = self.store.state(fid)
+        # An issue the LOOP closed (its item shipped) is not a human's verdict: a late-push follow-up shares
+        # the source item's issue and must keep waiting for its gate (18:01 Oct 25: #1783's own follow-up
+        # was retired a minute after the source shipped and its second commit never reached main).
+        states = {fid: self.store.state(fid) for fid in self.store.items()}
+        loop_closed = {st.get("issue") for st in states.values() if st.get("status") in ("pushed", "shipped", "pending_deploy")}
+        for fid, st in states.items():
+            if "-followup" in fid or st.get("issue") in loop_closed:
+                continue
             if st.get("status") == "handed_off" and st.get("issue") in numbers and not st.get("commit"):
                 st.update(status="closed_externally", closed={"reason": "closed on GitHub by a human", "at": iso()})
                 self.store.save_state(fid, st)
@@ -3821,6 +3857,7 @@ class Loop:
         # fetched ONCE per tick, only when main moved since the last scan, and every item is matched in memory.
         cur = self.store.cursor()
         self.retire_closed_handoffs(cur)
+        refs = self.gh.feedback_refs()
         main_head = self.gh.branch_head("main") or ""
         main_moved = main_head != cur.get("handoff_main_head")
         main_commits: list[dict] | None = None
@@ -3843,7 +3880,7 @@ class Loop:
                 st.pop("follow_after", None); st.pop("gated_head", None)
                 self.store.save_state(fid, st)
                 self.store.event(fid, "confirmation_hold_over")
-            head = self.gh.branch_head(f"feedback/{fid}")
+            head = refs.get(f"feedback/{fid}")
             if head and head != st.get("gated_head"):
                 cmp = self.gh.compare("main", head)
                 tagged = any(f"[feedback {fid}]" in c["commit"]["message"] for c in cmp.get("commits", []))

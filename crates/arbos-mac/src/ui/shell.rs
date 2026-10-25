@@ -4110,6 +4110,8 @@ impl Render for Shell {
                         .w(px(pane_width))
                         .flex_shrink_0()
                         .h_full()
+                        .border_l(px(profiles::PANE_EDGE))
+                        .border_color(theme.pane_edge)
                         .bg(theme.pane());
                     root = root.child(slide::pane_clip(frame.pane_visible, blank));
                 }
