@@ -1817,10 +1817,19 @@ impl AppState {
                 if self.selected_channel.is_none()
                     && self.projects.iter().any(|p| p.id == project_id)
                 {
-                    let open = self
-                        .primary_chat(&project_id)
-                        .map(|c| c.id.clone())
+                    // Rig: `ARBOS_FIXTURE_OPEN=<project>/<chat id>` names the exact tab
+                    // (a group under the agent, for example); the primary chat otherwise.
+                    let explicit = std::env::var("ARBOS_FIXTURE_OPEN")
+                        .ok()
+                        .and_then(|spec| spec.split_once('/').map(|(_, c)| c.to_owned()))
+                        .filter(|c| *c == chat_id);
+                    let open = explicit
                         .filter(|id| self.tabs(&project_id).iter().any(|c| &c.id == id))
+                        .or_else(|| {
+                            self.primary_chat(&project_id)
+                                .map(|c| c.id.clone())
+                                .filter(|id| self.tabs(&project_id).iter().any(|c| &c.id == id))
+                        })
                         .or_else(|| {
                             self.tabs(&project_id)
                                 .iter()
