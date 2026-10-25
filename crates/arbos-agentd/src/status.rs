@@ -921,12 +921,15 @@ pub(crate) mod tests {
         }))
     }
 
-    /// The last activity text the stub relay received (`POST /projects/{id}/activity`).
-    static LAST_ACTIVITY: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    /// Every activity text the stub relay received (`POST /projects/{id}/activity`), in order.
+    /// A log, not a last-value slot: tests run in parallel and another chat's act ack can land
+    /// between a test's own post and its read.
+    static ACTIVITY_LOG: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
     async fn mock_activity(axum::Json(body): axum::Json<Value>) -> axum::http::StatusCode {
-        *LAST_ACTIVITY.lock().unwrap() =
-            body.get("text").and_then(Value::as_str).map(str::to_owned);
+        if let Some(t) = body.get("text").and_then(Value::as_str) {
+            ACTIVITY_LOG.lock().unwrap().push(t.to_owned());
+        }
         axum::http::StatusCode::NO_CONTENT
     }
 
@@ -1548,6 +1551,63 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Parity after steps 1–3 (0.1.125): `ack_first` 0/13 because an act ack is working-row status
+    /// while Grok Bot posts it. After `ARBOS_ACT_ACK_BUBBLE_SECS` with nothing posted the ack
+    /// becomes the first bubble; a quick act that answered first never gets one.
+    #[tokio::test]
+    async fn long_act_turn_promotes_its_ack_to_a_bubble() {
+        use crate::config::SendTool;
+        std::env::set_var("ARBOS_ACT_ACK_BUBBLE_SECS", "1");
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000011";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.ack_text.clear();
+            t.activity = None;
+            t.send_tool = SendTool::On;
+            agent.test_open_row(&host, t).await;
+        }
+        agent
+            .hook_route(&json!({ "action": "act", "ack": "Looking up the top-rated surf schools around Santa Teresa now.", "plan": "search, read, compare" }))
+            .await
+            .unwrap();
+        assert!(
+            reply_rows(&host, "m-busy")
+                .iter()
+                .all(|r| r.text().trim().is_empty()),
+            "status first, no bubble yet"
+        );
+        tokio::time::sleep(Duration::from_millis(1600)).await;
+        let rows = reply_rows(&host, "m-busy");
+        let acks: Vec<_> = rows
+            .iter()
+            .filter(|r| {
+                r.text().trim() == "Looking up the top-rated surf schools around Santa Teresa now."
+            })
+            .collect();
+        assert_eq!(
+            acks.len(),
+            1,
+            "the ack became one bubble: {:?}",
+            rows.iter().map(|r| r.text()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            acks[0].rest.get("turnRole").and_then(Value::as_str),
+            Some("ack")
+        );
+        {
+            let tl = agent.turn.lock().await;
+            let t = tl.as_ref().unwrap();
+            assert!(t.ack_posted);
+            assert!(!t.row_closed, "a fresh result row is open for the answer");
+        }
+        std::env::remove_var("ARBOS_ACT_ACK_BUBBLE_SECS");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The send-tool switch: default on, `off` restores streamed prose, `strict` drops the fallback.
     #[test]
     fn send_tool_switch_parses() {
@@ -1896,7 +1956,7 @@ pub(crate) mod tests {
         let chat = "01TESTCHATQUICKREPLY000010";
         let host = agent.sync.open_room(chat).await.unwrap();
         let _busy = agent.test_hold_turn(chat).await;
-        *LAST_ACTIVITY.lock().unwrap() = None;
+        ACTIVITY_LOG.lock().unwrap().clear();
         let (msg_id, cmd) = send_cmd(
             &host,
             "Change of plan: stop at 20, not 40. Please apply that to the run that is going now.",
@@ -1913,11 +1973,22 @@ pub(crate) mod tests {
             "no bubble for a steer"
         );
         let t0 = Instant::now();
+        // The stub relay's log is process-wide: another test's act ack can land in between,
+        // so look for this chat's own "Steering: …" line.
         let seen = loop {
-            if let Some(a) = LAST_ACTIVITY.lock().unwrap().clone() {
+            if let Some(a) = ACTIVITY_LOG
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|a| a.starts_with("Steering:"))
+                .cloned()
+            {
                 break a;
             }
-            assert!(t0.elapsed() < Duration::from_secs(5), "no activity posted");
+            assert!(
+                t0.elapsed() < Duration::from_secs(5),
+                "no steering activity posted"
+            );
             tokio::time::sleep(Duration::from_millis(20)).await;
         };
         assert!(seen.starts_with("Steering: Change of plan"), "{seen}");
