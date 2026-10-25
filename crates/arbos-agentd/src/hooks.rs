@@ -68,6 +68,42 @@ async fn ask_user(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value>) 
 /// `send_message(text, activity?, to?)`: progress bubble mid-turn (no `to`), or a
 /// cross-subnet message to another agent when `to` is set — or when `text` is the
 /// antipattern `@Handle words` (feedback app-01M5NX3GHC37Y8FH3KKR0PRWG1).
+async fn start_job(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value>) -> Response {
+    if !authed(&a, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let s = |k: &str| b.get(k).and_then(Value::as_str).unwrap_or("").to_owned();
+    let touches: Vec<String> = b
+        .get("touches")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    match a
+        .hook_start_job(&s("title"), &s("brief"), &s("kind"), touches)
+        .await
+    {
+        Ok(v) => Json(json!({ "ok": true, "job": v })).into_response(),
+        Err(e) => err(e),
+    }
+}
+
+async fn list_jobs(State(a): State<S>, headers: HeaderMap) -> Response {
+    if !authed(&a, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match a.hook_list_jobs().await {
+        Ok(v) => Json(json!({ "ok": true, "jobs": v["jobs"] })).into_response(),
+        Err(e) => err(e),
+    }
+}
+
 async fn send_message(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value>) -> Response {
     if !authed(&a, &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
@@ -327,6 +363,8 @@ pub fn router(agent: Arc<Agent>) -> Router {
         .route("/hook/route", post(route))
         .route("/hook/ask_user", post(ask_user))
         .route("/hook/send_message", post(send_message))
+        .route("/hook/start_job", post(start_job))
+        .route("/hook/list_jobs", post(list_jobs))
         .route("/hook/approval", post(approval))
         .route("/hook/approval-status", post(approval_status))
         .route("/hook/approval-abandon", post(approval_abandon))

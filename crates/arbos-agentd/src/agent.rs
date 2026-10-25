@@ -1058,6 +1058,17 @@ impl Drop for PendingMemory {
     }
 }
 
+/// A background job started with the `start_job` tool (duplex design §2.3): runs as a pi
+/// subagent with no transcript row of its own; its title and steps drive the status line, and
+/// its result comes back as a job notice the main agent delivers with `send_message`.
+#[derive(Debug, Clone)]
+pub struct JobSpec {
+    pub id: String,
+    pub title: String,
+    pub kind: String,
+    pub touches: Vec<String>,
+}
+
 /// Why the main pi session is being prompted.
 #[derive(Debug, Clone)]
 pub enum TurnKind {
@@ -1590,7 +1601,7 @@ impl Agent {
 
     /// Core + router prompt (byte-stable, first) + project instructions + T0/T1 (design §6.9 layout).
     pub fn write_system_prompt(&self) -> Result<()> {
-        let mut s = base_system_prompt(self.cfg.code_mode());
+        let mut s = base_system_prompt_with(self.cfg.code_mode(), self.cfg.jobs());
         let talking = self
             .settings
             .models
@@ -2723,6 +2734,7 @@ impl Agent {
                 harness,
                 data_heavy,
                 escalated,
+                None,
             );
         }
         result
@@ -2742,6 +2754,7 @@ impl Agent {
         harness: Option<Harness>,
         data_heavy: bool,
         escalated: bool,
+        job: Option<JobSpec>,
     ) {
         let me = self.clone();
         let chat = chat_id.to_owned();
@@ -2760,10 +2773,17 @@ impl Agent {
                     harness,
                     data_heavy,
                     escalated,
+                    job.clone(),
                 )
                 .await
             {
                 tracing::warn!(error = %e, "subagent run failed");
+                if let Some(j) = &job {
+                    let _ = me
+                        .store
+                        .set_job_state(&j.id, "failed", Some(&e.to_string()));
+                    me.refresh_job_activity(&chat).await;
+                }
                 let label = if name.is_empty() {
                     existing.clone().unwrap_or_else(|| "subagent".into())
                 } else {
@@ -2850,6 +2870,7 @@ impl Agent {
                         0,
                         "(the subagent did not start)",
                         Some(&e.to_string()),
+                        job.as_ref(),
                     )
                     .await
                 {
@@ -3672,6 +3693,7 @@ impl Agent {
         total_ms: i64,
         raw: &str,
         error: Option<&str>,
+        job: Option<&JobSpec>,
     ) -> Result<()> {
         self.let_user_sends_go_first().await;
         let _guard = self.turn_lock.lock().await;
@@ -3704,11 +3726,20 @@ impl Agent {
             .collect::<Vec<_>>()
             .join("\n");
         let raw_trim: String = raw.chars().take(7000).collect();
-        let mut prompt = format!(
-            "[Arbos] Subagent \"{name}\" finished · status {status} · {:.0} s.\n\nThe user originally asked: {}\n",
-            total_ms as f64 / 1000.0,
-            if ask.trim().is_empty() { "(see the brief)" } else { ask.trim() },
-        );
+        let mut prompt = match job {
+            Some(j) => format!(
+                "[Arbos] Job \"{}\" ({}) finished · status {status} · {:.0} s.\n\nThe user originally asked (message id {user_msg_id}): {}\n",
+                j.title,
+                j.id,
+                total_ms as f64 / 1000.0,
+                if ask.trim().is_empty() { "(see the brief)" } else { ask.trim() },
+            ),
+            None => format!(
+                "[Arbos] Subagent \"{name}\" finished · status {status} · {:.0} s.\n\nThe user originally asked: {}\n",
+                total_ms as f64 / 1000.0,
+                if ask.trim().is_empty() { "(see the brief)" } else { ask.trim() },
+            ),
+        };
         if !recent.is_empty() {
             prompt.push_str(&format!("\nRecent turns in this chat:\n{recent}\n"));
         }
@@ -3718,6 +3749,11 @@ impl Agent {
         prompt.push_str(&format!(
             "\nSubagent output (for you only; the user has not seen it):\n<<<\n{raw_trim}\n>>>\n\nRoute `reply`, then deliver the update with `send_message` like a colleague in chat: what got done and the outcome, what changed that they care about, and what is open or needs their answer. Research or a comparison comes in parts, each its own `send_message`: the conclusion in one or two sentences; a markdown table with one row per item (name linked to its page, the compared facts as columns); then details and caveats, the sources used and what could not be checked, ending with one concrete next-step offer. Anything else is one short message. Speak as if you did the work; do not mention the subagent, its name, the harness, the model, tool calls, commands, scratch paths, or token counts. No JSON, no quoted output, no list of steps."
         ));
+        if job.is_some() {
+            prompt.push_str(&format!(
+                "\n\nThis was a job you started with start_job; the user has not seen its output. Deliver the answer now with send_message, each part its own call, with reply_to = {user_msg_id} so it threads under their ask. Never mention a job, a worker or that anything ran in the background."
+            ));
+        }
         let kind = TurnKind::SubagentResult {
             subagent_id: subagent_id.to_owned(),
             name: name.to_owned(),
@@ -4564,6 +4600,165 @@ impl Agent {
         });
     }
 
+    /// `start_job(title, brief, kind, touches?)` from the main turn (duplex step 2): returns at
+    /// once with the job id; the job runs as a pi subagent beside the chat, its title and steps
+    /// drive the status line, and its result comes back as a job notice turn.
+    pub async fn hook_start_job(
+        self: &Arc<Self>,
+        title: &str,
+        brief: &str,
+        kind: &str,
+        touches: Vec<String>,
+    ) -> Result<Value, String> {
+        if !self.cfg.jobs() {
+            return Err("jobs are off on this box: route `new` for background work".into());
+        }
+        let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+        if title.is_empty() || title.chars().count() > 80 {
+            return Err(
+                "title: two to five words, present tense (\"Searching for surf schools\")".into(),
+            );
+        }
+        if brief.trim().len() < 20 {
+            return Err("brief: the full instruction for the worker (what, for whom, acceptance criterion, what to return)".into());
+        }
+        let kind = match kind.trim().to_ascii_lowercase().as_str() {
+            "research" => "research",
+            "code" => "code",
+            "ops" => "ops",
+            _ => "other",
+        };
+        let (chat_id, user_msg_id) = {
+            let tl = self.turn.lock().await;
+            match tl.as_ref() {
+                Some(t) if !t.reply_only => (t.chat_id.clone(), t.user_msg_id.clone()),
+                Some(_) => {
+                    return Err(
+                        "this is a result turn: deliver the result, start no new job here".into(),
+                    )
+                }
+                None => return Err("no turn is running".into()),
+            }
+        };
+        let Some(host) = self.sync.host(&chat_id).await else {
+            return Err("no room for this chat".into());
+        };
+        let open_here = self
+            .store
+            .jobs_for_chat(&chat_id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|j| j.is_open())
+            .count();
+        let open_all = self.store.open_jobs().unwrap_or_default().len();
+        let cap_chat = crate::config::job_max_per_chat();
+        let cap_agent = crate::config::job_max_per_agent();
+        if open_here >= cap_chat {
+            return Err(format!(
+                "{open_here} jobs already run in this chat (cap {cap_chat}); fold this into one of them or wait for one to finish, and tell the user"
+            ));
+        }
+        if open_all >= cap_agent {
+            return Err(format!(
+                "{open_all} jobs already run across your chats (cap {cap_agent}); wait for one to finish, and tell the user"
+            ));
+        }
+        let job_id = ulid();
+        self.store
+            .insert_job(
+                &job_id,
+                &chat_id,
+                &user_msg_id,
+                &title,
+                kind,
+                brief,
+                &touches,
+            )
+            .map_err(|e| e.to_string())?;
+        let slug: String = title
+            .split_whitespace()
+            .take(4)
+            .map(|w| {
+                w.chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .flat_map(|c| c.to_lowercase())
+                    .collect::<String>()
+            })
+            .filter(|w| !w.is_empty())
+            .collect::<Vec<_>>()
+            .join("-");
+        let name = format!(
+            "job-{}-{}",
+            slug,
+            job_id[job_id.len().saturating_sub(4)..].to_lowercase()
+        );
+        let spec = JobSpec {
+            id: job_id.clone(),
+            title: title.clone(),
+            kind: kind.to_owned(),
+            touches,
+        };
+        let _ = self.store.t3_append(
+            &chat_id,
+            None,
+            Some(&chat_id),
+            "job_start",
+            Some("system"),
+            &format!("start_job {title}: {brief}"),
+            Some(&json!({ "job_id": job_id, "kind": kind, "message_id": user_msg_id })),
+        );
+        tracing::info!(chat_id, job = %job_id, %title, kind, open_here, "job started");
+        self.spawn_subagent_task(
+            &chat_id,
+            &host,
+            &user_msg_id,
+            None,
+            name,
+            title.clone(),
+            brief.to_owned(),
+            Some(Harness::Pi),
+            false,
+            false,
+            Some(spec),
+        );
+        let queued = self.subagent_slots.available_permits() == 0;
+        Ok(json!({
+            "job_id": job_id,
+            "title": title,
+            "state": if queued { "queued" } else { "running" },
+        }))
+    }
+
+    /// `list_jobs()` from the main turn: the jobs of this chat with state, step and elapsed time.
+    pub async fn hook_list_jobs(&self) -> Result<Value, String> {
+        let chat_id = {
+            let tl = self.turn.lock().await;
+            match tl.as_ref() {
+                Some(t) => t.chat_id.clone(),
+                None => return Err("no turn is running".into()),
+            }
+        };
+        let jobs: Vec<Value> = self
+            .store
+            .jobs_for_chat(&chat_id)
+            .unwrap_or_default()
+            .into_iter()
+            .take(12)
+            .map(|j| {
+                json!({
+                    "job_id": j.id,
+                    "title": j.title,
+                    "kind": j.kind,
+                    "state": j.state,
+                    "step": j.last_step,
+                    "elapsed_s": j.elapsed_s(),
+                    "asked_by_message_id": j.ask_message_id,
+                })
+            })
+            .collect();
+        Ok(json!({ "jobs": jobs }))
+    }
+
     /// `send_message(text, activity?, reply_to?)` from the main agent: a bubble now, as its own
     /// row, while the turn keeps running (agent-flow contract §1; duplex step 1 makes this the
     /// way every answer is posted). `reply_to` threads the bubble under that message; without
@@ -5090,10 +5285,13 @@ impl Agent {
     /// `on_boot`: every leftover row is an orphan (no tasks survived the restart).
     /// Otherwise only rows older than the freshness window are reclaimed, so a
     /// subagent waiting on a slot (queued, not yet in `subagent_msgs`) is safe.
-    pub async fn reclaim_orphan_subagents(&self, on_boot: bool) {
+    pub async fn reclaim_orphan_subagents(self: &Arc<Self>, on_boot: bool) {
         /// Same 15-minute window as the Mac/iOS working indicator: a status left
         /// `running` after the task died must not linger forever.
         const ORPHAN_FRESH_MS: i64 = 15 * 60 * 1000;
+        if on_boot {
+            self.reclaim_interrupted_jobs().await;
+        }
         let live: HashSet<String> = self.subagent_msgs.lock().await.keys().cloned().collect();
         let now = now_ms();
         let mut healed: Vec<(String, Option<String>)> = Vec::new();
@@ -5197,6 +5395,33 @@ impl Agent {
                         "starting"
                     } else {
                         s.last_status.as_str()
+                    }
+                ));
+            }
+        }
+        let jobs: Vec<_> = self
+            .store
+            .jobs_for_chat(chat_id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|j| j.is_open())
+            .collect();
+        if !jobs.is_empty() {
+            lines.push(format!(
+                "Jobs running in this chat ({}): each result arrives as a later [Arbos] job notice for you to deliver; answer new messages meanwhile and do not start the same work twice.",
+                jobs.len()
+            ));
+            for j in jobs.iter().take(8) {
+                lines.push(format!(
+                    "- {} (job {}, {}, {} s): {}",
+                    j.title,
+                    j.id,
+                    j.state,
+                    j.elapsed_s(),
+                    if j.last_step.trim().is_empty() {
+                        "starting"
+                    } else {
+                        j.last_step.as_str()
                     }
                 ));
             }
@@ -5474,6 +5699,7 @@ impl Agent {
                     None,
                     false,
                     false,
+                    None,
                 )
                 .await;
             me.jobs_running.fetch_sub(1, Ordering::SeqCst);
@@ -5523,7 +5749,14 @@ impl Agent {
         route_harness: Option<Harness>,
         data_heavy: bool,
         escalated: bool,
+        job: Option<JobSpec>,
     ) -> Result<()> {
+        // Jobs run on pi (Jacob, 2026-10-24): steer and stop need `RpcCommand::Steer` / `Abort`.
+        let route_harness = if job.is_some() {
+            Some(Harness::Pi)
+        } else {
+            route_harness
+        };
         let default_harness = std::env::var("ARBOS_DEFAULT_HARNESS")
             .ok()
             .and_then(|s| match s.as_str() {
@@ -5573,30 +5806,55 @@ impl Agent {
 
         // The progress message carries status events and hidden parts only; the main agent writes
         // the prose ack before this and the prose result after (demo review items 1–2).
+        // A job's row names no subagent (no "N messages with …" line, duplex §2.3): wordless and
+        // streaming it is the presence row that carries the status line; finished it is nothing.
         let msg_id = ulid();
         {
             let h = host.lock().await;
             h.doc
                 .start_assistant_message(&msg_id, in_reply_to, &self.cfg.device_id);
-            h.doc.set_message_fields(
-                &msg_id,
-                &[
-                    ("subagentId", json!(subagent_id)),
-                    ("subagentName", json!(sub_name)),
-                    (
-                        "turn",
-                        json!({ "kind": if is_new { "spawn" } else { "wake" } }),
-                    ),
-                    ("escalated_from_act", json!(escalated)),
-                    ("model", json!(subagent_model)),
-                    // Messages exchanged with the subagent so far: the brief now, the
-                    // result later (clients say "Messaged X" / "N messages with X").
-                    ("handoffMessages", json!(1)),
-                    // A background worker the user never named (traits 15): clients hide
-                    // this row; an agent-to-agent send keeps its "Messaged ◉ X" line.
-                    ("worker", json!(true)),
-                ],
-            );
+            match &job {
+                Some(j) => {
+                    h.doc.set_message_fields(
+                        &msg_id,
+                        &[
+                            (
+                                "job",
+                                json!({ "id": j.id, "title": j.title, "kind": j.kind, "touches": j.touches }),
+                            ),
+                            ("worker", json!(true)),
+                            ("hidden", json!(true)),
+                            ("model", json!(subagent_model)),
+                        ],
+                    );
+                    h.doc.set_activity(&msg_id, Some(&j.title));
+                }
+                None => {
+                    h.doc.set_message_fields(
+                        &msg_id,
+                        &[
+                            ("subagentId", json!(subagent_id)),
+                            ("subagentName", json!(sub_name)),
+                            (
+                                "turn",
+                                json!({ "kind": if is_new { "spawn" } else { "wake" } }),
+                            ),
+                            ("escalated_from_act", json!(escalated)),
+                            ("model", json!(subagent_model)),
+                            // Messages exchanged with the subagent so far: the brief now, the
+                            // result later (clients say "Messaged X" / "N messages with X").
+                            ("handoffMessages", json!(1)),
+                            // A background worker the user never named (traits 15): clients hide
+                            // this row; an agent-to-agent send keeps its "Messaged ◉ X" line.
+                            ("worker", json!(true)),
+                        ],
+                    );
+                }
+            }
+        }
+        if let Some(j) = &job {
+            let _ = self.store.set_job_subagent(&j.id, &subagent_id);
+            self.post_activity(chat_id, Some(j.title.clone()));
         }
         let queued_at = Instant::now();
         if self.subagent_slots.available_permits() == 0 {
@@ -5637,6 +5895,9 @@ impl Agent {
         {
             let h = host.lock().await;
             h.doc.add_status_part(&msg_id, "working", "Working…");
+        }
+        if let Some(j) = &job {
+            let _ = self.store.set_job_state(&j.id, "running", None);
         }
         self.subagent_msgs
             .lock()
@@ -5818,14 +6079,18 @@ impl Agent {
                     let _ = self
                         .store
                         .set_subagent_last_status(&subagent_id, &format!("step: {label}"));
-                    // The status line follows the worker's real activity (Grok parity, traits
-                    // 14: "Searching for surf schools" instead of "<agent> is working").
-                    if let Some(a) = crate::activity::label(&name, &input) {
+                    // The status line follows the worker's real activity (Grok parity, trait
+                    // 14: "Searching for surf schools" instead of "<agent> is working"); a job
+                    // also records the step for `list_jobs` and the working set.
+                    if let Some(live) = crate::activity::label(&name, &input) {
+                        if let Some(j) = &job {
+                            let _ = self.store.set_job_step(&j.id, &live);
+                        }
                         {
                             let h = host.lock().await;
-                            h.doc.set_activity(&msg_id, Some(&a));
+                            h.doc.set_activity(&msg_id, Some(&live));
                         }
-                        self.post_activity(chat_id, Some(a));
+                        self.post_activity(chat_id, Some(live));
                     }
                     let _ = self.store.t3_append(
                         &subagent_id,
@@ -5980,6 +6245,21 @@ impl Agent {
             );
         }
         self.subagent_msgs.lock().await.remove(&subagent_id);
+        if let Some(j) = &job {
+            let final_state = match (&done_err, status.as_str()) {
+                (Some(e), _) if e.contains("aborted") => "cancelled",
+                (Some(_), _) | (None, "blocked") => "failed",
+                _ => "done",
+            };
+            let _ = self
+                .store
+                .set_job_state(&j.id, final_state, done_err.as_deref());
+            {
+                let h = host.lock().await;
+                h.doc.set_activity(&msg_id, None);
+            }
+            self.refresh_job_activity(chat_id).await;
+        }
         let _ = self
             .store
             .set_subagent_last_status(&subagent_id, if failed { "failed" } else { "done" });
@@ -6060,7 +6340,7 @@ impl Agent {
         drop(_box_slot);
         drop(_slot);
         // The user hears about it from the main agent, in prose, in this chat.
-        {
+        if job.is_none() {
             let h = host.lock().await;
             h.doc
                 .set_message_fields(&msg_id, &[("handoffMessages", json!(2))]);
@@ -6085,18 +6365,53 @@ impl Agent {
                 )
                 .await;
         }
-        self.run_result_turn(
-            chat_id,
-            host,
-            in_reply_to,
-            &subagent_id,
-            &sub_name,
-            &status,
-            total_ms,
-            &result_text,
-            done_err.as_deref(),
-        )
-        .await
+        let r = self
+            .run_result_turn(
+                chat_id,
+                host,
+                in_reply_to,
+                &subagent_id,
+                &sub_name,
+                &status,
+                total_ms,
+                &result_text,
+                done_err.as_deref(),
+                job.as_ref(),
+            )
+            .await;
+        if let Some(j) = &job {
+            if r.is_ok() {
+                let _ = self
+                    .store
+                    .set_job_delivered(&j.id, &format!("job:{}:result", j.id));
+            }
+        }
+        r
+    }
+
+    /// The status line after a job ended: the newest step of another job still running in this
+    /// chat, else nothing (the main turn's own activity, when one runs, is set by that turn).
+    pub(crate) async fn refresh_job_activity(&self, chat_id: &str) {
+        let open: Vec<crate::store::JobRow> = self
+            .store
+            .jobs_for_chat(chat_id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|j| j.state == "running")
+            .collect();
+        let text = open
+            .iter()
+            .max_by_key(|j| j.last_step_at.unwrap_or(j.created_at))
+            .map(|j| {
+                if j.last_step.trim().is_empty() {
+                    j.title.clone()
+                } else {
+                    j.last_step.clone()
+                }
+            });
+        if text.is_some() || self.turn.lock().await.is_none() {
+            self.post_activity(chat_id, text);
+        }
     }
 
     /// The one answer bubble of a job: the subagent's raw output turned into the agent's own
@@ -6246,6 +6561,77 @@ impl Agent {
         h.doc.doc.commit();
     }
 
+    /// Jobs left `queued` / `running` by a restart (duplex design §2.6, Jacob's rule 3): a
+    /// `research` job with no declared resources restarts itself once with the same brief; any
+    /// other job is marked interrupted and the chat gets one plain line asking for a go.
+    pub(crate) async fn reclaim_interrupted_jobs(self: &Arc<Self>) {
+        let open = self.store.open_jobs().unwrap_or_default();
+        for j in open {
+            let _ = self
+                .store
+                .set_job_state(&j.id, "interrupted", Some("box restart"));
+            let Some(host) = self.sync.host(&j.chat_id).await else {
+                continue;
+            };
+            let restartable = j.kind == "research" && j.touches.is_empty() && j.restarts < 1;
+            let line = if restartable {
+                format!(
+                    "A restart cut off \"{}\"; I'm picking it up again now.",
+                    j.title
+                )
+            } else {
+                format!(
+                    "A restart cut off \"{}\". Say go and I'll pick it up again.",
+                    j.title
+                )
+            };
+            {
+                let h = host.lock().await;
+                let id = ulid();
+                h.doc
+                    .start_assistant_message(&id, &j.ask_message_id, &self.cfg.device_id);
+                if let Some(attr) = self.people_reply_fields(&j.chat_id) {
+                    h.doc.set_message_fields(&id, &attr.fields);
+                }
+                if let Some(p) = h.doc.add_text_part(&id, "text") {
+                    h.doc.append_text(&id, &p, &line);
+                }
+                h.doc.set_message_fields(
+                    &id,
+                    &[("deliveryKey", json!(format!("job:{}:interrupted", j.id)))],
+                );
+                h.doc.finish_message(&id, MessageStatus::Done);
+            }
+            if restartable {
+                let _ = self.store.bump_job_restarts(&j.id);
+                let _ = self.store.set_job_state(&j.id, "queued", None);
+                let spec = JobSpec {
+                    id: j.id.clone(),
+                    title: j.title.clone(),
+                    kind: j.kind.clone(),
+                    touches: j.touches.clone(),
+                };
+                tracing::info!(job = %j.id, "research job restarted after a box restart");
+                self.spawn_subagent_task(
+                    &j.chat_id,
+                    &host,
+                    &j.ask_message_id,
+                    None,
+                    format!(
+                        "job-restart-{}",
+                        j.id[j.id.len().saturating_sub(4)..].to_lowercase()
+                    ),
+                    j.title.clone(),
+                    j.brief.clone(),
+                    Some(Harness::Pi),
+                    false,
+                    false,
+                    Some(spec),
+                );
+            }
+        }
+    }
+
     /// MCP `spawn_subagent` / `wake_subagent` from inside an act turn (D66 escalation).
     pub async fn spawn_from_tool(
         self: &Arc<Self>,
@@ -6289,7 +6675,7 @@ impl Agent {
             let _ = idh;
             if let Err(e) = me
                 .run_subagent(
-                    &chat_id, &host, &user_msg, existing, &n, &p, &b, None, false, true,
+                    &chat_id, &host, &user_msg, existing, &n, &p, &b, None, false, true, None,
                 )
                 .await
             {
@@ -6620,21 +7006,36 @@ pub const ROUTER_PROMPT: &str = include_str!("../prompts/router.md");
 /// the same day). The unit test fails when a prompt edit crosses it, so growth is a decision,
 /// not drift.
 #[cfg(test)]
-pub const BASE_PROMPT_MAX_BYTES: usize = 27_000;
+pub const BASE_PROMPT_MAX_BYTES: usize = 28_000;
 
 /// The byte-stable part of the main agent's system prompt: core, then routing, then code mode
 /// when it is on. Everything per project (folder, model, instructions, memory) comes after it.
+#[cfg(test)]
 pub fn base_system_prompt(code_mode: bool) -> String {
+    base_system_prompt_with(code_mode, true)
+}
+
+/// `jobs`: the duplex step-2 jobs section (`start_job` / `list_jobs`), appended after the router
+/// prompt; off, the prompt is byte-identical to the one before jobs existed.
+pub fn base_system_prompt_with(code_mode: bool, jobs: bool) -> String {
     let mut s = String::with_capacity(CORE_PROMPT.len() + ROUTER_PROMPT.len() + 4096);
     s.push_str(CORE_PROMPT.trim_end());
     s.push_str("\n\n");
     s.push_str(ROUTER_PROMPT);
+    if jobs {
+        s.push_str("\n\n");
+        s.push_str(JOBS_SECTION);
+    }
     if code_mode {
         s.push_str("\n\n");
         s.push_str(CODE_MODE_SECTION);
     }
     s
 }
+
+/// Duplex step 2 (`docs/duplex-agent-design.md` §2.3): work that takes more than a few seconds
+/// is a job the main agent starts and then steps away from; the chat stays open for the user.
+pub const JOBS_SECTION: &str = "## Jobs: longer work runs beside the chat\n\nAnything that takes more than about ten seconds — research across several pages, a comparison of options or prices, a build, a test run, a long script, a report — is a **job**, never work inside your turn. Route `act`, post one short acknowledgement with `send_message` naming the first step (\"Looking up the top-rated surf schools around Santa Teresa and their prices now.\"), then call `start_job(title, brief, kind)` and end the turn. `title`: two to five words, present tense — the status line the user watches (\"Searching for surf schools\"). `brief`: the exact instruction for the worker — what to find or build, for whom, the acceptance criterion, what to return (for a comparison: each item with its page URL, the compared facts, sources, what could not be checked). `kind`: `research`, `code`, `ops` or `other`. The result returns later as an `[Arbos] Job … finished` message: deliver it then with `send_message` (in parts for a comparison, `reply_to` the user's message), as your own work. Up to three jobs run at once per chat; meanwhile answer every new message in a short turn, never start the same work twice (your working set lists jobs in flight), and answer \"how is it going?\" from `list_jobs`. `route new` / `wake` stay for a long-lived named thread; one piece of work is a job. `act` is for what you finish in a few tool calls.";
 
 #[cfg(test)]
 impl Agent {
