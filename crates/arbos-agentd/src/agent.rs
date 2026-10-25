@@ -2950,6 +2950,24 @@ impl Agent {
         if let Some(note) = self.take_side_notes(chat_id) {
             prompt_text = format!("{note}\n\n{prompt_text}");
         }
+        // Replies from other agents that arrived before this turn (#1780): told here, once; the
+        // notice turn waiting behind this send sees them marked and skips.
+        {
+            let h = host.lock().await;
+            let pending = crate::agent_messages::pending_agent_replies(&h.doc.messages());
+            if !pending.is_empty() {
+                for (id, ..) in &pending {
+                    crate::agent_messages::mark_agent_reply_relayed(&h.doc, id);
+                }
+                let note = crate::agent_messages::pending_replies_note(&pending);
+                prompt_text = format!("{note}{prompt_text}");
+                tracing::info!(
+                    chat_id,
+                    n = pending.len(),
+                    "arrived agent replies folded into the user turn"
+                );
+            }
+        }
 
         // Hang-up / typed preempt during setup: drop the claim and leave without opening a row.
         if self.turn.lock().await.as_ref().is_some_and(|t| t.stopped) {
@@ -4236,8 +4254,41 @@ impl Agent {
         prompt: &str,
         kind: TurnKind,
     ) -> Result<()> {
+        self.run_notice_turn_unless_relayed(chat_id, host, in_reply_to, prompt, kind, None)
+            .await
+    }
+
+    /// `run_notice_turn` for an agent reply pinned on hand-off row `relay_row` (#1780): once the
+    /// lock is ours, a reply a user turn already told the user is skipped; otherwise it is marked
+    /// relayed first, so a user send arriving now does not tell it a second time.
+    pub async fn run_notice_turn_unless_relayed(
+        self: &Arc<Self>,
+        chat_id: &str,
+        host: &SharedHost,
+        in_reply_to: &str,
+        prompt: &str,
+        kind: TurnKind,
+        relay_row: Option<&str>,
+    ) -> Result<()> {
         self.let_user_sends_go_first().await;
         let _guard = self.turn_lock.lock().await;
+        if let Some(id) = relay_row {
+            let h = host.lock().await;
+            let relayed = h
+                .doc
+                .message(id)
+                .and_then(|m| m.rest.get("agentReply").cloned())
+                .and_then(|r| r.get("relayed").and_then(Value::as_bool))
+                == Some(true);
+            if relayed {
+                tracing::info!(
+                    chat_id,
+                    "agent reply already told by a user turn; notice turn skipped"
+                );
+                return Ok(());
+            }
+            crate::agent_messages::mark_agent_reply_relayed(&h.doc, id);
+        }
         let outcome = self
             .drive_turn(
                 chat_id,
@@ -8381,6 +8432,8 @@ mod tests {
             "A promise with no routine behind it is a promise you will not keep",
             "## Approvals",
             "## Group chats",
+            // #1780: one answer per ask about another agent's reply
+            "never \"nothing yet\" followed by the reply",
             // Grok parity: comparisons arrive in parts with a linked table and a next step
             "A research or comparison answer",
             "a markdown table with one row per item",
