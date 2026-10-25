@@ -622,6 +622,18 @@ roll_continue() {
   finish_roll "$sha" "$snapshot" || true
 }
 
+# seed_check_parse <container output> → "<sha> <hits>". The output is the .source-sha file, an echo,
+# then grep's count: with the newline the image writes into .source-sha (41 bytes) the count sits on
+# line 3 and line 2 is blank — reading line 2 held the whole agentd lane on a fresh 0.1.126 (04:3x UTC,
+# "reply_to hits=0" with the right sha). The sha is the first non-blank line, the count the last.
+seed_check_parse() {
+  local sha hits
+  sha="$(printf '%s\n' "$1" | grep -m1 -v '^[[:space:]]*$' | tr -d '[:space:]')"
+  hits="$(printf '%s\n' "$1" | grep -v '^[[:space:]]*$' | tail -n1 | tr -d '[:space:]')"
+  [[ "$hits" == "$sha" ]] && hits=""
+  echo "${sha:-?} ${hits:-0}"
+}
+
 seed_check() {
   # seed_check <sha> <version> <image> — the pi-ext seed inside the image must come from this commit:
   # images 0.1.121–0.1.123 (2026-10-25) shipped a three-day-old arbos-pi-ext out of the buildx cache next to
@@ -635,8 +647,7 @@ seed_check() {
     record_failure agentd "$sha" "seed check: could not pull $image"; return 1
   fi
   out="$(docker run --rm --entrypoint sh "$image" -c 'cat /etc/arbos/pi-seed/extensions/arbos-pi-ext/.source-sha 2>/dev/null; echo; grep -c reply_to /etc/arbos/pi-seed/extensions/arbos-pi-ext/index.ts 2>/dev/null' 2>/dev/null || true)"
-  seed_sha="$(echo "$out" | sed -n 1p | tr -d '[:space:]')"
-  hits="$(echo "$out" | sed -n 2p | tr -d '[:space:]')"
+  read -r seed_sha hits < <(seed_check_parse "$out")
   if [[ "$seed_sha" != "$sha" || "${hits:-0}" -lt 1 ]]; then
     record_failure agentd "$sha" "seed check: image $version carries pi-ext seed from '${seed_sha:-?}' (want $sha), reply_to hits=${hits:-0}; stale layer — not rolled"
     hold_agentd "$sha" "$version" "stale arbos-pi-ext seed in the image (seed .source-sha ${seed_sha:-?} != $sha); purge the buildx cache"
@@ -1031,6 +1042,12 @@ selftest() {
   SELFTEST_DEPLOYED="$c"; [[ -z "$(relay_hotfix_marker)" ]] || { echo "selftest: marker above head must be empty" >&2; return 1; }
   SELFTEST_DEPLOYED="$m"; [[ -z "$(relay_hotfix_marker)" ]] || { echo "selftest: marker at the marker must be empty" >&2; return 1; }
   [[ "$(auto_enabled relay)" == "$AUTO_DEPLOY_RELAY" ]] || { echo "selftest: auto_enabled" >&2; return 1; }
+  # seed_check_parse: .source-sha with and without its trailing newline, and a seed with no file at all.
+  local sha40="90e62fb55993ff1b568c36f4bf6b8bc51e11dca5"
+  [[ "$(seed_check_parse "$(printf '%s\n\n3\n' "$sha40")")" == "$sha40 3" ]] || { echo "selftest: seed_check_parse with newline" >&2; return 1; }
+  [[ "$(seed_check_parse "$(printf '%s\n3\n' "$sha40")")" == "$sha40 3" ]] || { echo "selftest: seed_check_parse without newline" >&2; return 1; }
+  [[ "$(seed_check_parse "$(printf '%s\n\n0\n' "$sha40")")" == "$sha40 0" ]] || { echo "selftest: seed_check_parse zero hits" >&2; return 1; }
+  [[ "$(seed_check_parse "$(printf '\n\n')")" == "? 0" ]] || { echo "selftest: seed_check_parse no seed" >&2; return 1; }
   echo "selftest ok"
 }
 
