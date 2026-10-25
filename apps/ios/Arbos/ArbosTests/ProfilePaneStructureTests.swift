@@ -30,11 +30,17 @@ final class ProfilePaneStructureTests: XCTestCase {
         }
     }
 
-    /// The agent pane's Details tab puts live content first and the edit fields last, and
-    /// its copy is the Mac's (`agent::tests` in `profiles/agent.rs`).
-    func testAgentDetailsPutsLiveContentFirstAndReadsLikeTheMac() {
-        XCTAssertEqual(AgentPane.detailsOrder(mine: true), [.coding, .routines, .settings, .access, .permissions, .profile])
-        XCTAssertEqual(AgentPane.detailsOrder(mine: false), [.coding, .settings, .profile])
+    /// The agent pane's Details tab is the Settings card alone — no "Who may message", no
+    /// "Permissions", no "Profile" (Jacob 2026-10-25, [feedback
+    /// agent-details-remove-sections-ios-2026-10-25]); Coding / Routines come back ahead of
+    /// it only while the flag is on (routines for the owner alone). The copy is the Mac's
+    /// (`agent::tests` in `profiles/agent.rs`).
+    func testAgentDetailsIsSettingsAloneAndReadsLikeTheMac() {
+        XCTAssertFalse(AgentPane.agentDetailsShowCodingRoutines, "Coding and Routines stay hidden by default")
+        XCTAssertEqual(AgentPane.detailsOrder(mine: true), [.settings])
+        XCTAssertEqual(AgentPane.detailsOrder(mine: false), [.settings])
+        XCTAssertEqual(AgentPane.detailsOrder(mine: true, showCodingRoutines: true), [.coding, .routines, .settings])
+        XCTAssertEqual(AgentPane.detailsOrder(mine: false, showCodingRoutines: true), [.coding, .settings])
         XCTAssertEqual(AgentPane.subtitle(description: "", mine: true, ownerHandle: nil), "Add a label")
         XCTAssertEqual(AgentPane.subtitle(description: " Drafts before it sends. ", mine: true, ownerHandle: nil), "Drafts before it sends.")
         XCTAssertEqual(AgentPane.subtitle(description: "", mine: false, ownerHandle: "@sami"), "Run by @sami")

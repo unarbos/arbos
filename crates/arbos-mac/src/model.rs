@@ -2562,8 +2562,9 @@ impl SecretsView {
 }
 
 /// One standing shell approval (#1544, `GET /projects/{id}/shell-grants`): the owner chose
-/// "Always allow <agent> in /tmp" on a destructive-shell card. Shown and revoked in the agent
-/// pane › Settings › Shell approvals.
+/// "Always allow <agent> in /tmp" on a destructive-shell card. The relay holds them and the box
+/// applies them; the agent pane's Permissions card that listed them left on 2026-10-25
+/// ([feedback agent-details-remove-sections-mac-2026-10-25]) — the calls stay.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ShellGrant {
     pub id: String,
@@ -2583,25 +2584,6 @@ pub struct ShellGrant {
     /// "scratch only: /tmp and /work/tmp" (relay-rendered).
     #[serde(default)]
     pub detail: String,
-}
-
-impl ShellGrant {
-    /// The value of the Settings "Shell approvals" row: "Destructive · /tmp, anywhere" or
-    /// "Asks every time".
-    pub fn summary(grants: &[ShellGrant]) -> String {
-        if grants.is_empty() {
-            return "Asks every time".into();
-        }
-        let classes: Vec<&str> = grants
-            .iter()
-            .map(|g| match g.path_class.as_str() {
-                "scratch" => "/tmp",
-                "workspace" => "workspace",
-                other => other,
-            })
-            .collect();
-        format!("Destructive · {}", classes.join(", "))
-    }
 }
 
 /// `GET /projects/{id}/secrets`: what one agent may use, for its profile page.
