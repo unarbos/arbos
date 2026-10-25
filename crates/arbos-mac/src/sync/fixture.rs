@@ -85,6 +85,8 @@ struct Shared {
     connectors: Mutex<ConnectorsView>,
     channels: Mutex<ChannelsView>,
     secrets: Mutex<SecretsView>,
+    /// Standing shell approvals per agent (#1544): Doug starts with one for /tmp.
+    shell_grants: Mutex<HashMap<Id, Vec<crate::model::ShellGrant>>>,
     /// Settings → Devices: this account's signed-in devices (this Mac first).
     devices: Mutex<Vec<DeviceView>>,
     routines: Mutex<Vec<Routine>>,
@@ -146,6 +148,7 @@ impl SyncSource for FixtureSource {
                 connectors: Mutex::new(seed_connectors()),
                 channels: Mutex::new(seed_channels()),
                 secrets: Mutex::new(seed_secrets()),
+                shell_grants: Mutex::new(seed_shell_grants()),
                 devices: Mutex::new(seed_devices()),
                 routines: Mutex::new(seed_routines()),
                 routine_runs: Mutex::new(seed_routine_runs()),
@@ -1199,7 +1202,17 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         ClientCommand::Approve {
             chat_id,
             approval_id,
-        } => decide_approval(shared, chat_id, approval_id, ApprovalState::Approved, None),
+            grant,
+        } => {
+            if let Some(class) = grant {
+                with_doc(shared, &chat_id, |doc| {
+                    doc.core.transact(|d| {
+                        d.set_approval_grant(&approval_id, &class);
+                    });
+                });
+            }
+            decide_approval(shared, chat_id, approval_id, ApprovalState::Approved, None)
+        }
         ClientCommand::Reject {
             chat_id,
             approval_id,
@@ -1693,6 +1706,16 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             emit_connectors(shared);
         }
         ClientCommand::SecretsRefresh => emit_secrets(shared),
+        ClientCommand::ShellGrantsRefresh { project_id } => emit_shell_grants(shared, &project_id),
+        ClientCommand::ShellGrantRevoke {
+            project_id,
+            grant_id,
+        } => {
+            if let Some(list) = shared.shell_grants.lock().unwrap().get_mut(&project_id) {
+                list.retain(|g| g.id != grant_id);
+            }
+            emit_shell_grants(shared, &project_id);
+        }
         ClientCommand::DevicesRefresh => emit_devices(shared),
         ClientCommand::DeviceRevoke { id } => {
             // The relay refuses to revoke the caller's own device through this
@@ -3916,6 +3939,7 @@ fn approval_card(
         decided_at,
         decided_by: decided_at.map(|_| DEVICE.to_string()),
         reason: None,
+        grant: None,
     }
 }
 
@@ -4131,6 +4155,39 @@ fn membership_notice(shared: &Arc<Shared>, chat_id: &str, text: &str) {
             let _ = d.append_system_line(&new_id(), text, "relay", None);
         });
     });
+}
+
+fn emit_shell_grants(shared: &Arc<Shared>, project_id: &str) {
+    let items = shared
+        .shell_grants
+        .lock()
+        .unwrap()
+        .get(project_id)
+        .cloned()
+        .unwrap_or_default();
+    let _ = shared.events.send(SyncEvent::ShellGrants {
+        project_id: project_id.to_string(),
+        items,
+    });
+}
+
+/// #1544: the first agent has one standing grant (so the Settings row and its switch show).
+fn seed_shell_grants() -> HashMap<Id, Vec<crate::model::ShellGrant>> {
+    let mut m = HashMap::new();
+    m.insert(
+        PROJECT_ARBOS.to_string(),
+        vec![crate::model::ShellGrant {
+            id: "grant-scratch".into(),
+            rule_class: "file-delete".into(),
+            path_class: "scratch".into(),
+            chat_id: None,
+            granted_by: "dev-mac".into(),
+            created_at: now_ms() - 3 * 60 * 60 * 1000,
+            label: "File deletes in /tmp".into(),
+            detail: "scratch only: /tmp and /work/tmp".into(),
+        }],
+    );
+    m
 }
 
 fn with_doc<R>(shared: &Arc<Shared>, chat_id: &str, f: impl FnOnce(&ChatDoc) -> R) -> Option<R> {
@@ -5379,6 +5436,44 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
         drafts
             .core
             .set_message_fields(&pending, &[("waitingApproval", json!(true))]);
+        // #1544 rig (`ARBOS_FIXTURE_SHELL_CARD=1`): a destructive-shell card with its four
+        // standing rows, as agentd posts it for `rm -rf` outside scratch.
+        if std::env::var("ARBOS_FIXTURE_SHELL_CARD").as_deref() == Ok("1") {
+            s.user("clone arbos into /tmp and list the top level");
+            let command = "cd /work/app && rm -rf node_modules && git clone --depth 1 https://github.com/unarbos/arbos arbos-src";
+            let shell = s.assistant(
+                TurnKind::Act,
+                MessageStatus::Done,
+                vec![
+                    text("On it."),
+                    Part::Approval {
+                        id: new_id(),
+                        approval_id: "01J9APPROVAL0SHELL00000000".into(),
+                        title: "Run a destructive command (file-delete)".into(),
+                        summary: command.into(),
+                        risk: ApprovalRisk::Destructive,
+                        payload: json!({
+                            "kind": "tool_call", "tool": "bash", "class": "file-delete", "path_class": "workspace",
+                            "why": "deletes files outside /work/tmp",
+                            "input": { "command": command },
+                            "grant_options": [
+                                { "path_class": "workspace", "label": "its workspace", "detail": "the agent's own /work folder, including scratch" },
+                                { "path_class": "anywhere", "label": "anywhere", "detail": "any folder of its box" }
+                            ]
+                        }),
+                        state: ApprovalState::Pending,
+                        expires_at: Some(s.t + APPROVAL_TTL_MS as u64),
+                        decided_at: None,
+                        decided_by: None,
+                        reason: None,
+                        grant: None,
+                    },
+                ],
+            );
+            drafts
+                .core
+                .set_message_fields(&shell, &[("waitingApproval", json!(true))]);
+        }
     }
     out.push(drafts);
     let media = ChatDoc::new(CHAT_ARBOS_MEDIA, PROJECT_ARBOS);

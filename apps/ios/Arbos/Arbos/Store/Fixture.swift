@@ -96,6 +96,17 @@ extension AppModel {
             user("c5", c, "Hey", at: t0 + 120_000),
             streaming("c6", c, at: t0 + 125_000),
         ]
+        // #1544: the Comms agent's destructive-shell card with its four standing rows, when the
+        // rig asks for it (`ARBOS_FIXTURE_SHELL_CARD=1`); Comms also holds one standing grant.
+        if DebugHooks.fixtureShellCard {
+            allMessages[c]?.removeAll { $0.id == "c6" }
+            allMessages[c]?.append(user("c7", c, "clone arbos into /tmp and list the top level", at: t0 + 130_000))
+            allMessages[c]?.append(assistant("c8", c, "On it.", at: t0 + 131_000))
+            allMessages[c]?.append(shellCard("c9", c, at: t0 + 132_000))
+        }
+        shellGrants["fx-comms"] = [ShellGrant(id: "grant-scratch", ruleClass: "file-delete", pathClass: "scratch", chatId: nil,
+                                              grantedBy: "dev-iphone", createdAt: now - 3 * 3_600_000,
+                                              label: "File deletes in /tmp", detail: "scratch only: /tmp and /work/tmp")]
         // Affine's chat shows the card types: file, voice memo, question, stop.
         let a = "fx-affine-main"
         let a0 = now - 19 * 60_000
@@ -688,6 +699,28 @@ extension AppModel {
         return Message(id: id, chatId: chat, role: .assistant, sender: "agent", status: .done, turn: .reply, decision: "reply", subagentId: nil,
                        subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: at, completedAt: at, pending: false,
                        parts: [.question(id: "\(id)-w", question: q), .status(id: "\(id)-q", code: .askUser, message: text)], hiddenCount: 0)
+    }
+
+    /// #1544: an `approval` part as agentd writes it for `cd /tmp && rm -rf …` outside scratch —
+    /// `grant_options` make the card offer A once / B in its workspace / C anywhere / D deny.
+    private func shellCard(_ id: Id, _ chat: Id, at: Int64) -> Message {
+        let pm: [String: Any] = [
+            "id": "\(id)-ap", "kind": "approval", "approvalId": "\(id)-approval", "state": "pending",
+            "title": "Run a destructive command (file-delete)", "risk": "destructive",
+            "summary": "cd /work/app && rm -rf node_modules && git clone --depth 1 https://github.com/unarbos/arbos arbos-src",
+            "payload": [
+                "kind": "tool_call", "tool": "bash", "class": "file-delete", "path_class": "workspace",
+                "why": "deletes files outside /work/tmp",
+                "input": ["command": "cd /work/app && rm -rf node_modules && git clone --depth 1 https://github.com/unarbos/arbos arbos-src"],
+                "grant_options": [
+                    ["path_class": "workspace", "label": "its workspace", "detail": "the agent's own /work folder, including scratch"],
+                    ["path_class": "anywhere", "label": "anywhere", "detail": "any folder of its box"],
+                ],
+            ],
+        ]
+        return Message(id: id, chatId: chat, role: .assistant, sender: "agent", status: .done, turn: .reply, decision: "approval", subagentId: nil,
+                       subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: at, completedAt: at, pending: false,
+                       parts: [DocJSON.part(pm)], hiddenCount: 0)
     }
 
     private func stopped(_ id: Id, _ chat: Id, at: Int64) -> Message {

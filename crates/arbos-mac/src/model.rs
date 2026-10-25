@@ -1442,6 +1442,9 @@ pub enum Part {
         decided_by: Option<String>,
         #[serde(default)]
         reason: Option<String>,
+        /// #1544: the standing choice made on a destructive-shell card (a path class).
+        #[serde(default)]
+        grant: Option<String>,
     },
     #[serde(other)]
     Unknown,
@@ -2559,6 +2562,49 @@ impl SecretsView {
 
     pub fn secret(&self, id: &str) -> Option<&Secret> {
         self.secrets.iter().find(|s| s.id == id)
+    }
+}
+
+/// One standing shell approval (#1544, `GET /projects/{id}/shell-grants`): the owner chose
+/// "Always allow <agent> in /tmp" on a destructive-shell card. Shown and revoked in the agent
+/// pane › Settings › Shell approvals.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ShellGrant {
+    pub id: String,
+    #[serde(default)]
+    pub rule_class: String,
+    #[serde(default)]
+    pub path_class: String,
+    #[serde(default)]
+    pub chat_id: Option<String>,
+    #[serde(default)]
+    pub granted_by: String,
+    #[serde(default)]
+    pub created_at: u64,
+    /// "File deletes in /tmp" (relay-rendered).
+    #[serde(default)]
+    pub label: String,
+    /// "scratch only: /tmp and /work/tmp" (relay-rendered).
+    #[serde(default)]
+    pub detail: String,
+}
+
+impl ShellGrant {
+    /// The value of the Settings "Shell approvals" row: "Destructive · /tmp, anywhere" or
+    /// "Asks every time".
+    pub fn summary(grants: &[ShellGrant]) -> String {
+        if grants.is_empty() {
+            return "Asks every time".into();
+        }
+        let classes: Vec<&str> = grants
+            .iter()
+            .map(|g| match g.path_class.as_str() {
+                "scratch" => "/tmp",
+                "workspace" => "workspace",
+                other => other,
+            })
+            .collect();
+        format!("Destructive · {}", classes.join(", "))
     }
 }
 

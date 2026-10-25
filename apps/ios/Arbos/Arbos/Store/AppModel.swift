@@ -675,6 +675,8 @@ final class AppModel: ObservableObject {
     @Published var devicesError: String?
     /// Agent profile → Secrets, per project.
     @Published var projectSecrets: [Id: ProjectSecrets] = [:]
+    /// Standing shell approvals per agent (#1544), loaded when the agent pane opens.
+    @Published var shellGrants: [Id: [ShellGrant]] = [:]
     /// Fixture only: the Vault page's item list (the relay answers this live).
     var fixtureVaultItems: [[String: Any]] = []
     @Published var secretsBusy = false
@@ -4520,8 +4522,33 @@ final class AppModel: ObservableObject {
         guard let doc = docs[chatId] else { return }
         var payload: [String: Any] = ["approvalId": approvalId]
         if !approve { payload["reason"] = "denied on iPhone" }
+        // #1544: "grant:<path class>" is a destructive-shell card's standing option.
+        if let grant = choice.stripping(prefix: "grant:"), !grant.isEmpty { payload["grant"] = grant }
         try? doc.pushCommand(approve ? "approve" : "reject", payload: payload, device: deviceId)
         doc.commit()
+    }
+
+    /// #1544: the agent pane opened — load its standing shell approvals.
+    func refreshShellGrants(_ projectId: Id) async {
+        guard credentials != nil, !isFixture else { return }
+        if let v = try? await relay.shellGrants(projectId) {
+            shellGrants[projectId] = v
+        }
+    }
+
+    /// Settings › Shell approvals: switch a grant off. The row goes at once; the relay's list
+    /// confirms it.
+    func revokeShellGrant(projectId: Id, grantId: String) {
+        shellGrants[projectId]?.removeAll { $0.id == grantId }
+        guard !isFixture else { return }
+        Task { @MainActor in
+            do {
+                try await relay.revokeShellGrant(projectId, grantId: grantId)
+            } catch {
+                notice = Notice(text: "Shell approvals: \(error.localizedDescription)")
+            }
+            await refreshShellGrants(projectId)
+        }
     }
 
     private func markQuestionAnswered(chatId: Id, questionId: String, answer: [String]) {

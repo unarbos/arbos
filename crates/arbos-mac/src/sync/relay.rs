@@ -5152,12 +5152,17 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         ClientCommand::Approve {
             chat_id,
             approval_id,
+            grant,
         } => {
             let docs = shared.docs.lock().unwrap();
             if let Some(doc) = docs.get(&chat_id) {
                 let device = shared.device_id();
+                let mut payload = json!({ "approvalId": approval_id });
+                if let Some(g) = grant {
+                    payload["grant"] = json!(g);
+                }
                 doc.core.transact(|d| {
-                    d.push_command("approve", json!({ "approvalId": approval_id }), &device);
+                    d.push_command("approve", payload, &device);
                 });
             }
         }
@@ -6571,6 +6576,27 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 refresh_project_secrets(&shared, &project_id).await;
             });
         }
+        ClientCommand::ShellGrantsRefresh { project_id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                refresh_shell_grants(&shared, &project_id).await;
+            });
+        }
+        ClientCommand::ShellGrantRevoke {
+            project_id,
+            grant_id,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .delete(&format!("/projects/{project_id}/shell-grants/{grant_id}"))
+                    .await
+                {
+                    shared.notice(format!("Shell approvals: {}", relay_message(&err)));
+                }
+                refresh_shell_grants(&shared, &project_id).await;
+            });
+        }
         ClientCommand::SecretAdd { item } => {
             let shared = shared.clone();
             tokio::spawn(async move {
@@ -7389,6 +7415,30 @@ async fn refresh_project_secrets(shared: &Arc<Shared>, project_id: &str) {
         Err(err) => {
             if !format!("{err:#}").contains("HTTP 404") {
                 shared.notice(format!("Secrets: {}", relay_message(&err)));
+            }
+        }
+    }
+}
+
+/// One agent's standing shell approvals (`GET /projects/{id}/shell-grants`, #1544).
+async fn refresh_shell_grants(shared: &Arc<Shared>, project_id: &str) {
+    match shared
+        .get_json(&format!("/projects/{project_id}/shell-grants"))
+        .await
+    {
+        Ok(v) => {
+            let items: Vec<crate::model::ShellGrant> = v
+                .get("items")
+                .and_then(|i| serde_json::from_value(i.clone()).ok())
+                .unwrap_or_default();
+            let _ = shared.events.send(SyncEvent::ShellGrants {
+                project_id: project_id.to_string(),
+                items,
+            });
+        }
+        Err(err) => {
+            if !format!("{err:#}").contains("HTTP 404") {
+                shared.notice(format!("Shell approvals: {}", relay_message(&err)));
             }
         }
     }
