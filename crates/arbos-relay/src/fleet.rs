@@ -531,14 +531,75 @@ pub async fn unmount_work(state: &AppState, user_id: &str) -> Result<()> {
     helper(state, &script).await.map(|_| ())
 }
 
-/// First boot of a user's image: copy the agent image's `/etc` into `<mnt>/.etc` so the sandbox
-/// can mount it writable (per-project users, groups) while the rootfs stays read-only.
+/// Account files the box owns: per-project users and groups (agentd's `useradd`) live here, and
+/// they are the reason `/etc` is persisted at all. Everything else under `/etc` belongs to the
+/// image and follows it.
+const ETC_BOX_OWNED: &[&str] = &[
+    "passwd",
+    "passwd-",
+    "group",
+    "group-",
+    "shadow",
+    "shadow-",
+    "gshadow",
+    "gshadow-",
+    "subuid",
+    "subuid-",
+    "subgid",
+    "subgid-",
+    ".pwd.lock",
+];
+
+/// Image-owned trees under `/etc` that are replaced exactly (a file removed from the image must
+/// go from the box too), not merely overwritten.
+const ETC_IMAGE_TREES: &[&str] = &["arbos"];
+
+/// Marker of the image whose `/etc` the persisted copy reflects.
+const ETC_SEED_MARKER: &str = ".arbos-seed-image";
+
+/// The shell that refreshes a persisted `/etc` from the image it runs in (`/seed` = `<mnt>/.etc`).
+/// First boot (no `passwd` yet): the whole `/etc`. Later: everything except the box-owned
+/// account files, with the image-owned trees replaced exactly (#1708: the pi-ext seed under
+/// `/etc/arbos` stayed at the first image's version for the life of the box).
+pub fn etc_refresh_script(first_boot: bool) -> String {
+    if first_boot {
+        return "set -e; cp -a /etc/. /seed/".to_owned();
+    }
+    let keep: Vec<String> = ETC_BOX_OWNED
+        .iter()
+        .map(|f| format!("[ -e /seed/{f} ] && cp -a /seed/{f} /tmp/keep/{f} || true"))
+        .collect();
+    let restore: Vec<String> = ETC_BOX_OWNED
+        .iter()
+        .map(|f| format!("[ -e /tmp/keep/{f} ] && cp -a /tmp/keep/{f} /seed/{f} || true"))
+        .collect();
+    let trees: Vec<String> = ETC_IMAGE_TREES
+        .iter()
+        .map(|t| format!("rm -rf /seed/{t}; [ -e /etc/{t} ] && cp -a /etc/{t} /seed/{t} || true"))
+        .collect();
+    format!(
+        "set -e; mkdir -p /tmp/keep; {keep}; {trees}; cp -a /etc/. /seed/; {restore}",
+        keep = keep.join("; "),
+        trees = trees.join("; "),
+        restore = restore.join("; "),
+    )
+}
+
+/// Bring the persisted `/etc` of a user's image in line with `image`: full copy on first boot,
+/// image-owned parts refreshed whenever the image changed since the last seed. Account files
+/// (per-project users) survive.
 async fn seed_etc(mnt: &Path, image: &str) -> Result<()> {
     let etc = mnt.join(".etc");
-    if etc.join("passwd").exists() {
+    let first_boot = !etc.join("passwd").exists();
+    let marker = etc.join(ETC_SEED_MARKER);
+    if !first_boot
+        && std::fs::read_to_string(&marker)
+            .map(|s| s.trim() == image)
+            .unwrap_or(false)
+    {
         return Ok(());
     }
-    // `cp -a` from inside the image itself: `docker cp` refuses /etc's relative symlinks.
+    // From inside the image itself: `docker cp` refuses /etc's relative symlinks.
     docker(&[
         "run".into(),
         "--rm".into(),
@@ -549,14 +610,15 @@ async fn seed_etc(mnt: &Path, image: &str) -> Result<()> {
         "--mount".into(),
         format!("type=bind,src={},dst=/seed", etc.display()),
         "--entrypoint".into(),
-        "cp".into(),
+        "sh".into(),
         image.into(),
-        "-a".into(),
-        "/etc/.".into(),
-        "/seed/".into(),
+        "-c".into(),
+        etc_refresh_script(first_boot),
     ])
-    .await
-    .map(|_| ())
+    .await?;
+    std::fs::write(&marker, format!("{image}\n"))?;
+    tracing::info!(image, first_boot, mnt = %mnt.display(), "sandbox /etc seeded from the image");
+    Ok(())
 }
 
 fn resolv_path(state: &AppState) -> Result<PathBuf> {
@@ -1340,6 +1402,24 @@ mod tests {
         assert!((s.mem_mib_max - 400.0).abs() < 1e-9);
         assert_eq!(s.pids_max, 83);
         assert_eq!(state.db.prune_fleet_samples(now_ms() + 1).unwrap(), 4);
+    }
+
+    #[test]
+    fn etc_refresh_keeps_accounts_and_replaces_image_trees() {
+        assert_eq!(etc_refresh_script(true), "set -e; cp -a /etc/. /seed/");
+        let s = etc_refresh_script(false);
+        assert!(s.contains("cp -a /seed/passwd /tmp/keep/passwd"));
+        assert!(s.contains("cp -a /tmp/keep/group /seed/group"));
+        assert!(s.contains("rm -rf /seed/arbos; [ -e /etc/arbos ] && cp -a /etc/arbos /seed/arbos"));
+        assert!(s.contains("cp -a /etc/. /seed/"));
+        // order: keep → trees → full copy → restore
+        let (k, t, c, r) = (
+            s.find("/tmp/keep/passwd").unwrap(),
+            s.find("rm -rf /seed/arbos").unwrap(),
+            s.find("cp -a /etc/. /seed/").unwrap(),
+            s.rfind("cp -a /tmp/keep/passwd").unwrap(),
+        );
+        assert!(k < t && t < c && c < r);
     }
 
     #[test]
