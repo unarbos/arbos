@@ -1,0 +1,34 @@
+{
+  "id": "py-05-research-single",
+  "lane": "a",
+  "category": "parity",
+  "categories": [
+    "parity",
+    "research-single"
+  ],
+  "title": "Latest stable Python with the source",
+  "parity": true,
+  "timeout_s": 180,
+  "settle_s": 12,
+  "turns": [
+    {
+      "prompt": "What is the latest stable Python 3.x release? Include the source you used.",
+      "shape": {
+        "messages_min": 1,
+        "messages_max": 3,
+        "ack_first": false,
+        "table": false,
+        "links_min": 1,
+        "offer": false,
+        "first_bubble_max_s": 8,
+        "no_handle": true,
+        "worker_rows": 0,
+        "reply_to_ask": false
+      },
+      "truth": {
+        "kind": "python_latest"
+      },
+      "reply_regex": "https?://"
+    }
+  ]
+}

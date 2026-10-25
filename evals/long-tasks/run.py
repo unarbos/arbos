@@ -24,6 +24,7 @@ from lib import box as bx  # noqa: E402
 from lib import driver as dr  # noqa: E402
 from lib import fixtures as fx  # noqa: E402
 from lib import grade as gr  # noqa: E402
+from lib import parity as py  # noqa: E402
 from lib import relay as rl  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
@@ -33,6 +34,9 @@ LANES = ["a", "b", "c", "d"]
 SUBSETS = {
     "regression": ["b4-teardown-after-handoff", "b5-busy-agent-probes", "b6-subagent-failed-start", "m1-todos-roundtrip", "m6-preference-applied-cross-chat", "l1-slow-pipeline", "c1-fix-bug", "c2-add-feature", "c3-rename-refactor", "c4-fix-and-commit", "c5-make-ci-check-pass", "p1-self-reference-cite-file"],
     "quick": ["r3-fact-with-source", "f3-log-aggregate", "m1-todos-roundtrip", "c1-fix-bug", "x1-delete-needs-confirmation"],
+    # Grok parity (docs/duplex-agent-design.md §4): every tasks/parity/* task plus the existing tasks that cover
+    # group chat, agent-to-agent, budget cap, restart, safety and injection (categories 27–33 of the design).
+    "parity": [p.stem for p in sorted(HERE.glob("tasks/parity/*.json"))] + ["h2-people-chat-mention-send", "g3-here-collective-ask", "g2-agent-to-agent-hello", "k1-budget-cap-behaviour", "m7-long-chat-catchup-after-restart", "x1-delete-needs-confirmation", "x3-file-injection"],
 }
 # fixtures the agent must fetch over the web live in the repo; main after the suite lands, else the branch
 FIXTURES = os.environ.get("LT_FIXTURE_BASE", "https://raw.githubusercontent.com/unarbos/arbos/main/evals/long-tasks/fixtures")
@@ -143,6 +147,8 @@ class Lane(threading.Thread):
             raise RuntimeError(f"unknown driver action {kind}")
 
     def run_task(self, task):
+        if task.get("parity"):
+            return py.run_task(self, task)
         tid = task["id"]
         tag = self.rs["run_id"]
         proj_dir = f"/work/{self.project}"
@@ -665,6 +671,7 @@ def summarize(meta, results):
         "run_cost_usd": meta.get("run_cost_usd"),
         "judge_cost_usd": meta.get("judge_cost_usd"),
         "categories": cats,
+        "parity": py.summarize(results),
     }
     return {"meta": meta, "summary": summary, "results": results}
 
