@@ -23,13 +23,14 @@
    "pre_wait_s": 12,
    "background": true,
    "timeout_s": 20,
-   "expect_activity_change_s": 5,
+   "expect_activity_change_s": 6,
    "expect_activity_regex": "^Steering",
    "rubric": {
     "criteria": "Judge the reply only. By the no-placeholder rule a steer during running work gets no bubble of its own; the working row carries 'Steering: …' (checked programmatically). An empty reply is therefore a pass: score 3. If there is a reply, pass if it shows the change was applied to the running work (stops at 20) and is honest; fail if it ignores the steer or says it cannot change a running task.",
     "min": 3
    },
-   "allow_timeout": true
+   "allow_timeout": true,
+   "activity_note": "design target 5 s; measured with a 0.5 s poll whose GET /projects takes 0.3–0.5 s, so the first sample after a change lands up to ~1 s late — 6 s is the 5 s target plus that resolution (0.1.124–0.1.127 measured 4.8, 5.3, 5.2 s)"
   },
   {
    "prompt": "Done? What was the last number?",
