@@ -3477,7 +3477,35 @@ pub fn build_rows(
                         message.turn,
                         Some(TurnKind::New | TurnKind::Spawn | TurnKind::Wake)
                     );
-                if shows_nothing && finished && !streaming && !handoff_row && (failed || only_empty)
+                // The stock line is for a turn that said NOTHING. A turn that answered with a
+                // `send_message` bubble and ended on the fresh result row that bubble opened
+                // (wordless, "Working…") must not get "didn't answer" under its own answer
+                // (Jacob, "run bubble sort", 2026-10-25). Another visible row of the same turn
+                // = an assistant row answering the same user message with words or a card.
+                let turn_answered_elsewhere = !failed
+                    && message.in_reply_to.as_deref().is_some_and(|ask| {
+                        messages.iter().any(|m| {
+                            m.id != message.id
+                                && m.role == Role::Assistant
+                                && m.in_reply_to.as_deref() == Some(ask)
+                                && (!m.plain_text().trim().is_empty()
+                                    || m.parts.iter().any(|p| {
+                                        matches!(
+                                            p,
+                                            Part::Question { .. }
+                                                | Part::Approval { .. }
+                                                | Part::File { .. }
+                                                | Part::Attachment { .. }
+                                        )
+                                    }))
+                        })
+                    });
+                if shows_nothing
+                    && finished
+                    && !streaming
+                    && !handoff_row
+                    && !turn_answered_elsewhere
+                    && (failed || only_empty)
                 {
                     let line = errors
                         .first()
@@ -7000,6 +7028,55 @@ mod presence_rows_tests {
             None,
             true,
         )
+    }
+
+    fn reply_row(id: &str, ask: &str, status: &str, text: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "chatId": "chat_testing",
+            "role": "assistant",
+            "sender": "agent:01PROJGIGCHAD",
+            "senderName": "GigChadAgent",
+            "inReplyTo": ask,
+            "status": status,
+            "createdAt": at,
+            "parts": if text.is_empty() {
+                serde_json::json!([
+                    { "id": format!("t-{id}"), "kind": "text", "text": "" },
+                    { "id": format!("s-{id}"), "kind": "status", "code": "working", "message": "Working…" }
+                ])
+            } else {
+                serde_json::json!([{ "id": format!("p-{id}"), "kind": "text", "text": text }])
+            },
+        }))
+        .expect("message")
+    }
+
+    /// Jacob, "run bubble sort" (2026-10-25 18:08 UTC): the answer went out as a `send_message`
+    /// bubble, the fresh result row it opened ended wordless and Done, and the transcript drew
+    /// "The agent didn't answer. Ask again." under the answer. A turn that answered elsewhere
+    /// never gets the stock line; a turn that said nothing still does.
+    #[test]
+    fn no_stock_line_when_the_turn_answered_in_another_row() {
+        let now = now_ms();
+        let answered = [
+            reply_row("r1", "u1", "done", "Sorted: 1, 2, 3, 5, 8.", now),
+            reply_row("r2", "u1", "done", "", now + 1),
+        ];
+        let rows = rows_of(&answered);
+        assert!(
+            rows.iter()
+                .all(|r| !matches!(r.kind, RowKind::NoAnswer { .. })),
+            "no 'didn't answer' under an answer: {:?}",
+            rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
+        );
+        let silent = [reply_row("r3", "u2", "done", "", now + 2)];
+        let rows = rows_of(&silent);
+        assert!(
+            rows.iter()
+                .any(|r| matches!(r.kind, RowKind::NoAnswer { .. })),
+            "a turn that said nothing keeps the stock line"
+        );
     }
 
     #[test]
