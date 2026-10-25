@@ -112,7 +112,7 @@ DEPLOY_HOOK = "/usr/local/bin/arbos-deploy-hook"  # CD worker's hook: `<relay|ag
 DEPLOY_QUEUE = os.environ.get("ARBOS_DEPLOY_QUEUE", "/var/lib/arbos-feedback/deploy-requests")  # the hook's queue: one file per kind
 USER_AGENT = "arbos-feedback-poller/1 (+https://github.com/unarbos/arbos)"
 
-TERMINAL = {"shipped", "failed", "ignored", "rejected", "duplicate", "no_change", "handed_off", "deferred", "declined"}
+TERMINAL = {"shipped", "failed", "ignored", "rejected", "duplicate", "no_change", "handed_off", "deferred", "declined", "closed_externally"}
 
 # Fixes in these areas only count as shipped with device-level evidence (a real phone, the
 # tester's confirmation, or Jacob's OK): the simulator cannot show a silent ringback, a missing
@@ -3787,15 +3787,54 @@ class Loop:
                                         f"The loop will follow it as `{nfid}` (branch `{nbranch}`) and gate/ship it in **one hour** unless you say it was abandoned or already landed elsewhere "
                                         f"— reply here (or ask the loop operator to `decline {nfid}`).")
 
+    def retire_closed_handoffs(self, cur: dict) -> None:
+        """A handed-off item whose GitHub issue was closed by a human leaves `handed_off` (status
+        `closed_externally`, terminal) so the loop stops probing for its commit: run 6 auto-filed 37 eval issues
+        that were closed on GitHub while the loop kept asking main for each one every 2 min. One listing call."""
+        since = cur.get("closed_checked") or (utcnow() - dt.timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        q = urllib.parse.urlencode({"state": "closed", "since": since, "per_page": 100, "sort": "updated", "direction": "asc"})
+        try:
+            closed = self.gh.repo_api("GET", f"/issues?{q}") or []
+        except HttpError:
+            return
+        numbers = {i["number"] for i in closed if "pull_request" not in i}
+        # A full page means more may follow: resume from the last update seen, not from now.
+        cur["closed_checked"] = closed[-1]["updated_at"] if len(closed) >= 100 else iso()
+        if not numbers:
+            return
+        for fid in self.store.items():
+            st = self.store.state(fid)
+            if st.get("status") == "handed_off" and st.get("issue") in numbers and not st.get("commit"):
+                st.update(status="closed_externally", closed={"reason": "closed on GitHub by a human", "at": iso()})
+                self.store.save_state(fid, st)
+                self.store.event(fid, "closed_externally", issue=st["issue"])
+                log(f"[{fid}] issue #{st['issue']} was closed on GitHub; leaving handed_off (no more commit probes)")
+
     def watch_handoffs(self) -> None:
         """A handed-off item is picked up two ways: its owner pushes `feedback/<id>` (the loop gates and merges it
         like one of its own, diagnostics go to the issue instead of an agent), or tags a commit `[feedback <id>]`
         that reaches main. Either way the item becomes shipped-or-landed like a loop fix (iOS/Mac parts
         through the builds, voice/agentd/relay parts through watch_deploys), so the audit follows it."""
-        for fid in self.store.items():
-            st = self.store.state(fid)
-            if st.get("status") != "handed_off" or st.get("commit") or not st.get("track_commit"):
-                continue
+        # Budget (2026-10-25 17:10, auditor): this watch billed one `GET /commits?since=<per item>` per handed-off
+        # item per tick — 66–69 calls every 2 min, a third of them for closed eval issues. Now: (a) items whose
+        # GitHub issue is closed leave handed_off (one closed-issues listing per tick); (b) main's commit list is
+        # fetched ONCE per tick, only when main moved since the last scan, and every item is matched in memory.
+        cur = self.store.cursor()
+        self.retire_closed_handoffs(cur)
+        main_head = self.gh.branch_head("main") or ""
+        main_moved = main_head != cur.get("handoff_main_head")
+        main_commits: list[dict] | None = None
+        pending = [(fid, self.store.state(fid)) for fid in self.store.items()]
+        pending = [(f, st) for f, st in pending if st.get("status") == "handed_off" and not st.get("commit") and st.get("track_commit")]
+        if main_moved and pending:
+            oldest = min(max(st.get("created") or "", st.get("handed_off_at") or "") or iso() for _, st in pending)
+            since = (parse_iso(oldest) - dt.timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            # Up to 100 commits per page; main gained ~60 merges in the busiest 12 h, one page covers a day of items.
+            with contextlib.suppress(HttpError):
+                main_commits = self.gh.commits_since(since)
+                cur["handoff_main_head"] = main_head
+        self.store.save_cursor(cur)
+        for fid, st in pending:
             # A confirmation hold (auto follow-ups, 2026-10-25): the owner has until `follow_after` to decline a
             # tail the loop found on a merged branch; until then the branch is not followed into the pool.
             if st.get("follow_after") and iso() < st["follow_after"]:
@@ -3827,8 +3866,13 @@ class Loop:
                     self.store.event(fid, "branch_pushed", branch=st["branch"], head=head, files=files, by=st.get("handed_off_to"))
                     continue
             # Only commits newer than the hand-off count: an earlier loop merge that was reverted (#1058,
-            # 51ec9524) still carries the tag and must not be taken for the owner's landing.
-            commit = self.find_commit(fid, max(st.get("created") or "", st.get("handed_off_at") or "") or iso())
+            # 51ec9524) still carries the tag and must not be taken for the owner's landing. Matched against the
+            # one commit list fetched above (no per-item API call); nothing to do when main did not move.
+            if main_commits is None:
+                continue
+            floor = max(st.get("created") or "", st.get("handed_off_at") or "") or iso()
+            tag = f"[feedback {fid}]"
+            commit = next((c for c in main_commits if tag in c["commit"]["message"] and c["commit"]["committer"]["date"] >= floor[:19]), None)
             if not commit or commit["sha"] in (st.get("reverted") or []):
                 continue
             files = [f["filename"] for f in self.gh.commit(commit["sha"]).get("files", [])]
