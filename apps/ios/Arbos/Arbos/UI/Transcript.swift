@@ -375,7 +375,25 @@ enum Transcript {
                 // A hand-off row (a subagent brief, an agent-to-agent send) is its own line
                 // ("Messaged ◉ X"); it never gets the stock line, even with no parts (#1466).
                 let handoffRow = handoffName != nil
-                if showsNothing, finished, !streaming, !handoffRow, failed || onlyEmpty {
+                // The stock line is for a turn that said NOTHING. A turn that answered with a
+                // `send_message` bubble and ended on the fresh result row that bubble opened
+                // (wordless, "Working…") must not get "didn't answer" under its own answer
+                // (Jacob, "run bubble sort", 2026-10-25). Another visible row of the same turn
+                // = an assistant row answering the same user message with words or a card.
+                let turnAnsweredElsewhere: Bool = {
+                    guard !failed, let ask = message.inReplyTo else { return false }
+                    return messages.contains { other in
+                        other.id != message.id && other.role == .assistant && other.inReplyTo == ask
+                            && (!other.plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                || other.parts.contains { part in
+                                    switch part {
+                                    case .question, .attachment: return true
+                                    default: return false
+                                    }
+                                })
+                    }
+                }()
+                if showsNothing, finished, !streaming, !handoffRow, !turnAnsweredElsewhere, failed || onlyEmpty {
                     let line: String = {
                         if let first = errors.first?.text.trimmingCharacters(in: .whitespacesAndNewlines), !first.isEmpty {
                             return first
