@@ -98,7 +98,12 @@ async fn send_message(State(a): State<S>, headers: HeaderMap, Json(b): Json<Valu
             Err(e) => err(e),
         };
     }
-    match a.hook_send_message(text, activity).await {
+    let reply_to = b
+        .get("reply_to")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match a.hook_send_message(text, activity, reply_to).await {
         Ok(()) => ok(),
         Err(e) => err(e),
     }

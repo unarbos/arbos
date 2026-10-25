@@ -1233,6 +1233,129 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Duplex step 1 (`docs/duplex-agent-design.md` §2.1): with the send tool on, prose the
+    /// model writes outside `send_message` is not posted; a turn that posted nothing gets its
+    /// leftover prose once as the fallback (`On`), never under `Strict`; a `send_message`
+    /// bubble carries `replyTo` when asked and never trips the fallback.
+    #[tokio::test]
+    async fn send_tool_holds_leftover_prose_and_posts_the_fallback_once() {
+        use crate::config::SendTool;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000007";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        let user_msg = "m-busy";
+        // A: `On`, nothing posted → the leftover prose is the one fallback bubble, once.
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.ack_text.clear();
+            t.activity = None;
+            t.send_tool = SendTool::On;
+            agent.test_open_row(&host, t).await;
+            agent
+                .test_prose_then_finish(&host, t, "The tests pass now.")
+                .await;
+            assert!(t.posted_fallback);
+            assert_eq!(t.streamed_text.trim(), "The tests pass now.");
+            // a second pass changes nothing
+            agent.test_prose_then_finish(&host, t, "").await;
+            assert_eq!(t.streamed_text.trim(), "The tests pass now.");
+        }
+        let rows = reply_rows(&host, user_msg);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text().trim(), "The tests pass now.");
+        // B: `Strict`, nothing posted → silence; the words stay out of the doc.
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.streamed_text.clear();
+            t.posted_fallback = false;
+            t.send_tool = SendTool::Strict;
+            agent.test_open_row(&host, t).await;
+            agent
+                .test_prose_then_finish(&host, t, "Thinking about what to do next.")
+                .await;
+            assert!(!t.posted_fallback);
+            assert!(t.streamed_text.trim().is_empty());
+            assert_eq!(t.unposted_text.trim(), "Thinking about what to do next.");
+        }
+        let rows = reply_rows(&host, user_msg);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[1].text().trim(),
+            "",
+            "strict: leftover prose never posted"
+        );
+        // C: `On`, the model posted with `send_message` → leftover prose is notes, not a bubble.
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.streamed_text.clear();
+            t.unposted_text.clear();
+            t.send_tool = SendTool::On;
+            agent.test_open_row(&host, t).await;
+        }
+        {
+            // the ask exists as a row, so an explicit reply_to can point at it
+            let h = host.lock().await;
+            h.doc
+                .append_user_message(
+                    user_msg,
+                    "rename it everywhere",
+                    "dev-mac",
+                    &arbos_core::doc::UserMessageOpts::default(),
+                )
+                .unwrap();
+        }
+        agent
+            .hook_send_message("Three files use that name.", None, Some(user_msg))
+            .await
+            .unwrap();
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            agent
+                .test_prose_then_finish(&host, t, "I should also mention the tests.")
+                .await;
+            assert!(!t.posted_fallback, "a turn that posted does not fall back");
+            assert!(t.streamed_text.trim().is_empty());
+        }
+        let rows = reply_rows(&host, user_msg);
+        let posted: Vec<String> = rows
+            .iter()
+            .map(|r| r.text().trim().to_owned())
+            .filter(|t| !t.is_empty())
+            .collect();
+        assert_eq!(
+            posted,
+            vec![
+                "The tests pass now.".to_owned(),
+                "Three files use that name.".to_owned()
+            ]
+        );
+        let bubble = rows
+            .iter()
+            .find(|r| r.text().trim() == "Three files use that name.")
+            .unwrap();
+        assert_eq!(
+            bubble.rest.get("replyTo").and_then(Value::as_str),
+            Some(user_msg),
+            "send_message(reply_to) threads the bubble under the ask"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The send-tool switch: default on, `off` restores streamed prose, `strict` drops the fallback.
+    #[test]
+    fn send_tool_switch_parses() {
+        use crate::config::{parse_send_tool, SendTool};
+        assert_eq!(parse_send_tool("on"), Some(SendTool::On));
+        assert_eq!(parse_send_tool(" OFF "), Some(SendTool::Off));
+        assert_eq!(parse_send_tool("strict"), Some(SendTool::Strict));
+        assert_eq!(parse_send_tool("maybe"), None);
+    }
+
     /// Doug, 2026-10-22: the relay turn for a failed `continue-act` child routed `act`, ran
     /// tools for 13 minutes and held every chat. A relay turn may only `reply`, and the same
     /// limit line is written once.

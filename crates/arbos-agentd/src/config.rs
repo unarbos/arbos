@@ -37,6 +37,41 @@ pub fn parse_switch(s: &str) -> Option<bool> {
 
 /// Box-local override of the stable-prefix flag: `<work_root>/.arbos/stable-prefix` holding `on` or `off`.
 pub const STABLE_PREFIX_FILE: &str = "stable-prefix";
+/// Box-local override of the send tool (duplex step 1): `<work_root>/.arbos/send-tool`, `on`, `off` or `strict`.
+pub const SEND_TOOL_FILE: &str = "send-tool";
+
+/// How the main agent's words reach the chat (duplex design §2.1, `docs/duplex-agent-design.md`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SendTool {
+    /// Streamed prose is the reply, as before the duplex work.
+    Off,
+    /// Only `send_message` and `route.reply` post; leftover prose goes to T3. A turn that would
+    /// otherwise leave the user with nothing posts its leftover prose once (counted as a fallback).
+    On,
+    /// As `On`, with no fallback: leftover prose is never posted.
+    Strict,
+}
+
+pub fn parse_send_tool(s: &str) -> Option<SendTool> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "strict" => Some(SendTool::Strict),
+        other => parse_switch(other).map(|on| if on { SendTool::On } else { SendTool::Off }),
+    }
+}
+
+/// `ARBOS_SEND_TOOL=on|off|strict` (default **on**); the box-local file wins when valid.
+pub fn send_tool_mode(override_file: &std::path::Path) -> SendTool {
+    if let Some(v) = std::fs::read_to_string(override_file)
+        .ok()
+        .and_then(|s| parse_send_tool(&s))
+    {
+        return v;
+    }
+    std::env::var("ARBOS_SEND_TOOL")
+        .ok()
+        .and_then(|s| parse_send_tool(&s))
+        .unwrap_or(SendTool::On)
+}
 /// Box-local override of the compact memory pack: `<work_root>/.arbos/memory-pack-compact`, `on` or `off`.
 pub const MEMORY_PACK_COMPACT_FILE: &str = "memory-pack-compact";
 /// Box-local override of the fast memory walk: `<work_root>/.arbos/memory-walk-fast`, `on` or `off`.
@@ -362,6 +397,11 @@ impl Config {
     /// needs a pi respawn, not a box restart.
     pub fn code_mode(&self) -> bool {
         code_mode_on(&self.box_flag_file(CODE_MODE_FILE))
+    }
+
+    /// Send tool (duplex step 1): read per turn, so a toggle needs no respawn.
+    pub fn send_tool(&self) -> SendTool {
+        send_tool_mode(&self.box_flag_file(SEND_TOOL_FILE))
     }
 
     /// Stable prefix for this workspace's main agent (D87); read at every pi (re)spawn.
