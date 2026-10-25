@@ -13,6 +13,16 @@
 // bottom-sheet frame: a 44 pt bar with a hairline, the Create sheet's 33 / 40 / 56 leaf grid,
 // 23 pt swatches on a 40 pt pitch, two equal footer pills 8 pt apart (44 pt tall here, the
 // touch minimum — the same deviation as the Create sheet).
+//
+// The Create sheets (`CreateEntityView`, Jacob 2026-10-25) draw the **same Generate and Upload
+// bodies** through `AvatarSourceBody` and `AvatarSourceState` — `Upload | Generate` only, no
+// Bot tab, no Reset — and generate into my own slot (`POST /me/avatar/generate`) until the
+// entity exists.
+//
+// My own profile picture (Jacob, 2026-10-25) opens this sheet too — `AvatarTarget.me`:
+// Generate | Upload with Reset (people are D79 coloured initials, so no Bot tab); Generate goes
+// through the same `/me/avatar/generate`, Set sends `PUT /me/avatar {image_key}` or the JPEG,
+// Reset is `DELETE /me/avatar`.
 
 import ArbosFFI
 import PhotosUI
@@ -24,6 +34,8 @@ enum AvatarTarget: Equatable {
     case agent(Id)
     case group(String)
     case server(String)
+    /// My own profile picture (`/me/avatar…`; Jacob, 2026-10-25).
+    case me
 }
 
 /// Which body is up.
@@ -32,6 +44,184 @@ enum AvatarPickerTab: String, CaseIterable, Identifiable {
     case bot = "Bot"
     case generate = "Generate"
     case upload = "Upload"
+}
+
+/// Grok's dark sheet palette, shared by the picker sheet and the Create sheets.
+enum AvatarSheetPalette {
+    static let sheetBg = Color(red: 0x1F / 255, green: 0x1F / 255, blue: 0x1F / 255)
+    static let line = Color(red: 0x35 / 255, green: 0x35 / 255, blue: 0x35 / 255)
+    static let ring = Color(red: 0x50 / 255, green: 0x50 / 255, blue: 0x50 / 255)
+    static let placeholder = Color(red: 0x93 / 255, green: 0x93 / 255, blue: 0x93 / 255)
+    static let labelMuted = Color(red: 0x9A / 255, green: 0x9A / 255, blue: 0x9A / 255)
+    static let pillBg = Color(red: 0x27 / 255, green: 0x27 / 255, blue: 0x27 / 255)
+    static let mutedDisc = Color(red: 0x3A / 255, green: 0x3A / 255, blue: 0x3A / 255)
+    static let mutedInk = Color(red: 0x8A / 255, green: 0x8A / 255, blue: 0x8A / 255)
+    static let disabledBg = Color(red: 0x3B / 255, green: 0x3B / 255, blue: 0x3B / 255)
+    static let disabledText = Color(red: 0x73 / 255, green: 0x73 / 255, blue: 0x73 / 255)
+    static let setBg = Color(white: 0xE5 / 255)
+    static let title = Color(white: 0xF5 / 255)
+}
+
+/// The pending Upload / Generate choice — one object for the picker sheet and the Create
+/// sheets, so the two draw and behave the same.
+@MainActor
+final class AvatarSourceState: ObservableObject {
+    @Published var prompt = ""
+    @Published var generating = false
+    @Published var generatedKey: String?
+    @Published var errorText: String?
+    @Published var photoItem: PhotosPickerItem?
+    @Published var uploadPreview: UIImage?
+    @Published var uploadJpeg: Data?
+
+    /// The entity about to be created gets this (Jacob, 2026-10-25): the chosen JPEG, the
+    /// generated key in my slot, or nothing (→ the neutral initial).
+    func draftPicture(for tab: AvatarPickerTab) -> DraftPicture? {
+        switch tab {
+        case .upload: return uploadJpeg.map(DraftPicture.jpeg)
+        case .generate: return generatedKey.map { DraftPicture.generated(key: $0) }
+        case .bot: return nil
+        }
+    }
+
+    /// A Photos pick landed: square it at 512 px and keep the JPEG for the create / Set.
+    func tookPhoto(_ item: PhotosPickerItem?) async {
+        guard let item,
+              let data = try? await item.loadTransferable(type: Data.self),
+              let img = UIImage(data: data) else { return }
+        let square = AvatarPickerSheet.square(img, side: 512)
+        uploadPreview = square
+        uploadJpeg = square.jpegData(compressionQuality: 0.85)
+        errorText = nil
+    }
+}
+
+/// The two option capsules (`Upload | Generate` on a Create sheet; the picker sheet adds Bot).
+struct AvatarTabPill: View {
+    let tabs: [AvatarPickerTab]
+    @Binding var tab: AvatarPickerTab
+    var onChange: (() -> Void)? = nil
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(tabs, id: \.self) { t in
+                Button {
+                    tab = t
+                    onChange?()
+                } label: {
+                    Text(t.rawValue)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(tab == t ? AvatarSheetPalette.title : AvatarSheetPalette.labelMuted)
+                        .padding(.horizontal, 11)
+                        .frame(height: 28)
+                        .background(Capsule().fill(tab == t ? AvatarSheetPalette.pillBg : .clear))
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(t.rawValue + (tab == t ? ", selected" : ""))
+            }
+        }
+    }
+}
+
+/// The Generate / Upload tab bodies, shared by the picker sheet and the Create sheets. `preview`
+/// (the 114 pt disc) is drawn inside the body when given; a Create sheet shows its own hero
+/// preview above the name field and passes none. `keepsLine` names the action that keeps a
+/// generated picture ("Set avatar" / "Create").
+struct AvatarSourceBody<Preview: View>: View {
+    @Environment(\.theme) private var theme
+    @ObservedObject var state: AvatarSourceState
+    let tab: AvatarPickerTab
+    var keepsLine = "Set avatar keeps this one."
+    var uploadsLine = "Set avatar uploads it."
+    var generate: () -> Void
+    @ViewBuilder var preview: () -> Preview
+    @FocusState private var promptFocused: Bool
+
+    private var canGenerate: Bool { !state.prompt.trimmingCharacters(in: .whitespaces).isEmpty && !state.generating }
+    private var statusLine: String {
+        if let errorText = state.errorText { return errorText }
+        if state.generating { return "Painting a picture — a few seconds." }
+        if state.generatedKey != nil { return keepsLine }
+        return "A few words about the picture you want."
+    }
+
+    var body: some View {
+        switch tab {
+        case .generate: generateBody
+        case .upload: uploadBody
+        case .bot: EmptyView()
+        }
+    }
+
+    private var generateBody: some View {
+        VStack(spacing: 0) {
+            TextField("", text: $state.prompt, prompt: Text("A fox reading by a lamp").foregroundStyle(AvatarSheetPalette.placeholder))
+                .font(.system(size: 14))
+                .foregroundStyle(AvatarSheetPalette.title)
+                .autocorrectionDisabled()
+                .focused($promptFocused)
+                .submitLabel(.go)
+                .onSubmit(go)
+                .padding(.horizontal, 12)
+                .frame(height: 35)
+                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(AvatarSheetPalette.line, lineWidth: 1))
+                .padding(.horizontal, 16.5)
+                .accessibilityIdentifier("avatar-generate-prompt")
+            Button(action: go) {
+                Text(state.generating ? "Generating…" : (state.generatedKey == nil ? "Generate" : "Generate again"))
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(canGenerate ? AvatarSheetPalette.title : AvatarSheetPalette.disabledText)
+                    .padding(.horizontal, 18)
+                    .frame(height: 28)
+                    .background(Capsule().fill(canGenerate ? AvatarSheetPalette.pillBg : AvatarSheetPalette.disabledBg))
+            }
+            .buttonStyle(.plain)
+            .disabled(!canGenerate)
+            .padding(.top, 12)
+            .accessibilityIdentifier("avatar-generate-go")
+            preview()
+            Text(statusLine)
+                .font(.system(size: 12))
+                .foregroundStyle(state.errorText == nil ? AvatarSheetPalette.placeholder : theme.danger)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 16.5)
+                .padding(.top, 12)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func go() {
+        guard canGenerate else { return }
+        promptFocused = false
+        generate()
+    }
+
+    private var uploadBody: some View {
+        VStack(spacing: 0) {
+            preview()
+            PhotosPicker(selection: $state.photoItem, matching: .images) {
+                Text(state.uploadJpeg == nil ? "Choose a photo…" : "Choose another…")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(AvatarSheetPalette.title)
+                    .padding(.horizontal, 18)
+                    .frame(height: 28)
+                    .background(Capsule().fill(AvatarSheetPalette.pillBg))
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("avatar-upload-choose")
+            Text(state.uploadJpeg == nil ? "A picture from Photos; kept at 512 px." : uploadsLine)
+                .font(.system(size: 12))
+                .foregroundStyle(AvatarSheetPalette.placeholder)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 16.5)
+                .padding(.top, 12)
+        }
+        .frame(maxWidth: .infinity)
+        .onChange(of: state.photoItem) { _, item in
+            Task { await state.tookPhoto(item) }
+        }
+    }
 }
 
 struct AvatarPickerSheet: View {
@@ -45,15 +235,16 @@ struct AvatarPickerSheet: View {
     @State private var pickedLeaf: Int?
     @State private var pickedColor: Int?
     @State private var reset = false
-    @State private var prompt = ""
-    @State private var generating = false
-    @State private var generatedKey: String?
-    @State private var errorText: String?
-    @State private var photoItem: PhotosPickerItem?
-    @State private var uploadPreview: UIImage?
-    @State private var uploadJpeg: Data?
+    @StateObject private var source = AvatarSourceState()
     @State private var saving = false
-    @FocusState private var promptFocused: Bool
+    private var generatedKey: String? { source.generatedKey }
+    private var uploadJpeg: Data? { source.uploadJpeg }
+    private var uploadPreview: UIImage? { source.uploadPreview }
+    private var generating: Bool { source.generating }
+    private var errorText: String? {
+        get { source.errorText }
+        nonmutating set { source.errorText = newValue }
+    }
 
     // Grok's dark sheet palette, as the Create sheet has it.
     private let sheetBg = Color(red: 0x1F / 255, green: 0x1F / 255, blue: 0x1F / 255)
@@ -69,11 +260,14 @@ struct AvatarPickerSheet: View {
     private let setBg = Color(white: 0xE5 / 255)
     private let title = Color(white: 0xF5 / 255)
 
-    /// The tabs every target gets — agents, groups and servers alike (Jacob, 2026-10-24: the
-    /// group / server picker had lost Generate); Reset sits beside them in the bar.
+    /// The tabs per target: agents, groups and servers get all three (Jacob, 2026-10-24: the
+    /// group / server picker had lost Generate); my own picture has no leaf — people are D79
+    /// coloured initials — so it gets Generate | Upload (Jacob, 2026-10-25). Reset sits beside
+    /// them in the bar for every target.
     static func tabs(for target: AvatarTarget) -> [AvatarPickerTab] {
         switch target {
         case .agent, .group, .server: return [.bot, .generate, .upload]
+        case .me: return [.generate, .upload]
         }
     }
     private var tabs: [AvatarPickerTab] { Self.tabs(for: target) }
@@ -86,6 +280,7 @@ struct AvatarPickerSheet: View {
         case .agent(let id): return id
         case .group(let id): return "\(peopleSlot):\(id)"
         case .server(let id): return "servers:\(id)"
+        case .me: return "users:\(model.user?.id ?? "")"
         }
     }
 
@@ -101,6 +296,9 @@ struct AvatarPickerSheet: View {
         case .server(let id):
             if reset { return LeafArt.pick(seed: id) }
             return server?.leafPick ?? LeafArt.pick(seed: id)
+        case .me:
+            // People have no leaf; the Bot tab never shows for me.
+            return LeafArt.pick(seed: model.user?.id ?? "me")
         }
     }
     private var pick: LeafPick {
@@ -111,6 +309,8 @@ struct AvatarPickerSheet: View {
         case .agent: return project.map { $0.avatarLeaf != nil || $0.avatarLeafColor != nil || $0.imageKey != nil } ?? false
         case .group: return people.map { $0.leafPick != nil || $0.imageKey != nil } ?? false
         case .server: return server.map { $0.leafPick != nil || $0.imageKey != nil } ?? false
+        // Only an Arbos-uploaded picture resets (the GitHub one is already the default).
+        case .me: return model.hasCustomAvatar
         }
     }
     private var dirty: Bool {
@@ -129,8 +329,12 @@ struct AvatarPickerSheet: View {
             ScrollView(showsIndicators: false) {
                 switch tab {
                 case .bot: botBody
-                case .generate: generateBody
-                case .upload: uploadBody
+                case .generate, .upload:
+                    AvatarSourceBody(state: source, tab: tab, generate: generate) {
+                        preview.padding(.top, tab == .upload ? 24 : 16).padding(.bottom, tab == .upload ? 16 : 0)
+                    }
+                    .padding(.top, tab == .generate ? 16 : 0)
+                    .padding(.bottom, 24)
                 }
             }
             .scrollDismissesKeyboard(.interactively)
@@ -139,18 +343,16 @@ struct AvatarPickerSheet: View {
         .background(sheetBg.ignoresSafeArea())
         .presentationDetents([.height(397 + 44)])
         .presentationDragIndicator(.visible)
-        .onAppear { tab = tabs.contains(initialTab) ? initialTab : .bot }
-        .onChange(of: photoItem) { _, item in
-            guard let item else { return }
-            Task {
-                guard let data = try? await item.loadTransferable(type: Data.self),
-                      let img = UIImage(data: data) else { return }
-                let square = Self.square(img, side: 512)
-                uploadPreview = square
-                uploadJpeg = square.jpegData(compressionQuality: 0.85)
-                reset = false
-                errorText = nil
+        .onAppear {
+            tab = tabs.contains(initialTab) ? initialTab : (tabs.first ?? .bot)
+            // Rig: a prefilled prompt runs Generate at once.
+            if tab == .generate, let text = DebugHooks.avatarPrompt, !text.isEmpty {
+                source.prompt = text
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { generate() }
             }
+        }
+        .onChange(of: source.uploadJpeg) { _, jpeg in
+            if jpeg != nil { reset = false }
         }
     }
 
@@ -158,30 +360,15 @@ struct AvatarPickerSheet: View {
 
     private var bar: some View {
         HStack(spacing: 2) {
-            ForEach(tabs, id: \.self) { t in
-                Button {
-                    tab = t
-                    errorText = nil
-                } label: {
-                    Text(t.rawValue)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(tab == t ? title : labelMuted)
-                        .padding(.horizontal, 11)
-                        .frame(height: 28)
-                        .background(Capsule().fill(tab == t ? pillBg : .clear))
-                        .contentShape(Capsule())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(t.rawValue + (tab == t ? ", selected" : ""))
-            }
+            AvatarTabPill(tabs: tabs, tab: $tab) { errorText = nil }
             Spacer()
             Button {
                 reset = true
                 pickedLeaf = nil
                 pickedColor = nil
-                uploadJpeg = nil
-                uploadPreview = nil
-                generatedKey = nil
+                source.uploadJpeg = nil
+                source.uploadPreview = nil
+                source.generatedKey = nil
                 errorText = nil
             } label: {
                 Text("Reset")
@@ -262,96 +449,25 @@ struct AvatarPickerSheet: View {
 
     // MARK: Generate
 
-    private var generateBody: some View {
-        VStack(spacing: 0) {
-            TextField("", text: $prompt, prompt: Text("A fox reading by a lamp").foregroundStyle(placeholder))
-                .font(.system(size: 14))
-                .foregroundStyle(title)
-                .autocorrectionDisabled()
-                .focused($promptFocused)
-                .submitLabel(.go)
-                .onSubmit(generate)
-                .padding(.horizontal, 12)
-                .frame(height: 35)
-                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(line, lineWidth: 1))
-                .padding(.horizontal, 16.5)
-                .padding(.top, 16)
-            Button(action: generate) {
-                Text(generating ? "Generating…" : (generatedKey == nil ? "Generate" : "Generate again"))
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(canGenerate ? title : disabledText)
-                    .padding(.horizontal, 18)
-                    .frame(height: 28)
-                    .background(Capsule().fill(canGenerate ? pillBg : disabledBg))
-            }
-            .buttonStyle(.plain)
-            .disabled(!canGenerate)
-            .padding(.top, 12)
-            preview.padding(.top, 16)
-            Text(statusLine)
-                .font(.system(size: 12))
-                .foregroundStyle(errorText == nil ? placeholder : theme.danger)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 16.5)
-                .padding(.top, 14)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.bottom, 24)
-    }
-
-    private var canGenerate: Bool { !prompt.trimmingCharacters(in: .whitespaces).isEmpty && !generating }
-    private var statusLine: String {
-        if let errorText { return errorText }
-        if generating { return "Painting a picture — a few seconds." }
-        if generatedKey != nil { return "Set avatar keeps this one." }
-        return "A few words about the picture you want."
-    }
-
     private func generate() {
-        guard canGenerate else { return }
-        let text = prompt.trimmingCharacters(in: .whitespaces)
-        generating = true
-        errorText = nil
+        let text = source.prompt.trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty, !source.generating else { return }
+        source.generating = true
+        source.errorText = nil
         reset = false
-        promptFocused = false
         Task {
             do {
                 switch target {
-                case .agent(let id): generatedKey = try await model.generateProjectAvatar(projectId: id, prompt: text)
-                case .group(let id): generatedKey = try await model.generateGroupAvatar(chatId: id, prompt: text)
-                case .server(let id): generatedKey = try await model.generateServerAvatar(id, prompt: text)
+                case .agent(let id): source.generatedKey = try await model.generateProjectAvatar(projectId: id, prompt: text)
+                case .group(let id): source.generatedKey = try await model.generateGroupAvatar(chatId: id, prompt: text)
+                case .server(let id): source.generatedKey = try await model.generateServerAvatar(id, prompt: text)
+                case .me: source.generatedKey = try await model.generateMyAvatar(prompt: text)
                 }
             } catch {
-                errorText = error.localizedDescription
+                source.errorText = error.localizedDescription
             }
-            generating = false
+            source.generating = false
         }
-    }
-
-    // MARK: Upload
-
-    private var uploadBody: some View {
-        VStack(spacing: 0) {
-            preview.padding(.top, 24)
-            PhotosPicker(selection: $photoItem, matching: .images) {
-                Text(uploadJpeg == nil ? "Choose a photo…" : "Choose another…")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(title)
-                    .padding(.horizontal, 18)
-                    .frame(height: 28)
-                    .background(Capsule().fill(pillBg))
-            }
-            .buttonStyle(.plain)
-            .padding(.top, 16)
-            Text(uploadJpeg == nil ? "A picture from Photos; kept at 512 px." : "Set avatar uploads it.")
-                .font(.system(size: 12))
-                .foregroundStyle(placeholder)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 16.5)
-                .padding(.top, 14)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.bottom, 24)
     }
 
     /// The round 114 pt preview: the pending choice, else the picture as it is now.
@@ -369,8 +485,8 @@ struct AvatarPickerSheet: View {
                     ZStack {
                         Circle().fill(mutedDisc)
                         if phase.error != nil {
-                            // The fixture's "generated" key has no blob behind it: show the leaf.
-                            LeafAvatar(pick: currentPick, size: 114)
+                            // The fixture's "generated" key has no blob behind it: the picture as it is.
+                            currentPicture
                         } else {
                             ProgressView().tint(placeholder)
                         }
@@ -379,34 +495,49 @@ struct AvatarPickerSheet: View {
             }
             .frame(width: 114, height: 114)
             .clipShape(Circle())
+        } else if reset, case .me = target {
+            // Back to the GitHub picture (unknown here) or the coloured initials.
+            PersonAvatar(url: nil, handle: model.user?.login ?? "?", size: 114,
+                         name: model.user?.name, id: model.user?.id,
+                         colorIndex: model.user?.avatarColorIndexEffective)
         } else if reset {
             LeafAvatar(pick: currentPick, size: 114)
         } else {
-            switch target {
-            case .agent:
-                if let project {
-                    AgentAvatar(project: project, theme: theme, size: 114, still: true)
-                } else {
-                    LeafAvatar(pick: currentPick, size: 114)
-                }
-            case .group(let id):
-                if let key = people?.imageKey, let url = model.blobURL(projectId: "\(peopleSlot):\(id)", key: key) {
-                    AsyncImage(url: url) { phase in
-                        if let image = phase.image { image.resizable().scaledToFill() } else { Circle().fill(mutedDisc) }
-                    }
-                    .frame(width: 114, height: 114).clipShape(Circle())
-                } else if let leaf = people?.leafPick {
-                    LeafAvatar(pick: leaf, size: 114)
-                } else {
-                    LeafAvatar(pick: currentPick, size: 114).opacity(0.55)
-                }
-            case .server:
-                if let server {
-                    ServerAvatar(server: server, size: 114)
-                } else {
-                    LeafAvatar(pick: currentPick, size: 114).opacity(0.55)
-                }
+            currentPicture
+        }
+    }
+
+    /// The entity's picture as it is now (no pending choice).
+    @ViewBuilder
+    private var currentPicture: some View {
+        switch target {
+        case .agent:
+            if let project {
+                AgentAvatar(project: project, theme: theme, size: 114, still: true)
+            } else {
+                LeafAvatar(pick: currentPick, size: 114)
             }
+        case .group(let id):
+            if let key = people?.imageKey, let url = model.blobURL(projectId: "\(peopleSlot):\(id)", key: key) {
+                AsyncImage(url: url) { phase in
+                    if let image = phase.image { image.resizable().scaledToFill() } else { Circle().fill(mutedDisc) }
+                }
+                .frame(width: 114, height: 114).clipShape(Circle())
+            } else if let leaf = people?.leafPick {
+                LeafAvatar(pick: leaf, size: 114)
+            } else {
+                LeafAvatar(pick: currentPick, size: 114).opacity(0.55)
+            }
+        case .server:
+            if let server {
+                ServerAvatar(server: server, size: 114)
+            } else {
+                LeafAvatar(pick: currentPick, size: 114).opacity(0.55)
+            }
+        case .me:
+            PersonAvatar(url: model.user?.avatarUrl, handle: model.user?.login ?? "?", size: 114,
+                         name: model.user?.name, id: model.user?.id,
+                         colorIndex: model.user?.avatarColorIndexEffective)
         }
     }
 
@@ -470,13 +601,25 @@ struct AvatarPickerSheet: View {
                     case .generate: if let generatedKey { ok = await model.setServerImageKey(id, key: generatedKey) }
                     }
                 }
+            case .me:
+                // Reset = the GitHub picture again (`DELETE /me/avatar`); a photo goes up as
+                // `PUT /me/avatar`; a generated preview is set by its key.
+                if reset {
+                    ok = await model.removeUserAvatar()
+                } else {
+                    switch tab {
+                    case .bot: break
+                    case .upload: if let uploadJpeg { ok = await model.setUserAvatar(jpeg: uploadJpeg) }
+                    case .generate: if let generatedKey { ok = await model.setUserAvatarKey(generatedKey) }
+                    }
+                }
             }
             saving = false
             if ok { dismiss() }
         }
     }
 
-    private static func square(_ image: UIImage, side: CGFloat) -> UIImage {
+    static func square(_ image: UIImage, side: CGFloat) -> UIImage {
         let s = min(image.size.width, image.size.height)
         let rect = CGRect(x: (image.size.width - s) / 2, y: (image.size.height - s) / 2, width: s, height: s)
         let renderer = UIGraphicsImageRenderer(size: CGSize(width: side, height: side))

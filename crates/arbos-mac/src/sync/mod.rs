@@ -28,9 +28,9 @@ use crate::model::{
     Voice,
 };
 use crate::model::{
-    Attachment, BoxState, ChannelsView, Chat, ConnectorsView, DeviceView, Effort, Id, Link,
-    LinkState, LocalView, Machine, Message, NewSecret, Project, ProjectDocView, ProjectSecrets,
-    Routine, RoutineRun, RoutineTrigger, SecretsView, Skill,
+    Attachment, BoxReport, BoxState, ChannelsView, Chat, ConnectorsView, DeviceView, Effort, Id,
+    Link, LinkState, LocalView, Machine, Message, NewSecret, Project, ProjectDocView,
+    ProjectSecrets, Routine, RoutineRun, RoutineTrigger, SecretsView, Skill,
 };
 
 /// Something the source learned; the UI applies it to its mirror.
@@ -263,6 +263,12 @@ pub enum SyncEvent {
     RelayLink(LinkState),
     /// Short user-facing notice (errors from HTTP calls, etc.).
     Notice(String),
+    /// A room's pushes were refused (`not_available`) or an ACK cleared that refusal.
+    /// `refused: true` → show one notice and keep a per-room flag; `false` → clear both.
+    PushRefused {
+        chat_id: Id,
+        refused: bool,
+    },
     /// Settings → Connectors: catalog + connected accounts (F1).
     Connectors(ConnectorsView),
     /// An OAuth flow started: open this URL in the browser; the relay finishes the callback.
@@ -279,10 +285,31 @@ pub enum SyncEvent {
         project_id: Id,
         view: ProjectSecrets,
     },
+    /// One agent's standing shell approvals (#1544).
+    ShellGrants {
+        project_id: Id,
+        items: Vec<crate::model::ShellGrant>,
+    },
     /// Routines of one project (Settings → Routines).
     Routines {
         project_id: Id,
         routines: Vec<Routine>,
+    },
+    /// The box as `GET /machine/debug` reports it (the agent pane's Computer tab).
+    BoxReport(BoxReport),
+    /// The agent's open background jobs as the relay's activity record lists them
+    /// (`GET /projects/{id}` → `activity.jobs[]`, duplex §2.4) — the tasks chip and
+    /// drawer. Empty when nothing runs or the relay predates the field.
+    ProjectJobs {
+        project_id: Id,
+        jobs: Vec<crate::model::Job>,
+    },
+    /// One job's exchange (`GET /projects/{id}/jobs/{jobId}[?after=seq]`) — the rollout
+    /// view. `rollout.unavailable` when the relay has no endpoint yet (404).
+    JobRollout {
+        project_id: Id,
+        job_id: String,
+        rollout: crate::model::JobRollout,
     },
     /// Run history of one routine, newest first.
     RoutineRuns {
@@ -352,14 +379,37 @@ pub enum PictureTarget {
     Agent(Id),
     Group(Id),
     Server(Id),
+    /// The Create sheet's not-yet-created agent / group / server (Jacob, 2026-10-25): a picture
+    /// generated before the entity exists lands in my own slot (`POST /me/avatar/generate` →
+    /// `users:{me}`) and is copied into the new entity's slot on Create.
+    Draft,
+    /// My own profile picture (the id is my user id; `/me/avatar…` routes).
+    Me(Id),
 }
 
 impl PictureTarget {
-    pub fn id(&self) -> &Id {
+    /// The entity's id; the draft has none yet.
+    pub fn id(&self) -> Option<&Id> {
         match self {
-            PictureTarget::Agent(id) | PictureTarget::Group(id) | PictureTarget::Server(id) => id,
+            PictureTarget::Agent(id)
+            | PictureTarget::Group(id)
+            | PictureTarget::Server(id)
+            | PictureTarget::Me(id) => Some(id),
+            PictureTarget::Draft => None,
         }
     }
+}
+
+/// The Create sheet's pending picture, applied once the entity exists (Jacob, 2026-10-25: the
+/// sheet offers Upload and Generate only; with neither the entity is stored neutral —
+/// `avatar_leaf` = `leaf::NEUTRAL`, the name's initial on a grey disc — never an automatic
+/// leaf).
+#[derive(Clone, Debug, PartialEq)]
+pub enum DraftPicture {
+    /// A file the owner chose; uploaded as a 512 px JPEG into the new entity's slot.
+    File(std::path::PathBuf),
+    /// A picture the relay already holds in my own slot (`users:{me}`): copied over.
+    Generated { key: String },
 }
 
 /// Where an agent's new picture comes from (`ClientCommand::SetProjectImage`).
@@ -397,9 +447,11 @@ pub enum ClientCommand {
     CreatePeopleGroup {
         handles: Vec<String>,
         agent_ids: Vec<Id>,
-        /// D93 Create screen: the group's name and leaf picture, when it came through it.
+        /// D93 Create screen: the group's name and leaf pair, when it came through it.
         title: Option<String>,
         leaf: Option<crate::ui::avatars::LeafPick>,
+        /// The Create screen's uploaded / generated picture, applied right after the create.
+        picture: Option<DraftPicture>,
     },
     /// Presence `typing` for a people chat.
     SetTyping {
@@ -533,6 +585,26 @@ pub enum ClientCommand {
     Stop {
         chat_id: Id,
     },
+    /// The tasks drawer's per-job Stop (duplex D7): `stop { jobId, messageId }` halts
+    /// that job only; the running turn and the other jobs go on.
+    StopJob {
+        chat_id: Id,
+        job_id: String,
+        /// The newest user message of the chat, or empty — what the box binds the
+        /// command to, as the Stop button's `stop` does.
+        message_id: String,
+    },
+    /// Poll the agent's open jobs (`GET /projects/{id}` → `activity.jobs[]`).
+    JobsRefresh {
+        project_id: Id,
+    },
+    /// Poll one job's exchange for the open rollout view; `after` asks for the entries
+    /// past that `seq` only.
+    RolloutRefresh {
+        project_id: Id,
+        job_id: String,
+        after: Option<u64>,
+    },
     /// Toggle my emoji reaction on a message (written into the chat doc).
     React {
         chat_id: Id,
@@ -548,6 +620,9 @@ pub enum ClientCommand {
     Approve {
         chat_id: Id,
         approval_id: String,
+        /// #1544: card option B/C — the path class to allow from now on (`scratch`,
+        /// `workspace`, `anywhere`); `None` is a one-time approve.
+        grant: Option<String>,
     },
     Reject {
         chat_id: Id,
@@ -640,6 +715,11 @@ pub enum ClientCommand {
     SetMyAvatar {
         path: std::path::PathBuf,
     },
+    /// My own picture from a key the relay already holds in my `users:{id}` slot (the avatar
+    /// picker's Generate tab): `PUT /me/avatar {image_key}`.
+    SetMyAvatarKey {
+        key: String,
+    },
     /// Back to the GitHub picture (`DELETE /me/avatar`).
     RemoveMyAvatar,
     SetModel {
@@ -668,8 +748,11 @@ pub enum ClientCommand {
         name: String,
         /// D79: the owner's swatch pick at creation; `None` = automatic (the id's colour).
         avatar_color_index: Option<u8>,
-        /// D92: the leaf + colour the Create sheet previewed (forks copy the source's); `None` = automatic.
+        /// D92: the leaf + colour (forks copy the source's; the Create sheet sends the neutral
+        /// pair); `None` = automatic.
         leaf: Option<crate::ui::avatars::LeafPick>,
+        /// The Create sheet's uploaded / generated picture, applied right after the create.
+        picture: Option<DraftPicture>,
         /// Fork: copy this agent's workspace (files + memory) into the new one.
         source_project_id: Option<Id>,
         /// Optional profile blurb for the new agent (forks copy the source's).
@@ -809,6 +892,15 @@ pub enum ClientCommand {
     ProjectSecretsRefresh {
         project_id: Id,
     },
+    /// The agent pane opened: its standing shell approvals (#1544).
+    ShellGrantsRefresh {
+        project_id: Id,
+    },
+    /// Settings › Shell approvals: switch a grant off; the agent asks again next time.
+    ShellGrantRevoke {
+        project_id: Id,
+        grant_id: String,
+    },
     /// Add a secret; the value goes to the relay once.
     SecretAdd {
         item: NewSecret,
@@ -938,6 +1030,8 @@ pub enum ClientCommand {
     },
     /// Settings → This Mac opened or needs a refresh.
     LocalRefresh,
+    /// The agent pane opened (or its Computer tab was picked): fetch `GET /machine/debug`.
+    MachineDebugRefresh,
     /// Per-device "Allow reads without asking".
     LocalSetAllowReads {
         device_id: Id,
@@ -972,8 +1066,10 @@ pub enum ClientCommand {
     /// D88: `POST /servers {name}`; answered by `ServerOpened`.
     ServerCreate {
         name: String,
-        /// D93 Create screen: the server's leaf picture.
+        /// D93 Create screen: the server's leaf pair (the neutral pair since 2026-10-25).
         leaf: Option<crate::ui::avatars::LeafPick>,
+        /// The Create screen's uploaded / generated picture, applied right after the create.
+        picture: Option<DraftPicture>,
     },
     /// D88: `POST /servers/join {code}` with a code or a full invite link; `ServerOpened`.
     ServerJoin {

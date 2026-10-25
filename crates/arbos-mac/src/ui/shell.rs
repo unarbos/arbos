@@ -46,6 +46,7 @@ use crate::ui::secrets::{SecretsEvent, SecretsPanel};
 use crate::ui::servers;
 use crate::ui::sidebar;
 use crate::ui::skills::{self, SkillsPanel};
+use crate::ui::slide::{self, ChatSlide, PaneSlides};
 use crate::ui::theme::{
     reapply_window_background, AppearancePref, GlassOpacity, Surface, Theme, COLUMN_MARGIN,
     COMPOSER_BOTTOM, COMPOSER_WIDTH, DRAWER_WIDTH, GLASS_OPACITY_MAX, GLASS_OPACITY_MIN,
@@ -180,6 +181,22 @@ impl SettingsPage {
     }
 }
 
+/// What the chat column needs to know about its neighbours this frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CenterGeometry {
+    /// Left padding on the header bar: the traffic lights' band
+    /// (`TRAFFIC_LIGHTS_INSET`) while the sidebar is hidden, the part of it
+    /// the sidebar no longer covers while it slides, 0 while it is docked.
+    header_inset: f32,
+    /// Show the folded-sidebar expand disc in the header. During the collapse
+    /// slide it appears once the inset puts it at its resting spot (72 + 12
+    /// from the window edge), after the sidebar's own disc has left the frame.
+    show_sidebar_toggle: bool,
+    /// A slide is running: the transcript keeps `ChatSlide::start_width`
+    /// inside the live slot width (`ui::slide`).
+    chat_slide: Option<(ChatSlide, f32)>,
+}
+
 pub struct Shell {
     pub(crate) state: Entity<AppState>,
     pub(crate) transcript: Entity<Transcript>,
@@ -190,9 +207,9 @@ pub struct Shell {
     pub(crate) project_input: Entity<ComposerInput>,
     /// D79: the swatch picked for the agent being created; `None` = automatic.
     pub(crate) new_agent_color: Option<u8>,
-    /// D93 Create screen: the leaf and colour clicked; `None` = the sheet's default pick.
-    pub(crate) create_leaf: Option<u8>,
-    pub(crate) create_leaf_color: Option<u8>,
+    /// D93 Create screen (Jacob, 2026-10-25): the draft's picture — the picker's own
+    /// Upload | Generate state on a `Target::Draft`; nothing picked = the neutral initial.
+    pub(crate) create_picker: avatar_picker::Picker,
     /// Create group, step 1 (picture + name) showing over the New Message backdrop.
     pub(crate) create_group_open: bool,
     /// The avatar picker sheet (D92 amendment) while it is open: whose picture, which tab,
@@ -303,9 +320,6 @@ pub struct Shell {
     )>,
     /// The channel menu's Delete was clicked once: it shows "Delete #name?" with Cancel / Delete.
     pub(crate) channel_delete_armed: bool,
-    /// The agent pane's "Delete agent" was clicked once: the footer row asks
-    /// to confirm (D93 footer, #1318).
-    pub(crate) agent_delete_armed: bool,
     /// Group pane › Members: the row whose ✕ was clicked (`user:<id>` or
     /// `agent:<project>`); it shows "Remove … ?" with Cancel / Remove.
     pub(crate) member_remove_armed: Option<String>,
@@ -314,6 +328,9 @@ pub struct Shell {
     /// A member row's menu on the group pane (Shift-click / right-click): View
     /// profile, Remove from group → arms `member_remove_armed`.
     pub(crate) member_menu: Option<member_menu::MemberMenu>,
+    /// The Library tab's hover, unfolded days and ⋯ menu
+    /// ([feedback library-list-hover-mac-2026-10-25], `profiles/library.rs`).
+    pub(crate) library: crate::ui::profiles::library::LibraryUi,
     /// Right-click menu on a session row of the header's tab dropdown: the
     /// chat whose row carries it (#1256: anchored to the row, the dropdown
     /// stays open with the row highlighted).
@@ -339,10 +356,19 @@ pub struct Shell {
     /// `profile_scroll_epoch` mirrors `AppState::profile_opened`.
     pub(crate) profile_scroll: ScrollHandle,
     profile_scroll_epoch: u64,
+    /// The pane slides ([feedback right-pane-slide-2026-10-24], [feedback
+    /// sidebar-slide-2026-10-24]): derived each frame from `profile` and
+    /// `rail_collapsed`; `pane_page_drawn` is the page the right pane showed
+    /// last, so a closing pane can keep drawing it while it slides out.
+    slides: PaneSlides,
+    pane_page_drawn: Option<ProfilePage>,
     pub(crate) agent_pick_reveal: bool,
     /// Rig: `ARBOS_OPEN_SETTINGS=bottom` — my pane opens scrolled to its end
     /// (Sign out) each time it fills the pane.
     settings_open_at_bottom: bool,
+    /// Rig: `ARBOS_PROFILE_SCROLL=bottom` — a freshly opened agent pane starts scrolled to
+    /// its end (Permissions · Profile sit below the fold on the 1440×900 rig display).
+    profile_open_at_bottom: bool,
     /// Settings header: editing my display name and handle (`PATCH /me`).
     pub(crate) profile_edit_open: bool,
     pub(crate) name_input: Entity<ComposerInput>,
@@ -354,6 +380,10 @@ pub struct Shell {
     pub(crate) tab_rename_input: Entity<ComposerInput>,
     /// The tab strip's "+" dropdown: New chat + the agent's previous chats.
     pub(crate) tab_menu_open: bool,
+    /// The tasks chip's pointer state (rest / hover / pressed fade, `ui::tasks`).
+    pub(crate) tasks_chip: crate::ui::mention::ChipPointer<u8>,
+    /// The status line's link state (`tasks::link`: rest / hover / pressed).
+    pub(crate) tasks_link: crate::ui::tasks::LinkState,
     /// The tab strip's scroll row, so a new or reopened tab comes into view.
     pub(crate) tabs_scroll: ScrollHandle,
     /// Per-agent call voice picker sheet ("…" menu → Voice, profile → voice).
@@ -447,9 +477,15 @@ impl Shell {
                 if let Some(pk) = this.avatar_picker.as_mut() {
                     pk.tab = tab;
                 }
+                // Rig: type the prompt and press Generate so a shot shows prompt → result.
+                if let Some(prompt) = state.update(cx, |s, _| s.avatar_rig_prompt.take()) {
+                    this.avatar_prompt_input
+                        .update(cx, |input, cx| input.set_text(prompt, cx));
+                    this.generate_avatar(cx);
+                }
             }
             if let Some(done) = state.update(cx, |s, _| s.avatar_generated.take()) {
-                if let Some(pk) = this.avatar_picker.as_mut() {
+                if let Some(pk) = this.pending_picker_mut() {
                     if pk.target == done.target {
                         pk.generating = false;
                         match (done.image_key, done.url) {
@@ -706,7 +742,8 @@ impl Shell {
         // Rig: `ARBOS_SEARCH=<text>` opens the command palette with that query
         // (synthetic key events do not reach the GPUI field on the shared
         // display); `ARBOS_PALETTE=1` opens it empty (recents);
-        // `ARBOS_PALETTE_SELECT=<n>` highlights row n.
+        // `ARBOS_PALETTE_SELECT=<n>` highlights row n; `ARBOS_PALETTE_OPEN=1`
+        // opens that row once the rows are there (the jump-to-message shot).
         let search_query = std::env::var("ARBOS_SEARCH")
             .ok()
             .filter(|q| !q.trim().is_empty());
@@ -721,6 +758,7 @@ impl Shell {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(0),
             },
+            open_on_rows: std::env::var("ARBOS_PALETTE_OPEN").is_ok_and(|v| v == "1"),
             ..Default::default()
         };
         if std::env::var("ARBOS_OPEN_NEW_AGENT").is_ok_and(|v| v == "1") {
@@ -732,6 +770,19 @@ impl Shell {
             // `ARBOS_NEW_AGENT_NAME=…` prefills the name (the "named" state on the rig).
             if let Ok(name) = std::env::var("ARBOS_NEW_AGENT_NAME") {
                 project_input.update(cx, |input, cx| input.set_text(name, cx));
+            }
+        }
+        // Rig: `ARBOS_CREATE_PICTURE=upload|generate[:<prompt>]` opens the Create sheet on that
+        // option (and types the prompt into the Generate field).
+        let mut create_picker = avatar_picker::Picker::new(avatar_picker::Target::Draft);
+        if let Ok(spec) = std::env::var("ARBOS_CREATE_PICTURE") {
+            let (option, prompt) = spec.split_once(':').unwrap_or((spec.as_str(), ""));
+            if option == "generate" {
+                create_picker.tab = avatar_picker::Tab::Generate;
+                if !prompt.is_empty() {
+                    avatar_prompt_input
+                        .update(cx, |input, cx| input.set_text(prompt.to_owned(), cx));
+                }
             }
         }
         // Rig: `ARBOS_OPEN_CREATE=group|server` opens the D93 Create screen for that entity
@@ -842,8 +893,7 @@ impl Shell {
             pairing_input,
             project_input,
             new_agent_color: None,
-            create_leaf: None,
-            create_leaf_color: None,
+            create_picker,
             create_group_open,
             avatar_picker: None,
             avatar_prompt_input,
@@ -879,10 +929,10 @@ impl Shell {
             row_menu: None,
             channel_menu: None,
             channel_delete_armed: false,
-            agent_delete_armed: false,
             member_remove_armed: None,
             device_revoke_armed: None,
             member_menu: None,
+            library: Default::default(),
             chat_menu: None,
             chat_delete_armed: false,
             message_menu: None,
@@ -894,7 +944,10 @@ impl Shell {
             rig_reaction_capsule: reactions::rig_anchor(),
             renaming_tab: None,
             tab_rename_input,
-            tab_menu_open: false,
+            // Rig: `ARBOS_RIG_TABMENU=1` starts with the tab dropdown open (job tab shots).
+            tab_menu_open: std::env::var("ARBOS_RIG_TABMENU").is_ok_and(|v| v == "1"),
+            tasks_chip: crate::ui::mention::ChipPointer::default(),
+            tasks_link: crate::ui::tasks::LinkState::default(),
             tabs_scroll: ScrollHandle::new(),
             voice_picker_open: false,
             pip_offset: (24.0, 96.0),
@@ -930,11 +983,15 @@ impl Shell {
             model_search_input,
             profile_scroll: ScrollHandle::new(),
             profile_scroll_epoch: 0,
+            slides: PaneSlides::default(),
+            pane_page_drawn: None,
             agent_pick_reveal: false,
             // `ARBOS_OPEN_SETTINGS_BOTTOM=1` does the same for any Settings page (a Secret
             // page's People / Activity cards sit below the fold on the rig).
             settings_open_at_bottom: open_settings.as_deref() == Some("bottom")
                 || std::env::var("ARBOS_OPEN_SETTINGS_BOTTOM").is_ok_and(|v| v == "1"),
+            profile_open_at_bottom: std::env::var("ARBOS_PROFILE_SCROLL")
+                .is_ok_and(|v| v == "bottom"),
             profile_edit_open: false,
             name_input,
             handle_input,
@@ -1242,24 +1299,57 @@ impl Shell {
         }
         self.project_input.update(cx, |input, cx| input.clear(cx));
         let color = self.new_agent_color.take();
-        // D92: the Create sheet always shows a definite leaf + colour; send that pair so the
-        // new agent looks exactly like its preview.
-        let pick = create_entity::current_pick(self, CreateKind::Agent, cx);
-        self.create_leaf = None;
-        self.create_leaf_color = None;
+        // Jacob, 2026-10-25: the sheet's Upload / Generate pick travels with the create; the
+        // stored leaf pair is the neutral one, never an automatic leaf.
+        let picture = self.take_create_picture(cx);
         self.state.update(cx, |s, cx| {
             s.new_project_open = false;
             s.close_new_chat(cx);
-            s.create_project(name, color, Some(pick), cx);
+            s.create_project(name, color, Some(create_entity::stored_leaf()), picture, cx);
         });
         Composer::focus(&self.composer, window, cx);
+    }
+
+    /// A Create sheet is opening: a fresh draft picture (Upload tab, no prompt).
+    pub(crate) fn reset_create_picture(&mut self, cx: &mut Context<Self>) {
+        self.create_picker = avatar_picker::Picker::new(avatar_picker::Target::Draft);
+        self.avatar_prompt_input
+            .update(cx, |input, cx| input.set_text(String::new(), cx));
+    }
+
+    /// The Create sheet's pending picture for the entity being created, and a fresh draft.
+    pub(crate) fn take_create_picture(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<crate::sync::DraftPicture> {
+        let picture = self.create_picker.draft_picture();
+        self.reset_create_picture(cx);
+        picture
+    }
+
+    /// The picker whose Generate / Upload actions and answers apply: the avatar picker sheet
+    /// while it is open, else the Create sheet's draft (the two are never up together).
+    pub(crate) fn pending_picker_mut(&mut self) -> Option<&mut avatar_picker::Picker> {
+        Some(
+            self.avatar_picker
+                .as_mut()
+                .unwrap_or(&mut self.create_picker),
+        )
+    }
+
+    /// "New agent" in the New Message sheet: the Create New Agent screen with a fresh draft.
+    pub(crate) fn open_create_agent(&mut self, cx: &mut Context<Self>) {
+        self.reset_create_picture(cx);
+        self.state.update(cx, |s, cx| {
+            s.new_project_open = true;
+            cx.notify();
+        });
     }
 
     /// Open the Create group screen (step 1) over the New Message backdrop.
     pub(crate) fn open_create_group(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.create_group_open = true;
-        self.create_leaf = None;
-        self.create_leaf_color = None;
+        self.reset_create_picture(cx);
         // Agent create wins the sheet if both flags are set; clear it so New
         // group never opens as Create New Agent.
         self.state.update(cx, |s, _| s.new_project_open = false);
@@ -1287,16 +1377,18 @@ impl Shell {
                 if name.is_empty() {
                     return;
                 }
-                let pick = create_entity::current_pick(self, kind, cx);
+                let picture = self.take_create_picture(cx);
                 self.create_group_open = false;
-                self.create_leaf = None;
-                self.create_leaf_color = None;
                 self.project_input.update(cx, |input, cx| input.clear(cx));
                 self.people_input.update(cx, |input, _| {
                     input.set_placeholder("Add people or agents");
                 });
                 self.state.update(cx, |s, cx| {
-                    s.new_group_draft = Some((name, pick));
+                    s.new_group_draft = Some(crate::app::GroupDraft {
+                        title: name,
+                        leaf: Some(create_entity::stored_leaf()),
+                        picture,
+                    });
                     s.open_new_group(cx);
                 });
                 let handle = self.people_input.read(cx).focus_handle(cx);
@@ -1307,9 +1399,10 @@ impl Shell {
                 if name.is_empty() {
                     return;
                 }
-                let pick = create_entity::current_pick(self, kind, cx);
-                self.state
-                    .update(cx, |s, cx| s.create_server(name, Some(pick), cx));
+                let picture = self.take_create_picture(cx);
+                self.state.update(cx, |s, cx| {
+                    s.create_server(name, Some(create_entity::stored_leaf()), picture, cx)
+                });
             }
         }
     }
@@ -1347,7 +1440,7 @@ impl Shell {
     /// Generate tab: ask the relay for a picture from the prompt (preview only; Set applies).
     pub(crate) fn generate_avatar(&mut self, cx: &mut Context<Self>) {
         let prompt = self.avatar_prompt_input.read(cx).text().trim().to_string();
-        let Some(pk) = self.avatar_picker.as_mut() else {
+        let Some(pk) = self.pending_picker_mut() else {
             return;
         };
         if prompt.is_empty() || pk.generating {
@@ -1371,7 +1464,7 @@ impl Shell {
                 return;
             };
             let _ = this.update(cx, |this, cx| {
-                if let Some(pk) = this.avatar_picker.as_mut() {
+                if let Some(pk) = this.pending_picker_mut() {
                     pk.upload = Some(path);
                     pk.reset = false;
                     pk.error = None;
@@ -1387,7 +1480,10 @@ impl Shell {
         let Some(pk) = self.avatar_picker.take() else {
             return;
         };
-        let id = pk.target.id().clone();
+        // The draft never reaches this sheet (`avatar_picker::sheet` draws nothing for it).
+        let Some(id) = pk.target.id().cloned() else {
+            return;
+        };
         self.state.update(cx, |s, cx| match &pk.target {
             avatar_picker::Target::Agent(_) => {
                 if pk.reset {
@@ -1494,6 +1590,28 @@ impl Shell {
                     }
                 }
             }
+            // My own picture: Reset is the GitHub picture again (`DELETE /me/avatar`); a file
+            // goes up as today's `PUT /me/avatar`; a generated preview is set by its key.
+            avatar_picker::Target::Me(_) => {
+                if pk.reset {
+                    s.remove_my_avatar(cx);
+                } else {
+                    match pk.tab {
+                        avatar_picker::Tab::Upload => {
+                            if let Some(path) = pk.upload {
+                                s.set_my_avatar(path, cx);
+                            }
+                        }
+                        avatar_picker::Tab::Generate => {
+                            if let Some((key, _)) = pk.generated {
+                                s.set_my_avatar_key(key, cx);
+                            }
+                        }
+                        avatar_picker::Tab::Bot => {}
+                    }
+                }
+            }
+            avatar_picker::Target::Draft => {}
         });
         cx.notify();
     }
@@ -1675,6 +1793,7 @@ impl Shell {
     /// Cancel / click outside / Escape on a server sheet.
     pub(crate) fn close_server_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.server_input.update(cx, |input, cx| input.clear(cx));
+        self.reset_create_picture(cx);
         self.state.update(cx, |s, cx| {
             s.close_server_sheet(cx);
         });
@@ -1715,9 +1834,14 @@ impl Shell {
         };
         let restricted = self.new_channel_restricted;
         // Enter in the Create screen: same as its action button.
-        let server_pick = create_entity::current_pick(self, CreateKind::Server, cx);
+        let picture = match sheet {
+            ServerSheet::NewServer => self.take_create_picture(cx),
+            ServerSheet::JoinServer | ServerSheet::NewChannel { .. } => None,
+        };
         self.state.update(cx, |s, cx| match sheet {
-            ServerSheet::NewServer => s.create_server(text, Some(server_pick), cx),
+            ServerSheet::NewServer => {
+                s.create_server(text, Some(create_entity::stored_leaf()), picture, cx)
+            }
             ServerSheet::JoinServer => s.join_server(text, cx),
             ServerSheet::NewChannel { server_id } => {
                 s.create_channel(server_id, text, restricted, cx)
@@ -1807,19 +1931,23 @@ impl Shell {
             input.set_text_center(true);
             input.set_text(name, cx);
         });
+        // The label ("Add a label") edits alone, in the hero; the name edits
+        // alone too ([feedback agent-pane-details-tab-2026-10-24]).
         if description {
             self.description_input
                 .update(cx, |input, cx| input.set_text(about, cx));
+            self.state
+                .update(cx, |s, cx| s.set_profile_editing_description(true, cx));
+            let handle = self.description_input.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        } else {
+            self.state.update(cx, |s, cx| {
+                s.profile_editing_name = true;
+                cx.notify();
+            });
+            let handle = self.agent_name_input.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
         }
-        self.state.update(cx, |s, cx| {
-            s.profile_editing_name = true;
-            if description {
-                s.set_profile_editing_description(true, cx);
-            }
-            cx.notify();
-        });
-        let handle = self.agent_name_input.read(cx).focus_handle(cx);
-        window.focus(&handle, cx);
         cx.notify();
     }
 
@@ -1853,29 +1981,31 @@ impl Shell {
         cx.notify();
     }
 
-    /// The crayon on my own picture: pick an image (images only in the panel),
-    /// `PUT /me/avatar`.
+    /// The crayon on my own picture: the agents' avatar picker (Generate | Upload, Reset) for
+    /// my profile picture (Jacob, 2026-10-25); Set sends `PUT /me/avatar`.
     pub(crate) fn pick_my_avatar(&mut self, cx: &mut Context<Self>) {
-        let rx = image_picker::pick_image(cx, "Choose");
-        let state = self.state.clone();
-        cx.spawn(async move |_, cx| {
-            let Ok(Some(path)) = rx.await else {
-                return;
-            };
-            cx.update(|cx| {
-                state.update(cx, |s, cx| s.set_my_avatar(path, cx));
-            });
-        })
-        .detach();
+        let Some(me) = self.state.read(cx).account.as_ref().map(|a| a.id.clone()) else {
+            return;
+        };
+        self.open_avatar_picker(avatar_picker::Target::Me(me), cx);
     }
 
     /// Close the profile page (back button, click outside); the composer takes
     /// the keyboard back.
+    /// The right pane's width for `page`: `profiles::SHEET_WIDTH`, wider for
+    /// the two settings pages laid out past the card list (`sheet_width`).
+    fn pane_width(&self, page: &ProfilePage) -> f32 {
+        match page {
+            ProfilePage::Me => profiles::SHEET_WIDTH.max(self.settings_page.sheet_width()),
+            _ => profiles::SHEET_WIDTH,
+        }
+    }
+
     pub(crate) fn close_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.hide_settings_page(cx);
+        self.library_reset();
         self.profile_edit_open = false;
         self.member_remove_armed = None;
-        self.agent_delete_armed = false;
         self.server_member_armed = None;
         self.server_leave_armed = false;
         self.channel_rename = None;
@@ -1927,8 +2057,7 @@ impl Shell {
     pub(crate) fn close_new_chat_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.people_input
             .update(cx, |input, _| input.set_placeholder("Search people"));
-        self.create_leaf = None;
-        self.create_leaf_color = None;
+        self.reset_create_picture(cx);
         self.create_group_open = false;
         self.project_input.update(cx, |input, cx| {
             input.set_placeholder(CreateKind::Agent.placeholder());
@@ -2237,7 +2366,8 @@ impl Shell {
             || self.row_menu.is_some()
             || self.chat_menu.is_some()
             || self.message_menu.is_some()
-            || self.reaction_capsule.is_some();
+            || self.reaction_capsule.is_some()
+            || self.state.read(cx).tasks_open.is_some();
         self.close_popovers(cx);
         if floating {
             return;
@@ -2400,6 +2530,7 @@ impl Shell {
     /// Everything that floats closes on a click elsewhere.
     pub(crate) fn close_popovers(&mut self, cx: &mut Context<Self>) {
         self.close_agent_pick(None, cx);
+        self.state.update(cx, |s, cx| s.close_tasks(cx));
         if self.menu_open
             || self.members_open
             || self.add_agent_open
@@ -2409,16 +2540,17 @@ impl Shell {
             || self.chat_menu.is_some()
             || self.message_menu.is_some()
             || self.member_menu.is_some()
+            || self.library.menu.is_some()
             || self.reaction_capsule.is_some()
         {
             self.menu_open = false;
             self.member_menu = None;
+            self.library.menu = None;
             self.members_open = false;
             self.add_agent_open = false;
             self.tab_menu_open = false;
             self.row_menu = None;
             self.channel_menu = None;
-            self.agent_delete_armed = false;
             self.channel_delete_armed = false;
             self.chat_menu = None;
             self.chat_delete_armed = false;
@@ -2428,53 +2560,58 @@ impl Shell {
         }
     }
 
-    // ----- update pill (sidebar bottom) ------------------------------------------
+    // ----- update disc (sidebar footer, right end) --------------------------------
 
-    /// The Update button (D42): absent while up to date; appears the moment
-    /// the feed has a newer build; one click downloads, verifies, swaps the
-    /// bundle, and relaunches. It sits at the bottom of the chat list.
-    pub(crate) fn render_update_button(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+    /// Grok Bot's update button ([feedback footer-update-button-grok-2026-10-24]):
+    /// a solid blue disc with the white cloud-download glyph at the footer's
+    /// right end, the button family's size, drawn only when the update is
+    /// ready for a click (`UpdateState::disc_action`). One click downloads,
+    /// verifies, swaps the bundle and relaunches — or restarts now when the
+    /// automatic path already installed it. Brighter under the pointer,
+    /// brighter still while pressed (the chip rule, [feedback mention-chips]);
+    /// pulsing and inert while it works. Replaces the "Update" pill (D42).
+    pub(crate) fn render_update_disc(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
         let theme = Theme::of(cx).clone();
         let update = self.state.read(cx).update.clone();
-        if !update.button_visible() {
+        let action = update.disc_action();
+        if action == crate::update::DiscAction::Hidden {
             return None;
         }
-        let busy = update.busy();
-        let failed = matches!(update.phase, crate::update::UpdatePhase::Failed { .. });
+        let busy = action == crate::update::DiscAction::Busy;
         if busy {
             PulseClock::request(cx);
         }
-        let phase = if busy {
-            PulseClock::phase(cx, 1400)
+        let fill = if busy {
+            Theme::with_alpha(
+                theme.update_disc,
+                sidebar::DISC_BUSY_ALPHA_MIN
+                    + (1.0 - sidebar::DISC_BUSY_ALPHA_MIN) * PulseClock::phase(cx, 1400),
+            )
         } else {
-            1.0
+            theme.update_disc
         };
-        let bg = if failed {
-            theme.danger_soft
-        } else {
-            Theme::with_alpha(theme.primary, 0.75 + 0.25 * phase)
-        };
-        let fg = if failed { theme.text } else { theme.on_primary };
-        let label = update.button_label();
+        let glyph = theme.on_update_disc;
         Some(
-            div()
-                .id("rail-update")
-                .w_full()
-                .h(px(38.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .gap(px(6.0))
-                .rounded_full()
-                .bg(bg)
-                .text_color(fg)
-                .text_size(px(TEXT_SMALL))
-                .font_weight(FontWeight::SEMIBOLD)
-                .when(!busy, |el| el.cursor_pointer().hover(|s| s.opacity(0.88)))
-                .child(icon(if failed { "xmark" } else { "arrow-down" }, 14.0, fg))
-                .child(label)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.state.update(cx, |s, cx| s.install_update(cx));
+            sidebar::footer_disc_frame("sidebar-update")
+                .bg(fill)
+                .when(!busy, |el| {
+                    el.cursor_pointer()
+                        .hover(|s| {
+                            s.bg(Theme::lighter(theme.update_disc, sidebar::DISC_HOVER_LIFT))
+                        })
+                        .active(|s| {
+                            s.bg(Theme::lighter(
+                                theme.update_disc,
+                                sidebar::DISC_PRESSED_LIFT,
+                            ))
+                        })
+                })
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(icon("cloud-download", sidebar::FOOTER_DISC_GLYPH, glyph))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if !busy {
+                        this.state.update(cx, |s, cx| s.install_update(cx));
+                    }
                 })),
         )
     }
@@ -2643,11 +2780,19 @@ impl Shell {
         pre: Vec<AnyElement>,
         transcript: AnyElement,
         bottom: Vec<AnyElement>,
+        chat_slide: Option<(ChatSlide, f32)>,
     ) -> Stateful<Div> {
         let has_pre = !pre.is_empty();
         if has_pre {
             column = column.child(div().pt(px(header::metrics::HEIGHT)).children(pre));
         }
+        // While a neighbouring pane slides, the transcript keeps the width it
+        // had and is clipped/offset instead of re-measured per frame
+        // (`ui::slide`); the header and composer follow the live width.
+        let transcript = match chat_slide {
+            Some((slide, live_width)) => slide::transcript_clip(slide, live_width, transcript),
+            None => transcript,
+        };
         let body = div().flex_1().min_h_0().relative().child(transcript).child(
             div()
                 .absolute()
@@ -2678,7 +2823,12 @@ impl Shell {
         )
     }
 
-    fn render_center(&self, sidebar_hidden: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn render_center(&self, geometry: CenterGeometry, cx: &mut Context<Self>) -> Stateful<Div> {
+        let CenterGeometry {
+            header_inset,
+            show_sidebar_toggle,
+            chat_slide,
+        } = geometry;
         let theme = Theme::of(cx).clone();
         let state = self.state.read(cx);
         let project = state.selected().cloned();
@@ -2766,12 +2916,12 @@ impl Shell {
             // floating header, fade band and drag catchment (`chat_frame`).
             let header_bar = div()
                 .relative()
-                .when(sidebar_hidden, |el| el.pl(px(TRAFFIC_LIGHTS_INSET)))
+                .when(header_inset > 0.0, |el| el.pl(px(header_inset)))
                 .child(header::render_channel(
                     self,
                     &server,
                     &ch,
-                    sidebar_hidden,
+                    show_sidebar_toggle,
                     cx,
                 ));
             let pre: Vec<AnyElement> = self
@@ -2802,6 +2952,7 @@ impl Shell {
                 pre,
                 self.transcript.clone().into_any_element(),
                 vec![bottom.into_any_element()],
+                chat_slide,
             );
             return self.file_drop_target(column, &theme, cx);
         }
@@ -2854,9 +3005,11 @@ impl Shell {
             .relative()
             .left(px(shake_offset))
             // Without the sidebar the traffic lights sit over this header:
-            // clear them (14 pt in, three 12 pt lights, 8 pt gaps).
-            .when(sidebar_hidden, |el| el.pl(px(TRAFFIC_LIGHTS_INSET)))
-            .child(header::render(self, &space, sidebar_hidden, cx));
+            // clear them (14 pt in, three 12 pt lights, 8 pt gaps). While the
+            // sidebar slides the inset is whatever of the lights' band the
+            // sidebar no longer covers (`CenterGeometry`).
+            .when(header_inset > 0.0, |el| el.pl(px(header_inset)))
+            .child(header::render(self, &space, show_sidebar_toggle, cx));
         let floating_header = dropped;
         let mut pre: Vec<AnyElement> = Vec::new();
         let mut header_bar = Some(header_bar);
@@ -2967,8 +3120,27 @@ impl Shell {
             // Transcript above, composer pinned at the bottom. On the first
             // send the composer slides down from the centre over 220 ms using
             // a relative `top` inset (GPUI has no transform).
-            let presence_row = presence
-                .map(|p| column_row(crate::ui::presence::row(p, &theme, cx).into_any_element()));
+            // The tasks chip and drawer ride on the row while the agent has
+            // background jobs open in this chat (`ui::tasks`, duplex §2.4).
+            let presence_row = presence.map(|p| {
+                let row = match chat_id.clone() {
+                    Some(id) => {
+                        let (jobs, open) = crate::ui::tasks::for_chat(self.state.read(cx), &id);
+                        crate::ui::tasks::presence_row(
+                            p,
+                            id,
+                            jobs,
+                            open,
+                            &self.tasks_chip,
+                            self.tasks_link,
+                            &theme,
+                            cx,
+                        )
+                    }
+                    None => crate::ui::presence::row(p, &theme, cx),
+                };
+                column_row(row.into_any_element())
+            });
             let composer_row = div()
                 .w_full()
                 .flex()
@@ -3000,6 +3172,7 @@ impl Shell {
                 pre,
                 self.transcript.clone().into_any_element(),
                 vec![self.voice.clone().into_any_element(), composer_row],
+                chat_slide,
             );
         }
         self.file_drop_target(column, &theme, cx)
@@ -3800,8 +3973,10 @@ impl Render for Shell {
         let width: f32 = window.viewport_size().width.into();
         self.fullscreen = window.is_fullscreen();
         let state = self.state.read(cx);
-        let sidebar_hidden = state.rail_collapsed || state.window_is_narrow(width);
+        let narrow = state.window_is_narrow(width);
+        let sidebar_hidden = state.rail_collapsed || narrow;
         let sidebar_overlay = sidebar_hidden && state.sidebar_overlay;
+        let sidebar_width = state.sidebar_width;
         let details = state.details_open.clone();
         let viewer_open = state.media_viewer.is_some();
         let viewer_forward_open = state.media_viewer.as_ref().is_some_and(|v| v.forward_open);
@@ -3903,14 +4078,58 @@ impl Render for Shell {
             Composer::focus(&self.composer, window, cx);
         }
 
-        if !sidebar_hidden {
-            root = root.child(frosted(0.0, PANEL_BLUR, sidebar::render(self, cx)));
-            if self.state.read(cx).sidebar_overlay {
-                // Widened back past the band with the overlay up: it has docked.
-                self.state.update(cx, |s, _| s.sidebar_overlay = false);
-            }
+        // The pane slides ([feedback right-pane-slide-2026-10-24], [feedback
+        // sidebar-slide-2026-10-24]): the tracker turns this frame's logical
+        // state into visible widths; while one runs, every frame is redrawn.
+        let (profile, opened) = {
+            let state = self.state.read(cx);
+            (state.profile.clone(), state.profile_opened)
+        };
+        let pane_width = profile
+            .as_ref()
+            .or(self.pane_page_drawn.as_ref())
+            .map_or(profiles::SHEET_WIDTH, |page| self.pane_width(page));
+        let frame = self.slides.step(
+            slide::Want {
+                viewport_width: width,
+                sidebar_shown: !sidebar_hidden,
+                sidebar_width,
+                narrow,
+                pane_shown: profile.is_some(),
+                pane_width,
+                reduce_motion: cx.reduce_motion(),
+            },
+            std::time::Instant::now(),
+        );
+        if frame.animating() {
+            window.request_animation_frame();
         }
-        root = root.child(self.render_center(sidebar_hidden, cx));
+        let live_center = width - frame.sidebar_visible - frame.pane_visible;
+        // The header clears whatever of the traffic lights' band the sidebar
+        // does not cover, and shows the expand disc while that band is free:
+        // at rest that is 72 + the disc with the sidebar hidden, nothing with
+        // it docked; mid-slide the disc holds its spot (72 + 12) from the
+        // moment the sidebar's own disc has left until the sidebar is back.
+        let geometry = CenterGeometry {
+            header_inset: (TRAFFIC_LIGHTS_INSET - frame.sidebar_visible).max(0.0),
+            show_sidebar_toggle: frame.sidebar_visible <= TRAFFIC_LIGHTS_INSET,
+            chat_slide: frame.chat.map(|c| (c, live_center)),
+        };
+
+        if frame.sidebar_sliding {
+            root = root.child(slide::sidebar_clip(
+                frame.sidebar_visible,
+                sidebar_width,
+                frosted(0.0, PANEL_BLUR, sidebar::render(self, cx)),
+            ));
+        } else if !sidebar_hidden {
+            root = root.child(frosted(0.0, PANEL_BLUR, sidebar::render(self, cx)));
+        }
+        if !sidebar_hidden && self.state.read(cx).sidebar_overlay {
+            // Widened back past the band with the overlay up: it has docked.
+            self.state.update(cx, |s, _| s.sidebar_overlay = false);
+        }
+        root = root.child(self.render_center(geometry, cx));
         if sidebar_overlay {
             root = root.child(self.render_sidebar_overlay(&theme, cx));
         }
@@ -3918,12 +4137,23 @@ impl Render for Shell {
             root = root.child(self.render_details(&target, cx));
         }
         // The right pane (three-pane rule): a flex sibling beside the chat, so
-        // it never covers it; the floating menus below paint over both.
-        let (profile, opened) = {
-            let state = self.state.read(cx);
-            (state.profile.clone(), state.profile_opened)
-        };
-        if let Some(page) = profile {
+        // it never covers it; the floating menus below paint over both. A
+        // pane on its way out keeps drawing the page it showed.
+        let page_to_draw = profile.clone().or_else(|| {
+            frame
+                .pane_sliding
+                .then(|| self.pane_page_drawn.clone())
+                .flatten()
+        });
+        if profile.is_some() {
+            self.pane_page_drawn = profile.clone();
+        }
+        if let Some(page) = page_to_draw {
+            let opened = if profile.is_some() {
+                opened
+            } else {
+                self.profile_scroll_epoch
+            };
             // A page that just filled the pane starts at the top; a popped
             // one already carries its restored offset (see `back_profile`).
             if self.profile_scroll_epoch != opened {
@@ -3932,6 +4162,13 @@ impl Render for Shell {
                 if page == ProfilePage::Me && self.settings_open_at_bottom {
                     self.profile_scroll.scroll_to_bottom();
                 }
+                if matches!(page, ProfilePage::Agent { .. }) && self.profile_open_at_bottom {
+                    self.profile_scroll.scroll_to_bottom();
+                }
+            } else if matches!(page, ProfilePage::Agent { .. }) && self.profile_open_at_bottom {
+                // Rig only: the pane's rows arrive after it opened (grants, routines); keep
+                // the end in view.
+                self.profile_scroll.scroll_to_bottom();
             } else if page == ProfilePage::Me
                 && self.settings_open_at_bottom
                 && std::env::var("ARBOS_OPEN_SETTINGS_BOTTOM").is_ok_and(|v| v == "1")
@@ -3943,8 +4180,26 @@ impl Render for Shell {
             if page == ProfilePage::Me && !self.settings_page_alive(cx) {
                 self.settings_page = SettingsPage::Root;
             }
-            if let Some(pane) = profiles::pane(&page, self, cx) {
-                root = root.child(pane);
+            let pane_width = self.pane_width(&page);
+            match (profiles::pane(&page, self, cx), frame.pane_sliding) {
+                (Some(pane), true) => {
+                    root = root.child(slide::pane_clip(frame.pane_visible, pane));
+                }
+                (Some(pane), false) => root = root.child(pane),
+                (None, true) => {
+                    // The page's subject is gone mid-slide: an empty pane of
+                    // the same width finishes the motion.
+                    let blank = div()
+                        .id("profile-pane")
+                        .w(px(pane_width))
+                        .flex_shrink_0()
+                        .h_full()
+                        .border_l(px(profiles::PANE_EDGE))
+                        .border_color(theme.pane_edge)
+                        .bg(theme.pane());
+                    root = root.child(slide::pane_clip(frame.pane_visible, blank));
+                }
+                (None, false) => {}
             }
         }
         if let Some(menu) = sidebar::row_menu(self, cx) {
@@ -4044,6 +4299,9 @@ impl Render for Shell {
             }
         }
         if let Some(menu) = member_menu::render(self, window, cx) {
+            root = root.child(menu);
+        }
+        if let Some(menu) = crate::ui::profiles::library::menu(self, window, cx) {
             root = root.child(menu);
         }
         if let Some(space) = people_space {

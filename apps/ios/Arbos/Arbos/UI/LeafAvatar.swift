@@ -121,6 +121,29 @@ enum LeafArt {
     private static var paths: [Int: Path] = [:]
     private static var pivots: [Int: UnitPoint] = [:]
 
+    /// "No leaf" (Jacob, 2026-10-25): an entity created from the Create sheet without an uploaded
+    /// or generated picture is stored with `avatar_leaf` = `avatar_leaf_color` = 255
+    /// (`arbos_core::avatar::leaf::NEUTRAL`) and draws as **the name's first letter on a neutral
+    /// grey disc** — never an automatic leaf. Distinct from nil (= the id's automatic leaf), so
+    /// every existing agent keeps the leaf it has.
+    /// `arbos_core::avatar::leaf::NEUTRAL` (pinned by the core's `leaf::tests` and the relay's
+    /// `check_leaf_pick`); the ffi carries no getter so this item stays an apps/ios-only change.
+    static let neutral = 255
+    static var neutralPick: LeafPick { LeafPick(leaf: UInt8(clamping: neutral), color: UInt8(clamping: neutral)) }
+    static func isNeutral(_ leaf: Int?) -> Bool { leaf == neutral }
+    /// The one letter a neutral disc carries: the first letter or digit of the name, upper-cased
+    /// (`?` for an empty name) — the Mac's `leaf::initial`.
+    static func initial(_ name: String) -> String {
+        guard let c = name.unicodeScalars.first(where: { CharacterSet.alphanumerics.contains($0) }) else { return "?" }
+        return String(c).uppercased()
+    }
+    /// Neutral disc fill and letter ink per appearance (the picker's "unselected" grey).
+    static func neutralColors(dark: Bool) -> (disc: Color, ink: Color) {
+        dark
+            ? (Color(red: 0x3A / 255, green: 0x3A / 255, blue: 0x3A / 255), Color(white: 0xE5 / 255))
+            : (Color(white: 0xE6 / 255), Color(white: 0x4A / 255))
+    }
+
     /// The leaf and colour in effect for a project (owner picks, else the id's cell).
     static func pick(_ project: Project) -> LeafPick {
         leafPick(seed: project.id, leaf: project.avatarLeaf.map { UInt8(clamping: $0) }, color: project.avatarLeafColor.map { UInt8(clamping: $0) })
@@ -240,7 +263,34 @@ struct LeafAvatar: View {
     }
 }
 
-/// A server's picture: the leaf picked on its Create screen (D92 amendment), else D79 initials.
+/// The neutral avatar (Jacob, 2026-10-25): the name's first letter, semibold, on a plain grey
+/// disc — no gradient, no leaf. An empty name is an empty disc (the Create sheet before a name
+/// is typed).
+struct NeutralAvatar: View {
+    @Environment(\.theme) private var theme
+    let name: String
+    var size: CGFloat = Theme.avatar
+
+    var body: some View {
+        let c = LeafArt.neutralColors(dark: theme.isDark)
+        ZStack {
+            Circle().fill(c.disc)
+            if !name.trimmingCharacters(in: .whitespaces).isEmpty {
+                Text(LeafArt.initial(name))
+                    .font(.system(size: size * AvatarPalette.initialsScale, weight: .semibold))
+                    .foregroundStyle(c.ink)
+                    .lineLimit(1)
+                    .offset(y: size * 0.01)
+            }
+        }
+        .frame(width: size, height: size)
+        .accessibilityHidden(true)
+        .accessibilityIdentifier("neutral-avatar")
+    }
+}
+
+/// A server's picture: the leaf picked on its Create screen (D92 amendment), else D79 initials
+/// — or the neutral initial (Jacob, 2026-10-25).
 struct ServerAvatar: View {
     @EnvironmentObject private var model: AppModel
     @ObservedObject private var flag = LeafAvatarsFlag.shared
@@ -253,14 +303,21 @@ struct ServerAvatar: View {
             AsyncImage(url: url) { phase in
                 if let image = phase.image {
                     image.resizable().scaledToFill()
-                } else if let pick = server.leafPick, flag.on {
-                    LeafAvatar(pick: pick, size: size)
                 } else {
-                    InitialsAvatar(name: server.name, handle: nil, id: server.id, override: server.avatarColorIndex, size: size)
+                    fallback
                 }
             }
             .frame(width: size, height: size)
             .clipShape(Circle())
+        } else {
+            fallback
+        }
+    }
+
+    @ViewBuilder
+    private var fallback: some View {
+        if server.isNeutralAvatar {
+            NeutralAvatar(name: server.name, size: size)
         } else if let pick = server.leafPick, flag.on {
             LeafAvatar(pick: pick, size: size)
         } else {

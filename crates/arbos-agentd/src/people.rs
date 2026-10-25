@@ -1602,7 +1602,7 @@ impl Agent {
             ),
         };
         let mut prelude = format!(
-            "[People chat with {}. You are @{my_slug} (the agent of {owner_spoken}'s Project \"{}\"){}.{} {from_clause}. Your reply is read by everyone in the chat.{secrets_rule}]\n",
+            "[People chat with {}. You are @{my_slug} (the agent of {owner_spoken}'s Project \"{}\"){}.{} {from_clause}. Your reply is read by everyone in the chat. If this message is for someone else, say nothing: route `reply` with `reply` empty and no words.{secrets_rule}]\n",
             people.join(", "),
             self.cfg.project_id,
             others_clause,
@@ -1696,9 +1696,10 @@ pub fn user_address_name(
     };
     let usable =
         |n: &str| !n.eq_ignore_ascii_case("arbos") && !n.eq_ignore_ascii_case(agent_name.trim());
-    clean(sender_name)
-        .filter(|n| usable(n))
-        .or_else(|| clean(sender_handle).filter(|h| usable(h)))
+    // A login handle is never a name (Grok parity, traits 2/11: "Here's a list, unarbos"): with
+    // no usable display name the agent uses no name at all.
+    let _ = sender_handle;
+    clean(sender_name).filter(|n| usable(n))
 }
 
 /// The per-turn identity note for the project owner: who the user is, and that the agent's
@@ -1708,7 +1709,6 @@ pub fn owner_address_note_text(
     sender_handle: Option<&str>,
     agent_name: &str,
 ) -> Option<String> {
-    let name = user_address_name(sender_name, sender_handle, agent_name)?;
     let agent = agent_name.trim();
     let about_me = if agent.is_empty() || agent.eq_ignore_ascii_case("arbos") {
         String::new()
@@ -1717,9 +1717,16 @@ pub fn owner_address_note_text(
             " You are {agent}; \"{agent}\" is your own name, not a place, workspace or product — never say \"in {agent}\" or \"on {agent}\"."
         )
     };
-    Some(format!(
-        "[The user is {name}. Address them as {name}, never as an @handle and never as \"Arbos\" (Arbos is the app).{about_me}]\n\n"
-    ))
+    let present = |v: Option<&str>| v.is_some_and(|h| !h.trim().trim_start_matches('@').is_empty());
+    Some(match user_address_name(sender_name, sender_handle, agent_name) {
+        Some(name) => format!(
+            "[The user is {name}. Address them as {name}, never as an @handle and never as \"Arbos\" (Arbos is the app).{about_me}]\n\n"
+        ),
+        None if present(sender_handle) || present(sender_name) => format!(
+            "[The user's display name is not set: do not address them by any name, handle or login — just talk to them.{about_me}]\n\n"
+        ),
+        None => return None,
+    })
 }
 
 #[cfg(test)]
@@ -1739,33 +1746,38 @@ mod address_tests {
         assert!(note.ends_with("]\n\n"));
     }
 
+    /// Grok parity (traits 2/11, 2026-10-24): "Here's a 3-day surf trip list, unarbos:" — a login
+    /// is never a name. Jacob's `unarbos` GitHub profile is literally named "Arbos".
     #[test]
-    fn product_name_as_display_name_falls_back_to_the_handle() {
-        // Jacob's `unarbos` GitHub profile is literally named "Arbos".
+    fn a_handle_is_never_used_as_the_name() {
         assert_eq!(
-            user_address_name(Some("Arbos"), Some("unarbos"), "Doug").as_deref(),
-            Some("unarbos")
+            user_address_name(Some("Arbos"), Some("unarbos"), "Doug"),
+            None
         );
         assert_eq!(
-            user_address_name(Some("arbos"), Some("@unarbos"), "Doug").as_deref(),
-            Some("unarbos")
+            user_address_name(Some("arbos"), Some("@unarbos"), "Doug"),
+            None
         );
+        assert_eq!(user_address_name(None, Some("unarbos"), "Doug"), None);
         let note = owner_address_note_text(Some("Arbos"), Some("unarbos"), "Doug").unwrap();
-        assert!(note.contains("The user is unarbos. Address them as unarbos"));
+        assert!(note
+            .contains("display name is not set: do not address them by any name, handle or login"));
+        assert!(!note.contains("unarbos"));
         assert!(!note.contains("Address them as Arbos"));
+        assert!(note.contains("You are Doug"));
+        let note = owner_address_note_text(None, Some("unarbos"), "Doug").unwrap();
+        assert!(note.contains("do not address them by any name"));
     }
 
     #[test]
-    fn agent_name_as_display_name_falls_back_too() {
-        assert_eq!(
-            user_address_name(Some("Doug"), Some("jake"), "Doug").as_deref(),
-            Some("jake")
-        );
-        // Neither usable: no note rather than a wrong one.
+    fn agent_name_as_display_name_is_not_a_name_either() {
+        assert_eq!(user_address_name(Some("Doug"), Some("jake"), "Doug"), None);
         assert_eq!(user_address_name(Some("Arbos"), Some("Doug"), "Doug"), None);
-        assert_eq!(owner_address_note_text(Some("Arbos"), None, "Doug"), None);
+        // Nothing on the row at all: no note.
+        assert_eq!(owner_address_note_text(None, None, "Doug"), None);
         assert_eq!(user_address_name(None, None, "Doug"), None);
         assert_eq!(user_address_name(Some("  "), Some(""), "Doug"), None);
+        assert_eq!(owner_address_note_text(Some("  "), Some(""), "Doug"), None);
     }
 
     #[test]

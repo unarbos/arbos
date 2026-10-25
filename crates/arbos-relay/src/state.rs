@@ -279,6 +279,10 @@ pub struct ProjectActivity {
     pub chat_id: String,
     pub text: String,
     pub at: i64,
+    /// Background jobs in flight for the chip ("N tasks running"; duplex design §2.4):
+    /// `{ id, title, state, step, elapsed_s }` each. Absent when none run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jobs: Option<serde_json::Value>,
 }
 
 /// An activity older than this is stale (the box died mid-turn) and is not shown.
@@ -337,6 +341,16 @@ impl AppState {
                     .ok()
                     .flatten()
                     .is_some_and(|m| m.banned_at.is_none()),
+                crate::auth::Principal::Admin => true,
+                crate::auth::Principal::Box { .. } => false,
+            };
+        }
+        // A person's own picture slot (`users:{id}`): the generated previews of the avatar
+        // picker's Generate tab. Only that person's devices (and the admin) read it; `PUT
+        // /me/avatar {image_key}` is what makes one of them the profile picture.
+        if let Some(user_id) = project_id.strip_prefix(crate::images::USER_BLOB_PREFIX) {
+            return match principal {
+                crate::auth::Principal::Device { user_id: me, .. } => me == user_id,
                 crate::auth::Principal::Admin => true,
                 crate::auth::Principal::Box { .. } => false,
             };

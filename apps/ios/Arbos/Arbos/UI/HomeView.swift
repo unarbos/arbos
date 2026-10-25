@@ -1,9 +1,11 @@
 // Home, Grok Bot layout: top bar with the account circle (GitHub avatar, left)
-// and search + "+" circles (right), then All | Agents | People | Servers and the chat
-// list (avatar, name, time, preview). "+" opens a menu (New Message / New group / …).
-// The filter pills jump to sections in one vertical list so you can scroll Agents →
-// People → Servers without tapping (feedback app-01M5QN8V93PXQBZ6NGP1VJFGFK). One
-// machine: its state is the small dot on the account circle; details live in Settings.
+// and the "+" circle (right; menu: New Message / New group / …), then All |
+// Agents | People | Servers and the chat list. Filter pills jump to sections in
+// one vertical list so you can scroll without tapping (feedback
+// app-01M5QN8V93PXQBZ6NGP1VJFGFK). One machine: its state is the small dot on
+// the account circle; details live in Settings. The bottom edge holds one
+// app-wide search bar (Jacob, 2026-10-25, [feedback
+// iphone-bottom-search-bar-2026-10-25]; `GlobalSearchView.swift`).
 
 import ArbosFFI
 import SwiftUI
@@ -11,7 +13,7 @@ import SwiftUI
 /// Selection above the home list: All | Agents | People | Servers. The Mac
 /// sidebar carries the same four segments (`sidebar::ListFilter` in
 /// crates/arbos-mac). On iPhone the pills jump to sections in one vertical
-/// list (scroll without tapping); search still scopes with these rules.
+/// list (scroll without tapping).
 enum HomeListFilter: String, CaseIterable, Identifiable {
     case all = "All"
     case agents = "Agents"
@@ -51,7 +53,9 @@ struct HomeView: View {
     @State private var showNewChat = false
     /// "+" menu → Create agent / group / server (New Message stays `showNewChat`).
     @State private var showCreate: CreateKind? = nil
-    @State private var searching = false
+    /// Settings is a sheet from the account circle (as before the 2026-10-23 tab bar).
+    @State private var showSettings = false
+    /// The bottom bar's text; the results replace the list while it is focused or filled.
     @State private var query = ""
     @State private var slowConnect = false
     /// "Offline · saved chats": the list came from the on-device store and the
@@ -65,9 +69,8 @@ struct HomeView: View {
     /// Goals list (long-running objectives) from the home sidebar section.
     @State private var showGoals = false
     @State private var openGoalId: String?
-    /// Home list section highlight: All | Agents | People | Servers. Without a
-    /// search query the list is one vertical scroll of sections; the pill jumps
-    /// to that section. Search still scopes rows with `HomeListFilter`.
+    /// Home list section highlight: All | Agents | People | Servers. The list is
+    /// one vertical scroll of sections; the pill jumps to that section.
     @State private var listFilter: HomeListFilter = .all
     /// Bumped on every filter-pill tap so a re-tap of the same section still scrolls.
     @State private var filterScrollTicket = 0
@@ -88,124 +91,25 @@ struct HomeView: View {
     private var hiddenCount: Int { hiddenProjects.count + hiddenPeople.count + hiddenServers.count }
     @FocusState private var searchFocused: Bool
 
-
     /// Folded query (case + diacritics, leading `@` stripped) so "@robert" and "Zoe" find their rows.
     private var searchQuery: String { HomeSearch.normalizeQuery(query) }
+    /// The bar is focused or holds text: the results are up instead of the list.
+    private var searching: Bool { searchFocused || !query.isEmpty }
 
     var body: some View {
         NavigationStack(path: $model.path) {
             ZStack(alignment: .top) {
                 theme.bg.ignoresSafeArea()
-                ScrollViewReader { proxy in
-                    List {
-                        Color.clear.frame(height: 66)
-                            .listRowInsets(EdgeInsets())
-                            .listRowSeparator(.hidden)
-                            .listRowBackground(Color.clear)
-                            .accessibilityHidden(true)
-                            .id(HomeListFilter.all.sectionId)
-                        if model.projects.isEmpty && model.peopleChats.isEmpty && model.servers.isEmpty {
-                            emptyState
-                                .listRowInsets(EdgeInsets())
-                                .listRowSeparator(.hidden)
-                                .listRowBackground(Color.clear)
-                        } else if !searchQuery.isEmpty && homeRows.isEmpty {
-                            listFilterBar
-                                .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 8, trailing: 20))
-                                .listRowSeparator(.hidden)
-                                .listRowBackground(theme.bg)
-                            Text(homeEmptyCopy)
-                                .font(theme.font(Theme.small))
-                                .foregroundStyle(theme.muted)
-                                .frame(maxWidth: .infinity)
-                                .padding(.top, 80)
-                                .listRowInsets(EdgeInsets())
-                                .listRowSeparator(.hidden)
-                                .listRowBackground(Color.clear)
-                                .accessibilityIdentifier("home-search-empty")
-                        } else {
-                            listFilterBar
-                                .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 8, trailing: 20))
-                                .listRowSeparator(.hidden)
-                                .listRowBackground(theme.bg)
-                            if searchQuery.isEmpty {
-                                if let update = model.availableUpdate {
-                                    UpdateCard(update: update)
-                                        .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
-                                        .listRowSeparator(.hidden)
-                                        .listRowBackground(theme.bg)
-                                }
-                                if let position = model.waitlistPosition {
-                                    WaitlistCard(position: position)
-                                        .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
-                                        .listRowSeparator(.hidden)
-                                        .listRowBackground(theme.bg)
-                                }
-                                if !plannedTasks.isEmpty {
-                                    plannedTasksSection
-                                }
-                                homeSection(filter: .agents, entries: agentSectionEntries)
-                                homeSection(filter: .people, entries: peopleSectionEntries)
-                                homeSection(filter: .servers, entries: serverSectionEntries)
-                                if agentSectionEntries.isEmpty && peopleSectionEntries.isEmpty
-                                    && serverSectionEntries.isEmpty {
-                                    Text(HomeListFilter.all.emptyCopy)
-                                        .font(theme.font(Theme.small))
-                                        .foregroundStyle(theme.muted)
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.top, 80)
-                                        .listRowInsets(EdgeInsets())
-                                        .listRowSeparator(.hidden)
-                                        .listRowBackground(Color.clear)
-                                        .accessibilityIdentifier("home-filter-empty")
-                                }
-                            } else {
-                                ForEach(homeRows) { entry in
-                                    homeEntryRow(entry)
-                                }
-                            }
-
-                            if searchQuery.isEmpty, hiddenCount > 0 {
-                                hiddenFooter
-                                    .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
-                                    .listRowSeparator(.hidden)
-                                    .listRowBackground(theme.bg)
-                            }
-                            // Launch timing: the populated list is on screen.
-                            Color.clear.frame(height: 1)
-                                .listRowInsets(EdgeInsets())
-                                .listRowSeparator(.hidden)
-                                .listRowBackground(Color.clear)
-                                .accessibilityHidden(true)
-                                .onAppear {
-                                    let n = agentSectionEntries.count + peopleSectionEntries.count + serverSectionEntries.count
-                                    LaunchClock.mark("first-content", detail: "source=\(model.contentOrigin) rows=\(n)")
-                                }
-                        }
-                    }
-                    .listStyle(.plain)
-                    .scrollContentBackground(.hidden)
-                    .background(theme.bg)
-                    // Fade under the top bar as an overlay — a List `.mask` clips the
-                    // system scroll indicator on the right edge (feedback
-                    // app-01M5MY2Y9HTFR019WAEPPDCNYS). Same treatment as ChatView's
-                    // headerBlur: keep the soft edge, leave the scroller free.
-                    .scrollIndicators(.visible)
-                    .overlay(alignment: .top) {
-                        LinearGradient(colors: [theme.bg, theme.bg.opacity(0)], startPoint: .top, endPoint: .bottom)
-                            .frame(height: 100)
-                            .allowsHitTesting(false)
-                    }
-                    .refreshable { await model.refreshRegistry() }
-                    .onChange(of: filterScrollTicket) { _, _ in
-                        guard searchQuery.isEmpty else { return }
-                        withAnimation(.snappy(duration: 0.25)) {
-                            proxy.scrollTo(listFilter.sectionId, anchor: .top)
-                        }
-                    }
+                if searching {
+                    GlobalSearchResults(query: query, folded: searchQuery, onOpen: closeSearch)
+                        .transition(.opacity)
+                } else {
+                    homeList
                 }
                 topBar
             }
+            .safeAreaInset(edge: .bottom, spacing: 0) { bottomBar }
+            .animation(.easeOut(duration: 0.18), value: searching)
             .task(id: model.link) {
                 // Quiet for 4 s after a from-disk launch → say so; live again → hide.
                 guard model.showingSavedCopy else {
@@ -260,6 +164,9 @@ struct HomeView: View {
                 .presentationCornerRadius(28)
                 .preferredColorScheme(theme.isDark ? .dark : .light)
             }
+            .sheet(isPresented: $showSettings) {
+                SettingsView().environmentObject(model).environment(\.theme, theme)
+            }
         }
         .task {
             if DebugHooks.demo, model.isFixture {
@@ -288,17 +195,21 @@ struct HomeView: View {
             if DebugHooks.show == "hidden", DebugHooks.openProject == nil {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showHidden = true }
             }
+            if DebugHooks.show == "settings", DebugHooks.openProject == nil {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showSettings = true }
+            }
             // Rig: `ARBOS_HOME_FILTER=all|agents|people|servers` selects a segment at launch.
             if let raw = DebugHooks.homeFilter,
                let f = HomeListFilter.allCases.first(where: { $0.rawValue.lowercased() == raw.lowercased() }) {
                 listFilter = f
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { filterScrollTicket += 1 }
             }
-            // Rig: `ARBOS_SEARCH=<text>` opens the home search with that query.
+            // Rig: `ARBOS_SEARCH=<text>` opens the bottom search with that query
+            // (`ARBOS_SEARCH=-` focuses the empty bar).
             if let q = DebugHooks.search, DebugHooks.openProject == nil {
                 model.paintTranscriptsForSearch()
-                searching = true
-                query = q
+                query = q == "-" ? "" : q
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { searchFocused = true }
             }
             #if DEBUG
             if DebugHooks.show == "notify", DebugHooks.openProject == nil {
@@ -321,10 +232,125 @@ struct HomeView: View {
                 model.open(peopleChat: c)
             }
         }
-        .onChange(of: query) { _, _ in
+        .onChange(of: searchFocused) { _, focused in
             // Rooms may finish a checkpoint while the field is focused — paint
-            // any still-unpublished transcripts so message search can see them.
-            if searching, !searchQuery.isEmpty { model.paintTranscriptsForSearch() }
+            // any still-unpublished transcripts so message search can see them;
+            // and load the directory so people without a DM can be found.
+            guard focused else { return }
+            model.paintTranscriptsForSearch()
+            Task { await model.loadDirectory() }
+        }
+        .onChange(of: query) { _, _ in
+            if !searchQuery.isEmpty { model.paintTranscriptsForSearch() }
+        }
+    }
+
+    /// Clear the bar and drop the keyboard: back to the list.
+    private func closeSearch() {
+        query = ""
+        searchFocused = false
+    }
+
+    /// The one control on Home's bottom edge: the app-wide search capsule, 20 pt
+    /// side margins like the header, over a fade so rows slide under it. It sits in
+    /// the bottom safe-area inset, so it rides the keyboard and clears the home indicator.
+    private var bottomBar: some View {
+        VStack(spacing: 0) {
+            LinearGradient(colors: [theme.bg.opacity(0), theme.bg], startPoint: .top, endPoint: .bottom)
+                .frame(height: 18)
+                .allowsHitTesting(false)
+            HomeSearchBar(query: $query, focused: $searchFocused, active: searching, onClose: closeSearch)
+                .padding(.horizontal, 20)
+                .padding(.bottom, 8)
+                .background(theme.bg)
+        }
+        .accessibilityIdentifier("home-bottom-bar")
+    }
+
+    private var homeList: some View {
+        ScrollViewReader { proxy in
+                List {
+                    Color.clear.frame(height: 66)
+                        .listRowInsets(EdgeInsets())
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
+                        .accessibilityHidden(true)
+                        .id(HomeListFilter.all.sectionId)
+                    if model.projects.isEmpty && model.peopleChats.isEmpty && model.servers.isEmpty {
+                        emptyState
+                            .listRowInsets(EdgeInsets())
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
+                    } else {
+                        listFilterBar
+                            .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 8, trailing: 20))
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(theme.bg)
+                        if let update = model.availableUpdate {
+                            UpdateCard(update: update)
+                                .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
+                                .listRowSeparator(.hidden)
+                                .listRowBackground(theme.bg)
+                        }
+                        if let position = model.waitlistPosition {
+                            WaitlistCard(position: position)
+                                .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
+                                .listRowSeparator(.hidden)
+                                .listRowBackground(theme.bg)
+                        }
+                        if !plannedTasks.isEmpty {
+                            plannedTasksSection
+                        }
+                        homeSection(filter: .agents, entries: agentSectionEntries)
+                        homeSection(filter: .people, entries: peopleSectionEntries)
+                        homeSection(filter: .servers, entries: serverSectionEntries)
+                        if agentSectionEntries.isEmpty && peopleSectionEntries.isEmpty
+                            && serverSectionEntries.isEmpty {
+                            Text(HomeListFilter.all.emptyCopy)
+                                .font(theme.font(Theme.small))
+                                .foregroundStyle(theme.muted)
+                                .frame(maxWidth: .infinity)
+                                .padding(.top, 80)
+                                .listRowInsets(EdgeInsets())
+                                .listRowSeparator(.hidden)
+                                .listRowBackground(Color.clear)
+                                .accessibilityIdentifier("home-filter-empty")
+                        }
+
+                        if hiddenCount > 0 {
+                            hiddenFooter
+                                .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
+                                .listRowSeparator(.hidden)
+                                .listRowBackground(theme.bg)
+                        }
+                        // Launch timing: the populated list is on screen.
+                        Color.clear.frame(height: 1)
+                            .listRowInsets(EdgeInsets())
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
+                            .accessibilityHidden(true)
+                            .onAppear { LaunchClock.mark("first-content", detail: "source=\(model.contentOrigin) rows=\(agentSectionEntries.count + peopleSectionEntries.count + serverSectionEntries.count)") }
+                    }
+                }
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+                .background(theme.bg)
+                // Fade under the top bar as an overlay — a List `.mask` clips the
+                // system scroll indicator on the right edge (feedback
+                // app-01M5MY2Y9HTFR019WAEPPDCNYS). Same treatment as ChatView's
+                // headerBlur: keep the soft edge, leave the scroller free.
+                .scrollIndicators(.visible)
+                .overlay(alignment: .top) {
+                    LinearGradient(colors: [theme.bg, theme.bg.opacity(0)], startPoint: .top, endPoint: .bottom)
+                        .frame(height: 100)
+                        .allowsHitTesting(false)
+                }
+                .refreshable { await model.refreshRegistry() }
+                .onChange(of: filterScrollTicket) { _, _ in
+                    withAnimation(.snappy(duration: 0.25)) {
+                        proxy.scrollTo(listFilter.sectionId, anchor: .top)
+                    }
+                }
         }
     }
 
@@ -444,9 +470,11 @@ struct HomeView: View {
         .accessibilityLabel("Hidden chats, \(hiddenCount)")
     }
 
+    /// Account circle (→ Settings) left, the + menu right (New Message / New group / …).
+    /// Search lives in the bottom bar, so the header carries no search disc.
     private var topBar: some View {
         HStack(spacing: 10) {
-            Button { model.mainTab = .settings } label: {
+            Button { showSettings = true } label: {
                 ZStack(alignment: .bottomTrailing) {
                     PersonAvatar(url: model.user?.avatarUrl, handle: model.user?.login ?? "?", size: Theme.control, name: model.user?.name, id: model.user?.id, colorIndex: model.user?.avatarColorIndexEffective)
                     Circle()
@@ -458,87 +486,46 @@ struct HomeView: View {
                 .frame(width: Theme.control, height: Theme.control)
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Account and machine · \(model.machine.label)")
-            if searching {
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass").foregroundStyle(theme.icon)
-                    TextField("", text: $query, prompt: Text("Search").foregroundStyle(theme.placeholder))
-                        .font(theme.font(Theme.body))
+            .accessibilityLabel("Account, machine and settings · \(model.machine.label)")
+            .accessibilityIdentifier("home-account")
+            Spacer()
+                .overlay {
+                    // Between the account circle and the button, where nothing else lives.
+                    if offlineHint {
+                        Text("Offline · showing saved chats")
+                            .font(theme.font(Theme.small))
+                            .foregroundStyle(theme.muted)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                            .transition(.opacity)
+                            .accessibilityIdentifier("offline-hint")
+                    }
+                }
+            Menu {
+                Button { showNewChat = true } label: {
+                    Label("New Message", systemImage: "bubble.left.and.bubble.right")
+                }
+                Button { showCreate = .group } label: {
+                    Label("New group", systemImage: "person.2.fill")
+                }
+                Button { showCreate = .agent } label: {
+                    Label("New agent", systemImage: "sparkles")
+                }
+                if model.serversAvailable {
+                    Button { showCreate = .server } label: {
+                        Label("New server", systemImage: "number")
+                    }
+                }
+            } label: {
+                GlassCircle {
+                    Image(systemName: "plus")
+                        .font(theme.font(19, weight: .regular))
                         .foregroundStyle(theme.text)
-                        .focused($searchFocused)
-                        .submitLabel(.search)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                        .accessibilityIdentifier("home-search-field")
-                    Button {
-                        query = ""
-                        searching = false
-                        searchFocused = false
-                    } label: {
-                        Image(systemName: "xmark.circle.fill").foregroundStyle(theme.icon)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Clear search")
                 }
-                .padding(.horizontal, 14)
-                .frame(height: Theme.control)
-                .background(Capsule().fill(theme.field))
-                .overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1))
-                .transition(.opacity)
-            } else {
-                Spacer()
-                    .overlay {
-                        // Between the account circle and the buttons, where nothing else lives.
-                        if offlineHint {
-                            Text("Offline · showing saved chats")
-                                .font(theme.font(Theme.small))
-                                .foregroundStyle(theme.muted)
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.8)
-                                .transition(.opacity)
-                                .accessibilityIdentifier("offline-hint")
-                        }
-                    }
-                Button {
-                    model.paintTranscriptsForSearch()
-                    withAnimation(.easeOut(duration: 0.18)) { searching = true }
-                    // Focus after the field is in the tree (same pattern as in-chat search).
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { searchFocused = true }
-                } label: {
-                    GlassCircle {
-                        Image(systemName: "magnifyingglass")
-                            .font(theme.font(17, weight: .medium))
-                            .foregroundStyle(theme.text)
-                    }
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Search conversations")
-                Menu {
-                    Button { showNewChat = true } label: {
-                        Label("New Message", systemImage: "bubble.left.and.bubble.right")
-                    }
-                    Button { showCreate = .group } label: {
-                        Label("New group", systemImage: "person.2.fill")
-                    }
-                    Button { showCreate = .agent } label: {
-                        Label("New agent", systemImage: "sparkles")
-                    }
-                    if model.serversAvailable {
-                        Button { showCreate = .server } label: {
-                            Label("New server", systemImage: "number")
-                        }
-                    }
-                } label: {
-                    GlassCircle {
-                        Image(systemName: "plus")
-                            .font(theme.font(19, weight: .regular))
-                            .foregroundStyle(theme.text)
-                    }
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Create")
-                .accessibilityIdentifier("home-create-menu")
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Create")
+            .accessibilityIdentifier("home-create-menu")
         }
         // Grok home header: 20 pt side margins, 42 pt circles.
         .padding(.horizontal, 20)
@@ -612,96 +599,47 @@ struct HomeView: View {
         var activity: Int64 { 0 }
     }
 
-    /// One home row with how it matched the search (every row is a `title`
-    /// hit without a query, so the list is pinned-first in pin order, then by activity).
+    /// One home row. Every row is a plain `title` hit: the list is no longer
+    /// narrowed by typed text (search is the bottom bar, as the Mac's palette);
+    /// the segment alone scopes it.
     struct HomeEntry: Identifiable {
         var row: HomeRow
         var hit: HomeSearch.Hit
         var id: String { row.id }
     }
 
-    /// Search hits under the current filter pill (scoped). Without a query the
-    /// home list uses the vertical sections instead (`agentSectionEntries`…).
-    private var homeRows: [HomeEntry] { homeEntries(for: listFilter) }
-
-    /// Projects, DMs and servers for one filter. Without a query: pinned first
-    /// (in the user's pin order), then newest activity. With one: people
-    /// (display name / @handle) first, then rows matched by title, then by a
-    /// member, then by a message — newest first inside each group; a hit beyond
-    /// the row's own name is explained on its second line.
+    /// Rows under one filter for section building. Pinned first, then newest.
+    /// Archived rows stay out (Hidden chats).
     private func homeEntries(for filter: HomeListFilter) -> [HomeEntry] {
-        let q = searchQuery
         // pinRank: strip index when pinned (0 = top), Int.max when not.
-        var rows: [(HomeSearch.Kind, Int, Int64, HomeEntry)] = []
+        var rows: [(Int, Int64, HomeEntry)] = []
+        let hit = HomeSearch.Hit(kind: .title)
         if filter.showsProjects {
             for p in model.projects {
                 // Agents: my agents only (`!shared`) — no shared-in agents.
                 if !filter.admitsProject(shared: p.shared) { continue }
-                // Archived agents stay out of the home list until search (or open).
-                if q.isEmpty && model.isArchived(p.id) { continue }
-                guard let hit = projectHit(p, q: q) else { continue }
+                if model.isArchived(p.id) { continue }
                 let pinRank = model.homePinIndex(projectId: p.id) ?? Int.max
-                rows.append((hit.kind, pinRank, lastActivity(p), HomeEntry(row: .project(p), hit: hit)))
+                rows.append((pinRank, lastActivity(p), HomeEntry(row: .project(p), hit: hit)))
             }
         }
         if filter.showsPeople {
-            for c in model.peopleChats {
-                // Archived people stay out of the home list until search (or open).
-                if q.isEmpty && model.isArchived(peopleChatId: c.id) { continue }
-                guard let hit = peopleHit(c, q: q) else { continue }
+            for c in model.peopleChats where !model.isArchived(peopleChatId: c.id) {
                 let pinRank = model.homePinIndex(peopleChatId: c.id) ?? Int.max
-                rows.append((hit.kind, pinRank, peopleActivity(c), HomeEntry(row: .people(c), hit: hit)))
+                rows.append((pinRank, peopleActivity(c), HomeEntry(row: .people(c), hit: hit)))
             }
         }
         if filter.showsServers {
             // D88: servers sort among the chats by last activity (rule 1); the
             // Servers segment shows them alone (Mac parity, 2026-10-24).
-            for s in model.servers {
-                // Archived servers stay out of the home list until search (or Unarchive).
-                if q.isEmpty && model.isArchived(serverId: s.id) { continue }
-                guard let hit = HomeSearch.serverHit(name: s.name, channels: s.channels.map(\.name), q: q) else { continue }
-                rows.append((hit.kind, Int.max, model.serverActivity(s), HomeEntry(row: .server(s), hit: hit)))
+            for s in model.servers where !model.isArchived(serverId: s.id) {
+                rows.append((Int.max, model.serverActivity(s), HomeEntry(row: .server(s), hit: hit)))
             }
         }
         return rows.sorted {
             if $0.0 != $1.0 { return $0.0 < $1.0 }
-            if $0.1 != $1.1 { return $0.1 < $1.1 }
-            return $0.2 > $1.2
-        }.map(\.3)
-    }
-
-    /// Agent name; a shared project's owner; a chat title under the agent; a loaded message.
-    private func projectHit(_ p: Project, q: String) -> HomeSearch.Hit? {
-        let chats = model.chats(of: p.id)
-        var members: [HomeSearch.Member] = []
-        if p.shared, let owner = p.ownerHandle, owner != model.user?.login {
-            members.append(HomeSearch.Member(handle: owner, name: p.ownerName))
-        }
-        return HomeSearch.titledHit(title: p.name, members: members,
-                                    chats: chats.filter { !$0.isSystem }.map { HomeSearch.ChatTitle(id: $0.id, title: $0.title) },
-                                    messages: { searchableMessages(chats.map(\.id)) }, q: q)
-    }
-
-    /// DM: the other person's display name / @handle. Group: title, a member (not me), an agent.
-    private func peopleHit(_ c: PeopleChat, q: String) -> HomeSearch.Hit? {
-        let me = model.user?.id
-        if !c.isGroup, let other = c.counterpart(me: me) {
-            return HomeSearch.dmHit(name: other.displayName, handle: other.handle,
-                                    messages: { searchableMessages([c.id]) }, q: q)
-        }
-        let members = c.members.filter { $0.id != me }.map {
-            HomeSearch.Member(handle: $0.handle, name: $0.isAgent ? $0.displayName : $0.name, isAgent: $0.isAgent)
-        }
-        return HomeSearch.titledHit(title: c.title, members: members,
-                                    messages: { searchableMessages([c.id]) }, q: q)
-    }
-
-    private func searchableMessages(_ chatIds: [Id]) -> [HomeSearch.MessageText] {
-        chatIds.flatMap { chatId in
-            model.searchableMessages(of: chatId).map {
-                HomeSearch.MessageText(chatId: chatId, messageId: $0.id, createdAt: $0.createdAt, text: $0.plainText)
-            }
-        }
+            return $0.1 > $1.1
+        }.map(\.2)
     }
 
     /// Agents (including shared) for the vertical home sections.
@@ -723,8 +661,7 @@ struct HomeView: View {
     }
 
     /// One block in the unified vertical list. Invisible scroll anchor for the
-    /// matching filter pill (no section titles — Grok Bot has none). Empty
-    /// sections still expose the anchor so the pill has somewhere to land.
+    /// matching filter pill (no section titles — Grok Bot has none).
     @ViewBuilder
     private func homeSection(filter: HomeListFilter, entries: [HomeEntry]) -> some View {
         Color.clear.frame(height: 0)
@@ -966,15 +903,8 @@ struct HomeView: View {
             .accessibilityHint("Scrolls the chat list to that section")
     }
 
-    /// Empty copy when the current filter (or search) has no rows.
-    private var homeEmptyCopy: String {
-        if !searchQuery.isEmpty {
-            return "No conversations match \"\(query.trimmingCharacters(in: .whitespaces))\""
-        }
-        return listFilter.emptyCopy
-    }
 
-    /// Open the chat the hit points at (a chat title or a message), else the agent's landing chat.
+    /// Open the chat the row points at, else the agent's landing chat.
     private func openSearchHit(_ project: Project, hit: HomeSearch.Hit) {
         if let chatId = hit.chatId, let chat = model.chat(chatId) {
             model.open(chat: chat)
@@ -1434,6 +1364,8 @@ struct PeopleRow: View {
                 if chat.isGroup {
                     if let groupImageURL {
                         AvatarCluster(members: [], size: Theme.rowAvatar, imageUrl: groupImageURL)
+                    } else if chat.isNeutralAvatar {
+                        NeutralAvatar(name: chat.title, size: Theme.rowAvatar)
                     } else if let leaf = chat.leafPick, LeafAvatarsFlag.shared.on {
                         // D92 amendment: the leaf picked on the Create screen.
                         LeafAvatar(pick: leaf, size: Theme.rowAvatar)

@@ -715,13 +715,18 @@ impl Db {
         })
     }
 
-    pub fn mark_refresh_rotated(&self, token_hash: &str) -> Result<()> {
+    /// Atomically claim a refresh-token row for rotation.
+    ///
+    /// Returns `true` when this call set `rotated_at` (the claimer must issue the new pair).
+    /// Returns `false` when the row was already rotated — another refresh claimed it, or this
+    /// token is being re-presented after a restart.
+    pub fn mark_refresh_rotated(&self, token_hash: &str) -> Result<bool> {
         self.with(|c| {
             c.execute(
-                "UPDATE refresh_tokens SET rotated_at = ?2 WHERE token_hash = ?1",
+                "UPDATE refresh_tokens SET rotated_at = ?2 WHERE token_hash = ?1 AND rotated_at IS NULL",
                 params![token_hash, now_ms()],
             )
-            .map(|_| ())
+            .map(|n| n > 0)
         })
     }
 
@@ -938,7 +943,9 @@ impl Db {
     pub fn always_on_users(&self) -> Result<Vec<String>> {
         self.with(|c| {
             let mut st = c.prepare(
-                "SELECT user_id FROM boxes WHERE held_stopped = 0
+                // A box row without a users row is a phantom (a project id minted as a user,
+                // 2026-10-22); the sweep must never breathe life into it (#1708 follow-up).
+                "SELECT b.user_id FROM boxes b JOIN users u ON u.id = b.user_id WHERE b.held_stopped = 0
                  UNION SELECT id FROM users WHERE status = 'member' AND test = 0 AND id NOT IN (SELECT user_id FROM boxes)",
             )?;
             let rows = st.query_map([], |r| r.get(0))?;

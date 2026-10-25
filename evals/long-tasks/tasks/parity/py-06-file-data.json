@@ -1,0 +1,40 @@
+{
+  "id": "py-06-file-data",
+  "lane": "b",
+  "category": "parity",
+  "categories": [
+    "parity",
+    "file-data"
+  ],
+  "title": "Totals from a CSV in the folder",
+  "parity": true,
+  "timeout_s": 300,
+  "settle_s": 12,
+  "turns": [
+    {
+      "prompt": "{D}/sales.csv has 500 orders (columns date, order_id, product, quantity, unit_price, revenue). Give me the total revenue and the top 3 products by revenue.",
+      "generate": "sales_csv",
+      "shape": {
+        "messages_min": 1,
+        "messages_max": 3,
+        "ack_first": false,
+        "table": false,
+        "links_min": 0,
+        "offer": false,
+        "first_bubble_max_s": 8,
+        "no_handle": true,
+        "worker_rows": 0,
+        "reply_to_ask": false,
+        "ack_if_long_s": 5
+      },
+      "truth": {
+        "kind": "generated",
+        "keys": [
+          "total",
+          "top3"
+        ],
+        "tolerance": 1
+      }
+    }
+  ]
+}

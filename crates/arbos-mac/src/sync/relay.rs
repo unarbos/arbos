@@ -49,12 +49,13 @@ use super::dto::{
     transcript_text, voices_from_dto,
 };
 use super::store::{self, Store};
-use super::{ClientCommand, PictureSource, PictureTarget, SyncEvent, SyncSource};
+use super::{ClientCommand, DraftPicture, PictureSource, PictureTarget, SyncEvent, SyncSource};
 use crate::model::{
-    new_id, now_ms, AccountView, Attachment, AttachmentKind, BoxState, Call, CallEnded, CallLeft,
-    CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView, Chat, Effort, Id,
-    Link, LinkState, Machine, MachineState, Message, Part, Person, Project, ProjectDocView,
-    ProjectSecrets, Reachable, Role, Routine, RoutineRun, Sender, ServerInfo, ThreadInfo,
+    new_id, now_ms, AccountView, Attachment, AttachmentKind, BoxReport, BoxState, Call, CallEnded,
+    CallLeft, CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView, Chat,
+    Effort, Id, Link, LinkState, Machine, MachineState, Message, Part, Person, Project,
+    ProjectDocView, ProjectSecrets, Reachable, Role, Routine, RoutineRun, Sender, ServerInfo,
+    ThreadInfo,
 };
 use crate::update;
 
@@ -168,6 +169,9 @@ struct Shared {
     chats: Mutex<Vec<Chat>>,
     /// Client-minted message ids whose push the relay has not `ACK`ed (S3).
     unacked: Mutex<HashSet<Id>>,
+    /// Rooms whose pushes were refused with `not_available` on the live connection.
+    /// Cleared by the next ACK for that room (not by draining `unacked`, which is global).
+    push_refused: Mutex<HashSet<Id>>,
     events: mpsc::UnboundedSender<SyncEvent>,
     subscriptions: Mutex<Vec<loro::Subscription>>,
     machine: Mutex<Machine>,
@@ -707,6 +711,7 @@ impl SyncSource for RelaySource {
                 projects: Mutex::new(Vec::new()),
                 chats: Mutex::new(Vec::new()),
                 unacked: Mutex::new(HashSet::new()),
+                push_refused: Mutex::new(HashSet::new()),
                 events: events.clone(),
                 subscriptions: Mutex::new(Vec::new()),
                 machine: Mutex::new(Machine::default()),
@@ -1354,6 +1359,15 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
             | PushEventDto::ServerMemberJoined(_)
             | PushEventDto::ServerMemberRemoved(_)
             | PushEventDto::ServerDeleted(_) => refresh_servers = true,
+            // Someone's profile picture changed: mine (another device set it → re-read /me)
+            // or a person I share a chat or server with (their card comes with the lists).
+            PushEventDto::ProfileUpdated(payload) => {
+                if payload.user_id == shared.me_id() {
+                    refresh_me(shared).await;
+                }
+                refresh = true;
+                refresh_servers = true;
+            }
             PushEventDto::PeopleMessage(_)
             | PushEventDto::PeopleChatDeleted(_)
             | PushEventDto::ProjectMemberRemoved(_)
@@ -1543,10 +1557,15 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             let shared = shared.clone();
             tokio::spawn(async move { refresh_servers_list(&shared).await });
         }
-        ClientCommand::ServerCreate { name, leaf } => {
+        ClientCommand::ServerCreate {
+            name,
+            leaf,
+            picture,
+        } => {
             let shared = shared.clone();
             let name = name.clone();
             let leaf = *leaf;
+            let picture = picture.clone();
             tokio::spawn(async move {
                 let mut body = json!({ "name": name });
                 if let Some(l) = leaf {
@@ -1558,7 +1577,27 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                     .await
                     .and_then(parse_server)
                 {
-                    Ok(server) => {
+                    Ok(mut server) => {
+                        if let Some(picture) = picture {
+                            let id = server.id.clone();
+                            if adopt_draft_picture(
+                                &shared,
+                                &format!("servers:{id}"),
+                                &format!("/servers/{id}"),
+                                "server-",
+                                picture,
+                            )
+                            .await
+                            {
+                                if let Ok(fresh) = shared
+                                    .get_json(&format!("/servers/{id}"))
+                                    .await
+                                    .and_then(parse_server)
+                                {
+                                    server = fresh;
+                                }
+                            }
+                        }
                         let _ = shared
                             .events
                             .send(SyncEvent::ServerOpened(with_server_picture(
@@ -3259,6 +3298,30 @@ async fn perform_room_actions(
                     if !had.is_empty() && room_chat != PROJECT_DOC_CHAT_ID {
                         emit_snapshot(shared, key);
                     }
+                    // Per-room refusal flag (not `unacked`: that set is global and any
+                    // room's ACK drains it, so it cannot tell which chat was refused).
+                    if shared.push_refused.lock().unwrap().remove(room_chat) {
+                        let _ = shared.events.send(SyncEvent::PushRefused {
+                            chat_id: room_chat.to_string(),
+                            refused: false,
+                        });
+                    }
+                }
+                RoomAction::PushRefused { batch_id: _ } => {
+                    if room_chat != PROJECT_DOC_CHAT_ID
+                        && shared
+                            .push_refused
+                            .lock()
+                            .unwrap()
+                            .insert(room_chat.to_string())
+                    {
+                        // One notice per refusal stretch; the room link stays live.
+                        shared.notice("Messages in this chat are not being delivered");
+                        let _ = shared.events.send(SyncEvent::PushRefused {
+                            chat_id: room_chat.to_string(),
+                            refused: true,
+                        });
+                    }
                 }
                 RoomAction::BoxState {
                     state,
@@ -3474,19 +3537,134 @@ fn send_wake(shared: &Arc<Shared>, project_id: &str, reason: &'static str) {
 /// here; HEIC (Photos exports, iPhone shots) goes through macOS's own `sips` first, since
 /// the `image` crate has no HEIF decoder. Anything that is not an image is an error with a
 /// plain message.
-/// A picker target's picture as the avatar loader fetches it: the blob in its own slot.
-fn picture_url(shared: &Shared, target: &PictureTarget, key: Option<&str>) -> Option<String> {
-    let key = key.map(str::trim).filter(|k| !k.is_empty())?;
-    let slot = match target {
+/// The blob slot a picker target's pictures live in; the draft's is my own (`users:{me}`).
+fn picture_slot(shared: &Shared, target: &PictureTarget) -> String {
+    match target {
         PictureTarget::Agent(id) => id.clone(),
         PictureTarget::Group(id) => format!("people:{id}"),
         PictureTarget::Server(id) => format!("servers:{id}"),
-    };
+        PictureTarget::Draft => format!("users:{}", shared.me_id()),
+        PictureTarget::Me(id) => format!("users:{id}"),
+    }
+}
+
+/// A picker target's picture as the avatar loader fetches it: the blob in its own slot.
+fn picture_url(shared: &Shared, target: &PictureTarget, key: Option<&str>) -> Option<String> {
+    let key = key.map(str::trim).filter(|k| !k.is_empty())?;
+    let slot = picture_slot(shared, target);
     Some(format!(
         "{}/blob/{slot}/{key}?token={}",
         shared.http_url,
         shared.token()
     ))
+}
+
+/// The answer to `PUT /me/avatar` (a JPEG body or `{image_key}`): the new `user` lands in the
+/// store and `/me` is re-read so every surface shows the picture; a failure is a notice.
+async fn my_avatar_saved(shared: &Arc<Shared>, put: Result<reqwest::Response, reqwest::Error>) {
+    match put {
+        Ok(r) if r.status().is_success() => {
+            if let Ok(body) = r.json::<Value>().await {
+                if let Ok(dto) = serde_json::from_value::<MeUserResponseDto>(body) {
+                    let u: credentials::AccountUser = (&dto.user).into();
+                    shared.with_store(|s| s.put_json(store::KEY_ACCOUNT, &u));
+                    *shared.me.lock().unwrap() = Some(u);
+                }
+            }
+            refresh_me(shared).await;
+        }
+        Ok(r) => {
+            let status = r.status();
+            let detail = r
+                .json::<Value>()
+                .await
+                .ok()
+                .and_then(|v| {
+                    v.pointer("/error/message")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| format!("HTTP {status}"));
+            shared.notice(format!("Picture not saved: {detail}"));
+        }
+        Err(err) => shared.notice(format!("Picture not saved: {err}")),
+    }
+}
+
+/// The Create sheet's pending picture, once the entity exists: the file (or the bytes of the
+/// picture generated into my own slot) goes into the new entity's slot as a 512 px JPEG, then
+/// `PATCH <patch_path> {image_key}`. `prefix` names the key (`avatar-` / `server-`). Errors are
+/// a notice — the entity itself is already created and shows its neutral initial.
+async fn adopt_draft_picture(
+    shared: &Arc<Shared>,
+    slot: &str,
+    patch_path: &str,
+    prefix: &str,
+    picture: DraftPicture,
+) -> bool {
+    let jpeg = match picture {
+        DraftPicture::File(path) => {
+            match tokio::task::spawn_blocking(move || picture_jpeg(&path)).await {
+                Ok(Ok(j)) => j,
+                Ok(Err(err)) => {
+                    shared.notice(format!("Picture not uploaded: {err:#}"));
+                    return false;
+                }
+                Err(_) => return false,
+            }
+        }
+        DraftPicture::Generated { key } => {
+            let from = picture_url(shared, &PictureTarget::Draft, Some(&key));
+            let Some(from) = from else { return false };
+            match shared.http.get(from).send().await {
+                Ok(r) if r.status().is_success() => match r.bytes().await {
+                    Ok(b) => b.to_vec(),
+                    Err(err) => {
+                        shared.notice(format!("Generated picture not copied: {err}"));
+                        return false;
+                    }
+                },
+                Ok(r) => {
+                    shared.notice(format!("Generated picture not copied: HTTP {}", r.status()));
+                    return false;
+                }
+                Err(err) => {
+                    shared.notice(format!("Generated picture not copied: {err}"));
+                    return false;
+                }
+            }
+        }
+    };
+    let key = format!("{prefix}{}.jpg", new_id().to_lowercase());
+    let put = shared
+        .http
+        .put(format!("{}/blob/{slot}/{key}", shared.http_url))
+        .bearer_auth(shared.token())
+        .header("content-type", "image/jpeg")
+        .body(jpeg)
+        .send()
+        .await;
+    match put {
+        Ok(r) if r.status().is_success() => {}
+        Ok(r) => {
+            shared.notice(format!("Picture upload failed: HTTP {}", r.status()));
+            return false;
+        }
+        Err(err) => {
+            shared.notice(format!("Picture upload failed: {err}"));
+            return false;
+        }
+    }
+    match shared
+        .patch_json(patch_path, json!({ "image_key": key }))
+        .await
+    {
+        Ok(_) => true,
+        Err(err) => {
+            shared.notice(format!("Picture not saved: {}", people_error(&err)));
+            false
+        }
+    }
 }
 
 /// A server's `image_key` → `image_url` on every `ServerInfo` the relay client hands out.
@@ -3895,6 +4073,7 @@ async fn send_message(
                 None
             },
             answers_question_id: answer.as_ref().map(|(qid, _)| qid.clone()),
+            tz: arbos_core::doc::device_time_zone(),
         };
         let payload = match &answer {
             Some((qid, value)) => {
@@ -4414,6 +4593,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             agent_ids,
             title,
             leaf,
+            picture,
         } => {
             let shared = shared.clone();
             tokio::spawn(async move {
@@ -4454,6 +4634,16 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                                 (String::new(), Vec::new())
                             }
                         };
+                        if let Some(picture) = picture.filter(|_| !chat_id.is_empty()) {
+                            adopt_draft_picture(
+                                &shared,
+                                &format!("people:{chat_id}"),
+                                &format!("/chats/{chat_id}"),
+                                "avatar-",
+                                picture,
+                            )
+                            .await;
+                        }
                         for project_id in agent_ids {
                             if chat_id.is_empty() || already.contains(&project_id) {
                                 continue;
@@ -5037,6 +5227,37 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 });
             }
         }
+        ClientCommand::StopJob {
+            chat_id,
+            job_id,
+            message_id,
+        } => {
+            let docs = shared.docs.lock().unwrap();
+            if let Some(doc) = docs.get(&chat_id) {
+                let device = shared.device_id();
+                doc.core.transact(|d| {
+                    d.push_command(
+                        "stop",
+                        json!({ "jobId": job_id, "messageId": message_id }),
+                        &device,
+                    );
+                });
+            }
+        }
+        ClientCommand::JobsRefresh { project_id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move { refresh_project_jobs(&shared, &project_id).await });
+        }
+        ClientCommand::RolloutRefresh {
+            project_id,
+            job_id,
+            after,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(
+                async move { refresh_job_rollout(&shared, &project_id, &job_id, after).await },
+            );
+        }
         ClientCommand::React {
             chat_id,
             message_id,
@@ -5101,12 +5322,17 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         ClientCommand::Approve {
             chat_id,
             approval_id,
+            grant,
         } => {
             let docs = shared.docs.lock().unwrap();
             if let Some(doc) = docs.get(&chat_id) {
                 let device = shared.device_id();
+                let mut payload = json!({ "approvalId": approval_id });
+                if let Some(g) = grant {
+                    payload["grant"] = json!(g);
+                }
                 doc.core.transact(|d| {
-                    d.push_command("approve", json!({ "approvalId": approval_id }), &device);
+                    d.push_command("approve", payload, &device);
                 });
             }
         }
@@ -5593,6 +5819,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     PictureTarget::Agent(id) => format!("/projects/{id}/avatar/generate"),
                     PictureTarget::Group(id) => format!("/chats/{id}/avatar/generate"),
                     PictureTarget::Server(id) => format!("/servers/{id}/avatar/generate"),
+                    // The Create sheet: into my own slot (#1789's route); copied on Create.
+                    PictureTarget::Draft | PictureTarget::Me(_) => "/me/avatar/generate".to_owned(),
                 };
                 let result = shared.post_json(&path, json!({ "prompt": prompt })).await;
                 let event = match result {
@@ -5616,12 +5844,24 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             },
                         }
                     }
-                    Err(err) => SyncEvent::ImageGenerated {
-                        target,
-                        image_key: None,
-                        url: None,
-                        error: Some(people_error(&err)),
-                    },
+                    Err(err) => {
+                        // A relay without the own-slot route yet (#1789 not deployed): say so
+                        // instead of "HTTP 404".
+                        let error = if target == PictureTarget::Draft
+                            && err.to_string().contains("HTTP 404")
+                        {
+                            "Generate is not on this relay yet; upload a picture instead."
+                                .to_owned()
+                        } else {
+                            people_error(&err)
+                        };
+                        SyncEvent::ImageGenerated {
+                            target,
+                            image_key: None,
+                            url: None,
+                            error: Some(error),
+                        }
+                    }
                 };
                 let _ = shared.events.send(event);
             });
@@ -5755,20 +5995,20 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .body(jpeg)
                     .send()
                     .await;
-                match put {
-                    Ok(r) if r.status().is_success() => {
-                        if let Ok(body) = r.json::<Value>().await {
-                            if let Ok(dto) = serde_json::from_value::<MeUserResponseDto>(body) {
-                                let u: credentials::AccountUser = (&dto.user).into();
-                                shared.with_store(|s| s.put_json(store::KEY_ACCOUNT, &u));
-                                *shared.me.lock().unwrap() = Some(u);
-                            }
-                        }
-                        refresh_me(&shared).await;
-                    }
-                    Ok(r) => shared.notice(format!("Picture not saved: HTTP {}", r.status())),
-                    Err(err) => shared.notice(format!("Picture not saved: {err}")),
-                }
+                my_avatar_saved(&shared, put).await;
+            });
+        }
+        ClientCommand::SetMyAvatarKey { key } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let put = shared
+                    .http
+                    .put(format!("{}/me/avatar", shared.http_url))
+                    .bearer_auth(shared.token())
+                    .json(&json!({ "image_key": key }))
+                    .send()
+                    .await;
+                my_avatar_saved(&shared, put).await;
             });
         }
         ClientCommand::RemoveMyAvatar => {
@@ -6117,6 +6357,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             name,
             avatar_color_index,
             leaf,
+            picture,
             source_project_id,
             description,
             color,
@@ -6145,7 +6386,21 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     body["color"] = json!(c);
                 }
                 match shared.post_json("/projects", body).await {
-                    Ok(_) => {
+                    Ok(v) => {
+                        // The Create sheet's picture goes into the new agent's own slot first,
+                        // so the list refresh already shows it.
+                        if let Some(picture) = picture {
+                            if let Some(id) = v.get("id").and_then(Value::as_str) {
+                                adopt_draft_picture(
+                                    &shared,
+                                    id,
+                                    &format!("/projects/{id}"),
+                                    "avatar-",
+                                    picture,
+                                )
+                                .await;
+                            }
+                        }
                         if let Err(err) = refresh_registry(&shared).await {
                             shared.diagnostic("refresh", format!("{err:#}"));
                         }
@@ -6330,8 +6585,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     }
                     Err(err) => {
                         // Nobody asked for this fetch: no toast, no bubble. The card shows
-                        // "No preview"; the error goes to the log and the silent report.
-                        shared.diagnostic("thumbnail", format!("{key}: {err:#}"));
+                        // "No preview". A missing blob (deleted, never uploaded, stale ref)
+                        // is not a Mac bug — same quiet 404 treatment as routines / voices.
+                        // Other failures still go to the silent weekly report.
+                        let detail = format!("{key}: {err:#}");
+                        if detail.to_ascii_lowercase().contains("http 404") {
+                            log::warn!(target: "arbos_mac::diagnostic", "thumbnail: {detail}");
+                        } else {
+                            shared.diagnostic("thumbnail", detail);
+                        }
                         let _ = shared.events.send(SyncEvent::ThumbnailFailed { key });
                     }
                 }
@@ -6485,6 +6747,27 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let shared = shared.clone();
             tokio::spawn(async move {
                 refresh_project_secrets(&shared, &project_id).await;
+            });
+        }
+        ClientCommand::ShellGrantsRefresh { project_id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                refresh_shell_grants(&shared, &project_id).await;
+            });
+        }
+        ClientCommand::ShellGrantRevoke {
+            project_id,
+            grant_id,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .delete(&format!("/projects/{project_id}/shell-grants/{grant_id}"))
+                    .await
+                {
+                    shared.notice(format!("Shell approvals: {}", relay_message(&err)));
+                }
+                refresh_shell_grants(&shared, &project_id).await;
             });
         }
         ClientCommand::SecretAdd { item } => {
@@ -6781,6 +7064,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         ClientCommand::LocalRefresh => {
             let shared = shared.clone();
             tokio::spawn(async move { refresh_local(&shared).await });
+        }
+        ClientCommand::MachineDebugRefresh => {
+            let shared = shared.clone();
+            tokio::spawn(async move { refresh_machine_debug(&shared).await });
         }
         ClientCommand::LocalSetAllowReads { device_id, allow } => {
             let shared = shared.clone();
@@ -7123,6 +7410,97 @@ async fn refresh_routines(shared: &Arc<Shared>, project_id: &str) {
     }
 }
 
+/// `GET /machine/debug` → the Computer tab's report. A relay without the route (404) or an
+/// unreachable box is not a bug: the tab says so from the report's own fields.
+/// The tasks chip's poll: `GET /projects/{id}` → `activity.jobs[]` (duplex §2.4).
+/// A relay without the field or a `null` activity reads as "no open jobs" (the
+/// drawer degrades to nothing); a transport error keeps the last answer rather
+/// than blinking the list away on a blip.
+async fn refresh_project_jobs(shared: &Arc<Shared>, project_id: &str) {
+    match shared.get_json(&format!("/projects/{project_id}")).await {
+        Ok(v) => {
+            let _ = shared.events.send(SyncEvent::ProjectJobs {
+                project_id: project_id.to_string(),
+                jobs: crate::model::Job::list_from_activity(v.get("activity")),
+            });
+        }
+        Err(err) => {
+            if !format!("{err:#}").contains("HTTP 404") {
+                shared.diagnostic("project-jobs", format!("{err:#}"));
+            }
+        }
+    }
+}
+
+/// The rollout view's poll: `GET /projects/{id}/jobs/{jobId}[?after=<seq>]`. A 404 (relay
+/// before the endpoint) answers an `unavailable` placeholder so the view can say so; a
+/// transport error keeps the last document.
+async fn refresh_job_rollout(
+    shared: &Arc<Shared>,
+    project_id: &str,
+    job_id: &str,
+    after: Option<u64>,
+) {
+    let path = match after {
+        Some(seq) => format!("/projects/{project_id}/jobs/{job_id}?after={seq}"),
+        None => format!("/projects/{project_id}/jobs/{job_id}"),
+    };
+    match shared.get_json(&path).await {
+        Ok(v) => match serde_json::from_value::<crate::model::JobRollout>(v) {
+            Ok(rollout) => {
+                let _ = shared.events.send(SyncEvent::JobRollout {
+                    project_id: project_id.to_string(),
+                    job_id: job_id.to_string(),
+                    rollout,
+                });
+            }
+            Err(err) => {
+                log::warn!(target: "arbos_mac::relay", "JobRollout {job_id}: {err}");
+            }
+        },
+        Err(err) => {
+            let text = format!("{err:#}");
+            if text.contains("HTTP 404") {
+                let _ = shared.events.send(SyncEvent::JobRollout {
+                    project_id: project_id.to_string(),
+                    job_id: job_id.to_string(),
+                    rollout: crate::model::JobRollout {
+                        unavailable: true,
+                        ..crate::model::JobRollout::placeholder(
+                            &crate::model::Job {
+                                id: job_id.to_string(),
+                                title: String::new(),
+                                state: crate::model::JobState::Running,
+                                step: String::new(),
+                                elapsed_s: 0,
+                                ask_message_id: None,
+                                chat_id: None,
+                            },
+                            "",
+                        )
+                    },
+                });
+            } else {
+                shared.diagnostic("job-rollout", text);
+            }
+        }
+    }
+}
+
+async fn refresh_machine_debug(shared: &Arc<Shared>) {
+    match shared.get_json("/machine/debug").await {
+        Ok(v) => {
+            let report = BoxReport::from_debug(&v, now_ms());
+            let _ = shared.events.send(SyncEvent::BoxReport(report));
+        }
+        Err(err) => {
+            if !format!("{err:#}").contains("HTTP 404") {
+                shared.diagnostic("machine-debug", format!("{err:#}"));
+            }
+        }
+    }
+}
+
 async fn refresh_routine_runs(shared: &Arc<Shared>, project_id: &str, routine_id: &str) {
     match shared
         .get_json(&format!(
@@ -7265,6 +7643,30 @@ async fn refresh_project_secrets(shared: &Arc<Shared>, project_id: &str) {
         Err(err) => {
             if !format!("{err:#}").contains("HTTP 404") {
                 shared.notice(format!("Secrets: {}", relay_message(&err)));
+            }
+        }
+    }
+}
+
+/// One agent's standing shell approvals (`GET /projects/{id}/shell-grants`, #1544).
+async fn refresh_shell_grants(shared: &Arc<Shared>, project_id: &str) {
+    match shared
+        .get_json(&format!("/projects/{project_id}/shell-grants"))
+        .await
+    {
+        Ok(v) => {
+            let items: Vec<crate::model::ShellGrant> = v
+                .get("items")
+                .and_then(|i| serde_json::from_value(i.clone()).ok())
+                .unwrap_or_default();
+            let _ = shared.events.send(SyncEvent::ShellGrants {
+                project_id: project_id.to_string(),
+                items,
+            });
+        }
+        Err(err) => {
+            if !format!("{err:#}").contains("HTTP 404") {
+                shared.notice(format!("Shell approvals: {}", relay_message(&err)));
             }
         }
     }

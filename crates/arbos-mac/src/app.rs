@@ -19,14 +19,15 @@ use crate::model::{
     CallKind, CallMissed, Person, Reachable, Sender, Voice,
 };
 use crate::model::{
-    new_id, now_ms, Attachment, AttachmentKind, BoxState, ChannelSel, ChannelsView, Chat, ChatKind,
-    ConnectorsView, DevicesView, Effort, Id, Link, LinkState, LocalView, Machine, Message,
-    MessageStatus, NewSecret, Part, Project, ProjectDocView, ProjectSecrets, QuestionState, Role,
-    Routine, RoutineRun, RoutineTrigger, SecretDirector, SecretScope, SecretsView, ServerInfo,
-    Skill, StatusKind,
+    new_id, now_ms, Attachment, AttachmentKind, BoxReport, BoxState, ChannelSel, ChannelsView,
+    Chat, ChatKind, ConnectorsView, DevicesView, Effort, Id, Job, JobRollout, Link, LinkState,
+    LocalView, Machine, Message, MessageStatus, NewSecret, Part, Project, ProjectDocView,
+    ProjectSecrets, QuestionState, Role, Routine, RoutineRun, RoutineTrigger, SecretDirector,
+    SecretScope, SecretsView, ServerInfo, Skill, StatusKind,
 };
 use crate::palette;
 use crate::search;
+use crate::search_index::{self, SearchIndex};
 use crate::sign_in;
 use crate::sync::{ClientCommand, SyncEvent, SyncSource};
 use crate::ui::notify::{self, Gate, Notifier, NotifyEvent, NotifyKind};
@@ -34,6 +35,10 @@ use crate::ui::tones::{SamplePlayer, Tone, TonePlayer};
 
 /// How often held notification batches are re-checked.
 const NOTIFY_TICK_MS: u64 = 5_000;
+/// How often the open chat's background jobs are polled (`GET /projects/{id}`
+/// → `activity.jobs[]`) while a job row is live or the drawer lists one —
+/// the design's "chip updates on the next poll" (duplex §2.4, stop ≤ 3 s).
+pub const JOBS_POLL_MS: u64 = 1_000;
 /// A link state must hold this long before the header pill shows it.
 pub const LINK_PILL_GRACE_MS: u64 = 1_200;
 /// The ring card and its sound give up after this long.
@@ -365,6 +370,16 @@ pub struct ChatUi {
 /// Rows per history page the shared Matrix client fetches (`arbos_matrix::client::HISTORY_PAGE`).
 const CHANNEL_PAGE: usize = 50;
 
+/// What the Create group screen (step 1) hands to the member picker (step 2).
+#[derive(Clone, Debug, PartialEq)]
+pub struct GroupDraft {
+    pub title: String,
+    /// The leaf pair to store: the neutral pair since 2026-10-25 (no leaf grid on the sheet).
+    pub leaf: Option<crate::ui::avatars::LeafPick>,
+    /// The sheet's uploaded / generated picture, if any.
+    pub picture: Option<crate::sync::DraftPicture>,
+}
+
 /// The relay's answer to the avatar picker's Generate tab.
 #[derive(Clone, Debug)]
 pub struct AvatarGenerated {
@@ -386,8 +401,8 @@ pub struct AppState {
     pub new_chat_open: bool,
     /// New Message → New group: multi-select people (and optional agents).
     pub new_group_open: bool,
-    /// D93 Create group step 1 → 2: the name and leaf picked, sent with the members on Create.
-    pub new_group_draft: Option<(String, crate::ui::avatars::LeafPick)>,
+    /// D93 Create group step 1 → 2: the name and picture chosen, sent with the members on Create.
+    pub new_group_draft: Option<GroupDraft>,
     pub new_group_picked: Vec<Person>,
     pub new_group_agents: Vec<Id>,
     pub people_query: String,
@@ -455,6 +470,10 @@ pub struct AppState {
     pub blobs: HashMap<String, BlobView>,
     /// Decoded inline thumbnails of image attachments, by blob key (F10).
     pub thumbnails: HashMap<String, Arc<RenderImage>>,
+    /// The command palette's local index over every chat doc on this Mac
+    /// ([feedback search-palette-app-wide-2026-10-24]); kept current on each
+    /// snapshot, upsert and channel page.
+    pub search_index: SearchIndex,
     /// The same pictures with a uniform border trimmed (a screenshot's white
     /// page margin), for the chat's picture bubbles; absent when nothing to trim.
     pub thumbnails_trimmed: HashMap<String, Arc<RenderImage>>,
@@ -463,6 +482,9 @@ pub struct AppState {
     /// Blob keys whose thumbnail fetch failed: the card says "No preview" instead of loading.
     pub thumbnails_failed: HashSet<String>,
     pub notices: Vec<Notice>,
+    /// Rooms whose pushes were refused (`not_available`); the chat view can show a notice.
+    /// Cleared when that room's next ACK arrives.
+    pub push_refused: HashSet<Id>,
     pub selected_project: Option<Id>,
     /// Bytes and chats kept on this Mac by the on-device store (Settings → About).
     pub store_usage: (i64, i64),
@@ -522,8 +544,30 @@ pub struct AppState {
     pub devices: DevicesView,
     /// Agent profile → Secrets, per project.
     pub project_secrets: std::collections::HashMap<Id, ProjectSecrets>,
+    /// Standing shell approvals per agent (#1544), loaded when the agent pane opens.
+    pub shell_grants: std::collections::HashMap<Id, Vec<crate::model::ShellGrant>>,
     /// Settings → Routines, per project (F3).
     pub routines: HashMap<Id, Vec<Routine>>,
+    /// The box as `GET /machine/debug` last reported it — the agent pane's
+    /// Computer tab ([feedback agent-pane-details-tab-2026-10-24]); fetched
+    /// when an agent pane opens and when its Computer tab is picked.
+    pub box_report: Option<BoxReport>,
+    /// The agent's open background jobs per project, as the relay's activity
+    /// record last listed them (duplex §2.4) — the tasks chip and drawer. A
+    /// project with no entry or an empty list has no open job.
+    pub jobs: HashMap<Id, Vec<Job>>,
+    /// The tasks drawer is open over the presence row of this chat.
+    pub tasks_open: Option<Id>,
+    /// Each job's exchange as last fetched (`GET /projects/{id}/jobs/{jobId}`), by job id —
+    /// the job tab's transcript is synthesised from it (`jobtabs::messages`).
+    pub rollouts: HashMap<String, JobRollout>,
+    /// Job tabs per agent project (`jobtabs`): one `job:<id>` chat per job the agent started,
+    /// kept until the user closes it.
+    pub job_tabs: HashMap<Id, Vec<Chat>>,
+    /// Job tabs the user closed: not re-opened by the next listing (a link re-opens them).
+    pub closed_job_tabs: HashSet<String>,
+    /// Steers typed in a job tab the box has not echoed yet, by job id.
+    pub pending_steers: HashMap<String, Vec<Message>>,
     /// Run history per routine, newest first.
     pub routine_runs: HashMap<Id, Vec<RoutineRun>>,
     /// System notifications (D49); the Shell flips `window_active`.
@@ -548,6 +592,9 @@ pub struct AppState {
         crate::ui::avatar_picker::Target,
         crate::ui::avatar_picker::Tab,
     )>,
+    /// Rig: a prompt the shell types into the opened picker's Generate field and runs at once
+    /// (`ARBOS_OPEN_PROFILE=me:avatar:generate=<prompt>`), so a shot can show prompt → result.
+    pub avatar_rig_prompt: Option<String>,
     /// The Generate tab's answer, for the shell's open picker.
     pub avatar_generated: Option<AvatarGenerated>,
     /// Agent page: which settings row (model / reasoning / voice) is dropped down.
@@ -670,6 +717,7 @@ pub struct AppState {
     call_commands: mpsc::UnboundedSender<CallCmd>,
     _pump: Task<()>,
     _notify_tick: Task<()>,
+    _jobs_tick: Task<()>,
     _update_pump: Task<()>,
     _call_pump: Task<()>,
 }
@@ -724,6 +772,37 @@ impl ActiveCall {
     }
 }
 
+/// Store `new` in `slot` and return the previous frame so the caller can
+/// `App::drop_image` it (video frames upload into the window sprite atlas).
+fn swap_frame(
+    slot: &mut Option<Arc<RenderImage>>,
+    new: Option<Arc<RenderImage>>,
+) -> Option<Arc<RenderImage>> {
+    std::mem::replace(slot, new)
+}
+
+/// Remove the participant with `identity` and return their last video frame.
+fn remove_call_participant(active: &mut ActiveCall, identity: &str) -> Option<Arc<RenderImage>> {
+    let idx = active
+        .participants
+        .iter()
+        .position(|p| p.identity == identity)?;
+    active.participants.remove(idx).video
+}
+
+fn drop_video_frame(cx: &mut App, frame: Option<Arc<RenderImage>>) {
+    if let Some(image) = frame {
+        cx.drop_image(image, None);
+    }
+}
+
+fn drop_active_call_images(active: ActiveCall, cx: &mut App) {
+    drop_video_frame(cx, active.local_video);
+    for p in active.participants {
+        drop_video_frame(cx, p.video);
+    }
+}
+
 /// What the Details drawer (stub) describes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DetailsTarget {
@@ -764,7 +843,25 @@ impl AppState {
             }
         });
 
-        let update_state = UpdateState::new();
+        let jobs_tick = cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(JOBS_POLL_MS))
+                .await;
+            if this.update(cx, |state, _| state.jobs_tick()).is_err() {
+                break;
+            }
+        });
+
+        let mut update_state = UpdateState::new();
+        // Rig: `ARBOS_UPDATE_STATE=available|downloading|installed|failed` —
+        // the footer's update disc in that state for a fake 0.6.999 build
+        // (the worker never polls while the variable is set).
+        if let Some(phase) = std::env::var("ARBOS_UPDATE_STATE")
+            .ok()
+            .and_then(|v| UpdateState::fixture_phase(&v, &update_state.current_version))
+        {
+            update_state.phase = phase;
+        }
         let (update_event_tx, mut update_event_rx) = mpsc::unbounded_channel::<UpdateEvent>();
         let (update_command_tx, update_command_rx) = mpsc::unbounded_channel::<UpdateCommand>();
         let update_worker = Tokio::spawn(
@@ -846,10 +943,12 @@ impl AppState {
             chat_ui: HashMap::new(),
             blobs: HashMap::new(),
             thumbnails: HashMap::new(),
+            search_index: SearchIndex::default(),
             thumbnails_trimmed: HashMap::new(),
             thumbnails_requested: HashSet::new(),
             thumbnails_failed: HashSet::new(),
             notices: Vec::new(),
+            push_refused: HashSet::new(),
             selected_project: None,
             store_usage: (0, 0),
             active_tab: HashMap::new(),
@@ -877,7 +976,15 @@ impl AppState {
             secrets: SecretsView::default(),
             devices: DevicesView::default(),
             project_secrets: std::collections::HashMap::new(),
+            shell_grants: std::collections::HashMap::new(),
             routines: HashMap::new(),
+            box_report: None,
+            jobs: HashMap::new(),
+            tasks_open: None,
+            rollouts: HashMap::new(),
+            job_tabs: HashMap::new(),
+            closed_job_tabs: HashSet::new(),
+            pending_steers: HashMap::new(),
             routine_runs: HashMap::new(),
             notifier: Notifier::new(),
             window_active: true,
@@ -887,6 +994,7 @@ impl AppState {
             profile_stack: Vec::new(),
             profile_opened: 0,
             avatar_picker_request: None,
+            avatar_rig_prompt: None,
             avatar_generated: None,
             agent_pick: None,
             profile_editing_description: false,
@@ -947,6 +1055,7 @@ impl AppState {
             channel_pending_room: None,
             _pump: pump,
             _notify_tick: notify_tick,
+            _jobs_tick: jobs_tick,
             _update_pump: update_pump,
             _call_pump: call_pump,
         }
@@ -992,7 +1101,7 @@ impl AppState {
                             self.install_update(cx);
                         } else if fresh {
                             self.push_notice(format!(
-                                "Arbos {version} is ready to install — press Update in the rail."
+                                "Arbos {version} is ready — press the blue update button at the bottom of the chat list to install it."
                             ));
                         }
                     }
@@ -1051,7 +1160,7 @@ impl AppState {
                 }
                 self.push_notice(format!(
                     "Arbos {version} is installed — it restarts in a minute while you are in Arbos, \
-                     or when you pause. Press Restart now in the rail to do it at once."
+                     or when you pause. Press the blue update button at the bottom of the chat list to do it at once."
                 ));
                 cx.spawn(async move |this, cx| loop {
                     cx.background_executor()
@@ -1077,12 +1186,11 @@ impl AppState {
                         self.auto_update_failed = Some(a.item.version.clone());
                     }
                 }
-                // A quiet "Retry" in the rail is not enough: say what went wrong and offer the
-                // download page.
+                // The disc alone is not enough: say what went wrong and offer the download page.
                 let next = if message.ends_with('.') {
-                    " Press Retry"
+                    " Press the blue update button to retry"
                 } else {
-                    " — press Retry"
+                    " — press the blue update button to retry"
                 };
                 self.push_notice(format!(
                     "Update failed: {message}{next}, or get the newest version from {}.",
@@ -1206,37 +1314,48 @@ impl AppState {
         cx.notify();
     }
 
-    /// The rail button: download, verify, swap, relaunch in one click. From a translocated or
-    /// read-only copy the new version is installed into Applications instead.
+    /// The footer's update disc (and Settings → Updates → Install): one click does what
+    /// [`UpdateState::disc_action`] says — download, verify, swap and relaunch; restart now
+    /// for an installed build; from a translocated or read-only copy the move to Applications.
     pub fn install_update(&mut self, cx: &mut Context<Self>) {
         if self.update.busy() {
             return;
         }
-        if matches!(self.update.phase, UpdatePhase::Installed { .. }) {
-            // "Restart now": the automatic install is done; skip the wait.
-            if let Some(installed) = self.pending_relaunch.take() {
-                update::log("auto-update: Restart now pressed");
-                self.relaunch_into(installed, cx);
+        match self.update.click_action() {
+            update::DiscAction::Hidden | update::DiscAction::Busy => {}
+            update::DiscAction::Relaunch => {
+                // "Restart now": the automatic install is done; skip the wait.
+                if let Some(installed) = self.pending_relaunch.take() {
+                    update::log("auto-update: Restart now pressed");
+                    self.relaunch_into(installed, cx);
+                }
             }
-            return;
+            update::DiscAction::MoveToApplications => self.move_to_applications(cx),
+            update::DiscAction::Install => {
+                let Some(available) = self.update.available().cloned() else {
+                    return;
+                };
+                self.update.phase = UpdatePhase::Downloading {
+                    available,
+                    got: 0,
+                    total: None,
+                };
+                let _ = self.update_commands.send(UpdateCommand::Install);
+                cx.notify();
+            }
         }
-        if self.update.button_moves() {
-            self.move_to_applications(cx);
-            return;
-        }
-        let Some(available) = self.update.available().cloned() else {
-            return;
-        };
-        self.update.phase = UpdatePhase::Downloading {
-            available,
-            got: 0,
-            total: None,
-        };
-        let _ = self.update_commands.send(UpdateCommand::Install);
-        cx.notify();
     }
 
-    fn apply(&mut self, event: SyncEvent, cx: &mut Context<Self>) {
+    /// Headless tests: swap the source's command channel for one the test reads,
+    /// so what the UI sent (`stop { jobId }`, …) can be asserted.
+    #[cfg(test)]
+    pub(crate) fn take_command_channel(&mut self) -> mpsc::UnboundedReceiver<ClientCommand> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.commands = tx;
+        rx
+    }
+
+    pub(crate) fn apply(&mut self, event: SyncEvent, cx: &mut Context<Self>) {
         match event {
             SyncEvent::NeedsPairing { relay_url } => {
                 let mode = self
@@ -1253,6 +1372,7 @@ impl AppState {
                 });
                 self.device_id = None;
                 self.room_links.clear();
+                self.push_refused.clear();
                 self.relay_link = (LinkState::Live, 0);
                 self.people_directory.clear();
                 cx.notify();
@@ -1349,7 +1469,9 @@ impl AppState {
                     self.my_call.as_ref().map(|c| &c.status),
                     Some(CallStatus::Connecting)
                 ) {
-                    self.my_call = None;
+                    if let Some(active) = self.my_call.take() {
+                        drop_active_call_images(active, cx);
+                    }
                 }
                 self.push_notice(message);
                 cx.notify();
@@ -1458,6 +1580,8 @@ impl AppState {
                 }
                 if let Some(msgs) = self.messages.remove(&local_id) {
                     self.messages.insert(chat.id.clone(), msgs);
+                    self.search_index.remove_chat(&local_id);
+                    self.index_chat(&chat.id.clone());
                 }
                 if let Some(ui) = self.chat_ui.remove(&local_id) {
                     self.chat_ui.insert(chat.id.clone(), ui);
@@ -1553,6 +1677,18 @@ impl AppState {
                 self.push_notice(text);
                 cx.notify();
             }
+            SyncEvent::PushRefused { chat_id, refused } => {
+                const DELIVERY: &str = "Messages in this chat are not being delivered";
+                if refused {
+                    self.push_refused.insert(chat_id);
+                    // Notice is also emitted from the room host; keep the flag here
+                    // so the chat view can show it until the room's next ACK.
+                } else {
+                    self.push_refused.remove(&chat_id);
+                    self.notices.retain(|n| n.text != DELIVERY);
+                }
+                cx.notify();
+            }
             SyncEvent::Models(models) => {
                 self.models = models;
                 cx.notify();
@@ -1624,6 +1760,7 @@ impl AppState {
                             name: "Home".into(),
                             avatar_color_index: None,
                             leaf: None,
+                            picture: None,
                             source_project_id: None,
                             description: None,
                             color: None,
@@ -1709,10 +1846,19 @@ impl AppState {
                 if self.selected_channel.is_none()
                     && self.projects.iter().any(|p| p.id == project_id)
                 {
-                    let open = self
-                        .primary_chat(&project_id)
-                        .map(|c| c.id.clone())
+                    // Rig: `ARBOS_FIXTURE_OPEN=<project>/<chat id>` names the exact tab
+                    // (a group under the agent, for example); the primary chat otherwise.
+                    let explicit = std::env::var("ARBOS_FIXTURE_OPEN")
+                        .ok()
+                        .and_then(|spec| spec.split_once('/').map(|(_, c)| c.to_owned()))
+                        .filter(|c| *c == chat_id);
+                    let open = explicit
                         .filter(|id| self.tabs(&project_id).iter().any(|c| &c.id == id))
+                        .or_else(|| {
+                            self.primary_chat(&project_id)
+                                .map(|c| c.id.clone())
+                                .filter(|id| self.tabs(&project_id).iter().any(|c| &c.id == id))
+                        })
                         .or_else(|| {
                             self.tabs(&project_id)
                                 .iter()
@@ -1799,6 +1945,14 @@ impl AppState {
                             if self.agent_pick == Some(AgentPick::Voice) {
                                 self.fetch_voices();
                             }
+                            // `agent:library` / `agent:computer` land on that tab.
+                            match rest {
+                                ":library" => self
+                                    .set_profile_tab(crate::ui::profiles::agent::TAB_LIBRARY, cx),
+                                ":computer" => self
+                                    .set_profile_tab(crate::ui::profiles::agent::TAB_COMPUTER, cx),
+                                _ => {}
+                            }
                             // `agent:avatar[:generate|:upload]` opens the avatar picker sheet
                             // (D92 amendment) on that tab.
                             if let Some(tab) = rest.strip_prefix(":avatar") {
@@ -1878,8 +2032,31 @@ impl AppState {
                                     self.rig_unblock = Some(person);
                                 }
                             }
-                        } else if spec == "me" {
+                        } else if let Some(rest) = spec.strip_prefix("me") {
                             self.open_profile(ProfilePage::Me, cx);
+                            // `me:avatar[:generate[=<prompt>]|:upload]` — the avatar picker for
+                            // my own picture (Generate | Upload, Reset); with `=<prompt>` the
+                            // shell types the prompt and presses Generate.
+                            if let Some(tab) = rest.strip_prefix(":avatar") {
+                                use crate::ui::avatar_picker::{Tab, Target};
+                                let tab = match tab {
+                                    ":upload" => Tab::Upload,
+                                    t => {
+                                        if let Some(prompt) = t.strip_prefix(":generate=") {
+                                            if !prompt.trim().is_empty() {
+                                                self.avatar_rig_prompt = Some(prompt.to_owned());
+                                            }
+                                        }
+                                        Tab::Generate
+                                    }
+                                };
+                                let me = self
+                                    .account
+                                    .as_ref()
+                                    .map(|a| a.id.clone())
+                                    .unwrap_or_default();
+                                self.open_avatar_picker(Target::Me(me), tab, cx);
+                            }
                         }
                     } else if std::env::var_os("ARBOS_OPEN_SETTINGS").is_some() {
                         self.open_profile(ProfilePage::Me, cx);
@@ -2062,6 +2239,7 @@ impl AppState {
                     .cloned()
                     .collect();
                 self.messages.insert(chat_id.clone(), messages);
+                self.index_chat(&chat_id);
                 // Message counts decide an agent's primary chat (single-chat mode).
                 if let Some(project_id) = self.project_of_chat(&chat_id).map(|p| p.id.clone()) {
                     self.enforce_tab(&project_id);
@@ -2123,6 +2301,7 @@ impl AppState {
                         list.push(message.clone());
                     }
                 }
+                self.index_message(&chat_id, &message);
                 self.notify_for_message(
                     &chat_id,
                     &message,
@@ -2187,6 +2366,10 @@ impl AppState {
             SyncEvent::ProjectSecrets { project_id, view } => {
                 self.project_secrets.insert(project_id, view);
             }
+            SyncEvent::ShellGrants { project_id, items } => {
+                self.shell_grants.insert(project_id, items);
+                cx.notify();
+            }
             SyncEvent::Secrets(view) => {
                 self.secrets = view;
                 cx.notify();
@@ -2208,6 +2391,65 @@ impl AppState {
             } => {
                 self.routines.insert(project_id, routines);
                 cx.notify();
+            }
+            SyncEvent::BoxReport(report) => {
+                self.box_report = Some(report);
+                cx.notify();
+            }
+            SyncEvent::ProjectJobs { project_id, jobs } => {
+                if self.jobs.get(&project_id).is_some_and(|j| *j == jobs) {
+                    return;
+                }
+                if jobs.is_empty() {
+                    self.jobs.remove(&project_id);
+                } else {
+                    self.jobs.insert(project_id, jobs);
+                }
+                // The drawer lists live work only: nothing open → it closes itself.
+                if self
+                    .tasks_open
+                    .as_deref()
+                    .is_some_and(|chat| self.open_jobs(chat).is_empty())
+                {
+                    self.tasks_open = None;
+                }
+                // Rig: `ARBOS_RIG_TASKS=open` opens the drawer on the first listing.
+                if self.tasks_open.is_none() && crate::ui::tasks::rig_setting() == Some("open") {
+                    if let Some(chat) = self
+                        .active_chat_id()
+                        .filter(|c| !self.open_jobs(c).is_empty())
+                    {
+                        self.tasks_open = Some(chat);
+                    }
+                }
+                // Every listed job has its tab (`jobtabs`).
+                for project_id in self.jobs.keys().cloned().collect::<Vec<_>>() {
+                    self.sync_job_tabs(&project_id);
+                }
+                // Rig: `ARBOS_RIG_JOBTAB=open` selects the newest job's tab once.
+                if self.rollouts.is_empty()
+                    && std::env::var("ARBOS_RIG_JOBTAB").is_ok_and(|v| v == "open")
+                {
+                    if let Some(chat) = self
+                        .active_chat_id()
+                        .filter(|c| !self.open_jobs(c).is_empty())
+                    {
+                        self.open_newest_job_tab(chat, cx);
+                    }
+                }
+                cx.notify();
+            }
+            SyncEvent::JobRollout {
+                project_id,
+                job_id,
+                rollout,
+            } => {
+                // A document for a job no listing named yet still gets its tab.
+                if self.job_project(&job_id).is_none() && !rollout.unavailable {
+                    let tab = crate::jobtabs::tab(&project_id, &job_id, &rollout.title, now_ms());
+                    self.job_tabs.entry(project_id).or_default().push(tab);
+                }
+                self.apply_rollout(&job_id, rollout, cx);
             }
             SyncEvent::RoutineRuns { routine_id, runs } => {
                 self.routine_runs.insert(routine_id, runs);
@@ -2343,10 +2585,12 @@ impl AppState {
         let primary = self.primary_chat(project_id);
         if self.multi_chat {
             // Archived chats leave the strip; the pinned "Main" chat never does.
+            // Job tabs (`jobtabs`) follow the agent's chats.
             return self
                 .tabs(project_id)
                 .iter()
                 .filter(|c| c.is_pinned || !self.archived_chats.contains(&c.id))
+                .chain(self.job_tabs.get(project_id).into_iter().flatten())
                 .collect();
         }
         let mut out: Vec<&Chat> = primary.into_iter().collect();
@@ -2547,7 +2791,10 @@ impl AppState {
     pub fn active_chat(&self) -> Option<&Chat> {
         let project_id = self.selected_project.as_deref()?;
         let chat_id = self.active_tab.get(project_id)?;
-        self.tabs(project_id).iter().find(|c| &c.id == chat_id)
+        self.tabs(project_id)
+            .iter()
+            .chain(self.job_tabs.get(project_id).into_iter().flatten())
+            .find(|c| &c.id == chat_id)
     }
 
     /// The chat the centre shows: a channel's room id when one is open (D88), else the
@@ -2563,6 +2810,7 @@ impl AppState {
     pub fn space_of_chat(&self, chat_id: &str) -> Id {
         self.chats
             .iter()
+            .chain(self.job_tabs.iter())
             .find(|(_, tabs)| tabs.iter().any(|c| c.id == chat_id))
             .map(|(space, _)| space.clone())
             .unwrap_or_else(|| chat_id.to_owned())
@@ -2706,6 +2954,7 @@ impl AppState {
         // A chat replaces the channel in the centre (D88).
         self.selected_channel = None;
         if switching {
+            self.tasks_open = None;
             self.search_chat = None;
             // The right pane belongs to the chat it was opened from; a new
             // chat starts without one.
@@ -2840,29 +3089,98 @@ impl AppState {
     }
 
     /// Everything the command palette can find for `query` (already
-    /// `search::normalize_query`'d; empty = recents): chat rows through the
-    /// #1477 matcher, servers and their channels by name, and the files,
-    /// pictures and links shared in loaded chats ([feedback
-    /// search-palette-2026-10-24]). Ordering and grouping is `palette::arrange`.
+    /// `search::normalize_query`'d; empty = recents), app-wide whatever chat is
+    /// open ([feedback search-palette-2026-10-24], [feedback
+    /// search-palette-app-wide-2026-10-24]): every chat row through the #1477
+    /// matcher (name, @handle, title, member, chat title — never a message
+    /// here), people met in groups and shared projects who have no DM yet,
+    /// servers and their channels by name, and — from the local
+    /// [`SearchIndex`] — message text, attachments and links in every chat
+    /// doc on this Mac. Ordering and grouping is `palette::arrange`.
     pub fn palette_entries(&self, query: &str) -> Vec<palette::Entry> {
-        use crate::palette::{Entry, Kind, Target};
+        use crate::palette::{Entry, Kind, Rank, Target};
+        let me = self.me_handle();
         let mut out = Vec::new();
         for space in &self.projects {
-            let Some(hit) = self.space_search_hit(space, query) else {
+            let Some(hit) = search::space_hit(
+                space,
+                &me,
+                self.tabs(&space.id)
+                    .iter()
+                    .filter(|c| !c.is_system)
+                    .map(|c| (c.id.as_str(), c.title.as_str())),
+                Vec::new,
+                query,
+            ) else {
                 continue;
             };
             let when = crate::ui::sidebar::last_activity(self, space);
             out.push(palette::space_entry(space, hit, when, query));
         }
+        if !query.is_empty() {
+            // People without a DM: members of my groups and shared projects,
+            // the other side's owner, the last directory search. Opening one
+            // starts the DM (`start_dm`).
+            let dm_handles: HashSet<String> = self
+                .people_spaces()
+                .filter(|p| !p.is_people_group())
+                .filter_map(|p| p.person().map(|x| x.handle.clone()))
+                .collect();
+            let mut seen: HashSet<String> = HashSet::new();
+            let mut met: Vec<(Person, String)> = Vec::new();
+            for space in &self.projects {
+                let where_ = space.name.clone();
+                for p in space.people.iter().chain(space.owner_person.iter()) {
+                    if p.handle.is_empty() || p.handle == me || dm_handles.contains(&p.handle) {
+                        continue;
+                    }
+                    if seen.insert(p.handle.clone()) {
+                        met.push((p.clone(), where_.clone()));
+                    }
+                }
+            }
+            for p in &self.people_results {
+                if p.handle.is_empty() || p.handle == me || dm_handles.contains(&p.handle) {
+                    continue;
+                }
+                if seen.insert(p.handle.clone()) {
+                    met.push((p.clone(), String::new()));
+                }
+            }
+            for (p, where_) in met {
+                let name = p.display_name();
+                let rank = Rank::best([name.as_str(), p.handle.as_str()], query);
+                if rank == Rank::Indirect {
+                    continue;
+                }
+                let mut subtitle = format!("@{}", p.handle);
+                if !where_.is_empty() {
+                    subtitle.push_str(&format!(" · in {where_}"));
+                }
+                out.push(Entry {
+                    kind: Kind::Person,
+                    title: name,
+                    subtitle,
+                    when: 0,
+                    rank,
+                    target: Target::Person(p.handle.clone()),
+                });
+            }
+        }
         for server in &self.servers {
             let when = self.server_last_activity(server);
-            if query.is_empty() || search::fold(&server.name).contains(query) {
+            let rank = if query.is_empty() {
+                Rank::Prefix
+            } else {
+                Rank::of(&server.name, query)
+            };
+            if rank != Rank::Indirect {
                 out.push(Entry {
                     kind: Kind::Server,
                     title: server.name.clone(),
                     subtitle: palette::server_subtitle(server.channels.len(), server.member_count),
                     when,
-                    indirect: false,
+                    rank,
                     target: Target::Server(server.id.clone()),
                 });
             }
@@ -2870,7 +3188,8 @@ impl AppState {
                 continue;
             }
             for channel in &server.channels {
-                if !search::fold(&channel.name).contains(query) {
+                let rank = Rank::of(&channel.name, query);
+                if rank == Rank::Indirect {
                     continue;
                 }
                 let when = self
@@ -2883,7 +3202,7 @@ impl AppState {
                     title: format!("#{}", channel.name),
                     subtitle: server.name.clone(),
                     when,
-                    indirect: false,
+                    rank,
                     target: Target::Channel {
                         server_id: server.id.clone(),
                         channel_id: channel.id.clone(),
@@ -2894,91 +3213,128 @@ impl AppState {
         if query.is_empty() {
             return out;
         }
-        for space in &self.projects {
-            for chat in self.tabs(&space.id) {
-                for m in self.messages_of(&chat.id) {
-                    let by = m
-                        .sender_name
-                        .clone()
-                        .filter(|n| !n.is_empty())
-                        .or_else(|| m.sender_handle.clone().map(|h| format!("@{h}")))
-                        .unwrap_or_else(|| {
-                            if self.is_mine(m) {
-                                "You".into()
-                            } else {
-                                space.name.clone()
-                            }
-                        });
-                    let where_ = if space.is_people() {
-                        if let Some(p) = space.person().filter(|_| !space.is_people_group()) {
-                            p.display_name()
-                        } else {
-                            space.name.clone()
-                        }
-                    } else {
-                        space.name.clone()
-                    };
-                    for part in &m.parts {
-                        match part {
-                            Part::Attachment { id, attachment } => {
-                                let name = attachment.title();
-                                if !search::fold(name).contains(query)
-                                    && !search::fold(&attachment.name).contains(query)
-                                {
-                                    continue;
-                                }
-                                let kind = match attachment.kind() {
-                                    AttachmentKind::Image | AttachmentKind::Video => Kind::Media,
-                                    _ => Kind::File,
-                                };
-                                let mut meta = attachment.kind().label().to_string();
-                                let size = attachment.size_label();
-                                if !size.is_empty() {
-                                    meta.push_str(" · ");
-                                    meta.push_str(&size);
-                                }
-                                out.push(Entry {
-                                    kind,
-                                    title: name.to_string(),
-                                    subtitle: format!("{meta} · {by} in {where_}"),
-                                    when: m.created_at,
-                                    indirect: false,
-                                    target: Target::Media {
-                                        chat_id: chat.id.clone(),
-                                        message_id: m.id.clone(),
-                                        part_id: id.clone(),
-                                    },
-                                });
-                            }
-                            Part::Text { text, .. } => {
-                                for url in crate::ui::profiles::urls_in(text) {
-                                    if !search::fold(&url).contains(query) {
-                                        continue;
-                                    }
-                                    out.push(Entry {
-                                        kind: Kind::Link,
-                                        title: url
-                                            .trim_start_matches("https://")
-                                            .trim_start_matches("http://")
-                                            .to_string(),
-                                        subtitle: format!(
-                                            "{} · {by} in {where_}",
-                                            palette::link_host(&url)
-                                        ),
-                                        when: m.created_at,
-                                        indirect: false,
-                                        target: Target::Link(url),
-                                    });
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
+        // Message text, attachments and links from the local index. A hit's
+        // chat is an agent / people chat (by chat id) or a channel (by room id).
+        let cap = palette::SECTION_CAP * 2;
+        for hit in self.search_index.messages(query, cap) {
+            let Some((title, target)) = self.palette_place(&hit.chat_id, &hit.message_id) else {
+                continue;
+            };
+            out.push(Entry {
+                kind: Kind::Message,
+                title,
+                subtitle: format!("{} · {}", hit.sender, hit.snippet),
+                when: hit.created_at,
+                rank: Rank::Contains,
+                target,
+            });
+        }
+        for hit in self.search_index.attachments(query, cap) {
+            let Some((where_, _)) = self.palette_place(&hit.chat_id, &hit.message_id) else {
+                continue;
+            };
+            let kind = match hit.kind {
+                AttachmentKind::Image | AttachmentKind::Video => Kind::Media,
+                _ => Kind::File,
+            };
+            let mut meta = hit.kind.label().to_string();
+            if !hit.size_label.is_empty() {
+                meta.push_str(" · ");
+                meta.push_str(&hit.size_label);
+            }
+            out.push(Entry {
+                kind,
+                title: hit.name,
+                subtitle: format!("{meta} · {} in {where_}", hit.sender),
+                when: hit.created_at,
+                rank: Rank::Contains,
+                target: Target::Media {
+                    chat_id: hit.chat_id,
+                    message_id: hit.message_id,
+                    part_id: hit.part_id,
+                },
+            });
+        }
+        for hit in self.search_index.links(query, cap) {
+            let Some((where_, _)) = self.palette_place(&hit.chat_id, &hit.message_id) else {
+                continue;
+            };
+            out.push(Entry {
+                kind: Kind::Link,
+                title: hit
+                    .url
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .to_string(),
+                subtitle: format!(
+                    "{} · {} in {where_}",
+                    palette::link_host(&hit.url),
+                    hit.sender
+                ),
+                when: hit.created_at,
+                rank: Rank::Contains,
+                target: Target::Link(hit.url),
+            });
+        }
+        out
+    }
+
+    /// Where an indexed message lives, for the palette: the chat's display
+    /// name (the person for a DM, the agent / group otherwise, `#channel ·
+    /// Server` for a channel room) and the target that opens it there.
+    fn palette_place(&self, chat_id: &str, message_id: &str) -> Option<(String, palette::Target)> {
+        use crate::palette::Target;
+        if let Some(space) = self.project_of_chat(chat_id) {
+            let name = match space
+                .person()
+                .filter(|_| space.is_people() && !space.is_people_group())
+            {
+                Some(p) => p.display_name(),
+                None => space.name.clone(),
+            };
+            return Some((
+                name,
+                Target::Message {
+                    space_id: space.id.clone(),
+                    chat_id: chat_id.to_string(),
+                    message_id: message_id.to_string(),
+                },
+            ));
+        }
+        for server in &self.servers {
+            for channel in &server.channels {
+                let room = channel
+                    .room_id
+                    .clone()
+                    .or_else(|| self.channel_row(channel).map(|r| r.room_id.clone()));
+                if room.as_deref() == Some(chat_id) {
+                    return Some((
+                        format!("#{} · {}", channel.name, server.name),
+                        Target::ChannelMessage {
+                            server_id: server.id.clone(),
+                            channel_id: channel.id.clone(),
+                            message_id: message_id.to_string(),
+                        },
+                    ));
                 }
             }
         }
-        out.dedup_by(|a, b| a.kind == Kind::Link && b.kind == Kind::Link && a.target == b.target);
-        out
+        None
+    }
+
+    /// Re-index one chat doc for the palette (a snapshot, a channel page).
+    fn index_chat(&mut self, chat_id: &str) {
+        let mut index = std::mem::take(&mut self.search_index);
+        let messages = self.messages_of(chat_id);
+        index.replace_chat(chat_id, messages, self);
+        self.search_index = index;
+    }
+
+    /// Re-index one message for the palette (an upsert, a streaming delta).
+    fn index_message(&mut self, chat_id: &str, message: &Message) {
+        let mut index = std::mem::take(&mut self.search_index);
+        index.upsert(chat_id, message, self);
+        self.search_index = index;
     }
 
     /// Open what a palette row points at ([feedback search-palette-2026-10-24]).
@@ -3005,6 +3361,25 @@ impl AppState {
                 self.open_server = Some(server_id.clone());
                 self.select_channel(server_id, channel_id, cx);
             }
+            Target::ChannelMessage {
+                server_id,
+                channel_id,
+                message_id,
+            } => {
+                self.open_server = Some(server_id.clone());
+                self.select_channel(server_id.clone(), channel_id.clone(), cx);
+                if let Some(room) = self
+                    .server(&server_id)
+                    .and_then(|s| s.channel(&channel_id))
+                    .and_then(|c| self.room_of_channel(c))
+                {
+                    self.highlight_message = Some(message_id.clone());
+                    self.reveal_message = Some((room, message_id));
+                    self.reveal_nonce += 1;
+                    cx.notify();
+                }
+            }
+            Target::Person(handle) => self.start_dm(handle, cx),
             Target::Media {
                 chat_id,
                 message_id,
@@ -3061,6 +3436,9 @@ impl AppState {
         if self.search_chat.as_deref() != Some(chat_id.as_str()) {
             self.search_chat = None;
         }
+        if self.tasks_open.as_deref() != Some(chat_id.as_str()) {
+            self.tasks_open = None;
+        }
         self.reveal_message = None;
         self.highlight_message = None;
         // Single-chat: an agent has one chat, whichever one was asked for.
@@ -3089,10 +3467,13 @@ impl AppState {
             chat.unread_count = 0;
         }
         self.sync_badge();
-        self.command(ClientCommand::MarkRead {
-            chat_id: chat_id.clone(),
-        });
-        self.command(ClientCommand::OpenChat { chat_id });
+        // A job tab is client-side (`jobtabs`): nothing for the relay to open or mark.
+        if !crate::jobtabs::is_job_chat(&chat_id) {
+            self.command(ClientCommand::MarkRead {
+                chat_id: chat_id.clone(),
+            });
+            self.command(ClientCommand::OpenChat { chat_id });
+        }
         self.sync_focus();
         cx.notify();
     }
@@ -3165,6 +3546,9 @@ impl AppState {
     pub fn close_tab(&mut self, chat_id: Id, cx: &mut Context<Self>) -> bool {
         if !self.multi_chat {
             return false;
+        }
+        if crate::jobtabs::is_job_chat(&chat_id) {
+            return self.close_job_tab(&chat_id, cx);
         }
         let Some(project_id) = self.project_of_chat(&chat_id).map(|p| p.id.clone()) else {
             return false;
@@ -3268,6 +3652,10 @@ impl AppState {
         let Some(chat_id) = self.active_chat_id() else {
             return;
         };
+        if crate::jobtabs::is_job_chat(&chat_id) {
+            self.steer_from_job_tab(&chat_id, text, cx);
+            return;
+        }
         if self.selected_channel.is_some() {
             self.send_to_channel(
                 chat_id,
@@ -3383,6 +3771,9 @@ impl AppState {
                 subagent_id: None,
                 subagent_name: None,
                 handoff_messages: None,
+                worker: false,
+                job: None,
+                hidden: false,
                 agent_reply_to: None,
                 reactions: Default::default(),
                 in_reply_to: None,
@@ -3649,6 +4040,7 @@ impl AppState {
         &mut self,
         name: String,
         leaf: Option<crate::ui::avatars::LeafPick>,
+        picture: Option<crate::sync::DraftPicture>,
         cx: &mut Context<Self>,
     ) {
         let name = name.trim().chars().take(64).collect::<String>();
@@ -3657,7 +4049,11 @@ impl AppState {
         }
         self.server_busy = true;
         self.server_error = None;
-        self.command(ClientCommand::ServerCreate { name, leaf });
+        self.command(ClientCommand::ServerCreate {
+            name,
+            leaf,
+            picture,
+        });
         cx.notify();
     }
 
@@ -4109,6 +4505,9 @@ impl AppState {
                 subagent_id: None,
                 subagent_name: None,
                 handoff_messages: None,
+                worker: false,
+                job: None,
+                hidden: false,
                 agent_reply_to: None,
                 reactions: Default::default(),
                 in_reply_to: None,
@@ -4340,6 +4739,7 @@ impl AppState {
         }
         let count = decoded.len();
         self.channel_rows.insert(room_id.clone(), decoded);
+        self.index_chat(&room_id);
         // A full first page means there is more above: fetch one more page so the room opens
         // with a comfortable scrollback (one extra page per session; the rest on demand later).
         if count >= CHANNEL_PAGE && self.channel_paged.insert(room_id.clone()) {
@@ -4509,6 +4909,9 @@ impl AppState {
                 subagent_id: None,
                 subagent_name: None,
                 handoff_messages: None,
+                worker: false,
+                job: None,
+                hidden: false,
                 agent_reply_to: None,
                 reactions: Default::default(),
                 in_reply_to: None,
@@ -4584,8 +4987,414 @@ impl AppState {
 
     pub fn stop(&mut self, cx: &mut Context<Self>) {
         if let Some(chat_id) = self.active_chat_id() {
+            if let Some(job_id) = crate::jobtabs::job_id(&chat_id).map(str::to_owned) {
+                // A job tab's Stop halts that job only (`stop { jobId }`).
+                if let Some(parent) = self.job_parent_chat(&job_id) {
+                    self.stop_job(parent, &job_id, cx);
+                }
+                return;
+            }
+            self.stop_all_jobs(&chat_id);
             self.command(ClientCommand::Stop { chat_id });
         }
+        cx.notify();
+    }
+
+    // ----- tasks chip and drawer (duplex §2.4, D7) ------------------------------
+
+    /// The open background jobs of `chat_id`, newest step first as the relay
+    /// lists them. Empty when the relay predates `activity.jobs[]`, when no job
+    /// runs, or when every job row of the chat has closed (the box finished them;
+    /// the next poll confirms).
+    pub fn open_jobs(&self, chat_id: &str) -> Vec<Job> {
+        let Some(project) = self.project_of_chat(chat_id) else {
+            return Vec::new();
+        };
+        if project.is_people() {
+            // A group / DM: the jobs any agent in it started from this chat (each agent's
+            // own listing names the chat).
+            return self
+                .jobs
+                .values()
+                .flatten()
+                .filter(|j| j.chat_id.as_deref() == Some(chat_id))
+                .cloned()
+                .collect();
+        }
+        let Some(jobs) = self.jobs.get(&project.id) else {
+            return Vec::new();
+        };
+        jobs.iter()
+            .filter(|j| j.chat_id.as_deref().is_none_or(|c| c == chat_id))
+            .cloned()
+            .collect()
+    }
+
+    /// The agent projects whose listings the open chat needs: its own agent, or every
+    /// agent in a group / DM.
+    fn jobs_projects_for(&self, chat_id: &str) -> Vec<Id> {
+        let Some(project) = self.project_of_chat(chat_id) else {
+            return Vec::new();
+        };
+        if project.is_people() {
+            project
+                .agents
+                .iter()
+                .map(|a| a.project_id.clone())
+                .filter(|pid| self.projects.iter().any(|p| &p.id == pid && !p.is_people()))
+                .collect()
+        } else {
+            vec![project.id.clone()]
+        }
+    }
+
+    /// Something to poll for: a job row of the open chat still streams, the
+    /// relay listed a job last time, or the drawer is up.
+    fn jobs_poll_wanted(&self) -> Vec<Id> {
+        let Some(chat_id) = self.active_chat_id() else {
+            return Vec::new();
+        };
+        let projects = self.jobs_projects_for(&chat_id);
+        if projects.is_empty() {
+            return Vec::new();
+        }
+        let live = Message::chat_has_live_job(self.messages_of(&chat_id), now_ms());
+        let listed = projects
+            .iter()
+            .any(|pid| self.jobs.get(pid).is_some_and(|j| !j.is_empty()));
+        if live || listed || self.tasks_open.is_some() {
+            projects
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn jobs_tick(&mut self) {
+        for project_id in self.jobs_poll_wanted() {
+            self.command(ClientCommand::JobsRefresh { project_id });
+        }
+        self.rollout_tick();
+    }
+
+    // ----- job tabs (the sub-agent's rollout as a chat tab, `jobtabs`) --------------
+
+    /// The project a job belongs to: the one whose listing or tabs hold it.
+    pub fn job_project(&self, job_id: &str) -> Option<Id> {
+        if let Some((pid, _)) = self
+            .jobs
+            .iter()
+            .find(|(_, jobs)| jobs.iter().any(|j| j.id == job_id))
+        {
+            return Some(pid.clone());
+        }
+        let chat = crate::jobtabs::chat_id(job_id);
+        self.job_tabs
+            .iter()
+            .find(|(_, tabs)| tabs.iter().any(|c| c.id == chat))
+            .map(|(pid, _)| pid.clone())
+    }
+
+    /// The chip's row for a job, wherever it is listed.
+    fn job_row(&self, job_id: &str) -> Option<&Job> {
+        self.jobs.values().flatten().find(|j| j.id == job_id)
+    }
+
+    /// The chat the job was asked in (its parent chat): the document's word, else the chip's.
+    fn job_parent_chat(&self, job_id: &str) -> Option<Id> {
+        self.rollouts
+            .get(job_id)
+            .and_then(|r| r.chat_id.clone())
+            .or_else(|| self.job_row(job_id).and_then(|j| j.chat_id.clone()))
+    }
+
+    /// The listing changed: every job the agent runs has a tab (unless the user closed it);
+    /// tabs of finished jobs stay until closed.
+    fn sync_job_tabs(&mut self, project_id: &Id) {
+        let now = now_ms();
+        let listed: Vec<Job> = self.jobs.get(project_id).cloned().unwrap_or_default();
+        let closed = self.closed_job_tabs.clone();
+        let tabs = self.job_tabs.entry(project_id.clone()).or_default();
+        for job in listed {
+            if closed.contains(&job.id) {
+                continue;
+            }
+            let id = crate::jobtabs::chat_id(&job.id);
+            match tabs.iter_mut().find(|c| c.id == id) {
+                Some(tab) => {
+                    if !job.title.trim().is_empty() {
+                        tab.title = job.title.clone();
+                    }
+                }
+                None => tabs.push(crate::jobtabs::tab(project_id, &job.id, &job.title, now)),
+            }
+        }
+    }
+
+    /// Open (and select) the tab of `job_id`: from a group chat this jumps to the agent's
+    /// own space first. A tab the user closed comes back.
+    pub fn open_job_tab(&mut self, job_id: &str, cx: &mut Context<Self>) {
+        let Some(project_id) = self.job_project(job_id) else {
+            return;
+        };
+        self.closed_job_tabs.remove(job_id);
+        let title = self
+            .job_row(job_id)
+            .map(|j| j.title.clone())
+            .or_else(|| self.rollouts.get(job_id).map(|r| r.title.clone()))
+            .unwrap_or_default();
+        let chat_id = crate::jobtabs::chat_id(job_id);
+        let tabs = self.job_tabs.entry(project_id.clone()).or_default();
+        if !tabs.iter().any(|c| c.id == chat_id) {
+            tabs.push(crate::jobtabs::tab(&project_id, job_id, &title, now_ms()));
+        }
+        self.tasks_open = None;
+        if self.selected_project.as_deref() != Some(project_id.as_str())
+            || self.selected_channel.is_some()
+        {
+            self.select_project(project_id.clone(), cx);
+        }
+        self.select_tab(chat_id.clone(), cx);
+        self.refresh_job_tab(&chat_id);
+        cx.notify();
+    }
+
+    /// The status line's link: the newest open job of the chat.
+    pub fn open_newest_job_tab(&mut self, chat_id: Id, cx: &mut Context<Self>) {
+        if let Some(job) = self.open_jobs(&chat_id).into_iter().next() {
+            self.open_job_tab(&job.id, cx);
+        }
+    }
+
+    /// Close a job tab: back to the agent's chat; the job itself goes on.
+    fn close_job_tab(&mut self, chat_id: &str, cx: &mut Context<Self>) -> bool {
+        let Some(job_id) = crate::jobtabs::job_id(chat_id).map(str::to_owned) else {
+            return false;
+        };
+        let Some(project_id) = self.job_project(&job_id) else {
+            return false;
+        };
+        if let Some(tabs) = self.job_tabs.get_mut(&project_id) {
+            tabs.retain(|c| c.id != chat_id);
+        }
+        self.closed_job_tabs.insert(job_id.clone());
+        self.messages.remove(chat_id);
+        self.pending_steers.remove(&job_id);
+        if self.active_tab.get(&project_id).map(String::as_str) == Some(chat_id) {
+            if let Some(primary) = self.primary_chat(&project_id).map(|c| c.id.clone()) {
+                self.select_tab(primary, cx);
+            }
+        }
+        cx.notify();
+        true
+    }
+
+    /// Ask for the tab's exchange: the whole document first, then only the entries past
+    /// the newest one held.
+    fn refresh_job_tab(&self, chat_id: &str) {
+        let Some(job_id) = crate::jobtabs::job_id(chat_id) else {
+            return;
+        };
+        let Some(project_id) = self.job_project(job_id) else {
+            return;
+        };
+        let after = self
+            .rollouts
+            .get(job_id)
+            .filter(|r| !r.entries.is_empty())
+            .map(|r| r.next_seq.saturating_sub(1));
+        self.command(ClientCommand::RolloutRefresh {
+            project_id,
+            job_id: job_id.to_string(),
+            after,
+        });
+    }
+
+    /// Each tick: the active job tab polls while its job runs (or until its document arrives).
+    fn rollout_tick(&mut self) {
+        let Some(chat_id) = self.active_chat_id() else {
+            return;
+        };
+        let Some(job_id) = crate::jobtabs::job_id(&chat_id) else {
+            return;
+        };
+        let wanted = match self.rollouts.get(job_id) {
+            Some(r) => !r.unavailable && r.is_running(),
+            None => true,
+        };
+        if wanted {
+            self.refresh_job_tab(&chat_id);
+        }
+    }
+
+    /// A job document arrived: the tab's transcript is rebuilt from it.
+    pub(crate) fn apply_rollout(
+        &mut self,
+        job_id: &str,
+        rollout: JobRollout,
+        cx: &mut Context<Self>,
+    ) {
+        match self.rollouts.get_mut(job_id) {
+            Some(held) if rollout.unavailable => held.unavailable = true,
+            Some(held) => held.merge(rollout),
+            None => {
+                self.rollouts.insert(job_id.to_string(), rollout);
+            }
+        }
+        let chat_id = crate::jobtabs::chat_id(job_id);
+        let Some(doc) = self.rollouts.get(job_id).cloned() else {
+            return;
+        };
+        let pending = self.pending_steers.get(job_id).cloned().unwrap_or_default();
+        let messages = crate::jobtabs::messages(&doc, &pending);
+        if let Some(project_id) = self.job_project(job_id) {
+            if let Some(tab) = self
+                .job_tabs
+                .get_mut(&project_id)
+                .and_then(|tabs| tabs.iter_mut().find(|c| c.id == chat_id))
+            {
+                if !doc.title.trim().is_empty() {
+                    tab.title = doc.title.clone();
+                }
+                if let Some(last) = messages.iter().map(|m| m.created_at).max() {
+                    tab.last_message_at = tab.last_message_at.max(last);
+                }
+            }
+        }
+        self.messages.insert(chat_id.clone(), messages);
+        cx.emit(AppEvent::TranscriptChanged { chat_id });
+        cx.notify();
+    }
+
+    /// Typing in a job tab steers the job: the words go to the parent chat as a reply to the
+    /// job's ask (the wire the drawer's Steer uses) and show in the tab at once.
+    fn steer_from_job_tab(&mut self, chat_id: &Id, text: String, cx: &mut Context<Self>) {
+        let Some(job_id) = crate::jobtabs::job_id(chat_id).map(str::to_owned) else {
+            return;
+        };
+        let parent_chat = self.job_parent_chat(&job_id);
+        let ask = self
+            .rollouts
+            .get(&job_id)
+            .and_then(|r| r.ask_message_id.clone())
+            .or_else(|| self.job_row(&job_id).and_then(|j| j.ask_message_id.clone()));
+        let (Some(parent_chat), Some(ask)) = (parent_chat, ask) else {
+            self.push_notice(
+                "This task cannot be steered from here yet — reply to your request in the chat instead.",
+            );
+            cx.notify();
+            return;
+        };
+        let message_id = new_id();
+        let echo = crate::jobtabs::typed_steer(chat_id, &message_id, &text, &ask);
+        self.pending_steers
+            .entry(job_id.clone())
+            .or_default()
+            .push(echo.clone());
+        self.messages
+            .entry(chat_id.clone())
+            .or_default()
+            .push(echo.clone());
+        // The parent chat carries the real message: a reply under the ask.
+        self.messages
+            .entry(parent_chat.clone())
+            .or_default()
+            .push(Message {
+                chat_id: parent_chat.clone(),
+                status: MessageStatus::Queued,
+                ..echo
+            });
+        self.command(ClientCommand::Send {
+            chat_id: parent_chat.clone(),
+            message_id,
+            text,
+            attachments: Vec::new(),
+            reply_to: Some(ask),
+            mentions: Vec::new(),
+        });
+        cx.emit(AppEvent::TranscriptChanged {
+            chat_id: chat_id.clone(),
+        });
+        cx.emit(AppEvent::TranscriptChanged {
+            chat_id: parent_chat,
+        });
+        cx.notify();
+    }
+
+    /// The chip was clicked: the drawer opens over the presence row (or closes).
+    pub fn toggle_tasks(&mut self, chat_id: Id, cx: &mut Context<Self>) {
+        if self.tasks_open.as_deref() == Some(chat_id.as_str()) {
+            self.tasks_open = None;
+        } else if !self.open_jobs(&chat_id).is_empty() {
+            self.tasks_open = Some(chat_id);
+        }
+        cx.notify();
+    }
+
+    pub fn close_tasks(&mut self, cx: &mut Context<Self>) {
+        if self.tasks_open.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Steer a job (contract: no command of its own): the composer becomes a
+    /// reply to the job's ask and the user types the correction; the agent
+    /// binds a correction that quotes the ask to that job.
+    pub fn steer_job(&mut self, chat_id: Id, job: &Job, cx: &mut Context<Self>) -> bool {
+        let Some(ask) = job.ask_message_id.clone().filter(|a| !a.is_empty()) else {
+            return false;
+        };
+        self.set_reply_to(chat_id, ask, cx);
+        self.tasks_open = None;
+        cx.notify();
+        true
+    }
+
+    /// `stop { jobId }`: that job only. The row leaves the drawer at once; the
+    /// next poll is the box's word.
+    pub fn stop_job(&mut self, chat_id: Id, job_id: &str, cx: &mut Context<Self>) {
+        let message_id = self
+            .messages_of(&chat_id)
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::User)
+            .map(|m| m.id.clone())
+            .unwrap_or_default();
+        if let Some(project_id) = self.project_of_chat(&chat_id).map(|p| p.id.clone()) {
+            if let Some(jobs) = self.jobs.get_mut(&project_id) {
+                jobs.retain(|j| j.id != job_id);
+                if jobs.is_empty() {
+                    self.jobs.remove(&project_id);
+                    self.tasks_open = None;
+                }
+            }
+        }
+        self.command(ClientCommand::StopJob {
+            chat_id,
+            job_id: job_id.to_string(),
+            message_id,
+        });
+        cx.notify();
+    }
+
+    /// The drawer's Stop all = the Stop button: `stop {}` halts the turn and
+    /// every job of the chat (D7). Forgets the chat's jobs at once.
+    fn stop_all_jobs(&mut self, chat_id: &str) {
+        if let Some(project_id) = self.project_of_chat(chat_id).map(|p| p.id.clone()) {
+            if let Some(jobs) = self.jobs.get_mut(&project_id) {
+                jobs.retain(|j| j.chat_id.as_deref().is_some_and(|c| c != chat_id));
+                if jobs.is_empty() {
+                    self.jobs.remove(&project_id);
+                }
+            }
+        }
+        if self.tasks_open.as_deref() == Some(chat_id) {
+            self.tasks_open = None;
+        }
+    }
+
+    pub fn stop_all(&mut self, chat_id: Id, cx: &mut Context<Self>) {
+        self.stop_all_jobs(&chat_id);
+        self.command(ClientCommand::Stop { chat_id });
         cx.notify();
     }
 
@@ -4622,6 +5431,30 @@ impl AppState {
         cx.notify();
     }
 
+    /// Retry on one of my bubbles the relay refused (`MessageStatus::Error`,
+    /// see `MessageSendFailed`): the failed row goes, and its text + reply-to go
+    /// out again as a new message through the normal send path (attachments
+    /// were local files picked at send time and are not re-read).
+    pub fn resend_failed(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
+        let Some(list) = self.messages.get_mut(&chat_id) else {
+            return;
+        };
+        let Some(ix) = list
+            .iter()
+            .position(|m| m.id == message_id && m.status == MessageStatus::Error)
+        else {
+            return;
+        };
+        let failed = list.remove(ix);
+        let text = failed.plain_text();
+        if text.trim().is_empty() {
+            cx.emit(AppEvent::TranscriptChanged { chat_id });
+            cx.notify();
+            return;
+        }
+        self.send(text, Vec::new(), failed.reply_to.clone(), Vec::new(), cx);
+    }
+
     pub fn retry(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
         self.command(ClientCommand::Retry {
             chat_id,
@@ -4649,9 +5482,12 @@ impl AppState {
                 reason: Some("denied".into()),
             });
         } else {
+            // #1544: "grant:<path class>" is a destructive-shell card's standing option.
+            let grant = choice.strip_prefix("grant:").map(str::to_owned);
             self.command(ClientCommand::Approve {
                 chat_id,
                 approval_id,
+                grant,
             });
         }
         cx.notify();
@@ -4663,6 +5499,7 @@ impl AppState {
         self.command(ClientCommand::Approve {
             chat_id,
             approval_id,
+            grant: None,
         });
         cx.notify();
     }
@@ -5056,11 +5893,29 @@ impl AppState {
             ProfilePage::Agent { project_id } => Some(project_id.clone()),
             _ => None,
         };
+        if let ProfilePage::Agent { project_id } = &page {
+            self.command(ClientCommand::ShellGrantsRefresh {
+                project_id: project_id.clone(),
+            });
+        }
         if let ProfilePage::Server { server_id } | ProfilePage::Channel { server_id, .. } = &page {
             // Members only come with the detail route.
             self.command(ClientCommand::ServerFetch {
                 server_id: server_id.clone(),
             });
+        }
+        if let ProfilePage::Agent { project_id } = &page {
+            // The Details tab's live cards (routines) and the Computer tab's
+            // box report ([feedback agent-pane-details-tab-2026-10-24]).
+            if self
+                .project(project_id)
+                .is_some_and(|p| !p.is_people() && !p.is_guest())
+            {
+                self.command(ClientCommand::RoutinesRefresh {
+                    project_id: project_id.clone(),
+                });
+                self.command(ClientCommand::MachineDebugRefresh);
+            }
         }
         self.profile = Some(page);
         self.profile_opened = self.profile_opened.wrapping_add(1);
@@ -5186,6 +6041,12 @@ impl AppState {
         cx.notify();
     }
 
+    /// The avatar picker's generated preview becomes my picture (`PUT /me/avatar {image_key}`).
+    pub fn set_my_avatar_key(&mut self, key: String, cx: &mut Context<Self>) {
+        self.command(ClientCommand::SetMyAvatarKey { key });
+        cx.notify();
+    }
+
     /// Back to the GitHub picture.
     pub fn remove_my_avatar(&mut self, cx: &mut Context<Self>) {
         self.command(ClientCommand::RemoveMyAvatar);
@@ -5228,6 +6089,12 @@ impl AppState {
 
     pub fn set_profile_tab(&mut self, tab: usize, cx: &mut Context<Self>) {
         self.profile_tab = tab;
+        // The agent pane's Computer tab shows the box as of now.
+        if tab == crate::ui::profiles::agent::TAB_COMPUTER
+            && matches!(self.profile, Some(ProfilePage::Agent { .. }))
+        {
+            self.command(ClientCommand::MachineDebugRefresh);
+        }
         cx.notify();
     }
 
@@ -5751,6 +6618,9 @@ impl AppState {
                 subagent_id: None,
                 subagent_name: None,
                 handoff_messages: None,
+                worker: false,
+                job: None,
+                hidden: false,
                 agent_reply_to: None,
                 reactions: Default::default(),
                 in_reply_to: None,
@@ -5881,6 +6751,9 @@ impl AppState {
                 subagent_id: None,
                 subagent_name: None,
                 handoff_messages: None,
+                worker: false,
+                job: None,
+                hidden: false,
                 agent_reply_to: None,
                 reactions: Default::default(),
                 in_reply_to: None,
@@ -6620,14 +7493,19 @@ impl AppState {
         cx.notify();
     }
 
-    /// Agent pane › "Give a person access…": the same sheet; a pick lets that person's agents
-    /// message this agent (`PUT /projects/{id}/message-access`).
+    /// "Give a person access…": the same sheet; a pick lets that person's agents message
+    /// this agent (`PUT /projects/{id}/message-access`). The agent pane's "Who may message"
+    /// card that opened it left on 2026-10-25 ([feedback
+    /// agent-details-remove-sections-mac-2026-10-25]); the list and its calls stay for the
+    /// next way in.
+    #[allow(dead_code)]
     pub fn open_message_grant_picker(&mut self, project_id: Id, cx: &mut Context<Self>) {
         self.open_new_chat(cx);
         self.message_grant_target = Some(project_id);
         cx.notify();
     }
 
+    #[allow(dead_code)]
     pub fn set_message_grant(
         &mut self,
         project_id: Id,
@@ -6648,6 +7526,7 @@ impl AppState {
         cx.notify();
     }
 
+    #[allow(dead_code)]
     pub fn remove_message_grant(
         &mut self,
         project_id: Id,
@@ -6980,15 +7859,16 @@ impl AppState {
         self.people_busy = true;
         self.people_error = None;
         self.awaiting_group = Some(handles.clone());
-        let (title, leaf) = match self.new_group_draft.take() {
-            Some((t, l)) => (Some(t), Some(l)),
-            None => (None, None),
+        let (title, leaf, picture) = match self.new_group_draft.take() {
+            Some(d) => (Some(d.title), d.leaf, d.picture),
+            None => (None, None, None),
         };
         self.command(ClientCommand::CreatePeopleGroup {
             handles,
             agent_ids,
             title,
             leaf,
+            picture,
         });
         cx.notify();
     }
@@ -7103,10 +7983,11 @@ impl AppState {
         live.into_iter().map(|(handle, _)| handle.clone()).collect()
     }
 
-    fn project_of_chat(&self, chat_id: &str) -> Option<&Project> {
+    pub fn project_of_chat(&self, chat_id: &str) -> Option<&Project> {
         let pid = self
             .chats
             .values()
+            .chain(self.job_tabs.values())
             .flat_map(|v| v.iter())
             .find(|c| c.id == chat_id)
             .map(|c| c.project_id.clone())?;
@@ -7159,6 +8040,7 @@ impl AppState {
             self.selected_project = None;
         }
         self.messages.remove(&chat_id);
+        self.search_index.remove_chat(&chat_id);
         self.chat_ui.remove(&chat_id);
         self.chats.remove(&chat_id);
         self.archived_chats.remove(&chat_id);
@@ -7278,6 +8160,7 @@ impl AppState {
         name: String,
         avatar_color_index: Option<u8>,
         leaf: Option<crate::ui::avatars::LeafPick>,
+        picture: Option<crate::sync::DraftPicture>,
         cx: &mut Context<Self>,
     ) {
         self.new_project_open = false;
@@ -7286,6 +8169,7 @@ impl AppState {
             name,
             avatar_color_index,
             leaf,
+            picture,
             source_project_id: None,
             description: None,
             color: None,
@@ -7312,13 +8196,18 @@ impl AppState {
             &src.id,
             src.avatar_color_override.or(src.avatar_color_index),
         ));
-        // D92: the fork keeps the source's leaf and colour too.
-        let leaf = Some(crate::ui::avatars::project_leaf(src));
+        // D92: the fork keeps the source's leaf and colour too — or its neutral disc.
+        let leaf = Some(if crate::ui::avatars::leaf::is_neutral(src.avatar_leaf) {
+            crate::ui::avatars::neutral_pick()
+        } else {
+            crate::ui::avatars::project_leaf(src)
+        });
         self.awaiting_new_project = true;
         self.command(ClientCommand::CreateProject {
             name,
             avatar_color_index,
             leaf,
+            picture: None,
             source_project_id: Some(project_id),
             description,
             color,
@@ -7382,6 +8271,7 @@ impl AppState {
         if let Some(tabs) = self.chats.remove(&project_id) {
             for c in tabs {
                 self.messages.remove(&c.id);
+                self.search_index.remove_chat(&c.id);
                 self.chat_ui.remove(&c.id);
                 self.archived_chats.remove(&c.id);
             }
@@ -7403,6 +8293,7 @@ impl AppState {
             self.selected_project = None;
         }
         self.messages.remove(&chat_id);
+        self.search_index.remove_chat(&chat_id);
         self.chat_ui.remove(&chat_id);
         self.chats.remove(&chat_id);
         self.archived_chats.remove(&chat_id);
@@ -7433,6 +8324,7 @@ impl AppState {
             tabs.retain(|c| c.id != chat_id);
         }
         self.messages.remove(&chat_id);
+        self.search_index.remove_chat(&chat_id);
         self.chat_ui.remove(&chat_id);
         if self.active_tab.get(&project_id) == Some(&chat_id) {
             let pick = self
@@ -7539,13 +8431,16 @@ impl AppState {
     }
 
     fn request_thumbnails_for(&mut self, chat_id: &Id, messages: &[Message]) {
-        let project_id = self
+        // Only the chat's own space: guessing `selected_project` for a background
+        // upsert (or a chat not yet in the map) hits the wrong blob slot → HTTP 404
+        // and a weekly `mac:thumbnail:* http 404` diagnostic. Snapshot / open retries
+        // once the chat is listed.
+        let Some(project_id) = self
             .chats
             .iter()
             .find(|(_, tabs)| tabs.iter().any(|c| &c.id == chat_id))
             .map(|(pid, _)| pid.clone())
-            .or_else(|| self.selected_project.clone());
-        let Some(project_id) = project_id else {
+        else {
             return;
         };
         for message in messages {
@@ -7671,6 +8566,22 @@ impl AppState {
 
     pub fn project_secrets_refresh(&mut self, project_id: Id, cx: &mut Context<Self>) {
         self.command(ClientCommand::ProjectSecretsRefresh { project_id });
+        cx.notify();
+    }
+
+    /// Switch a standing shell grant off (`DELETE /projects/{id}/shell-grants/{grant}`). The
+    /// row goes at once; the relay's list confirms it. The Permissions card that showed the
+    /// switches left the agent pane on 2026-10-25 ([feedback
+    /// agent-details-remove-sections-mac-2026-10-25]); the call stays for the next way in.
+    #[allow(dead_code)]
+    pub fn shell_grant_revoke(&mut self, project_id: Id, grant_id: String, cx: &mut Context<Self>) {
+        if let Some(list) = self.shell_grants.get_mut(&project_id) {
+            list.retain(|g| g.id != grant_id);
+        }
+        self.command(ClientCommand::ShellGrantRevoke {
+            project_id,
+            grant_id,
+        });
         cx.notify();
     }
 
@@ -8262,9 +9173,10 @@ impl AppState {
         let _ = self.call_commands.send(CallCmd::Leave);
         if !active.call.call_id.is_empty() {
             self.command(ClientCommand::LeaveCall {
-                call_id: active.call.call_id,
+                call_id: active.call.call_id.clone(),
             });
         }
+        drop_active_call_images(active, cx);
         self.sync_tones();
         cx.notify();
     }
@@ -8285,7 +9197,7 @@ impl AppState {
         if let Some(c) = self.my_call.as_mut() {
             c.camera = !c.camera;
             if !c.camera {
-                c.local_video = None;
+                drop_video_frame(cx, swap_frame(&mut c.local_video, None));
                 c.agent_seeing = false;
             }
             c.notice = None;
@@ -8346,7 +9258,9 @@ impl AppState {
             .unwrap_or(call.kind == CallKind::Video);
         let Some(token) = call.token.clone() else {
             self.push_notice("The relay sent no join token.");
-            self.my_call = None;
+            if let Some(active) = self.my_call.take() {
+                drop_active_call_images(active, cx);
+            }
             cx.notify();
             return;
         };
@@ -8450,7 +9364,9 @@ impl AppState {
             .map(|c| c.call.call_id == ended.call_id)
             .unwrap_or(false)
         {
-            self.my_call = None;
+            if let Some(active) = self.my_call.take() {
+                drop_active_call_images(active, cx);
+            }
             let _ = self.call_commands.send(CallCmd::Leave);
         }
         // Exactly one device writes the end line (contract §1) — and once: the
@@ -8641,23 +9557,29 @@ impl AppState {
                             video: None,
                         }),
                     }
-                } else {
-                    active.participants.retain(|p| p.identity != identity);
+                } else if let Some(frame) = remove_call_participant(active, &identity) {
+                    cx.drop_image(frame, None);
                 }
             }
             CallEvent::Video { identity, frame } => {
-                if identity == "local" {
-                    active.local_video = Some(frame);
+                let prev = if identity == "local" {
+                    swap_frame(&mut active.local_video, Some(frame))
                 } else if let Some(p) = active.participant_mut(&identity) {
-                    p.video = Some(frame);
-                }
+                    swap_frame(&mut p.video, Some(frame))
+                } else {
+                    None
+                };
+                drop_video_frame(cx, prev);
             }
             CallEvent::VideoOff { identity } => {
-                if identity == "local" {
-                    active.local_video = None;
+                let prev = if identity == "local" {
+                    swap_frame(&mut active.local_video, None)
                 } else if let Some(p) = active.participant_mut(&identity) {
-                    p.video = None;
-                }
+                    swap_frame(&mut p.video, None)
+                } else {
+                    None
+                };
+                drop_video_frame(cx, prev);
             }
             CallEvent::Speaking(ids) => {
                 for p in active.participants.iter_mut() {
@@ -8686,7 +9608,7 @@ impl AppState {
             }
             CallEvent::CameraUnavailable(why) => {
                 active.camera = false;
-                active.local_video = None;
+                drop_video_frame(cx, swap_frame(&mut active.local_video, None));
                 active.notice = Some(format!("Camera unavailable: {why}"));
             }
             CallEvent::MicUnavailable(why) => {
@@ -8703,7 +9625,9 @@ impl AppState {
                 if active.status == CallStatus::Connected {
                     // The engine dropped the room on its own: leave the relay side too.
                     let call_id = active.call.call_id.clone();
-                    self.my_call = None;
+                    if let Some(ended) = self.my_call.take() {
+                        drop_active_call_images(ended, cx);
+                    }
                     if !call_id.is_empty() {
                         self.command(ClientCommand::LeaveCall { call_id });
                     }
@@ -9418,6 +10342,83 @@ mod chat_image_scale_tests {
 }
 
 #[cfg(test)]
+mod call_video_frame_tests {
+    //! feedback app-01M5R1Z6356QE63XK9EP4HDGEG: each decoded video frame was a
+    //! new RenderImage left in the sprite atlas. swap_frame / remove_call_participant
+    //! hand the previous frame back so App::drop_image can free it.
+    use super::{remove_call_participant, swap_frame, ActiveCall, CallParticipant, CallStatus};
+    use crate::model::{Call, Sender};
+    use gpui::RenderImage;
+    use std::sync::Arc;
+
+    fn frame() -> Arc<RenderImage> {
+        Arc::new(RenderImage::new(Vec::new()))
+    }
+
+    fn active_with(participant: CallParticipant) -> ActiveCall {
+        ActiveCall {
+            call: Call::default(),
+            status: CallStatus::Connected,
+            muted: false,
+            camera: true,
+            participants: vec![participant],
+            local_video: None,
+            joined_at: 0,
+            expanded: true,
+            notice: None,
+            outgoing: false,
+            reachable: None,
+            agent_seeing: false,
+        }
+    }
+
+    #[test]
+    fn swap_frame_returns_none_the_first_time() {
+        let mut slot = None;
+        let first = frame();
+        assert!(swap_frame(&mut slot, Some(first.clone())).is_none());
+        assert!(Arc::ptr_eq(slot.as_ref().unwrap(), &first));
+    }
+
+    #[test]
+    fn swap_frame_returns_the_previous_frame_and_keeps_the_new_one() {
+        let mut slot = None;
+        let first = frame();
+        let second = frame();
+        assert!(swap_frame(&mut slot, Some(first.clone())).is_none());
+        let prev = swap_frame(&mut slot, Some(second.clone()));
+        assert!(Arc::ptr_eq(prev.as_ref().unwrap(), &first));
+        assert!(Arc::ptr_eq(slot.as_ref().unwrap(), &second));
+        assert!(swap_frame(&mut slot, None).is_some_and(|p| Arc::ptr_eq(&p, &second)));
+        assert!(slot.is_none());
+    }
+
+    #[test]
+    fn remove_call_participant_hands_back_that_participants_frame() {
+        let video = frame();
+        let mut active = active_with(CallParticipant {
+            identity: "u_ken".into(),
+            sender: Sender::default(),
+            speaking: false,
+            muted: false,
+            video: Some(video.clone()),
+        });
+        active.participants.push(CallParticipant {
+            identity: "u_other".into(),
+            sender: Sender::default(),
+            speaking: false,
+            muted: false,
+            video: Some(frame()),
+        });
+        let taken = remove_call_participant(&mut active, "u_ken");
+        assert!(taken.is_some_and(|p| Arc::ptr_eq(&p, &video)));
+        assert_eq!(active.participants.len(), 1);
+        assert_eq!(active.participants[0].identity, "u_other");
+        assert!(remove_call_participant(&mut active, "u_missing").is_none());
+    }
+}
+
+#[cfg(test)]
 mod forward_filter_tests {
     //! feedback forward-sheet-focus-2026-10-24: typing in the "Forward to"
     //! field filters the list (once keys reach the field at all).
@@ -9470,5 +10471,11 @@ mod forward_filter_tests {
         );
         assert_eq!(names(&filter_forward_targets(all(), "agent")), ["Arbos"]);
         assert!(filter_forward_targets(all(), "zzz").is_empty());
+    }
+}
+
+impl search_index::SenderName for AppState {
+    fn sender_name(&self, _chat_id: &str, message: &Message) -> String {
+        self.viewer_sender_name(message)
     }
 }

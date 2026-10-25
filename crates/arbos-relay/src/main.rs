@@ -51,6 +51,7 @@ mod room_health;
 mod rooms;
 mod routines;
 mod secrets;
+mod shell_grants;
 mod signin;
 mod skills;
 mod smoke;
@@ -659,6 +660,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/projects/{id}/archive", put(api::archive_project))
         .route("/projects/{id}/status", get(api::project_status))
         .route("/projects/{id}/inspect", get(inspect::project_inspect))
+        .route("/projects/{id}/jobs/{job_id}", get(inspect::project_job))
         // Read-only debugging for an account's own devices (debug_api.rs).
         .route("/me/devices", get(debug_api::me_devices))
         .route("/me/feedback", get(debug_api::me_feedback))
@@ -813,6 +815,7 @@ async fn main() -> anyhow::Result<()> {
             "/servers/{id}/avatar/generate",
             post(images::server_avatar_generate),
         )
+        .route("/me/avatar/generate", post(images::me_avatar_generate))
         .route(
             "/proxy/v1/audio/transcriptions",
             post(proxy::audio_transcriptions),
@@ -899,6 +902,18 @@ async fn main() -> anyhow::Result<()> {
         .route("/me/secrets/settings", put(secrets::put_settings))
         .route("/box/secrets", get(secrets::box_list))
         .route("/box/secrets/env", get(secrets::box_env))
+        .route(
+            "/box/shell-grants",
+            get(shell_grants::box_list).post(shell_grants::box_create),
+        )
+        .route(
+            "/projects/{id}/shell-grants",
+            get(shell_grants::list).post(shell_grants::create),
+        )
+        .route(
+            "/projects/{id}/shell-grants/{grant}",
+            delete(shell_grants::revoke),
+        )
         .route("/box/secrets/{id}/scrub", get(secrets::box_scrub))
         .route("/box/secrets/request", post(secrets::box_request))
         .route(

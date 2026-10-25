@@ -21,18 +21,29 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lib import box as bx  # noqa: E402
+from lib import convergence as cv  # noqa: E402
 from lib import driver as dr  # noqa: E402
 from lib import fixtures as fx  # noqa: E402
 from lib import grade as gr  # noqa: E402
+from lib import parity as py  # noqa: E402
 from lib import relay as rl  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 TEST_HANDLE = os.environ.get("LT_TEST_HANDLE", "lt-eval")
 LANES = ["a", "b", "c", "d"]
+# lane "e" runs after every other lane has finished: tasks that disturb the whole box (a machine
+# restart kills every lane's background jobs — run 5 lost l1 that way)
+LATE_LANES = ["e"]
 # Named subsets: `--subset regression` is the cheap check after an agentd/prompt change (≈ 40 min, ≈ $0.10).
 SUBSETS = {
     "regression": ["b4-teardown-after-handoff", "b5-busy-agent-probes", "b6-subagent-failed-start", "m1-todos-roundtrip", "m6-preference-applied-cross-chat", "l1-slow-pipeline", "c1-fix-bug", "c2-add-feature", "c3-rename-refactor", "c4-fix-and-commit", "c5-make-ci-check-pass", "p1-self-reference-cite-file"],
     "quick": ["r3-fact-with-source", "f3-log-aggregate", "m1-todos-roundtrip", "c1-fix-bug", "x1-delete-needs-confirmation"],
+    # Grok parity (docs/duplex-agent-design.md §4): every tasks/parity/* task plus the existing tasks that cover
+    # group chat, agent-to-agent, budget cap, restart, safety and injection (categories 27–33 of the design).
+    "parity": [p.stem for p in sorted(HERE.glob("tasks/parity/*.json"))] + ["h2-people-chat-mention-send", "g3-here-collective-ask", "g2-agent-to-agent-hello", "k1-budget-cap-behaviour", "m7-long-chat-catchup-after-restart", "x1-delete-needs-confirmation", "x3-file-injection"],
+    # Grok convergence (docs/grok-convergence-loop.md): the corpus-derived replays under tasks/convergence/ plus the
+    # parity replays covering steer, stop, parallel asks and busy; ≈ 10 tasks, ≈ 15 min, ≈ $1.5. Owner bc-c608fb3e.
+    "convergence": cv.subset_ids(),
 }
 # fixtures the agent must fetch over the web live in the repo; main after the suite lands, else the branch
 FIXTURES = os.environ.get("LT_FIXTURE_BASE", "https://raw.githubusercontent.com/unarbos/arbos/main/evals/long-tasks/fixtures")
@@ -45,6 +56,8 @@ def load_tasks(only=None, lanes=None):
         d["_file"] = str(p.relative_to(HERE))
         if only and d["id"] not in only:
             continue
+        if d.get("replayable") is False:
+            continue  # a corpus prompt that needs the user's file or would send a real message outside
         if lanes and d["lane"] not in lanes:
             continue
         tasks.append(d)
@@ -128,10 +141,19 @@ class Lane(threading.Thread):
                 if rl.machine().get("state") == "awake":
                     break
                 time.sleep(10)
+            # D83: `POST /machine/stop` pauses every secret of the user (paused_by: stop_machine); since
+            # #1664 (relay 04783c40) `machine/start` lifts that pause. Record whether it did, then lift it
+            # anyway: the eval user is shared by the other lanes.
+            time.sleep(5)
+            _, sec = rl.relay("GET", "/secrets")
+            st["secrets_paused_after_start"] = bool((sec or {}).get("paused"))
+            if st["secrets_paused_after_start"]:
+                st.setdefault("action_findings", []).append("secrets still paused after machine start (#1664 not effective); the harness lifted the pause")
+            rl.relay("PUT", "/me/secrets/settings", {"paused": False})
             time.sleep(act.get("settle_s", 60))
         elif kind == "capped_user_turn":
             # a scratch user with a tiny daily cap; one project; a message that must trip the cap
-            st["capped"] = rl.capped_user_turn(act["handle"], act["cap_usd"], act["prompt"].replace("{D}", st["D"]), act.get("timeout_s", 240))
+            st["capped"] = rl.capped_user_turn(act["handle"], act["cap_usd"], act["prompt"].replace("{D}", st["D"]), act.get("timeout_s", 240), second_prompt=act.get("second_prompt"))
         elif kind == "people_dm":
             # a DM between the eval user and a second scratch user, with this lane's agent added
             st["dm_chat"], st["dm_peer_token"] = rl.people_dm_with_agent(act["peer_handle"], self.project)
@@ -143,6 +165,8 @@ class Lane(threading.Thread):
             raise RuntimeError(f"unknown driver action {kind}")
 
     def run_task(self, task):
+        if task.get("parity"):
+            return py.run_task(self, task)
         tid = task["id"]
         tag = self.rs["run_id"]
         proj_dir = f"/work/{self.project}"
@@ -228,11 +252,24 @@ class Lane(threading.Thread):
                     reasons.append(f"reply matches forbidden /{turn['reply_regex_not'][:40]}/")
                 if turn.get("expect_key") and not val.get(turn["expect_key"]):
                     reasons.append(f"{st_key}.{turn['expect_key']} missing")
+                if turn.get("expect_each_answered") and val.get("user_messages", 0) > val.get("answered_rows", 0):
+                    reasons.append(f"{val.get('user_messages')} user messages but only {val.get('answered_rows')} answered (a capped user got silence)")
                 rb = gr.judge(turn.get("prompt", ""), turn["rubric"]["criteria"], reply, json.dumps(val)[:2000], "") if turn.get("rubric") else None
                 if rb and rb.get("score") is not None and rb["score"] < turn["rubric"].get("min", 3):
                     reasons.append(f"rubric {rb['score']}/5: {rb['reason']}")
                 turns_out.append({"turn": i, "chat_id": val.get("chat_id"), "prompt": turn.get("prompt", "")[:300], "ok": not reasons, "reasons": reasons, "ttfr_s": val.get("ttfr_s"), "first_status_s": None, "wall_s": val.get("wall_s"), "timed_out": False, "stalls": 0, "approvals_rejected": [], "routes": val.get("routes") or [], "tool_calls": 0, "tool_errors": 0, "model_calls": 0, "compactions": 0, "audit_denied": 0, "rubric": rb, "truth": {k: v for k, v in val.items() if k not in ("reply",)}, "verify_out": "", "reply": reply[:1500], "excerpt": f"**User (capped):** {turn.get('prompt','')[:300]}\n\n**Assistant:** {reply[:900]}"})
                 self.say(f"{tid} state turn {i}: {'ok' if not reasons else 'FAIL ' + str(reasons)[:160]}")
+                continue
+            if turn.get("expect_no_reply_s"):
+                # a people-chat message not for the agent: it must stay quiet
+                t0 = time.time()
+                rl.ctl("chat", "send", "people", chat_id, prompt, "--timeout", "3", timeout=40)
+                time.sleep(turn["expect_no_reply_s"])
+                doc = rl.chat_dump("people", chat_id)
+                late = [m for m in doc.get("messages", []) if m.get("role") == "assistant" and (m.get("createdAt") or 0) >= int(t0 * 1000) - 1000 and dr.text_of(m)]
+                ok = not late
+                turns_out.append({"turn": i, "chat_id": chat_id, "prompt": prompt[:300], "ok": ok, "reasons": [] if ok else [f"the agent answered a message not addressed to it: {dr.text_of(late[0])[:80]!r}"], "ttfr_s": None, "first_status_s": None, "wall_s": turn["expect_no_reply_s"], "timed_out": False, "stalls": 0, "approvals_rejected": [], "routes": [], "tool_calls": 0, "tool_errors": 0, "model_calls": 0, "compactions": 0, "audit_denied": 0, "rubric": None, "truth": {}, "verify_out": "", "reply": "", "excerpt": f"**User (not for the agent):** {prompt}\n\n(agent stayed quiet: {ok})"})
+                self.say(f"{tid} quiet turn {i}: {'ok' if ok else 'FAIL'}")
                 continue
             if turn.get("peer"):
                 # the colleague writes in the DM; we watch the agent's reply by polling the doc
@@ -261,7 +298,15 @@ class Lane(threading.Thread):
                 self.say(f"{tid} peer turn {i}: {'ok' if g['ok'] else 'FAIL ' + str(g['reasons'])[:160]} | ttfr {ttfr}")
                 continue
             decided = []
-            activity_seen = {"before": rl.project_activity(self.project) if turn.get("expect_activity_change_s") else None, "changed_at": None, "text": None, "t0": time.time()}
+            activity_seen = {"before": rl.project_activity(self.project) if turn.get("expect_activity_change_s") else None, "changed_at": None, "text": None, "t0": time.time(), "mid_turn": None}
+            if turn.get("expect_activity_change_s"):
+                # the guide path (#1657) only exists while a user turn of this chat is running; a steer that
+                # lands after the agent finished is a plain new turn, so the activity check does not apply
+                try:
+                    pre = rl.chat_dump(self.project, chat_id)
+                    activity_seen["mid_turn"] = any(m.get("role") == "assistant" and m.get("status") == "streaming" for m in pre.get("messages", []))
+                except Exception:  # noqa: BLE001
+                    activity_seen["mid_turn"] = None
 
             def on_poll():
                 if turn.get("expect_activity_change_s") and activity_seen["changed_at"] is None:
@@ -284,6 +329,7 @@ class Lane(threading.Thread):
                 until_first_reply=bool(turn.get("background")),
                 on_poll=on_poll if (turn.get("secret_decide") or turn.get("expect_activity_change_s")) else None,
                 skip_secret_cards=bool(turn.get("secret_decide")),
+                tight_s=(turn["expect_activity_change_s"] + 5) if turn.get("expect_activity_change_s") else 2.0,
             )
             res["secret_requests_decided"] = decided
             if turn.get("after_s"):
@@ -305,9 +351,15 @@ class Lane(threading.Thread):
             if turn.get("expect_activity_change_s"):
                 g["truth"]["activity_changed_s"] = activity_seen["changed_at"]
                 g["truth"]["activity_text"] = (activity_seen["text"] or "")[:80]
-                if activity_seen["changed_at"] is None or activity_seen["changed_at"] > turn["expect_activity_change_s"]:
+                g["truth"]["steer_mid_turn"] = activity_seen["mid_turn"]
+                if activity_seen["mid_turn"] is False:
+                    g["truth"]["activity_note"] = "the agent's turn had already ended when the steer was sent; the guide path was not exercised"
+                elif activity_seen["changed_at"] is None or activity_seen["changed_at"] > turn["expect_activity_change_s"]:
                     g["ok"] = False
                     g["reasons"].append(f"the working row's activity did not change within {turn['expect_activity_change_s']} s of the steer (changed at {activity_seen['changed_at']}, text {activity_seen['text']!r})")
+                elif turn.get("expect_activity_regex") and not re.search(turn["expect_activity_regex"], activity_seen["text"] or ""):
+                    g["ok"] = False
+                    g["reasons"].append(f"the working row changed to {activity_seen['text']!r}, not the steer line /{turn['expect_activity_regex']}/")
             if turn.get("expect_secret_request") and not res.get("secret_requests_decided"):
                 g["ok"] = False
                 g["reasons"].append("no secret access request (approval card) appeared for the driver to decide")
@@ -400,11 +452,16 @@ class Lane(threading.Thread):
                 texts = " ".join(dr.text_of(m) for m in proj_rows)
                 if plc.get("expect_text") and plc["expect_text"] not in texts:
                     reasons.append(f"lane-b's pinned chat shows no agent message carrying {plc['expect_text']!r} ({len(proj_rows)} project rows)")
+                if plc.get("verify_peer"):
+                    code, out = self.box.run_as_ws(peer_pid, plc["verify_peer"], timeout=60)
+                    if "PASS" not in out:
+                        reasons.append(f"peer lane check: {out.strip()[-120:]}")
                 if plc.get("expect_reply_to"):
                     ids = {m.get("id") for m in proj_rows}
                     answered = [m for m in recent if m.get("role") == "assistant" and m.get("inReplyTo") in ids]
                     if not answered:
                         reasons.append("lane-b's answer does not reply-to the agent message")
+        reasons += task_state.get("action_findings") or []
         dc = task.get("doc_checks")
         if dc:
             checks = doc_checks(all_docs, after_ms=task_state.get("renamed_at_ms"))
@@ -412,7 +469,8 @@ class Lane(threading.Thread):
                 reasons.append(f"{checks['handoffs']} handoffs (continue-act) > {dc['max_handoffs']}")
             if dc.get("no_duplicate_status") and checks["dup_status"]:
                 reasons.append(f"duplicated status lines: {checks['dup_status'][:3]}")
-            if dc.get("no_empty_result_rows") and checks["empty_result_rows"]:
+            bg_chats = {t["chat_id"] for t, spec in zip(turns_out, task["turns"]) if spec.get("background")}
+            if dc.get("no_empty_result_rows") and checks["empty_result_rows"] and not bg_chats:
                 reasons.append(f"{checks['empty_result_rows']} result row(s) with tool cards but no text (reply lost)")
             if dc.get("no_repeated_sentence") and checks["repeated_sentences"]:
                 reasons.append(f"a sentence appears twice in one bubble: {checks['repeated_sentences'][:2]}")
@@ -464,6 +522,7 @@ class Lane(threading.Thread):
             "success": not reasons,
             "reasons": reasons,
             "ttfr_s": turns_out[0]["ttfr_s"] if turns_out else None,
+            "first_seen_s": min([x for x in (turns_out[0]["ttfr_s"], turns_out[0]["first_status_s"]) if x is not None] or [None]) if turns_out else None,
             # the first turn's route decides the cost shape: `new` = a Sonnet helper (≈ 5× an `act` turn on Haiku)
             "route_t1": next((r for t in turns_out for r in (t.get("routes") or []) if r), None),
             "ttfr_all_s": [t["ttfr_s"] for t in turns_out],
@@ -515,7 +574,7 @@ def doc_checks(docs, after_ms=None):
                     texts_after.append(text)
                 # a finished bubble that stops on a comma / dash / mid-word (no closing punctuation,
                 # bracket, quote or code tick) was cut off (#1411)
-                if m.get("status") == "done" and len(text) > 30 and not re.search(r"[.!?…:)\]\"'`*_]\s*$|\n\s*[-•*\d].*$", text):
+                if m.get("status") == "done" and len(text) > 30 and not re.search(r"[.!?…:)\]\"'`*_\d]\s*$|\n\s*[-•*\d].*$|^[\w ,\-]+$|^(\w[\w\- ]*,\s*)+\w[\w\- ]*$", text):
                     truncated.append(text[-60:])
                 sentences = [x.strip() for x in re.split(r"(?<=[.!?])\s+", text) if len(x.strip()) > 25]
                 for x in sentences:
@@ -535,6 +594,8 @@ def main():
     ap.add_argument("--run-id", default=time.strftime("%Y%m%dT%H%M"))
     ap.add_argument("--out", default="")
     ap.add_argument("--dry-run", action="store_true", help="list the tasks per lane and exit")
+    ap.add_argument("--allow-stale-seed", action="store_true", help="run even when the box's pi-ext seed does not match its image commit (#1702)")
+    ap.add_argument("--refresh-stale-seed", action="store_true", help="when the seed is stale, re-copy /etc/arbos from the image into the box's persisted /etc and restart it (test box only)")
     args = ap.parse_args()
     only = set(args.tasks.split(",")) if args.tasks else None
     if args.subset:
@@ -563,6 +624,30 @@ def main():
     print(f"preflight: /work free {free_mib} MiB", flush=True)
     if 0 <= free_mib < 300:
         raise SystemExit(f"preflight: only {free_mib} MiB free on /work — clean the box first (#1641)")
+    # #1702: the box must run the pi extension its image was built from; a stale seed measures the wrong code
+    seed = box.pi_seed(HERE.parent.parent)
+    seed_line = lambda s: f"pi-ext seed {'ok' if s['ok'] else 'MISMATCH' if s['ok'] is False else 'unverified'} — {s['reason']} (image {s['image']}, source_sha {str(s.get('source_sha'))[:12]}, tag commit {str(s.get('tag_commit'))[:12]})"  # noqa: E731
+    print(f"preflight: {seed_line(seed)}", flush=True)
+    if seed["ok"] is False and args.refresh_stale_seed:
+        # the persisted /etc of a host-sandbox box keeps the seed of the image that created it (fleet.rs
+        # seed_etc runs once); re-copy /etc/arbos from the current image and restart so agentd re-seeds
+        code, out = box.refresh_etc_arbos()
+        print(f"preflight: refreshed /etc/arbos from the image (rc={code}): {out[-200:]}", flush=True)
+        rl.ctl("machine", "stop", "--force", timeout=180)
+        time.sleep(5)
+        rl.ctl("machine", "start", timeout=180)
+        for _ in range(30):
+            if rl.machine().get("state") == "awake":
+                break
+            time.sleep(10)
+        rl.relay("PUT", "/me/secrets/settings", {"paused": False})
+        time.sleep(20)
+        box = bx.Box()
+        seed = box.pi_seed(HERE.parent.parent)
+        seed["refreshed"] = True
+        print(f"preflight: after refresh, {seed_line(seed)}", flush=True)
+    if seed["ok"] is not True and not args.allow_stale_seed:
+        raise SystemExit(f"preflight: blocked — {seed['reason']}; not a result (pass --allow-stale-seed to run anyway)")
     spent, cap = rl.spent_today()
     if cap and cap - spent < args.budget_usd:
         print(f"WARNING: daily cap headroom ${cap - spent:.2f} < budget ${args.budget_usd}; the relay will stop the agent first", flush=True)
@@ -572,12 +657,17 @@ def main():
     run_state = {"run_id": args.run_id, "budget": args.budget_usd, "spent_at_start": spent, "lock": threading.Lock()}
     projects = {ln: rl.ensure_project(f"lane-{ln}") for ln in LANES}
     run_state["projects"] = projects
-    projects = {ln: pid for ln, pid in projects.items() if any(t["lane"] == ln for t in tasks)}
+    late = [t for t in tasks if t["lane"] in LATE_LANES]
+    tasks = [t for t in tasks if t["lane"] not in LATE_LANES]
+    for t in late:
+        t["lane"] = "a"  # late tasks run on lane a's project, after the parallel lanes
+    projects = {ln: pid for ln, pid in projects.items() if any(t["lane"] == ln for t in tasks + late)}
     meta = {
         "run_id": args.run_id,
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "image": box.image,
         "agentd": box.agentd_sha(),
+        "pi_seed": seed,
         "provider": box.provider,
         "user": box.user,
         "projects": projects,
@@ -593,6 +683,11 @@ def main():
     for l in lanes_t:
         l.join()
     results = [r for l in lanes_t for r in l.results]
+    if late:
+        late_lane = Lane("a", projects["a"], late, box, run_state, out_dir, log)
+        late_lane.start()
+        late_lane.join()
+        results += late_lane.results
     spent_end, _ = rl.spent_today()
     meta["ended_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     meta["spent_today_at_end"] = spent_end
@@ -646,6 +741,8 @@ def summarize(meta, results):
         "run_cost_usd": meta.get("run_cost_usd"),
         "judge_cost_usd": meta.get("judge_cost_usd"),
         "categories": cats,
+        "parity": py.summarize(results),
+        "convergence": cv.summarize(results),
     }
     return {"meta": meta, "summary": summary, "results": results}
 

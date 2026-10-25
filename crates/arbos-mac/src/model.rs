@@ -1029,6 +1029,8 @@ pub enum ChatKind {
     Chat,
     Group,
     Projects,
+    /// A background job's tab (`jobtabs`): client-side, never on the relay.
+    Job,
     #[serde(other)]
     Other,
 }
@@ -1438,6 +1440,9 @@ pub enum Part {
         decided_by: Option<String>,
         #[serde(default)]
         reason: Option<String>,
+        /// #1544: the standing choice made on a destructive-shell card (a path class).
+        #[serde(default)]
+        grant: Option<String>,
     },
     #[serde(other)]
     Unknown,
@@ -1533,6 +1538,329 @@ pub enum StatusKind {
     Other,
 }
 
+/// The `job` map on a background job's hidden row (duplex §2.3). Only the id and
+/// the title are read; `kind` / `touches` are the box's business.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobRef {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+}
+
+/// Where an open job is in its life — the two states the relay lists
+/// (`activity.jobs[].state`, duplex §2.4). Finished, failed, cancelled and
+/// interrupted jobs are not listed: their outcome is a bubble in the chat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobState {
+    /// Waiting for a slot or a resource lock; not steerable yet.
+    Queued,
+    Running,
+}
+
+/// One open background job as the relay's activity record lists it
+/// (`GET /projects/{id}` → `activity.jobs[]`): the rows of the tasks drawer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Job {
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default = "Job::default_state")]
+    pub state: JobState,
+    /// The job's newest step in plain words ("Reading tripadvisor.com"); empty
+    /// while it starts; "Waiting for <title>" while it queues behind a lock.
+    #[serde(default)]
+    pub step: String,
+    #[serde(default)]
+    pub elapsed_s: u64,
+    /// The user message that asked for it: Steer prefills a reply to it.
+    #[serde(default)]
+    pub ask_message_id: Option<String>,
+    #[serde(default)]
+    pub chat_id: Option<String>,
+}
+
+impl Job {
+    fn default_state() -> JobState {
+        JobState::Running
+    }
+
+    /// `activity.jobs` as the relay sends it — `null`, missing or not a list all
+    /// read as "no open jobs"; a row that does not parse is skipped, never fatal
+    /// (the drawer must degrade to nothing on an older relay).
+    pub fn list_from_activity(activity: Option<&serde_json::Value>) -> Vec<Job> {
+        activity
+            .and_then(|a| a.get("jobs"))
+            .and_then(serde_json::Value::as_array)
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|r| serde_json::from_value::<Job>(r.clone()).ok())
+                    .filter(|j| !j.id.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Only a running job has a session to steer; a queued one has not started.
+    pub fn can_steer(&self) -> bool {
+        self.state == JobState::Running && self.ask_message_id.is_some()
+    }
+
+    /// The drawer row's second line (contract, "Drawer, per state"): the live
+    /// step, "Working" for a running job with no step yet, "Starting" for a
+    /// queued job with no step, the "Waiting for <title>" step as the box wrote it.
+    pub fn status_line(&self) -> String {
+        let step = self.step.trim();
+        if !step.is_empty() {
+            return step.to_string();
+        }
+        match self.state {
+            JobState::Queued => "Starting".to_string(),
+            JobState::Running => "Working".to_string(),
+        }
+    }
+
+    /// `elapsed_s` as m:ss (an hour and more as h:mm:ss).
+    pub fn elapsed_label(&self) -> String {
+        let s = self.elapsed_s;
+        if s >= 3600 {
+            format!("{}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60)
+        } else {
+            format!("{}:{:02}", s / 60, s % 60)
+        }
+    }
+
+    /// "1 task" / "N tasks": the chip's words and the presence suffix.
+    pub fn count_label(n: usize) -> String {
+        if n == 1 {
+            "1 task".to_string()
+        } else {
+            format!("{n} tasks")
+        }
+    }
+
+    /// The presence text without the box's "· N tasks" suffix — the chip
+    /// carries the count, so the words are not said twice on one line.
+    pub fn strip_count_suffix(text: &str) -> &str {
+        let Some((head, tail)) = text.rsplit_once(" · ") else {
+            return text;
+        };
+        let is_count = tail
+            .strip_suffix(" tasks")
+            .or_else(|| tail.strip_suffix(" task"))
+            .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+        if is_count {
+            head
+        } else {
+            text
+        }
+    }
+}
+
+/// One entry of a job's exchange (`GET /projects/{id}/jobs/{jobId}` → `entries[]`,
+/// `internal/duplex-rollout-client-contract.md`): the parent's prompt, the job's own
+/// words, a tool step (plain-words `label`, raw I/O stays in Details), a steer the
+/// user sent, the final result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RolloutKind {
+    Prompt,
+    Text,
+    Tool,
+    Steer,
+    Result,
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RolloutEntry {
+    pub seq: u64,
+    /// ms since the epoch.
+    #[serde(default)]
+    pub at: u64,
+    #[serde(default = "RolloutEntry::default_kind")]
+    pub kind: RolloutKind,
+    #[serde(default)]
+    pub text: Option<String>,
+    /// A tool step's words ("Reading tripadvisor.com").
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// `running` | `done` | `failed` on a tool step or the result.
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+}
+
+impl RolloutEntry {
+    fn default_kind() -> RolloutKind {
+        RolloutKind::Other
+    }
+
+    pub fn is_live(&self) -> bool {
+        self.status.as_deref() == Some("running")
+    }
+
+    /// "2.1 s" / "1:04" for a step's duration.
+    pub fn duration_label(&self) -> Option<String> {
+        let ms = self.duration_ms?;
+        Some(if ms < 60_000 {
+            format!("{:.1} s", ms as f64 / 1000.0)
+        } else {
+            format!("{}:{:02}", ms / 60_000, (ms / 1000) % 60)
+        })
+    }
+}
+
+/// The job's parent agent as the document names it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct RolloutParent {
+    #[serde(default)]
+    pub project_id: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+/// One job's full exchange — the rollout view's document.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct JobRollout {
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default = "Job::default_state")]
+    pub state: JobState,
+    #[serde(default)]
+    pub step: String,
+    #[serde(default)]
+    pub elapsed_s: u64,
+    #[serde(default)]
+    pub started_at: Option<u64>,
+    #[serde(default)]
+    pub ended_at: Option<u64>,
+    #[serde(default)]
+    pub chat_id: Option<String>,
+    #[serde(default)]
+    pub ask_message_id: Option<String>,
+    #[serde(default)]
+    pub parent: RolloutParent,
+    #[serde(default)]
+    pub brief: String,
+    #[serde(default)]
+    pub entries: Vec<RolloutEntry>,
+    #[serde(default)]
+    pub tool_calls: u64,
+    #[serde(default)]
+    pub next_seq: u64,
+    /// Client-only: the relay answered 404 — the server half is not live yet.
+    #[serde(default, skip_serializing)]
+    pub unavailable: bool,
+}
+
+impl JobRollout {
+    /// A rollout the client builds from the chip's `Job` while the document loads
+    /// (or when the relay has no endpoint yet): header only.
+    pub fn placeholder(job: &Job, parent_name: &str) -> Self {
+        Self {
+            id: job.id.clone(),
+            title: job.title.clone(),
+            kind: String::new(),
+            state: job.state,
+            step: job.step.clone(),
+            elapsed_s: job.elapsed_s,
+            started_at: None,
+            ended_at: None,
+            chat_id: job.chat_id.clone(),
+            ask_message_id: job.ask_message_id.clone(),
+            parent: RolloutParent {
+                project_id: String::new(),
+                name: parent_name.to_string(),
+            },
+            brief: String::new(),
+            entries: Vec::new(),
+            tool_calls: 0,
+            next_seq: 0,
+            unavailable: false,
+        }
+    }
+
+    /// The job is still running: the view polls and shows Steer / Stop.
+    pub fn is_running(&self) -> bool {
+        self.ended_at.is_none() && self.outcome().is_none()
+    }
+
+    /// The final entry's status once the job ended (`done` | `failed` | `cancelled`).
+    pub fn outcome(&self) -> Option<&str> {
+        self.entries
+            .iter()
+            .rev()
+            .find(|e| e.kind == RolloutKind::Result)
+            .and_then(|e| e.status.as_deref())
+    }
+
+    /// Merge an incremental answer (`?after=<seq>`): header fields follow the newer
+    /// document; entries are appended by `seq`, an entry already held is replaced
+    /// (a tool step goes `running` → `done`).
+    pub fn merge(&mut self, newer: JobRollout) {
+        let JobRollout {
+            entries, next_seq, ..
+        } = newer.clone();
+        let mut kept = self.entries.clone();
+        for e in entries {
+            match kept.iter_mut().find(|k| k.seq == e.seq) {
+                Some(slot) => *slot = e,
+                None => kept.push(e),
+            }
+        }
+        kept.sort_by_key(|e| e.seq);
+        *self = JobRollout {
+            entries: kept,
+            next_seq: next_seq.max(self.next_seq),
+            ..newer
+        };
+    }
+
+    /// "Running · 0:51" / "Finished · 6:12" — the tab dropdown's trailing words.
+    pub fn status_short(&self) -> String {
+        let full = self.status_line();
+        match full.rsplit_once(" · ") {
+            Some((head, _)) => head.to_string(),
+            None => full,
+        }
+    }
+
+    /// "Running · 0:51 · 4 tool calls" / "Finished · 6:12 · 11 tool calls".
+    pub fn status_line(&self) -> String {
+        let word = match (self.is_running(), self.state, self.outcome()) {
+            (true, JobState::Queued, _) => "Queued",
+            (true, JobState::Running, _) => "Running",
+            (false, _, Some("failed")) => "Failed",
+            (false, _, Some("cancelled")) => "Stopped",
+            (false, _, _) => "Finished",
+        };
+        let elapsed = Job {
+            id: String::new(),
+            title: String::new(),
+            state: self.state,
+            step: String::new(),
+            elapsed_s: self.elapsed_s,
+            ask_message_id: None,
+            chat_id: None,
+        }
+        .elapsed_label();
+        let calls = match self.tool_calls {
+            1 => "1 tool call".to_string(),
+            n => format!("{n} tool calls"),
+        };
+        format!("{word} · {elapsed} · {calls}")
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
@@ -1555,6 +1883,20 @@ pub struct Message {
     /// Messages exchanged with the subagent on a hand-off row (1 = brief sent, 2 = result back).
     #[serde(default)]
     pub handoff_messages: Option<u32>,
+    /// A background worker the user never named (agentd, Grok parity trait 15): the
+    /// transcript hides this spawn row — Grok shows no "N messages with …" line for its own
+    /// workers — while the working line still reads its `activity`. An agent-to-agent
+    /// `send_message(to)` row carries no flag and keeps its "Messaged ◉ X" line.
+    #[serde(default)]
+    pub worker: bool,
+    /// Duplex design §2.3: the background job this row belongs to (`job: { id, title,
+    /// kind, touches }`). The row is wordless and `hidden`; it exists so the presence
+    /// line can read its `activity` and so the client knows a job is live in this chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job: Option<JobRef>,
+    /// The box asks the transcript to draw nothing for this row (job rows).
+    #[serde(default)]
+    pub hidden: bool,
     /// Agent-to-agent messaging: this reply answered a message another agent sent into the
     /// chat; the name drawn in the "Replied to ◉ X" line under the bubble.
     #[serde(default)]
@@ -1731,10 +2073,28 @@ impl Message {
         })
     }
 
-    /// Working line should show: an active stream, or a brief open hand-off.
+    /// A background job's row that still runs (duplex §2.3): jobs are
+    /// independent of the turn, so a newer user line does not end one — only
+    /// the box finishing the row does, or the freshness window (a dead box).
+    pub fn is_live_job_row(&self, now: u64) -> bool {
+        self.role == Role::Assistant
+            && self.job.is_some()
+            && self.is_streaming()
+            && self.created_at >= now.saturating_sub(Self::STREAM_FRESH_MS)
+    }
+
+    /// At least one job row of this chat is still live: the presence row stays
+    /// up and the tasks drawer has something to poll for.
+    pub fn chat_has_live_job(messages: &[Message], now: u64) -> bool {
+        messages.iter().any(|m| m.is_live_job_row(now))
+    }
+
+    /// Working line should show: an active stream, a brief open hand-off, or
+    /// a background job still running.
     pub fn chat_is_actively_working(messages: &[Message], now: u64) -> bool {
         Self::chat_is_actively_streaming(messages, now)
             || Self::chat_has_open_subagent(messages, now)
+            || Self::chat_has_live_job(messages, now)
     }
 
     /// The working line's text while this turn streams: the `activity` field,
@@ -2406,6 +2766,31 @@ impl SecretsView {
     }
 }
 
+/// One standing shell approval (#1544, `GET /projects/{id}/shell-grants`): the owner chose
+/// "Always allow <agent> in /tmp" on a destructive-shell card. The relay holds them and the box
+/// applies them; the agent pane's Permissions card that listed them left on 2026-10-25
+/// ([feedback agent-details-remove-sections-mac-2026-10-25]) — the calls stay.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ShellGrant {
+    pub id: String,
+    #[serde(default)]
+    pub rule_class: String,
+    #[serde(default)]
+    pub path_class: String,
+    #[serde(default)]
+    pub chat_id: Option<String>,
+    #[serde(default)]
+    pub granted_by: String,
+    #[serde(default)]
+    pub created_at: u64,
+    /// "File deletes in /tmp" (relay-rendered).
+    #[serde(default)]
+    pub label: String,
+    /// "scratch only: /tmp and /work/tmp" (relay-rendered).
+    #[serde(default)]
+    pub detail: String,
+}
+
 /// `GET /projects/{id}/secrets`: what one agent may use, for its profile page.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProjectSecrets {
@@ -2798,6 +3183,129 @@ impl Machine {
         } else {
             self.state
         }
+    }
+}
+
+/// The box as `GET /machine/debug` reports it — the relay's view plus the
+/// box's own `GET /box/state` (image, uptime, load, memory, disk, every
+/// workspace with its turn lock). The agent pane's **Computer** tab
+/// ([feedback agent-pane-details-tab-2026-10-24]) reads this; nothing else.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BoxReport {
+    pub fetched_at: u64,
+    /// `relay.state`: awake / waking / asleep / stopped / error.
+    pub state: String,
+    pub awake_for_s: Option<u64>,
+    /// `relay.agentd.image` → the image the box booted (e.g. `arbos-agent-0.1.114`).
+    pub image: Option<String>,
+    /// `box.reachable`: the box answered `/box/state`; the rest is `None` when it did not.
+    pub reachable: bool,
+    pub unreachable_reason: Option<String>,
+    pub uptime_s: Option<u64>,
+    /// 1-minute load average.
+    pub load_1m: Option<f64>,
+    pub mem_total_mb: Option<u64>,
+    pub mem_available_mb: Option<u64>,
+    pub disk_total_mb: Option<u64>,
+    pub disk_available_mb: Option<u64>,
+    pub workspaces: Vec<BoxWorkspace>,
+}
+
+/// One agent's workspace on the box.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BoxWorkspace {
+    pub project_id: Id,
+    pub name: String,
+    pub healthy: bool,
+    /// A turn is running right now (`turn.running`).
+    pub running: bool,
+    /// How long the current turn has run (`turn.current.elapsed_ms`).
+    pub elapsed_ms: Option<u64>,
+    pub tool_calls: Option<u64>,
+}
+
+impl BoxReport {
+    /// `GET /machine/debug` → the report. Lenient: every field is optional on
+    /// the wire (older relays, an unreachable box), nothing here fails.
+    pub fn from_debug(v: &serde_json::Value, now: u64) -> BoxReport {
+        let relay = &v["relay"];
+        let on_box = &v["box"];
+        let st = &on_box["state"];
+        let mut out = BoxReport {
+            fetched_at: now,
+            state: relay["state"].as_str().unwrap_or("unknown").to_owned(),
+            awake_for_s: relay["awake_for_s"].as_u64(),
+            image: relay["agentd"]["image"]
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| st["image_version"].as_str().map(str::to_owned)),
+            reachable: on_box["reachable"].as_bool().unwrap_or(false),
+            unreachable_reason: on_box["error"].as_str().map(str::to_owned),
+            ..Default::default()
+        };
+        if !out.reachable {
+            return out;
+        }
+        out.uptime_s = st["uptime_s"].as_u64();
+        out.load_1m = st["load"].get(0).and_then(|l| l.as_f64());
+        out.mem_total_mb = st["memory_mb"]["total"].as_u64();
+        out.mem_available_mb = st["memory_mb"]["available"].as_u64();
+        out.disk_total_mb = st["disk"]["total_mb"].as_u64();
+        out.disk_available_mb = st["disk"]["available_mb"].as_u64();
+        out.workspaces = st["workspaces"]
+            .as_array()
+            .map(|ws| {
+                ws.iter()
+                    .map(|w| BoxWorkspace {
+                        project_id: w["project_id"].as_str().unwrap_or_default().to_owned(),
+                        name: w["name"].as_str().unwrap_or_default().to_owned(),
+                        healthy: w["healthy"].as_bool().unwrap_or(false),
+                        running: w["turn"]["running"].as_bool().unwrap_or(false),
+                        elapsed_ms: w["turn"]["current"]["elapsed_ms"].as_u64(),
+                        tool_calls: w["turn"]["current"]["tool_calls"].as_u64(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        out
+    }
+
+    /// The workspace of one agent, if the box lists it.
+    pub fn workspace(&self, project_id: &str) -> Option<&BoxWorkspace> {
+        self.workspaces.iter().find(|w| w.project_id == project_id)
+    }
+
+    /// Workspaces with a turn running right now — the box's running jobs.
+    pub fn running(&self) -> impl Iterator<Item = &BoxWorkspace> {
+        self.workspaces.iter().filter(|w| w.running)
+    }
+}
+
+/// "12.4 GB" / "840 MB" from megabytes.
+pub fn size_mb(mb: u64) -> String {
+    if mb >= 1024 {
+        let gb = mb as f64 / 1024.0;
+        if gb >= 10.0 {
+            format!("{gb:.0} GB")
+        } else {
+            format!("{gb:.1} GB")
+        }
+    } else {
+        format!("{mb} MB")
+    }
+}
+
+/// "3 d 4 h" / "2 h 10 m" / "45 s" from seconds.
+pub fn duration_s(s: u64) -> String {
+    let (d, h, m) = (s / 86_400, (s % 86_400) / 3600, (s % 3600) / 60);
+    if d > 0 {
+        format!("{d} d {h} h")
+    } else if h > 0 {
+        format!("{h} h {m} m")
+    } else if m > 0 {
+        format!("{m} m")
+    } else {
+        format!("{s} s")
     }
 }
 

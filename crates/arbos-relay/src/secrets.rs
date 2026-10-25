@@ -2000,6 +2000,19 @@ pub struct PauseBody {
 
 /// Flip the kill switch for a user: relay refuses at once; boxes hear within 5 s; Daytona
 /// mounts within 15 s.
+/// The pause `POST /machine/stop` set (D83 decision 8, `paused_by: stop_machine`) is the kill
+/// switch for the downtime, not a standing choice: `POST /machine/start` lifts it. A pause the
+/// user set themselves (`paused_by: user`) stays (#1664: every restart used to leave all
+/// secrets paused and the agent said "paused by the owner").
+pub(crate) async fn resume_after_stop(state: &AppState, user_id: &str) -> bool {
+    let settings = state.db.secrets_settings(user_id).unwrap_or_default();
+    if settings.paused && settings.paused_by.as_deref() == Some("stop_machine") {
+        set_paused(state, user_id, false, "start_machine").await;
+        return true;
+    }
+    false
+}
+
 pub(crate) async fn set_paused(
     state: &AppState,
     user_id: &str,
@@ -3726,6 +3739,26 @@ mod tests {
         assert_eq!(Refusal::NotDirector.kind(), "not_allowed_person");
         assert_eq!(status_for("always"), Some("allowed_always"));
         assert_eq!(status_for("nope"), None);
+    }
+
+    /// #1664: the pause set by `POST /machine/stop` is lifted by `POST /machine/start`; a pause
+    /// the user set stays.
+    #[tokio::test]
+    async fn start_lifts_the_stop_machine_pause_but_not_the_users() {
+        let state = test_state(AuthMode::Github);
+        let (owner, _) = person(&state, 701);
+        set_paused(&state, &owner, true, "stop_machine").await;
+        assert!(state.db.secrets_settings(&owner).unwrap().paused);
+        assert!(resume_after_stop(&state, &owner).await);
+        let after = state.db.secrets_settings(&owner).unwrap();
+        assert!(!after.paused, "{after:?}");
+        assert!(!resume_after_stop(&state, &owner).await, "nothing to lift");
+        set_paused(&state, &owner, true, "user").await;
+        assert!(
+            !resume_after_stop(&state, &owner).await,
+            "a user pause stays"
+        );
+        assert!(state.db.secrets_settings(&owner).unwrap().paused);
     }
 
     /// Owner, agent with standing Access, and three people: Sam (row on), Samir (row off),

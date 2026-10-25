@@ -96,6 +96,17 @@ extension AppModel {
             user("c5", c, "Hey", at: t0 + 120_000),
             streaming("c6", c, at: t0 + 125_000),
         ]
+        // #1544: the Comms agent's destructive-shell card with its four standing rows, when the
+        // rig asks for it (`ARBOS_FIXTURE_SHELL_CARD=1`); Comms also holds one standing grant.
+        if DebugHooks.fixtureShellCard {
+            allMessages[c]?.removeAll { $0.id == "c6" }
+            allMessages[c]?.append(user("c7", c, "clone arbos into /tmp and list the top level", at: t0 + 130_000))
+            allMessages[c]?.append(assistant("c8", c, "On it.", at: t0 + 131_000))
+            allMessages[c]?.append(shellCard("c9", c, at: t0 + 132_000))
+        }
+        shellGrants["fx-comms"] = [ShellGrant(id: "grant-scratch", ruleClass: "file-delete", pathClass: "scratch", chatId: nil,
+                                              grantedBy: "dev-iphone", createdAt: now - 3 * 3_600_000,
+                                              label: "File deletes in /tmp", detail: "scratch only: /tmp and /work/tmp")]
         // Affine's chat shows the card types: file, voice memo, question, stop.
         let a = "fx-affine-main"
         let a0 = now - 19 * 60_000
@@ -268,6 +279,33 @@ extension AppModel {
                 messages[c, default: []].append(streaming("fx-working-agent", c, at: now - 5_000))
             }
         }
+        // `ARBOS_FIXTURE_JOBS=<n>`: background jobs open in the opened agent chat — each with
+        // its hidden `job` row (what agentd writes) and its entry in the relay's
+        // `activity.jobs[]` (what the poll would answer): the tasks chip and sheet.
+        if DebugHooks.fixtureJobs > 0, let c = DebugHooks.openChat, let projectId = chat(c)?.projectId,
+           peopleChat(c) == nil {
+            let ask = messages[c]?.last { $0.role == .user }?.id
+            let seeds: [(id: String, title: String, state: JobState, step: String, elapsed: Int)] = [
+                ("fx-job-surf", "Searching for surf schools", .running, "Reading tripadvisor.com", 41),
+                ("fx-job-tests", "Fixing the flaky tests", .running, "", 125),
+                ("fx-job-rename", "Renaming the config module", .queued, "Waiting for Fixing the flaky tests", 12),
+            ]
+            let n = DebugHooks.fixtureJobs
+            var list: [Job] = []
+            for (i, seed) in seeds.prefix(n).enumerated() {
+                let activity = seed.step.isEmpty ? seed.title : seed.step
+                var row = streaming("fx-job-row-\(i)", c, at: now - Int64(seed.elapsed) * 1000)
+                row.job = JobRef(["id": seed.id, "title": seed.title])
+                row.worker = true
+                row.hidden = true
+                row.inReplyTo = ask
+                row.activity = n > 1 ? "\(activity) · \(n) tasks" : activity
+                messages[c, default: []].append(row)
+                list.append(Job(id: seed.id, title: seed.title, state: seed.state, step: seed.step, elapsedS: seed.elapsed,
+                                askMessageId: ask, chatId: c))
+            }
+            applyJobs(projectId: projectId, list)
+        }
         // `ARBOS_FIXTURE_TYPING=1|<handle>[,<handle>…]`: those people type in every fixture
         // people chat for the whole launch (`1` = the DM's other person / the group's first).
         if let spec = DebugHooks.fixtureTyping {
@@ -295,6 +333,10 @@ extension AppModel {
                     subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 7 * 60_000, completedAt: nil, pending: false,
                     parts: [.text(id: "d3t", text: "Sending in a sec. Also: can we add your Arbos agent here so it can pull the numbers while we talk?")], hiddenCount: 0,
                     senderHandle: "unconst", senderName: "Unconst"),
+            // A second line of mine after unconst's last one (rig: two own bubbles in a 1:1 shot).
+            Message(id: "d4", chatId: "fx-dm-unconst", role: .user, sender: "user:fx-me", status: .done, turn: nil, decision: nil, subagentId: nil,
+                    subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 6 * 60_000, completedAt: nil, pending: false,
+                    parts: [.text(id: "d4t", text: "Sure — add it, and send the copy whenever you're ready.")], hiddenCount: 0, senderHandle: "jacob", senderName: "Jacob Steeves"),
         ]
         caughtUp.insert("fx-dm-unconst")
         directory = [
@@ -380,6 +422,47 @@ extension AppModel {
         vaultAccess["target_kind"] = "vault"
         projectSecrets["fx-comms"] = ProjectSecrets.parse(["paused": false, "owner": true, "items": withVault ? [stripeAccess, vaultAccess] : [stripeAccess],
                                                             "requests": [request], "activity": activity])
+    }
+
+    /// The agent pane's Routines card (the Mac fixture's three: a weekday stand-up, a paused
+    /// digest, a webhook that last fired 40 min ago). Comms owns them; other agents have none.
+    func fixtureRoutines(_ projectId: Id) -> [Routine] {
+        guard projectId == "fx-comms" else { return [] }
+        let now = nowMs()
+        return [
+            Routine(id: "fx-rt-standup", projectId: projectId, name: "Morning stand-up",
+                    trigger: .cron(expr: "0 9 * * 1-5", tz: "Europe/Berlin"), enabled: true,
+                    lastRunAt: now - 20 * 3_600_000, nextRunAt: now + 4 * 3_600_000),
+            Routine(id: "fx-rt-digest", projectId: projectId, name: "Open PR digest",
+                    trigger: .cron(expr: "0 * * * *", tz: "UTC"), enabled: false, lastRunAt: nil, nextRunAt: nil),
+            Routine(id: "fx-rt-deploy", projectId: projectId, name: "Deploy finished",
+                    trigger: .webhook, enabled: true, lastRunAt: now - 40 * 60_000, nextRunAt: nil),
+        ]
+    }
+
+    /// `GET /machine/debug` as the rig answers it: an awake 4-core box up 5 h 12 m, one
+    /// workspace per agent, Comms mid-turn (42 s, 7 tool calls) and — with
+    /// `ARBOS_FIXTURE_WORKING=n` — the next agents too. Goes through the real parser.
+    func fixtureBoxReport() -> BoxReport {
+        let working = Set(["fx-comms"] + projects.dropFirst().prefix(max(0, DebugHooks.fixtureWorking - 1)).map(\.id))
+        let workspaces: [[String: Any]] = projects.filter { $0.id != peopleSlot }.map { p in
+            var turn: [String: Any] = ["running": working.contains(p.id)]
+            if working.contains(p.id) {
+                turn["current"] = ["elapsed_ms": p.id == "fx-comms" ? 42_000 : 128_000, "tool_calls": p.id == "fx-comms" ? 7 : 3]
+            }
+            return ["project_id": p.id, "name": p.name, "healthy": true, "turn": turn]
+        }
+        let debug: [String: Any] = [
+            "relay": ["state": "awake", "awake_for_s": 5 * 3600 + 12 * 60, "provider": "gvisor",
+                      "agentd": ["image": "arbos-agent-0.1.7"]],
+            "box": ["reachable": true, "state": [
+                "uptime_s": 5 * 3600 + 12 * 60, "load": [0.42, 0.38, 0.35],
+                "memory_mb": ["total": 8192, "available": 5325],
+                "disk": ["total_mb": 10240, "available_mb": 6861],
+                "workspaces": workspaces,
+            ]],
+        ]
+        return BoxReport(debug: debug, now: nowMs())
     }
 
     /// Two sample message notifications (an agent, a person) for screenshots.
@@ -469,6 +552,18 @@ extension AppModel {
         }
         messages[chatId] = list
     }
+
+    /// Rig (`ARBOS_SHOW=code-block`): the Mac fixture's `REPLY_CODE` reply.
+    static let codeReply = """
+    The transcript is a bottom-aligned list with one row per markdown block:
+
+    ```rust
+    let list = ListState::new(0, ListAlignment::Bottom, px(320.0));
+    list(list.clone(), cx.processor(Self::render_row))
+    ```
+
+    Rows are keyed by `{msg}#{part}.{block}` and re-spliced only when their bytes change.
+    """
 
     /// The shape of Jacob's Oct 23 screenshot — a heading, bold labels and bullets over
     /// twenty-odd lines (the Mac fixture's `ARBOS_FIXTURE_REPLY=long` carries the same text).
@@ -594,6 +689,28 @@ extension AppModel {
         return Message(id: id, chatId: chat, role: .assistant, sender: "agent", status: .done, turn: .reply, decision: "reply", subagentId: nil,
                        subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: at, completedAt: at, pending: false,
                        parts: [.question(id: "\(id)-w", question: q), .status(id: "\(id)-q", code: .askUser, message: text)], hiddenCount: 0)
+    }
+
+    /// #1544: an `approval` part as agentd writes it for `cd /tmp && rm -rf …` outside scratch —
+    /// `grant_options` make the card offer A once / B in its workspace / C anywhere / D deny.
+    private func shellCard(_ id: Id, _ chat: Id, at: Int64) -> Message {
+        let pm: [String: Any] = [
+            "id": "\(id)-ap", "kind": "approval", "approvalId": "\(id)-approval", "state": "pending",
+            "title": "Run a destructive command (file-delete)", "risk": "destructive",
+            "summary": "cd /work/app && rm -rf node_modules && git clone --depth 1 https://github.com/unarbos/arbos arbos-src",
+            "payload": [
+                "kind": "tool_call", "tool": "bash", "class": "file-delete", "path_class": "workspace",
+                "why": "deletes files outside /work/tmp",
+                "input": ["command": "cd /work/app && rm -rf node_modules && git clone --depth 1 https://github.com/unarbos/arbos arbos-src"],
+                "grant_options": [
+                    ["path_class": "workspace", "label": "its workspace", "detail": "the agent's own /work folder, including scratch"],
+                    ["path_class": "anywhere", "label": "anywhere", "detail": "any folder of its box"],
+                ],
+            ],
+        ]
+        return Message(id: id, chatId: chat, role: .assistant, sender: "agent", status: .done, turn: .reply, decision: "approval", subagentId: nil,
+                       subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: at, completedAt: at, pending: false,
+                       parts: [DocJSON.part(pm)], hiddenCount: 0)
     }
 
     private func stopped(_ id: Id, _ chat: Id, at: Int64) -> Message {

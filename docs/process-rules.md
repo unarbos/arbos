@@ -30,6 +30,43 @@ Decided by Jacob; kept in the repo so the loop, its agents and every worker read
   stands even when a tester report asks for something else; a fix that would move one of those rules
   holds for his approval like any other outside change, and the agent says so in its summary.
 
+## The loop merges the live branch head, never an older one (2026-10-25)
+
+- A gate run gates one commit per branch. When the run passes, the loop merges that commit **only if it is
+  still the branch's head**. If the author pushed after the run started, the gated head is not merged: the new
+  head re-gates and merges on green, and the issue says so. Nothing is orphaned by a merge.
+- A push to `feedback/<id>` **after** the item merged (the loop deletes the branch on merge; the next push
+  recreates it) is followed automatically: the loop makes `feedback/<id>-followup` (…`-followup2`, …) from that
+  head, registers `<id>-followup` on the same issue and owner, gates and ships it, and notes it on the issue.
+  Authors do not re-land tails as new issues (#1684, #1721 were that).
+- **A follow-up inherits its source item's reporter and tier.** If the source's reporter is anyone other than
+  Jacob (or a coordinator-owned item), the follow-up holds as `awaiting-jacob` and merges only on an explicit
+  per-item `approve` — no timer, no owner-confirm shortcut. Silence is not a yes. Jacob/coordinator-source
+  follow-ups get a one-hour owner-confirm hold, then gate as normal.
+- Authors: one branch per item is fine, but once the item merged, push the tail to the same branch and let the
+  loop pick it up — or open the follow-up item yourself if you want a different scope.
+- The merge-revert probe (#1588) runs on the head that is about to be gated/merged; with this rule that is
+  always the live head, so the two compose: a stale gated head is never merged, and a live head whose merge
+  commit reverts main's files is sent back before integration.
+
+## iOS unit tests on the shared EC2 Mac (2026-10-25 19:30 UTC)
+
+The EC2 Mac is the only Mac the iOS workers have, so running the iPhone unit tests there is allowed — under
+these rules, because the box also runs the Rust/iOS gate and the Mac release + TestFlight runner on 8 cores
+and a 250 GB volume (five leftover 13 GB test-simulator clones took it from 60 to 14 GB free on 2026-10-25):
+
+- `xcodebuild test` with `-destination` naming **one** existing simulator (`-destination 'platform=iOS
+  Simulator,name=iPhone 17'` or `id=<udid>`), never a generic destination that makes Xcode clone a device.
+- `-parallel-testing-enabled NO` — parallel testing is what creates the "Clone N of iPhone 17" devices
+  under `~/Library/Developer/XCTestDevices`.
+- Leave nothing behind: delete any clone your run made (`xcrun simctl --set ~/Library/Developer/XCTestDevices
+  delete <udid>`) and shut down the simulators you booted (`xcrun simctl shutdown <udid>`). Do not erase or
+  delete the shared named simulators (`Arbos *`, `iPhone 17`).
+- Build in your own checkout and derived-data path (`-derivedDataPath ~/<your-id>-dd`); the gate's trees
+  (`~/arbos-gate`, `~/arbos-gate-dd-*`, `~/arbos-rust-gate-target`) and the runner's are not yours.
+- The clean script's sweep (idle clones > 30 min, idle rig checkouts > 30 min, stale `Deleting-*` dirs) is the
+  backstop, not the plan; a run that leaves the box under 20 GB free is a regression to raise on your issue.
+
 ## Standing rules that this does not change
 
 - One issue per release; a hotfix marker (`[hotfix]`) is for P0s only.

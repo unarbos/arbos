@@ -112,11 +112,14 @@ pub const CONTROL_GLYPH_WIDE: f32 = 17.0;
 pub const CONTROL_GAP: f32 = 8.0;
 /// Bubble corners (Grok Mac, measured: 12 pt; the iPhone uses 20).
 pub const BUBBLE_RADIUS: f32 = 12.0;
-/// Chat bubbles: Grok Mac's body is 13.5 pt on a 20 pt pitch with 15 pt
-/// horizontal and 6 pt vertical padding (refs 57/58); the rest of the app
-/// keeps `TEXT_BODY`.
+/// Chat bubbles: Grok Mac's body is 13.5 pt on a **22 pt** pitch with 15 pt
+/// horizontal and 6 pt vertical padding. The pitch is re-measured on Jacob's
+/// 2026-10-24 Grok Bot shots (44 px between the lines of a wrapped agent
+/// answer and of a wrapped user message at 2 px/pt; refs 57/58 had read 20)
+/// — [feedback bubble-markdown-2026-10-24]. The rest of the app keeps
+/// `TEXT_BODY`.
 pub const CHAT_BODY: f32 = 13.5;
-pub const CHAT_LINE_HEIGHT: f32 = 20.0;
+pub const CHAT_LINE_HEIGHT: f32 = 22.0;
 pub const BUBBLE_PAD_X: f32 = 15.0;
 pub const BUBBLE_PAD_Y: f32 = 6.0;
 pub const PANEL_RADIUS: f32 = 14.0;
@@ -343,11 +346,19 @@ pub struct Theme {
     pub bg: Hsla,
     /// The chat-list column (a shade off the conversation, as on Grok Mac).
     pub sidebar: Hsla,
-    /// The right pane (details, members, settings — the three-pane rule) and
-    /// the grouped cards on it. Light: a grey pane with white cards, Apple's
-    /// Account-screen grouping (D80); dark: the card tones the pane had before.
-    pub pane: Hsla,
+    /// The grouped cards on the right pane (details, members, settings — the
+    /// three-pane rule). The pane itself has no tone of its own any more: it
+    /// is the chat's surface, as Grok Bot's (dark `#121212` both sides of the
+    /// join; [feedback info-pane-chrome-2026-10-24]), so the cards carry the
+    /// contrast — dark: the D80 grey (+15 over `bg`, Grok's `#1F1F1F` is +13
+    /// over its `#121212`); light: a grey card on the white page.
     pub pane_card: Hsla,
+    /// The hairline on the right pane's left edge — Grok Bot's: one device
+    /// pixel of `#1F1F1F` on its `#121212` page (+13, ≈ 5 % toward white),
+    /// full height ([feedback info-pane-left-hairline-2026-10-25], Jacob
+    /// 2026-10-25). Dark: the same step over `bg`; light: the same step toward
+    /// black. A colour, not `border`'s alpha, so it reads the same on glass.
+    pub pane_edge: Hsla,
     /// Cards, sheets, rows that lift off the background (iPhone `card`).
     pub surface_1: Hsla,
     /// Hover / selected fills and chips (the assistant-bubble grey).
@@ -374,6 +385,11 @@ pub struct Theme {
     pub on_primary: Hsla,
     /// Presence green.
     pub online: Hsla,
+    /// Grok Bot's update disc: the solid blue circle at the footer's right end
+    /// with the white cloud-download glyph (`#326CCB` / `#F5F5F5`, measured
+    /// on Jacob's Oct-2026 ref) — [feedback footer-update-button-grok-2026-10-24].
+    pub update_disc: Hsla,
+    pub on_update_disc: Hsla,
     pub warn: Hsla,
     pub danger: Hsla,
     pub danger_soft: Hsla,
@@ -405,8 +421,8 @@ impl Theme {
             glass_opacity: GLASS_ALPHA,
             bg: hex(0x141414),
             sidebar: hex(0x1a1a1a),
-            pane: hex(0x1e1e1e),
             pane_card: hex(0x232323),
+            pane_edge: hex(0x212121),
             surface_1: hex(0x1e1e1e),
             surface_2: hex(0x262626),
             border: hex_a(0xffffff, 0.08),
@@ -423,6 +439,8 @@ impl Theme {
             primary: grey(1.0),
             on_primary: grey(0.0),
             online: hex(0x34c759),
+            update_disc: hex(0x326ccb),
+            on_update_disc: hex(0xf5f5f5),
             warn: hex(0xffb340),
             danger: hex(0xff453a),
             danger_soft: hex_a(0xff453a, 0.14),
@@ -448,8 +466,10 @@ impl Theme {
             // white (#1084FE was 3.7:1).
             bg: hex(0xfcfcfc),
             sidebar: hex(0xf6f6f6),
-            pane: hex(0xf6f6f6),
-            pane_card: grey(1.0),
+            // The pane is the chat's `#FCFCFC` now, so the card takes the
+            // grey the pane had (white on white was no card at all).
+            pane_card: hex(0xf2f2f2),
+            pane_edge: hex(0xefefef),
             surface_1: grey(1.0),
             surface_2: hex(0xe8e8e8),
             border: hex_a(0x000000, 0.10),
@@ -466,6 +486,9 @@ impl Theme {
             primary: hex(0x111111),
             on_primary: grey(1.0),
             online: hex(0x34c759),
+            // The same blue on the light sidebar (white glyph 5.0:1 on it).
+            update_disc: hex(0x326ccb),
+            on_update_disc: hex(0xf5f5f5),
             warn: hex(0xe59a00),
             danger: hex(0xd7332a),
             danger_soft: hex_a(0xd7332a, 0.10),
@@ -586,16 +609,13 @@ impl Theme {
         }
     }
 
-    /// The right pane (three-pane rule): its own tone, so it reads apart from
-    /// the chat beside it; translucent like a card on frost.
+    /// The right pane (three-pane rule) blends with the chat beside it —
+    /// Grok Bot's pane is the window, not a lighter panel (Jacob, [feedback
+    /// info-pane-chrome-2026-10-24]): the chat column's own wash (nothing on
+    /// matte and dark glass, the white wash on light glass), so both sides of
+    /// the join are one surface and no hairline is needed between them.
     pub fn pane(&self) -> Hsla {
-        let mut c = self.pane;
-        c.a = if self.is_frost() {
-            self.frost_alpha(FROST_TINT_ALPHA, FROST_TINT_ALPHA_LIGHT)
-        } else {
-            1.0
-        };
-        c
+        self.chat_wash()
     }
 
     /// Chrome strips (sidebar, side panels) over frost: thinner than cards.
@@ -627,6 +647,14 @@ impl Theme {
 
     pub fn with_alpha(mut c: Hsla, a: f32) -> Hsla {
         c.a = a;
+        c
+    }
+
+    /// The same hue, `by` lighter (HSL lightness, clamped): a solid control's
+    /// hover and pressed fills — brighter under the hand, brighter still while
+    /// the button is down (the chip rule).
+    pub fn lighter(mut c: Hsla, by: f32) -> Hsla {
+        c.l = (c.l + by).clamp(0.0, 1.0);
         c
     }
 }

@@ -45,7 +45,12 @@ final class SessionRoom {
     var onPresence: (([String: Any]) -> Void)?
     /// Relay rejected this room (HTTP 403/404); caller should refresh membership.
     var onUnavailable: (() -> Void)?
+    /// A push was refused with `not_available` on this connection; stay connected.
+    var onPushRefused: (() -> Void)?
     var presenceUser: () -> (id: String, handle: String)? = { nil }
+    /// Read receipt (Mac `presence_header` `seen`): the newest message id of this people chat,
+    /// sent while it is focused so peers can lift their own bubbles to full opacity.
+    var newestMessageId: () -> String? = { nil }
     var inCall: String? {
         didSet {
             guard inCall != oldValue else { return }
@@ -166,6 +171,11 @@ final class SessionRoom {
         )
         doc.onLocalUpdate { [weak self] bytes in
             Task { @MainActor in
+                #if DEBUG
+                if let self, SendTrace.traces(self.key) {
+                    SendTrace.mark("push-queued", detail: "bytes=\(bytes.count) live=\(self.session.isLive())")
+                }
+                #endif
                 self?.session.onLocalCommit(bytes: bytes)
                 self?.drain()
             }
@@ -413,14 +423,16 @@ final class SessionRoom {
             if code == "state_timeout" { stateTimeouts += 1 }
             // The relay restarts in a few seconds (#1340): the pill says so; the clean close that follows redials.
             if code == "restart_soon" { onLinkState?(.restartSoon); return }
-            // Push refused permanently for this room — no redial; surface like HTTP 403/404.
+            // Push refused for this connection — stay connected; `pushRefused` carries the notice.
             if code == "not_available" {
                 lastError = "\(roomChat): not_available"
-                onUnavailable?()
                 NSLog("relay room \(roomChat): error \(code): \(message)")
                 return
             }
             NSLog("relay room \(roomChat): error \(code): \(message)")
+        case .pushRefused(_):
+            lastError = "\(roomChat): not_available"
+            onPushRefused?()
         case .presence(_, _, let typing, _, let mine, let headerJson):
             guard !mine else { return }
             if let data = headerJson.data(using: .utf8),
@@ -432,7 +444,10 @@ final class SessionRoom {
             }
         case .droppedOversize(let bytes):
             NSLog("relay room \(roomChat): local update \(bytes) bytes exceeds row cap; dropped")
-        case .ack(_, _):
+        case .ack(_, let seq):
+            #if DEBUG
+            if SendTrace.traces(key) { SendTrace.mark("relay-ack", detail: "seq=\(seq)") }
+            #endif
             onAcked?()
             onCursorMoved?()
         }
@@ -528,7 +543,10 @@ final class SessionRoom {
     private func presenceHeaderJSON() -> String? {
         var header: [String: Any] = ["device": deviceId(), "at": nowMs()]
         if let u = presenceUser() { header["user"] = u.id; header["handle"] = u.handle }
-        if focused { header["focused_chat"] = roomChat }
+        if focused {
+            header["focused_chat"] = roomChat
+            if let seen = newestMessageId(), !seen.isEmpty { header["seen"] = seen }
+        }
         if let inCall { header["in_call"] = inCall }
         guard let data = try? JSONSerialization.data(withJSONObject: header),
               let json = String(data: data, encoding: .utf8) else { return nil }

@@ -37,6 +37,93 @@ pub fn parse_switch(s: &str) -> Option<bool> {
 
 /// Box-local override of the stable-prefix flag: `<work_root>/.arbos/stable-prefix` holding `on` or `off`.
 pub const STABLE_PREFIX_FILE: &str = "stable-prefix";
+/// Box-local override of the send tool (duplex step 1): `<work_root>/.arbos/send-tool`, `on`, `off` or `strict`.
+pub const SEND_TOOL_FILE: &str = "send-tool";
+/// Box-local override of background jobs (duplex step 2): `<work_root>/.arbos/jobs`, `on` or `off`.
+pub const JOBS_FILE: &str = "jobs";
+/// Box-local override of act→job conversion (duplex step 4): `<work_root>/.arbos/act-to-job`, `on` or `off`.
+pub const ACT_TO_JOB_FILE: &str = "act-to-job";
+
+/// Act→job conversion (duplex step 4, Jacob 2026-10-25 16:01 UTC): an `act` turn still running after
+/// `act_to_job_after()` that has used a web tool or more than `act_to_job_tool_calls()` tool calls
+/// posts its ack at once and hands the rest to a job, freeing the lock. `ARBOS_ACT_TO_JOB=on|off`,
+/// default **on**.
+pub fn act_to_job_on(override_file: &std::path::Path) -> bool {
+    switch_on("ARBOS_ACT_TO_JOB", override_file, true)
+}
+
+/// Seconds an act turn may run before it is converted (`ARBOS_ACT_TO_JOB_SECS`, default 6).
+pub fn act_to_job_after() -> std::time::Duration {
+    let secs = std::env::var("ARBOS_ACT_TO_JOB_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(6);
+    std::time::Duration::from_secs(secs)
+}
+
+/// Tool calls beyond which an act turn counts as long work (`ARBOS_ACT_TO_JOB_TOOL_CALLS`, default 3).
+pub fn act_to_job_tool_calls() -> u32 {
+    std::env::var("ARBOS_ACT_TO_JOB_TOOL_CALLS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3)
+}
+
+/// Background jobs as tools (duplex step 2, `docs/duplex-agent-design.md` §2.3): `start_job` /
+/// `list_jobs` are offered and the router prompt carries the jobs section. `ARBOS_JOBS=on|off`,
+/// default **on**. Off: the hooks refuse and the prompt is byte-identical to before.
+pub fn jobs_on(override_file: &std::path::Path) -> bool {
+    switch_on("ARBOS_JOBS", override_file, true)
+}
+
+/// Running or queued jobs per chat (`ARBOS_JOB_MAX_PER_CHAT`, default 3; design D4).
+pub fn job_max_per_chat() -> usize {
+    std::env::var("ARBOS_JOB_MAX_PER_CHAT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3)
+}
+
+/// Running or queued jobs per agent across its chats (`ARBOS_JOB_MAX_PER_AGENT`, default 6).
+pub fn job_max_per_agent() -> usize {
+    std::env::var("ARBOS_JOB_MAX_PER_AGENT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(6)
+}
+
+/// How the main agent's words reach the chat (duplex design §2.1, `docs/duplex-agent-design.md`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SendTool {
+    /// Streamed prose is the reply, as before the duplex work.
+    Off,
+    /// Only `send_message` and `route.reply` post; leftover prose goes to T3. A turn that would
+    /// otherwise leave the user with nothing posts its leftover prose once (counted as a fallback).
+    On,
+    /// As `On`, with no fallback: leftover prose is never posted.
+    Strict,
+}
+
+pub fn parse_send_tool(s: &str) -> Option<SendTool> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "strict" => Some(SendTool::Strict),
+        other => parse_switch(other).map(|on| if on { SendTool::On } else { SendTool::Off }),
+    }
+}
+
+/// `ARBOS_SEND_TOOL=on|off|strict` (default **on**); the box-local file wins when valid.
+pub fn send_tool_mode(override_file: &std::path::Path) -> SendTool {
+    if let Some(v) = std::fs::read_to_string(override_file)
+        .ok()
+        .and_then(|s| parse_send_tool(&s))
+    {
+        return v;
+    }
+    std::env::var("ARBOS_SEND_TOOL")
+        .ok()
+        .and_then(|s| parse_send_tool(&s))
+        .unwrap_or(SendTool::On)
+}
 /// Box-local override of the compact memory pack: `<work_root>/.arbos/memory-pack-compact`, `on` or `off`.
 pub const MEMORY_PACK_COMPACT_FILE: &str = "memory-pack-compact";
 /// Box-local override of the fast memory walk: `<work_root>/.arbos/memory-walk-fast`, `on` or `off`.
@@ -362,6 +449,22 @@ impl Config {
     /// needs a pi respawn, not a box restart.
     pub fn code_mode(&self) -> bool {
         code_mode_on(&self.box_flag_file(CODE_MODE_FILE))
+    }
+
+    /// Background jobs (duplex step 2); read at every pi (re)spawn like code mode (the prompt
+    /// section rides in the cached prefix) and at every `start_job` call.
+    pub fn jobs(&self) -> bool {
+        jobs_on(&self.box_flag_file(JOBS_FILE))
+    }
+
+    /// Act→job conversion (duplex step 4); read per turn.
+    pub fn act_to_job(&self) -> bool {
+        act_to_job_on(&self.box_flag_file(ACT_TO_JOB_FILE))
+    }
+
+    /// Send tool (duplex step 1): read per turn, so a toggle needs no respawn.
+    pub fn send_tool(&self) -> SendTool {
+        send_tool_mode(&self.box_flag_file(SEND_TOOL_FILE))
     }
 
     /// Stable prefix for this workspace's main agent (D87); read at every pi (re)spawn.

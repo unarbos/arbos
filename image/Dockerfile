@@ -113,7 +113,17 @@ RUN if [ "$WITH_BROWSER" = "1" ]; then \
 
 # --- Arbos files last, so a code change rebuilds only these thin layers (heavy downloads stay cached)
 COPY image/pi-seed/ /etc/arbos/pi-seed/
-COPY harness/arbos-pi-ext/*.ts harness/arbos-pi-ext/package.json /etc/arbos/pi-seed/extensions/arbos-pi-ext/
+# The extension is copied by a RUN keyed on this build's AGENTD_SHA, from a bind mount of the build
+# context: a `COPY` of these files (glob or directory) kept coming back from the buildx cache with the
+# 2026-10-22 03:32 copy on images 0.1.121–0.1.123 while index.ts had changed on main four times (the
+# agentd binary in the same images was fresh). The sha changes every build, so this thin layer is
+# always rebuilt from the checked-out files; the RUN also records which commit the seed came from.
+ARG AGENTD_SHA=unknown
+RUN --mount=type=bind,source=harness/arbos-pi-ext,target=/tmp/arbos-pi-ext \
+    mkdir -p /etc/arbos/pi-seed/extensions/arbos-pi-ext \
+ && cp -a /tmp/arbos-pi-ext/. /etc/arbos/pi-seed/extensions/arbos-pi-ext/ \
+ && rm -rf /etc/arbos/pi-seed/extensions/arbos-pi-ext/node_modules \
+ && echo "$AGENTD_SHA" > /etc/arbos/pi-seed/extensions/arbos-pi-ext/.source-sha
 # typebox resolves from pi's own node_modules; link it next to the extension so jiti finds it.
 RUN mkdir -p /etc/arbos/pi-seed/extensions/arbos-pi-ext/node_modules \
  && TB="$(dirname "$(find "$(npm root -g)/@earendil-works" -path '*/node_modules/typebox/package.json' | head -1)")" \

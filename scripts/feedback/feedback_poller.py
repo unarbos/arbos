@@ -112,7 +112,7 @@ DEPLOY_HOOK = "/usr/local/bin/arbos-deploy-hook"  # CD worker's hook: `<relay|ag
 DEPLOY_QUEUE = os.environ.get("ARBOS_DEPLOY_QUEUE", "/var/lib/arbos-feedback/deploy-requests")  # the hook's queue: one file per kind
 USER_AGENT = "arbos-feedback-poller/1 (+https://github.com/unarbos/arbos)"
 
-TERMINAL = {"shipped", "failed", "ignored", "rejected", "duplicate", "no_change", "handed_off", "deferred", "declined"}
+TERMINAL = {"shipped", "failed", "ignored", "rejected", "duplicate", "no_change", "handed_off", "deferred", "declined", "closed_externally"}
 
 # Fixes in these areas only count as shipped with device-level evidence (a real phone, the
 # tester's confirmation, or Jacob's OK): the simulator cannot show a silent ringback, a missing
@@ -295,10 +295,11 @@ class Config:
 
 
 class HttpError(Exception):
-    def __init__(self, status: int, body: str, url: str):
+    def __init__(self, status: int, body: str, url: str, headers: dict[str, str] | None = None):
         super().__init__(f"HTTP {status} for {url}: {body[:300]}")
         self.status = status
         self.body = body
+        self.headers = headers or {}
 
 
 def http(method: str, url: str, headers: dict[str, str] | None = None, data: bytes | None = None,
@@ -315,7 +316,7 @@ def http(method: str, url: str, headers: dict[str, str] | None = None, data: byt
             return resp.status, {k.lower(): v for k, v in resp.headers.items()}, resp.read()
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors="replace")
-        raise HttpError(e.code, body, url) from None
+        raise HttpError(e.code, body, url, {k.lower(): v for k, v in e.headers.items()}) from None
 
 
 def http_json(method: str, url: str, **kw: Any) -> Any:
@@ -433,6 +434,8 @@ class GitHub:
         # Per-tick ledger: calls billed / answered 304, by endpoint shape — logged at the end of the tick.
         self.ledger: dict[str, list[int]] = {}
         self.rate_remaining: int | None = None
+        self._feedback_refs: dict[str, str] | None = None
+        self._login: str | None = None
 
     @staticmethod
     def endpoint_shape(url: str) -> str:
@@ -442,13 +445,37 @@ class GitHub:
         p = re.sub(r"/heads/[^/]+$", "/heads/<branch>", p)
         return p
 
+    # Budget guard (2026-10-25 15:1x, the shared PAT at 0/5000 with Jacob's P0 gating): below BUDGET_FLOOR
+    # remaining, only merges and the gate's branch writes go out; reads and comments wait for the reset. The
+    # remaining count is logged per call while low so the consumer of the budget is visible.
+    BUDGET_FLOOR = 500
+    ESSENTIAL = ("/merges", "/git/refs", "/git/commits", "/actions/workflows/ci.yml/dispatches")
+
     def api(self, method: str, path: str, **kw: Any) -> Any:
         url = path if path.startswith("http") else f"{GITHUB_API}{path}"
         shape = f"{method} {self.endpoint_shape(url)}"
         row = self.ledger.setdefault(shape, [0, 0])
+        low = self.rate_remaining is not None and self.rate_remaining < self.BUDGET_FLOOR
+        essential = method != "GET" and any(seg in url for seg in self.ESSENTIAL)
+        if low and not essential:
+            if not self.ledger.get("_budget_refusals"):
+                self.ledger["_budget_refusals"] = [0, 0]
+                log(f"GitHub budget guard: {self.rate_remaining} remaining < {self.BUDGET_FLOOR}; refusing non-essential calls until the reset (merges and gate writes still go out)")
+            self.ledger["_budget_refusals"][0] += 1
+            raise HttpError(429, f"budget guard: {self.rate_remaining} remaining", url)
         if method != "GET":
             row[0] += 1
-            return http_json(method, url, headers=self.h, **kw)
+            try:
+                status, headers, body = http(method, url, headers=self.h, **kw)
+            except HttpError as e:
+                self.note_remaining(e.headers)
+                raise
+            self.note_remaining(headers)
+            if low:
+                log(f"GitHub call while low: {shape} → remaining {self.rate_remaining}")
+            if status == 204 or not body:
+                return None
+            return json.loads(body)
         cached = self.etags.get(url)
         hdrs = dict(self.h)
         if cached and time.time() - cached.get("at", 0) < self.ETAG_TTL_S:
@@ -461,10 +488,15 @@ class GitHub:
                 cached["at"] = time.time()
                 self.etags_dirty = True
                 return cached["body"]
+            # A 404 (missing branch) or 422 is billed like a 200 and has no ETag: it must show in the ledger.
+            # 17:5x Oct 25: ~200 unlisted 404 branch probes per tick were the "external" PAT drain.
+            row[0] += 1
+            self.note_remaining(e.headers)
             raise
         row[0] += 1
-        with contextlib.suppress(ValueError, TypeError):
-            self.rate_remaining = int(headers.get("x-ratelimit-remaining", ""))
+        self.note_remaining(headers)
+        if self.rate_remaining is not None and self.rate_remaining < self.BUDGET_FLOOR * 2:
+            log(f"GitHub call: {shape} → remaining {self.rate_remaining}")
         if status == 204 or not body:
             return None
         data = json.loads(body)
@@ -476,6 +508,10 @@ class GitHub:
             self.etags.pop(url, None)
             self.etags_dirty = True
         return data
+
+    def note_remaining(self, headers: dict[str, str]) -> None:
+        with contextlib.suppress(ValueError, TypeError):
+            self.rate_remaining = int(headers.get("x-ratelimit-remaining", ""))
 
     def save_etags(self) -> None:
         if not self.etags_dirty:
@@ -570,6 +606,32 @@ class GitHub:
             if e.status == 404:
                 return None
             raise
+
+    def login(self) -> str:
+        """The account the token posts as (one ETag-cached GET per process); the repo owner if that fails."""
+        if self._login is None:
+            try:
+                self._login = self.api("GET", "/user")["login"]
+            except (HttpError, KeyError, TypeError):
+                self._login = self.repo.split("/")[0]
+        return self._login
+
+    def feedback_refs(self) -> dict[str, str]:
+        """Every `feedback/*` branch head in one listing (pages of 100), cached for this process (one tick).
+        The watches used to probe `/branches/feedback/<id>` per item; a deleted branch answers 404, which is
+        billed and never a 304 — ~200 such probes per tick (17:5x Oct 25) were the token's biggest consumer."""
+        if self._feedback_refs is None:
+            refs: dict[str, str] = {}
+            page = 1
+            while True:
+                batch = self.repo_api("GET", f"/git/matching-refs/heads/feedback/?per_page=100&page={page}") or []
+                for r in batch:
+                    refs[r["ref"].removeprefix("refs/heads/")] = r["object"]["sha"]
+                if len(batch) < 100:
+                    break
+                page += 1
+            self._feedback_refs = refs
+        return self._feedback_refs
 
     def compare(self, base: str, head: str) -> dict:
         return self.repo_api("GET", f"/compare/{base}...{head}")
@@ -1370,7 +1432,8 @@ class Loop:
                  "# Awaiting Jacob — tester fixes that are green and held for release approval", "",
                  f"Regenerated by the feedback poller at {iso()} (release-approval gate "
                  + (f"ON — standing rule, allow: {', '.join(gate.get('allow', []))}" if gate else "LIFTED WHOLESALE by an operator; see the loop log") + "). "
-                 "`sudo arbos-feedback approve <item>` merges + ships; `sudo arbos-feedback decline <item> \"<note>\"` closes the issue and keeps the branch.", "",
+                 "`sudo arbos-feedback approve <item>` merges + ships; `sudo arbos-feedback decline <item> \"<note>\"` closes the issue and keeps the branch. "
+                 "A follow-up inherits its source item's reporter: outside-reporter follow-ups wait here for a per-item approve (no timer); silence is not a yes.", "",
                  f"{len(rows)} item(s).", "",
                  "| Issue | Reporter | What / why | Platform | Before | After | Ready since | State | Item |",
                  "|---|---|---|---|---|---|---|---|---|"]
@@ -1383,6 +1446,11 @@ class Loop:
 
     def freeze_allows(self, fid: str, st: dict, fz: dict) -> bool:
         allow = {a.lower().lstrip("@") for a in fz.get("allow", []) if a}
+        # `approval_required` beats every exemption: set on follow-ups whose SOURCE item's reporter is outside
+        # (2026-10-25 13:40 — "silence is not a yes": an auto follow-up of a tester item must not inherit the
+        # coordinator-owner exemption through its owner id).
+        if st.get("approval_required"):
+            return False
         # Structural exemptions (owner scope, 2026-10-24 00:35): the freeze is for tester-filed reports whose
         # reporter is not on the allow list. Anything owned by a coordinator worker (`handed_off_to` bc-…; loop
         # agents are `agent_id`, not owners), anything tracked/registered by the coordinator (`track_commit`,
@@ -2724,6 +2792,21 @@ class Loop:
             self.hold_for_approval(fid, st)
             return
         head = st["branch_head"]
+        # Merge-time probe (2026-10-25, #1656/#1659/#1707 and the re-landed tails #1684/#1721): the commit that
+        # merges must be the branch's LIVE head. If the author pushed after the gate run started, the gated head
+        # is stale — re-gate the new head instead of merging the old one and orphaning the tail.
+        live = self.gh.branch_head(st["branch"]) if st.get("branch") else None
+        if live and live != head:
+            st.update(branch_head=live, gated_head=None)
+            st.pop("rust_gate", None)
+            self.store.save_state(fid, st)
+            self.store.event(fid, "branch_moved_at_merge", gated=head, live=live)
+            log(f"[{fid}] branch moved {head[:8]} → {live[:8]} after the gate started; not merging the gated head — re-gating the new one")
+            if st.get("issue"):
+                with contextlib.suppress(HttpError):
+                    self.gh.comment(st["issue"], f"`{st['branch']}` moved to `{live[:8]}` after the gate run started on `{head[:8]}`; the gated head was NOT merged. "
+                                    "The new head re-gates and merges on green. (Nothing is orphaned: the loop always merges the live head, never an older one.)")
+            return
         summary = re.sub(r"\s+", " ", st.get("agent_summary") or "").strip()[:80]
         merged = self.gh.merge_into_main(head, f"Merge {st['branch']}: {summary or 'feedback fix'} [feedback {fid}]")
         if merged is None:
@@ -3411,6 +3494,10 @@ class Loop:
             self.watch_handoffs()
         except Exception as e:  # noqa: BLE001
             log(f"handoff watch failed: {e}")
+        try:
+            self.watch_late_pushes()
+        except Exception as e:  # noqa: BLE001
+            log(f"late-push watch failed: {e}")
         with contextlib.suppress(Exception):
             self.write_awaiting_doc()
         with contextlib.suppress(Exception):
@@ -3619,10 +3706,17 @@ class Loop:
                 body = c.get("body") or ""
                 if "scripts/feedback/feedback_poller.py" in body or body.startswith(("Cursor agent started", "Merged to", "Handed off", "Pushed to")):
                     continue
+                # The loop's own comments are never claims: its "comment `take over bc-…` if <owner> should have
+                # it" reply was read back as a take-over one tick later and bounced #1804 (Jacob P0) out of a
+                # green gate at 21:17 Oct 25. Operator notes posted with the same token count as the loop's.
+                if (c.get("user") or {}).get("login", "").lower() == self.gh.login().lower():
+                    continue
                 m = self.CLAIM_RE.search(body)
                 if not m:
                     continue
                 owner = m.group(4)
+                if st.get("handed_off_to", "").startswith(owner) or owner.startswith(st.get("handed_off_to") or "\0"):
+                    continue  # the current owner re-stating ownership changes nothing, mid-gate least of all
                 mid_fix = st.get("status") in ("running", "gating")
                 if mid_fix and not re.search(r"\btak(e|ing) ?over\b", body, re.I):
                     self.gh.comment(st["issue"], f"The loop's own agent is mid-fix on this one ({st.get('agent_url') or 'running'}, state `{st['status']}`); "
@@ -3656,16 +3750,154 @@ class Loop:
                             "push a new commit to re-gate. A commit tagged `[feedback <id>]` that reaches `main` directly is tracked too.")
             self.gh.set_labels(st["issue"], [label, "in-progress"], ["shipped", "needs-human", "no-change"])
 
+    def watch_late_pushes(self) -> None:
+        """A push to `feedback/<fid>` AFTER the item merged (the loop deleted the branch; the author's next push
+        recreated it with the tail) used to be invisible — authors re-landed tails as new issues (#1684, #1721).
+        For items merged in the last 3 days: a branch with commits not on main becomes `<fid>-followupN`, same
+        issue and owner, gated and shipped like any item; the issue gets one note. Cheap: the live `feedback/*`
+        heads come from one listing per tick (a per-item probe of a deleted branch is a billed 404, never a 304)."""
+        cutoff = (utcnow() - dt.timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        refs = self.gh.feedback_refs()
+        for fid in self.store.items():
+            st = self.store.state(fid)
+            if st.get("status") not in ("pushed", "shipped") or not st.get("commit") or (st.get("pushed_at") or "") < cutoff:
+                continue
+            if "-followup" in fid or st.get("late_push_followup"):
+                continue
+            branch = f"feedback/{fid}"
+            head = refs.get(branch)
+            if not head or head == st.get("commit"):
+                continue
+            try:
+                cmp = self.gh.compare("main", head)
+            except HttpError:
+                continue
+            if cmp.get("status") not in ("ahead", "diverged") or not cmp.get("commits"):
+                continue
+            n = 1
+            while self.store.item_dir(f"{fid}-followup{'' if n == 1 else n}").exists():
+                n += 1
+            nfid = f"{fid}-followup{'' if n == 1 else n}"
+            nbranch = f"feedback/{nfid}"
+            try:
+                self.gh.create_branch(nbranch, head)
+                c = self.gh.api("GET", f"/repos/{self.cfg.github_repo}/git/commits/{head}")
+                marker = self.gh.repo_api("POST", "/git/commits", json_body={
+                    "message": f"follow-up to {fid}: later push on {branch} after the merge [feedback {nfid}]",
+                    "tree": c["tree"]["sha"], "parents": [head]})
+                self.gh.repo_api("PATCH", f"/git/refs/heads/{nbranch}", json_body={"sha": marker["sha"], "force": False})
+            except HttpError as e:
+                log(f"[{fid}] late push on {branch} ({head[:8]}) but the follow-up branch could not be made: {e}")
+                continue
+            info = {}
+            with contextlib.suppress(Exception):
+                info = self.store.submission(fid)
+            owner = st.get("handed_off_to") or st.get("agent_id") or "operator"
+            self.register_tracked(nfid, st.get("issue") or 0, f"follow-up to {fid}: later push on {branch} after the merge ({head[:8]})",
+                                  owner, handle=(info.get("handle") or ""), target=st.get("target"))
+            st["late_push_followup"] = nfid
+            self.store.save_state(fid, st)
+            self.store.event(fid, "late_push_followup", head=head, followup=nfid)
+            # The follow-up inherits the SOURCE item's reporter and tier. Outside source (reporter not Jacob,
+            # not a coordinator-owned item) → the follow-up needs Jacob's per-item approve like any outside fix:
+            # it waits as awaiting_jacob, no timer, no owner-confirm shortcut. Jacob/coordinator source → the
+            # one-hour owner-confirm hold, then the pool.
+            nst = self.store.state(nfid)
+            if nst:
+                for k in ("tester", "tester_key", "tier", "target"):
+                    if st.get(k) is not None:
+                        nst[k] = st[k]
+                outside = not self.freeze_allows(fid, st, {"allow": self.APPROVAL_DEFAULT_ALLOW})
+                nst["source_item"] = fid
+                if outside:
+                    nst.update(approval_required=True, status="awaiting_jacob", branch=nbranch, branch_head=marker["sha"], gated_head=marker["sha"],
+                               awaiting={"since": iso(), "ready": False, "main_head": self.gh.branch_head("main") or "", "conflict": False, "needs_gate": True})
+                else:
+                    nst["follow_after"] = (utcnow() + dt.timedelta(minutes=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    nst["gated_head"] = head
+                self.store.save_state(nfid, nst)
+                self.store.event(nfid, "followup_registered", source=fid, outside=outside)
+            else:
+                outside = False
+            log(f"[{fid}] late push on {branch} ({head[:8]}, {len(cmp.get('commits', []))} commit(s) not on main) → following it as {nfid} "
+                + ("(outside reporter: awaiting Jacob's per-item approve)" if outside else "(after a 60-min owner-confirm hold)"))
+            if st.get("issue"):
+                with contextlib.suppress(HttpError):
+                    if outside:
+                        self.gh.ensure_label("awaiting-jacob", "0E8A16", "Gate green; merges and ships when Jacob approves (release-approval gate)")
+                        self.gh.set_labels(st["issue"], ["awaiting-jacob"], [])
+                        self.gh.comment(st["issue"], f"A push landed on `{branch}` after this item merged ({head[:8]}, {len(cmp.get('commits', []))} commit(s) not on main). "
+                                        f"The loop follows it as `{nfid}` (branch `{nbranch}`). Reporter is outside Jacob's own asks, so it waits for **Jacob's per-item approve** "
+                                        f"(`arbos-feedback approve {nfid}`) before it gates and merges — no timer.")
+                    else:
+                        self.gh.comment(st["issue"], f"{owner}: a push landed on `{branch}` after this item merged ({head[:8]}, {len(cmp.get('commits', []))} commit(s) not on main). "
+                                        f"The loop will follow it as `{nfid}` (branch `{nbranch}`) and gate/ship it in **one hour** unless you say it was abandoned or already landed elsewhere "
+                                        f"— reply here (or ask the loop operator to `decline {nfid}`).")
+
+    def retire_closed_handoffs(self, cur: dict) -> None:
+        """A handed-off item whose GitHub issue was closed by a human leaves `handed_off` (status
+        `closed_externally`, terminal) so the loop stops probing for its commit: run 6 auto-filed 37 eval issues
+        that were closed on GitHub while the loop kept asking main for each one every 2 min. One listing call."""
+        since = cur.get("closed_checked") or (utcnow() - dt.timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        q = urllib.parse.urlencode({"state": "closed", "since": since, "per_page": 100, "sort": "updated", "direction": "asc"})
+        try:
+            closed = self.gh.repo_api("GET", f"/issues?{q}") or []
+        except HttpError:
+            return
+        numbers = {i["number"] for i in closed if "pull_request" not in i}
+        # A full page means more may follow: resume from the last update seen, not from now.
+        cur["closed_checked"] = closed[-1]["updated_at"] if len(closed) >= 100 else iso()
+        if not numbers:
+            return
+        # An issue the LOOP closed (its item shipped) is not a human's verdict: a late-push follow-up shares
+        # the source item's issue and must keep waiting for its gate (18:01 Oct 25: #1783's own follow-up
+        # was retired a minute after the source shipped and its second commit never reached main).
+        states = {fid: self.store.state(fid) for fid in self.store.items()}
+        loop_closed = {st.get("issue") for st in states.values() if st.get("status") in ("pushed", "shipped", "pending_deploy")}
+        for fid, st in states.items():
+            if "-followup" in fid or st.get("issue") in loop_closed:
+                continue
+            if st.get("status") == "handed_off" and st.get("issue") in numbers and not st.get("commit"):
+                st.update(status="closed_externally", closed={"reason": "closed on GitHub by a human", "at": iso()})
+                self.store.save_state(fid, st)
+                self.store.event(fid, "closed_externally", issue=st["issue"])
+                log(f"[{fid}] issue #{st['issue']} was closed on GitHub; leaving handed_off (no more commit probes)")
+
     def watch_handoffs(self) -> None:
         """A handed-off item is picked up two ways: its owner pushes `feedback/<id>` (the loop gates and merges it
         like one of its own, diagnostics go to the issue instead of an agent), or tags a commit `[feedback <id>]`
         that reaches main. Either way the item becomes shipped-or-landed like a loop fix (iOS/Mac parts
         through the builds, voice/agentd/relay parts through watch_deploys), so the audit follows it."""
-        for fid in self.store.items():
-            st = self.store.state(fid)
-            if st.get("status") != "handed_off" or st.get("commit") or not st.get("track_commit"):
+        # Budget (2026-10-25 17:10, auditor): this watch billed one `GET /commits?since=<per item>` per handed-off
+        # item per tick — 66–69 calls every 2 min, a third of them for closed eval issues. Now: (a) items whose
+        # GitHub issue is closed leave handed_off (one closed-issues listing per tick); (b) main's commit list is
+        # fetched ONCE per tick, only when main moved since the last scan, and every item is matched in memory.
+        cur = self.store.cursor()
+        self.retire_closed_handoffs(cur)
+        refs = self.gh.feedback_refs()
+        main_head = self.gh.branch_head("main") or ""
+        main_moved = main_head != cur.get("handoff_main_head")
+        main_commits: list[dict] | None = None
+        pending = [(fid, self.store.state(fid)) for fid in self.store.items()]
+        pending = [(f, st) for f, st in pending if st.get("status") == "handed_off" and not st.get("commit") and st.get("track_commit")]
+        if main_moved and pending:
+            oldest = min(max(st.get("created") or "", st.get("handed_off_at") or "") or iso() for _, st in pending)
+            since = (parse_iso(oldest) - dt.timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            # Up to 100 commits per page; main gained ~60 merges in the busiest 12 h, one page covers a day of items.
+            with contextlib.suppress(HttpError):
+                main_commits = self.gh.commits_since(since)
+                cur["handoff_main_head"] = main_head
+        self.store.save_cursor(cur)
+        for fid, st in pending:
+            # A confirmation hold (auto follow-ups, 2026-10-25): the owner has until `follow_after` to decline a
+            # tail the loop found on a merged branch; until then the branch is not followed into the pool.
+            if st.get("follow_after") and iso() < st["follow_after"]:
                 continue
-            head = self.gh.branch_head(f"feedback/{fid}")
+            if st.get("follow_after"):
+                st.pop("follow_after", None); st.pop("gated_head", None)
+                self.store.save_state(fid, st)
+                self.store.event(fid, "confirmation_hold_over")
+            head = refs.get(f"feedback/{fid}")
             if head and head != st.get("gated_head"):
                 cmp = self.gh.compare("main", head)
                 tagged = any(f"[feedback {fid}]" in c["commit"]["message"] for c in cmp.get("commits", []))
@@ -3688,8 +3920,13 @@ class Loop:
                     self.store.event(fid, "branch_pushed", branch=st["branch"], head=head, files=files, by=st.get("handed_off_to"))
                     continue
             # Only commits newer than the hand-off count: an earlier loop merge that was reverted (#1058,
-            # 51ec9524) still carries the tag and must not be taken for the owner's landing.
-            commit = self.find_commit(fid, max(st.get("created") or "", st.get("handed_off_at") or "") or iso())
+            # 51ec9524) still carries the tag and must not be taken for the owner's landing. Matched against the
+            # one commit list fetched above (no per-item API call); nothing to do when main did not move.
+            if main_commits is None:
+                continue
+            floor = max(st.get("created") or "", st.get("handed_off_at") or "") or iso()
+            tag = f"[feedback {fid}]"
+            commit = next((c for c in main_commits if tag in c["commit"]["message"] and c["commit"]["committer"]["date"] >= floor[:19]), None)
             if not commit or commit["sha"] in (st.get("reverted") or []):
                 continue
             files = [f["filename"] for f in self.gh.commit(commit["sha"]).get("files", [])]

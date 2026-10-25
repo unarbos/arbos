@@ -2824,7 +2824,7 @@ impl Composer {
                 .cursor_pointer()
                 .when(i == selected, |el| el.bg(theme.surface_2))
                 .hover(|s| s.bg(theme.surface_2))
-                .child(mention_picture(&c.picture, MENTION_ROW_PICTURE))
+                .child(mention_picture(&c.picture, MENTION_ROW_PICTURE, &theme))
                 .child(
                     div()
                         .text_size(px(TEXT_SMALL))
@@ -2919,8 +2919,8 @@ fn mention_match(query: &str, handle: &str, name: &str) -> Option<bool> {
         .then_some(false)
 }
 
-/// A picker row's picture as an element: photo, D79 initials or D92 leaf.
-fn mention_picture(picture: &mention::Picture, size: f32) -> gpui::AnyElement {
+/// A picker row's picture as an element: photo, D79 initials, D92 leaf or the neutral disc.
+fn mention_picture(picture: &mention::Picture, size: f32, theme: &Theme) -> gpui::AnyElement {
     match picture {
         mention::Picture::Image(image) => img(image.clone())
             .size(px(size))
@@ -2947,6 +2947,9 @@ fn mention_picture(picture: &mention::Picture, size: f32) -> gpui::AnyElement {
             .into_any_element(),
         mention::Picture::Leaf(pick) => {
             crate::ui::avatars::leaf_element(*pick, size).into_any_element()
+        }
+        mention::Picture::Neutral { name } => {
+            crate::ui::avatars::neutral_element(name, size, theme).into_any_element()
         }
     }
 }
@@ -3005,8 +3008,17 @@ impl Render for Composer {
                 v.notice_for(active_chat.as_deref()).map(str::to_owned),
             )
         };
+        // Per-room push refusal (`not_available`): keep the link live, show one muted line.
+        let delivery_notice = state
+            .active_chat_id()
+            .filter(|id| state.push_refused.contains(id))
+            .map(|_| "Messages in this chat are not being delivered".to_string());
         let in_livekit = state.my_call.is_some();
         let has_text = !self.input.read(cx).text().trim().is_empty();
+        // In a job tab (`jobtabs`) typing steers that job.
+        let job_tab = state
+            .active_chat_id()
+            .is_some_and(|id| crate::jobtabs::is_job_chat(&id));
 
         self.input.update(cx, |input, _| {
             input.set_placeholder(match mode {
@@ -3014,6 +3026,7 @@ impl Render for Composer {
                 ComposerMode::Approve => "Approve or reject the card above".to_string(),
                 ComposerMode::Send if transcribing => "Transcribing…".to_string(),
                 ComposerMode::Send if voice_mode => "Speak or type…".to_string(),
+                ComposerMode::Send if job_tab => "Steer this task".to_string(),
                 // Grok Mac says "Message <bot>" (the iPhone says "Ask <bot>").
                 ComposerMode::Send => format!("Message {name}"),
             });
@@ -3359,10 +3372,13 @@ impl Render for Composer {
         // One muted line about the voice path while it is doing something (or
         // when it had to fall back: no microphone, mock relay). The link has
         // no line here: the header's connection pill is its one place
-        // ([feedback connection-pill]). Overlay just above the field so the
-        // pill does not jump when the note appears (a flow child above or
-        // below would shift the bottom-pinned composer).
-        let note = voice_notice.filter(|_| recording || transcribing || voice_mode);
+        // ([feedback connection-pill]). A push-refusal notice for this chat
+        // can show here too. Overlay just above the field so the pill does
+        // not jump when the note appears (a flow child above or below would
+        // shift the bottom-pinned composer).
+        let note = voice_notice
+            .filter(|_| recording || transcribing || voice_mode)
+            .or(delivery_notice);
         let mut field_wrap = div().relative().w_full();
         if let Some(note) = note {
             field_wrap = field_wrap.child(

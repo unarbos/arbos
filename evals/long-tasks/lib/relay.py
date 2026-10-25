@@ -292,7 +292,7 @@ def people_send_as(peer, chat_id, text):
     return p.returncode
 
 
-def capped_user_turn(handle, cap_usd, prompt, timeout_s=240):
+def capped_user_turn(handle, cap_usd, prompt, timeout_s=240, second_prompt=None):
     """Create (once) a scratch user with a tiny daily cap, one project, send one message as them
     and return what the chat showed. Lets the suite see the cap behaviour without capping lt-eval."""
     st, users = admin("GET", "/admin/users")
@@ -333,14 +333,22 @@ def capped_user_turn(handle, cap_usd, prompt, timeout_s=240):
     t0 = time.time()
     p = subprocess.run([ARBOSCTL, "chat", "send", pid, chat_id, prompt, "--stream", "--timeout", str(timeout_s)], capture_output=True, text=True, timeout=timeout_s + 60, env=env)
     out = p.stdout + "\n" + p.stderr
+    if second_prompt:
+        # the cap is judged on debits: the first message spends, the second must be refused plainly
+        time.sleep(5)
+        p = subprocess.run([ARBOSCTL, "chat", "send", pid, chat_id, second_prompt, "--stream", "--timeout", str(timeout_s)], capture_output=True, text=True, timeout=timeout_s + 60, env=env)
+        out += "\n" + p.stdout + "\n" + p.stderr
     p2 = subprocess.run([ARBOSCTL, "chat", "dump", pid, chat_id], capture_output=True, text=True, timeout=60, env=env)
     s = p2.stdout
     doc = json.loads(s[s.find("{"):]) if "{" in s else {"messages": []}
     rows = [m for m in doc.get("messages", []) if m.get("role") == "assistant"]
-    reply = "\n\n".join("".join(pp.get("text", "") for pp in m.get("parts", []) if pp.get("kind") == "text") for m in rows)
+    # what the user reads: text parts and the error line the product shows when the cap trips
+    reply = "\n\n".join("".join((pp.get("text") or pp.get("message") or "") for pp in m.get("parts", []) if pp.get("kind") in ("text", "error")) for m in rows)
+    users_after = [m for m in doc.get("messages", []) if m.get("role") == "user"]
+    answered = sum(1 for m in rows if any(pp.get("kind") in ("text", "error") and (pp.get("text") or pp.get("message")) for pp in m.get("parts", [])))
     errors = [pp.get("message") or pp.get("text") for m in rows for pp in m.get("parts", []) if pp.get("kind") in ("error", "status") and (pp.get("code") in ("failed", "error", "cap", "daily_cap") or "cap" in str(pp.get("message") or "").lower())]
     st, me = http("GET", f"{RELAY}/me", token=tok["access_token"])
-    return {"user_id": uid, "project": pid, "chat_id": chat_id, "reply": reply, "errors": errors, "routes": [m.get("decision") for m in rows], "wall_s": round(time.time() - t0, 1), "stream_tail": out[-800:], "credits": (me or {}).get("credits"), "cap_hit": any("cap" in str(e).lower() for e in errors) or "cap" in reply.lower()}
+    return {"user_id": uid, "project": pid, "chat_id": chat_id, "reply": reply, "errors": errors, "user_messages": len(users_after), "answered_rows": answered, "routes": [m.get("decision") for m in rows], "wall_s": round(time.time() - t0, 1), "stream_tail": out[-800:], "credits": (me or {}).get("credits"), "cap_hit": any("cap" in str(e).lower() for e in errors) or "cap" in reply.lower()}
 
 
 def project_activity(project):

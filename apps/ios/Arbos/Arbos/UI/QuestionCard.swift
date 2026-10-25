@@ -28,8 +28,21 @@ struct QuestionCard: View {
     let picked: [String]
     let open: Bool
 
+    /// #1544: a destructive-shell card; the footer says a standing choice is kept per agent.
+    var shellCard: Bool = false
+
     @State private var dismissed = false
     @State private var selected: Set<String> = []
+
+    /// The agent whose card this is, for "Always allow Doug in /tmp".
+    private var agentName: String {
+        if let pid = model.chat(chatId)?.projectId, let p = model.project(pid) { return p.name }
+        return "the agent"
+    }
+
+    private func named(_ s: String) -> String {
+        s.replacingOccurrences(of: "{agent}", with: agentName)
+    }
 
     static let radius: CGFloat = 24
     static let pad: CGFloat = 14
@@ -47,11 +60,15 @@ struct QuestionCard: View {
                     list
                 }
                 if open && !options.isEmpty {
-                    Text("Or answer in the chat below")
+                    Text(shellCard
+                         ? "Standing choices are per agent: \(agentName) stops asking for what you allow here. Or answer in the chat below."
+                         : "Or answer in the chat below")
                         .font(theme.font(Theme.small))
                         .foregroundStyle(palette.badgeInk)
+                        .fixedSize(horizontal: false, vertical: true)
                         .padding(.top, 4)
                         .padding(.leading, 1)
+                        .accessibilityIdentifier(shellCard ? "shell-card-foot" : "question-card-foot")
                 }
             }
             .padding(.top, Self.pad)
@@ -114,7 +131,7 @@ struct QuestionCard: View {
             if multi {
                 if selected.remove(option.id) == nil { selected.insert(option.id) }
             } else {
-                answer(ids: [option.id], label: option.label)
+                answer(ids: [option.id], label: named(option.label))
             }
         } label: {
             HStack(spacing: 11) {
@@ -123,12 +140,20 @@ struct QuestionCard: View {
                     .foregroundStyle(chosen ? palette.inner : palette.badgeInk)
                     .frame(width: Self.badge, height: Self.badge)
                     .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(chosen ? theme.text : palette.badge))
-                Text(option.label)
+                Text(named(option.label))
                     .font(theme.font(Theme.body))
-                    .foregroundStyle(faded ? theme.placeholder : theme.text)
+                    .foregroundStyle(faded ? theme.placeholder : (option.destructive ? theme.danger : theme.text))
                     .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 0)
+                if let hint = option.hint, !hint.isEmpty {
+                    Text(named(hint))
+                        .font(theme.font(Theme.tiny))
+                        .foregroundStyle(palette.badgeInk)
+                        .multilineTextAlignment(.trailing)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: 150, alignment: .trailing)
+                }
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
@@ -137,7 +162,8 @@ struct QuestionCard: View {
         }
         .buttonStyle(RowPress(enabled: open, fill: palette.press))
         .disabled(!open)
-        .accessibilityLabel("\(Self.letter(ix)), \(option.label)")
+        .accessibilityLabel("\(Self.letter(ix)), \(named(option.label))")
+        .accessibilityIdentifier("option-\(option.id)")
     }
 
     private var sendRow: some View {

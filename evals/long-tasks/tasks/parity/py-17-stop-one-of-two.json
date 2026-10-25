@@ -1,0 +1,65 @@
+{
+  "id": "py-17-stop-one-of-two",
+  "lane": "b",
+  "category": "parity",
+  "categories": [
+    "parity",
+    "stop-one"
+  ],
+  "title": "Two tasks running; stop only one by name",
+  "parity": true,
+  "timeout_s": 480,
+  "settle_s": 25,
+  "turns": [
+    {
+      "prompt": "Find me the 3 best-reviewed surf schools near Santa Teresa and compare their prices.",
+      "shape": {
+        "messages_min": 1,
+        "messages_max": 8,
+        "ack_first": true,
+        "table": false,
+        "links_min": 0,
+        "offer": false,
+        "first_bubble_max_s": 5,
+        "no_handle": true,
+        "worker_rows": 0,
+        "reply_to_ask": false
+      }
+    },
+    {
+      "prompt": "Also compare the three cheapest ways to host a static website, with prices.",
+      "at_s": 2,
+      "shape": {
+        "messages_min": 1,
+        "messages_max": 8,
+        "ack_first": true,
+        "table": false,
+        "links_min": 0,
+        "offer": false,
+        "first_bubble_max_s": 5,
+        "no_handle": true,
+        "worker_rows": 0,
+        "reply_to_ask": false
+      }
+    },
+    {
+      "prompt": "Stop the hosting one.",
+      "at_s": 8,
+      "shape": {
+        "messages_min": 1,
+        "messages_max": 2,
+        "ack_first": false,
+        "table": false,
+        "links_min": 0,
+        "offer": false,
+        "first_bubble_max_s": 5,
+        "no_handle": true,
+        "worker_rows": 0,
+        "reply_to_ask": false
+      },
+      "judge": {
+        "criteria": "Only the hosting comparison is stopped (one line says so); the surf-school comparison still arrives with a table. Fail if both stop, or if the hosting result still arrives in full."
+      }
+    }
+  ]
+}

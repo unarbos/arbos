@@ -1,0 +1,34 @@
+{
+  "id": "py-04-research-compare",
+  "lane": "b",
+  "category": "parity",
+  "categories": [
+    "parity",
+    "research-compare"
+  ],
+  "title": "Compare three cheap static-site hosts with prices",
+  "parity": true,
+  "timeout_s": 420,
+  "settle_s": 20,
+  "turns": [
+    {
+      "prompt": "Compare the three cheapest ways to host a static website, with prices.",
+      "shape": {
+        "messages_min": 3,
+        "messages_max": 7,
+        "ack_first": true,
+        "table": true,
+        "links_min": 2,
+        "offer": true,
+        "first_bubble_max_s": 5,
+        "no_handle": true,
+        "worker_rows": 0,
+        "reply_to_ask": true,
+        "sources": true
+      },
+      "judge": {
+        "criteria": "Compare against the Grok baseline shape: a one-line acknowledgement first, then the conclusion in one or two sentences, a markdown table with one row per item and a link per row, then details, caveats and sources (including what could not be checked), ending with one concrete next-step offer. Speaks to the user directly, never by handle. Score the whole set of messages, not one bubble."
+      }
+    }
+  ]
+}

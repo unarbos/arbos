@@ -27,16 +27,17 @@ use crate::model::{
 };
 
 use super::doc::ChatDoc;
-use super::{ClientCommand, PictureSource, SyncEvent, SyncSource};
+use super::{ClientCommand, DraftPicture, PictureSource, PictureTarget, SyncEvent, SyncSource};
 use crate::model::{
-    new_id, now_ms, ApprovalRisk, ApprovalState, Attachment, AttachmentKind, BoxState,
-    ChannelBinding, ChannelPairing, ChannelPlatform, ChannelPlatformState, ChannelsView, Chat,
-    ChatKind, ChoiceOption, Connector, ConnectorAction, ConnectorProvider, ConnectorStatus,
-    ConnectorsView, DeviceView, Effort, FieldKind, FormField, Id, Link, LocalDevice, LocalView,
-    Message, MessageStatus, Part, Project, QuestionState, Role, Routine, RoutineRun,
-    RoutineRunStatus, RoutineTrigger, Secret, SecretActivity, SecretAgent, SecretDirector,
-    SecretRequest, SecretScope, SecretsView, ServerChannel, ServerInfo, Skill, StatusKind,
-    ToolCall, ToolStatus, TurnKind, Widget,
+    new_id, now_ms, ApprovalRisk, ApprovalState, Attachment, AttachmentKind, BoxReport, BoxState,
+    BoxWorkspace, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelPlatformState,
+    ChannelsView, Chat, ChatKind, ChoiceOption, Connector, ConnectorAction, ConnectorProvider,
+    ConnectorStatus, ConnectorsView, DeviceView, Effort, FieldKind, FormField, Id, Job, JobRollout,
+    JobState, Link, LocalDevice, LocalView, Message, MessageStatus, Part, Project, QuestionState,
+    Role, RolloutEntry, RolloutKind, RolloutParent, Routine, RoutineRun, RoutineRunStatus,
+    RoutineTrigger, Secret, SecretActivity, SecretAgent, SecretDirector, SecretRequest,
+    SecretScope, SecretsView, ServerChannel, ServerInfo, Skill, StatusKind, ToolCall, ToolStatus,
+    TurnKind, Widget,
 };
 
 pub const STREAM_FRAME_MS: u64 = arbos_core::STREAM_COMMIT_MS;
@@ -85,6 +86,8 @@ struct Shared {
     connectors: Mutex<ConnectorsView>,
     channels: Mutex<ChannelsView>,
     secrets: Mutex<SecretsView>,
+    /// Standing shell approvals per agent (#1544): Doug starts with one for /tmp.
+    shell_grants: Mutex<HashMap<Id, Vec<crate::model::ShellGrant>>>,
     /// Settings → Devices: this account's signed-in devices (this Mac first).
     devices: Mutex<Vec<DeviceView>>,
     routines: Mutex<Vec<Routine>>,
@@ -95,6 +98,18 @@ struct Shared {
     machine: Mutex<Machine>,
     /// People blocked in this session (the relay's `GET /blocks` stand-in, #1545).
     blocked: Mutex<Vec<Person>>,
+    /// `ARBOS_FIXTURE_JOBS=<n>`: the open background jobs the relay's activity
+    /// record would list (duplex §2.4), per chat, with their hidden rows' ids.
+    jobs: Mutex<Vec<FixtureJob>>,
+}
+
+/// One seeded job: the relay's row plus when it started (elapsed grows live)
+/// and the hidden transcript row that stands for it.
+#[derive(Clone, Debug)]
+struct FixtureJob {
+    job: Job,
+    started_at: u64,
+    row_id: Id,
 }
 
 /// What the offline STT "hears" (the bundled test clip says this).
@@ -134,12 +149,14 @@ impl SyncSource for FixtureSource {
                 connectors: Mutex::new(seed_connectors()),
                 channels: Mutex::new(seed_channels()),
                 secrets: Mutex::new(seed_secrets()),
+                shell_grants: Mutex::new(seed_shell_grants()),
                 devices: Mutex::new(seed_devices()),
                 routines: Mutex::new(seed_routines()),
                 routine_runs: Mutex::new(seed_routine_runs()),
                 local: Mutex::new(seed_local()),
                 voice_blobs: Mutex::new(HashMap::new()),
                 blocked: Mutex::new(Vec::new()),
+                jobs: Mutex::new(Vec::new()),
                 machine: Mutex::new(Machine {
                     // `ARBOS_FIXTURE_MACHINE=error|waking` seeds a banner state (screenshot rig).
                     state: match std::env::var("ARBOS_FIXTURE_MACHINE").as_deref() {
@@ -219,6 +236,7 @@ impl SyncSource for FixtureSource {
             emit_link_hook(&shared);
             emit_typing_hook(&shared);
             emit_working_hook(&shared);
+            emit_jobs_hook(&shared);
 
             loop {
                 tokio::select! {
@@ -489,6 +507,334 @@ fn emit_working_hook(shared: &Arc<Shared>) {
                 });
             }
         }
+    }
+}
+
+/// `ARBOS_FIXTURE_JOBS=<n>` (screenshot rig, duplex §2.4): the first n of three
+/// background jobs are open in every agent chat — each with its hidden `job` row
+/// (what agentd writes) and its entry in the relay's `activity.jobs[]` (what
+/// `JobsRefresh` answers): 1 running with a step, 2 running with no step yet,
+/// 3 queued behind a lock — the three drawer states. Elapsed grows live; the
+/// drawer's Stop removes a job, the Stop button removes them all.
+fn fixture_jobs_count() -> usize {
+    std::env::var("ARBOS_FIXTURE_JOBS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(0)
+        .min(3)
+}
+
+const FIXTURE_JOBS: [(&str, &str, JobState, &str, u64); 3] = [
+    (
+        "01J9JOBSURF000000000000000",
+        "Searching for surf schools",
+        JobState::Running,
+        "Reading tripadvisor.com",
+        41,
+    ),
+    (
+        "01J9JOBTESTS00000000000000",
+        "Fixing the flaky tests",
+        JobState::Running,
+        "",
+        125,
+    ),
+    (
+        "01J9JOBRENAME0000000000000",
+        "Renaming the config module",
+        JobState::Queued,
+        "Waiting for Fixing the flaky tests",
+        12,
+    ),
+];
+
+fn emit_jobs_hook(shared: &Arc<Shared>) {
+    let n = fixture_jobs_count();
+    if n == 0 {
+        return;
+    }
+    let spaces: Vec<Project> = shared.projects.lock().unwrap().clone();
+    let now = now_ms();
+    for space in spaces.iter().filter(|s| !s.is_people()) {
+        let chats: Vec<Id> = shared
+            .chats
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.project_id == space.id)
+            .map(|c| c.id.clone())
+            .collect();
+        for chat_id in chats {
+            // The ask the jobs answer: the newest user line of the chat.
+            let ask = with_doc(shared, &chat_id, |doc| {
+                doc.read_all()
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == Role::User)
+                    .map(|m| m.id.clone())
+            })
+            .flatten();
+            for (id, title, state, step, elapsed) in FIXTURE_JOBS.iter().take(n) {
+                let job_id = format!("{id}{}", &chat_id[chat_id.len().saturating_sub(4)..]);
+                let row_id = new_id();
+                let activity = if step.is_empty() { *title } else { step };
+                let shown = if n > 1 {
+                    format!("{activity} · {n} tasks")
+                } else {
+                    activity.to_string()
+                };
+                let fields = [
+                    (
+                        "job",
+                        json!({ "id": job_id, "title": title, "kind": "research" }),
+                    ),
+                    ("worker", json!(true)),
+                    ("hidden", json!(true)),
+                    ("inReplyTo", json!(ask.clone().unwrap_or_default())),
+                ];
+                with_doc(shared, &chat_id, |doc| {
+                    doc.core.transact(|d| {
+                        begin_assistant_row(
+                            d,
+                            &row_id,
+                            "agent",
+                            &fields,
+                            StatusKind::Working,
+                            "Working…",
+                        );
+                        d.set_activity(&row_id, Some(&shown));
+                    })
+                });
+                shared.jobs.lock().unwrap().push(FixtureJob {
+                    job: Job {
+                        id: job_id,
+                        title: (*title).to_string(),
+                        state: *state,
+                        step: (*step).to_string(),
+                        elapsed_s: *elapsed,
+                        ask_message_id: ask.clone(),
+                        chat_id: Some(chat_id.clone()),
+                    },
+                    started_at: now.saturating_sub(elapsed * 1000),
+                    row_id,
+                });
+            }
+        }
+    }
+}
+
+/// `JobsRefresh`: the relay's `activity.jobs[]` for one project — the seeded
+/// jobs of its chats with their elapsed clocks moved on.
+fn emit_project_jobs(shared: &Arc<Shared>, project_id: &str) {
+    let chats: Vec<Id> = shared
+        .chats
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|c| c.project_id == project_id)
+        .map(|c| c.id.clone())
+        .collect();
+    let now = now_ms();
+    let jobs: Vec<Job> = shared
+        .jobs
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|f| f.job.chat_id.as_ref().is_some_and(|c| chats.contains(c)))
+        .map(|f| Job {
+            elapsed_s: now.saturating_sub(f.started_at) / 1000,
+            ..f.job.clone()
+        })
+        .collect();
+    let _ = shared.events.send(SyncEvent::ProjectJobs {
+        project_id: project_id.to_string(),
+        jobs,
+    });
+}
+
+/// A job ends (Stop in the drawer, or the Stop button for every job of the
+/// chat): its hidden row closes as agentd closes it and the list forgets it.
+/// The scripted exchange of each fixture job, as offsets (s) from its start: the brief,
+/// the ack, tool steps with their lengths, the result. `RolloutRefresh` answers the
+/// entries that have "happened" by now, the step under way as `running`, so a rollout
+/// opened on the rig streams. `ARBOS_FIXTURE_ROLLOUT_DONE=1` ends the first job's document
+/// (result delivered, `ended_at`) while the chip still lists it — the finished-state shot.
+/// One scripted step: (offset_s, kind, words, duration_ms).
+type ScriptStep = (u64, &'static str, &'static str, u64);
+
+fn fixture_rollout_script(title: &str) -> (&'static str, Vec<ScriptStep>, &'static str) {
+    // (brief, [(offset_s, kind, words, duration_ms)], result)
+    match title {
+        "Searching for surf schools" => (
+            "Find the 3 best-reviewed surf schools near Santa Teresa, compare group and private lesson prices, and say which is the best value. Return each school with its page URL and the facts you compared.",
+            vec![
+                (3, "text", "On it — pulling ratings and current prices for the top schools around Santa Teresa.", 0),
+                (6, "tool", "Searched the web for “surf schools Santa Teresa reviews 2026”", 2100),
+                (9, "tool", "Read tripadvisor.com — Santa Teresa surf schools", 4800),
+                (15, "tool", "Read bluemysticsurf.com/prices", 3000),
+                (19, "tool", "Reading delsoulsurf.com", 2600),
+                (23, "tool", "Read monkeyadventures.cr", 3400),
+                (28, "text", "Three schools have enough reviews to compare; checking the lesson pages for this month's prices.", 0),
+                (33, "tool", "Read bluemysticsurf.com/lessons", 2200),
+                (40, "tool", "Comparing prices across the three", 1800),
+            ],
+            "Blue Mystic is the best value for single lessons ($60–70 group, $90 private, 4.9 from 444 Google reviews); Del Soul is the pick if you take above five (5.0 from 593, $65–75 group); Monkey Adventures runs $75 group / $115 private. Full table with page URLs attached.",
+        ),
+        "Fixing the flaky tests" => (
+            "The relay's websocket tests fail one run in five on CI. Find the race, fix it on a branch, and run the suite three times.",
+            vec![
+                (4, "text", "Reading the failing runs first.", 0),
+                (8, "tool", "Read .github/workflows/ci.yml", 1200),
+                (12, "tool", "Ran cargo test -p arbos-relay ws:: (3×)", 48_000),
+                (70, "tool", "Read crates/arbos-relay/src/ws.rs", 2100),
+                (80, "text", "The ping timer races the close frame; adding the join before the shutdown.", 0),
+                (90, "tool", "Edited crates/arbos-relay/src/ws.rs", 900),
+                (100, "tool", "Running cargo test -p arbos-relay (1 of 3)", 45_000),
+            ],
+            "Fixed: the ping timer raced the close frame. Three green runs on the branch fix/ws-close-race.",
+        ),
+        _ => (
+            "Rename the config module to settings across the crate and keep the public re-exports.",
+            vec![],
+            "",
+        ),
+    }
+}
+
+fn emit_job_rollout(shared: &Arc<Shared>, project_id: &str, job_id: &str, after: Option<u64>) {
+    let Some(f) = shared
+        .jobs
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|f| f.job.id == job_id)
+        .cloned()
+    else {
+        return;
+    };
+    let parent = shared
+        .projects
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|p| p.id == project_id)
+        .map(|p| p.name.clone())
+        .unwrap_or_default();
+    let now = now_ms();
+    let done = std::env::var("ARBOS_FIXTURE_ROLLOUT_DONE").is_ok_and(|v| v == "1")
+        && f.job.title == "Searching for surf schools";
+    let (brief, script, result) = fixture_rollout_script(&f.job.title);
+    let start = f.started_at;
+    let mut entries = vec![RolloutEntry {
+        seq: 1,
+        at: start,
+        kind: RolloutKind::Prompt,
+        text: Some(brief.to_string()),
+        label: None,
+        name: None,
+        status: None,
+        duration_ms: None,
+    }];
+    let mut seq = 2;
+    let mut tool_calls = 0;
+    let mut running_step: Option<String> = None;
+    let horizon = if done { u64::MAX } else { now };
+    for (offset, kind, words, dur) in &script {
+        let at = start + offset * 1000;
+        if at > horizon {
+            break;
+        }
+        let is_tool = *kind == "tool";
+        let finished = done || at + dur <= now;
+        if is_tool {
+            tool_calls += 1;
+            if !finished {
+                running_step = Some(words.to_string());
+            }
+        }
+        entries.push(RolloutEntry {
+            seq,
+            at,
+            kind: if is_tool {
+                RolloutKind::Tool
+            } else {
+                RolloutKind::Text
+            },
+            text: (!is_tool).then(|| words.to_string()),
+            label: is_tool.then(|| words.to_string()),
+            name: is_tool.then(|| "tool".to_string()),
+            status: is_tool.then(|| if finished { "done" } else { "running" }.to_string()),
+            duration_ms: (is_tool && finished).then_some(*dur),
+        });
+        seq += 1;
+    }
+    let ended_at = done.then(|| start + 372_000);
+    if done {
+        entries.push(RolloutEntry {
+            seq,
+            at: start + 372_000,
+            kind: RolloutKind::Result,
+            text: Some(result.to_string()),
+            label: None,
+            name: None,
+            status: Some("done".to_string()),
+            duration_ms: Some(372_000),
+        });
+        seq += 1;
+    }
+    if let Some(a) = after {
+        entries.retain(|e| e.seq > a || e.is_live());
+    }
+    let step = running_step.unwrap_or_else(|| f.job.step.clone());
+    let rollout = JobRollout {
+        id: f.job.id.clone(),
+        title: f.job.title.clone(),
+        kind: "research".into(),
+        state: f.job.state,
+        step,
+        elapsed_s: if done {
+            372
+        } else {
+            now.saturating_sub(start) / 1000
+        },
+        started_at: Some(start),
+        ended_at,
+        chat_id: f.job.chat_id.clone(),
+        ask_message_id: f.job.ask_message_id.clone(),
+        parent: RolloutParent {
+            project_id: project_id.to_string(),
+            name: parent,
+        },
+        brief: brief.to_string(),
+        entries,
+        tool_calls,
+        next_seq: seq,
+        unavailable: false,
+    };
+    let _ = shared.events.send(SyncEvent::JobRollout {
+        project_id: project_id.to_string(),
+        job_id: job_id.to_string(),
+        rollout,
+    });
+}
+
+fn fixture_stop_jobs(shared: &Arc<Shared>, chat_id: &str, only: Option<&str>) {
+    let ended: Vec<FixtureJob> = {
+        let mut jobs = shared.jobs.lock().unwrap();
+        let (gone, kept): (Vec<FixtureJob>, Vec<FixtureJob>) = jobs.drain(..).partition(|f| {
+            f.job.chat_id.as_deref() == Some(chat_id) && only.is_none_or(|id| f.job.id == id)
+        });
+        *jobs = kept;
+        gone
+    };
+    for f in ended {
+        with_doc(shared, chat_id, |doc| {
+            doc.core.transact(|d| {
+                d.set_activity(&f.row_id, None);
+                let _ = d.add_status_part(&f.row_id, "stopped", "Stopped");
+                d.finish_message(&f.row_id, CoreStatus::Cancelled);
+            })
+        });
     }
 }
 
@@ -964,7 +1310,30 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     d.push_command("stop", json!({}), DEVICE);
                 });
             });
+            fixture_stop_jobs(shared, &chat_id, None);
         }
+        ClientCommand::StopJob {
+            chat_id,
+            job_id,
+            message_id,
+        } => {
+            with_doc(shared, &chat_id, |doc| {
+                doc.core.transact(|d| {
+                    d.push_command(
+                        "stop",
+                        json!({ "jobId": job_id, "messageId": message_id }),
+                        DEVICE,
+                    );
+                });
+            });
+            fixture_stop_jobs(shared, &chat_id, Some(&job_id));
+        }
+        ClientCommand::JobsRefresh { project_id } => emit_project_jobs(shared, &project_id),
+        ClientCommand::RolloutRefresh {
+            project_id,
+            job_id,
+            after,
+        } => emit_job_rollout(shared, &project_id, &job_id, after),
         ClientCommand::React {
             chat_id,
             message_id,
@@ -1002,7 +1371,17 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         ClientCommand::Approve {
             chat_id,
             approval_id,
-        } => decide_approval(shared, chat_id, approval_id, ApprovalState::Approved, None),
+            grant,
+        } => {
+            if let Some(class) = grant {
+                with_doc(shared, &chat_id, |doc| {
+                    doc.core.transact(|d| {
+                        d.set_approval_grant(&approval_id, &class);
+                    });
+                });
+            }
+            decide_approval(shared, chat_id, approval_id, ApprovalState::Approved, None)
+        }
         ClientCommand::Reject {
             chat_id,
             approval_id,
@@ -1209,6 +1588,23 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     daily_cap_usd: Some(20.0),
                 })));
         }
+        ClientCommand::SetMyAvatarKey { key } => {
+            // The Generate tab's preview (seeded by `GenerateImage`) becomes my picture.
+            let url = format!("fixture://avatar/me-{key}");
+            emit_avatar(shared, &url);
+            let _ = shared
+                .events
+                .send(SyncEvent::Account(Some(crate::model::AccountView {
+                    id: ME_ID.into(),
+                    login: ME_HANDLE.into(),
+                    name: "Jacob Steeves".into(),
+                    avatar_url: url,
+                    device_name: "Fixture".into(),
+                    balance_usd: 84.5,
+                    spent_today_usd: 1.6,
+                    daily_cap_usd: Some(20.0),
+                })));
+        }
         ClientCommand::RemoveMyAvatar => {
             let _ = shared
                 .events
@@ -1312,11 +1708,14 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             name,
             avatar_color_index,
             leaf,
+            picture,
             source_project_id: _,
             description,
             color,
         } => {
             let id = new_id();
+            // No blob store in the demo: the Create sheet's picture becomes a seeded one.
+            let image_url = picture.as_ref().map(|p| draft_picture_url("agent", p));
             let icon = name
                 .chars()
                 .next()
@@ -1356,9 +1755,12 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 avatar_color_override: avatar_color_index,
                 avatar_leaf: leaf.map(|l| l.leaf),
                 avatar_leaf_color: leaf.map(|l| l.color),
-                image_url: None,
+                image_url: image_url.clone(),
                 message_grants: Vec::new(),
             });
+            if let Some(url) = &image_url {
+                emit_avatar(shared, url);
+            }
             let chat_id = new_id();
             shared.chats.lock().unwrap().push(Chat {
                 id: chat_id.clone(),
@@ -1495,6 +1897,16 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             emit_connectors(shared);
         }
         ClientCommand::SecretsRefresh => emit_secrets(shared),
+        ClientCommand::ShellGrantsRefresh { project_id } => emit_shell_grants(shared, &project_id),
+        ClientCommand::ShellGrantRevoke {
+            project_id,
+            grant_id,
+        } => {
+            if let Some(list) = shared.shell_grants.lock().unwrap().get_mut(&project_id) {
+                list.retain(|g| g.id != grant_id);
+            }
+            emit_shell_grants(shared, &project_id);
+        }
         ClientCommand::DevicesRefresh => emit_devices(shared),
         ClientCommand::DeviceRevoke { id } => {
             // The relay refuses to revoke the caller's own device through this
@@ -1926,6 +2338,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             emit_channels(shared);
         }
         ClientCommand::LocalRefresh => emit_local(shared),
+        ClientCommand::MachineDebugRefresh => emit_box_report(shared),
         ClientCommand::LocalSetAllowReads { device_id, allow } => {
             if let Some(d) = shared
                 .local
@@ -2062,6 +2475,7 @@ fn send_user(
             sender_name: me.name.clone(),
             sender_avatar: Some(me.avatar_url.clone()),
             answers_question_id: None,
+            tz: None,
         };
         with_doc(shared, &chat_id, |doc| {
             doc.core.transact(|d| {
@@ -2491,6 +2905,72 @@ fn seed_connectors() -> ConnectorsView {
         items,
         loaded: true,
     }
+}
+
+/// The Computer tab's report, scripted from the fixture's machine: an awake box with the
+/// fixture's spec, one workspace per agent project, the streaming one mid-turn.
+fn emit_box_report(shared: &Shared) {
+    let machine = shared.machine.lock().unwrap().clone();
+    let streaming: Vec<Id> = shared
+        .running
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, on)| on.load(Ordering::SeqCst))
+        .map(|(chat, _)| chat.clone())
+        .collect();
+    let chats = shared.chats.lock().unwrap().clone();
+    // `ARBOS_FIXTURE_WORKING=<n>`: the first n agents are mid-turn here too.
+    let working_n = fixture_working_count();
+    let state = match machine.shown_state() {
+        MachineState::Awake => "awake",
+        MachineState::Waking => "waking",
+        MachineState::Stopped => "stopped",
+        MachineState::Error => "error",
+        MachineState::Asleep | MachineState::Unknown => "asleep",
+    };
+    let reachable = machine.shown_state() == MachineState::Awake;
+    let workspaces: Vec<BoxWorkspace> = shared
+        .projects
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|p| !p.is_people())
+        .enumerate()
+        .map(|(i, p)| {
+            let running = i < working_n
+                || streaming
+                    .iter()
+                    .any(|c| chats.iter().any(|ch| &ch.id == c && ch.project_id == p.id));
+            BoxWorkspace {
+                project_id: p.id.clone(),
+                name: p.name.clone(),
+                healthy: true,
+                running,
+                elapsed_ms: running.then_some(42_000),
+                tool_calls: running.then_some(7),
+            }
+        })
+        .collect();
+    let report = BoxReport {
+        fetched_at: now_ms(),
+        state: state.into(),
+        awake_for_s: reachable.then_some(5 * 3600 + 12 * 60),
+        image: machine
+            .image
+            .clone()
+            .or_else(|| Some("arbos-agent-0.1.114".into())),
+        reachable,
+        unreachable_reason: (!reachable).then(|| "box has no url yet (asleep or starting)".into()),
+        uptime_s: reachable.then_some(5 * 3600 + 12 * 60),
+        load_1m: reachable.then_some(0.42),
+        mem_total_mb: reachable.then_some(8 * 1024),
+        mem_available_mb: reachable.then_some(5_300),
+        disk_total_mb: reachable.then_some(10 * 1024),
+        disk_available_mb: reachable.then_some(6_900),
+        workspaces: if reachable { workspaces } else { Vec::new() },
+    };
+    let _ = shared.events.send(SyncEvent::BoxReport(report));
 }
 
 fn emit_routines(shared: &Shared, project_id: &str) {
@@ -3650,6 +4130,7 @@ fn approval_card(
         decided_at,
         decided_by: decided_at.map(|_| DEVICE.to_string()),
         reason: None,
+        grant: None,
     }
 }
 
@@ -3867,6 +4348,39 @@ fn membership_notice(shared: &Arc<Shared>, chat_id: &str, text: &str) {
     });
 }
 
+fn emit_shell_grants(shared: &Arc<Shared>, project_id: &str) {
+    let items = shared
+        .shell_grants
+        .lock()
+        .unwrap()
+        .get(project_id)
+        .cloned()
+        .unwrap_or_default();
+    let _ = shared.events.send(SyncEvent::ShellGrants {
+        project_id: project_id.to_string(),
+        items,
+    });
+}
+
+/// #1544: the first agent has one standing grant (so the Settings row and its switch show).
+fn seed_shell_grants() -> HashMap<Id, Vec<crate::model::ShellGrant>> {
+    let mut m = HashMap::new();
+    m.insert(
+        PROJECT_ARBOS.to_string(),
+        vec![crate::model::ShellGrant {
+            id: "grant-scratch".into(),
+            rule_class: "file-delete".into(),
+            path_class: "scratch".into(),
+            chat_id: None,
+            granted_by: "dev-mac".into(),
+            created_at: now_ms() - 3 * 60 * 60 * 1000,
+            label: "File deletes in /tmp".into(),
+            detail: "scratch only: /tmp and /work/tmp".into(),
+        }],
+    );
+    m
+}
+
 fn with_doc<R>(shared: &Arc<Shared>, chat_id: &str, f: impl FnOnce(&ChatDoc) -> R) -> Option<R> {
     let docs = shared.docs.lock().unwrap();
     docs.get(chat_id).map(f)
@@ -4054,6 +4568,7 @@ fn write_message(core: &CoreDoc, msg: &Message) {
             sender_name: msg.sender_name.clone(),
             sender_avatar: msg.sender_avatar.clone(),
             answers_question_id: None,
+            tz: None,
         };
         let _ = core.append_user_message(&msg.id, text, DEVICE, &opts);
         fill_attachment_details(core, &msg.id, &attachments);
@@ -4844,6 +5359,8 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
         // `ARBOS_FIXTURE_REPLY=1` (screenshot rig): one reply bubble quoting that answer.
         // `ARBOS_FIXTURE_REPLY=long`: a multi-paragraph markdown review as the last
         // message, so `ARBOS_REPLY_TO=1` arms the composer's reply preview on it.
+        // `ARBOS_FIXTURE_REPLY=code`: the `REPLY_CODE` reply (a ```rust card) as
+        // the last message, for the code card's Copy pill shots.
         match std::env::var("ARBOS_FIXTURE_REPLY").as_deref() {
             Ok("1") => {
                 s.user_replying_to("Which tabs do you mean here?", &last);
@@ -4854,6 +5371,14 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
                     TurnKind::Reply,
                     MessageStatus::Done,
                     vec![text(LONG_REVIEW)],
+                );
+            }
+            Ok("code") => {
+                s.user("How is the transcript list built?");
+                s.assistant(
+                    TurnKind::Reply,
+                    MessageStatus::Done,
+                    vec![text(&REPLY_CODE.join("\n\n"))],
                 );
             }
             _ => {}
@@ -5099,6 +5624,44 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
         drafts
             .core
             .set_message_fields(&pending, &[("waitingApproval", json!(true))]);
+        // #1544 rig (`ARBOS_FIXTURE_SHELL_CARD=1`): a destructive-shell card with its four
+        // standing rows, as agentd posts it for `rm -rf` outside scratch.
+        if std::env::var("ARBOS_FIXTURE_SHELL_CARD").as_deref() == Ok("1") {
+            s.user("clone arbos into /tmp and list the top level");
+            let command = "cd /work/app && rm -rf node_modules && git clone --depth 1 https://github.com/unarbos/arbos arbos-src";
+            let shell = s.assistant(
+                TurnKind::Act,
+                MessageStatus::Done,
+                vec![
+                    text("On it."),
+                    Part::Approval {
+                        id: new_id(),
+                        approval_id: "01J9APPROVAL0SHELL00000000".into(),
+                        title: "Run a destructive command (file-delete)".into(),
+                        summary: command.into(),
+                        risk: ApprovalRisk::Destructive,
+                        payload: json!({
+                            "kind": "tool_call", "tool": "bash", "class": "file-delete", "path_class": "workspace",
+                            "why": "deletes files outside /work/tmp",
+                            "input": { "command": command },
+                            "grant_options": [
+                                { "path_class": "workspace", "label": "its workspace", "detail": "the agent's own /work folder, including scratch" },
+                                { "path_class": "anywhere", "label": "anywhere", "detail": "any folder of its box" }
+                            ]
+                        }),
+                        state: ApprovalState::Pending,
+                        expires_at: Some(s.t + APPROVAL_TTL_MS as u64),
+                        decided_at: None,
+                        decided_by: None,
+                        reason: None,
+                        grant: None,
+                    },
+                ],
+            );
+            drafts
+                .core
+                .set_message_fields(&shell, &[("waitingApproval", json!(true))]);
+        }
     }
     out.push(drafts);
     let media = ChatDoc::new(CHAT_ARBOS_MEDIA, PROJECT_ARBOS);
@@ -5520,6 +6083,9 @@ fn human_message(chat_id: &str, who: &Person, text: &str, at: u64) -> Message {
         subagent_id: None,
         subagent_name: None,
         handoff_messages: None,
+        worker: false,
+        job: None,
+        hidden: false,
         agent_reply_to: None,
         reactions: Default::default(),
         in_reply_to: None,
@@ -6050,6 +6616,20 @@ fn avatar_png(seed: &str) -> Vec<u8> {
     out.into_inner()
 }
 
+/// The Create sheet's pending picture as a seeded fixture URL (the same seed the sheet
+/// previewed for a generated one, so the new entity shows the picture it was created with).
+fn draft_picture_url(kind: &str, picture: &DraftPicture) -> String {
+    match picture {
+        DraftPicture::File(path) => format!(
+            "fixture://avatar/{kind}-{}",
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("picture")
+        ),
+        DraftPicture::Generated { key } => format!("fixture://avatar/draft-{key}"),
+    }
+}
+
 fn emit_avatar(shared: &Shared, url: &str) {
     let seed = url.rsplit('/').next().unwrap_or(url).to_string();
     let _ = shared.events.send(SyncEvent::Avatar {
@@ -6155,6 +6735,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             agent_ids,
             title: draft_title,
             leaf,
+            picture,
         } => {
             let mut members: Vec<Person> = Vec::new();
             for raw in handles {
@@ -6240,6 +6821,10 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             space.name = title.clone();
             space.avatar_leaf = leaf.as_ref().map(|l| l.leaf);
             space.avatar_leaf_color = leaf.as_ref().map(|l| l.color);
+            if let Some(url) = picture.as_ref().map(|p| draft_picture_url("group", p)) {
+                emit_avatar(shared, &url);
+                space.image_url = Some(url);
+            }
             space.people = members;
             space.pending = space.people.iter().any(|p| p.status == "invited");
             space.owner_handle = Some(ME_HANDLE.into());
@@ -6662,7 +7247,14 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
         ClientCommand::GenerateImage { target, prompt } => {
             // The demo "generates" after a short wait: a seeded picture named after the prompt.
             let key = format!("gen-{}", prompt.trim().to_lowercase().replace(' ', "-"));
-            let url = format!("fixture://avatar/{}-{key}", target.id());
+            // My own picture keeps the `me-` prefix `has_custom_avatar` reads.
+            let url = match target {
+                PictureTarget::Me(_) => format!("fixture://avatar/me-{key}"),
+                _ => {
+                    let owner = target.id().map(String::as_str).unwrap_or("draft");
+                    format!("fixture://avatar/{owner}-{key}")
+                }
+            };
             let shared = shared.clone();
             let target = target.clone();
             tokio::spawn(async move {
@@ -7250,6 +7842,7 @@ mod create_group_tests {
             agent_ids: vec![PROJECT_ARBOS.into()],
             title: None,
             leaf: None,
+            picture: None,
         })
         .unwrap();
         let (after, chat_id) = until_created(&mut rx).await;
@@ -7283,6 +7876,7 @@ mod create_group_tests {
             agent_ids: vec![PROJECT_ARBOS.into(), PROJECT_COMMS.into()],
             title: None,
             leaf: None,
+            picture: None,
         })
         .unwrap();
         let (after, chat_id) = until_created(&mut rx).await;
@@ -7307,6 +7901,7 @@ mod create_group_tests {
             agent_ids: vec![],
             title: None,
             leaf: None,
+            picture: None,
         })
         .unwrap();
         let err = timeout(WAIT, async {

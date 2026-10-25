@@ -63,6 +63,20 @@ const ICONS: &[(&str, &str)] = &[
         "<path d=\"M7 3h10M7 21h10M8 3c0 5 4 6 4 9s-4 4-4 9M16 3c0 5-4 6-4 9s4 4 4 9\"/>"
     ),
     icon!("xmark", "<path d=\"M6 6l12 12M18 6L6 18\"/>"),
+    // Grok Bot's activity spinner (the Coding row while the bot works): eight
+    // spokes fading round the dial; `cards::activity_spinner` steps it.
+    icon!(
+        "spinner",
+        "<path d=\"M12.00 5.50L12.00 1.50\" stroke-width=\"2.4\" stroke-opacity=\"1.0\"/><path d=\"M16.60 7.40L19.42 4.58\" stroke-width=\"2.4\" stroke-opacity=\"0.85\"/><path d=\"M18.50 12.00L22.50 12.00\" stroke-width=\"2.4\" stroke-opacity=\"0.7\"/><path d=\"M16.60 16.60L19.42 19.42\" stroke-width=\"2.4\" stroke-opacity=\"0.55\"/><path d=\"M12.00 18.50L12.00 22.50\" stroke-width=\"2.4\" stroke-opacity=\"0.42\"/><path d=\"M7.40 16.60L4.58 19.42\" stroke-width=\"2.4\" stroke-opacity=\"0.3\"/><path d=\"M5.50 12.00L1.50 12.00\" stroke-width=\"2.4\" stroke-opacity=\"0.2\"/><path d=\"M7.40 7.40L4.58 4.58\" stroke-width=\"2.4\" stroke-opacity=\"0.12\"/>"
+    ),
+    // Grok Bot's share disc glyph (SF `square.and.arrow.up`): an open-topped
+    // box with the arrow rising out of it. Measured 14 × 14 pt in the 36 pt
+    // disc on `grok-right-pane-details.png` (2 px/pt); the mark spans 16 of
+    // the 24 grid, so `glass::PANE_SHARE_GLYPH` 21 paints 14 pt.
+    icon!(
+        "share",
+        "<path d=\"M8 10H6a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6a2 2 0 0 0-2-2h-2\" stroke-width=\"1.8\"/><path d=\"M12 15V4M8.5 7.5L12 4l3.5 3.5\" stroke-width=\"1.8\"/>"
+    ),
     icon!(
         "archivebox",
         "<rect x=\"3\" y=\"4\" width=\"18\" height=\"4\" rx=\"1\"/><path d=\"M5 8v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8M10 12h4\"/>"
@@ -142,6 +156,15 @@ const ICONS: &[(&str, &str)] = &[
     icon!("crown", "<path d=\"M4 17h16l1-9-5 3.5L12 5l-4 6.5L3 8z\" fill=\"#000\"/>"),
     icon!("photo", "<rect x=\"3\" y=\"5\" width=\"18\" height=\"14\" rx=\"2\"/><circle cx=\"9\" cy=\"10\" r=\"1.5\" fill=\"#000\"/><path d=\"M21 16l-5-5-8 8\"/>"),
     icon!("arrow-down", "<path d=\"M12 5v14M5 12l7 7 7-7\" stroke-width=\"2.6\"/>"),
+    // Grok Bot's update disc glyph (SF `icloud.and.arrow.down`): a cloud open
+    // at the bottom — 8 pt dome, 3 pt lobes, straight sides — with the arrow
+    // coming out of it. Traced pixel for pixel from the 72 px disc in Jacob's
+    // Oct-2026 ref (glyph box 26 × 28 px, 2.5 px stroke): 15.6 × 16.2 on the
+    // 24 grid at a 1.5 stroke, so `size` 20 paints Grok's 13 × 14 pt mark.
+    icon!(
+        "cloud-download",
+        "<path d=\"M4.95 13.8V11.4A3 3 0 0 1 7.95 8.4A4.05 4.05 0 0 1 16.05 8.4A3 3 0 0 1 19.05 11.4V13.8\" stroke-width=\"1.5\"/><path d=\"M12 11.4V19M8.4 15.6L12 19L15.6 15.6\" stroke-width=\"1.5\"/>"
+    ),
     icon!("cpu", "<rect x=\"6\" y=\"6\" width=\"12\" height=\"12\" rx=\"2\"/><rect x=\"10\" y=\"10\" width=\"4\" height=\"4\" fill=\"#000\" stroke=\"none\"/><path d=\"M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4\"/>"),
     icon!("window", "<rect x=\"3\" y=\"4\" width=\"18\" height=\"16\" rx=\"2\"/><path d=\"M3 9h18\"/>"),
     // Settings root rows (D80 / iPhone parity): Credits, Machine, Appearance, About.
@@ -171,6 +194,10 @@ const ICONS: &[(&str, &str)] = &[
         "<circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M12 3a9 9 0 0 0 0 18z\" fill=\"#000\"/>"
     ),
     icon!("info", "<circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M12 11v6M12 8h.01\"/>"),
+    icon!(
+        "exclamation",
+        "<circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M12 7v6M12 16.5h.01\" stroke-width=\"2.4\"/>"
+    ),
     icon!("minus", "<path d=\"M5 12h14\"/>"),
     icon!(
         "envelope",

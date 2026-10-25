@@ -498,13 +498,21 @@ enum CreateKind: Identifiable {
 }
 
 /// The one Create screen (D93) for a new agent, group or server — Grok Bot's "Create New Bot"
-/// layout: title + close ×, the swaying preview of the chosen leaf, a centred name field, the nine
-/// leaves in a 5 / 4 grid, the ten colours in two rows of five, Cancel + the action pinned above the
-/// home indicator. Grok's sizes in points (measured on the 2x reference) inside the shipped
-/// bottom-sheet frame; the 44 pt footer pills are the one deliberate deviation (touch minimum).
-/// Agents create here; a group goes on to the member picker (`NewGroupView`) as step two with the
-/// name + leaf as its draft; a server keeps its one-line explainer under the field. Pushed from New
-/// Message with its own header; × and Cancel close the whole sheet.
+/// layout: title + close ×, the preview, a centred name field, the picture options, Cancel + the
+/// action pinned above the home indicator. Grok's sizes in points (measured on the 2x reference)
+/// inside the shipped bottom-sheet frame; the 44 pt footer pills are the one deliberate deviation
+/// (touch minimum). Agents create here; a group goes on to the member picker (`NewGroupView`) as
+/// step two with the name + picture as its draft; a server keeps its one-line explainer under
+/// the field. Pushed from New Message with its own header; × and Cancel close the whole sheet.
+///
+/// **Picture (Jacob, 2026-10-25, [feedback create-sheet-avatar-upload-generate-ios-2026-10-25]):
+/// the sixteen-leaf grid and the ten pastel swatches are gone. Under the name field sit the
+/// agent avatar picker's own two options — `Upload | Generate` (`AvatarTabPill` +
+/// `AvatarSourceBody` on an `AvatarSourceState`) — and the preview above the field shows the
+/// chosen photo, the generated picture, or, when neither was picked, the fallback every new
+/// agent / group / server gets: the name's first letter on a neutral grey disc (`NeutralAvatar`).
+/// The entity is stored with the neutral pair (`LeafArt.neutral`), never an automatic leaf;
+/// existing agents keep theirs.**
 struct CreateEntityView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -512,35 +520,33 @@ struct CreateEntityView: View {
     /// Closes the whole sheet (a pushed view's own dismiss only pops).
     let onDone: () -> Void
     @State private var name = DebugHooks.newAgentName ?? ""
-    @State private var pickedLeaf: Int? = nil
-    @State private var pickedColor: Int? = nil
+    @State private var option: AvatarPickerTab = CreateEntityView.initialOption
+    @StateObject private var source = AvatarSourceState()
     @State private var creating = false
     @State private var errorText: String?
     @State private var next = false
     @FocusState private var focused: Bool
 
     private var clean: String { name.trimmingCharacters(in: .whitespaces) }
-    /// A stable default for this sheet (seeded by how many of that entity exist) so successive new
-    /// ones start on different leaves without the preview jumping while typing; clicks override it.
-    private var pick: LeafPick {
-        let n: Int
-        switch kind {
-        case .agent: n = model.projects.filter { !$0.shared }.count
-        case .group: n = model.peopleChats.filter(\.isGroup).count
-        case .server: n = model.servers.count
-        }
-        return LeafArt.pick(seed: "new-\(kind)-\(n)", leaf: pickedLeaf, color: pickedColor)
+    private var canGo: Bool { !clean.isEmpty && !creating && !source.generating }
+
+    /// The two options every Create sheet offers, in order — the draft picker's tabs.
+    static let options: [AvatarPickerTab] = [.upload, .generate]
+    /// The leaf pair a new entity is stored with: the neutral one, whatever else was picked, so
+    /// no leaf is ever auto-assigned (a later Reset lands on the initial, not on a leaf).
+    static var storedLeaf: LeafPick { LeafArt.neutralPick }
+    /// Rig: `ARBOS_CREATE_PICTURE=generate[:<prompt>]` opens the sheet on Generate.
+    private static var initialOption: AvatarPickerTab {
+        (DebugHooks.createPicture ?? "").hasPrefix("generate") ? .generate : .upload
     }
-    private var canGo: Bool { !clean.isEmpty && !creating }
 
     // Grok's palette, approved as is.
-    private let sheetBg = Color(red: 0x1F / 255, green: 0x1F / 255, blue: 0x1F / 255)
-    private let line = Color(red: 0x35 / 255, green: 0x35 / 255, blue: 0x35 / 255)
-    private let ring = Color(red: 0x50 / 255, green: 0x50 / 255, blue: 0x50 / 255)
-    private let placeholder = Color(red: 0x93 / 255, green: 0x93 / 255, blue: 0x93 / 255)
-    private let cancelBg = Color(red: 0x27 / 255, green: 0x27 / 255, blue: 0x27 / 255)
-    private let createBg = Color(red: 0x3B / 255, green: 0x3B / 255, blue: 0x3B / 255)
-    private let createText = Color(red: 0x73 / 255, green: 0x73 / 255, blue: 0x73 / 255)
+    private let sheetBg = AvatarSheetPalette.sheetBg
+    private let line = AvatarSheetPalette.line
+    private let placeholder = AvatarSheetPalette.placeholder
+    private let cancelBg = AvatarSheetPalette.pillBg
+    private let createBg = AvatarSheetPalette.disabledBg
+    private let createText = AvatarSheetPalette.disabledText
 
     var body: some View {
         VStack(spacing: 0) {
@@ -549,12 +555,12 @@ struct CreateEntityView: View {
             // so the action is always reachable); at rest it is Grok's fixed layout.
             ScrollView(showsIndicators: false) {
                 ZStack(alignment: .top) {
-                    LeafAvatar(pick: pick, size: 114, idle: true)
+                    preview
                         .padding(.top, 62 - 54.5)
-                        .animation(.snappy, value: "\(pick.leaf)-\(pick.color)")
-                    // Grok's vertical rhythm from the sheet top (header 54.5): field 183…218, leaf
-                    // row centres 264 / 320 (40 pt rings → 244…340), swatch row centres 386 / 426
-                    // (32 pt rings → 370…442). The server explainer (two lines) adds 40 under the field.
+                        .animation(.snappy, value: source.generatedKey)
+                    // Grok's vertical rhythm from the sheet top (header 54.5): field 183…218; the
+                    // option capsules start where Grok's first icon row began (246); the chosen
+                    // option's body 16 under them. The server explainer adds 40 under the field.
                     VStack(spacing: 0) {
                         field.padding(.top, 183 - 54.5)
                         if let explainer = kind.explainer {
@@ -575,8 +581,13 @@ struct CreateEntityView: View {
                                 .font(.system(size: 13)).foregroundStyle(theme.danger)
                                 .multilineTextAlignment(.center).padding(.horizontal, 24).padding(.top, 8)
                         }
-                        leafGrid.padding(.top, 246 - 218)
-                        colourGrid.padding(.top, 450 - 426)
+                        AvatarTabPill(tabs: Self.options, tab: $option) { source.errorText = nil }
+                            .padding(.top, 246 - 218)
+                            .accessibilityIdentifier("create-entity-options")
+                        AvatarSourceBody(state: source, tab: option, keepsLine: "Create keeps this one.", uploadsLine: "Create uploads it.", generate: generate) {
+                            EmptyView()
+                        }
+                        .padding(.top, 16)
                     }
                 }
                 .padding(.bottom, 24)
@@ -587,10 +598,15 @@ struct CreateEntityView: View {
         .background(sheetBg.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
         .navigationDestination(isPresented: $next) {
-            NewGroupView(onDone: onDone, draft: GroupDraft(title: clean, leaf: pick))
+            NewGroupView(onDone: onDone, draft: GroupDraft(title: clean, leaf: Self.storedLeaf, picture: source.draftPicture(for: option)))
         }
         // The rig shoots the sheet without the keyboard (`ARBOS_SHOW=new…`); users get the caret.
-        .onAppear { if !(DebugHooks.show ?? "").hasPrefix("new") { focused = true } }
+        .onAppear {
+            if !(DebugHooks.show ?? "").hasPrefix("new") { focused = true }
+            if let spec = DebugHooks.createPicture, let colon = spec.firstIndex(of: ":") {
+                source.prompt = String(spec[spec.index(after: colon)...])
+            }
+        }
     }
 
     private var header: some View {
@@ -615,6 +631,31 @@ struct CreateEntityView: View {
         .overlay(alignment: .bottom) { Rectangle().fill(line).frame(height: 1) }
     }
 
+    /// The 114 pt preview: the chosen photo, the generated picture (fetched from my own slot),
+    /// else the neutral initial of the typed name — an empty disc until something is typed.
+    @ViewBuilder
+    private var preview: some View {
+        if option == .upload, let image = source.uploadPreview {
+            Image(uiImage: image).resizable().scaledToFill()
+                .frame(width: 114, height: 114).clipShape(Circle())
+        } else if option == .generate, let key = source.generatedKey, let url = model.draftPictureURL(key: key) {
+            AsyncImage(url: url) { phase in
+                if let image = phase.image {
+                    image.resizable().scaledToFill()
+                } else {
+                    ZStack {
+                        NeutralAvatar(name: clean, size: 114)
+                        if phase.error == nil { ProgressView().tint(placeholder) }
+                    }
+                }
+            }
+            .frame(width: 114, height: 114)
+            .clipShape(Circle())
+        } else {
+            NeutralAvatar(name: clean, size: 114)
+        }
+    }
+
     private var field: some View {
         TextField("", text: $name, prompt: Text(kind.placeholder).foregroundStyle(placeholder))
             .font(.system(size: 15.5))
@@ -628,47 +669,6 @@ struct CreateEntityView: View {
             .frame(height: 35)
             .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(line, lineWidth: 1))
             .padding(.horizontal, 16.5)
-    }
-
-    /// The sixteen leaves (v2) as their 4 × 4 sheet on a 48 pt pitch: 30 pt discs on the chosen
-    /// hue, a 36 pt ring on the pick.
-    private var leafGrid: some View {
-        VStack(spacing: 48 - 36) {
-            ForEach(0..<4, id: \.self) { r in
-                HStack(spacing: 48 - 36) {
-                    ForEach(r * 4..<r * 4 + 4, id: \.self) { i in
-                        Button { pickedLeaf = i } label: {
-                            LeafAvatar(pick: LeafPick(leaf: UInt8(i), color: pick.color), size: 30)
-                                .frame(width: 36, height: 36)
-                                .overlay(Circle().strokeBorder(Int(pick.leaf) == i ? ring : .clear, lineWidth: 1))
-                                .contentShape(Circle())
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(LeafArt.names[i] + (Int(pick.leaf) == i ? ", selected" : ""))
-                    }
-                }
-            }
-        }
-    }
-
-    /// Ten colours in two rows of five on a 40 pt pitch: 24 pt discs, a 32 pt ring on the pick.
-    private var colourGrid: some View {
-        VStack(spacing: 40 - 32) {
-            ForEach([Array(0..<5), Array(5..<10)], id: \.self) { row in
-                HStack(spacing: 40 - 32) {
-                    ForEach(row, id: \.self) { i in
-                        Button { pickedColor = i } label: {
-                            Circle().fill(LeafArt.colors[i]).frame(width: 24, height: 24)
-                                .frame(width: 32, height: 32)
-                                .overlay(Circle().strokeBorder(Int(pick.color) == i ? ring : .clear, lineWidth: 1))
-                                .contentShape(Circle())
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(LeafArt.colorNames[i] + (Int(pick.color) == i ? ", selected" : ""))
-                    }
-                }
-            }
-        }
     }
 
     private var footer: some View {
@@ -693,11 +693,28 @@ struct CreateEntityView: View {
         .overlay(alignment: .top) { Rectangle().fill(line).frame(height: 1) }
     }
 
+    /// Generate into my own slot (`POST /me/avatar/generate`): the entity does not exist yet.
+    private func generate() {
+        let text = source.prompt.trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty, !source.generating else { return }
+        source.generating = true
+        source.errorText = nil
+        Task {
+            do {
+                source.generatedKey = try await model.generateDraftAvatar(prompt: text)
+            } catch {
+                source.errorText = error.localizedDescription
+            }
+            source.generating = false
+        }
+    }
+
     private func go() {
         guard canGo else { return }
+        let picture = source.draftPicture(for: option)
         switch kind {
         case .agent:
-            model.createProject(name: clean, leaf: pick)
+            model.createProject(name: clean, leaf: Self.storedLeaf, picture: picture)
             onDone()
         case .group:
             next = true
@@ -705,7 +722,7 @@ struct CreateEntityView: View {
             creating = true
             errorText = nil
             Task {
-                if await model.createServer(name: clean, leaf: pick) {
+                if await model.createServer(name: clean, leaf: Self.storedLeaf, picture: picture) {
                     onDone()
                 } else {
                     errorText = model.notice?.text ?? "Could not create the server."
@@ -721,6 +738,8 @@ struct CreateEntityView: View {
 struct GroupDraft: Equatable {
     var title: String
     var leaf: LeafPick
+    /// The Create screen's uploaded / generated picture, applied once the group exists.
+    var picture: DraftPicture? = nil
 }
 
 /// New group: pick people (and your own agents), then create. With `addTo`
@@ -1004,7 +1023,7 @@ struct NewGroupView: View {
         errorText = nil
         let agentIds = pickedAgents.map(\.id)
         Task {
-            if await model.createGroup(handles: picked.map(\.handle), agentIds: agentIds, title: draft?.title, leaf: draft?.leaf) {
+            if await model.createGroup(handles: picked.map(\.handle), agentIds: agentIds, title: draft?.title, leaf: draft?.leaf, picture: draft?.picture) {
                 onDone()
             } else {
                 // Copy onto this screen: RootView's alert is behind the sheet.

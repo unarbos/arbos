@@ -236,6 +236,74 @@ final class SessionRoomTests: XCTestCase {
         room.stop()
     }
 
+    func testNotAvailableDoesNotCallOnUnavailableOrOpenANewSocket() async throws {
+        let sockets = SocketFactory()
+        let room = SessionRoom(
+            projectId: "people",
+            key: "chat",
+            roomChat: "chat",
+            doc: CoreChatDoc(key: "chat"),
+            roomURL: { _ in URL(string: "wss://example.test/r")! },
+            makeSocket: { sockets.make($0) },
+            fetchCheckpoint: { _ in (0, Data()) },
+            pending: [("batch-1", Data("pending".utf8))],
+            deviceId: { "dev:me" }
+        )
+        var unavailableCalls = 0
+        var pushRefusedCalls = 0
+        room.onUnavailable = { unavailableCalls += 1 }
+        room.onPushRefused = { pushRefusedCalls += 1 }
+        room.start()
+        try await waitUntil { sockets.sockets.count == 1 }
+        let sock = try XCTUnwrap(sockets.current)
+        sock.fireOpen()
+        try await waitUntil { !sock.sent.isEmpty }
+
+        sock.deliver(try encodeState(checkpointSeq: 0, frontier: Data()))
+        try await waitUntil {
+            sock.sent.contains { data in
+                (try? decodeFrame(bytes: data))?.ty == .rowsReq
+            }
+        }
+
+        let rowsDone = try encodeFrame(
+            ty: .rowsDone,
+            headerJson: #"{"headSeq":0}"#,
+            payload: Data()
+        )
+        sock.deliver(rowsDone)
+        try await waitUntil {
+            sock.sent.contains { data in
+                (try? decodeFrame(bytes: data))?.ty == .push
+            }
+        }
+
+        let errHeader = try JSONSerialization.data(
+            withJSONObject: [
+                "code": "not_available",
+                "message": "this chat is not available",
+                "batchId": "batch-1",
+            ] as [String: Any]
+        )
+        let errJson = try XCTUnwrap(String(data: errHeader, encoding: .utf8))
+        sock.deliver(try encodeFrame(ty: .error, headerJson: errJson, payload: Data()))
+
+        try await waitUntil { pushRefusedCalls > 0 || room.lastError != nil }
+
+        // Brief settle: must not dial again after not_available.
+        for _ in 0..<30 {
+            await Task.yield()
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(sockets.sockets.count, 1, "not_available must not open a second socket")
+        XCTAssertEqual(room.reconnects, 0)
+        XCTAssertEqual(unavailableCalls, 0, "not_available must not call onUnavailable")
+        XCTAssertEqual(pushRefusedCalls, 1)
+        let err = try XCTUnwrap(room.lastError)
+        XCTAssertTrue(err.contains("not_available"), "lastError=\(err)")
+        room.stop()
+    }
+
     func testRateLimitedDoesNotOpenANewSocket() async throws {
         let sockets = SocketFactory()
         let room = SessionRoom(

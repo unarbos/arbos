@@ -243,10 +243,13 @@ struct PeopleChat: Identifiable, Equatable {
     /// D92 amendment: the group's leaf picture from the Create screen (the uploaded picture wins).
     var avatarLeaf: Int? = nil
     var avatarLeafColor: Int? = nil
+    /// The leaf to draw; nil for a group without one — including the neutral pair (Jacob,
+    /// 2026-10-25), which `isNeutralAvatar` names and draws as the title's initial on grey.
     var leafPick: LeafPick? {
-        guard let l = avatarLeaf, let c = avatarLeafColor else { return nil }
+        guard let l = avatarLeaf, let c = avatarLeafColor, !LeafArt.isNeutral(l) else { return nil }
         return LeafPick(leaf: UInt8(clamping: l), color: UInt8(clamping: c))
     }
+    var isNeutralAvatar: Bool { LeafArt.isNeutral(avatarLeaf) }
     /// Optional about text for a people group (≤200 chars).
     var description: String = ""
     var pending: Bool

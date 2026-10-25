@@ -1,0 +1,47 @@
+{
+  "id": "py-20-parallel-two",
+  "lane": "b",
+  "category": "parity",
+  "categories": [
+    "parity",
+    "parallel-asks"
+  ],
+  "title": "Two asks back to back: each answered under its own ask",
+  "parity": true,
+  "timeout_s": 480,
+  "settle_s": 20,
+  "turns": [
+    {
+      "prompt": "Find me the 3 best-reviewed surf schools near Santa Teresa and compare their prices.",
+      "shape": {
+        "messages_min": 3,
+        "messages_max": 8,
+        "ack_first": true,
+        "table": true,
+        "links_min": 1,
+        "offer": false,
+        "first_bubble_max_s": 5,
+        "no_handle": true,
+        "worker_rows": 0,
+        "reply_to_ask": true
+      }
+    },
+    {
+      "prompt": "Make me a quick packing list for a 3-day surf trip.",
+      "at_s": 1,
+      "shape": {
+        "messages_min": 1,
+        "messages_max": 3,
+        "ack_first": false,
+        "table": false,
+        "links_min": 0,
+        "offer": false,
+        "first_bubble_max_s": 8,
+        "no_handle": true,
+        "worker_rows": 0,
+        "reply_to_ask": true,
+        "bullets": true
+      }
+    }
+  ]
+}

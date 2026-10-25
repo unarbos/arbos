@@ -1,0 +1,43 @@
+{
+  "id": "py-26-long-progress",
+  "lane": "b",
+  "category": "parity",
+  "categories": [
+    "parity",
+    "long-task-progress"
+  ],
+  "title": "Twenty chunks with a note every five",
+  "parity": true,
+  "timeout_s": 420,
+  "settle_s": 30,
+  "turns": [
+    {
+      "prompt": "Process the 20 chunks in {D}/chunks: for each file run `sleep 6 && wc -c < <file> > {D}/out/<name>.len` (so it takes about two minutes), as a detached background job. Tell me after every 5 chunks, and when all 20 are done.",
+      "seed": "mkdir -p {D}/chunks {D}/out && for i in $(seq -w 1 20); do head -c $((i*100)) /dev/zero | tr '\\0' 'x' > {D}/chunks/c$i.txt; done",
+      "shape": {
+        "messages_min": 3,
+        "messages_max": 8,
+        "ack_first": true,
+        "table": false,
+        "links_min": 0,
+        "offer": false,
+        "first_bubble_max_s": 8,
+        "no_handle": true,
+        "worker_rows": 0,
+        "reply_to_ask": false
+      }
+    },
+    {
+      "kind": "wait",
+      "at_s": 200,
+      "shape": {
+        "expect_new_bubble_regex": "(?i)(20|all|done|finished)",
+        "label": "final note"
+      }
+    }
+  ],
+  "verify_wait": {
+    "verify": "n=$(ls {D}/out 2>/dev/null | wc -l); echo \"SHOW outputs=$n\"; [ \"$n\" -ge 20 ] && echo PASS || echo FAIL: outputs=$n",
+    "wait_s": 300
+  }
+}

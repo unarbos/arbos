@@ -17,7 +17,9 @@ final class ProfilePaneStructureTests: XCTestCase {
     }
 
     func testKindsKeepTheirOwnTabSets() {
-        XCTAssertEqual(PaneKinds.agent, ["Profile", "Settings", "Library"])
+        // Grok Bot's agent tabs, the same on the Mac (#1679) and the iPhone
+        // ([feedback iphone-agent-pane-tabs-2026-10-25]).
+        XCTAssertEqual(PaneKinds.agent, ["Details", "Library", "Computer"])
         XCTAssertEqual(PaneKinds.ownProfile, ["Profile", "Settings"])
         XCTAssertEqual(PaneKinds.person, ["Links", "Groups"])
         XCTAssertEqual(PaneKinds.group, ["Members", "Library"])
@@ -26,6 +28,65 @@ final class ProfilePaneStructureTests: XCTestCase {
         for (kind, tabs) in PaneKinds.all {
             XCTAssertEqual(Set(tabs).count, tabs.count, "\(kind): a tab label appears once")
         }
+    }
+
+    /// The agent pane's Details tab is the Settings card alone — no "Who may message", no
+    /// "Permissions", no "Profile" (Jacob 2026-10-25, [feedback
+    /// agent-details-remove-sections-ios-2026-10-25]); Coding / Routines come back ahead of
+    /// it only while the flag is on (routines for the owner alone). The copy is the Mac's
+    /// (`agent::tests` in `profiles/agent.rs`).
+    func testAgentDetailsIsSettingsAloneAndReadsLikeTheMac() {
+        XCTAssertFalse(AgentPane.agentDetailsShowCodingRoutines, "Coding and Routines stay hidden by default")
+        XCTAssertEqual(AgentPane.detailsOrder(mine: true), [.settings])
+        XCTAssertEqual(AgentPane.detailsOrder(mine: false), [.settings])
+        XCTAssertEqual(AgentPane.detailsOrder(mine: true, showCodingRoutines: true), [.coding, .routines, .settings])
+        XCTAssertEqual(AgentPane.detailsOrder(mine: false, showCodingRoutines: true), [.coding, .settings])
+        XCTAssertEqual(AgentPane.subtitle(description: "", mine: true, ownerHandle: nil), "Add a label")
+        XCTAssertEqual(AgentPane.subtitle(description: " Drafts before it sends. ", mine: true, ownerHandle: nil), "Drafts before it sends.")
+        XCTAssertEqual(AgentPane.subtitle(description: "", mine: false, ownerHandle: "@sami"), "Run by @sami")
+
+        let working = BoxWorkspace(projectId: "p", name: "Arbos", healthy: true, running: true, elapsedMs: 42_000, toolCalls: 7)
+        XCTAssertEqual(AgentPane.codingStatus(streaming: false, workspace: working, machine: .awake, alwaysOn: false), "Working · 42 s · 7 tool calls")
+        XCTAssertEqual(AgentPane.codingStatus(streaming: true, workspace: nil, machine: .awake, alwaysOn: false), "Working")
+        XCTAssertEqual(AgentPane.codingStatus(streaming: false, workspace: nil, machine: .awake, alwaysOn: false), "Idle")
+        XCTAssertEqual(AgentPane.codingStatus(streaming: false, workspace: nil, machine: .hibernatedLight, alwaysOn: false), "Machine asleep")
+
+        let now: Int64 = 1_000_000_000
+        let standup = Routine(id: "r", projectId: "p", name: "Stand-up", trigger: .cron(expr: "0 9 * * 1-5", tz: "UTC"), enabled: true, lastRunAt: nil, nextRunAt: now + 2 * 3_600_000)
+        XCTAssertEqual(AgentPane.routineStatus(standup, now: now), "Weekdays 09:00 · next in 2 h")
+        var paused = standup
+        paused.enabled = false
+        XCTAssertEqual(AgentPane.routineStatus(paused, now: now), "Paused")
+        let hook = Routine(id: "w", projectId: "p", name: "Deploy", trigger: .webhook, enabled: true, lastRunAt: now - 40 * 60_000, nextRunAt: nil)
+        XCTAssertEqual(AgentPane.routineStatus(hook, now: now), "Webhook · last 40 min ago")
+    }
+
+    /// `GET /machine/debug` → the Computer tab: Machine, then Resources only when the box
+    /// answered, then Running now; sizes and durations read like the Mac's.
+    func testAgentComputerFollowsTheReport() {
+        let debug: [String: Any] = [
+            "relay": ["state": "awake", "awake_for_s": 18_720, "agentd": ["image": "arbos-agent-0.1.7"]],
+            "box": ["reachable": true, "state": [
+                "uptime_s": 18_720, "load": [0.42], "memory_mb": ["total": 8192, "available": 5325],
+                "disk": ["total_mb": 10240, "available_mb": 6861],
+                "workspaces": [["project_id": "p", "name": "Arbos", "healthy": true, "turn": ["running": true, "current": ["elapsed_ms": 42_000, "tool_calls": 7]]]],
+            ]],
+        ]
+        let report = BoxReport(debug: debug, now: 0)
+        XCTAssertTrue(report.reachable)
+        XCTAssertEqual(report.image, "arbos-agent-0.1.7")
+        XCTAssertEqual(report.running.map(\.name), ["Arbos"])
+        XCTAssertEqual(AgentPane.computerOrder(mine: true, report: report), [.machine, .resources, .running])
+        XCTAssertEqual(AgentPane.computerOrder(mine: false, report: report), [.machine])
+        XCTAssertEqual(AgentPane.freeOf(available: report.diskAvailableMb, total: report.diskTotalMb), "6.7 GB free of 10 GB")
+        XCTAssertEqual(AgentPane.durationS(18_720), "5 h 12 m")
+
+        let down: [String: Any] = ["relay": ["state": "asleep"], "box": ["reachable": false, "error": "box has no url yet (asleep or starting)"]]
+        let asleep = BoxReport(debug: down, now: 0)
+        XCTAssertFalse(asleep.reachable)
+        XCTAssertEqual(asleep.unreachableReason, "box has no url yet (asleep or starting)")
+        XCTAssertEqual(AgentPane.computerOrder(mine: true, report: asleep), [.machine, .running])
+        XCTAssertEqual(AgentPane.computerOrder(mine: true, report: nil), [.machine, .running])
     }
 }
 

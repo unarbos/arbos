@@ -437,8 +437,8 @@ jobs:
           tags: |
             ${{ env.IMAGE }}:${{ needs.plan.outputs.version }}
             ${{ needs.plan.outputs.promote == 'true' && format('{0}:{1}', env.IMAGE, needs.plan.outputs.channel) || '' }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=release
+          cache-to: type=gha,mode=max,scope=release
       - uses: actions/upload-artifact@v4
         with:
           name: payload-linux

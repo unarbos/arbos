@@ -1,10 +1,14 @@
 //! Text selection for the chat transcript: drag, double-click (word),
-//! triple-click (paragraph), shift-click, ⌘C. One selection range per
-//! **bubble**: byte offsets into the bubble's rendered plain text, which runs
-//! through every paragraph, list, table and code block of the message. Each
-//! text element knows the bubble it belongs to and where its own text starts
-//! in that plain text, so a drag that leaves one paragraph continues in the
-//! next (#1389).
+//! triple-click (paragraph), shift-click, ⌘C. A selection is a pair of
+//! positions, each a byte offset into one **bubble's** rendered plain text
+//! (which runs through every paragraph, list, table and code block of the
+//! message) plus that bubble's place in the transcript. Each text element
+//! knows the bubble it belongs to and where its own text starts in it, so a
+//! drag that leaves one paragraph continues in the next (#1389), and a drag
+//! that leaves one bubble continues in the next bubble, up or down, like
+//! Grok's (Jacob, 2026-10-24, [feedback bubble-selection-2026-10-24]): the
+//! bubbles between the two ends are selected whole, and ⌘C copies them in
+//! transcript order whichever way the drag went.
 //!
 //! [`TextSelection`] is the model (an entity the transcript observes);
 //! [`Selectable::bubble`] scopes it to one bubble; [`SelectableText`] wraps a
@@ -27,10 +31,6 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::ui::avatars;
 use crate::ui::mention::{self, Mention, Mentions};
 
-/// Ignore pointer noise until the drag travels this far before choosing
-/// text selection vs. vertical scroll (same idea as reply-swipe slop).
-const SELECTION_DRAG_SLOP: f32 = 12.0;
-
 /// What one click, two clicks or three clicks select, and what a drag that
 /// started with them extends by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,23 +47,130 @@ enum Granularity {
 /// cells) still extends the selection.
 pub type Distance = (f32, f32);
 
+/// One bubble as the selection sees it: where it sits in the transcript
+/// (`order` — its first row's index, shared by every block row of the
+/// message), its key, and its rendered plain text at the time of the gesture
+/// (copy reads from this, so a streaming bubble cannot shift the offsets
+/// under the user).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BubbleAt {
+    pub order: usize,
+    pub key: SharedString,
+    pub text: SharedString,
+}
+
+impl BubbleAt {
+    /// Transcript order: by row, then by key for two bubbles on one row.
+    fn rank(&self) -> (usize, &str) {
+        (self.order, self.key.as_ref())
+    }
+}
+
+/// One end of the selection: a snapped byte range inside one bubble.
+#[derive(Clone, Debug)]
+struct Pos {
+    at: BubbleAt,
+    range: Range<usize>,
+}
+
+impl Pos {
+    fn same_bubble(&self, other: &Pos) -> bool {
+        self.at.key == other.at.key
+    }
+}
+
+/// The two ends of a selection in transcript order, with the byte offsets in
+/// their bubbles; `start` and `end` name the same bubble when the selection
+/// lives in one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Span {
+    pub start: BubbleAt,
+    pub start_index: usize,
+    pub end: BubbleAt,
+    pub end_index: usize,
+}
+
+impl Span {
+    /// The part of bubble `at` this span covers, in that bubble's own bytes:
+    /// all of it between the ends, a tail at the start, a head at the end.
+    pub fn range_in(&self, at: &BubbleAt) -> Option<Range<usize>> {
+        let same_start = at.key == self.start.key;
+        let same_end = at.key == self.end.key;
+        if same_start && same_end {
+            return Some(self.start_index..self.end_index);
+        }
+        if same_start {
+            return Some(self.start_index..at.text.len());
+        }
+        if same_end {
+            return Some(0..self.end_index);
+        }
+        (self.start.rank() < at.rank() && at.rank() < self.end.rank()).then(|| 0..at.text.len())
+    }
+
+    /// `true` when the two ends are one bubble (plain ⌘C can copy from the
+    /// span's own texts).
+    pub fn one_bubble(&self) -> bool {
+        self.start.key == self.end.key
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Active {
-    key: SharedString,
-    /// The bubble's plain text when the selection was made; copy reads from
-    /// this so a streaming bubble cannot shift the offsets under the user.
-    text: SharedString,
     /// The fixed end: the pressed index, or the pressed word / paragraph.
-    anchor: Range<usize>,
+    anchor: Pos,
     /// The moving end, already snapped to the granularity.
-    head: Range<usize>,
+    head: Pos,
     granularity: Granularity,
     dragging: bool,
 }
 
 impl Active {
+    /// The ends in transcript order.
+    fn ends(&self) -> (&Pos, &Pos) {
+        let (a, h) = (&self.anchor, &self.head);
+        if a.same_bubble(h) {
+            if h.range.start < a.range.start {
+                (h, a)
+            } else {
+                (a, h)
+            }
+        } else if h.at.rank() < a.at.rank() {
+            (h, a)
+        } else {
+            (a, h)
+        }
+    }
+
+    /// Nothing is selected: both ends in one bubble at one point.
+    fn is_empty(&self) -> bool {
+        self.anchor.same_bubble(&self.head) && self.range().is_empty()
+    }
+
+    /// The range inside the one bubble both ends share (callers check).
     fn range(&self) -> Range<usize> {
-        self.anchor.start.min(self.head.start)..self.anchor.end.max(self.head.end)
+        let (a, h) = (&self.anchor.range, &self.head.range);
+        a.start.min(h.start)..a.end.max(h.end)
+    }
+
+    fn span(&self) -> Span {
+        let (start, end) = self.ends();
+        if start.same_bubble(end) {
+            let range = self.range();
+            Span {
+                start: start.at.clone(),
+                start_index: range.start,
+                end: end.at.clone(),
+                end_index: range.end,
+            }
+        } else {
+            Span {
+                start: start.at.clone(),
+                start_index: start.range.start,
+                end: end.at.clone(),
+                end_index: end.range.end,
+            }
+        }
     }
 }
 
@@ -103,9 +210,16 @@ impl TextSelection {
         }
     }
 
-    /// The selected text, if anything is selected.
+    /// The selected text when the selection lives in one bubble. A selection
+    /// across bubbles needs the texts in between, which only the transcript
+    /// has: see [`TextSelection::span`].
     pub fn selected_text(&self) -> Option<String> {
         self.model.selected_text()
+    }
+
+    /// The two ends of a non-empty selection, in transcript order.
+    pub fn span(&self) -> Option<Span> {
+        self.model.span()
     }
 
     /// Drop a settled (not dragging) selection; `true` when something changed.
@@ -113,8 +227,7 @@ impl TextSelection {
         self.model.clear_settled()
     }
 
-    /// Drop any selection (drag or settled). Used when a row gesture
-    /// (swipe-right-to-reply) takes over the pointer.
+    /// Drop any selection (drag or settled).
     pub fn clear(&mut self) {
         self.model.active = None;
         self.model.proposal = None;
@@ -126,7 +239,15 @@ impl TextSelection {
         self.model
             .active
             .as_ref()
-            .is_some_and(|a| a.dragging && !a.range().is_empty())
+            .is_some_and(|a| a.dragging && !a.is_empty())
+    }
+
+    /// `true` from a press on bubble text until the button comes up: the
+    /// pointer belongs to the selection, whichever way it moves (Grok: a drag
+    /// from the bottom of a message upward selects; the transcript must not
+    /// take it for drag-scroll — [feedback bubble-selection-2026-10-24]).
+    pub fn is_dragging(&self) -> bool {
+        self.model.is_dragging()
     }
 
     /// Screenshot rig (`ARBOS_RIG_SELECT`): select part of bubble `key` as a
@@ -164,6 +285,17 @@ impl TextSelection {
         true
     }
 
+    /// Screenshot rig: a drag from the second word of bubble `from` to the
+    /// second-to-last word of bubble `to` (two messages, the end bubbles cut).
+    pub fn rig_select_across(&mut self, from: BubbleAt, to: BubbleAt) {
+        let second_word = |t: &str| t.find(' ').map(|i| i + 1).unwrap_or(0);
+        let before_last_word = |t: &str| t.trim_end().rfind(' ').unwrap_or(t.len());
+        let (start, end) = (second_word(&from.text), before_last_word(&to.text));
+        self.model.begin_at(from, start, 1, false);
+        self.model.extend_in(&to, end);
+        self.model.finish_drag();
+    }
+
     #[cfg(test)]
     pub(crate) fn model_for_tests(&mut self) -> &mut Model {
         &mut self.model
@@ -180,24 +312,31 @@ pub(crate) struct Model {
 }
 
 impl Model {
+    /// The selected text when both ends are in one bubble.
     pub(crate) fn selected_text(&self) -> Option<String> {
         let active = self.active.as_ref()?;
+        if !active.anchor.same_bubble(&active.head) {
+            return None;
+        }
         let range = active.range();
         if range.is_empty() {
             return None;
         }
-        active.text.get(range).map(str::to_string)
+        active.anchor.at.text.get(range).map(str::to_string)
     }
 
-    /// `true` while a mouse drag that started in bubble `key` is in progress.
-    fn is_dragging_in(&self, key: &str) -> bool {
-        self.active
-            .as_ref()
-            .is_some_and(|a| a.dragging && a.key.as_ref() == key)
+    pub(crate) fn span(&self) -> Option<Span> {
+        let active = self.active.as_ref()?;
+        (!active.is_empty()).then(|| active.span())
+    }
+
+    /// `true` while a mouse drag is in progress (in any bubble).
+    fn is_dragging(&self) -> bool {
+        self.active.as_ref().is_some_and(|a| a.dragging)
     }
 
     fn has_range(&self) -> bool {
-        self.active.as_ref().is_some_and(|a| !a.range().is_empty())
+        self.active.as_ref().is_some_and(|a| !a.is_empty())
     }
 
     fn clear_settled(&mut self) -> bool {
@@ -210,8 +349,35 @@ impl Model {
         }
     }
 
-    /// Mouse down at byte `index` of the bubble's `text`: one click arms a
-    /// drag, shift extends, two clicks take the word, three the paragraph.
+    /// Mouse down at byte `index` of bubble `at`: one click arms a drag,
+    /// shift extends, two clicks take the word, three the paragraph.
+    pub(crate) fn begin_at(&mut self, at: BubbleAt, index: usize, click_count: usize, shift: bool) {
+        self.proposal = None;
+        if shift {
+            if let Some(a) = self.active.as_mut() {
+                let range = snap(&at.text, index, a.granularity);
+                a.head = Pos { at, range };
+                a.dragging = true;
+                return;
+            }
+        }
+        let granularity = match click_count {
+            0 | 1 => Granularity::Character,
+            2 => Granularity::Word,
+            _ => Granularity::Paragraph,
+        };
+        let range = snap(&at.text, index, granularity);
+        let anchor = Pos { at, range };
+        self.active = Some(Active {
+            head: anchor.clone(),
+            anchor,
+            granularity,
+            dragging: true,
+        });
+    }
+
+    /// [`Model::begin_at`] for a bubble at transcript order 0 (one-bubble
+    /// callers and tests).
     pub(crate) fn begin(
         &mut self,
         key: SharedString,
@@ -220,54 +386,67 @@ impl Model {
         click_count: usize,
         shift: bool,
     ) {
-        self.proposal = None;
-        if shift {
-            if let Some(a) = self.active.as_mut() {
-                if a.key == key && a.text == text {
-                    a.head = snap(&text, index, a.granularity);
-                    a.dragging = true;
-                    return;
-                }
-            }
-        }
-        let granularity = match click_count {
-            0 | 1 => Granularity::Character,
-            2 => Granularity::Word,
-            _ => Granularity::Paragraph,
-        };
-        let anchor = snap(&text, index, granularity);
-        self.active = Some(Active {
-            key,
-            text,
-            head: anchor.clone(),
-            anchor,
-            granularity,
-            dragging: true,
-        });
+        self.begin_at(
+            BubbleAt {
+                order: 0,
+                key,
+                text,
+            },
+            index,
+            click_count,
+            shift,
+        )
     }
 
-    /// Drag to byte `index`; `true` when the range changed.
-    pub(crate) fn extend_to(&mut self, index: usize) -> bool {
+    /// Drag to byte `index` of bubble `at`; `true` when the range changed.
+    pub(crate) fn extend_in(&mut self, at: &BubbleAt, index: usize) -> bool {
         let Some(a) = self.active.as_mut() else {
             return false;
         };
-        let head = snap(&a.text, index, a.granularity);
-        if head == a.head {
+        let range = snap(&at.text, index, a.granularity);
+        if a.head.at == *at && range == a.head.range {
             return false;
         }
-        a.head = head;
+        a.head = Pos {
+            at: at.clone(),
+            range,
+        };
         true
     }
 
-    /// One text element's answer to a mouse move at `position`: the index it
-    /// would extend to, and how far the pointer is from it. The nearest
-    /// element of the same move wins; `true` when the range changed.
-    fn propose(&mut self, position: Point<Pixels>, index: usize, distance: Distance) -> bool {
+    /// Drag to byte `index` of the bubble the drag started in.
+    pub(crate) fn extend_to(&mut self, index: usize) -> bool {
+        let Some(at) = self.active.as_ref().map(|a| a.anchor.at.clone()) else {
+            return false;
+        };
+        self.extend_in(&at, index)
+    }
+
+    /// One text element's answer to a mouse move at `position`: the bubble it
+    /// belongs to, the index it would extend to, and how far the pointer is
+    /// from it. The nearest element of the same move wins — across bubbles
+    /// too; `true` when the range changed.
+    fn propose_in(
+        &mut self,
+        position: Point<Pixels>,
+        at: &BubbleAt,
+        index: usize,
+        distance: Distance,
+    ) -> bool {
         match self.proposal {
-            Some((at, best)) if at == position && best <= distance => return false,
+            Some((p, best)) if p == position && best <= distance => return false,
             _ => self.proposal = Some((position, distance)),
         }
-        self.extend_to(index)
+        self.extend_in(at, index)
+    }
+
+    /// [`Model::propose_in`] for the bubble the drag started in.
+    #[cfg(test)]
+    fn propose(&mut self, position: Point<Pixels>, index: usize, distance: Distance) -> bool {
+        let Some(at) = self.active.as_ref().map(|a| a.anchor.at.clone()) else {
+            return false;
+        };
+        self.propose_in(position, &at, index, distance)
     }
 
     /// Mouse up: `true` when the gesture ended as a plain click (no range).
@@ -279,7 +458,7 @@ impl Model {
             return true;
         };
         a.dragging = false;
-        a.range().is_empty()
+        a.is_empty()
     }
 }
 
@@ -288,7 +467,11 @@ impl Model {
 #[derive(Clone)]
 pub struct Selectable {
     entity: Entity<TextSelection>,
-    current: Option<(SharedString, SharedString, Range<usize>)>,
+    /// The selection as it stands this frame (both ends), for the highlights.
+    current: Option<Span>,
+    /// Transcript order of the bubbles built from this (the row index of the
+    /// message's first row); see [`Selectable::ordered`].
+    order: usize,
     color: Hsla,
     /// Who `@name` runs resolve to, and the accent the chips take (name
     /// text; the pill is the accent at `mention::PILL_ALPHA`, brighter under
@@ -299,13 +482,11 @@ pub struct Selectable {
 
 impl Selectable {
     pub fn new(entity: &Entity<TextSelection>, color: Hsla, cx: &App) -> Self {
-        let current = entity.read(cx).model.active.as_ref().and_then(|a| {
-            let range = a.range();
-            (!range.is_empty()).then(|| (a.key.clone(), a.text.clone(), range))
-        });
+        let current = entity.read(cx).model.span();
         Self {
             entity: entity.clone(),
             current,
+            order: 0,
             color,
             mentions: Mentions::empty(),
             chip_accent: Hsla::default(),
@@ -328,6 +509,13 @@ impl Selectable {
         }
     }
 
+    /// Where in the transcript the bubbles built from this sit: a drag that
+    /// crosses bubbles orders its two ends by this (then by key).
+    pub fn ordered(mut self, order: usize) -> Self {
+        self.order = order;
+        self
+    }
+
     /// Scope to one bubble: `key` names it, `text` is its whole rendered
     /// plain text (every block, in order). The bubble's text elements are
     /// then built with [`BubbleSelectable::text`] at their byte offset.
@@ -336,16 +524,24 @@ impl Selectable {
         key: impl Into<SharedString>,
         text: impl Into<SharedString>,
     ) -> BubbleSelectable {
-        let key = key.into();
-        let text = text.into();
-        let range = match &self.current {
-            Some((k, t, range)) if *k == key && *t == text => Some(range.clone()),
-            _ => None,
+        let at = BubbleAt {
+            order: self.order,
+            key: key.into(),
+            text: text.into(),
         };
+        // An end bubble whose text changed since the gesture (streaming) is
+        // not highlighted: its offsets no longer mean the same glyphs.
+        let range = self.current.as_ref().and_then(|span| {
+            let fresh = (at.key != span.start.key || at.text == span.start.text)
+                && (at.key != span.end.key || at.text == span.end.text);
+            fresh
+                .then(|| span.range_in(&at))
+                .flatten()
+                .filter(|r| !r.is_empty())
+        });
         BubbleSelectable {
             entity: self.entity.clone(),
-            key,
-            text,
+            at,
             range,
             color: self.color,
             mentions: self.mentions.clone(),
@@ -358,9 +554,8 @@ impl Selectable {
 #[derive(Clone)]
 pub struct BubbleSelectable {
     entity: Entity<TextSelection>,
-    key: SharedString,
-    text: SharedString,
-    /// The current selection when it lives in this bubble.
+    at: BubbleAt,
+    /// The part of the current selection that falls in this bubble.
     range: Option<Range<usize>>,
     color: Hsla,
     mentions: Rc<Mentions>,
@@ -401,7 +596,7 @@ impl BubbleSelectable {
     ) -> SelectableText {
         let text = text.into();
         debug_assert_eq!(
-            self.text.get(at..at + text.len()),
+            self.at.text.get(at..at + text.len()),
             Some(text.as_ref()),
             "selectable text must be the bubble's plain text at its offset"
         );
@@ -420,7 +615,7 @@ impl BubbleSelectable {
             };
             runs = chip_runs(runs, range.clone(), cell, accent);
             chips.push(Chip {
-                key: (self.key.clone(), at + range.start..at + range.end),
+                key: (self.at.key.clone(), at + range.start..at + range.end),
                 range,
                 cell,
                 mention,
@@ -434,8 +629,7 @@ impl BubbleSelectable {
         };
         SelectableText {
             styled: StyledText::new(text.clone()).with_runs(runs),
-            key: self.key.clone(),
-            bubble_text: self.text.clone(),
+            bubble: self.at.clone(),
             span: at..at + text.len(),
             at,
             links: Vec::new(),
@@ -631,10 +825,9 @@ fn drag_index(layout: &TextLayout, position: Point<Pixels>, distance: Distance) 
 /// A [`StyledText`] the user can select from. Registers its own mouse
 /// listeners during paint (the same way `InteractiveText` does).
 pub struct SelectableText {
-    /// The bubble this element belongs to, its whole plain text, and where
-    /// this element's text starts in it.
-    key: SharedString,
-    bubble_text: SharedString,
+    /// The bubble this element belongs to (with its whole plain text), and
+    /// where this element's text starts in it.
+    bubble: BubbleAt,
     at: usize,
     /// `at..at + text.len()`: the bubble bytes this element covers.
     span: Range<usize>,
@@ -721,7 +914,7 @@ impl Element for SelectableText {
             .then(|| chip_at(&chips, &layout, window.mouse_position()))
             .flatten()
             .map(|c| c.key.clone());
-        let (key, span) = (self.key.clone(), self.span.clone());
+        let (key, span) = (self.bubble.key.clone(), self.span.clone());
         selection.update(cx, |s, _| {
             s.chips.tidy(now);
             // Ours: a chip in this element, or a chip this bubble no longer
@@ -758,7 +951,8 @@ impl Element for SelectableText {
         }
         let links = std::mem::take(&mut self.links);
         let focus_handle = selection.read(cx).focus_handle.clone();
-        let (key, bubble_text, at) = (self.key.clone(), self.bubble_text.clone(), self.at);
+        let (bubble, at) = (self.bubble.clone(), self.at);
+        let key = bubble.key.clone();
 
         let over_link = hitbox.is_hovered(window)
             && layout
@@ -815,10 +1009,6 @@ impl Element for SelectableText {
             }
         });
 
-        // Press origin for axis lock: a vertical pan with no range yet yields
-        // to transcript drag-scroll instead of selecting across lines.
-        let press_at = Rc::new(std::cell::Cell::new(Point::default()));
-
         window.on_mouse_event({
             let (hitbox, layout, selection, focus_handle) = (
                 hitbox.clone(),
@@ -826,8 +1016,7 @@ impl Element for SelectableText {
                 selection.clone(),
                 focus_handle.clone(),
             );
-            let (key, bubble_text, chips) = (key.clone(), bubble_text.clone(), chips.clone());
-            let press_at = press_at.clone();
+            let (bubble, chips) = (bubble.clone(), chips.clone());
             move |event: &MouseDownEvent, phase, window, cx| {
                 // Control-click is the bubble's copy; right-click its menu.
                 if phase != DispatchPhase::Bubble
@@ -837,7 +1026,6 @@ impl Element for SelectableText {
                 {
                     return;
                 }
-                press_at.set(event.position);
                 let index = at + closest_index(&layout, event.position);
                 if let Some(chip) = chip_at(&chips, &layout, event.position) {
                     if selection.update(cx, |s, _| s.chips.press(chip.key.clone(), Instant::now()))
@@ -846,9 +1034,8 @@ impl Element for SelectableText {
                     }
                 }
                 let selected = selection.update(cx, |s, cx| {
-                    s.model.begin(
-                        key.clone(),
-                        bubble_text.clone(),
+                    s.model.begin_at(
+                        bubble.clone(),
                         index,
                         event.click_count,
                         event.modifiers.shift,
@@ -865,16 +1052,20 @@ impl Element for SelectableText {
             }
         });
 
+        // A drag that started on bubble text — this bubble's or another's —
+        // proposes its nearest index on every move, whichever way the pointer
+        // went: up, down, into the next bubble. (The old axis lock that handed
+        // a vertical pan to drag-scroll made a bottom-up drag select nothing;
+        // the transcript now leaves a press on text to the selection.)
         window.on_mouse_event({
-            let (layout, selection, focus_handle, key) = (
+            let (layout, selection, focus_handle, bubble) = (
                 layout.clone(),
                 selection.clone(),
                 focus_handle.clone(),
-                key.clone(),
+                bubble.clone(),
             );
             move |event: &MouseMoveEvent, phase, window, cx| {
-                if phase != DispatchPhase::Bubble || !selection.read(cx).model.is_dragging_in(&key)
-                {
+                if phase != DispatchPhase::Bubble || !selection.read(cx).model.is_dragging() {
                     return;
                 }
                 if event.pressed_button != Some(MouseButton::Left) {
@@ -884,28 +1075,10 @@ impl Element for SelectableText {
                     });
                     return;
                 }
-                // Vertical-dominant pan with no range yet: yield so the
-                // transcript can drag-scroll ([feedback app-01M5PDB3QYAPBPA4FJXZE1FFD0]).
-                // Double/triple-click already has a range and keeps selecting.
-                if !selection.read(cx).model.has_range() {
-                    let start = press_at.get();
-                    let dx: f32 = (event.position.x - start.x).into();
-                    let dy: f32 = (event.position.y - start.y).into();
-                    if dx.abs() + dy.abs() < SELECTION_DRAG_SLOP {
-                        return;
-                    }
-                    if dy.abs() > dx.abs() * 1.15 {
-                        selection.update(cx, |s, cx| {
-                            s.clear();
-                            cx.notify();
-                        });
-                        return;
-                    }
-                }
                 let distance = distance_to(&layout.bounds(), event.position);
                 let index = at + drag_index(&layout, event.position, distance);
                 let selected = selection.update(cx, |s, cx| {
-                    if s.model.propose(event.position, index, distance) {
+                    if s.model.propose_in(event.position, &bubble, index, distance) {
                         cx.notify();
                     }
                     s.model.has_range()
@@ -921,7 +1094,7 @@ impl Element for SelectableText {
             move |event: &MouseUpEvent, phase, window, cx| {
                 if phase != DispatchPhase::Bubble
                     || event.button != MouseButton::Left
-                    || !selection.read(cx).model.is_dragging_in(&key)
+                    || !selection.read(cx).model.is_dragging()
                 {
                     return;
                 }
@@ -1090,6 +1263,37 @@ pub fn paint_picture(
                 cx,
             );
         }
+        mention::Picture::Neutral { name } => {
+            let (disc, ink) = avatars::neutral_colors(crate::ui::theme::Theme::of(cx));
+            window.paint_quad(gpui::quad(
+                bounds,
+                radii,
+                disc,
+                gpui::Edges::all(px(0.0)),
+                gpui::transparent_black(),
+                gpui::BorderStyle::default(),
+            ));
+            let text = arbos_core::avatar::leaf::initial(name);
+            let font_size = d * avatars::INITIALS_SCALE;
+            let mut font = window.text_style().font();
+            font.weight = FontWeight::SEMIBOLD;
+            let run = TextRun {
+                len: text.len(),
+                font,
+                color: ink,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let line = window.text_system().shape_line(
+                SharedString::from(text.clone()),
+                font_size,
+                &[run],
+                None,
+            );
+            let x = origin.x + (d - line.width) / 2.0;
+            let _ = line.paint(point(x, origin.y), d, TextAlign::Left, None, window, cx);
+        }
     }
 }
 
@@ -1231,9 +1435,158 @@ mod tests {
         sel.finish_drag();
         sel.begin("k".into(), text.clone(), 12, 1, true);
         assert_eq!(sel.selected_text().as_deref(), Some("alpha beta gamma"));
-        // Shift-click in another bubble starts over there.
-        sel.begin("other".into(), "zeta".into(), 1, 1, true);
-        assert_eq!(sel.selected_text(), None);
+        // Shift-click in a later bubble extends across to it (macOS / Grok).
+        sel.begin_at(at(1, "other", "zeta"), 1, 1, true);
+        let span = sel.span().expect("a span across two bubbles");
+        assert_eq!(span.start.key.as_ref(), "k");
+        assert_eq!(span.start_index, 0);
+        assert_eq!(span.end.key.as_ref(), "other");
+        assert_eq!(
+            span.end_index, 4,
+            "the double-click's word granularity still applies"
+        );
+        assert_eq!(sel.selected_text(), None, "one-bubble copy has no answer");
+    }
+
+    fn at(order: usize, key: &str, text: &str) -> BubbleAt {
+        BubbleAt {
+            order,
+            key: key.to_string().into(),
+            text: text.to_string().into(),
+        }
+    }
+
+    /// Jacob (2026-10-24, [feedback bubble-selection-2026-10-24]): a drag
+    /// from one message into the next selects the end of the first, the whole
+    /// of anything between, and the start of the last — and the same drag
+    /// made from the bottom up gives the same span.
+    #[test]
+    fn a_drag_across_bubbles_spans_them_in_transcript_order() {
+        let (a, b, c) = (
+            at(0, "a", "First message here."),
+            at(3, "b", "Second, in the middle."),
+            at(7, "c", "Third and last one."),
+        );
+        // Top down: press at "message" in a, drag to after "Third" in c.
+        let mut sel = Model::default();
+        sel.begin_at(a.clone(), 6, 1, false);
+        assert!(sel.is_dragging());
+        assert!(!sel.has_range());
+        let p = point(px(10.0), px(300.0));
+        assert!(sel.propose_in(p, &c, 5, (0.0, 0.0)));
+        assert!(sel.has_range());
+        let down = sel.span().expect("span");
+        assert_eq!(
+            down,
+            Span {
+                start: a.clone(),
+                start_index: 6,
+                end: c.clone(),
+                end_index: 5
+            }
+        );
+        assert_eq!(down.range_in(&a), Some(6..a.text.len()));
+        assert_eq!(
+            down.range_in(&b),
+            Some(0..b.text.len()),
+            "the middle bubble, whole"
+        );
+        assert_eq!(down.range_in(&c), Some(0..5));
+        assert_eq!(down.range_in(&at(9, "d", "after")), None);
+        assert!(!down.one_bubble());
+        assert!(!sel.finish_drag(), "not a plain click");
+
+        // Bottom up: press after "Third" in c, drag up to "message" in a.
+        let mut sel = Model::default();
+        sel.begin_at(c.clone(), 5, 1, false);
+        assert!(sel.propose_in(p, &a, 6, (0.0, 0.0)));
+        assert_eq!(sel.span().expect("span"), down, "same span either way");
+        // Back into the anchor's own bubble: an ordinary one-bubble range.
+        assert!(sel.propose_in(point(px(10.0), px(310.0)), &c, 0, (0.0, 0.0)));
+        assert_eq!(sel.selected_text().as_deref(), Some("Third"));
+    }
+
+    /// Two bubbles rendered one above the other; a real pointer drag from
+    /// the end of the lower one up into the upper one selects across both,
+    /// bottom-up (the gesture Jacob found broken).
+    struct TwoBubbles {
+        selection: Entity<TextSelection>,
+    }
+
+    const UPPER: &str = "The upper message, first in the chat.";
+    const LOWER: &str = "The lower message, sent after it.";
+
+    impl gpui::Render for TwoBubbles {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            use gpui::{div, InteractiveElement as _, ParentElement as _, Styled as _};
+            let selectable = Selectable::new(&self.selection, Hsla::default(), cx);
+            let upper = selectable.clone().ordered(0).bubble("upper", UPPER);
+            let lower = selectable.ordered(1).bubble("lower", LOWER);
+            div()
+                .w(px(500.0))
+                .h(px(200.0))
+                .p(px(20.0))
+                .text_size(px(15.0))
+                .flex()
+                .flex_col()
+                .gap(px(30.0))
+                .child(
+                    div()
+                        .debug_selector(|| "upper-text".into())
+                        .child(upper.text(0, UPPER, vec![run(UPPER.len())])),
+                )
+                .child(
+                    div()
+                        .debug_selector(|| "lower-text".into())
+                        .child(lower.text(0, LOWER, vec![run(LOWER.len())])),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn a_bottom_up_drag_selects_across_two_rendered_bubbles(cx: &mut gpui::TestAppContext) {
+        let selection = cx.update(|cx| cx.new(TextSelection::new));
+        let (_view, vcx) = cx.add_window_view(|_, _| TwoBubbles {
+            selection: selection.clone(),
+        });
+        vcx.run_until_parked();
+        let upper = vcx.debug_bounds("upper-text").expect("upper drawn");
+        let lower = vcx.debug_bounds("lower-text").expect("lower drawn");
+        let mid = |b: Bounds<Pixels>| b.origin.y + b.size.height / 2.0;
+        // Press inside the lower line, drag straight up (a vertical move — no
+        // sideways motion first) into the upper line, release.
+        let press = point(lower.left() + px(90.0), mid(lower));
+        let over_gap = point(lower.left() + px(90.0), lower.top() - px(10.0));
+        let target = point(upper.left() + px(40.0), mid(upper));
+        vcx.simulate_mouse_down(press, MouseButton::Left, gpui::Modifiers::default());
+        vcx.run_until_parked();
+        assert!(selection.read_with(&*vcx, |s, _| s.is_dragging()));
+        vcx.simulate_mouse_move(
+            over_gap,
+            Some(MouseButton::Left),
+            gpui::Modifiers::default(),
+        );
+        vcx.run_until_parked();
+        vcx.simulate_mouse_move(target, Some(MouseButton::Left), gpui::Modifiers::default());
+        vcx.run_until_parked();
+        vcx.simulate_mouse_up(target, MouseButton::Left, gpui::Modifiers::default());
+        vcx.run_until_parked();
+        let span = selection
+            .read_with(&*vcx, |s, _| s.span())
+            .expect("a selection across the two bubbles");
+        assert_eq!(
+            span.start.key.as_ref(),
+            "upper",
+            "starts in the upper bubble"
+        );
+        assert_eq!(span.end.key.as_ref(), "lower", "ends in the lower bubble");
+        assert!(span.start_index > 0 && span.start_index < UPPER.len());
+        assert!(span.end_index > 0 && span.end_index < LOWER.len());
+        assert!(!selection.read_with(&*vcx, |s, _| s.is_dragging()));
     }
 
     /// Jacob's report (#1389): a drag that starts in one paragraph and ends
