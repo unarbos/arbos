@@ -350,6 +350,8 @@ struct PaneHeader<Avatar: View>: View {
     let subtitle: String
     /// SF Symbol after the name ("lock.fill" on a private channel).
     var badge: String? = nil
+    /// A tap on the name (the agent pane: the owner's rename alert).
+    var nameAction: (() -> Void)? = nil
     /// The subtitle's colour when it is not the muted default (a placeholder reads fainter).
     var subtitleTint: Color? = nil
     /// A tap on the subtitle (the agent pane's label: tap to edit it in place).
@@ -361,16 +363,13 @@ struct PaneHeader<Avatar: View>: View {
     var body: some View {
         VStack(spacing: 10) {
             avatar().frame(width: PaneKit.heroAvatar, height: PaneKit.heroAvatar)
-            HStack(spacing: 6) {
-                Text(name)
-                    .font(theme.font(28, weight: .semibold))
-                    .foregroundStyle(theme.text)
-                    .lineLimit(1)
-                if let badge {
-                    Image(systemName: badge).font(theme.font(15, weight: .semibold)).foregroundStyle(theme.muted)
-                }
+            if let nameAction {
+                Button(action: nameAction) { nameLine }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Renames")
+            } else {
+                nameLine
             }
-            .padding(.horizontal, 24)
             if let subtitleEditor {
                 subtitleEditor
             } else if let subtitleAction {
@@ -382,6 +381,19 @@ struct PaneHeader<Avatar: View>: View {
             }
         }
         .frame(maxWidth: .infinity)
+    }
+
+    private var nameLine: some View {
+        HStack(spacing: 6) {
+            Text(name)
+                .font(theme.font(28, weight: .semibold))
+                .foregroundStyle(theme.text)
+                .lineLimit(1)
+            if let badge {
+                Image(systemName: badge).font(theme.font(15, weight: .semibold)).foregroundStyle(theme.muted)
+            }
+        }
+        .padding(.horizontal, 24)
     }
 
     private var subtitleText: some View {
@@ -2446,6 +2458,8 @@ struct PaneHero {
     }
     let picture: Picture
     let name: String
+    /// A tap on the name (the agent pane: the owner's rename alert).
+    var nameAction: (() -> Void)? = nil
     /// SF Symbol after the name ("lock.fill" on a private channel).
     var badge: String? = nil
     let subtitle: String
@@ -2554,7 +2568,7 @@ struct ProfilePane: View {
                 }
             } header: {
                 VStack(spacing: 18) {
-                    PaneHeader(name: hero.name, subtitle: hero.subtitle, badge: hero.badge,
+                    PaneHeader(name: hero.name, subtitle: hero.subtitle, badge: hero.badge, nameAction: hero.nameAction,
                                subtitleTint: hero.subtitleTint, subtitleAction: hero.subtitleAction, subtitleEditor: hero.subtitleEditor) {
                         switch hero.picture {
                         case .image(let v): v

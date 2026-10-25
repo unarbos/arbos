@@ -320,9 +320,6 @@ pub struct Shell {
     )>,
     /// The channel menu's Delete was clicked once: it shows "Delete #name?" with Cancel / Delete.
     pub(crate) channel_delete_armed: bool,
-    /// Agent pane › Details › "Edit profile" unfolded the Name · Handle ·
-    /// Description rows ([feedback agent-pane-details-tab-2026-10-24]).
-    pub(crate) agent_edit_open: bool,
     /// Group pane › Members: the row whose ✕ was clicked (`user:<id>` or
     /// `agent:<project>`); it shows "Remove … ?" with Cancel / Remove.
     pub(crate) member_remove_armed: Option<String>,
@@ -909,7 +906,6 @@ impl Shell {
             row_menu: None,
             channel_menu: None,
             channel_delete_armed: false,
-            agent_edit_open: false,
             member_remove_armed: None,
             device_revoke_armed: None,
             member_menu: None,
@@ -1922,7 +1918,6 @@ impl Shell {
     pub(crate) fn close_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.hide_settings_page(cx);
         self.profile_edit_open = false;
-        self.agent_edit_open = false;
         self.member_remove_armed = None;
         self.server_member_armed = None;
         self.server_leave_armed = false;

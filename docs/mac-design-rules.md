@@ -450,19 +450,36 @@ edits the label in place but the name through an alert.
 |---|---|---|
 | Subtitle | "Add a label", 12 pt muted, under the name | the agent's **description is its label**: shown under the name (`HERO_SUBTITLE` 12, `text_muted`), `LABEL_PLACEHOLDER` "Add a label" in `text_faint` while empty (owner); a click edits it in place (the hero's `label_editor`, Done / Return commits). Someone else's agent: its label, else "Run by @owner". "working" is no longer a subtitle — the Coding row spins |
 | Tab pill | capsule **26** tall, label **13** pt, 9 pt beside it, 2 between capsules | `TAB_HEIGHT` 26 / `TEXT_SMALL` / `TAB_PAD_X` 9 / `TAB_GAP` 2 (shared `tab_bar`; was 30 / body / 14 / 4) |
-| Details, first | "Coding": the project with a 15 pt blue spinner, 41 pt row | **Coding** card: the agent's workspace — `cards::activity_spinner` (`CODING_SPINNER` 15, `accent`, eight spokes stepping every 100 ms) while a turn runs, the `code` glyph when idle; subtitle "Working · 42 s · 7 tool calls" / "Idle" / "Machine asleep" (`coding_status`); a click opens the Computer tab |
-| Details, second | "Routines": name over schedule, a 32 × 20 switch | **Routines** card (own agents): one `kit::row` per routine, subtitle "trigger · next in …" / "Paused" (`routine_status`), a `glass::switch` that flips `routine_set_enabled`; "No routines yet" when empty. Routines load when the pane opens (`RoutinesRefresh`) |
-| Details, then | — | **Settings** (Model · Reasoning · Voice, the hoverpick rows; Model alone on someone else's agent) → **Who may message X** (the grant rows + "Give a person access…") → **Profile**: one "Edit profile" row (pencil tile) that unfolds Name · Handle · Description (`Shell.agent_edit_open`); someone else's agent shows the three rows plain. No footnotes |
+| Details, first | "Coding": the project with a 15 pt blue spinner, 41 pt row | **Coding** card — **hidden for now** (see the 2026-10-25 trim below): the agent's workspace — `cards::activity_spinner` (`CODING_SPINNER` 15, `accent`, eight spokes stepping every 100 ms) while a turn runs, the `code` glyph when idle; subtitle "Working · 42 s · 7 tool calls" / "Idle" / "Machine asleep" (`coding_status`); a click opens the Computer tab |
+| Details, second | "Routines": name over schedule, a 32 × 20 switch | **Routines** card (own agents) — **hidden for now**: one `kit::row` per routine, subtitle "trigger · next in …" / "Paused" (`routine_status`), a `glass::switch` that flips `routine_set_enabled`; "No routines yet" when empty. Routines still load when the pane opens (`RoutinesRefresh`) |
+| Details, then | — | **Settings** (Model · Reasoning · Voice, the hoverpick rows; Model alone on someone else's agent). No footnotes. The **Who may message X**, **Permissions** and **Profile** cards that followed it are gone (below) |
 | Library | Grok's second tab | unchanged (images · files · links) |
 | Computer | Grok's third tab (the bot's computer) | the agent's **box**: **Machine** card — Status (dot + "Awake · 5 h 12 m"), Where it runs, Machine spec, Image, Spend today (`GET /machine`); **Resources** — Disk / Memory "x free of y", Load, Up for; **Running now** — every workspace with a turn running (spinner, name, "42 s · 7 tool calls") or "Nothing running · N workspaces". The last two come from the box's own `/box/state` through **`GET /machine/debug`** (`ClientCommand::MachineDebugRefresh` → `SyncEvent::BoxReport` → `AppState.box_report`), fetched when the pane opens and when the tab is picked; an asleep box says "The machine did not answer · <reason>". Someone else's agent: Status + Machine class from its project |
 | Delete agent | — | not on the pane (see above) |
 
-Order pinned by `agent::tests` (`details_puts_live_content_first_and_the_edit_fields_last`,
+Order pinned by `agent::tests` (`details_is_settings_alone_until_the_live_cards_are_switched_back_on`,
 `computer_order_follows_the_report`, `coding_status_…`, `routine_status_…`,
 `box_report_reads_the_relay_and_the_box`) and `pane::tests::kinds_keep_their_own_tab_sets`.
 Rig: `ARBOS_OPEN_PROFILE=agent` (Details), `agent:library`, `agent:computer`;
 the fixture answers `MachineDebugRefresh` with an awake 4-core box and one
 workspace per agent (the streaming one mid-turn).
+
+**Details trimmed to Settings (Jacob 2026-10-25, [feedback agent-details-remove-sections-mac-2026-10-25], iPhone [feedback agent-details-remove-sections-ios-2026-10-25]).**
+Five blocks left the Details tab on both platforms, the same release each:
+
+| Block | Mac | iPhone | Status |
+|---|---|---|---|
+| "Who may message X" (grant rows, "Give a person access…") | `DetailsBlock::Access`, `message_grant_rows` removed | `.access`, `messageGrantRow`, `AddMessageGrantSheet` removed | **gone.** The access list itself is untouched: `message_grants` on the project, `PUT/DELETE /projects/{id}/message-access`, the state methods and the relay calls stay |
+| "Permissions" (Shell approvals row, its caption, one switch per grant) | `DetailsBlock::Permissions`, `shell_grant_sections` removed | `.permissions` removed | **gone.** Standing answers from the destructive-shell card (#1544) still apply on the box; `ShellGrantsRefresh` / `shell_grant_revoke` and the relay endpoints stay. The card's footer no longer points at the pane ("Standing choices are per agent: X stops asking for what you allow here") |
+| "Profile" ("Edit profile" → Name · Handle · Description) | `DetailsBlock::Profile`, `profile_rows`, `Shell.agent_edit_open` removed | `.profile`, `profileRows`, `editOpen` removed | **gone.** Name and label are edited in the hero as before (Mac: click the name / the label). iPhone: the label was already in place; the name had no other way in, so the hero's name is now a tap → the same rename alert (`PaneHero.nameAction`, nil on every other pane — a second inline editor would stack on the label's) |
+| "Coding" | `DetailsBlock::Coding` | `.coding` | **hidden, temporary** — behind `AGENT_DETAILS_SHOW_CODING_ROUTINES` (Mac, `profiles/agent.rs`) / `AgentPane.agentDetailsShowCodingRoutines` (iPhone, `Model/AgentPane.swift`), compile-time, **off** by default. The Computer tab, `coding_status` and the box report are unchanged |
+| "Routines" | `DetailsBlock::Routines` | `.routines` | **hidden, temporary** — the same flag; `RoutinesRefresh` / `routine_set_enabled` and the relay calls stay |
+
+What is left on Details: the **Settings** card alone (Model · Reasoning · Voice;
+Model alone on someone else's agent) under the hero (picture, name, label).
+`details_order(mine, show)` / `AgentPane.detailsOrder(mine:showCodingRoutines:)`
+are pure and pinned for both flag states. Rig: `ARBOS_SHOW=agentrename` opens
+the iPhone rename alert (replaces `agentedit`).
 
 ## Pane animations (Jacob 2026-10-24, [feedback right-pane-slide-2026-10-24], [feedback sidebar-slide-2026-10-24])
 

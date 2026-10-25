@@ -168,15 +168,28 @@ enum AgentPane {
     /// Grok's "Add a label": the owner's subtitle while the agent has no description.
     static let labelPlaceholder = "Add a label"
 
-    /// The Details tab, top to bottom — live content first, the options after it, the
-    /// edit fields last and folded.
+    /// Jacob 2026-10-25 ([feedback agent-details-remove-sections-ios-2026-10-25]): the
+    /// Details tab hides its Coding and Routines cards for now. Temporary — flip this to
+    /// bring them back; the Computer tab, the routines calls and the status line are
+    /// untouched. Off by default. The Mac's `AGENT_DETAILS_SHOW_CODING_ROUTINES`.
+    static let agentDetailsShowCodingRoutines = false
+
+    /// The Details tab, top to bottom — live content first, the options after it. "Who may
+    /// message X", "Permissions" and "Profile" left the pane for good on 2026-10-25 (the
+    /// access list, the standing shell answers and the relay calls behind them are
+    /// unchanged; the name and the label are edited in the hero).
     enum DetailsBlock: Equatable {
-        /// `permissions`: Shell approvals — the standing grants from destructive-shell cards (#1544).
-        case coding, routines, settings, access, permissions, profile
+        case coding, routines, settings
     }
 
-    static func detailsOrder(mine: Bool) -> [DetailsBlock] {
-        mine ? [.coding, .routines, .settings, .access, .permissions, .profile] : [.coding, .settings, .profile]
+    static func detailsOrder(mine: Bool, showCodingRoutines: Bool = agentDetailsShowCodingRoutines) -> [DetailsBlock] {
+        var out: [DetailsBlock] = []
+        if showCodingRoutines {
+            out.append(.coding)
+            if mine { out.append(.routines) }
+        }
+        out.append(.settings)
+        return out
     }
 
     /// The Computer tab's blocks, in order.
