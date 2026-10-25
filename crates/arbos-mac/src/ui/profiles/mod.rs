@@ -541,6 +541,51 @@ pub(super) struct Content {
     pub links: Vec<Link>,
 }
 
+/// Only what was exchanged in the chat feeds the Library (Jacob, 2026-10-25,
+/// [feedback library-chat-only-mac-2026-10-25]): links, pictures and files
+/// people sent, and what the agent made and shared in a reply. A hidden job
+/// row or an unnamed worker's spawn row is the agent's own machinery — the
+/// files it read, the pages it fetched — and never counts; tool parts never
+/// count either (`library_links` / `library_attachments` read text and
+/// attachment parts only).
+pub(crate) fn shared_in_chat(m: &Message) -> bool {
+    !m.hidden && !m.worker
+}
+
+/// The `http(s)://` links a chat row shares: the ones **people** sent (Jacob's
+/// rule names links people sent and files the agent made — an agent's prose
+/// link, "source: https://…", is its research, not something it shared) —
+/// none for a row that was not exchanged in the chat, none from tool parts,
+/// none for a bare file name ("app.rs" is a file, not a site).
+pub(crate) fn library_links(m: &Message) -> Vec<String> {
+    if !shared_in_chat(m) || m.role != crate::model::Role::User {
+        return Vec::new();
+    }
+    m.parts
+        .iter()
+        .filter_map(|p| match p {
+            Part::Text { text, .. } => Some(urls_in(text)),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+/// The attachments a chat row shares — none for a row that was not exchanged
+/// in the chat.
+pub(crate) fn library_attachments(m: &Message) -> Vec<(&Id, &Attachment)> {
+    if !shared_in_chat(m) {
+        return Vec::new();
+    }
+    m.parts
+        .iter()
+        .filter_map(|p| match p {
+            Part::Attachment { id, attachment } => Some((id, attachment)),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Everything shareable in `chats`, newest first. Only loaded docs count.
 pub(super) fn collect(state: &AppState, chats: &[&Chat]) -> Content {
     let mut out = Content {
@@ -553,41 +598,34 @@ pub(super) fn collect(state: &AppState, chats: &[&Chat]) -> Content {
         for m in state.messages_of(&chat.id) {
             let by = sender_label(state, m);
             let sender = Sender::of(state, m, &chat.project_id);
-            for part in &m.parts {
-                match part {
-                    Part::Attachment { id, attachment } => {
-                        let thumbnail = attachment
-                            .blob_ref
-                            .as_ref()
-                            .and_then(|k| state.thumbnails.get(k).cloned());
-                        let found = Found {
-                            attachment: attachment.clone(),
-                            by: sender_name(state, m),
-                            sender: sender.clone(),
-                            when: m.created_at,
-                            thumbnail,
-                            chat_id: chat.id.clone(),
-                            part_id: id.clone(),
-                        };
-                        match attachment.kind() {
-                            AttachmentKind::Image | AttachmentKind::Video => out.media.push(found),
-                            AttachmentKind::Audio => out.voice.push(found),
-                            _ => out.files.push(found),
-                        }
-                    }
-                    Part::Text { text, .. } => {
-                        for url in urls_in(text) {
-                            out.links.push(Link {
-                                url,
-                                by: by.clone(),
-                                sender: sender.clone(),
-                                chat: chat.title.clone(),
-                                when: m.created_at,
-                            });
-                        }
-                    }
-                    _ => {}
+            for (id, attachment) in library_attachments(m) {
+                let thumbnail = attachment
+                    .blob_ref
+                    .as_ref()
+                    .and_then(|k| state.thumbnails.get(k).cloned());
+                let found = Found {
+                    attachment: attachment.clone(),
+                    by: sender_name(state, m),
+                    sender: sender.clone(),
+                    when: m.created_at,
+                    thumbnail,
+                    chat_id: chat.id.clone(),
+                    part_id: id.clone(),
+                };
+                match attachment.kind() {
+                    AttachmentKind::Image | AttachmentKind::Video => out.media.push(found),
+                    AttachmentKind::Audio => out.voice.push(found),
+                    _ => out.files.push(found),
                 }
+            }
+            for url in library_links(m) {
+                out.links.push(Link {
+                    url,
+                    by: by.clone(),
+                    sender: sender.clone(),
+                    chat: chat.title.clone(),
+                    when: m.created_at,
+                });
             }
         }
     }
@@ -763,6 +801,120 @@ pub(super) fn link_list(
 /// The chats of a space, for content tabs (one per agent unless multi-chat is on).
 pub(super) fn chats_of<'a>(state: &'a AppState, space_id: &str) -> Vec<&'a Chat> {
     state.visible_tabs(space_id)
+}
+
+#[cfg(test)]
+mod library_source_tests {
+    //! Jacob (2026-10-25): the Library holds only what was exchanged in the
+    //! chat. A hidden job row's text and files, an unnamed worker's spawn row
+    //! and tool parts never reach it; a person's link / picture and the
+    //! agent's shared file do. Bare file names ("app.rs") are not links.
+    use super::{library_attachments, library_links, shared_in_chat, urls_in};
+    use crate::model::Message;
+
+    fn message(v: serde_json::Value) -> Message {
+        serde_json::from_value(v).expect("message")
+    }
+
+    #[test]
+    fn hidden_job_rows_workers_and_tool_parts_never_enter_the_library() {
+        let job = message(serde_json::json!({
+            "id": "j", "chatId": "c", "role": "assistant", "sender": "box:1", "status": "streaming",
+            "createdAt": 1, "hidden": true, "worker": true,
+            "job": { "id": "job1", "title": "Reading the repo", "kind": "research", "touches": [] },
+            "parts": [
+                { "id": "j-t", "kind": "text", "text": "Read https://github.com/unarbos/arbos/blob/main/crates/arbos-mac/src/app.rs" },
+                { "id": "j-a", "kind": "attachment", "attachment": { "name": "app.rs", "mime": "text/plain", "ref": "blob-1" } }
+            ],
+        }));
+        assert!(!shared_in_chat(&job));
+        assert!(
+            library_links(&job).is_empty(),
+            "a job row's pages are not links the chat shared"
+        );
+        assert!(
+            library_attachments(&job).is_empty(),
+            "a job row's files are not shared files"
+        );
+
+        let worker = message(serde_json::json!({
+            "id": "w", "chatId": "c", "role": "assistant", "sender": "agent", "status": "done",
+            "createdAt": 2, "worker": true, "subagentName": "reader",
+            "parts": [{ "id": "w-t", "kind": "text", "text": "https://docs.rs/gpui" }],
+        }));
+        assert!(!shared_in_chat(&worker));
+        assert!(library_links(&worker).is_empty());
+
+        let with_tool = message(serde_json::json!({
+            "id": "t", "chatId": "c", "role": "assistant", "sender": "box:1", "status": "done",
+            "createdAt": 3,
+            "parts": [
+                { "id": "t-c", "kind": "tool", "call": { "id": "call1", "name": "web_fetch", "input": { "url": "https://news.ycombinator.com" } },
+                  "outputSummary": "Fetched https://news.ycombinator.com (200)" },
+                { "id": "t-t", "kind": "text", "text": "I read calls.rs, auth.rs and update.rs; nothing to change." }
+            ],
+        }));
+        assert!(
+            shared_in_chat(&with_tool),
+            "the reply itself is in the chat"
+        );
+        assert!(
+            library_links(&with_tool).is_empty(),
+            "a fetched page in a tool part and bare file names are not links: {:?}",
+            library_links(&with_tool)
+        );
+        assert!(library_attachments(&with_tool).is_empty());
+    }
+
+    #[test]
+    fn what_people_send_and_the_files_the_agent_shares_do_enter() {
+        let sent = message(serde_json::json!({
+            "id": "u", "chatId": "c", "role": "user", "sender": "user:gh_2", "status": "done",
+            "createdAt": 4,
+            "parts": [
+                { "id": "u-t", "kind": "text", "text": "Landing page: https://arbos.life/launch — and the deck:" },
+                { "id": "u-a", "kind": "attachment", "attachment": { "name": "deck-v3.pdf", "mime": "application/pdf", "ref": "blob-2" } }
+            ],
+        }));
+        assert_eq!(library_links(&sent), ["https://arbos.life/launch"]);
+        assert_eq!(
+            library_attachments(&sent)
+                .iter()
+                .map(|(_, a)| a.name.as_str())
+                .collect::<Vec<_>>(),
+            ["deck-v3.pdf"]
+        );
+        let shared = message(serde_json::json!({
+            "id": "a", "chatId": "c", "role": "assistant", "sender": "box:1", "status": "done",
+            "createdAt": 5,
+            "parts": [
+                { "id": "a-t", "kind": "text", "text": "Here is the chart, source at https://github.com/unarbos/arbos." },
+                { "id": "a-a", "kind": "attachment", "attachment": { "name": "signups.png", "mime": "image/png", "ref": "blob-3", "kind": "image" } }
+            ],
+        }));
+        assert!(
+            library_links(&shared).is_empty(),
+            "the agent's prose link is its research, not a shared link"
+        );
+        assert_eq!(
+            library_attachments(&shared).len(),
+            1,
+            "the chart it shared is"
+        );
+    }
+
+    #[test]
+    fn bare_file_names_are_not_links() {
+        assert!(urls_in("I looked at app.rs, calls.rs, auth.rs and update.rs.").is_empty());
+        assert!(
+            urls_in("see www.example.com").is_empty(),
+            "no scheme, no link"
+        );
+        assert_eq!(
+            urls_in("ok: https://arbos.life/x."),
+            ["https://arbos.life/x"]
+        );
+    }
 }
 
 #[cfg(test)]
