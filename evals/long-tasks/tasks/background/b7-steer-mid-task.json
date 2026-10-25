@@ -21,7 +21,8 @@
    },
    "timeout_s": 60,
    "expect_activity_change_s": 5,
-   "allow_timeout": true
+   "allow_timeout": true,
+   "expect_activity_regex": "^(Steering|Changing course)"
   },
   {
    "prompt": "Done? What was the last number?",

@@ -87,7 +87,14 @@ if [ "${LT_COMMIT:-1}" = 1 ] && [ -n "${ARBOS_GITHUB:-}" ]; then
   (
     cd "$ROOT"
     git fetch -q "$REMOTE" main
+    # SUMMARY.md is regenerated from every scoreboard, so a locally modified copy must not block
+    # the branch switch (it did once: "commit your changes or stash them"); keep the run's files aside
+    TMPSB="$(mktemp -d)"
+    cp "$EVAL/scoreboard/$RUN_ID".* "$TMPSB"/
+    git checkout -q -- evals/long-tasks/scoreboard/SUMMARY.md 2>/dev/null || true
     git checkout -q -B "feedback/$FID" FETCH_HEAD
+    cp "$TMPSB"/* "$EVAL/scoreboard/"
+    python3 "$EVAL/report.py" --run "$RUN_ID" --report-out "$TMPSB/report.md" >/dev/null
     git add evals/long-tasks/scoreboard
     if git -c user.name="Cursor agent (bc-dcc557ae)" -c user.email="agents@arbos.life" commit -qm "evals(long-tasks): run $RUN_ID scoreboard [feedback $FID]"; then
       git push -q "$REMOTE" "feedback/$FID"

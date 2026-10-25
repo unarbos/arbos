@@ -3,7 +3,7 @@
  "lane": "c",
  "category": "background",
  "title": "Steer while the agent's own turn is running: the working row says 'Steering: …' and the running work takes the correction",
- "regression": "#1657 guide path (working row 'Steering: …' ≤ 5 s, applied in-turn) and #1690 (a steer during a long tool call must take effect before the tool returns)",
+ "regression": "#1657 guide path (working row 'Steering: …' / 'Changing course…' ≤ 5 s), #1690 (a steer during a long tool call interrupts it and is delivered at once) and #1704 (the continuation is not re-gated by route-first and resumes the work to the new target)",
  "notes": "b7 asks for a detached job and the agent's turn ends in ~15 s, so a steer there is a plain new turn. Here the agent runs the loop itself in the foreground, so its turn is still running when the steer lands; the harness confirms a streaming row before sending it (truth.steer_mid_turn).",
  "cleanup_routines": true,
  "doc_checks": {
@@ -24,7 +24,7 @@
    "background": true,
    "timeout_s": 20,
    "expect_activity_change_s": 5,
-   "expect_activity_regex": "^Steering",
+   "expect_activity_regex": "^(Steering|Changing course)",
    "rubric": {
     "criteria": "Judge the reply only. By the no-placeholder rule a steer during running work gets no bubble of its own; the working row carries 'Steering: …' (checked programmatically). An empty reply is therefore a pass: score 3. If there is a reply, pass if it shows the change was applied to the running work (stops at 20) and is honest; fail if it ignores the steer or says it cannot change a running task.",
     "min": 3
