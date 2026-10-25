@@ -64,6 +64,15 @@ struct ChatView: View {
 
 /// Forwards only chat-scoped `AppModel` publishes into `ChatSession`. Unrelated
 /// fields (credits, devices, goals, …) no longer rebuild the open chat.
+///
+/// `tick` is handed to the session as a stored input on purpose: SwiftUI re-runs a
+/// child's body only when its inputs differ, and `model` / `chatId` / `projectId`
+/// never do. Re-rendering this host alone left `ChatSession.body` — and with it
+/// `.onChange(of: messagesVersion[chatId])`, which rebuilds the rows — unevaluated,
+/// so a sent bubble sat in `messages` until some unrelated state flipped (a scroll,
+/// the keyboard, a presence tick, the next inbound row): Jacob's 5-second own
+/// message in groups, Doug's "appears when I scroll" (#1720), measured per hop in
+/// iphone-group-send-instant-2026-10-25.
 private struct ChatSessionHost: View {
     let model: AppModel
     let chatId: Id
@@ -71,8 +80,10 @@ private struct ChatSessionHost: View {
     @State private var tick = 0
 
     var body: some View {
-        let _ = tick
-        ChatSession(model: model, chatId: chatId, projectId: projectId)
+        #if DEBUG
+        let _ = SendTrace.recent ? SendTrace.mark("host-body", detail: "tick=\(tick)", once: false) : ()
+        #endif
+        ChatSession(model: model, chatId: chatId, projectId: projectId, tick: tick)
             .onReceive(model.$messages) { _ in tick &+= 1 }
             .onReceive(model.$messagesVersion) { _ in tick &+= 1 }
             .onReceive(model.$channelRows) { _ in tick &+= 1 }
@@ -111,6 +122,10 @@ private struct ChatSession: View {
     @Environment(\.dismiss) private var dismiss
     let chatId: Id
     let projectId: Id
+    /// The host's publish counter. Not read in `body`; it is here so a forwarded
+    /// publish changes this view's inputs and SwiftUI evaluates the body (and its
+    /// `onChange` modifiers) again — see `ChatSessionHost`.
+    let tick: Int
 
     /// The composer text lives in its own observable so a keystroke re-renders the
     /// field, not this screen. Read it as `composerDraft.text` for actions; the
@@ -527,7 +542,12 @@ private struct ChatSession: View {
         let list = messages
         #if DEBUG
         let refreshStarted = Date()
-        defer { PerfCounters.time("rows()", ms: Date().timeIntervalSince(refreshStarted) * 1000) }
+        defer {
+            PerfCounters.time("rows()", ms: Date().timeIntervalSince(refreshStarted) * 1000)
+            if SendTrace.traces(chatId) {
+                SendTrace.markIfPresent("rows-has-row", ids: rows.map(\.messageId), detail: "rows=\(rows.count) window=\(windowCount) skipEnd=\(windowSkipEnd)")
+            }
+        }
         #endif
         let me = isChannel ? model.channelMe : model.myUserId
         // Sender names inside the bubbles: groups and channels only — never a 1:1 chat.
@@ -627,6 +647,7 @@ private struct ChatSession: View {
         #if DEBUG
         let _ = PerfCounters.bump("chatBody")
         let _ = DebugHooks.perfChanges ? Self._printChanges() : ()
+        let _ = SendTrace.recent ? SendTrace.mark("session-body", detail: "tick=\(tick) version=\(model.messagesVersion[chatId] ?? 0) rows=\(rows.count) msgs=\(messages.count)", once: false) : ()
         #endif
         // Header stays outside GeometryReader (same pattern as ServerChannelsView /
         // HiddenChatsView). Nesting it inside the reader let iOS 26/27 vertically
@@ -1098,7 +1119,10 @@ private struct ChatSession: View {
         // The per-chat version, not the array: comparing 1 000+ messages on every
         // body (each keystroke, presence tick, publish) was a measurable share of
         // the Arbonites lag (arbonites-chat-lag, 2026-10-24).
-        .onChange(of: model.messagesVersion[chatId] ?? 0, initial: true) { _, _ in
+        .onChange(of: model.messagesVersion[chatId] ?? 0, initial: true) { _, new in
+            #if DEBUG
+            if SendTrace.traces(chatId) { SendTrace.mark("version-onchange", detail: "version=\(new)", once: false) }
+            #endif
             let old = rowsSource
             let new = messages
             let initial = old.isEmpty && rows.isEmpty
@@ -2567,6 +2591,9 @@ private struct ChatSession: View {
     private func send() {
         let text = composerDraft.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !pending.isEmpty else { return }
+        #if DEBUG
+        SendTrace.begin(chatId: chatId, rows: rows.count, caughtUp: model.caughtUp.contains(chatId))
+        #endif
         Haptics.send()
         // A send means follow the reply: re-pin even if the reader had scrolled up.
         pinnedToBottom = true
@@ -2980,6 +3007,11 @@ private struct TranscriptRows: View, Equatable {
                 .padding(.top, row.id == firstId ? 0 : row.gapBefore)
                 .id(row.id)
                 .onAppear {
+                    #if DEBUG
+                    if SendTrace.traces(chatId) {
+                        SendTrace.markIfPresent("row-in-tree", ids: [row.messageId], detail: "row=\(row.id)")
+                    }
+                    #endif
                     // Once per open — not on every row (group chats fire this dozens of times).
                     if row.id == firstId {
                         LaunchClock.mark("chat-first-row", detail: "shown=\(shown.count) rows=\(rowsCount) messages=\(messagesCount)")
@@ -3061,6 +3093,13 @@ private struct AwayFromBottomReporter: ViewModifier {
                 )
             } action: { old, new in
                 let grew = new.height > old.height + 0.5
+                #if DEBUG
+                if SendTrace.recent {
+                    SendTrace.mark("scroll-geometry", detail: "grew=\(grew) distance=\(Int(new.distance)) pinned=\(pinned)", once: false)
+                    // The "bottom" spacer and padding sit ~60 pt under the last bubble.
+                    if new.distance < 100 { SendTrace.mark("at-bottom", detail: "distance=\(Int(new.distance))") }
+                }
+                #endif
                 if grew {
                     if pinned {
                         away = false

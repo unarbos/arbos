@@ -1864,6 +1864,26 @@ final class AppModel: ObservableObject {
             PerfLog.mark("phase replay end", ms: Date().timeIntervalSince(started) * 1000)
         }
     }
+
+    /// Test seam (iphone-group-send-instant): a fixture people chat gets a real chat doc
+    /// seeded with its fixture lines and a room that is stopped at once, so `sendPeople`
+    /// writes the way a live chat does — doc, push queue, change events — with no relay.
+    func fixtureAttachDoc(chatId: Id) {
+        guard docs[chatId] == nil else { return }
+        let doc = CoreChatDoc(key: chatId)
+        for m in messages[chatId] ?? [] where m.role == .user || m.role == .system {
+            let author = CoreChatDoc.Author(sender: m.sender, handle: m.senderHandle, name: m.senderName, avatar: m.senderAvatar)
+            if m.role == .system {
+                try? doc.insertSystemLine(id: m.id, text: m.plainText, deviceId: "ios:fixture")
+            } else {
+                try? doc.insertUserMessage(id: m.id, text: m.plainText, deviceId: "ios:fixture", author: author, replyTo: m.replyTo)
+            }
+        }
+        doc.commit()
+        ensureRoom(projectId: peopleSlot, key: chatId, roomChat: chatId, restored: (doc, 0, [], doc.readAll()))
+        rooms[chatId]?.stop()
+        caughtUp.insert(chatId)
+    }
     #endif
 
     private func ensureRoom(projectId: Id, key: Id, roomChat: String,
@@ -1892,6 +1912,11 @@ final class AppModel: ObservableObject {
         doc.onChange { [weak self] touched in
             Task { @MainActor in
                 guard let self else { return }
+                #if DEBUG
+                if SendTrace.traces(key) {
+                    SendTrace.mark("doc-change", detail: "list=\(touched.listChanged) msgs=\(touched.messages.count) caughtUp=\(self.caughtUp.contains(key))")
+                }
+                #endif
                 self.markDirty(key)
                 if isProjectDoc {
                     self.applyProjectDoc(projectId)
@@ -2084,6 +2109,12 @@ final class AppModel: ObservableObject {
     /// full re-read when the next 70 arrive within the window); the paint the
     /// reader sees meanwhile is the store / checkpoint one.
     private func requestSnapshot(_ chatId: Id, windowMs: Int = AppModel.snapshotCoalesceMs, deferAlways: Bool = false) {
+        #if DEBUG
+        if SendTrace.traces(chatId) {
+            let since = Date().timeIntervalSince1970 - (snapshotLastAt[chatId] ?? 0)
+            SendTrace.mark("snapshot-request", detail: "window=\(windowMs) deferAlways=\(deferAlways) alreadyPending=\(snapshotPending.contains(chatId)) sinceLast=\(Int(since * 1000))ms")
+        }
+        #endif
         guard !snapshotPending.contains(chatId) else { return }
         let window = Double(windowMs) / 1000
         let since = Date().timeIntervalSince1970 - (snapshotLastAt[chatId] ?? 0)
@@ -2112,6 +2143,11 @@ final class AppModel: ObservableObject {
         guard let doc = docs[chatId] else { return }
         let gen = (snapshotGeneration[chatId] ?? 0) &+ 1
         snapshotGeneration[chatId] = gen
+        #if DEBUG
+        if SendTrace.traces(chatId) {
+            SendTrace.mark("snapshot-read", detail: "rows=\(doc.count) async=\(doc.count >= Self.asyncSnapshotMinRows)", once: false)
+        }
+        #endif
         // Short lists decode inline (tests and the fixture read `messages` right after);
         // a long group's 1 MB of rows is read and parsed off the main actor — the FFI doc
         // is thread-safe — and applied when it is back, unless a newer read superseded it.
@@ -2150,6 +2186,11 @@ final class AppModel: ObservableObject {
         var next = messages
         next[chatId] = list
         messages = next
+        #if DEBUG
+        if SendTrace.traces(chatId) {
+            SendTrace.markIfPresent("messages-has-row", ids: list.map(\.id), detail: "via=snapshot rows=\(list.count)")
+        }
+        #endif
         // The home list re-sorts once the room is live, not per catch-up snapshot.
         if caughtUp.contains(chatId), activityPending.remove(chatId) != nil {
             markActivity(chatId: chatId)
@@ -2184,6 +2225,11 @@ final class AppModel: ObservableObject {
             var next = messages
             next[chatId] = list
             messages = next
+            #if DEBUG
+            if SendTrace.traces(chatId) {
+                SendTrace.markIfPresent("messages-has-row", ids: list.map(\.id), detail: "via=indexes rows=\(list.count)")
+            }
+            #endif
         }
     }
 
@@ -2967,12 +3013,18 @@ final class AppModel: ObservableObject {
             notice = Notice(text: "Could not write the message: \(error.localizedDescription)")
             return
         }
+        #if DEBUG
+        SendTrace.message(messageId, chatId: chatId)
+        #endif
         // Bubble at once — same as channels / optimistic new chats. onChange still
         // reconciles; live coalesce + async full re-reads must not gate the send.
         paintLocalUserMessage(chatId: chatId, messageId: messageId, text: text,
                               attachments: attachments, replyTo: reply, forwardedFrom: forwardedFrom,
-                              author: author, mentions: mentions)
+                              author: author, mentions: mentions, doc: doc)
         doc.commit()
+        #if DEBUG
+        if SendTrace.traces(chatId) { SendTrace.mark("commit") }
+        #endif
         announce(chatId: chatId, projectId: nil, messageId: messageId, text: text)
         if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i].lastActivityAt = nowMs() }
         peopleChats.sort { $0.lastActivityAt > $1.lastActivityAt }
@@ -4604,12 +4656,18 @@ final class AppModel: ObservableObject {
             notice = Notice(text: "Could not write the message: \(error.localizedDescription)")
             return
         }
+        #if DEBUG
+        SendTrace.message(messageId, chatId: chatId)
+        #endif
         // Bubble at once — same as channels / optimistic new chats. onChange still
         // reconciles; live coalesce + async full re-reads must not gate the send.
         paintLocalUserMessage(chatId: chatId, messageId: messageId, text: text,
                               attachments: attachments, replyTo: replyTo, forwardedFrom: forwardedFrom,
-                              author: author)
+                              author: author, doc: doc)
         doc.commit()
+        #if DEBUG
+        if SendTrace.traces(chatId) { SendTrace.mark("commit") }
+        #endif
         markActivity(chatId: chatId)
         if command == "send" { announce(chatId: chatId, projectId: chat.projectId, messageId: messageId, text: text) }
         if let p = project(chat.projectId), p.state.isAsleep || p.state == .error {
@@ -4621,12 +4679,27 @@ final class AppModel: ObservableObject {
     /// same turn as Send — before onChange's coalesced / async snapshot lands.
     /// Without this, a send is on the wire at once but the chat stays blank until
     /// a scroll forces a layout pass (feedback app-01M5S3V2823WNP081K5FT16ANQ).
+    ///
+    /// The row is read back from the doc (`doc`, the writer that just appended it),
+    /// so it is byte-for-byte what the next snapshot will carry — same `createdAt`,
+    /// same part ids — and that snapshot changes nothing the view can see. The
+    /// hand-built row below is the fallback for a doc that cannot be read yet.
     private func paintLocalUserMessage(
         chatId: Id, messageId: Id, text: String, attachments: [Attachment],
         replyTo: Id? = nil, forwardedFrom: String? = nil,
-        author: CoreChatDoc.Author? = nil, mentions: [String] = []
+        author: CoreChatDoc.Author? = nil, mentions: [String] = [], doc: CoreChatDoc? = nil
     ) {
         if messages[chatId]?.contains(where: { $0.id == messageId }) == true { return }
+        if let doc, doc.count > 0, var row = doc.readMessage(doc.count - 1), row.id == messageId {
+            row.pending = true
+            var next = messages
+            next[chatId, default: []].append(row)
+            messages = next
+            #if DEBUG
+            if SendTrace.traces(chatId) { SendTrace.mark("messages-has-row", detail: "via=optimistic-readback rows=\(next[chatId]?.count ?? 0)") }
+            #endif
+            return
+        }
         var parts: [Part] = attachments.map { .attachment(id: newId(), attachment: $0) }
         if !text.isEmpty {
             parts.append(.text(id: "\(messageId)-t", text: text))
@@ -4651,6 +4724,9 @@ final class AppModel: ObservableObject {
         var next = messages
         next[chatId, default: []].append(m)
         messages = next
+        #if DEBUG
+        if SendTrace.traces(chatId) { SendTrace.mark("messages-has-row", detail: "via=optimistic rows=\(next[chatId]?.count ?? 0)") }
+        #endif
     }
 
     /// Author fields for a row in a project chat (API §3/§7, same as the Mac): always the
