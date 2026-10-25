@@ -39,6 +39,10 @@ Decided by Jacob; kept in the repo so the loop, its agents and every worker read
   recreates it) is followed automatically: the loop makes `feedback/<id>-followup` (…`-followup2`, …) from that
   head, registers `<id>-followup` on the same issue and owner, gates and ships it, and notes it on the issue.
   Authors do not re-land tails as new issues (#1684, #1721 were that).
+- **A follow-up inherits its source item's reporter and tier.** If the source's reporter is anyone other than
+  Jacob (or a coordinator-owned item), the follow-up holds as `awaiting-jacob` and merges only on an explicit
+  per-item `approve` — no timer, no owner-confirm shortcut. Silence is not a yes. Jacob/coordinator-source
+  follow-ups get a one-hour owner-confirm hold, then gate as normal.
 - Authors: one branch per item is fine, but once the item merged, push the tail to the same branch and let the
   loop pick it up — or open the follow-up item yourself if you want a different scope.
 - The merge-revert probe (#1588) runs on the head that is about to be gated/merged; with this rule that is
