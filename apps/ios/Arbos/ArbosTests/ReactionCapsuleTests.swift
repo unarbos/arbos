@@ -18,6 +18,9 @@ final class ReactionCapsuleTests: XCTestCase {
         XCTAssertEqual(ReactionCapsule.pickedEmoji("🎉"), "🎉")
         XCTAssertEqual(ReactionCapsule.pickedEmoji("❤️ love"), "❤️")
         XCTAssertEqual(ReactionCapsule.pickedEmoji("👍🏽"), "👍🏽")
+        // Full grapheme clusters (skin tone / ZWJ), not a truncated scalar.
+        XCTAssertEqual(ReactionCapsule.pickedEmoji("👨‍💻"), "👨‍💻")
+        XCTAssertEqual(ReactionCapsule.pickFieldWidth, 160)
         XCTAssertNil(ReactionCapsule.pickedEmoji("ok"))
         XCTAssertNil(ReactionCapsule.pickedEmoji(""))
     }

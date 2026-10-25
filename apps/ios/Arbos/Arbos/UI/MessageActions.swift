@@ -17,11 +17,39 @@ enum ReactionCapsule {
     static var width: CGFloat { 2 * padding + CGFloat(palette.count + 1) * cell }
     static var height: CGFloat { 2 * padding + cell }
 
-    /// The first emoji the keyboard typed, if any.
+    /// Width of the "pick any emoji" field that replaces the palette while the
+    /// system emoji keyboard is up (Mac `PICK_FIELD_WIDTH`).
+    static let pickFieldWidth: CGFloat = 160
+
+    /// The first emoji grapheme the keyboard typed, if any. Uses the full
+    /// extended grapheme cluster so skin-tone and ZWJ sequences stay intact.
     static func pickedEmoji(_ text: String) -> String? {
-        guard let first = text.trimmingCharacters(in: .whitespaces).first else { return nil }
-        let isEmoji = first.unicodeScalars.contains { $0.properties.isEmojiPresentation || $0.properties.isEmoji && $0.value > 0x238C }
-        return isEmoji ? String(first) : nil
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = trimmed.first else { return nil }
+        let grapheme = String(first)
+        return isEmojiGrapheme(grapheme) ? grapheme : nil
+    }
+
+    /// True when `s` is a single emoji grapheme (presentation emoji, emoji
+    /// scalar, or a sequence held together by ZWJ / VS16 — same idea as Mac
+    /// `picked_emoji`).
+    static func isEmojiGrapheme(_ s: String) -> Bool {
+        for scalar in s.unicodeScalars {
+            let v = scalar.value
+            if scalar.properties.isEmojiPresentation { return true }
+            if scalar.properties.isEmoji && v > 0x238C { return true }
+            if (0x1F000...0x1FAFF).contains(v)
+                || (0x2600...0x27BF).contains(v)
+                || (0x2B00...0x2BFF).contains(v)
+                || (0x1F900...0x1F9FF).contains(v)
+                || (0x2190...0x21FF).contains(v)
+                || v == 0x200D
+                || v == 0xFE0F
+            {
+                return true
+            }
+        }
+        return false
     }
 }
 
@@ -78,47 +106,68 @@ struct MessageActionsOverlay<Bubble: View>: View {
             }
             .frame(width: width, alignment: mine ? .trailing : .leading)
             .offset(y: top)
-            if pickOpen {
-                EmojiKeyboardField(text: $picked) { text in
-                    if let emoji = ReactionCapsule.pickedEmoji(text) { onReact(emoji) }
-                }
-                .frame(width: 1, height: 1)
-                .opacity(0.01)
-            }
         }
         .transition(.opacity)
     }
 
     private var capsule: some View {
         HStack(spacing: 0) {
-            ForEach(ReactionCapsule.palette, id: \.self) { emoji in
+            if pickOpen {
+                // Mac parity: the palette yields to a real pick field so the
+                // system emoji keyboard has a focused target (a 1×1 hidden
+                // field often never raised the keyboard — testers only saw
+                // the eight preview emojis).
+                EmojiKeyboardField(
+                    text: $picked,
+                    placeholder: "Pick an emoji…",
+                    textColor: UIColor(theme.text),
+                    placeholderColor: UIColor(theme.placeholder)
+                ) { text in
+                    if let emoji = ReactionCapsule.pickedEmoji(text) { onReact(emoji) }
+                }
+                .frame(width: ReactionCapsule.pickFieldWidth, height: ReactionCapsule.cell)
+                .padding(.leading, 6)
                 Button {
-                    onReact(emoji)
+                    pickOpen = false
+                    picked = ""
                 } label: {
-                    Text(emoji)
-                        .font(.system(size: ReactionCapsule.emojiSize))
+                    Image(systemName: "xmark")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(theme.muted)
                         .frame(width: ReactionCapsule.cell, height: ReactionCapsule.cell)
-                        .background(Circle().fill(held.contains(emoji) ? theme.accent.opacity(0.22) : Color.clear))
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("React \(emoji)")
-            }
-            Button {
-                pickOpen = true
-            } label: {
-                ZStack(alignment: .topTrailing) {
-                    Image(systemName: "face.smiling")
-                        .font(.system(size: 24, weight: .regular))
-                        .foregroundStyle(theme.muted)
-                    Image(systemName: "plus.circle.fill")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(theme.text, theme.card)
-                        .offset(x: 4, y: -3)
+                .accessibilityLabel("Close emoji picker")
+            } else {
+                ForEach(ReactionCapsule.palette, id: \.self) { emoji in
+                    Button {
+                        onReact(emoji)
+                    } label: {
+                        Text(emoji)
+                            .font(.system(size: ReactionCapsule.emojiSize))
+                            .frame(width: ReactionCapsule.cell, height: ReactionCapsule.cell)
+                            .background(Circle().fill(held.contains(emoji) ? theme.accent.opacity(0.22) : Color.clear))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("React \(emoji)")
                 }
-                .frame(width: ReactionCapsule.cell, height: ReactionCapsule.cell)
+                Button {
+                    pickOpen = true
+                } label: {
+                    ZStack(alignment: .topTrailing) {
+                        Image(systemName: "face.smiling")
+                            .font(.system(size: 24, weight: .regular))
+                            .foregroundStyle(theme.muted)
+                        Image(systemName: "plus.circle.fill")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(theme.text, theme.card)
+                            .offset(x: 4, y: -3)
+                    }
+                    .frame(width: ReactionCapsule.cell, height: ReactionCapsule.cell)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("More emoji")
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("More emoji")
         }
         .padding(ReactionCapsule.padding)
         .background(Capsule(style: .continuous).fill(theme.card))
@@ -161,10 +210,14 @@ struct MessageActionsOverlay<Bubble: View>: View {
     }
 }
 
-/// A one-character field that raises the **emoji** keyboard (the system picker
-/// on iPhone): `textInputMode` is pinned to the emoji input mode.
+/// A pick field that raises the **emoji** keyboard (the system picker on
+/// iPhone): `textInputMode` is pinned to the emoji input mode, and the field
+/// sits in the capsule so focus is real (not a hidden 1×1 stub).
 struct EmojiKeyboardField: UIViewRepresentable {
     @Binding var text: String
+    var placeholder: String = "Pick an emoji…"
+    var textColor: UIColor = .label
+    var placeholderColor: UIColor = .secondaryLabel
     let onChange: (String) -> Void
 
     func makeUIView(context: Context) -> EmojiTextField {
@@ -173,12 +226,31 @@ struct EmojiKeyboardField: UIViewRepresentable {
         field.addTarget(context.coordinator, action: #selector(Coordinator.changed(_:)), for: .editingChanged)
         field.autocorrectionType = .no
         field.spellCheckingType = .no
-        field.tintColor = .clear
-        DispatchQueue.main.async { field.becomeFirstResponder() }
+        field.returnKeyType = .done
+        field.tintColor = textColor
+        field.textColor = textColor
+        field.font = .systemFont(ofSize: 17)
+        field.backgroundColor = .clear
+        field.borderStyle = .none
+        field.attributedPlaceholder = NSAttributedString(
+            string: placeholder,
+            attributes: [.foregroundColor: placeholderColor]
+        )
+        // Focus after the capsule has laid the field out; a same-run call often
+        // fails when the representable was just inserted.
+        DispatchQueue.main.async { _ = field.becomeFirstResponder() }
         return field
     }
 
-    func updateUIView(_ uiView: EmojiTextField, context: Context) {}
+    func updateUIView(_ uiView: EmojiTextField, context: Context) {
+        context.coordinator.parent = self
+        uiView.textColor = textColor
+        uiView.tintColor = textColor
+        uiView.attributedPlaceholder = NSAttributedString(
+            string: placeholder,
+            attributes: [.foregroundColor: placeholderColor]
+        )
+    }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -190,13 +262,13 @@ struct EmojiKeyboardField: UIViewRepresentable {
             parent.onChange(parent.text)
         }
         // The emoji keyboard's insert arrives here first; `editingChanged` does
-        // not always follow for a non-text key.
+        // not always follow for a non-text key. Consume the insert so a failed
+        // (non-emoji) keystroke does not linger in the field.
         func textField(_ textField: UITextField, shouldChangeCharactersIn range: NSRange, replacementString string: String) -> Bool {
-            if !string.isEmpty {
-                parent.text = string
-                parent.onChange(string)
-            }
-            return true
+            guard !string.isEmpty else { return true }
+            parent.text = string
+            parent.onChange(string)
+            return false
         }
     }
 }
@@ -206,6 +278,14 @@ final class EmojiTextField: UITextField {
         UITextInputMode.activeInputModes.first { $0.primaryLanguage == "emoji" } ?? super.textInputMode
     }
     override var textInputContextIdentifier: String? { "arbos.reaction.emoji" }
+
+    @discardableResult
+    override func becomeFirstResponder() -> Bool {
+        let ok = super.becomeFirstResponder()
+        // Re-ask for the emoji input mode after UIKit attaches the keyboard.
+        if ok { reloadInputViews() }
+        return ok
+    }
 }
 
 extension View {
