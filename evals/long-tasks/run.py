@@ -617,6 +617,8 @@ def main():
         "user": box.user,
         "projects": projects,
         "tasks": len(tasks),
+        # "full" (the scheduled run), a named subset, or "tasks" for a hand-picked rerun; the report compares like with like
+        "subset": args.subset or ("tasks" if args.tasks else "full"),
         "budget_usd": args.budget_usd,
         "spent_today_at_start": spent,
         "judge_model": gr.JUDGE_MODEL,
@@ -636,7 +638,11 @@ def main():
     spent_end, _ = rl.spent_today()
     meta["ended_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     meta["spent_today_at_end"] = spent_end
-    meta["run_cost_usd"] = round(spent_end - spent, 4)
+    # the relay's "spent today" resets at 00:00 UTC; a run across midnight reads negative, so fall back to the per-task sum
+    run_cost = spent_end - spent
+    if run_cost < 0:
+        run_cost = sum(r.get("cost_usd") or 0 for r in results)
+    meta["run_cost_usd"] = round(run_cost, 4)
     meta["judge_cost_usd"] = round(sum(r.get("judge_usd") or 0 for r in results), 4)
     board = summarize(meta, results)
     sb_dir = HERE / "scoreboard"

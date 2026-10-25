@@ -23,7 +23,7 @@ One row per run, newest last. `pass` counts tasks whose programmatic checks and 
 | 20261024T1950-b7 | arbos-agent-0.1.116 | 1/1 | 0 | 0.0 % | 2.58 s | 178.4 s | 0 | 0 | $0.19 | $0.00 |
 | 20261024T2109-b7-1657 | arbos-agent-0.1.118 | 1/1 | 0 | 0.0 % | 2.59 s | 193.5 s | 0 | 0 | $0.15 | $0.00 |
 | 20261024T2115-run5 | arbos-agent-0.1.118 | 62/63 | 59 | 95.2 % | 6.07 s | 32.0 s | 9 | 0 | $1.18 | $0.00 |
-| 20261024T2330-parity-before | arbos-agent-0.1.118 | 33/33 | 9 | 27.3 % | 6.55 s | 46.3 s | 1 | 1 | $-3.46 | $0.00 |
+| 20261024T2330-parity-before | arbos-agent-0.1.118 | 33/33 | 9 | 27.3 % | 6.55 s | 46.3 s | 1 | 1 | $2.17 | $0.00 |
 
 ## Grok parity (docs/duplex-agent-design.md §4)
 

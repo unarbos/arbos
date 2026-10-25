@@ -2,7 +2,8 @@
 # Long-task agent eval (D94): one command, end to end.
 #   preflight → run every task through the product path → grade → scoreboard → report → issues
 #
-# Usage: scripts/evals/long-tasks/run-suite.sh [--tasks a,b] [--lanes a,b] [--no-issues] [--budget-usd 8] [--run-id ID]
+# Usage: scripts/evals/long-tasks/run-suite.sh [--tasks a,b] [--subset regression|quick|parity] [--lanes a,b] [--no-issues] [--budget-usd 8] [--run-id ID]
+# The scheduled (9 AM / 3 PM CR) run takes no selector: every task under tasks/, the Grok-parity set included.
 # Needs: OP_SERVICE_ACCOUNT_TOKEN (vault "Arbos"), a built arbosctl (target/release/arbosctl or $ARBOSCTL),
 #        ssh access to the relay host as const with the Cloud Agents key (LT_HOST_SSH_KEY, default ~/.ssh/arbos_cloud).
 # Secrets are read into the environment only; nothing is written to the repo.
