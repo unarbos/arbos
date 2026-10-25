@@ -416,14 +416,15 @@ window top at row 0; pane 639 px = 319.5 pt wide). Points.
 | Rows | one-line **41**, two-line **51**, 13 pt title / 13 pt muted subtitle | `kit::ROW_MIN_H` 41 (was 48); a title + subtitle row lands on 51–52 by its own padding; row type unchanged (`TEXT_BODY` / `TEXT_SMALL`) |
 | Section label | "Coding" / "Routines": text **28** from the pane edge, 13.5 pt `#A5A5A5`; glyphs 24 under the pill, 26 under the card before, 10 over the card after | `kit::section_title`: `INSET + SECTION_TITLE_INDENT` 28, `TEXT_SMALL` muted on a 16 pt line, padding 10 / 8 over `CARD_GAP` 14; a leading label pulls the fade spacer in by `pane::FIRST_TITLE_PULL` 7 |
 | Share · close discs | **36** each, fill `#1F1F1F`, glyph `#E0E0E0`; **8** apart, **12** from the pane edge, centred on the strip discs' line (top 12 in the 60 band; `grok-chat-1.png` rows 28–99 for both sets) | `glass::control_disc` — the strip's disc (`CONTROL` 36, `surface_2`, `text`); `top_bar()` pads `PANE_DISC_INSET` 12, gaps `CONTROL_GAP` 8; close `xmark` at `PANE_CLOSE_GLYPH` 22 → 11 pt mark (Grok 11); share `share` at `PANE_SHARE_GLYPH` 21 → 14 pt (Grok 14). Before: a 30 pt `glass::circle` with a 6.5 pt × at top 17, inset 10 |
-| Share disc action | — | the invite sheet (agent: let a person in on this agent; group: Add members). Pages with nothing to share (person, channel, server, own profile) draw the × alone |
+| Share disc action | — | **agent pane only** (owner: the invite sheet — let a person in on this agent). Every other pane — group, server, person, channel, own profile — draws the × alone on the discs' line (`pane::share_disc_allowed`). Jacob 2026-10-25, [feedback info-pane-no-share-disc-groups-2026-10-25]: "remove this button from side bar on group/" — the group's share disc (Add members) of v0.6.224 is gone; Add members stays the group's first card |
 | Top bar fill | none | none (was `card()`); the body still fades under the pinned hero + pill |
 | Hero picture | plain bot mark, 58 pt, 73.5 under the window top | `HERO_TOP` 14 under the 60 band (was 4); the agent's leaf **without its pastel disc** (`avatars::project_hero_bare`: the hue's pastel as ink on dark, its ink on light) and **no presence dot** — presence stays on the sidebar row; `HERO_AVATAR` 72 kept (Jacob's mock b) |
 | Delete agent | — | **gone from the pane** (footer and `Shell.agent_delete_armed` removed). Deleting an agent is the sidebar row's menu → Delete, at once (`sidebar::row_menu`, the Delete-is-immediate rule below) |
 
 Pinned by `profiles::chrome_tests` (`the_pane_is_the_chats_surface_in_both_appearances`,
 `the_constants_are_groks`, `the_share_and_close_discs_land_on_groks_pixels`,
-`cards_are_inset_and_labelled_at_groks_margins`) and `pane::tests::every_kind_lays_out_hero_then_pill_then_options`.
+`cards_are_inset_and_labelled_at_groks_margins`), `pane::tests::every_kind_lays_out_hero_then_pill_then_options`
+and `pane::tests::only_the_agent_pane_may_have_a_share_disc`.
 
 ### Agent pane: Details · Library · Computer (Jacob 2026-10-24, [feedback agent-pane-details-tab-2026-10-24])
 
