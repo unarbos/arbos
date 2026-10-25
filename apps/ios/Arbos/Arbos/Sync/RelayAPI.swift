@@ -328,6 +328,14 @@ final class RelayAPI {
         _ = try await json("POST", "/projects/\(projectId)/wake", body: [String: Any]())
     }
 
+    /// The tasks chip's poll (duplex §2.4): `GET /projects/{id}` → `activity.jobs[]`. A relay
+    /// without the field or a `null` activity reads as no open jobs.
+    func projectJobs(projectId: Id) async throws -> [Job] {
+        let raw = try await json("GET", "/projects/\(projectId)")
+        guard let detail = raw as? [String: Any] else { return [] }
+        return Job.list(fromActivity: detail["activity"])
+    }
+
     // MARK: Machine (D70: one box per user, projects are workspaces on it)
 
     /// `GET /machine` → the caller's one box and its workspaces.

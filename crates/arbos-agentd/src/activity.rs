@@ -330,13 +330,22 @@ fn code_label(code: &str) -> Option<String> {
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
         .collect();
+    // The argument is often a variable filled from a list above the call (`qs=["best yoga
+    // studios …", …]; for q in qs: … {"query": q}`): then the first literal in the script that
+    // looks like a search phrase / a URL stands in for it.
     if name == "web_search" {
-        if let Some(q) = first_string_arg(after, &["query", "q"]) {
+        if let Some(q) = first_string_arg(after, &["query", "q"]).or_else(|| {
+            string_literals(code).find(|l| l.split_whitespace().count() >= 3 && !l.contains("://"))
+        }) {
             return Some(query_label("Searching", &q));
         }
     }
     if name == "web_fetch" {
         if let Some(h) = first_string_arg(after, &["url"])
+            .or_else(|| {
+                string_literals(code)
+                    .find(|l| l.starts_with("http://") || l.starts_with("https://"))
+            })
             .as_deref()
             .and_then(host_of)
         {
@@ -449,6 +458,26 @@ fn first_string_arg(call: &str, keys: &[&str]) -> Option<String> {
     None
 }
 
+/// Every `"…"` / `'…'` literal of a script, in order, without the quotes (no escapes handled:
+/// a literal with an escaped quote just ends early, which is fine for a status line).
+fn string_literals(code: &str) -> impl Iterator<Item = String> + '_ {
+    let mut rest = code;
+    std::iter::from_fn(move || loop {
+        let i = rest.find(['"', '\''])?;
+        let quote = rest.as_bytes()[i] as char;
+        let body = &rest[i + 1..];
+        let Some(end) = body.find(quote) else {
+            rest = "";
+            return None;
+        };
+        let lit = body[..end].trim().to_owned();
+        rest = &body[end + 1..];
+        if !lit.is_empty() {
+            return Some(lit);
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -517,11 +546,28 @@ mod tests {
                 &json!({ "code": "async def fetch(u):\n    r=await mcp.call_tool(\"arbos\",\"web_fetch\",{\"url\":u}); return str(r)\nurls=[\"https://www.ondateresa.com/guide\"]" })
             )
             .as_deref(),
-            Some("Reading a web page")
+            Some("Reading ondateresa.com")
         );
         assert_eq!(
             label("ipython", &json!({ "code": "await mcp.call_tool('arbos', 'web_fetch', {'url': 'https://www.bluemysticsurf.com/'})" })).as_deref(),
             Some("Reading bluemysticsurf.com")
+        );
+        // Queries / URLs kept in a list and passed as a variable (the yoga-studio run).
+        assert_eq!(
+            label(
+                "ipython",
+                &json!({ "code": "qs=[\"best yoga studios Santa Teresa Costa Rica\",\"Santa Teresa yoga drop-in price\"]\nfor q in qs:\n    r=await mcp.call_tool(\"arbos\",\"web_search\",{\"query\":q})" })
+            )
+            .as_deref(),
+            Some("Searching for best yoga studios Santa Teresa")
+        );
+        assert_eq!(
+            label(
+                "ipython",
+                &json!({ "code": "for u in [\"https://www.tripadvisor.com/Attractions-g635538\",\"https://horizon-yogahotel.com/yoga/\"]:\n    r=await mcp.call_tool(\"arbos\",\"web_fetch\",{\"url\":u})" })
+            )
+            .as_deref(),
+            Some("Reading tripadvisor.com")
         );
         assert_eq!(generic_label("ipython"), "Running a command");
         assert_eq!(

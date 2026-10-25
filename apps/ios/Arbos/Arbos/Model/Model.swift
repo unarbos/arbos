@@ -626,6 +626,116 @@ struct MessageReaction: Equatable, Hashable {
     }
 }
 
+/// The `job` map on a background job's hidden row (duplex §2.3). Only the id and the
+/// title are read; `kind` / `touches` are the box's business.
+struct JobRef: Equatable {
+    var id: String
+    var title: String
+
+    init?(_ raw: Any?) {
+        guard let m = raw as? [String: Any], let id = m["id"] as? String, !id.isEmpty else { return nil }
+        self.id = id
+        self.title = (m["title"] as? String) ?? ""
+    }
+}
+
+/// Where an open job is in its life — the two states the relay lists
+/// (`activity.jobs[].state`, duplex §2.4). Finished, failed, cancelled and interrupted
+/// jobs are not listed: their outcome is a bubble in the chat.
+enum JobState: String, Equatable {
+    /// Waiting for a slot or a resource lock; not steerable yet.
+    case queued
+    case running
+}
+
+/// One open background job as the relay's activity record lists it
+/// (`GET /projects/{id}` → `activity.jobs[]`): the rows of the tasks sheet.
+struct Job: Identifiable, Equatable {
+    var id: String
+    var title: String
+    var state: JobState
+    /// The job's newest step in plain words ("Reading tripadvisor.com"); empty while it
+    /// starts; "Waiting for <title>" while it queues behind a lock.
+    var step: String
+    var elapsedS: Int
+    /// The user message that asked for it: Steer prefills a reply to it.
+    var askMessageId: String?
+    var chatId: String?
+
+    init(id: String, title: String, state: JobState, step: String, elapsedS: Int,
+         askMessageId: String? = nil, chatId: String? = nil) {
+        self.id = id
+        self.title = title
+        self.state = state
+        self.step = step
+        self.elapsedS = elapsedS
+        self.askMessageId = askMessageId
+        self.chatId = chatId
+    }
+
+    /// One relay row; nil when it has no id. Unknown states read as running.
+    init?(_ raw: Any) {
+        guard let m = raw as? [String: Any], let id = m["id"] as? String, !id.isEmpty else { return nil }
+        self.id = id
+        self.title = (m["title"] as? String) ?? ""
+        self.state = JobState(rawValue: (m["state"] as? String) ?? "") ?? .running
+        self.step = (m["step"] as? String) ?? ""
+        self.elapsedS = Int((m["elapsed_s"] as? NSNumber)?.int64Value ?? 0)
+        self.askMessageId = (m["ask_message_id"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        self.chatId = (m["chat_id"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    /// `activity.jobs` as the relay sends it — `null`, missing or not a list all read as
+    /// "no open jobs"; a row that does not parse is skipped, never fatal (the sheet must
+    /// degrade to nothing on an older relay).
+    static func list(fromActivity activity: Any?) -> [Job] {
+        guard let a = activity as? [String: Any], let rows = a["jobs"] as? [Any] else { return [] }
+        return rows.compactMap { Job($0) }
+    }
+
+    /// Only a running job has a session to steer; a queued one has not started.
+    var canSteer: Bool { state == .running && askMessageId != nil }
+
+    /// The row's second line (contract, "Drawer, per state"): the live step, "Working" for a
+    /// running job with no step yet, "Starting" for a queued job with no step, the
+    /// "Waiting for <title>" step as the box wrote it.
+    var statusLine: String {
+        let s = step.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !s.isEmpty { return s }
+        switch state {
+        case .queued: return "Starting"
+        case .running: return "Working"
+        }
+    }
+
+    /// `elapsed_s` as m:ss (an hour and more as h:mm:ss).
+    var elapsedLabel: String {
+        let s = max(0, elapsedS)
+        if s >= 3600 {
+            return String(format: "%d:%02d:%02d", s / 3600, (s / 60) % 60, s % 60)
+        }
+        return String(format: "%d:%02d", s / 60, s % 60)
+    }
+
+    /// "1 task" / "N tasks": the chip's words.
+    static func countLabel(_ n: Int) -> String {
+        n == 1 ? "1 task" : "\(n) tasks"
+    }
+
+    /// The presence text without the box's "· N tasks" suffix — the chip carries the
+    /// count, so the words are not said twice on one line.
+    static func stripCountSuffix(_ text: String) -> String {
+        guard let range = text.range(of: " · ", options: .backwards) else { return text }
+        let tail = String(text[range.upperBound...])
+        let head = String(text[..<range.lowerBound])
+        for suffix in [" tasks", " task"] where tail.hasSuffix(suffix) {
+            let n = tail.dropLast(suffix.count)
+            if !n.isEmpty, n.allSatisfy(\.isNumber) { return head }
+        }
+        return text
+    }
+}
+
 struct Message: Identifiable, Equatable {
     var id: Id
     var chatId: Id
@@ -643,6 +753,12 @@ struct Message: Identifiable, Equatable {
     /// the working line still reads its `activity`. An agent-to-agent `send_message(to)` row
     /// carries no flag and keeps its "Messaged ◉ X" line.
     var worker: Bool = false
+    /// Duplex design §2.3: the background job this row stands for (`job: { id, title, kind,
+    /// touches }`). Wordless and `hidden`; it exists so the presence line can read its
+    /// `activity` and so the client knows a job is live in this chat.
+    var job: JobRef? = nil
+    /// The box asks the transcript to draw nothing for this row (job rows).
+    var hidden: Bool = false
     /// Agent-to-agent messaging: this reply answered a message another agent sent into the
     /// chat; the name drawn in the "Replied to ◉ X" line under the bubble.
     var agentReplyTo: String? = nil
@@ -820,6 +936,8 @@ enum DocJSON {
             subagentName: str(m["subagentName"]),
             handoffMessages: int(m["handoffMessages"]).map { Int($0) },
             worker: bool(m["worker"]),
+            job: JobRef(m["job"]),
+            hidden: bool(m["hidden"]),
             agentReplyTo: str(m["agentReplyTo"]).flatMap { $0.isEmpty ? nil : $0 },
             inReplyTo: str(m["inReplyTo"]),
             usage: usage,

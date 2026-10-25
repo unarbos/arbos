@@ -1500,6 +1500,54 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// py-06 on image 0.1.121 (parity after-run, 2026-10-25 02:11 UTC): an `act` turn computed the
+    /// answer and wrote it as prose; the ack ("Checking the file now.") sat on the working row,
+    /// counted as "posted", and the fallback never ran — the user got an empty row. An act ack is
+    /// status, not words the user read.
+    #[tokio::test]
+    async fn act_ack_on_the_working_row_does_not_swallow_the_fallback() {
+        use crate::config::SendTool;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000010";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.ack_text.clear();
+            t.activity = None;
+            t.send_tool = SendTool::On;
+            agent.test_open_row(&host, t).await;
+        }
+        agent
+            .hook_route(&json!({ "action": "act", "ack": "Counting the rows in the file.", "plan": "count the rows" }))
+            .await
+            .unwrap();
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            assert_eq!(
+                t.activity.as_deref(),
+                Some("Counting the rows in the file.")
+            );
+            assert!(
+                !t.ack_posted,
+                "an act ack is working-row status, not a bubble"
+            );
+            agent
+                .test_prose_then_finish(&host, t, "500 orders, total 161,095.09.")
+                .await;
+            assert!(t.posted_fallback, "the answer must reach the user");
+            assert_eq!(t.streamed_text.trim(), "500 orders, total 161,095.09.");
+        }
+        let rows = reply_rows(&host, "m-busy");
+        assert_eq!(
+            rows.iter().filter(|r| !r.text().trim().is_empty()).count(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The send-tool switch: default on, `off` restores streamed prose, `strict` drops the fallback.
     #[test]
     fn send_tool_switch_parses() {

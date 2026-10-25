@@ -618,7 +618,7 @@ pub struct Transcript {
     state: Entity<AppState>,
     chat_id: Option<Id>,
     list: ListState,
-    rows: Vec<Row>,
+    pub(crate) rows: Vec<Row>,
     /// Who `@handle` resolves to in this chat's bubbles (mention chips),
     /// rebuilt with the rows.
     mentions: Rc<Mentions>,
@@ -3146,6 +3146,14 @@ pub fn build_rows(
                 }
             }
             Role::Assistant | Role::Project => {
+                // A background job's row (duplex §2.3, `job` + `hidden`) is wordless
+                // by design: its status parts feed the presence line and the tasks
+                // drawer, never a bubble — not while it runs, not the "no answer"
+                // stock line when it ends. The job's outcome is the agent's own
+                // reply bubble (or the "Stopped: …" line).
+                if message.hidden || message.job.is_some() {
+                    continue;
+                }
                 if matches!(
                     message.turn,
                     Some(TurnKind::New | TurnKind::Spawn | TurnKind::Wake)

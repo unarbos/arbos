@@ -197,11 +197,14 @@ pub fn gather(state: &AppState, chat_id: &str, space: &Project, theme: &Theme) -
                 && (m.is_streaming() && m.created_at >= recent
                     || Message::chat_has_open_subagent(std::slice::from_ref(m), now))
         };
+        // The newest live row that has words: a short main turn streaming
+        // with no activity yet must not blank the job's "Reading … · 2 tasks"
+        // under it (duplex §2.4: the line is the newest step of the newest job).
         detail = messages
             .iter()
             .rev()
-            .find(|m| m.is_streaming() && m.created_at >= recent)
-            .and_then(Message::current_activity);
+            .filter(|m| m.role == Role::Assistant && m.is_streaming() && m.created_at >= recent)
+            .find_map(Message::current_activity);
         if space.is_people() {
             let mut seen: Vec<String> = Vec::new();
             for m in messages.iter().rev().filter(|m| live(m)) {
@@ -254,8 +257,24 @@ pub fn gather(state: &AppState, chat_id: &str, space: &Project, theme: &Theme) -
 /// inside whatever frames it — the shell puts it through
 /// `transcript::column_row`, so its left edge is the composer's.
 pub fn row(presence: Presence, theme: &Theme, cx: &App) -> Div {
+    row_inner(presence, None, theme, cx)
+}
+
+/// The row with the tasks chip after its line (`ui::tasks`, duplex §2.4):
+/// the box's "· N tasks" suffix leaves the words — the chip says the count —
+/// and the chip sits one row gap after the text, on the line's centre.
+pub fn row_with_chip(presence: Presence, chip: AnyElement, theme: &Theme, cx: &App) -> Div {
+    row_inner(presence, Some(chip), theme, cx)
+}
+
+fn row_inner(presence: Presence, chip: Option<AnyElement>, theme: &Theme, cx: &App) -> Div {
     let phase = PulseClock::phase(cx, 1100);
     let text = presence.text();
+    let text = if chip.is_some() {
+        crate::model::Job::strip_count_suffix(&text).to_string()
+    } else {
+        text
+    };
     let total = presence.participants.len();
     // Taffy reports a zero content width for a row whose children carry
     // negative margins, so the stack states its width: one picture plus
@@ -340,6 +359,8 @@ pub fn row(presence: Presence, theme: &Theme, cx: &App) -> Div {
                 .debug_selector(|| "presence-text".into())
                 .child(text),
         )
+        // The row's own gap (14, the disc → bubble gap) separates text and chip.
+        .children(chip.map(|chip| div().flex_shrink_0().child(chip)))
 }
 
 #[cfg(test)]

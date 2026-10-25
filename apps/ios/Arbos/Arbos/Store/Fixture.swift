@@ -268,6 +268,33 @@ extension AppModel {
                 messages[c, default: []].append(streaming("fx-working-agent", c, at: now - 5_000))
             }
         }
+        // `ARBOS_FIXTURE_JOBS=<n>`: background jobs open in the opened agent chat — each with
+        // its hidden `job` row (what agentd writes) and its entry in the relay's
+        // `activity.jobs[]` (what the poll would answer): the tasks chip and sheet.
+        if DebugHooks.fixtureJobs > 0, let c = DebugHooks.openChat, let projectId = chat(c)?.projectId,
+           peopleChat(c) == nil {
+            let ask = messages[c]?.last { $0.role == .user }?.id
+            let seeds: [(id: String, title: String, state: JobState, step: String, elapsed: Int)] = [
+                ("fx-job-surf", "Searching for surf schools", .running, "Reading tripadvisor.com", 41),
+                ("fx-job-tests", "Fixing the flaky tests", .running, "", 125),
+                ("fx-job-rename", "Renaming the config module", .queued, "Waiting for Fixing the flaky tests", 12),
+            ]
+            let n = DebugHooks.fixtureJobs
+            var list: [Job] = []
+            for (i, seed) in seeds.prefix(n).enumerated() {
+                let activity = seed.step.isEmpty ? seed.title : seed.step
+                var row = streaming("fx-job-row-\(i)", c, at: now - Int64(seed.elapsed) * 1000)
+                row.job = JobRef(["id": seed.id, "title": seed.title])
+                row.worker = true
+                row.hidden = true
+                row.inReplyTo = ask
+                row.activity = n > 1 ? "\(activity) · \(n) tasks" : activity
+                messages[c, default: []].append(row)
+                list.append(Job(id: seed.id, title: seed.title, state: seed.state, step: seed.step, elapsedS: seed.elapsed,
+                                askMessageId: ask, chatId: c))
+            }
+            jobs[projectId] = list
+        }
         // `ARBOS_FIXTURE_TYPING=1|<handle>[,<handle>…]`: those people type in every fixture
         // people chat for the whole launch (`1` = the DM's other person / the group's first).
         if let spec = DebugHooks.fixtureTyping {
@@ -394,6 +421,47 @@ extension AppModel {
         vaultAccess["target_kind"] = "vault"
         projectSecrets["fx-comms"] = ProjectSecrets.parse(["paused": false, "owner": true, "items": withVault ? [stripeAccess, vaultAccess] : [stripeAccess],
                                                             "requests": [request], "activity": activity])
+    }
+
+    /// The agent pane's Routines card (the Mac fixture's three: a weekday stand-up, a paused
+    /// digest, a webhook that last fired 40 min ago). Comms owns them; other agents have none.
+    func fixtureRoutines(_ projectId: Id) -> [Routine] {
+        guard projectId == "fx-comms" else { return [] }
+        let now = nowMs()
+        return [
+            Routine(id: "fx-rt-standup", projectId: projectId, name: "Morning stand-up",
+                    trigger: .cron(expr: "0 9 * * 1-5", tz: "Europe/Berlin"), enabled: true,
+                    lastRunAt: now - 20 * 3_600_000, nextRunAt: now + 4 * 3_600_000),
+            Routine(id: "fx-rt-digest", projectId: projectId, name: "Open PR digest",
+                    trigger: .cron(expr: "0 * * * *", tz: "UTC"), enabled: false, lastRunAt: nil, nextRunAt: nil),
+            Routine(id: "fx-rt-deploy", projectId: projectId, name: "Deploy finished",
+                    trigger: .webhook, enabled: true, lastRunAt: now - 40 * 60_000, nextRunAt: nil),
+        ]
+    }
+
+    /// `GET /machine/debug` as the rig answers it: an awake 4-core box up 5 h 12 m, one
+    /// workspace per agent, Comms mid-turn (42 s, 7 tool calls) and — with
+    /// `ARBOS_FIXTURE_WORKING=n` — the next agents too. Goes through the real parser.
+    func fixtureBoxReport() -> BoxReport {
+        let working = Set(["fx-comms"] + projects.dropFirst().prefix(max(0, DebugHooks.fixtureWorking - 1)).map(\.id))
+        let workspaces: [[String: Any]] = projects.filter { $0.id != peopleSlot }.map { p in
+            var turn: [String: Any] = ["running": working.contains(p.id)]
+            if working.contains(p.id) {
+                turn["current"] = ["elapsed_ms": p.id == "fx-comms" ? 42_000 : 128_000, "tool_calls": p.id == "fx-comms" ? 7 : 3]
+            }
+            return ["project_id": p.id, "name": p.name, "healthy": true, "turn": turn]
+        }
+        let debug: [String: Any] = [
+            "relay": ["state": "awake", "awake_for_s": 5 * 3600 + 12 * 60, "provider": "gvisor",
+                      "agentd": ["image": "arbos-agent-0.1.7"]],
+            "box": ["reachable": true, "state": [
+                "uptime_s": 5 * 3600 + 12 * 60, "load": [0.42, 0.38, 0.35],
+                "memory_mb": ["total": 8192, "available": 5325],
+                "disk": ["total_mb": 10240, "available_mb": 6861],
+                "workspaces": workspaces,
+            ]],
+        ]
+        return BoxReport(debug: debug, now: nowMs())
     }
 
     /// Two sample message notifications (an agent, a person) for screenshots.

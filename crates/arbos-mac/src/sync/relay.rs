@@ -5067,6 +5067,27 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 });
             }
         }
+        ClientCommand::StopJob {
+            chat_id,
+            job_id,
+            message_id,
+        } => {
+            let docs = shared.docs.lock().unwrap();
+            if let Some(doc) = docs.get(&chat_id) {
+                let device = shared.device_id();
+                doc.core.transact(|d| {
+                    d.push_command(
+                        "stop",
+                        json!({ "jobId": job_id, "messageId": message_id }),
+                        &device,
+                    );
+                });
+            }
+        }
+        ClientCommand::JobsRefresh { project_id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move { refresh_project_jobs(&shared, &project_id).await });
+        }
         ClientCommand::React {
             chat_id,
             message_id,
@@ -7192,6 +7213,26 @@ async fn refresh_routines(shared: &Arc<Shared>, project_id: &str) {
 
 /// `GET /machine/debug` → the Computer tab's report. A relay without the route (404) or an
 /// unreachable box is not a bug: the tab says so from the report's own fields.
+/// The tasks chip's poll: `GET /projects/{id}` → `activity.jobs[]` (duplex §2.4).
+/// A relay without the field or a `null` activity reads as "no open jobs" (the
+/// drawer degrades to nothing); a transport error keeps the last answer rather
+/// than blinking the list away on a blip.
+async fn refresh_project_jobs(shared: &Arc<Shared>, project_id: &str) {
+    match shared.get_json(&format!("/projects/{project_id}")).await {
+        Ok(v) => {
+            let _ = shared.events.send(SyncEvent::ProjectJobs {
+                project_id: project_id.to_string(),
+                jobs: crate::model::Job::list_from_activity(v.get("activity")),
+            });
+        }
+        Err(err) => {
+            if !format!("{err:#}").contains("HTTP 404") {
+                shared.diagnostic("project-jobs", format!("{err:#}"));
+            }
+        }
+    }
+}
+
 async fn refresh_machine_debug(shared: &Arc<Shared>) {
     match shared.get_json("/machine/debug").await {
         Ok(v) => {
