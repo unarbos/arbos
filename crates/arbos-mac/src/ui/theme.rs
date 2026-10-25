@@ -112,11 +112,14 @@ pub const CONTROL_GLYPH_WIDE: f32 = 17.0;
 pub const CONTROL_GAP: f32 = 8.0;
 /// Bubble corners (Grok Mac, measured: 12 pt; the iPhone uses 20).
 pub const BUBBLE_RADIUS: f32 = 12.0;
-/// Chat bubbles: Grok Mac's body is 13.5 pt on a 20 pt pitch with 15 pt
-/// horizontal and 6 pt vertical padding (refs 57/58); the rest of the app
-/// keeps `TEXT_BODY`.
+/// Chat bubbles: Grok Mac's body is 13.5 pt on a **22 pt** pitch with 15 pt
+/// horizontal and 6 pt vertical padding. The pitch is re-measured on Jacob's
+/// 2026-10-24 Grok Bot shots (44 px between the lines of a wrapped agent
+/// answer and of a wrapped user message at 2 px/pt; refs 57/58 had read 20)
+/// — [feedback bubble-markdown-2026-10-24]. The rest of the app keeps
+/// `TEXT_BODY`.
 pub const CHAT_BODY: f32 = 13.5;
-pub const CHAT_LINE_HEIGHT: f32 = 20.0;
+pub const CHAT_LINE_HEIGHT: f32 = 22.0;
 pub const BUBBLE_PAD_X: f32 = 15.0;
 pub const BUBBLE_PAD_Y: f32 = 6.0;
 pub const PANEL_RADIUS: f32 = 14.0;

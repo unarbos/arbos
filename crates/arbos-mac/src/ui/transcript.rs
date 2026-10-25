@@ -8,9 +8,10 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    actions, div, list, prelude::*, px, Animation, AnimationExt, AnyElement, App, Context, Div,
-    Entity, FontWeight, ListAlignment, ListScrollEvent, ListState, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, SharedString, Stateful, TextRun, Window,
+    actions, div, list, prelude::*, px, Animation, AnimationExt, AnyElement, App, Bounds, Context,
+    Div, Entity, FontWeight, ListAlignment, ListScrollEvent, ListState, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, SharedString, Stateful,
+    TextRun, Window,
 };
 
 use crate::app::{AppEvent, AppState, DetailsTarget};
@@ -30,7 +31,7 @@ use crate::ui::markdown::{
 use crate::ui::mention::{self, Mentions};
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
-use crate::ui::select::{BubbleSelectable, Selectable, TextSelection};
+use crate::ui::select::{BubbleAt, BubbleSelectable, Selectable, Span, TextSelection};
 use crate::ui::theme::{
     Theme, BUBBLE_PAD_X, BUBBLE_PAD_Y, BUBBLE_RADIUS, CHAT_BODY, CHAT_LINE_HEIGHT, COLUMN_MARGIN,
     COMPOSER_HEIGHT, COMPOSER_WIDTH, LINE_HEIGHT, PLUS_BUTTON, TEXT_SMALL, TEXT_TINY,
@@ -95,6 +96,23 @@ pub const COLUMN_MAX_WIDTH: f32 = COMPOSER_WIDTH + 2.0 * PLUS_BUTTON;
 /// sent/seen label sits inside the bubble; the time is hover-only
 /// (docs/mac-design-rules.md).
 pub const ASSISTANT_RIGHT_GAP: f32 = 84.0;
+/// Agent bubble ceiling, measured on Jacob's Grok Bot shot of 2026-10-24
+/// (`grok-chat-1.png` / `grok-chat-2-research.png`, 2 px/pt, a 1728 pt
+/// window): every wrapped agent bubble ends at 1120 px = **560 pt** in a
+/// 960 pt composer column (58 % of it) — the list bubble is content-sized
+/// narrower, nothing is wider. Ours filled the column minus the gap (792 at
+/// the 876 pt cap, 90 %), which is what Jacob saw as "Arbos bubbles are
+/// wider" ([feedback bubble-width-2026-10-24]). The cap is the smaller of
+/// the two rules ([`assistant_cap`]): narrow panes keep Grok's fixed gap
+/// (refs 57/58: 612 in a 696 pill, 310 in 392), wide panes stop at 560.
+pub const ASSISTANT_MAX_WIDTH: f32 = 560.0;
+
+/// The widest an agent bubble (or a question / approval card in its slot) can
+/// be in a slot `slot_width` wide: the slot minus [`ASSISTANT_RIGHT_GAP`],
+/// never more than [`ASSISTANT_MAX_WIDTH`].
+pub fn assistant_cap(slot_width: f32) -> f32 {
+    (slot_width - ASSISTANT_RIGHT_GAP).min(ASSISTANT_MAX_WIDTH)
+}
 /// A new time stamp line whenever messages are this far apart.
 const STAMP_GAP_MS: u64 = 60 * 60 * 1000;
 /// Vertical rhythm measured from Grok Bot's Mac app (parity it.36, 2 px/pt):
@@ -107,6 +125,22 @@ const TURN_GAP_EXTRA: f32 = 20.0 - 2.0 * ROW_GAP_HALF;
 /// carries ~4 pt of its own above and ~7 below the glyphs (measured).
 const STAMP_PAD_TOP: f32 = 20.0 - ROW_GAP_HALF - 4.0;
 const STAMP_PAD_BOTTOM: f32 = 24.0 - ROW_GAP_HALF - 7.0;
+/// Markdown rhythm inside a bubble, measured on Jacob's Grok Bot shot of
+/// 2026-10-24 (`grok-chat-1.png`, 2 px/pt; [feedback bubble-markdown-2026-10-24]):
+/// list items sit on a 26 pt pitch and blocks (paragraph → heading → list →
+/// paragraph) on a 32 pt pitch over Grok's 22 pt text line
+/// (`CHAT_LINE_HEIGHT`) — 4 pt between items, 10 between blocks (5 above
+/// and 5 below each block row). Arbos had 3 and 6 on a 20 pt line.
+const LIST_ITEM_GAP: f32 = 4.0;
+const BLOCK_GAP_HALF: f32 = 5.0;
+/// Grok's bullet is a 4.5 pt disc in the muted text colour, its centre 8.5 pt
+/// from the block's left edge, the item text starting at 20 pt (Arbos drew the
+/// font's "•" — a 3 pt dot 2 pt in — with the text at 24).
+const LIST_INDENT: f32 = 20.0;
+/// Two-digit numbered markers ("10.") need a wider gutter.
+const LIST_INDENT_WIDE: f32 = 26.0;
+const BULLET_DOT: f32 = 4.5;
+const BULLET_CENTRE: f32 = 8.5;
 /// Clearance above the composer when pinned (54 pt glyph-to-pill, minus the
 /// composer row's own 6 pt top padding and the last row's half-gap). Kept as a
 /// trailing list row — not as container padding — so scrolling bubbles reach
@@ -136,39 +170,32 @@ const HOVER_FADE_MS: f32 = 150.0;
 pub const HEADER_FADE_BAND: f32 = crate::ui::header::metrics::FADE_BAND;
 /// How long the hover copy glyph stays a checkmark after a successful copy.
 const COPY_FEEDBACK_MS: u64 = 2_000;
-/// How far a right swipe pulls the bubble before reply arms (iPhone
-/// `replySwipeWidth` / Telegram-style).
-const REPLY_SWIPE_WIDTH: f32 = 56.0;
-/// Release past this fraction of [`REPLY_SWIPE_WIDTH`] starts a reply.
-const REPLY_SWIPE_ARM: f32 = REPLY_SWIPE_WIDTH * 0.7;
-/// Ignore pointer noise until the drag travels this far (iPhone minimumDistance).
-const REPLY_SWIPE_SLOP: f32 = 12.0;
+/// Ignore pointer noise until a click-drag travels this far before it is a
+/// scroll (iPhone minimumDistance).
+const DRAG_SCROLL_SLOP: f32 = 12.0;
 
-/// Which bubble row the pointer is over, and the one it just left, with the
+/// Which bubble the pointer is over, and the one it just left, with the
 /// moment each happened: the fade is computed from those at render time.
+///
+/// Keyed by **bubble**, not by transcript row: an agent reply is one row per
+/// markdown block, and Grok shows the rail while the pointer is anywhere on
+/// the bubble (Jacob, 2026-10-24, [feedback bubble-hover-rail-2026-10-24]).
+/// `rows` remembers which rows of a bubble the pointer is over right now, so
+/// crossing from one block to the next — whichever order GPUI reports the
+/// leave and the enter — never fades the rail out.
 #[derive(Default)]
 struct HoverFade {
     over: Option<(String, Instant)>,
     left: Option<(String, Instant)>,
-}
-
-/// In-progress swipe-right-to-reply on a message row (iPhone `replySwipeGesture`).
-struct ReplySwipe {
-    /// The transcript row the press started on (visual offset + reply glyph).
-    row_id: String,
-    /// The message to reply to when the swipe arms.
-    message_id: Id,
-    /// Press origin in window coordinates.
-    start: Point<Pixels>,
-    /// How far the row has been pulled right (px).
-    drag: f32,
-    /// True once the pan is clearly horizontal-right (scroll / select stay free until then).
-    locked: bool,
+    rows: HashMap<String, HashSet<String>>,
 }
 
 /// Click-drag vertical pan that scrolls the list (iPhone ScrollView parity).
-/// Armed on press; locks once the pan is clearly vertical so text selection
-/// and reply-swipe stay free for horizontal / select gestures.
+/// Armed on a press that is not on bubble text (a press on text belongs to
+/// the selection, whichever way it then moves); locks once the pan is
+/// clearly vertical. There is no swipe-to-reply on the Mac: dragging a
+/// message must never turn it into a reply (Jacob, 2026-10-24, [feedback
+/// bubble-selection-2026-10-24]); the iPhone keeps its own gesture.
 struct DragScroll {
     start: Point<Pixels>,
     last: Point<Pixels>,
@@ -176,9 +203,20 @@ struct DragScroll {
 }
 
 impl HoverFade {
-    /// Record a hover change for `row_id`; `true` when something changed.
-    fn set(&mut self, row_id: &str, hovered: bool, now: Instant) -> bool {
-        let is_over = self.over.as_ref().is_some_and(|(id, _)| id == row_id);
+    /// Record that the pointer entered or left `row_id`, one of the rows of
+    /// bubble `key`; `true` when the bubble's hover state changed.
+    fn set(&mut self, key: &str, row_id: &str, hovered: bool, now: Instant) -> bool {
+        let rows = self.rows.entry(key.to_string()).or_default();
+        if hovered {
+            rows.insert(row_id.to_string());
+        } else {
+            rows.remove(row_id);
+        }
+        let hovered = !rows.is_empty();
+        if !hovered {
+            self.rows.remove(key);
+        }
+        let is_over = self.over.as_ref().is_some_and(|(id, _)| id == key);
         if hovered == is_over {
             return false;
         }
@@ -188,17 +226,17 @@ impl HoverFade {
             }
             // Re-entering mid-fade starts the fade-in from the current level.
             let head_start = match &self.left {
-                Some((id, at)) if id == row_id => {
+                Some((id, at)) if id == key => {
                     let remaining = 1.0 - Self::progress(*at, now);
                     Duration::from_secs_f32(remaining * HOVER_FADE_MS / 1000.0)
                 }
                 _ => Duration::ZERO,
             };
             self.left = None;
-            self.over = Some((row_id.to_string(), now - head_start));
+            self.over = Some((key.to_string(), now - head_start));
         } else {
             self.over = None;
-            self.left = Some((row_id.to_string(), now));
+            self.left = Some((key.to_string(), now));
         }
         true
     }
@@ -617,8 +655,6 @@ pub struct Transcript {
     /// `ARBOS_RIG_SELECT_AFTER_MS` (so a reply typed over VNC can land
     /// first). Cleared when applied.
     rig_select: Option<(String, Instant)>,
-    /// Swipe-right-to-reply in progress (Telegram / iPhone parity).
-    reply_swipe: Option<ReplySwipe>,
     /// Vertical click-drag scroll over bubbles / empty rows.
     drag_scroll: Option<DragScroll>,
 }
@@ -677,112 +713,39 @@ impl Transcript {
                 .detach();
                 (spec, Instant::now() + Duration::from_millis(after))
             }),
-            reply_swipe: None,
             drag_scroll: None,
         }
     }
 
-    /// Rows that can be replied to (same set as the message menu's Reply item
-    /// on the iPhone: text, media, and empty agent bubbles — not stamps,
-    /// cards, errors, or chrome).
-    fn can_reply_row(kind: &RowKind) -> bool {
-        matches!(
-            kind,
-            RowKind::User { .. }
-                | RowKind::Markdown { .. }
-                | RowKind::NoAnswer { .. }
-                | RowKind::Attachment { .. }
-        )
-    }
-
-    /// Mouse down on a replyable row: arm a possible swipe-right-to-reply.
-    /// Vertical scroll and text selection stay free until the pan locks.
-    fn begin_reply_swipe(&mut self, row_id: String, message_id: Id, start: Point<Pixels>) {
-        self.reply_swipe = Some(ReplySwipe {
-            row_id,
-            message_id,
-            start,
-            drag: 0.0,
-            locked: false,
-        });
-    }
-
-    /// Trackpad / mouse move while a reply swipe may be in progress.
-    fn on_reply_swipe_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
-        if self.reply_swipe.is_none() {
-            return;
-        }
-        if event.pressed_button != Some(MouseButton::Left) {
-            self.reply_swipe = None;
-            cx.notify();
-            return;
-        }
-        let (dx, dy, was_locked, prev_drag) = {
-            let swipe = self.reply_swipe.as_ref().expect("checked above");
-            let dx: f32 = (event.position.x - swipe.start.x).into();
-            let dy: f32 = (event.position.y - swipe.start.y).into();
-            (dx, dy, swipe.locked, swipe.drag)
-        };
-        if !was_locked {
-            if dx.abs() + dy.abs() < REPLY_SWIPE_SLOP {
-                return;
-            }
-            // Vertical scroll or leftward peek: do not steal the gesture.
-            if dx <= 0.0 || dx.abs() <= dy.abs() * 1.15 {
-                self.reply_swipe = None;
-                return;
-            }
-        }
-        let raw = dx.max(0.0);
-        let w = REPLY_SWIPE_WIDTH;
-        let reveal = if raw <= w {
-            raw
-        } else {
-            w + ((raw - w) * 0.2).min(24.0)
-        };
-        let just_locked = !was_locked;
-        let moved = (prev_drag - reveal).abs() > 0.5;
-        if let Some(swipe) = self.reply_swipe.as_mut() {
-            swipe.locked = true;
-            if moved {
-                swipe.drag = reveal;
-            }
-        }
-        if just_locked {
-            self.selection.update(cx, |s, cx| {
-                s.clear();
-                cx.notify();
-            });
-        }
-        if just_locked || moved {
-            cx.notify();
-        }
-    }
-
-    /// Mouse up: if the swipe armed far enough, start a reply (same path as
-    /// the hover reply glyph and the message-menu Reply item).
-    fn on_reply_swipe_up(&mut self, cx: &mut Context<Self>) {
-        let Some(swipe) = self.reply_swipe.take() else {
-            return;
-        };
-        let triggered = swipe.locked && swipe.drag >= REPLY_SWIPE_ARM;
-        if triggered {
-            if let Some(chat_id) = self.chat_id.clone() {
-                cx.emit(TranscriptEvent::Reply {
-                    chat_id,
-                    message_id: swipe.message_id,
-                });
-            }
-        }
-        cx.notify();
-    }
-
     /// Apply `ARBOS_RIG_SELECT` to the newest settled agent bubble, once.
+    /// `across` selects from the second word of the bubble before it to the
+    /// second-to-last word of that bubble — a drag across two messages.
     fn apply_rig_select(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((spec, not_before)) = self.rig_select.clone() else {
             return;
         };
         if Instant::now() < not_before {
+            return;
+        }
+        if spec.trim() == "across" {
+            let bubbles = self.bubble_texts(cx);
+            let n = bubbles.len();
+            if n < 2 {
+                return;
+            }
+            let at = |(order, key, text): &(usize, String, String)| BubbleAt {
+                order: *order,
+                key: key.clone().into(),
+                text: text.clone().into(),
+            };
+            let (from, to) = (at(&bubbles[n - 2]), at(&bubbles[n - 1]));
+            self.rig_select = None;
+            let focus = self.selection.read(cx).focus_handle.clone();
+            self.selection.update(cx, |s, cx| {
+                s.rig_select_across(from, to);
+                cx.notify();
+            });
+            window.focus(&focus, cx);
             return;
         }
         let target = self.rows.iter().rev().find_map(|row| match &row.kind {
@@ -808,9 +771,74 @@ impl Transcript {
         }
     }
 
-    /// ⌘C with text selected in a bubble.
+    /// The transcript order of the bubble row `ix` belongs to: the index of
+    /// the message's first row, shared by every block row of one reply.
+    fn message_order(&self, ix: usize) -> usize {
+        let Some(row) = self.rows.get(ix) else {
+            return ix;
+        };
+        let mut first = ix;
+        while first > 0 && self.rows[first - 1].message_id == row.message_id {
+            first -= 1;
+        }
+        first
+    }
+
+    /// The selectable bubbles of the transcript in order — `(order, key,
+    /// plain text)`, the same key and text each row hands its
+    /// `Selectable::bubble` — so a selection across bubbles can be copied with
+    /// the bubbles in between, in transcript order.
+    fn bubble_texts(&self, cx: &Context<Self>) -> Vec<(usize, String, String)> {
+        let mut out: Vec<(usize, String, String)> = Vec::new();
+        for (ix, row) in self.rows.iter().enumerate() {
+            let order = self.message_order(ix);
+            let entry = match &row.kind {
+                RowKind::Markdown { bubble, .. } => {
+                    Some((format!("{}#text", row.message_id), bubble.text.to_string()))
+                }
+                RowKind::NoAnswer { seed, name, .. } => {
+                    let hint = name.as_deref().unwrap_or("Agent");
+                    let (resolved, _, _, _) = self.agent_identity(seed, hint, cx);
+                    let who = if resolved == "Agent" || resolved.trim().is_empty() {
+                        "The agent".to_owned()
+                    } else {
+                        resolved
+                    };
+                    Some((
+                        format!("{}#text", row.message_id),
+                        format!("{who} didn't answer. Ask again."),
+                    ))
+                }
+                RowKind::User { text, .. } => {
+                    Some((format!("{}.u", row.id), user_bubble_plain(text)))
+                }
+                RowKind::Stamp { label } => Some((format!("{}.s", row.id), inline_plain(label))),
+                _ => None,
+            };
+            if let Some((key, text)) = entry {
+                // Block rows of one reply share one bubble: keep it once.
+                if out.last().is_some_and(|(_, k, _)| *k == key) {
+                    continue;
+                }
+                out.push((order, key, text));
+            }
+        }
+        out
+    }
+
+    /// ⌘C with text selected: one bubble's slice, or — across bubbles — the
+    /// tail of the first, every bubble in between whole, the head of the
+    /// last, in transcript order whichever way the drag went, one blank line
+    /// between messages (what Grok's copy gives).
     fn copy_selection(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = self.selection.read(cx).selected_text() {
+        let text = {
+            let selection = self.selection.read(cx);
+            match selection.span() {
+                Some(span) if !span.one_bubble() => copy_across(&span, &self.bubble_texts(cx)),
+                _ => selection.selected_text(),
+            }
+        };
+        if let Some(text) = text {
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
         }
     }
@@ -818,14 +846,19 @@ impl Transcript {
     /// The row around a bubble: tracks the pointer so the time and react glyph
     /// can fade, and reports their opacity for this frame. With Reduce Motion
     /// the fade collapses to the snap it replaced.
+    ///
+    /// `key` names the bubble the row belongs to: every block row of one agent
+    /// reply shares its message's key, so the rail shows and stays while the
+    /// pointer is anywhere on the bubble; single-row bubbles use their row id.
     fn hover_row(
         &self,
         row_id: &str,
+        key: &str,
         now: Instant,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> (Stateful<Div>, f32) {
-        let (opacity, moving) = self.hover.opacity(row_id, now);
+        let (opacity, moving) = self.hover.opacity(key, now);
         let opacity = if cx.reduce_motion() {
             opacity.round()
         } else {
@@ -834,18 +867,74 @@ impl Transcript {
             }
             opacity
         };
-        let id = row_id.to_string();
+        let (id, key) = (row_id.to_string(), key.to_string());
         let row = div()
             .id(SharedString::from(format!("{row_id}#row")))
             .w_full()
             .flex()
             .items_center()
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                if this.hover.set(&id, *hovered, Instant::now()) {
+                if this.hover.set(&key, &id, *hovered, Instant::now()) {
                     cx.notify();
                 }
             }));
         (row, opacity)
+    }
+
+    /// The hover key of a multi-block agent bubble (every `RowKind::Markdown`
+    /// row of one message).
+    fn bubble_hover_key(message_id: &Id) -> String {
+        format!("{message_id}#bubble")
+    }
+
+    /// Where the hover rail of the bubble whose last block is row `ix` sits:
+    /// the vertical centre of the whole bubble, in pixels from that row's
+    /// top. `None` for a one-row bubble (its row centres the rail itself) or
+    /// before the list has laid the rows out.
+    fn bubble_rail_centre(&self, ix: usize) -> Option<Pixels> {
+        let message_id = &self.rows.get(ix)?.message_id;
+        let is_block = |i: usize| {
+            self.rows.get(i).is_some_and(|r| {
+                r.message_id == *message_id && matches!(r.kind, RowKind::Markdown { .. })
+            })
+        };
+        let mut first = ix;
+        while first > 0 && is_block(first - 1) {
+            first -= 1;
+        }
+        if first == ix {
+            return None;
+        }
+        let last = self.list.bounds_for_item(ix)?;
+        let rows: Vec<Option<Bounds<Pixels>>> =
+            (first..ix).map(|i| self.list.bounds_for_item(i)).collect();
+        let top_inset = ROW_GAP_HALF
+            + if self.is_turn_start(first) {
+                TURN_GAP_EXTRA
+            } else {
+                0.0
+            };
+        Some(rail_centre(
+            &rows,
+            last,
+            self.list.viewport_bounds(),
+            (px(top_inset), px(ROW_GAP_HALF)),
+        ))
+    }
+
+    /// The first row of a message from a new sender opens the turn gap; a
+    /// stamp between them already carries its own spacing.
+    fn is_turn_start(&self, ix: usize) -> bool {
+        let Some(row) = self.rows.get(ix) else {
+            return false;
+        };
+        ix.checked_sub(1)
+            .and_then(|i| self.rows.get(i))
+            .is_some_and(|prev| {
+                prev.message_id != row.message_id
+                    && !matches!(prev.kind, RowKind::Stamp { .. } | RowKind::BottomInset)
+                    && self.turn_starts.contains(&row.message_id)
+            })
     }
 
     /// Runs inside the list's own scroll callback while `ListState` is
@@ -917,11 +1006,6 @@ impl Transcript {
             self.drag_scroll = None;
             return;
         }
-        // Reply swipe has locked horizontal: leave it alone.
-        if self.reply_swipe.as_ref().is_some_and(|s| s.locked) {
-            self.drag_scroll = None;
-            return;
-        }
 
         let (dx, dy_from_start, locked) = {
             let drag = self.drag_scroll.as_ref().expect("checked above");
@@ -930,16 +1014,15 @@ impl Transcript {
             (dx, dy, drag.locked)
         };
         if !locked {
-            if dx.abs() + dy_from_start.abs() < REPLY_SWIPE_SLOP {
+            if dx.abs() + dy_from_start.abs() < DRAG_SCROLL_SLOP {
                 return;
             }
-            // Horizontal-dominant: text selection / reply swipe own the gesture.
+            // Horizontal-dominant: not a scroll.
             if dx.abs() > dy_from_start.abs() * 1.15 {
                 self.drag_scroll = None;
                 return;
             }
             // Vertical: take the gesture.
-            self.reply_swipe = None;
             self.selection.update(cx, |s, cx| {
                 s.clear();
                 cx.notify();
@@ -1020,7 +1103,6 @@ impl Transcript {
         let pane_changed = pane_open != self.pane_open;
         self.pane_open = pane_open;
         if chat_changed {
-            self.reply_swipe = None;
             self.drag_scroll = None;
         }
         let messages: Vec<Message> = chat_id
@@ -1602,6 +1684,7 @@ impl Transcript {
         lane: Option<String>,
         quote: Option<Quote>,
         named: bool,
+        rail_centre: Option<Pixels>,
         now: Instant,
         theme: &Theme,
         selectable: &Selectable,
@@ -1673,9 +1756,9 @@ impl Transcript {
             .when(fill, |el| el.w_full())
             .px(px(BUBBLE_PAD_X))
             .when(first, |el| el.pt(px(BUBBLE_PAD_Y)).rounded_t(r))
-            .when(!first, |el| el.pt(px(3.0)))
+            .when(!first, |el| el.pt(px(BLOCK_GAP_HALF)))
             .when(last, |el| el.pb(px(BUBBLE_PAD_Y)).rounded_b(r))
-            .when(!last, |el| el.pb(px(3.0)))
+            .when(!last, |el| el.pb(px(BLOCK_GAP_HALF)))
             .bg(theme.bubble_assistant)
             .when_some(agent_accent, |el, color| {
                 el.border_l_2().border_color(Theme::with_alpha(color, 0.7))
@@ -1694,25 +1777,22 @@ impl Transcript {
                     &self.code_copy(cx),
                 ),
             ));
-        let (row_el, reveal) = self.hover_row(row_id, now, window, cx);
-        // Hover: the rail (smiley · reply · ⋯) and the bubble's time on the last
-        // block of a finished reply. Nothing of it exists at rest.
+        // Every block row of the reply shares one hover key, so the rail shows
+        // while the pointer is anywhere on the bubble, not only its last block.
+        let (row_el, reveal) =
+            self.hover_row(row_id, &Self::bubble_hover_key(message_id), now, window, cx);
+        // Hover: the rail (smiley · reply · ⋯) and the bubble's time, drawn by
+        // the last block of a finished reply. Nothing of it exists at rest.
         let hover_actions =
             (last && !live).then(|| self.hover_rail(row_id, message_id, reveal, theme, cx));
         let hover_time = (last && !live)
             .then(|| hover_time(time, reveal, theme).map(|t| t.ml(px(8.0))))
             .flatten();
         // The rail hangs off the bubble's right edge, out of the flow: it
-        // lives in the column's 84 pt gap and never narrows the bubble.
+        // lives in the column's 84 pt gap and never narrows the bubble. It is
+        // centred on the whole bubble (all of its block rows), like Grok's.
         let hover_rail = (hover_actions.is_some() || hover_time.is_some()).then(|| {
-            div()
-                .absolute()
-                .left(relative_width(1.0))
-                .top_0()
-                .bottom_0()
-                .pl(px(6.0))
-                .flex()
-                .items_center()
+            hover_rail_frame(rail_centre)
                 .children(hover_actions)
                 .children(hover_time)
         });
@@ -1763,12 +1843,12 @@ impl Transcript {
         };
         let theme = Theme::of(cx).clone();
         let now = Instant::now();
-        // Before the match moves `row.kind`: which rows accept swipe-right-to-reply.
-        let can_reply = Self::can_reply_row(&row.kind) && !row.message_id.is_empty();
-        let swipe_row_id = row.id.clone();
-        let swipe_message_id = row.message_id.clone();
+        let row_frame_id = row.id.clone();
+        // Every block row of a message shares its bubble's transcript order,
+        // so a selection across bubbles knows which end comes first.
         let selectable = Selectable::new(&self.selection, theme.accent_soft, cx)
-            .with_mentions(self.mentions.clone(), theme.accent);
+            .with_mentions(self.mentions.clone(), theme.accent)
+            .ordered(self.message_order(ix));
         let inner: AnyElement = match row.kind {
             RowKind::User {
                 text,
@@ -1884,7 +1964,8 @@ impl Transcript {
                         .items_start()
                         .py(px(ROW_GAP_HALF))
                         .child({
-                            let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
+                            let (row_el, reveal) =
+                                self.hover_row(&row.id, &row.id, now, window, cx);
                             let actions =
                                 self.hover_rail(&row.id, &row.message_id, reveal, &theme, cx);
                             row_el
@@ -1943,7 +2024,8 @@ impl Transcript {
                             // hover-only time) is on the left. Its delivery state is
                             // its opacity: pending < sent < seen; failed is full with
                             // a red glyph at the outer edge (no captions).
-                            let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
+                            let (row_el, reveal) =
+                                self.hover_row(&row.id, &row.id, now, window, cx);
                             let actions =
                                 self.hover_rail(&row.id, &row.message_id, reveal, &theme, cx);
                             let delivery = delivery.unwrap_or(Delivery::Seen);
@@ -1968,25 +2050,31 @@ impl Transcript {
                 lane,
                 quote,
                 named,
-            } => self.markdown_bubble(
-                &row.id,
-                &row.message_id,
-                block,
-                bubble,
-                live,
-                first,
-                last,
-                fill,
-                time,
-                lane,
-                quote,
-                named,
-                now,
-                &theme,
-                &selectable,
-                window,
-                cx,
-            ),
+            } => {
+                let rail_centre = (last && !live)
+                    .then(|| self.bubble_rail_centre(ix))
+                    .flatten();
+                self.markdown_bubble(
+                    &row.id,
+                    &row.message_id,
+                    block,
+                    bubble,
+                    live,
+                    first,
+                    last,
+                    fill,
+                    time,
+                    lane,
+                    quote,
+                    named,
+                    rail_centre,
+                    now,
+                    &theme,
+                    &selectable,
+                    window,
+                    cx,
+                )
+            }
             RowKind::NoAnswer {
                 seed,
                 name,
@@ -2017,6 +2105,7 @@ impl Transcript {
                     lane,
                     quote,
                     named,
+                    None,
                     now,
                     &theme,
                     &selectable,
@@ -2172,7 +2261,7 @@ impl Transcript {
                         self.state.clone(),
                         &theme,
                     ));
-                let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
+                let (row_el, reveal) = self.hover_row(&row.id, &row.id, now, window, cx);
                 let actions = self.hover_rail(&row.id, &row.message_id, reveal, &theme, cx);
                 if mine {
                     // My media sits right; the rail is on its outer (left) edge.
@@ -2344,58 +2433,13 @@ impl Transcript {
         };
         let highlighted =
             self.state.read(cx).highlight_message.as_deref() == Some(row.message_id.as_str());
-        // The first row of a message from a new sender opens the turn gap; a
-        // stamp between them already carries its own spacing.
-        let turn_start = ix
-            .checked_sub(1)
-            .and_then(|i| self.rows.get(i))
-            .is_some_and(|prev| {
-                prev.message_id != row.message_id
-                    && !matches!(prev.kind, RowKind::Stamp { .. } | RowKind::BottomInset)
-                    && self.turn_starts.contains(&row.message_id)
-            });
-        let swipe_drag = self
-            .reply_swipe
-            .as_ref()
-            .filter(|s| s.row_id == swipe_row_id)
-            .map(|s| s.drag)
-            .unwrap_or(0.0);
-        let accent = theme.accent;
+        let turn_start = self.is_turn_start(ix);
         div()
-            .id(SharedString::from(format!("{swipe_row_id}#swipe")))
+            .id(SharedString::from(format!("{row_frame_id}#frame")))
             .relative()
             .w_full()
-            .when(can_reply, |el| {
-                let (row_id, message_id) = (swipe_row_id.clone(), swipe_message_id.clone());
-                el.on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, event: &MouseDownEvent, _, _cx| {
-                        if event.modifiers.control || event.modifiers.shift {
-                            return;
-                        }
-                        this.begin_reply_swipe(row_id.clone(), message_id.clone(), event.position);
-                    }),
-                )
-            })
-            .when(swipe_drag > 0.5, |el| {
-                el.child(
-                    div()
-                        .absolute()
-                        .left(px(COLUMN_MARGIN + swipe_drag - REPLY_SWIPE_WIDTH))
-                        .top_0()
-                        .bottom_0()
-                        .w(px(REPLY_SWIPE_WIDTH))
-                        .flex()
-                        .items_center()
-                        .justify_start()
-                        .pl(px(4.0))
-                        .opacity((swipe_drag / (REPLY_SWIPE_WIDTH * 0.55)).min(1.0))
-                        .child(icon("reply", 16.0, accent)),
-                )
-            })
             .child(
                 column_row(inner)
-                    .when(swipe_drag > 0.0, |el| el.ml(px(swipe_drag)))
                     .when(turn_start, |el| el.pt(px(TURN_GAP_EXTRA)))
                     .when(highlighted, |el| {
                         el.bg(Theme::with_alpha(theme.accent, 0.14))
@@ -2425,8 +2469,10 @@ pub fn column_row(inner: AnyElement) -> Div {
 }
 
 /// Where an agent bubble goes in its row: the rest of the row after the
-/// sender lane, minus Grok's fixed [`ASSISTANT_RIGHT_GAP`]. The bubble's
-/// `max_w_full` is this slot's width.
+/// sender lane, minus Grok's fixed [`ASSISTANT_RIGHT_GAP`], and never wider
+/// than [`ASSISTANT_MAX_WIDTH`] ([`assistant_cap`]). The bubble's
+/// `max_w_full` is the inner cap frame's width; the hover rail, absolute at
+/// the bubble's right edge, lands in the gap after it.
 fn assistant_slot(bubble: impl IntoElement) -> Div {
     div()
         .flex_1()
@@ -2435,7 +2481,16 @@ fn assistant_slot(bubble: impl IntoElement) -> Div {
         .flex()
         .items_center()
         .debug_selector(|| "chat-bubble-slot".into())
-        .child(bubble)
+        .child(
+            div()
+                .w_full()
+                .max_w(px(ASSISTANT_MAX_WIDTH))
+                .min_w_0()
+                .flex()
+                .items_center()
+                .debug_selector(|| "chat-bubble-cap".into())
+                .child(bubble),
+        )
 }
 
 /// A question / approval card is a transcript row like a bubble (#1374, #1440 follow-up): the
@@ -2483,32 +2538,35 @@ impl Render for Transcript {
             .track_focus(&focus)
             .on_action(cx.listener(Self::copy_selection))
             .on_scroll_wheel(cx.listener(|this, event, _, cx| this.on_wheel(event, cx)))
-            // Drag-scroll + swipe-right-to-reply: move/up live on the transcript
-            // so a drag that leaves the row still finishes (iPhone parity).
+            // Drag-scroll: move/up live on the transcript so a drag that
+            // leaves the row still finishes (iPhone parity). A press on bubble
+            // text is the selection's (its listener ran first and armed the
+            // drag), so the pointer is left to it — up, down or across
+            // bubbles — and never scrolls the list instead.
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, event: &MouseDownEvent, _, _cx| {
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
                     if event.modifiers.control || event.modifiers.shift {
+                        return;
+                    }
+                    if this.selection.read(cx).is_dragging() {
                         return;
                     }
                     this.begin_drag_scroll(event.position);
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                this.on_reply_swipe_move(event, cx);
                 this.on_drag_scroll_move(event, cx);
             }))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _: &MouseUpEvent, _, cx| {
-                    this.on_reply_swipe_up(cx);
+                cx.listener(|this, _: &MouseUpEvent, _, _cx| {
                     this.end_drag_scroll();
                 }),
             )
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(|this, _: &MouseUpEvent, _, cx| {
-                    this.on_reply_swipe_up(cx);
+                cx.listener(|this, _: &MouseUpEvent, _, _cx| {
                     this.end_drag_scroll();
                 }),
             )
@@ -2693,6 +2751,73 @@ fn message_is_seen(
     messages[mix + 1..]
         .iter()
         .any(|m| matches!(m.role, Role::Assistant | Role::Project))
+}
+
+/// Grok keeps the rail inside the chat: a bubble taller than the pane gets
+/// its rail at the centre of the visible part, this far in from the list's
+/// edges (the top edge is the header's fade band, where nothing is readable).
+const RAIL_EDGE_INSET: f32 = 8.0;
+
+/// The hover rail's vertical centre for a multi-row bubble, measured from the
+/// top of its last row: the middle of the whole bubble — the rows above it
+/// (`None` for one the list has not laid out, which only happens above the
+/// viewport) plus `last` — clamped so the rail stays inside `viewport` (Grok,
+/// Jacob's grok-chat-2 ref: the ☺ ↩ ⋯ sit at the table bubble's mid-height).
+///
+/// `insets` are the row padding outside the bubble: above its first row
+/// (the half gap, plus the turn gap when the message opens a turn) and
+/// below its last.
+fn rail_centre(
+    rows_above: &[Option<Bounds<Pixels>>],
+    last: Bounds<Pixels>,
+    viewport: Bounds<Pixels>,
+    insets: (Pixels, Pixels),
+) -> Pixels {
+    let mut top = last.top();
+    let mut unknown = false;
+    for row in rows_above {
+        match row {
+            Some(b) => top = top.min(b.top()),
+            None => unknown = true,
+        }
+    }
+    top += insets.0;
+    if unknown {
+        // Rows above the scroll top are not measured: the bubble starts at
+        // least there, and only the visible part matters for the clamp below.
+        top = top.min(viewport.top());
+    }
+    let bottom = last.bottom() - insets.1;
+    let centre = (top + bottom) / 2.0;
+    let half = px(RAIL_BUTTON / 2.0 + RAIL_EDGE_INSET);
+    let low = viewport.top() + px(HEADER_FADE_BAND) + half;
+    let high = viewport.bottom() - half;
+    let centre = if high <= low {
+        centre
+    } else {
+        centre.clamp(low, high)
+    };
+    // Never outside the bubble itself (a short bubble at the very edge).
+    let centre = centre.clamp(top + px(RAIL_BUTTON / 2.0), bottom - px(RAIL_BUTTON / 2.0));
+    centre - last.top()
+}
+
+/// The frame that hangs the rail (and the hover time) off a bubble's right
+/// edge, out of the flow, in the column's [`ASSISTANT_RIGHT_GAP`]: centred on
+/// the bubble's own height, or — for a bubble drawn as several rows — at
+/// `centre` pixels from this row's top ([`rail_centre`]).
+fn hover_rail_frame(centre: Option<Pixels>) -> Div {
+    let frame = div()
+        .absolute()
+        .left(relative_width(1.0))
+        .pl(px(6.0))
+        .flex()
+        .items_center()
+        .debug_selector(|| "bubble-rail".into());
+    match centre {
+        Some(c) => frame.top(c - px(RAIL_BUTTON / 2.0)).h(px(RAIL_BUTTON)),
+        None => frame.top_0().bottom_0(),
+    }
 }
 
 /// The 11 pt muted time beside a bubble at the row's current hover opacity.
@@ -3536,6 +3661,44 @@ fn block_segments(block: &Block, literal: bool) -> Vec<Segment> {
     }
 }
 
+/// The plain text a user bubble is selectable as — what `user_message_body`
+/// hands its `Selectable::bubble`: the text as typed, or its blocks when it
+/// carries a fenced code block.
+fn user_bubble_plain(text: &str) -> String {
+    if has_fenced_code(text) {
+        bubble_plain(&split_blocks(text), true)
+    } else {
+        text.to_string()
+    }
+}
+
+/// The clipboard text of a selection that spans bubbles: the start bubble
+/// from the pressed index, every bubble strictly between the ends (from
+/// `bubbles`, the transcript's `(order, key, text)` list), and the end
+/// bubble up to its index — in transcript order, one blank line between
+/// messages. The two ends use the texts the gesture saw.
+fn copy_across(span: &Span, bubbles: &[(usize, String, String)]) -> Option<String> {
+    let head = span.start.text.get(span.start_index..)?;
+    let tail = span.end.text.get(..span.end_index)?;
+    let start = (span.start.order, span.start.key.as_ref());
+    let end = (span.end.order, span.end.key.as_ref());
+    let mut parts = vec![head.to_string()];
+    for (order, key, text) in bubbles {
+        let rank = (*order, key.as_str());
+        if rank > start && rank < end {
+            parts.push(text.clone());
+        }
+    }
+    parts.push(tail.to_string());
+    Some(
+        parts
+            .into_iter()
+            .filter(|p| !p.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+    )
+}
+
 /// The rendered plain text of one block (what a full selection of it copies).
 pub fn block_plain(block: &Block, literal: bool) -> String {
     block_segments(block, literal)
@@ -3720,10 +3883,32 @@ fn styled_text(
     bubble: &BubbleSelectable,
     at: usize,
 ) -> AnyElement {
+    let (full, runs, links) = inline_runs(text, base_color, theme);
+    let runs = match veil {
+        Some(veil) => apply_veil(runs, &veil.spans(now), veil_offset),
+        None => runs,
+    };
+    bubble
+        .text(at, full, runs)
+        .with_links(links)
+        .into_any_element()
+}
+
+/// Grok Bot's **bold** and headings are bold (700), not semibold: on Jacob's
+/// 2026-10-24 shot the "Surf gear" heading of the surf list is a wider,
+/// heavier cut than Arbos's semibold ([feedback bubble-markdown-2026-10-24]).
+const STRONG_WEIGHT: FontWeight = FontWeight::BOLD;
+
+/// Clickable link ranges of a rendered text (element-local bytes → href).
+type Links = Vec<(std::ops::Range<usize>, String)>;
+
+/// The rendered text, its styled runs and its link ranges for inline
+/// markdown `text` (`**bold**`, `*italic*`, `` `code` ``, links).
+fn inline_runs(text: &str, base_color: gpui::Hsla, theme: &Theme) -> (String, Vec<TextRun>, Links) {
     let spans = inline_spans(text);
     let mut full = String::new();
     let mut runs: Vec<TextRun> = Vec::new();
-    let mut links: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+    let mut links: Links = Vec::new();
     let sans = sans_font(theme);
     let mono = gpui::Font {
         family: theme.font_mono.into(),
@@ -3737,7 +3922,7 @@ fn styled_text(
             sans.clone()
         };
         if style.bold {
-            font.weight = FontWeight::SEMIBOLD;
+            font.weight = STRONG_WEIGHT;
         }
         if style.italic {
             font.style = gpui::FontStyle::Italic;
@@ -3768,14 +3953,7 @@ fn styled_text(
         });
         full.push_str(&span.text);
     }
-    let runs = match veil {
-        Some(veil) => apply_veil(runs, &veil.spans(now), veil_offset),
-        None => runs,
-    };
-    bubble
-        .text(at, full, runs)
-        .with_links(links)
-        .into_any_element()
+    (full, runs, links)
 }
 
 /// Split runs at chunk boundaries and multiply alpha in (zeron veil.rs).
@@ -3875,7 +4053,7 @@ fn render_block(
                 _ => 15.0,
             };
             base.text_size(px(size))
-                .font_weight(FontWeight::SEMIBOLD)
+                .font_weight(STRONG_WEIGHT)
                 .pt(px(6.0))
                 .child(styled_text(
                     text, theme.text, theme, veil, now, 0, bubble, starts[0],
@@ -3884,34 +4062,51 @@ fn render_block(
         }
         Block::Bullets(items) | Block::Numbered(items) => {
             let numbered = matches!(block, Block::Numbered(_));
-            let mut col = base.flex().flex_col().gap(px(3.0));
+            let mut col = base.flex().flex_col().gap(px(LIST_ITEM_GAP));
             let mut offset = 0usize;
-            // Two-digit markers ("10.") need a wider gutter than "•".
-            let marker_w = if numbered && items.len() >= 10 {
-                24.0
+            // Two-digit markers ("10.") need a wider gutter than a dot.
+            let indent = if numbered && items.len() >= 10 {
+                LIST_INDENT_WIDE
             } else {
-                16.0
+                LIST_INDENT
             };
             for (i, item) in items.iter().enumerate() {
+                let marker = div()
+                    .w(px(indent))
+                    .h(px(CHAT_LINE_HEIGHT))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .text_color(theme.text_muted)
+                    .debug_selector(move || format!("list-marker-{i}"));
                 let marker = if numbered {
-                    format!("{}.", i + 1)
+                    marker.child(format!("{}.", i + 1))
                 } else {
-                    "•".to_string()
+                    // Grok's bullet: a real disc, not the font's "•" glyph.
+                    marker.child(
+                        div()
+                            .ml(px(BULLET_CENTRE - BULLET_DOT / 2.0))
+                            .size(px(BULLET_DOT))
+                            .flex_shrink_0()
+                            .rounded_full()
+                            .bg(theme.text_muted)
+                            .debug_selector(move || format!("list-bullet-{i}")),
+                    )
                 };
                 col = col.child(
                     div()
                         .flex()
-                        .gap(px(8.0))
+                        .debug_selector(move || format!("list-item-{i}"))
+                        .child(marker)
                         .child(
                             div()
-                                .w(px(marker_w))
-                                .flex_shrink_0()
-                                .text_color(theme.text_muted)
-                                .child(marker),
-                        )
-                        .child(div().flex_1().min_w_0().child(styled_text(
-                            item, theme.text, theme, veil, now, offset, bubble, starts[i],
-                        ))),
+                                .flex_1()
+                                .min_w_0()
+                                .debug_selector(move || format!("list-text-{i}"))
+                                .child(styled_text(
+                                    item, theme.text, theme, veil, now, offset, bubble, starts[i],
+                                )),
+                        ),
                 );
                 offset += item.len() + 1;
             }
@@ -4843,7 +5038,9 @@ mod layout_tests {
                 "pane {pane}: people card left {pcx} vs people bubble left {}",
                 e.people_bubble_left
             );
-            let people_cap = e.bubble_width - SENDER_LANE;
+            // The lane's slot is the column minus the avatar lane; the same
+            // cap rule applies to it (gap, at most Grok's ceiling).
+            let people_cap = assistant_cap(e.column_width - SENDER_LANE);
             assert!(
                 pcw <= people_cap + 0.5,
                 "pane {pane}: people card width {pcw} over the lane cap {people_cap}"
@@ -5015,10 +5212,14 @@ mod layout_tests {
     }
 
     #[gpui::test]
-    fn the_agent_bubble_cap_is_the_column_minus_the_grok_gap(cx: &mut TestAppContext) {
+    fn the_agent_bubble_cap_is_the_column_minus_the_grok_gap_at_most_grok_width(
+        cx: &mut TestAppContext,
+    ) {
         // Reference window (884 pt pane): the margins bound the column, so
-        // the composer is 852 wide at 16 and the bubble 768 wide at 16 —
-        // Grok's 16 pt left inset and 100 pt right inset.
+        // the composer is 852 wide at 16; the bubble starts at 16 (Grok's
+        // left inset) and stops at Grok's 560 pt ceiling (Jacob's shot of
+        // 2026-10-24: 1120 px at 2 px/pt), not at the column − 84 = 768 it
+        // filled before [feedback bubble-width-2026-10-24].
         let e = measure(cx, REFERENCE_PANE);
         let column = REFERENCE_PANE - 2.0 * COMPOSER_MARGIN;
         assert!((e.column_width - column).abs() <= 1.0, "{}", e.column_width);
@@ -5030,22 +5231,26 @@ mod layout_tests {
         assert!((e.composer_left - 16.0).abs() <= 1.0, "{}", e.composer_left);
         assert!((e.bubble_left - 16.0).abs() <= 1.0, "{}", e.bubble_left);
         assert!(
-            (e.bubble_width - (column - ASSISTANT_RIGHT_GAP)).abs() <= 1.0,
-            "bubble width {}",
-            e.bubble_width
+            (e.bubble_width - ASSISTANT_MAX_WIDTH).abs() <= 1.0,
+            "bubble width {} (cap {})",
+            e.bubble_width,
+            assistant_cap(column)
         );
+        assert!(column - ASSISTANT_RIGHT_GAP > ASSISTANT_MAX_WIDTH);
         assert!((e.bubble_left - e.column_left).abs() <= 1.0);
-        // A wide pane: the cap holds both, centred together.
+        // A wide pane: the column caps at the composer's 876; the bubble still
+        // stops at 560 — 64 % of the column (Grok: 560 of its 960 pt composer).
         let e = measure(cx, 1400.0);
         assert_eq!(e.column_width, COLUMN_MAX_WIDTH);
         assert_eq!(e.composer_width, COLUMN_MAX_WIDTH);
         assert!(
-            (e.bubble_width - (COLUMN_MAX_WIDTH - ASSISTANT_RIGHT_GAP)).abs() <= 1.0,
+            (e.bubble_width - ASSISTANT_MAX_WIDTH).abs() <= 1.0,
             "bubble width {}",
             e.bubble_width
         );
-        // Grok's own pane (ref 57, 2 px/pt): composer 696 pt wide at 16 from
-        // the pane, bubble 612 pt wide at 16 — the measured reference.
+        // Grok's narrow pane (ref 57, 2 px/pt): composer 696 pt wide at 16
+        // from the pane; the gap rule is the smaller one there (696 − 84 = 612,
+        // above the 560 ceiling), so the bubble is 560 wide at 16.
         let e = measure(cx, GROK_REF_57_PANE);
         assert!((e.composer_left - 16.0).abs() <= 1.0, "{}", e.composer_left);
         assert!(
@@ -5054,7 +5259,21 @@ mod layout_tests {
             e.composer_width
         );
         assert!((e.bubble_left - 16.0).abs() <= 1.0, "{}", e.bubble_left);
-        assert!((e.bubble_width - 612.0).abs() <= 1.0, "{}", e.bubble_width);
+        assert!(
+            (e.bubble_width - assistant_cap(696.0)).abs() <= 1.0,
+            "{}",
+            e.bubble_width
+        );
+        // Narrower than the ceiling allows (ref 58's 424 pt pane): the fixed
+        // 84 pt gap rules, as before — 392 − 84 = 310, Grok's measured bubble.
+        let e = measure(cx, 424.0);
+        assert!((e.bubble_width - 308.0).abs() <= 2.0, "{}", e.bubble_width);
+        assert_eq!(assistant_cap(392.0), 308.0);
+        assert_eq!(
+            assistant_cap(644.0),
+            560.0,
+            "the crossover is a 644 pt slot"
+        );
     }
 
     struct NamedBubble;
@@ -5212,7 +5431,7 @@ mod layout_tests {
             let tw: f32 = text.size.width.into();
             let tx: f32 = text.origin.x.into();
             let bx: f32 = bubble.origin.x.into();
-            let cap: f32 = f32::from(slot.size.width) - ASSISTANT_RIGHT_GAP;
+            let cap: f32 = assistant_cap(slot.size.width.into());
             assert!(
                 qw < 120.0 && bw > qw + 200.0,
                 "lane={lane}: bubble {bw} pt is as narrow as its quote ({qw} pt)"
@@ -5314,14 +5533,7 @@ mod layout_tests {
                         ))
                         // The rail (glyphs · time) out of the flow, as `markdown_bubble` does.
                         .child(
-                            div()
-                                .absolute()
-                                .left(relative_width(1.0))
-                                .top_0()
-                                .bottom_0()
-                                .pl(px(6.0))
-                                .flex()
-                                .items_center()
+                            hover_rail_frame(None)
                                 .child(div().size(px(16.0)))
                                 .children(time().map(|t| t.ml(px(8.0)))),
                         );
@@ -5402,7 +5614,7 @@ mod layout_tests {
         match who {
             Who::Agent => {
                 let slot = vcx.debug_bounds("chat-bubble-slot").expect("slot drawn");
-                f32::from(slot.size.width) - ASSISTANT_RIGHT_GAP
+                assistant_cap(slot.size.width.into())
             }
             Who::Mine | Who::Other => {
                 let parent = vcx
@@ -5597,6 +5809,404 @@ mod layout_tests {
         assert_eq!(margin, composer_margin, "one side margin");
         assert_eq!(margin, 16.0, "Grok: 16 pt from the pane");
         assert_eq!(cap, input + 2.0 * circle, "the pill at its widest");
+    }
+}
+
+#[cfg(test)]
+mod cross_bubble_copy_tests {
+    //! Jacob, 2026-10-24 ([feedback bubble-selection-2026-10-24]): a selection
+    //! across messages copies cleanly, like Grok's — the first message from
+    //! the pressed word, every message between whole, the last up to the
+    //! pointer, in transcript order whichever way the drag went.
+    use super::*;
+
+    fn at(order: usize, key: &str, text: &str) -> BubbleAt {
+        BubbleAt {
+            order,
+            key: key.to_string().into(),
+            text: text.to_string().into(),
+        }
+    }
+
+    fn transcript() -> Vec<(usize, String, String)> {
+        vec![
+            (0, "m1.u".into(), "What's the time difference?".into()),
+            (
+                1,
+                "m2#text".into(),
+                "London is 7 hours ahead of you.".into(),
+            ),
+            (2, "m3.u".into(), "Make me a packing list.".into()),
+            (
+                3,
+                "m4#text".into(),
+                "Here's a list:\n• Boards\n• Leash".into(),
+            ),
+        ]
+    }
+
+    #[test]
+    fn copy_across_is_top_to_bottom_with_the_middle_whole() {
+        let rows = transcript();
+        let span = Span {
+            start: at(0, "m1.u", "What's the time difference?"),
+            start_index: 11,
+            end: at(3, "m4#text", "Here's a list:\n• Boards\n• Leash"),
+            end_index: 14,
+        };
+        assert_eq!(
+            copy_across(&span, &rows).as_deref(),
+            Some(
+                "time difference?\n\nLondon is 7 hours ahead of you.\n\nMake me a packing list.\n\nHere's a list:"
+            )
+        );
+    }
+
+    /// The model orders the ends; a drag that started at the bottom gives
+    /// the same span and so the same copy.
+    #[test]
+    fn a_bottom_up_drag_copies_the_same_text() {
+        let rows = transcript();
+        let mut model = crate::ui::select::Model::default();
+        let (top, bottom) = (
+            at(1, "m2#text", "London is 7 hours ahead of you."),
+            at(3, "m4#text", "Here's a list:\n• Boards\n• Leash"),
+        );
+        model.begin_at(bottom.clone(), 6, 1, false);
+        model.extend_in(&top, 10);
+        let up = model.span().expect("span");
+        model.begin_at(top, 10, 1, false);
+        model.extend_in(&bottom, 6);
+        let down = model.span().expect("span");
+        assert_eq!(up, down);
+        assert_eq!(
+            copy_across(&up, &rows).as_deref(),
+            Some("7 hours ahead of you.\n\nMake me a packing list.\n\nHere's")
+        );
+    }
+
+    #[test]
+    fn two_adjacent_bubbles_have_nothing_between() {
+        let rows = transcript();
+        let span = Span {
+            start: at(2, "m3.u", "Make me a packing list."),
+            start_index: 10,
+            end: at(3, "m4#text", "Here's a list:\n• Boards\n• Leash"),
+            end_index: 6,
+        };
+        assert_eq!(
+            copy_across(&span, &rows).as_deref(),
+            Some("packing list.\n\nHere's")
+        );
+    }
+
+    #[test]
+    fn a_user_bubble_is_selectable_as_typed() {
+        assert_eq!(user_bubble_plain("# not a heading"), "# not a heading");
+        assert_eq!(
+            user_bubble_plain("see\n```rs\nlet x = 1;\n```"),
+            "see\nlet x = 1;"
+        );
+    }
+}
+
+#[cfg(test)]
+mod markdown_tests {
+    //! Jacob, 2026-10-24 (Grok side by side, [feedback bubble-markdown-2026-10-24]):
+    //! "Arbos list bullets are small dots with tighter heading weight; Grok
+    //! headings are bolder and bullets render more like markdown." Measured
+    //! on `grok-chat-1.png` at 2 px/pt: 22 pt text line, items 26 pt apart,
+    //! blocks 32 pt apart, a 4.5 pt disc centred 8.5 pt in, text at 20.
+    use gpui::TestAppContext;
+
+    use super::*;
+
+    /// The pitches Grok's list reads at, over our line height.
+    #[test]
+    fn the_rhythm_is_groks() {
+        let [line, item, block] =
+            std::hint::black_box([CHAT_LINE_HEIGHT, LIST_ITEM_GAP, BLOCK_GAP_HALF]);
+        assert_eq!(
+            line, 22.0,
+            "Grok's wrapped lines are 44 px apart at 2 px/pt"
+        );
+        assert_eq!(line + item, 26.0, "item pitch");
+        assert_eq!(line + 2.0 * block, 32.0, "block pitch");
+        assert_eq!(STRONG_WEIGHT, FontWeight::BOLD);
+    }
+
+    /// `**bold**` is bold (700), not semibold; the rest of the line keeps the
+    /// body weight.
+    #[test]
+    fn strong_runs_are_bold() {
+        let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+        let (text, runs, _) = inline_runs("Surf **gear** list", theme.text, &theme);
+        assert_eq!(text, "Surf gear list");
+        let weights: Vec<(usize, FontWeight)> =
+            runs.iter().map(|r| (r.len, r.font.weight)).collect();
+        assert_eq!(
+            weights,
+            vec![
+                (5, FontWeight::NORMAL),
+                (4, FontWeight::BOLD),
+                (5, FontWeight::NORMAL)
+            ]
+        );
+    }
+
+    struct Bullets {
+        selection: Entity<TextSelection>,
+    }
+
+    impl gpui::Render for Bullets {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+            let selectable = Selectable::new(&self.selection, theme.accent_soft, cx);
+            let block = Block::Bullets(vec![
+                "Leash, with a spare".into(),
+                "Wax and a wax comb".into(),
+                "Ding repair kit".into(),
+            ]);
+            let text = bubble_plain(std::slice::from_ref(&block), false);
+            let bubble = selectable.bubble("b#text", text);
+            div()
+                .w(px(500.0))
+                .h(px(300.0))
+                .pl(px(40.0))
+                .pt(px(10.0))
+                .child(
+                    div()
+                        .w(px(400.0))
+                        .debug_selector(|| "test-block".into())
+                        .child(render_block(
+                            "b",
+                            &block,
+                            0,
+                            None,
+                            Instant::now(),
+                            &theme,
+                            &bubble,
+                            &CodeCopy::default(),
+                        )),
+                )
+        }
+    }
+
+    /// Rendered: a real disc of Grok's size at Grok's place, the text at the
+    /// 20 pt indent, one item every 26 pt.
+    #[gpui::test]
+    fn bullets_are_discs_at_groks_indent_and_pitch(cx: &mut TestAppContext) {
+        let (_view, vcx) = cx.add_window_view(|_, cx| Bullets {
+            selection: cx.new(TextSelection::new),
+        });
+        vcx.run_until_parked();
+        let block = vcx.debug_bounds("test-block").expect("block drawn");
+        let left = f32::from(block.left());
+        let dot = vcx.debug_bounds("list-bullet-0").expect("bullet drawn");
+        assert_eq!(f32::from(dot.size.width), BULLET_DOT);
+        assert_eq!(f32::from(dot.size.height), BULLET_DOT);
+        let dot_centre = f32::from(dot.left() + dot.right()) / 2.0 - left;
+        assert!(
+            (dot_centre - BULLET_CENTRE).abs() <= 0.5,
+            "dot centre {dot_centre} pt from the block's left"
+        );
+        let text = vcx.debug_bounds("list-text-0").expect("item text drawn");
+        assert!(
+            (f32::from(text.left()) - left - LIST_INDENT).abs() <= 0.5,
+            "text starts {} pt in",
+            f32::from(text.left()) - left
+        );
+        let item0 = vcx.debug_bounds("list-item-0").expect("item 0 drawn");
+        let item1 = vcx.debug_bounds("list-item-1").expect("item 1 drawn");
+        let item2 = vcx.debug_bounds("list-item-2").expect("item 2 drawn");
+        let pitch = f32::from(item1.top() - item0.top());
+        assert!((pitch - 26.0).abs() <= 0.5, "item pitch {pitch}");
+        assert!((f32::from(item2.top() - item1.top()) - 26.0).abs() <= 0.5);
+        // The dot sits on the first line's centre.
+        let line_centre = f32::from(item0.top()) + CHAT_LINE_HEIGHT / 2.0;
+        let dot_mid = f32::from(dot.top() + dot.bottom()) / 2.0;
+        assert!(
+            (dot_mid - line_centre).abs() <= 0.5,
+            "dot mid {dot_mid} vs line {line_centre}"
+        );
+    }
+
+    /// The copy of a list is unchanged: "• " markers, one item per line.
+    #[test]
+    fn list_plain_text_keeps_its_markers() {
+        let block = Block::Bullets(vec!["a".into(), "b".into()]);
+        assert_eq!(block_plain(&block, false), "• a\n• b");
+    }
+}
+
+#[cfg(test)]
+mod rail_tests {
+    //! Jacob, 2026-10-24 (Grok side by side, [feedback bubble-hover-rail-2026-10-24]):
+    //! the ☺ ↩ ⋯ rail sits vertically centred beside the bubble, and it shows
+    //! while the pointer is anywhere on the bubble — not only on its last
+    //! block. An agent reply is one transcript row per markdown block, so both
+    //! are about the rows of one message acting as one bubble.
+    use gpui::{point, size, Bounds, TestAppContext};
+
+    use super::*;
+
+    fn b(top: f32, height: f32) -> Bounds<Pixels> {
+        Bounds::new(point(px(0.0), px(top)), size(px(800.0), px(height)))
+    }
+
+    const NO_INSET: (Pixels, Pixels) = (px(0.0), px(0.0));
+
+    /// Hovering any block row of a reply hovers the bubble; moving from one
+    /// block to the next — leave-then-enter or enter-then-leave — keeps it
+    /// hovered; leaving the last row the pointer was on fades it out.
+    #[test]
+    fn the_bubble_stays_hovered_across_its_block_rows() {
+        let mut fade = HoverFade::default();
+        let now = Instant::now();
+        let later = now + Duration::from_millis(HOVER_FADE_MS as u64 + 50);
+        assert!(fade.set("m1#bubble", "m1.0", true, now), "enter block 0");
+        assert_eq!(fade.opacity("m1#bubble", later).0, 1.0);
+        // Block 0 → block 1, leave reported first: the leave starts a fade
+        // out, the enter in the same instant resumes from full — no dip.
+        fade.set("m1#bubble", "m1.0", false, later);
+        fade.set("m1#bubble", "m1.1", true, later);
+        assert_eq!(fade.opacity("m1#bubble", later).0, 1.0, "still hovered");
+        // Block 1 → block 2, enter reported first: nothing changes at all.
+        assert!(!fade.set("m1#bubble", "m1.2", true, later));
+        assert!(!fade.set("m1#bubble", "m1.1", false, later));
+        assert_eq!(fade.opacity("m1#bubble", later).0, 1.0, "still hovered");
+        // Off the bubble: fades out.
+        assert!(fade.set("m1#bubble", "m1.2", false, later));
+        let (opacity, moving) = fade.opacity(
+            "m1#bubble",
+            later + Duration::from_millis(HOVER_FADE_MS as u64 / 2),
+        );
+        assert!(opacity < 1.0 && moving, "fading out: {opacity}");
+        assert_eq!(
+            fade.opacity("m1#bubble", later + Duration::from_secs(1)).0,
+            0.0
+        );
+    }
+
+    /// Two bubbles: entering the second's row leaves the first.
+    #[test]
+    fn hovering_another_bubble_fades_the_first() {
+        let mut fade = HoverFade::default();
+        let now = Instant::now();
+        let later = now + Duration::from_secs(1);
+        fade.set("m1#bubble", "m1.0", true, now);
+        assert!(fade.set("m2#bubble", "m2.0", true, later));
+        let settled = later + Duration::from_secs(1);
+        assert_eq!(fade.opacity("m2#bubble", settled).0, 1.0);
+        assert_eq!(fade.opacity("m1#bubble", settled).0, 0.0);
+    }
+
+    /// The rail's centre is the middle of the whole bubble — the rows above
+    /// plus the last — measured from the last row's top, less the row padding
+    /// around the bubble.
+    #[test]
+    fn the_rail_is_centred_on_the_whole_bubble() {
+        let viewport = b(0.0, 1000.0);
+        // Three block rows: 100 + 60 + 40 from y = 200; the bubble spans 200..400.
+        let rows = [Some(b(200.0, 100.0)), Some(b(300.0, 60.0))];
+        let last = b(360.0, 40.0);
+        let centre = rail_centre(&rows, last, viewport, NO_INSET);
+        assert_eq!(
+            f32::from(centre),
+            300.0 - 360.0,
+            "mid-bubble is 60 above the last row"
+        );
+        // The half gap above the first row and below the last is not bubble.
+        let centre = rail_centre(&rows, last, viewport, (px(3.0), px(3.0)));
+        assert_eq!(
+            f32::from(centre),
+            300.0 - 360.0,
+            "symmetric insets keep the middle"
+        );
+        let centre = rail_centre(&rows, last, viewport, (px(17.0), px(3.0)));
+        assert_eq!(
+            f32::from(centre),
+            307.0 - 360.0,
+            "a turn gap above shifts it down"
+        );
+    }
+
+    /// A bubble taller than the pane keeps its rail on screen: the centre is
+    /// clamped inside the viewport, under the header fade band.
+    #[test]
+    fn a_tall_bubble_keeps_its_rail_inside_the_viewport() {
+        let viewport = b(100.0, 600.0);
+        // The bubble runs from far above the viewport (unmeasured rows) to below it.
+        let rows = [None, Some(b(-900.0, 500.0)), Some(b(-400.0, 500.0))];
+        let last = b(100.0, 900.0);
+        let centre = f32::from(rail_centre(&rows, last, viewport, NO_INSET)) + 100.0;
+        let low = 100.0 + HEADER_FADE_BAND + RAIL_BUTTON / 2.0 + RAIL_EDGE_INSET;
+        let high = 700.0 - RAIL_BUTTON / 2.0 - RAIL_EDGE_INSET;
+        assert!(
+            (low..=high).contains(&centre),
+            "centre {centre} outside the pane's {low}..{high}"
+        );
+        // A bubble that ends above the viewport's bottom: clamped to the bubble, not past it.
+        let rows = [Some(b(-200.0, 100.0))];
+        let last = b(-100.0, 150.0);
+        let centre = f32::from(rail_centre(&rows, last, viewport, NO_INSET)) - 100.0;
+        assert!(
+            centre <= 50.0 - RAIL_BUTTON / 2.0 + 0.01,
+            "rail {centre} below the bubble's bottom (50)"
+        );
+    }
+
+    struct Stack;
+
+    impl gpui::Render for Stack {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            // Three stacked "block rows" of one bubble, 60 + 40 + 20 tall; the
+            // last carries the rail, centred on all three (= 60 above its own top).
+            let block = |h: f32| div().w(px(300.0)).h(px(h)).relative();
+            div()
+                .w(px(500.0))
+                .h(px(400.0))
+                .flex()
+                .flex_col()
+                .child(block(60.0).debug_selector(|| "test-first".into()))
+                .child(block(40.0))
+                .child(
+                    block(20.0).debug_selector(|| "test-last".into()).child(
+                        hover_rail_frame(Some(px(-40.0))).child(div().size(px(RAIL_BUTTON))),
+                    ),
+                )
+        }
+    }
+
+    /// Rendered: the frame puts the rail's centre at the bubble's centre and
+    /// hangs it 6 pt off the bubble's right edge.
+    #[gpui::test]
+    fn the_rail_frame_hangs_at_the_bubbles_centre(cx: &mut TestAppContext) {
+        let (_view, vcx) = cx.add_window_view(|_, _| Stack);
+        vcx.run_until_parked();
+        let first = vcx.debug_bounds("test-first").expect("first row drawn");
+        let last = vcx.debug_bounds("test-last").expect("last row drawn");
+        let rail = vcx.debug_bounds("bubble-rail").expect("rail drawn");
+        let bubble_centre = f32::from(first.top() + last.bottom()) / 2.0;
+        let rail_centre = f32::from(rail.top() + rail.bottom()) / 2.0;
+        assert!(
+            (rail_centre - bubble_centre).abs() <= 0.5,
+            "rail centre {rail_centre}, bubble centre {bubble_centre}"
+        );
+        assert!(
+            (f32::from(rail.left() - last.right()) - 0.0).abs() <= 0.5,
+            "rail frame starts at the bubble's right edge: {} vs {}",
+            f32::from(rail.left()),
+            f32::from(last.right())
+        );
     }
 }
 
