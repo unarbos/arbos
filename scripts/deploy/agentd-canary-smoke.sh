@@ -64,6 +64,26 @@ if (( up == 0 )); then
   unpin
   exit 2
 fi
+# Seed check INSIDE the running box (#1708): agentd reports the `.source-sha` of the pi-ext seed
+# it copies into its projects (`machine.agentd.seed_sha`). A persisted /etc that kept an older
+# image's seed means the box runs old extension code whatever the image says; hold the lane.
+# An agentd too old to report the field (null) is logged, not blocking.
+in_box_seed="$(curl -fsS --max-time 20 -H "Authorization: Bearer $admin" "$RELAY_URL/admin/users" | python3 -c '
+import sys, json
+for u in json.load(sys.stdin):
+    if u["id"] == sys.argv[1]:
+        print(((u.get("machine") or {}).get("agentd") or {}).get("seed_sha") or "")
+' "$SMOKE_USER_ID" 2>/dev/null | tr -d '[:space:]')"
+if [[ -z "$in_box_seed" ]]; then
+  log "in-box seed check skipped: $SMOKE_USER_ID reports no seed_sha (agentd older than #1708)"
+elif [[ "$in_box_seed" != "$sha"* && "$sha" != "$in_box_seed"* ]]; then
+  event smoke_failed "pi-ext seed INSIDE the canary box is $in_box_seed, image $version was built from $sha — the box's /etc did not follow the image (#1708)"
+  log "in-box seed check FAILED: box seed $in_box_seed != $sha"
+  unpin
+  exit 1
+else
+  log "in-box seed check ok — $SMOKE_USER_ID runs pi-ext seed $in_box_seed"
+fi
 sleep 20
 report="$(ARBOS_RELAY_ADMIN_TOKEN="$admin" python3 "$here/busy-reply-smoke.py" \
   --relay "$RELAY_URL" --user "$SMOKE_USER_ID" --gate-seconds "$SMOKE_GATE_S" \

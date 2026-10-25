@@ -54,7 +54,7 @@ pub async fn list_users(State(state): State<AppState>, principal: Principal) -> 
             "snapshot": sb.as_ref().and_then(|s| s.snapshot.clone()),
             "image_outdated": sb.as_ref().is_some_and(|s| crate::upgrade::image_outdated(&state, s)),
             "upgrade": crate::upgrade::status_json(&state, &u.id).await,
-            "agentd": state.db.box_agentd(&u.id).ok().flatten().map(|a| json!({ "sha": a.sha, "version": a.version, "image": a.image, "reported_at": a.reported_at })),
+            "agentd": state.db.box_agentd(&u.id).ok().flatten().map(|a| json!({ "sha": a.sha, "version": a.version, "image": a.image, "seed_sha": a.seed_sha, "reported_at": a.reported_at })),
         });
         out.push(v);
     }

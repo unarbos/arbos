@@ -364,6 +364,12 @@ async fn boot() -> Result<()> {
                 // box runs, so the relay admin can tell what is shipped.
                 "sha": std::env::var("ARBOS_AGENTD_SHA").ok().filter(|v| !v.is_empty() && v != "unknown"),
                 "image": std::env::var("ARBOS_IMAGE_VERSION").ok().filter(|v| !v.is_empty() && v != "unknown"),
+                // The pi-ext seed this box actually copies into its projects (#1708): on a host
+                // sandbox /etc is persisted, so it can lag behind the image.
+                "seed_sha": std::fs::read_to_string("/etc/arbos/pi-seed/extensions/arbos-pi-ext/.source-sha")
+                    .ok()
+                    .map(|s| s.trim().to_owned())
+                    .filter(|s| !s.is_empty()),
             }))
             .send()
             .await;
