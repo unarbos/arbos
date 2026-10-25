@@ -41,6 +41,33 @@ pub const STABLE_PREFIX_FILE: &str = "stable-prefix";
 pub const SEND_TOOL_FILE: &str = "send-tool";
 /// Box-local override of background jobs (duplex step 2): `<work_root>/.arbos/jobs`, `on` or `off`.
 pub const JOBS_FILE: &str = "jobs";
+/// Box-local override of act→job conversion (duplex step 4): `<work_root>/.arbos/act-to-job`, `on` or `off`.
+pub const ACT_TO_JOB_FILE: &str = "act-to-job";
+
+/// Act→job conversion (duplex step 4, Jacob 2026-10-25 16:01 UTC): an `act` turn still running after
+/// `act_to_job_after()` that has used a web tool or more than `act_to_job_tool_calls()` tool calls
+/// posts its ack at once and hands the rest to a job, freeing the lock. `ARBOS_ACT_TO_JOB=on|off`,
+/// default **on**.
+pub fn act_to_job_on(override_file: &std::path::Path) -> bool {
+    switch_on("ARBOS_ACT_TO_JOB", override_file, true)
+}
+
+/// Seconds an act turn may run before it is converted (`ARBOS_ACT_TO_JOB_SECS`, default 6).
+pub fn act_to_job_after() -> std::time::Duration {
+    let secs = std::env::var("ARBOS_ACT_TO_JOB_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(6);
+    std::time::Duration::from_secs(secs)
+}
+
+/// Tool calls beyond which an act turn counts as long work (`ARBOS_ACT_TO_JOB_TOOL_CALLS`, default 3).
+pub fn act_to_job_tool_calls() -> u32 {
+    std::env::var("ARBOS_ACT_TO_JOB_TOOL_CALLS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3)
+}
 
 /// Background jobs as tools (duplex step 2, `docs/duplex-agent-design.md` §2.3): `start_job` /
 /// `list_jobs` are offered and the router prompt carries the jobs section. `ARBOS_JOBS=on|off`,
@@ -428,6 +455,11 @@ impl Config {
     /// section rides in the cached prefix) and at every `start_job` call.
     pub fn jobs(&self) -> bool {
         jobs_on(&self.box_flag_file(JOBS_FILE))
+    }
+
+    /// Act→job conversion (duplex step 4); read per turn.
+    pub fn act_to_job(&self) -> bool {
+        act_to_job_on(&self.box_flag_file(ACT_TO_JOB_FILE))
     }
 
     /// Send tool (duplex step 1): read per turn, so a toggle needs no respawn.
