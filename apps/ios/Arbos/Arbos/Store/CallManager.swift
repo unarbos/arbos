@@ -757,7 +757,9 @@ final class CallManager: NSObject, ObservableObject {
     /// Mute / unmute the published mic track (keeps the track, engine, and session as they are).
     /// CallKit's mute action uses the same path. Never calls `setMicrophone(enabled: false)`.
     fileprivate func applyLocalMicMute(_ wantMuted: Bool) async {
-        let pub = room.localParticipant.getTrackPublication(source: .microphone) as? LocalTrackPublication
+        // `getTrackPublication(source:)` is internal to LiveKit; use the public local list.
+        let pub = room.localParticipant.localAudioTracks.first { $0.source == .microphone }
+            ?? room.localParticipant.localAudioTracks.first
         switch MicMutePlan.plan(wantMuted: wantMuted, hasMicPublication: pub != nil) {
         case .muteTrack:
             try? await pub?.mute()
