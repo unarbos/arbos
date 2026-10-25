@@ -933,6 +933,9 @@ struct RowView: View, Equatable {
     /// Shared mention table from ChatView (built once per directory sync).
     let mentions: MentionTable
 
+    /// Which reaction chip is expanded to show who used that emoji under the bubble.
+    @State private var selectedReactionEmoji: String? = nil
+
     /// Trailing column width for swipe-revealed times (fits "12:59 PM").
     static let timeRevealWidth: CGFloat = 56
 
@@ -985,6 +988,10 @@ struct RowView: View, Equatable {
             bubble
             if !row.reactions.isEmpty {
                 reactionChips
+                if let emoji = selectedReactionEmoji,
+                   let reaction = row.reactions.first(where: { $0.emoji == emoji }) {
+                    reactionSenders(reaction)
+                }
             }
         }
         // Quote tap landed here: a soft accent wash that fades out (Mac parity).
@@ -1226,15 +1233,17 @@ struct RowView: View, Equatable {
         }
     }
 
-    /// Compact chips under the bubble (iMessage-style). Tap toggles your own reaction.
+    /// Compact chips under the bubble (iMessage-style). Tap shows who used that
+    /// emoji below the message; add/remove stays on the long-press capsule.
     private var reactionChips: some View {
         let mine = model.myUserId
         return HStack(spacing: 4) {
             if row.role == .user { Spacer(minLength: 0) }
             ForEach(row.reactions, id: \.emoji) { reaction in
                 let mineOn = mine.map { reaction.senders.contains($0) } ?? false
+                let selected = selectedReactionEmoji == reaction.emoji
                 Button {
-                    model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: reaction.emoji)
+                    selectedReactionEmoji = selected ? nil : reaction.emoji
                 } label: {
                     HStack(spacing: 3) {
                         Text(reaction.emoji).font(theme.font(14))
@@ -1248,19 +1257,64 @@ struct RowView: View, Equatable {
                     .padding(.vertical, 4)
                     .background(
                         Capsule(style: .continuous)
-                            .fill(mineOn ? theme.accent.opacity(0.22) : theme.card)
+                            .fill((mineOn || selected) ? theme.accent.opacity(0.22) : theme.card)
                     )
                     .overlay(
                         Capsule(style: .continuous)
-                            .strokeBorder(mineOn ? theme.accent.opacity(0.55) : theme.separator, lineWidth: 1)
+                            .strokeBorder(
+                                (mineOn || selected) ? theme.accent.opacity(0.55) : theme.separator,
+                                lineWidth: 1
+                            )
                     )
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("\(reaction.emoji) reaction, \(reaction.senders.count)")
+                .accessibilityHint("Shows who used this emoji")
             }
             if row.role != .user { Spacer(minLength: 0) }
         }
         .padding(.leading, reactionLeading)
+    }
+
+    /// Names of everyone who used `reaction`'s emoji, under the chips.
+    private func reactionSenders(_ reaction: MessageReaction) -> some View {
+        let names = reaction.senders.map(reactionSenderLabel).joined(separator: ", ")
+        return HStack(spacing: 0) {
+            if row.role == .user { Spacer(minLength: 0) }
+            Text(names)
+                .font(theme.font(12))
+                .foregroundStyle(theme.muted)
+                .multilineTextAlignment(row.role == .user ? .trailing : .leading)
+                .fixedSize(horizontal: false, vertical: true)
+            if row.role != .user { Spacer(minLength: 0) }
+        }
+        .padding(.leading, reactionLeading)
+        .accessibilityLabel("\(reaction.emoji) from \(names)")
+    }
+
+    /// Display name for a reaction sender id (`user:…` / `agent:…`).
+    private func reactionSenderLabel(_ sender: String) -> String {
+        if sender == model.myUserId { return "You" }
+        if let member = model.peopleChat(chatId)?.members.first(where: { $0.member == sender }) {
+            return member.displayName
+        }
+        if sender.hasPrefix("agent:"),
+           let id = sender.split(separator: ":", maxSplits: 1).last.map(String.init) {
+            if let project = model.project(id) ?? model.foreignAgent(id) {
+                return project.name
+            }
+        }
+        if sender.hasPrefix("user:"),
+           let id = sender.split(separator: ":", maxSplits: 1).last.map(String.init) {
+            if let me = model.user, me.id == id { return "You" }
+            if let person = model.directory.first(where: { $0.id == id }) {
+                return person.displayName
+            }
+        }
+        if let bare = sender.split(separator: ":", maxSplits: 1).last.map(String.init), !bare.isEmpty {
+            return bare
+        }
+        return sender
     }
 
     /// Match the avatar offset used by people-chat bubbles (26 pt + 8 pt gap).
