@@ -1768,6 +1768,17 @@ pub struct SecretExpiringPayloadDto {
     pub expired: bool,
 }
 
+/// `profile_updated` payload: a person changed their picture (`PUT` / `DELETE /me/avatar`).
+/// Sent to their own other devices and to everyone who shares a people chat or a server with
+/// them; `avatar_url` is the new picture (`null` = none, the coloured initials show).
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProfileUpdatedPayloadDto {
+    pub user_id: String,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+}
+
 /// One kind the relay queues on `/me/pushes` via `push_user` / `push_user_except` /
 /// `push_everyone`. Adjacent tagging matches the stored `{ kind, payload }` row.
 ///
@@ -1830,6 +1841,8 @@ pub enum PushEventDto {
     SecretsPaused(SecretsPausedPayloadDto),
     #[serde(rename = "secret_expiring")]
     SecretExpiring(SecretExpiringPayloadDto),
+    #[serde(rename = "profile_updated")]
+    ProfileUpdated(ProfileUpdatedPayloadDto),
 }
 
 impl PushEventDto {

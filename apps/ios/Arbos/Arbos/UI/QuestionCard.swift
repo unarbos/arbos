@@ -28,7 +28,7 @@ struct QuestionCard: View {
     let picked: [String]
     let open: Bool
 
-    /// #1544: a destructive-shell card; the footer points at Settings › Shell approvals.
+    /// #1544: a destructive-shell card; the footer says a standing choice is kept per agent.
     var shellCard: Bool = false
 
     @State private var dismissed = false
@@ -61,7 +61,7 @@ struct QuestionCard: View {
                 }
                 if open && !options.isEmpty {
                     Text(shellCard
-                         ? "Standing choices are per agent. See and revoke them in \(agentName) › Settings › Shell approvals. Or answer in the chat below."
+                         ? "Standing choices are per agent: \(agentName) stops asking for what you allow here. Or answer in the chat below."
                          : "Or answer in the chat below")
                         .font(theme.font(Theme.small))
                         .foregroundStyle(palette.badgeInk)

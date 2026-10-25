@@ -1,0 +1,9 @@
+{
+  "created_at": 1700000000000,
+  "id": "push_profile_updated",
+  "kind": "profile_updated",
+  "payload": {
+    "avatar_url": "https://relay.example/avatars/gh_201.jpg?v=1700000000000",
+    "user_id": "gh_201"
+  }
+}

@@ -413,7 +413,7 @@ pub fn approval_card(
             .text_color(theme.text_faint)
             .debug_selector(|| "shell-card-foot".into())
             .child(format!(
-                "Standing choices are per agent. See and revoke them in {agent} › Settings › Shell approvals."
+                "Standing choices are per agent: {agent} stops asking for what you allow here."
             ))
     });
 

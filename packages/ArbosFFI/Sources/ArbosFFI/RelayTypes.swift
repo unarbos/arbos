@@ -1705,6 +1705,19 @@ public struct PeopleProjectSharedPayloadDto: Codable {
 	}
 }
 
+/// `profile_updated` payload: a person changed their picture (`PUT` / `DELETE /me/avatar`).
+/// Sent to their own other devices and to everyone who shares a people chat or a server with
+/// them; `avatar_url` is the new picture (`null` = none, the coloured initials show).
+public struct ProfileUpdatedPayloadDto: Codable {
+	public let user_id: String
+	public let avatar_url: String?
+
+	public init(user_id: String, avatar_url: String?) {
+		self.user_id = user_id
+		self.avatar_url = avatar_url
+	}
+}
+
 /// One row in `project_members_json` → `members`.
 public struct ProjectMemberDto: Codable {
 	public let id: String
@@ -2608,6 +2621,7 @@ public enum PushEventDto: Codable {
 	case secretRequest(SecretRequestPushPayloadDto)
 	case secretsPaused(SecretsPausedPayloadDto)
 	case secretExpiring(SecretExpiringPayloadDto)
+	case profileUpdated(ProfileUpdatedPayloadDto)
 
 	enum CodingKeys: String, CodingKey, Codable {
 		case peopleMessage = "people_message",
@@ -2635,7 +2649,8 @@ public enum PushEventDto: Codable {
 			releasePublished = "release_published",
 			secretRequest = "secret_request",
 			secretsPaused = "secrets_paused",
-			secretExpiring = "secret_expiring"
+			secretExpiring = "secret_expiring",
+			profileUpdated = "profile_updated"
 	}
 
 	private enum ContainerCodingKeys: String, CodingKey {
@@ -2776,6 +2791,11 @@ public enum PushEventDto: Codable {
 					self = .secretExpiring(content)
 					return
 				}
+			case .profileUpdated:
+				if let content = try? container.decode(ProfileUpdatedPayloadDto.self, forKey: .payload) {
+					self = .profileUpdated(content)
+					return
+				}
 			}
 		}
 		throw DecodingError.typeMismatch(PushEventDto.self, DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "Wrong type for PushEventDto"))
@@ -2861,6 +2881,9 @@ public enum PushEventDto: Codable {
 			try container.encode(content, forKey: .payload)
 		case .secretExpiring(let content):
 			try container.encode(CodingKeys.secretExpiring, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .profileUpdated(let content):
+			try container.encode(CodingKeys.profileUpdated, forKey: .kind)
 			try container.encode(content, forKey: .payload)
 		}
 	}

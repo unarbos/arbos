@@ -957,6 +957,13 @@ fn push_fixture_events() -> Vec<(&'static str, PushEventDto)> {
                 expired: false,
             }),
         ),
+        (
+            "push_profile_updated.json",
+            PushEventDto::ProfileUpdated(arbos_core::api::ProfileUpdatedPayloadDto {
+                user_id: "gh_201".into(),
+                avatar_url: Some("https://relay.example/avatars/gh_201.jpg?v=1700000000000".into()),
+            }),
+        ),
     ]
 }
 

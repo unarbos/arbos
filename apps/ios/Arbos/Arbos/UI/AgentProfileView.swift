@@ -211,10 +211,12 @@ struct AgentEditSheet: View {
 /// The agent's pane on the shared profile pane (D93) — Grok Bot's content model, the same
 /// as the Mac's `profiles/agent.rs` (#1679; iPhone [feedback iphone-agent-pane-tabs-2026-10-25]):
 /// hero with the description as the label ("Add a label" for the owner, tap edits it in
-/// place), then **Details** (Coding → Routines → Settings → Who may message → Profile behind an
-/// Edit profile row), **Library** (images · files · voice · links) and **Computer** (Machine ·
-/// Resources · Running now from `GET /machine/debug`). No Delete footer: the home row's
-/// menu deletes, at once.
+/// place; a tap on the name renames), then **Details** (Settings — Coding and Routines ahead
+/// of it while `AgentPane.agentDetailsShowCodingRoutines` is on), **Library** (images ·
+/// files · voice · links) and **Computer** (Machine · Resources · Running now from
+/// `GET /machine/debug`). No Delete footer: the home row's menu deletes, at once. "Who may
+/// message", "Permissions" and "Profile" left Details on 2026-10-25 ([feedback
+/// agent-details-remove-sections-ios-2026-10-25]).
 struct AgentProfileView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -223,12 +225,11 @@ struct AgentProfileView: View {
     /// For an agent that is not in my project list (someone else's agent in a DM).
     var fallback: Project? = nil
     @State private var tab = "Details"
-    /// The Profile card's "Edit profile" row unfolds Name · Handle · Description.
-    @State private var editOpen = false
     /// The hero's label (= the description) being edited in place.
     @State private var editingLabel = false
     @State private var labelDraft = ""
     @FocusState private var labelFocused: Bool
+    /// The rename alert, from a tap on the hero's name (the owner only).
     @State private var showRename = false
     @State private var renameDraft = ""
     /// The avatar picker sheet (D92 amendment), from the hero's crayon; the rig's
@@ -238,8 +239,6 @@ struct AgentProfileView: View {
     @State private var showReasoning = false
     /// The call-voice picker (#1316's `VoicePickerView`) from the Settings card's Voice row.
     @State private var showVoice = false
-    @State private var showMessageGrantPicker = false
-    @State private var messageGrantError: String?
 
     private var project: Project? { model.project(projectId) ?? fallback }
     private var isMine: Bool { model.project(projectId) != nil && project?.shared != true }
@@ -272,8 +271,8 @@ struct AgentProfileView: View {
                 }
                 .scrollDismissesKeyboard(.interactively)
                 .onAppear {
-                    // Rig: `ARBOS_PANE_SCROLL=<block>` brings a Details block below the fold
-                    // into view (`permissions`, `profile`, or `end`).
+                    // Rig: `ARBOS_PANE_SCROLL=<anchor>` scrolls to a `pane-<anchor>` id
+                    // (`end` is the pane's foot).
                     guard let anchor = DebugHooks.paneScroll else { return }
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                         withAnimation(nil) { reader.scrollTo(anchor == "end" ? "pane-end" : "pane-\(anchor)", anchor: .top) }
@@ -293,7 +292,6 @@ struct AgentProfileView: View {
             guard isMine else { return }
             await model.refreshRoutines(projectId)
             await model.refreshBoxReport()
-            await model.refreshShellGrants(projectId)
         }
         .task(id: "\(tab)-\(model.isStreaming(project: projectId))") {
             // The Coding row's elapsed time and the Computer tab's jobs move: poll while
@@ -322,7 +320,7 @@ struct AgentProfileView: View {
             }
             // Rig: `ARBOS_PANEL_TAB=Computer|Library` lands on a tab; `ARBOS_SHOW=agentvoice`
             // also opens the Voice row's picker; `ARBOS_SHOW=agentlabel` edits the label;
-            // `ARBOS_SHOW=agentedit` unfolds Edit profile.
+            // `ARBOS_SHOW=agentrename` opens the rename alert.
             if let t = DebugHooks.panelTab, PaneKinds.agent.contains(t) { tab = t }
             if isMine, DebugHooks.show == "agentvoice" {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { showVoice = true }
@@ -330,7 +328,9 @@ struct AgentProfileView: View {
             if isMine, DebugHooks.show == "agentlabel" {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { startLabelEdit() }
             }
-            if isMine, DebugHooks.show == "agentedit" { editOpen = true }
+            if isMine, DebugHooks.show == "agentrename" {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { startRename() }
+            }
         }
         .sheet(isPresented: $showReasoning) {
             if let project = model.project(projectId) { ReasoningPickerView(project: project).environmentObject(model).environment(\.theme, theme) }
@@ -338,16 +338,6 @@ struct AgentProfileView: View {
         .sheet(isPresented: $showVoice) {
             if let project = model.project(projectId) { VoicePickerView(project: project).environmentObject(model).environment(\.theme, theme) }
         }
-        .sheet(isPresented: $showMessageGrantPicker) {
-            if let project = model.project(projectId) {
-                NavigationStack {
-                    AddMessageGrantSheet(project: project).environmentObject(model).environment(\.theme, theme)
-                }
-            }
-        }
-        .alert("Couldn't change who may message", isPresented: Binding(get: { messageGrantError != nil }, set: { if !$0 { messageGrantError = nil } })) {
-            Button("OK", role: .cancel) { }
-        } message: { Text(messageGrantError ?? "") }
         .alert("Name", isPresented: $showRename) {
             TextField("Agent name", text: $renameDraft)
             Button("Save") { commitRename() }
@@ -363,11 +353,20 @@ struct AgentProfileView: View {
         return PaneHero(
             picture: .image(AnyView(heroPicture(project))),
             name: project.name,
+            nameAction: isMine ? { startRename() } : nil,
             subtitle: subtitle,
             subtitleTint: hasLabel || !isMine ? nil : theme.placeholder,
             subtitleAction: isMine ? { startLabelEdit() } : nil,
             subtitleEditor: editingLabel ? AnyView(labelEditor) : nil
         )
+    }
+
+    /// The name is renamed through an alert (a second inline editor would stack on the
+    /// label's); since the Profile card left, the hero's name is the one way in.
+    private func startRename() {
+        guard isMine, let project else { return }
+        renameDraft = project.name
+        showRename = true
     }
 
     /// The label field under the name while the label is being edited: Return or Done
@@ -436,7 +435,7 @@ struct AgentProfileView: View {
         }
     }
 
-    // MARK: Details — live content first, the edit fields last
+    // MARK: Details — Settings (Coding and Routines ahead of it while the flag is on)
 
     private func detailsSections(_ project: Project) -> [PaneSection] {
         var out: [PaneSection] = []
@@ -455,60 +454,6 @@ struct AgentProfileView: View {
             case .settings:
                 out.append(.title("Settings"))
                 out.append(.card(settingsRows(project)))
-            case .access:
-                out.append(.title("Who may message \(project.name)"))
-                var grants: [AnyView] = project.messageGrants.map { g in AnyView(messageGrantRow(project, g)) }
-                grants.append(AnyView(Button { showMessageGrantPicker = true } label: {
-                    PaneRow(leading: .glyph("person.badge.plus"), title: "Give a person access…", titleTint: theme.accent)
-                }.buttonStyle(.plain)))
-                out.append(.card(grants, separatorInset: PaneKit.separatorInset(.glyph(""))))
-            case .permissions:
-                // Permissions · Shell approvals (#1544): the standing choices made on
-                // destructive-shell cards, one switch each; off = revoked, the agent asks again.
-                let grants = model.shellGrants[project.id] ?? []
-                out.append(.custom(AnyView(PaneSectionTitle("Permissions").padding(.bottom, -10).id("pane-permissions"))))
-                out.append(.card([AnyView(
-                    PaneRow(leading: .tile("terminal"), title: "Shell approvals", value: ShellGrant.summary(grants))
-                        .accessibilityIdentifier("shell-approvals-row")
-                )]))
-                out.append(.footnote("\(project.name) asks before destructive shell commands outside /work/tmp. Standing answers from the cards land here."))
-                if !grants.isEmpty {
-                    out.append(.title("Shell approvals · \(project.name)"))
-                    out.append(.card(grants.map { g in
-                        AnyView(
-                            PaneRow(
-                                leading: .glyph("terminal"),
-                                title: g.label,
-                                subtitle: g.ruleClass + " · " + g.detail + (g.chatId == nil ? "" : " · this chat only"),
-                                trailing: AnyView(
-                                    Toggle("", isOn: Binding(get: { true }, set: { on in
-                                        if !on { model.revokeShellGrant(projectId: project.id, grantId: g.id) }
-                                    }))
-                                    .labelsHidden().tint(theme.online)
-                                    .accessibilityLabel("\(g.label) allowed")
-                                    .accessibilityIdentifier("shell-grant-\(g.id)")
-                                )
-                            )
-                        )
-                    }, separatorInset: PaneKit.separatorInset(.glyph(""))))
-                    out.append(.footnote("Turn one off and \(project.name) asks again next time. Every allowed run is in Activity."))
-                }
-            case .profile:
-                out.append(.custom(AnyView(PaneSectionTitle("Profile").padding(.bottom, -10).id("pane-profile"))))
-                var rows: [AnyView] = []
-                if isMine {
-                    rows.append(AnyView(Button {
-                        withAnimation(.snappy(duration: 0.2)) { editOpen.toggle() }
-                    } label: {
-                        PaneRow(leading: .tile("pencil"), title: "Edit profile", trailing: AnyView(
-                            Image(systemName: editOpen ? "chevron.up" : "chevron.down")
-                                .font(theme.font(14, weight: .semibold))
-                                .foregroundStyle(theme.placeholder)
-                        ))
-                    }.buttonStyle(.plain)))
-                }
-                if !isMine || editOpen { rows += profileRows(project) }
-                out.append(.card(rows, separatorInset: isMine ? PaneKit.separatorInset(.tile("")) : PaneKit.inset))
             }
         }
         return out
@@ -577,29 +522,6 @@ struct AgentProfileView: View {
             }
             .buttonStyle(.plain)
         ))
-        return rows
-    }
-
-    /// Name · Handle · Description — the edit fields, under the Edit profile row.
-    private func profileRows(_ project: Project) -> [AnyView] {
-        var rows: [AnyView] = []
-        if isMine {
-            rows.append(AnyView(Button {
-                renameDraft = project.name
-                showRename = true
-            } label: { PaneRow(title: "Name", value: project.name, chevron: true) }.buttonStyle(.plain)))
-        } else {
-            rows.append(AnyView(PaneRow(title: "Name", value: project.name)))
-        }
-        rows.append(AnyView(PaneRow(title: "Handle", value: "@\(mentionSlug(project.name))")))
-        let description = project.description.trimmingCharacters(in: .whitespacesAndNewlines)
-        if isMine {
-            rows.append(AnyView(Button { startLabelEdit() } label: {
-                PaneRow(title: "Description", value: description.isEmpty ? "Add a description" : description, chevron: true)
-            }.buttonStyle(.plain)))
-        } else {
-            rows.append(AnyView(PaneRow(title: "Description", value: description.isEmpty ? "—" : description)))
-        }
         return rows
     }
 
@@ -702,65 +624,6 @@ struct AgentProfileView: View {
         }
     }
 
-    // MARK: Who may message
-
-    /// One grant row: avatar · name / @handle · last message · switch; a long press removes it
-    /// (the switch only pauses it).
-    private func messageGrantRow(_ project: Project, _ g: MessageGrant) -> some View {
-        let subtitle: String = {
-            var s = g.handle.map { "@\($0)" } ?? g.kind
-            if g.kind == "agent" { s += " · agent" }
-            if let at = g.lastAt { s += " · messaged \(SecretsText.ago(at))" } else if !g.note.isEmpty { s += " · \(g.note)" }
-            return s
-        }()
-        let isOn = Binding<Bool>(
-            get: { model.project(project.id)?.messageGrants.first(where: { $0.grantee == g.grantee })?.enabled ?? g.enabled },
-            set: { on in Task { await setMessageGrant(project.id, grantee: g.grantee, enabled: on) } }
-        )
-        return PaneRow(
-            leading: .avatar(AnyView(
-                g.kind == "agent"
-                    ? AnyView(InitialsAvatar(name: g.displayName, handle: g.handle ?? g.id, id: g.id, override: nil, size: PaneKit.avatar))
-                    : AnyView(PersonAvatar(url: g.avatarUrl, handle: g.handle ?? g.id, size: PaneKit.avatar, name: g.name, id: g.id))
-            )),
-            title: g.displayName,
-            subtitle: subtitle,
-            trailing: AnyView(Toggle("", isOn: isOn).labelsHidden().tint(theme.online))
-        )
-        .contextMenu {
-            Button(role: .destructive) {
-                Task { await removeMessageGrant(project.id, grantee: g.grantee) }
-            } label: { Label("Remove", systemImage: "trash") }
-        }
-    }
-
-    private func setMessageGrant(_ pid: Id, grantee: String, enabled: Bool) async {
-        if let i = model.projects.firstIndex(where: { $0.id == pid }),
-           let j = model.projects[i].messageGrants.firstIndex(where: { $0.grantee == grantee }) {
-            model.projects[i].messageGrants[j].enabled = enabled
-        }
-        do {
-            let grants = try await model.relay.setMessageGrant(pid, grantee: grantee, enabled: enabled)
-            if let i = model.projects.firstIndex(where: { $0.id == pid }) { model.projects[i].messageGrants = grants }
-        } catch {
-            messageGrantError = error.localizedDescription
-            await model.refreshRegistry()
-        }
-    }
-
-    private func removeMessageGrant(_ pid: Id, grantee: String) async {
-        if let i = model.projects.firstIndex(where: { $0.id == pid }) {
-            model.projects[i].messageGrants.removeAll { $0.grantee == grantee }
-        }
-        do {
-            let grants = try await model.relay.removeMessageGrant(pid, grantee: grantee)
-            if let i = model.projects.firstIndex(where: { $0.id == pid }) { model.projects[i].messageGrants = grants }
-        } catch {
-            messageGrantError = error.localizedDescription
-            await model.refreshRegistry()
-        }
-    }
-
     /// The Voice row's value — the chosen voice's name, or "Default" (the Mac's
     /// `voicepicker::current_label`); the raw id until the catalog arrives.
     private func voiceLine(_ p: Project) -> String {
@@ -814,96 +677,5 @@ struct ReasoningPickerView: View {
             }
         }
         .presentationDetents([.medium])
-    }
-}
-
-/// "Give a person access…": pick an Arbos user; their agents may then message this agent
-/// (`PUT /projects/{id}/message-access`). The secrets' "Who can direct" picker, same shape.
-struct AddMessageGrantSheet: View {
-    @EnvironmentObject private var model: AppModel
-    @Environment(\.theme) private var theme
-    @Environment(\.dismiss) private var dismiss
-    let project: Project
-    @State private var query = ""
-    @State private var remote: [Person] = []
-    @State private var busy = false
-    @State private var error: String?
-
-    private var already: Set<String> { Set(project.messageGrants.map(\.id)) }
-
-    private var candidates: [Person] {
-        let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        var out = q.isEmpty
-            ? model.directory
-            : model.directory.filter { $0.handle.lowercased().contains(q) || ($0.name ?? "").lowercased().contains(q) }
-        for p in remote where !out.contains(where: { $0.id == p.id }) { out.append(p) }
-        return out.filter { $0.id != model.user?.id && !already.contains($0.id) }
-    }
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                Text("The person you add may have their agents message \(project.name). Their messages land in \(project.name)'s chat, and \(project.name) answers them. Your own agents can always message it.")
-                    .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
-                TextField("", text: $query, prompt: Text("Search by name or @handle").foregroundStyle(theme.placeholder))
-                    .font(theme.font(Theme.body))
-                    .foregroundStyle(theme.text)
-                    .padding(.horizontal, 14)
-                    .frame(height: Theme.fieldHeight)
-                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
-                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                if candidates.isEmpty {
-                    Text(query.isEmpty ? "Nobody else on Arbos yet." : "No one named that.")
-                        .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
-                } else {
-                    VStack(spacing: 0) {
-                        ForEach(Array(candidates.prefix(12))) { p in
-                            Button {
-                                Haptics.pick()
-                                Task { await grant(p) }
-                            } label: { PersonRow(person: p) }
-                            .buttonStyle(.plain)
-                            .disabled(busy)
-                        }
-                    }
-                }
-                if let error {
-                    Text(error).font(theme.font(Theme.tiny)).foregroundStyle(theme.danger)
-                }
-            }
-            .padding(.horizontal, 24)
-            .padding(.top, 16)
-            .padding(.bottom, 32)
-        }
-        .scrollDismissesKeyboard(.interactively)
-        .background(theme.bg)
-        .navigationTitle("Who may message \(project.name)")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                Button("Cancel") { dismiss() }.foregroundStyle(theme.text)
-            }
-        }
-        .task { await model.loadDirectory(force: false) }
-        .task(id: query) {
-            let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard q.count >= 2 else { remote = []; return }
-            try? await Task.sleep(nanoseconds: 250_000_000)
-            remote = await model.searchPeople(q)
-        }
-    }
-
-    private func grant(_ p: Person) async {
-        busy = true
-        defer { busy = false }
-        do {
-            let grants = try await model.relay.setMessageGrant(project.id, grantee: "@\(p.handle)", enabled: true)
-            if let i = model.projects.firstIndex(where: { $0.id == project.id }) { model.projects[i].messageGrants = grants }
-            dismiss()
-        } catch {
-            self.error = error.localizedDescription
-        }
     }
 }

@@ -7087,14 +7087,19 @@ impl AppState {
         cx.notify();
     }
 
-    /// Agent pane › "Give a person access…": the same sheet; a pick lets that person's agents
-    /// message this agent (`PUT /projects/{id}/message-access`).
+    /// "Give a person access…": the same sheet; a pick lets that person's agents message
+    /// this agent (`PUT /projects/{id}/message-access`). The agent pane's "Who may message"
+    /// card that opened it left on 2026-10-25 ([feedback
+    /// agent-details-remove-sections-mac-2026-10-25]); the list and its calls stay for the
+    /// next way in.
+    #[allow(dead_code)]
     pub fn open_message_grant_picker(&mut self, project_id: Id, cx: &mut Context<Self>) {
         self.open_new_chat(cx);
         self.message_grant_target = Some(project_id);
         cx.notify();
     }
 
+    #[allow(dead_code)]
     pub fn set_message_grant(
         &mut self,
         project_id: Id,
@@ -7115,6 +7120,7 @@ impl AppState {
         cx.notify();
     }
 
+    #[allow(dead_code)]
     pub fn remove_message_grant(
         &mut self,
         project_id: Id,
@@ -8148,8 +8154,11 @@ impl AppState {
         cx.notify();
     }
 
-    /// Settings › Shell approvals: switch a grant off. The row goes at once; the relay's list
-    /// confirms it.
+    /// Switch a standing shell grant off (`DELETE /projects/{id}/shell-grants/{grant}`). The
+    /// row goes at once; the relay's list confirms it. The Permissions card that showed the
+    /// switches left the agent pane on 2026-10-25 ([feedback
+    /// agent-details-remove-sections-mac-2026-10-25]); the call stays for the next way in.
+    #[allow(dead_code)]
     pub fn shell_grant_revoke(&mut self, project_id: Id, grant_id: String, cx: &mut Context<Self>) {
         if let Some(list) = self.shell_grants.get_mut(&project_id) {
             list.retain(|g| g.id != grant_id);

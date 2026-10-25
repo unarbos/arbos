@@ -908,15 +908,24 @@ pub async fn patch_me(
     .into_response()
 }
 
-/// `PUT /me/avatar`: raw JPEG body → public `{public_url}/avatars/{user_id}.jpg?v=…`.
+/// `PUT /me/avatar {image_key}` (JSON body): make a picture the relay already holds in my
+/// `users:{id}` slot — the Generate tab's preview — my profile picture.
+#[derive(Deserialize)]
+struct PutAvatarKeyBody {
+    image_key: String,
+}
+
+/// `PUT /me/avatar`: raw JPEG body → public `{public_url}/avatars/{user_id}.jpg?v=…`. With a
+/// JSON body `{image_key}` the bytes come from my `users:{id}` blob slot instead (the avatar
+/// picker's generated preview). Either way the new picture fans out (`profile_updated`).
 pub async fn put_avatar(
     State(state): State<AppState>,
     principal: Principal,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let user_id = match &principal {
-        Principal::Device { user_id, .. } => user_id.clone(),
+    let (user_id, device_id) = match &principal {
+        Principal::Device { id, user_id, .. } => (user_id.clone(), id.clone()),
         Principal::Box { .. } | Principal::Admin => {
             return api_error(StatusCode::FORBIDDEN, "forbidden", "device token required")
         }
@@ -924,25 +933,49 @@ pub async fn put_avatar(
     if !safe_avatar_user_id(&user_id) {
         return api_error(StatusCode::BAD_REQUEST, "bad_user", "bad user id");
     }
-    // Header and bytes must both say "image" (the shared gate); the file is then served as
-    // `{user}.jpg`, so of the image types only a JPEG is stored here — the apps re-encode.
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok());
-    match check_avatar(content_type, &body) {
-        Ok(ImageKind::Jpeg) => {}
-        Ok(other) => {
-            return api_error(
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                "not_jpeg",
-                format!(
-                    "Profile pictures are stored as JPEG; this is a {other}. Re-encode it first"
-                ),
-            );
+    let jpeg: Vec<u8> = if content_type.is_some_and(|t| t.starts_with("application/json")) {
+        let Ok(key) = serde_json::from_slice::<PutAvatarKeyBody>(&body) else {
+            return api_error(StatusCode::BAD_REQUEST, "bad_request", "provide image_key");
+        };
+        let slot = format!("{}{user_id}", crate::images::USER_BLOB_PREFIX);
+        match crate::blobs::stored_image(&state, &slot, &key.image_key).await {
+            crate::blobs::StoredImage::Image(ImageKind::Jpeg) => {}
+            crate::blobs::StoredImage::Image(other) => {
+                return api_error(
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    "not_jpeg",
+                    format!("Profile pictures are stored as JPEG; this is a {other}"),
+                );
+            }
+            crate::blobs::StoredImage::Missing => return crate::blobs::no_such_image(),
+            crate::blobs::StoredImage::NotAnImage(why) => return not_an_image(&why),
         }
-        Err(why) => return not_an_image(&why),
-    }
-    if body.len() > MAX_AVATAR_BYTES {
+        match crate::blobs::read(&state, &slot, &key.image_key).await {
+            Some(bytes) => bytes,
+            None => return crate::blobs::no_such_image(),
+        }
+    } else {
+        // Header and bytes must both say "image" (the shared gate); the file is then served
+        // as `{user}.jpg`, so of the image types only a JPEG is stored here — the apps re-encode.
+        match check_avatar(content_type, &body) {
+            Ok(ImageKind::Jpeg) => {}
+            Ok(other) => {
+                return api_error(
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    "not_jpeg",
+                    format!(
+                        "Profile pictures are stored as JPEG; this is a {other}. Re-encode it first"
+                    ),
+                );
+            }
+            Err(why) => return not_an_image(&why),
+        }
+        body.to_vec()
+    };
+    if jpeg.len() > MAX_AVATAR_BYTES {
         return api_error(
             StatusCode::PAYLOAD_TOO_LARGE,
             "too_large",
@@ -955,7 +988,7 @@ pub async fn put_avatar(
             return api_error(StatusCode::INTERNAL_SERVER_ERROR, "io", e.to_string());
         }
     }
-    if let Err(e) = tokio::fs::write(&path, &body).await {
+    if let Err(e) = tokio::fs::write(&path, &jpeg).await {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "io", e.to_string());
     }
     let v = now_ms();
@@ -966,6 +999,7 @@ pub async fn put_avatar(
     if let Err(e) = state.db.set_user_avatar_url(&user_id, &avatar_url) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
+    fan_out_profile(&state, &user_id, &device_id, Some(avatar_url.clone()));
     Json(MeUserResponseDto {
         user: user_dto(&state, &user_id),
         avatar_url: Some(Some(avatar_url)),
@@ -976,8 +1010,8 @@ pub async fn put_avatar(
 /// `DELETE /me/avatar`: drop the uploaded picture; the GitHub avatar (by github_id, GitHub's
 /// stable URL) shows again, or the D79 coloured initials when there is none.
 pub async fn delete_avatar(State(state): State<AppState>, principal: Principal) -> Response {
-    let user_id = match &principal {
-        Principal::Device { user_id, .. } => user_id.clone(),
+    let (user_id, device_id) = match &principal {
+        Principal::Device { id, user_id, .. } => (user_id.clone(), id.clone()),
         Principal::Box { .. } | Principal::Admin => {
             return api_error(StatusCode::FORBIDDEN, "forbidden", "device token required")
         }
@@ -994,16 +1028,68 @@ pub async fn delete_avatar(State(state): State<AppState>, principal: Principal) 
         .and_then(|u| u.github_id)
         .map(|id| format!("https://avatars.githubusercontent.com/u/{id}?v=4"));
     match state.db.clear_user_avatar_url(&user_id, github.as_deref()) {
-        Ok(()) => Json(MeUserResponseDto {
-            user: user_dto(&state, &user_id),
-            avatar_url: Some(github),
-        })
-        .into_response(),
+        Ok(()) => {
+            fan_out_profile(&state, &user_id, &device_id, github.clone());
+            Json(MeUserResponseDto {
+                user: user_dto(&state, &user_id),
+                avatar_url: Some(github),
+            })
+            .into_response()
+        }
         Err(e) if e.to_string() == "no such user" => {
             api_error(StatusCode::NOT_FOUND, "not_found", "no such user")
         }
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
     }
+}
+
+/// Upper bound on the people told about one picture change (a member of very large servers
+/// would otherwise write thousands of push rows per change).
+const PROFILE_FAN_OUT_MAX: usize = 2000;
+
+/// A changed profile picture reaches every device that shows it: my own other devices (the one
+/// that made the change already has the answer) and everyone who shares a people chat or a
+/// server with me, as one `profile_updated` push each. Clients re-read `/me` for themselves and
+/// the people / server lists for others; `avatar_url` carries the new picture for a cheap
+/// in-place update.
+fn fan_out_profile(state: &AppState, user_id: &str, device_id: &str, avatar_url: Option<String>) {
+    let event = PushEventDto::ProfileUpdated(arbos_core::api::ProfileUpdatedPayloadDto {
+        user_id: user_id.to_owned(),
+        avatar_url,
+    });
+    let _ = state.db.push_user_except_event(user_id, device_id, &event);
+    for uid in profile_audience(state, user_id) {
+        let _ = state.db.push_user_event(&uid, &event, None);
+    }
+}
+
+/// Who else sees my picture: the humans in my people chats and the members of my servers, each
+/// once, never me, capped at `PROFILE_FAN_OUT_MAX`.
+pub fn profile_audience(state: &AppState, user_id: &str) -> Vec<String> {
+    let mut audience: Vec<String> = Vec::new();
+    for cm in state
+        .db
+        .chats_of_member(&format!("user:{user_id}"))
+        .unwrap_or_default()
+    {
+        audience.extend(crate::people::human_user_ids(&cm));
+    }
+    for (server, _) in state.db.servers_of_user(user_id).unwrap_or_default() {
+        audience.extend(
+            state
+                .db
+                .server_members(&server.id)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|m| m.banned_at.is_none())
+                .map(|m| m.user_id),
+        );
+    }
+    audience.sort();
+    audience.dedup();
+    audience.retain(|u| u != user_id);
+    audience.truncate(PROFILE_FAN_OUT_MAX);
+    audience
 }
 
 /// `GET /avatars/{user_id}.jpg` — public (same role as a GitHub CDN avatar URL).

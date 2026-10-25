@@ -1694,6 +1694,7 @@ mod tests {
             "push_secret_request_secret.json",
             "push_secrets_paused.json",
             "push_secret_expiring.json",
+            "push_profile_updated.json",
         ];
         for name in names {
             let item: PushItemDto = load_json(name);
