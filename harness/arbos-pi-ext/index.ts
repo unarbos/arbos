@@ -35,6 +35,9 @@ const ROUTE_PREFIX = "(Arbos: call `route` first.) ";
 // turn — as pi's steer, or as the prompt that continues the turn after agentd aborted a long
 // tool call — so it gets no route reminder and the turn keeps its `routed` state.
 const STEER_PREFIX = "[Arbos steer:";
+// Mirrors `agent::RELAY_TURN_MARK`: agentd stamps every relay turn (a job's or subagent's
+// result, an approval outcome, an agent's reply) — turns whose only valid route is `reply`.
+const RELAY_TURN_MARK = "[Arbos relay turn]";
 // Mirrors `arbos_core::approval::SHELL_TOOLS`; the classification itself happens in agentd.
 const SHELL_TOOLS = new Set(["bash", "shell", "run_command", "execute_command"]);
 const APPROVAL_POLL_MS = Number(process.env.ARBOS_APPROVAL_POLL_MS ?? 1500);
@@ -109,6 +112,11 @@ export default function arbosPiExt(pi: ExtensionAPI) {
   // Per-turn state. Reset at every run start.
   let routeAttempts = 0;
   let routed = false;
+  // A relay turn (a job's or subagent's result, an approval outcome, an agent's reply): its only
+  // valid route is `reply`, so a `send_message` that comes first is that route (sweep 2026-10-25:
+  // the result turn's two send_message calls were blocked "route-first"; the model then routed
+  // `reply` with "Delivering the update now." and the user read only that).
+  let relayTurn = false;
   let routeCorrections = 0;
   let correcting = false;
   let sessionId = "";
@@ -154,6 +162,7 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     // that turn already routed, so the route-first guard does not apply again. Read from the
     // prompt itself: state carried from the `input` hook can miss when the hooks run apart.
     routed = event.messageType === "user" && event.prompt.startsWith(STEER_PREFIX);
+    relayTurn = event.messageType === "user" && event.prompt.startsWith(RELAY_TURN_MARK);
     routeCorrections = 0;
     correcting = false;
     if (STABLE_PREFIX) return; // D87: the context rides in the user turn (see the `input` hook)
@@ -220,7 +229,13 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     if (directOnly) {
       return { block: true, reason: `${event.toolName} cannot be called from a script: call it directly, after the script.` };
     }
-    if (beforeRoute) {
+    if (beforeRoute && relayTurn && event.toolName === "send_message") {
+      // Speaking first in a relay turn is routing `reply`: record it and let the message out.
+      routeAttempts += 1;
+      const res = await hook("/hook/route", { session_id: sessionId, role: SESSION_ROLE, attempt: routeAttempts, args: { action: "reply" } });
+      routed = true;
+      audit({ kind: "route_implicit", session: sessionId, role: SESSION_ROLE, ok: !res || res.ok !== false });
+    } else if (beforeRoute) {
       return {
         block: true,
         reason:
