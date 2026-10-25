@@ -3892,6 +3892,44 @@ impl Agent {
         if model_failed.is_some() || silent_no_route {
             final_status = MessageStatus::Error;
         }
+        // #1779: in a shared chat a `route reply` with nothing to say is the agent staying quiet
+        // — the row goes away instead of becoming a stock "didn't answer" line (or, worse, a
+        // bubble announcing the silence).
+        if quiet_in_shared_chat(
+            &turn,
+            self.people.is_people_chat(chat_id),
+            model_failed.is_none(),
+            err_text.is_none(),
+        ) {
+            {
+                let h = host.lock().await;
+                if let Err(e) = h.doc.delete_message(&assistant_msg_id) {
+                    tracing::warn!(chat_id, error = %e, "quiet turn: could not remove the empty row");
+                }
+            }
+            if turn.activity.is_some() {
+                self.post_activity(chat_id, None);
+            }
+            let _ = self.store.t3_append(
+                chat_id,
+                None,
+                Some(chat_id),
+                "quiet",
+                Some("system"),
+                "stayed quiet: route reply with nothing to say in a shared chat (no row)",
+                Some(&json!({ "message_id": assistant_msg_id, "user_message_id": user_msg_id })),
+            );
+            tracing::info!(
+                chat_id,
+                "quiet turn in a shared chat: empty reply, row removed"
+            );
+            return Ok(TurnOutcome {
+                assistant_msg_id,
+                route_name: "quiet",
+                turn,
+                result,
+            });
+        }
         let (talking_model, _) = self.live_models().await;
         let owner_label = self.budget_owner_label(chat_id, host, user_msg_id).await;
         // A budget refusal arms the block (`budget.rs`); the line goes in this bubble below.
@@ -7527,6 +7565,32 @@ pub fn route_name(r: &ValidRoute) -> &'static str {
 
 /// Main-turn wall-clock deadline in seconds. `ARBOS_TURN_DEADLINE_SECS` (default 900).
 /// A user row from a voice-call tool (`ask_agent` / `look`): `voice: true` and/or `source: "voice"`.
+/// A turn that is the agent staying quiet in a shared chat (#1779): it routed `reply`, said
+/// nothing anywhere (no streamed prose, no ack, no `reply` text, no progress note), nothing
+/// failed, and the chat is shared with people. Not a user-turn fallback case: in the agent's own
+/// chat an empty answer stays visible as the stock line, because there someone is waiting.
+pub(crate) fn quiet_in_shared_chat(
+    t: &TurnState,
+    shared_chat: bool,
+    model_ok: bool,
+    no_error: bool,
+) -> bool {
+    shared_chat
+        && model_ok
+        && no_error
+        && !t.stopped
+        && !t.metrics.route_missing
+        && matches!(&t.route, Some(ValidRoute::Reply { reply }) if reply.as_deref().is_none_or(|r| r.trim().is_empty()))
+        && t.streamed_text.trim().is_empty()
+        && t.ack_text.trim().is_empty()
+        && t.unposted_text.trim().is_empty()
+        && t.progress_texts.iter().all(|p| p.trim().is_empty())
+        && t.route_reply_text
+            .as_deref()
+            .is_none_or(|r| r.trim().is_empty())
+        && t.metrics.tool_calls == 0
+}
+
 /// How many of this chat's recent rows the fresh-session retry carries, and how much of each.
 const RECAP_ROWS: usize = 8;
 const RECAP_ROW_CHARS: usize = 500;
@@ -8555,6 +8619,60 @@ mod tests {
         assert!(ROUTER_PROMPT.contains(
             "this chat's own turns and the current state of your folder and jobs outrank them"
         ));
+    }
+
+    /// #1779 (eval h2 turn 2): "Priya — see you at the 3 pm sync" got the bubble "I'm staying
+    /// quiet here: that message was addressed to Priya". Staying quiet is a `route reply` with
+    /// nothing to say in a shared chat — the row is removed; the same shape in the agent's own
+    /// chat, or with any words, any tool, a failure or a missing route, is not quiet.
+    #[test]
+    fn empty_reply_in_a_shared_chat_is_quiet_and_only_there() {
+        let mut t = TurnState::claim("c1", "m1", false);
+        t.route = Some(ValidRoute::Reply { reply: None });
+        assert!(quiet_in_shared_chat(&t, true, true, true));
+        assert!(
+            !quiet_in_shared_chat(&t, false, true, true),
+            "own chat: the stock line stays"
+        );
+        assert!(
+            !quiet_in_shared_chat(&t, true, false, true),
+            "a model failure is not quiet"
+        );
+        assert!(
+            !quiet_in_shared_chat(&t, true, true, false),
+            "a turn error is not quiet"
+        );
+        let mut spoke = TurnState::claim("c1", "m1", false);
+        spoke.route = Some(ValidRoute::Reply {
+            reply: Some("I'm staying quiet here.".into()),
+        });
+        assert!(
+            !quiet_in_shared_chat(&spoke, true, true, true),
+            "words in `reply` are words"
+        );
+        let mut streamed = TurnState::claim("c1", "m1", false);
+        streamed.route = Some(ValidRoute::Reply { reply: None });
+        streamed.streamed_text = "That was for Priya.".into();
+        assert!(!quiet_in_shared_chat(&streamed, true, true, true));
+        let mut acted = TurnState::claim("c1", "m1", false);
+        acted.route = Some(ValidRoute::Act {
+            plan: "look".into(),
+        });
+        assert!(
+            !quiet_in_shared_chat(&acted, true, true, true),
+            "an act turn is never quiet"
+        );
+        let mut missing = TurnState::claim("c1", "m1", false);
+        missing.route = Some(ValidRoute::Reply { reply: None });
+        missing.metrics.route_missing = true;
+        assert!(
+            !quiet_in_shared_chat(&missing, true, true, true),
+            "a missed route is an error, not quiet"
+        );
+        // The prompt tells the model the mechanism and forbids announcing it.
+        assert!(ROUTER_PROMPT.contains("Staying quiet is silent"));
+        assert!(ROUTER_PROMPT
+            .contains("never post that you are staying quiet, who was addressed, or why"));
     }
 
     /// The code-mode prompt names the exact script identifiers of the project tools, so the model
