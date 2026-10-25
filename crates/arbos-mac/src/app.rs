@@ -592,6 +592,9 @@ pub struct AppState {
         crate::ui::avatar_picker::Target,
         crate::ui::avatar_picker::Tab,
     )>,
+    /// Rig: a prompt the shell types into the opened picker's Generate field and runs at once
+    /// (`ARBOS_OPEN_PROFILE=me:avatar:generate=<prompt>`), so a shot can show prompt → result.
+    pub avatar_rig_prompt: Option<String>,
     /// The Generate tab's answer, for the shell's open picker.
     pub avatar_generated: Option<AvatarGenerated>,
     /// Agent page: which settings row (model / reasoning / voice) is dropped down.
@@ -991,6 +994,7 @@ impl AppState {
             profile_stack: Vec::new(),
             profile_opened: 0,
             avatar_picker_request: None,
+            avatar_rig_prompt: None,
             avatar_generated: None,
             agent_pick: None,
             profile_editing_description: false,
@@ -2028,8 +2032,31 @@ impl AppState {
                                     self.rig_unblock = Some(person);
                                 }
                             }
-                        } else if spec == "me" {
+                        } else if let Some(rest) = spec.strip_prefix("me") {
                             self.open_profile(ProfilePage::Me, cx);
+                            // `me:avatar[:generate[=<prompt>]|:upload]` — the avatar picker for
+                            // my own picture (Generate | Upload, Reset); with `=<prompt>` the
+                            // shell types the prompt and presses Generate.
+                            if let Some(tab) = rest.strip_prefix(":avatar") {
+                                use crate::ui::avatar_picker::{Tab, Target};
+                                let tab = match tab {
+                                    ":upload" => Tab::Upload,
+                                    t => {
+                                        if let Some(prompt) = t.strip_prefix(":generate=") {
+                                            if !prompt.trim().is_empty() {
+                                                self.avatar_rig_prompt = Some(prompt.to_owned());
+                                            }
+                                        }
+                                        Tab::Generate
+                                    }
+                                };
+                                let me = self
+                                    .account
+                                    .as_ref()
+                                    .map(|a| a.id.clone())
+                                    .unwrap_or_default();
+                                self.open_avatar_picker(Target::Me(me), tab, cx);
+                            }
                         }
                     } else if std::env::var_os("ARBOS_OPEN_SETTINGS").is_some() {
                         self.open_profile(ProfilePage::Me, cx);
@@ -5987,6 +6014,12 @@ impl AppState {
     /// A picked file becomes my picture everywhere (`PUT /me/avatar`).
     pub fn set_my_avatar(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
         self.command(ClientCommand::SetMyAvatar { path });
+        cx.notify();
+    }
+
+    /// The avatar picker's generated preview becomes my picture (`PUT /me/avatar {image_key}`).
+    pub fn set_my_avatar_key(&mut self, key: String, cx: &mut Context<Self>) {
+        self.command(ClientCommand::SetMyAvatarKey { key });
         cx.notify();
     }
 

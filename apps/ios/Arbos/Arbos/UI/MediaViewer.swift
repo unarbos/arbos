@@ -690,7 +690,7 @@ struct ForwardSheet: View {
             AgentAvatar(project: p, theme: theme, size: 44, still: true)
         case .people(let c):
             if c.isGroup {
-                AvatarCluster(members: c.humans, size: 44, leaf: c.leafPick)
+                AvatarCluster(members: c.humans, size: 44, leaf: c.leafPick, neutralName: c.isNeutralAvatar ? c.title : nil)
             } else {
                 let other = c.counterpart(me: model.user?.id)
                 PersonAvatar(url: other?.avatarUrl, handle: other?.handle ?? "?", size: 44, name: other?.name, id: other?.id, colorIndex: other?.avatarColorIndex)

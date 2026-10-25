@@ -81,6 +81,9 @@ enum DebugHooks {
     static var showDelayMs: Int { value("ARBOS_SHOW_DELAY_MS").flatMap(Int.init) ?? 600 }
     /// With `ARBOS_SHOW=newagent`: prefill the Create agent name (the "named" state on the rig).
     static var newAgentName: String? { value("ARBOS_NEW_AGENT_NAME") }
+    /// With a Create screen open: `upload | generate[:<prompt>]` picks the picture option (and
+    /// types the prompt).
+    static var createPicture: String? { value("ARBOS_CREATE_PICTURE") }
     static var onboardingStage: String? { value("ARBOS_ONBOARDING_STAGE") }
     static var onboardingAutoplay: Bool { value("ARBOS_ONBOARDING_AUTOPLAY") == "1" }
     /// With `ARBOS_SHOW=onboarding`: also present the name/handle sheet over the terminal (rig).

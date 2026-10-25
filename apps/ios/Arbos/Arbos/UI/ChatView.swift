@@ -1261,6 +1261,12 @@ private struct ChatSession: View {
                                     .font(.system(size: Theme.body, weight: .semibold))
                                     .foregroundStyle(theme.text)
                                     .lineLimit(1)
+                            } else if people.isGroup, people.isNeutralAvatar {
+                                NeutralAvatar(name: people.title, size: Theme.avatar)
+                                Text(people.title)
+                                    .font(.system(size: Theme.body, weight: .semibold))
+                                    .foregroundStyle(theme.text)
+                                    .lineLimit(1)
                             } else if people.isGroup, let leaf = people.leafPick, LeafAvatarsFlag.shared.on {
                                 // D92 amendment: the leaf picked on the Create screen.
                                 LeafAvatar(pick: leaf, size: Theme.avatar)

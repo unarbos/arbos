@@ -1434,6 +1434,8 @@ struct PeopleRow: View {
                 if chat.isGroup {
                     if let groupImageURL {
                         AvatarCluster(members: [], size: Theme.rowAvatar, imageUrl: groupImageURL)
+                    } else if chat.isNeutralAvatar {
+                        NeutralAvatar(name: chat.title, size: Theme.rowAvatar)
                     } else if let leaf = chat.leafPick, LeafAvatarsFlag.shared.on {
                         // D92 amendment: the leaf picked on the Create screen.
                         LeafAvatar(pick: leaf, size: Theme.rowAvatar)

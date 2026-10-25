@@ -291,7 +291,7 @@ final class RelayAPI {
         description: String? = nil,
         instructions: String? = nil,
         sourceProjectId: Id? = nil
-    ) async throws {
+    ) async throws -> Id? {
         var body: [String: Any] = ["name": name]
         if let avatarColorIndex { body["avatar_color_index"] = avatarColorIndex }
         // D92: the Create sheet's leaf + colour (forks copy the source's).
@@ -301,7 +301,8 @@ final class RelayAPI {
         if let instructions, !instructions.isEmpty { body["instructions"] = instructions }
         // Fork: relay copies the source agent's workspace (files + memory) into the new one.
         if let sourceProjectId { body["source_project_id"] = sourceProjectId }
-        _ = try await json("POST", "/projects", body: body)
+        let v = try await json("POST", "/projects", body: body)
+        return (v as? [String: Any])?["id"] as? String
     }
 
     /// Soft-delete an owned agent (`DELETE /projects/{id}`).
@@ -949,6 +950,28 @@ final class RelayAPI {
 
     func generateServerAvatar(_ serverId: String, prompt: String) async throws -> String {
         try await generateAvatar(path: "/servers/\(serverId)/avatar/generate", prompt: prompt)
+    }
+
+    /// `POST /me/avatar/generate {prompt}` (#1789): a picture in my own slot `users:{me}` — the
+    /// own-profile picker's route, and the Create sheets' (the entity does not exist yet; the
+    /// bytes are copied into its slot on Create).
+    func generateMyAvatar(prompt: String) async throws -> String {
+        try await generateAvatar(path: "/me/avatar/generate", prompt: prompt)
+    }
+
+    /// The bytes of a blob I may read (a generated preview in my own slot), for copying.
+    func blobData(projectId: Id, key: String) async throws -> Data {
+        guard let url = URL(string: "\(endpoint.httpUrl)/blob/\(projectId)/\(key)") else {
+            throw RelayError(status: 0, message: "Bad relay URL")
+        }
+        var req = URLRequest(url: url)
+        req.setValue("Bearer \(token())", forHTTPHeaderField: "Authorization")
+        let (body, response) = try await session.data(for: req)
+        guard let http = response as? HTTPURLResponse, http.statusCode < 400 else {
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            throw RelayError.from(status: status, body: body)
+        }
+        return body
     }
 
     private func generateAvatar(path: String, prompt: String) async throws -> String {

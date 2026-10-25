@@ -2681,7 +2681,7 @@ final class AppModel: ObservableObject {
     /// People, agents, or both — never nobody. Agents ride in the create body
     /// (`agent_ids`); whatever the relay did not add (an older relay) is added
     /// one by one afterwards.
-    func createGroup(handles: [String], agentIds: [Id] = [], title: String? = nil, leaf: LeafPick? = nil) async -> Bool {
+    func createGroup(handles: [String], agentIds: [Id] = [], title: String? = nil, leaf: LeafPick? = nil, picture: DraftPicture? = nil) async -> Bool {
         let cleaned = handles
             .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "@ ")) }
             .filter { !$0.isEmpty }
@@ -2695,6 +2695,13 @@ final class AppModel: ObservableObject {
                 chat = try await api.createGroup(handles: cleaned, agentIds: agentIds, title: title, leaf: leaf)
             } catch let e as RelayError where !cleaned.isEmpty && (e.status == 404 || e.status == 405 || e.status == 501) {
                 chat = try await createGroupViaDm(handles: cleaned)
+            }
+            if let picture, let jpeg = await draftJpeg(picture) {
+                let key = "group-avatar-\(Int(Date().timeIntervalSince1970 * 1000)).jpg"
+                if (try? await api.putBlob(projectId: "\(peopleSlot):\(chat.id)", key: key, mime: "image/jpeg", data: jpeg)) != nil,
+                   let patched = try? await api.patchPeopleChat(chat.id, imageKey: key) {
+                    chat = patched
+                }
             }
             for pid in agentIds where !chat.hasAgent(pid) {
                 do {
@@ -5360,13 +5367,61 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func createProject(name: String, avatarColorIndex: Int? = nil, leaf: LeafPick? = nil) {
+    func createProject(name: String, avatarColorIndex: Int? = nil, leaf: LeafPick? = nil, picture: DraftPicture? = nil) {
         Task {
             do {
-                try await api.createProject(name: name, avatarColorIndex: avatarColorIndex, leaf: leaf)
+                let id = try await api.createProject(name: name, avatarColorIndex: avatarColorIndex, leaf: leaf)
+                // The Create sheet's picture goes into the new agent's own slot first, so the
+                // list refresh already shows it.
+                if let picture, let id, let jpeg = await draftJpeg(picture) {
+                    let key = "avatar-\(Int(Date().timeIntervalSince1970 * 1000)).jpg"
+                    if (try? await api.putBlob(projectId: id, key: key, mime: "image/jpeg", data: jpeg)) != nil {
+                        try? await api.setProjectImageKey(id, key: key)
+                    }
+                }
                 await refreshRegistry()
             } catch {
                 notice = Notice(text: "New project failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    // MARK: Create sheet pictures (Jacob, 2026-10-25)
+
+    /// Generate before the entity exists: into my own slot (`POST /me/avatar/generate`, #1789).
+    func generateDraftAvatar(prompt: String) async throws -> String {
+        if isFixture {
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            return "fixture-gen-\(prompt.lowercased().replacingOccurrences(of: " ", with: "-"))"
+        }
+        do {
+            return try await api.generateMyAvatar(prompt: prompt)
+        } catch let e as RelayError where e.status == 404 {
+            // A relay without the own-slot route yet: say so instead of "HTTP 404".
+            throw RelayError(status: 404, message: "Generate is not on this relay yet; upload a picture instead.")
+        }
+    }
+
+    /// Where a draft's generated picture is fetched from: `users:{me}`.
+    func draftPictureURL(key: String) -> URL? {
+        guard let me = user?.id else { return nil }
+        return blobURL(projectId: "users:\(me)", key: key)
+    }
+
+    /// The Create sheet's picture as JPEG bytes for the new entity's slot: the photo as chosen, or
+    /// the generated picture read back from my slot. nil when it cannot be read (a notice says so;
+    /// the entity keeps its neutral initial).
+    func draftJpeg(_ picture: DraftPicture) async -> Data? {
+        switch picture {
+        case .jpeg(let data):
+            return data
+        case .generated(let key):
+            guard let me = user?.id else { return nil }
+            do {
+                return try await api.blobData(projectId: "users:\(me)", key: key)
+            } catch {
+                notice = Notice(text: "Generated picture not copied: \(error.localizedDescription)")
+                return nil
             }
         }
     }
@@ -5386,9 +5441,9 @@ final class AppModel: ObservableObject {
                 // relay's default subagent/decision slots. Set the talking
                 // model after the copy exists. `sourceProjectId` asks the
                 // relay to copy the source agent's project folder and memory.
-                try await api.createProject(
+                _ = try await api.createProject(
                     name: name,
-                    leaf: LeafArt.pick(project),
+                    leaf: LeafArt.isNeutral(project.avatarLeaf) ? LeafArt.neutralPick : LeafArt.pick(project),
                     color: project.color,
                     description: project.description,
                     instructions: project.instructions,

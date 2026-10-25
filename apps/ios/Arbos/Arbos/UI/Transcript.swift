@@ -1974,12 +1974,16 @@ struct AvatarCluster: View {
     var imageUrl: String? = nil
     /// D92 amendment: the group's leaf picture from the Create screen (a custom picture wins).
     var leaf: LeafPick? = nil
+    /// Jacob, 2026-10-25: a group created with no leaf shows its title's initial on grey.
+    var neutralName: String? = nil
 
     private var shown: [ChatMember] { Array(members.prefix(maxVisible)) }
     private var hasMore: Bool { members.count > maxVisible }
 
     var body: some View {
-        if let leaf, imageUrl?.isEmpty ?? true, LeafAvatarsFlag.shared.on {
+        if let neutralName, imageUrl?.isEmpty ?? true {
+            NeutralAvatar(name: neutralName, size: size * 1.12)
+        } else if let leaf, imageUrl?.isEmpty ?? true, LeafAvatarsFlag.shared.on {
             LeafAvatar(pick: leaf, size: size * 1.12)
         } else if let imageUrl, !imageUrl.isEmpty {
             // Keep the group silhouette under the picture until it arrives so we
