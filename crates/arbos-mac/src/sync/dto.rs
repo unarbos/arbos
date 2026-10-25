@@ -695,6 +695,7 @@ pub(crate) fn project_from_dto(
         avatar_leaf_color: p.avatar_leaf_color.and_then(leaf_index),
         image_url: None,
         message_grants: p.message_grants.iter().map(message_grant_from).collect(),
+        members_see_reads: true,
     }
 }
 
@@ -1012,6 +1013,7 @@ pub(crate) fn people_space_from(
             .and_then(non_empty)
             .map(|k| format!("{http_url}/blob/people:{id}/{k}?token={token}")),
         message_grants: Vec::new(),
+        members_see_reads: dto.members_see_reads.unwrap_or(true),
     };
     let chat = Chat {
         id: id.clone(),
