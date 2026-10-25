@@ -30,6 +30,21 @@ Decided by Jacob; kept in the repo so the loop, its agents and every worker read
   stands even when a tester report asks for something else; a fix that would move one of those rules
   holds for his approval like any other outside change, and the agent says so in its summary.
 
+## The loop merges the live branch head, never an older one (2026-10-25)
+
+- A gate run gates one commit per branch. When the run passes, the loop merges that commit **only if it is
+  still the branch's head**. If the author pushed after the run started, the gated head is not merged: the new
+  head re-gates and merges on green, and the issue says so. Nothing is orphaned by a merge.
+- A push to `feedback/<id>` **after** the item merged (the loop deletes the branch on merge; the next push
+  recreates it) is followed automatically: the loop makes `feedback/<id>-followup` (…`-followup2`, …) from that
+  head, registers `<id>-followup` on the same issue and owner, gates and ships it, and notes it on the issue.
+  Authors do not re-land tails as new issues (#1684, #1721 were that).
+- Authors: one branch per item is fine, but once the item merged, push the tail to the same branch and let the
+  loop pick it up — or open the follow-up item yourself if you want a different scope.
+- The merge-revert probe (#1588) runs on the head that is about to be gated/merged; with this rule that is
+  always the live head, so the two compose: a stale gated head is never merged, and a live head whose merge
+  commit reverts main's files is sent back before integration.
+
 ## Standing rules that this does not change
 
 - One issue per release; a hotfix marker (`[hotfix]`) is for P0s only.
