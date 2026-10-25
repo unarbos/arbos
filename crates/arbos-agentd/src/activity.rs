@@ -99,7 +99,11 @@ pub fn label(tool_name: &str, args: &Value) -> Option<String> {
         "local_run" | "local_read" | "local_list" | "local_devices" => {
             Some("Working on your computer".into())
         }
-        "codemode" => code_label(s(&["code"])?),
+        // Prime workers call project tools from Python (`mcp.call_tool("arbos", "web_search",
+        // {"query": …})`); pi's `codemode` from JavaScript. Both are read for the tool they call.
+        "codemode" | "ipython" | "python" | "execute_python" | "run_python" => {
+            code_label(s(&["code", "source", "script"])?)
+        }
         _ => None,
     };
     out.map(|l| trim_to(&l, MAX_CHARS))
@@ -109,9 +113,8 @@ pub fn label(tool_name: &str, args: &Value) -> Option<String> {
 /// empty mid-turn, #1657).
 pub fn generic_label(tool_name: &str) -> String {
     match bare_tool_name(tool_name) {
-        "bash" | "shell" | "execute" | "run_command" | "execute_command" | "codemode" => {
-            "Running a command".to_owned()
-        }
+        "bash" | "shell" | "execute" | "run_command" | "execute_command" | "codemode"
+        | "ipython" | "python" => "Running a command".to_owned(),
         _ => "Working on it".to_owned(),
     }
 }
@@ -311,10 +314,18 @@ fn step_label(step: &str) -> Option<String> {
 fn code_label(code: &str) -> Option<String> {
     // `tools.mcp__arbos__web_search({query: "…"})` / `arbos.web_search(...)`: the first project
     // tool the script calls names the activity; a search query makes it concrete.
-    let after = code
-        .split("mcp__arbos__")
-        .nth(1)
-        .or_else(|| code.split("arbos.").nth(1))?;
+    let after = [
+        "mcp__arbos__",
+        "arbos.",
+        "call_tool(\"arbos\", \"",
+        "call_tool(\"arbos\",\"",
+        "call_tool('arbos', '",
+        "call_tool('arbos','",
+    ]
+    .iter()
+    .filter_map(|marker| code.find(marker).map(|i| (i, i + marker.len())))
+    .min_by_key(|(i, _)| *i)
+    .map(|(_, end)| &code[end..])?;
     let name: String = after
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
@@ -322,6 +333,14 @@ fn code_label(code: &str) -> Option<String> {
     if name == "web_search" {
         if let Some(q) = first_string_arg(after, &["query", "q"]) {
             return Some(query_label("Searching", &q));
+        }
+    }
+    if name == "web_fetch" {
+        if let Some(h) = first_string_arg(after, &["url"])
+            .as_deref()
+            .and_then(host_of)
+        {
+            return Some(format!("Reading {h}"));
         }
     }
     let l = match name.as_str() {
@@ -408,7 +427,8 @@ fn trim_to(s: &str, max: usize) -> String {
 /// `{query: "surf schools"}` / `{ "query": 'x' }` → the first string value of one of `keys` in
 /// the call's argument object, plain text only.
 fn first_string_arg(call: &str, keys: &[&str]) -> Option<String> {
-    let args = &call[..call.find(')').unwrap_or(call.len())];
+    let args: String = call.chars().take(600).collect();
+    let args = args.as_str();
     for k in keys {
         for pat in [format!("{k}:"), format!("\"{k}\":"), format!("'{k}':")] {
             if let Some(i) = args.find(&pat) {
@@ -482,6 +502,28 @@ mod tests {
             .as_deref(),
             Some("Setting the schedule")
         );
+        // Prime worker: Python calling the project tools (what the surf-school research ran).
+        assert_eq!(
+            label(
+                "ipython",
+                &json!({ "code": "r = await mcp.call_tool(\"arbos\",\"web_search\",{\"query\":\"best surf schools Santa Teresa Costa Rica TripAdvisor reviews\"})\nprint(str(r)[:4000])" })
+            )
+            .as_deref(),
+            Some("Searching for best surf schools Santa Teresa")
+        );
+        assert_eq!(
+            label(
+                "ipython",
+                &json!({ "code": "async def fetch(u):\n    r=await mcp.call_tool(\"arbos\",\"web_fetch\",{\"url\":u}); return str(r)\nurls=[\"https://www.ondateresa.com/guide\"]" })
+            )
+            .as_deref(),
+            Some("Reading a web page")
+        );
+        assert_eq!(
+            label("ipython", &json!({ "code": "await mcp.call_tool('arbos', 'web_fetch', {'url': 'https://www.bluemysticsurf.com/'})" })).as_deref(),
+            Some("Reading bluemysticsurf.com")
+        );
+        assert_eq!(generic_label("ipython"), "Running a command");
         assert_eq!(
             label("mcp__arbos__ask_user", &json!({})).as_deref(),
             Some("Waiting for your answer")

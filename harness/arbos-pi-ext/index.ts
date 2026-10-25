@@ -395,15 +395,15 @@ export default function arbosPiExt(pi: ExtensionAPI) {
           if (args.reply && args.reply.trim()) {
             return { content: [{ type: "text", text: "Reply delivered to the user." }], details: { action }, terminate: true };
           }
-          return { content: [{ type: "text", text: "Route accepted: reply. Write only the answer the user should see — no thinking aloud." }], details: { action } };
+          return { content: [{ type: "text", text: "Route accepted: reply. Post the answer with send_message (one call for a short answer; parts for a comparison); words outside send_message are not shown." }], details: { action } };
         case "act":
           return {
             content: [
               {
                 type: "text",
                 text: acked
-                  ? "Route accepted: act. Your acknowledgement is already in the chat. Do the work (send_message only at real milestones), then write only the conversational result — no thinking aloud, no process narration."
-                  : "Route accepted: act. Arbos posted a short acknowledgement for you. Follow your plan, then write only the conversational result — no thinking aloud, no process narration.",
+                  ? "Route accepted: act. Your acknowledgement is on the working line. Do the work, then post the result with send_message (a comparison as conclusion, linked table, details + sources, one next-step offer — each its own call); words outside send_message are not shown. No thinking aloud, no process narration."
+                  : "Route accepted: act. Follow your plan, then post the result with send_message (several calls when the answer has parts); words outside send_message are not shown. No thinking aloud, no process narration.",
               },
             ],
             details: { action },
@@ -441,12 +441,13 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     name: "send_message",
     label: "Send message",
     description:
-      "Two uses. (1) With `to` (agent name, @handle or id): message that agent — the text lands in their own chat and their reply comes back here; never write `@name …` as a chat bubble to reach them. (2) Without `to`: post a short progress note to the user mid-task (real milestones only). Optional `activity`: 2–5 plain words for the working line (\"Running tests\").",
-    promptSnippet: "send_message: with `to` = message another agent; without `to` = progress note to the user",
+      "Two uses. (1) Without `to`: post a message to the user in this chat — the only way your words reach them (an acknowledgement before longer work, a progress note at a real milestone, each part of a result, or the whole answer). Markdown is fine: tables, lists, links. (2) With `to` (agent name, @handle or id): message that agent — the text lands in their own chat and their reply comes back here; never write `@name …` as a chat bubble to reach them. Optional `activity`: 2–5 plain words for the working line (\"Running tests\"). Optional `reply_to`: the id of the message this answers (default: the message that started this turn).",
+    promptSnippet: "send_message: post to the user (the only way your words are shown); with `to` = message another agent",
     parameters: Type.Object({
-      text: Type.String({ description: "The words for the other agent, or one or two plain sentences of progress" }),
+      text: Type.String({ description: "The message for the user (markdown allowed), or the words for the other agent" }),
       to: Type.Optional(Type.Union([Type.String(), Type.Null()], { description: "Agent name, @handle or id — set this to message another agent" })),
-      activity: Type.Optional(Type.Union([Type.String(), Type.Null()], { description: "What you are doing next, 2-5 words, present tense (progress only)" })),
+      activity: Type.Optional(Type.Union([Type.String(), Type.Null()], { description: "What you are doing next, 2-5 words, present tense" })),
+      reply_to: Type.Optional(Type.Union([Type.String(), Type.Null()], { description: "Message id this answers, when not the message that started the turn" })),
     }),
     exposure: "model-only",
     executionMode: "sequential",
@@ -456,6 +457,7 @@ export default function arbosPiExt(pi: ExtensionAPI) {
         text: params.text,
         to: params.to ?? null,
         activity: params.activity ?? null,
+        reply_to: params.reply_to ?? null,
       });
       if (res && !res.ok) {
         return { content: [{ type: "text", text: `Not sent (${res.error ?? "unknown"}). Keep working; say it in your final result instead.` }], details: undefined };
@@ -463,7 +465,7 @@ export default function arbosPiExt(pi: ExtensionAPI) {
       if (typeof res?.note === "string" && res.note.trim()) {
         return { content: [{ type: "text", text: res.note }], details: undefined };
       }
-      return { content: [{ type: "text", text: "Sent. Keep working; do not repeat it in your final result." }], details: undefined };
+      return { content: [{ type: "text", text: "Posted. Do not repeat it; anything you write outside send_message is not shown." }], details: undefined };
     },
   });
 

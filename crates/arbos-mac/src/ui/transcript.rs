@@ -2859,23 +2859,12 @@ fn hover_time(time: Option<String>, opacity: f32, theme: &Theme) -> Option<Div> 
     })
 }
 
-/// My own bubble at its delivery opacity (see [`Delivery::opacity`]). One
-/// wrapper for every own bubble so the layout tests can read the state back.
-fn own_bubble(bubble: impl IntoElement, delivery: Delivery) -> Div {
-    div()
-        .max_w_full()
-        .min_w_0()
-        .debug_selector(|| {
-            match delivery {
-                Delivery::Pending => "own-bubble-pending",
-                Delivery::Failed => "own-bubble-failed",
-                Delivery::Sent => "own-bubble-sent",
-                Delivery::Seen => "own-bubble-seen",
-            }
-            .into()
-        })
-        .opacity(delivery.opacity())
-        .child(bubble)
+/// My own bubble at its delivery opacity (see [`Delivery::opacity`]). Applied
+/// to the bubble itself, never a wrapper: the bubble's cap is
+/// `relative_width(0.72)` of its parent, and a wrapper that is itself
+/// content-sized shrinks that cap (v0.6.223 wrapped own bubbles a word early).
+fn own_bubble<E: Styled>(bubble: E, delivery: Delivery) -> E {
+    bubble.opacity(delivery.opacity())
 }
 
 /// The red mark beside a bubble the relay refused: always visible, outside
@@ -3128,7 +3117,10 @@ pub fn build_rows(
                             _ => None,
                         })
                     });
-                    if let Some(name) = named {
+                    // A background worker's spawn row draws nothing (`worker`,
+                    // [feedback hide-worker-rows-and-tz-2026-10-24]); its activity
+                    // still feeds the working line through `Message::current_activity`.
+                    if let Some(name) = named.filter(|_| !message.worker) {
                         let count = message.handoff_messages.unwrap_or(1).max(1);
                         // Consecutive hand-offs merge into one line.
                         if let Some(Row {
@@ -5614,7 +5606,9 @@ mod layout_tests {
                             .debug_selector(|| "test-bubble-parent".into())
                             .children(time().map(|t| t.mr(px(8.0))))
                             .child(div().size(px(16.0)).mr(px(6.0)))
-                            .child(bubble)
+                            // Through the real delivery wrapper: a sent bubble must
+                            // keep the same cap as a seen one (v0.6.223 regression).
+                            .child(own_bubble(bubble, Delivery::Sent))
                     }
                 }
             };
@@ -6270,6 +6264,79 @@ mod system_line_tests {
         .expect("agent reply")
     }
 
+    fn spawn_row(id: &str, name: &str, worker: bool, at: u64) -> Message {
+        let mut row = serde_json::json!({
+            "id": id,
+            "chatId": "chat_testing",
+            "role": "assistant",
+            "sender": "box:1",
+            "status": "done",
+            "turn": "spawn",
+            "subagentId": format!("sub-{id}"),
+            "subagentName": name,
+            "handoffMessages": 2,
+            "activity": "Searching for surf schools Santa Teresa",
+            "createdAt": at,
+            "parts": [],
+        });
+        if worker {
+            row["worker"] = serde_json::json!(true);
+        }
+        serde_json::from_value(row).expect("spawn row")
+    }
+
+    /// Grok parity trait 15 ([feedback hide-worker-rows-and-tz-2026-10-24]): a
+    /// background worker's spawn row (`worker: true`) draws no "N messages
+    /// with ◉ X" line; an agent-to-agent send (no flag) keeps its line; the
+    /// worker row's `activity` still feeds the working line.
+    #[test]
+    fn worker_spawn_rows_are_hidden_but_their_activity_is_read() {
+        let t = 1_700_000_000_000u64;
+        let worker = spawn_row("w1", "santa-teresa-surf-schools", true, t + 1_000);
+        let teammate = spawn_row("t1", "Comms", false, t + 2_000);
+        assert!(worker.worker && !teammate.worker);
+        let messages = [
+            message("user", "user", "find me the 3 best surf schools", t),
+            worker.clone(),
+            teammate,
+        ];
+        let spoken = HashSet::new();
+        let failed = HashMap::new();
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        let rows = build_rows(
+            &messages,
+            false,
+            speech,
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+            None,
+            true,
+        );
+        let handoffs: Vec<&Vec<String>> = rows
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::Handoff { names, .. } => Some(names),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(handoffs, [&vec!["Comms".to_string()]], "{handoffs:?}");
+        assert!(
+            rows.iter().all(|r| r.message_id != "w1"),
+            "no row at all for the worker"
+        );
+        assert_eq!(
+            worker.current_activity().as_deref(),
+            Some("Searching for surf schools Santa Teresa")
+        );
+    }
+
     #[test]
     fn membership_notice_is_a_centred_stamp_that_breaks_the_sender_run() {
         let t = 1_700_000_000_000u64;
@@ -6911,8 +6978,17 @@ mod delivery_tests {
             _: &mut gpui::Context<Self>,
         ) -> impl IntoElement {
             let theme = Theme::dark(crate::ui::theme::Surface::Matte);
-            let bubble = |text: &'static str| {
+            let bubble = |text: &'static str, d: Delivery| {
                 div()
+                    .debug_selector(move || {
+                        match d {
+                            Delivery::Pending => "own-bubble-pending",
+                            Delivery::Failed => "own-bubble-failed",
+                            Delivery::Sent => "own-bubble-sent",
+                            Delivery::Seen => "own-bubble-seen",
+                        }
+                        .into()
+                    })
                     .px(px(BUBBLE_PAD_X))
                     .py(px(BUBBLE_PAD_Y))
                     .rounded(px(BUBBLE_RADIUS))
@@ -6940,7 +7016,7 @@ mod delivery_tests {
                             .justify_end()
                             .items_center()
                             .children(failed_glyph(d, &theme).map(|g| g.mr(px(8.0))))
-                            .child(own_bubble(bubble("fish?"), d))
+                            .child(own_bubble(bubble("fish?", d), d))
                     }),
                 )
         }

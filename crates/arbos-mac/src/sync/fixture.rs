@@ -2065,6 +2065,7 @@ fn send_user(
             sender_name: me.name.clone(),
             sender_avatar: Some(me.avatar_url.clone()),
             answers_question_id: None,
+            tz: None,
         };
         with_doc(shared, &chat_id, |doc| {
             doc.core.transact(|d| {
@@ -4123,6 +4124,7 @@ fn write_message(core: &CoreDoc, msg: &Message) {
             sender_name: msg.sender_name.clone(),
             sender_avatar: msg.sender_avatar.clone(),
             answers_question_id: None,
+            tz: None,
         };
         let _ = core.append_user_message(&msg.id, text, DEVICE, &opts);
         fill_attachment_details(core, &msg.id, &attachments);
@@ -5604,6 +5606,7 @@ fn human_message(chat_id: &str, who: &Person, text: &str, at: u64) -> Message {
         subagent_id: None,
         subagent_name: None,
         handoff_messages: None,
+        worker: false,
         agent_reply_to: None,
         reactions: Default::default(),
         in_reply_to: None,

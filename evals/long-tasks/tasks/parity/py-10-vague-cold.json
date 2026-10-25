@@ -1,0 +1,34 @@
+{
+  "id": "py-10-vague-cold",
+  "lane": "a",
+  "category": "parity",
+  "categories": [
+    "parity",
+    "vague-ask"
+  ],
+  "title": "A vague ask in a fresh chat",
+  "parity": true,
+  "timeout_s": 90,
+  "settle_s": 12,
+  "turns": [
+    {
+      "prompt": "Can you help me with my trip?",
+      "shape": {
+        "messages_min": 1,
+        "messages_max": 1,
+        "ack_first": false,
+        "table": false,
+        "links_min": 0,
+        "offer": false,
+        "first_bubble_max_s": 5,
+        "no_handle": true,
+        "worker_rows": 0,
+        "reply_to_ask": false,
+        "question": true
+      },
+      "judge": {
+        "criteria": "One short question that moves the conversation forward (where/when/what kind of help), no list of five questions, no handle."
+      }
+    }
+  ]
+}

@@ -380,6 +380,7 @@ dependencies = [
  "bytes",
  "chrono",
  "hex",
+ "iana-time-zone",
  "loro",
  "rand 0.8.8",
  "regex-lite",
