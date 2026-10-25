@@ -252,6 +252,12 @@ impl Agent {
             | "secret_decided"
             | "secret_notice"
             | "secret_scrub" => crate::vault::on_push(self, kind, &payload).await,
+            // #1544: the owner added or revoked a standing shell grant in Settings.
+            "shell_grants_changed" => {
+                if let Err(e) = self.refresh_shell_grants().await {
+                    tracing::warn!(error = %e, "shell grants: refresh after push failed");
+                }
+            }
             // The feedback loop opened the issue for a report the agent filed (`submit_feedback`).
             "feedback_issue" => crate::feedback::on_issue_push(self, &payload).await,
             other => {

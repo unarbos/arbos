@@ -283,6 +283,7 @@ struct AgentProfileView: View {
             guard isMine else { return }
             await model.refreshRoutines(projectId)
             await model.refreshBoxReport()
+            await model.refreshShellGrants(projectId)
         }
         .task(id: "\(tab)-\(model.isStreaming(project: projectId))") {
             // The Coding row's elapsed time and the Computer tab's jobs move: poll while
@@ -451,6 +452,37 @@ struct AgentProfileView: View {
                     PaneRow(leading: .glyph("person.badge.plus"), title: "Give a person access…", titleTint: theme.accent)
                 }.buttonStyle(.plain)))
                 out.append(.card(grants, separatorInset: PaneKit.separatorInset(.glyph(""))))
+            case .permissions:
+                // Permissions · Shell approvals (#1544): the standing choices made on
+                // destructive-shell cards, one switch each; off = revoked, the agent asks again.
+                let grants = model.shellGrants[project.id] ?? []
+                out.append(.title("Permissions"))
+                out.append(.card([AnyView(
+                    PaneRow(leading: .tile("terminal"), title: "Shell approvals", value: ShellGrant.summary(grants))
+                        .accessibilityIdentifier("shell-approvals-row")
+                )]))
+                out.append(.footnote("\(project.name) asks before destructive shell commands outside /work/tmp. Standing answers from the cards land here."))
+                if !grants.isEmpty {
+                    out.append(.title("Shell approvals · \(project.name)"))
+                    out.append(.card(grants.map { g in
+                        AnyView(
+                            PaneRow(
+                                leading: .glyph("terminal"),
+                                title: g.label,
+                                subtitle: g.ruleClass + " · " + g.detail + (g.chatId == nil ? "" : " · this chat only"),
+                                trailing: AnyView(
+                                    Toggle("", isOn: Binding(get: { true }, set: { on in
+                                        if !on { model.revokeShellGrant(projectId: project.id, grantId: g.id) }
+                                    }))
+                                    .labelsHidden().tint(theme.online)
+                                    .accessibilityLabel("\(g.label) allowed")
+                                    .accessibilityIdentifier("shell-grant-\(g.id)")
+                                )
+                            )
+                        )
+                    }, separatorInset: PaneKit.separatorInset(.glyph(""))))
+                    out.append(.footnote("Turn one off and \(project.name) asks again next time. Every allowed run is in Activity."))
+                }
             case .profile:
                 out.append(.title("Profile"))
                 var rows: [AnyView] = []
