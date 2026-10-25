@@ -40,6 +40,12 @@ pub(super) const HERO_AVATAR: f32 = 72.0;
 /// strip's `STRIP_INSET`: Grok's close disc ends 24 px = 12 pt before the
 /// window edge (`grok-right-pane-details.png`).
 pub(crate) const PANE_DISC_INSET: f32 = crate::ui::sidebar::STRIP_INSET;
+/// The hairline on the pane's left edge: Grok's is one device pixel (1 px at
+/// 2 px/pt in `grok-chat-1.png` / `grok-chat-2-research.png`, column 2816 /
+/// 2814, rows 4–2171), so half a point — a 1 pt line would be twice Grok's.
+/// Jacob 2026-10-25 ([feedback info-pane-left-hairline-2026-10-25]): "a thin
+/// 1 px divider … matching Grok Bot"; reverses #1675's reading of trait 20.
+pub(crate) const PANE_EDGE: f32 = 0.5;
 /// Top bar → hero picture: Grok's avatar starts 73.5 pt under the window edge
 /// (rows 147–264 at 2 px/pt), 13.5 under its 60 pt band → 14.
 pub(crate) const HERO_TOP: f32 = 14.0;
@@ -222,10 +228,10 @@ pub(crate) fn pane_frame(
     }
     let header = header.children(right).children(share).child(close);
     let has_pinned = pinned.is_some();
-    // No hairline between the pane and the chat, and the chat's own surface:
-    // Grok's pane is the window (`#121212` on both sides of the join, a
-    // half-point `#1F1F1F` line that reads as nothing); ours was a lighter
-    // panel (`#1E1E1E` on `#141414`) behind a 1 pt `border` line.
+    // The chat's own surface on both sides of the join (Grok's pane is the
+    // window, `#121212` either side), with Grok's hairline on the edge: one
+    // device pixel, `pane_edge` (+13 over the page) — not the 1 pt `border`
+    // line of the old lighter panel (`#1E1E1E` on `#141414`).
     div()
         .id("profile-pane")
         .w(px(width))
@@ -233,6 +239,8 @@ pub(crate) fn pane_frame(
         .h_full()
         .flex()
         .flex_col()
+        .border_l(px(PANE_EDGE))
+        .border_color(theme.pane_edge)
         .bg(theme.pane())
         .child(header)
         .children(pinned.map(|p| p.flex_shrink_0()))
@@ -1016,6 +1024,32 @@ mod chrome_tests {
                     );
                 }
             }
+        }
+    }
+
+    /// Grok's pane edge: one device pixel, ≈ 5 % of the way from the page
+    /// toward the text colour (`#1F1F1F` on `#121212` = +13/255 = 0.051 in
+    /// lightness). Dark: lighter than `bg`; light: darker.
+    #[test]
+    fn the_pane_edge_is_groks_hairline() {
+        assert_eq!(super::PANE_EDGE, 0.5, "one device pixel at 2 px/pt");
+        let grok_step = 13.0 / 255.0;
+        for pref in [AppearancePref::Dark, AppearancePref::Light] {
+            let theme = Theme::with(pref.resolve(gpui::WindowAppearance::Dark), Surface::Matte);
+            let step = theme.pane_edge.l - theme.bg.l;
+            let expect = if theme.is_light() {
+                -grok_step
+            } else {
+                grok_step
+            };
+            assert!(
+                (step - expect).abs() < 0.006,
+                "{pref:?}: edge {step:.3} vs Grok's {expect:.3}"
+            );
+            assert!(
+                theme.pane_edge.l < theme.pane_card.l || theme.is_light(),
+                "{pref:?}: the edge is quieter than a card"
+            );
         }
     }
 
