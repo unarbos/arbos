@@ -17,7 +17,7 @@ use crate::onboarding::{Onboarding, Stage};
 use crate::ui::motion::PulseClock;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, BUBBLE_RADIUS, COLUMN_MARGIN, HEADER_HEIGHT, TEXT_BODY, TEXT_SMALL};
-use crate::ui::transcript::{ASSISTANT_RIGHT_GAP, COLUMN_MAX_WIDTH};
+use crate::ui::transcript::{assistant_cap, COLUMN_MAX_WIDTH};
 
 const CARD_W: f32 = 256.0;
 const CARD_H: f32 = 172.0;
@@ -100,7 +100,7 @@ fn bubble_target(viewport: gpui::Size<Pixels>, sidebar_width: f32, text_px: f32)
     let center_w = f32::from(viewport.width) - left;
     let column_w = (center_w - 2.0 * COLUMN_MARGIN).min(COLUMN_MAX_WIDTH);
     let column_x = left + (center_w - column_w) / 2.0;
-    let bubble_cap = column_w - ASSISTANT_RIGHT_GAP;
+    let bubble_cap = assistant_cap(column_w);
     let width = (text_px + 28.0).min(bubble_cap);
     let lines = (text_px / (bubble_cap - 28.0)).ceil().max(1.0);
     let height = 22.0 + 21.0 * lines;
