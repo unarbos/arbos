@@ -1346,6 +1346,56 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Duplex step 2: `start_job` returns at once with a job row the working set and `list_jobs`
+    /// show; the per-chat cap refuses the fourth job with a reason the model can relay.
+    #[tokio::test]
+    async fn start_job_returns_at_once_and_caps_per_chat() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000008";
+        let _host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        let t0 = Instant::now();
+        let brief = "Find the three best-reviewed surf schools near Santa Teresa; return each with its page URL, group and private prices, the sources, and what could not be checked.";
+        let mut ids = Vec::new();
+        for title in [
+            "Searching for surf schools",
+            "Comparing hosting prices",
+            "Checking the weather",
+        ] {
+            let v = agent
+                .hook_start_job(title, brief, "research", vec![])
+                .await
+                .unwrap();
+            ids.push(v["job_id"].as_str().unwrap().to_owned());
+        }
+        assert!(
+            t0.elapsed() < Duration::from_secs(2),
+            "start_job must not wait for the worker"
+        );
+        let err = agent
+            .hook_start_job("A fourth one", brief, "research", vec![])
+            .await
+            .unwrap_err();
+        assert!(err.contains("cap"), "{err}");
+        let listed = agent.hook_list_jobs().await.unwrap();
+        let jobs = listed["jobs"].as_array().unwrap();
+        assert_eq!(jobs.len(), 3);
+        assert!(jobs
+            .iter()
+            .all(|j| j["state"] == "queued" || j["state"] == "running" || j["state"] == "failed"));
+        // The worker cannot start in this test box, so a job may already have failed; while any
+        // job is open the working set names it.
+        let row = agent.store.jobs_for_chat(chat).unwrap();
+        if row.iter().any(|j| j.is_open()) {
+            let ws = agent.working_set_text(chat);
+            assert!(ws.contains("Jobs running in this chat"), "{ws}");
+        }
+        assert_eq!(row.len(), 3);
+        assert_eq!(row[0].kind, "research");
+        assert_eq!(row[0].ask_message_id, "m-busy");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The send-tool switch: default on, `off` restores streamed prose, `strict` drops the fallback.
     #[test]
     fn send_tool_switch_parses() {

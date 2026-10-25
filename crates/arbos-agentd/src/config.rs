@@ -39,6 +39,31 @@ pub fn parse_switch(s: &str) -> Option<bool> {
 pub const STABLE_PREFIX_FILE: &str = "stable-prefix";
 /// Box-local override of the send tool (duplex step 1): `<work_root>/.arbos/send-tool`, `on`, `off` or `strict`.
 pub const SEND_TOOL_FILE: &str = "send-tool";
+/// Box-local override of background jobs (duplex step 2): `<work_root>/.arbos/jobs`, `on` or `off`.
+pub const JOBS_FILE: &str = "jobs";
+
+/// Background jobs as tools (duplex step 2, `docs/duplex-agent-design.md` §2.3): `start_job` /
+/// `list_jobs` are offered and the router prompt carries the jobs section. `ARBOS_JOBS=on|off`,
+/// default **on**. Off: the hooks refuse and the prompt is byte-identical to before.
+pub fn jobs_on(override_file: &std::path::Path) -> bool {
+    switch_on("ARBOS_JOBS", override_file, true)
+}
+
+/// Running or queued jobs per chat (`ARBOS_JOB_MAX_PER_CHAT`, default 3; design D4).
+pub fn job_max_per_chat() -> usize {
+    std::env::var("ARBOS_JOB_MAX_PER_CHAT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(3)
+}
+
+/// Running or queued jobs per agent across its chats (`ARBOS_JOB_MAX_PER_AGENT`, default 6).
+pub fn job_max_per_agent() -> usize {
+    std::env::var("ARBOS_JOB_MAX_PER_AGENT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(6)
+}
 
 /// How the main agent's words reach the chat (duplex design §2.1, `docs/duplex-agent-design.md`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -397,6 +422,12 @@ impl Config {
     /// needs a pi respawn, not a box restart.
     pub fn code_mode(&self) -> bool {
         code_mode_on(&self.box_flag_file(CODE_MODE_FILE))
+    }
+
+    /// Background jobs (duplex step 2); read at every pi (re)spawn like code mode (the prompt
+    /// section rides in the cached prefix) and at every `start_job` call.
+    pub fn jobs(&self) -> bool {
+        jobs_on(&self.box_flag_file(JOBS_FILE))
     }
 
     /// Send tool (duplex step 1): read per turn, so a toggle needs no respawn.
