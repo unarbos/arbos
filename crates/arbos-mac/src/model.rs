@@ -118,6 +118,10 @@ pub struct Project {
     /// owner allowed to message this agent. Empty unless I own it.
     #[serde(default)]
     pub message_grants: Vec<MessageGrant>,
+    /// Group policy (`PATCH /chats/{id} {members_see_reads}`): members may see who
+    /// has read messages. Default on. Owners/admins still see when off.
+    #[serde(default = "default_true")]
+    pub members_see_reads: bool,
 }
 
 /// One row of an agent's "Who may message X" card (`message_grants` on the project).

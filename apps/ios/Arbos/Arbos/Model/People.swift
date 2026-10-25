@@ -264,6 +264,8 @@ struct PeopleChat: Identifiable, Equatable {
     var silencedUntil: Int64? = nil
     /// Per-user sidebar archive (`archived_at` on the relay); nil = in the list.
     var archivedAt: Int64? = nil
+    /// Group policy: members may see who has read messages (owner/admin toggle). Default on.
+    var membersSeeReads: Bool = true
     /// Banned people (owner/admin with mute-ban rights); Unban from the member list.
     var banned: [ChatMember] = []
 
@@ -318,6 +320,7 @@ extension PeopleChat {
         self.silenced = dto.me.silenced ?? false
         self.silencedUntil = dto.me.silenced_until
         self.archivedAt = dto.archived_at.flatMap { $0 > 0 ? $0 : nil }
+        self.membersSeeReads = dto.members_see_reads ?? true
         self.banned = (dto.banned ?? []).map { ChatMember(dto: $0) }
     }
 

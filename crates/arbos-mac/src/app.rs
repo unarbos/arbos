@@ -5623,6 +5623,18 @@ impl AppState {
         cx.notify();
     }
 
+    /// Owner/admin: whether members can see who has read messages in this group.
+    pub fn set_members_see_reads(&mut self, chat_id: Id, enabled: bool, cx: &mut Context<Self>) {
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == chat_id) {
+            if p.members_see_reads == enabled {
+                return;
+            }
+            p.members_see_reads = enabled;
+        }
+        self.command(ClientCommand::SetMembersSeeReads { chat_id, enabled });
+        cx.notify();
+    }
+
     /// A picked file becomes my picture everywhere (`PUT /me/avatar`).
     pub fn set_my_avatar(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
         self.command(ClientCommand::SetMyAvatar { path });

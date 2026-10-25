@@ -1168,7 +1168,27 @@ impl Transcript {
         let receipts = chat_id
             .as_deref()
             .and_then(|id| state.message_receipts.get(id));
-        let read_receipts = state.read_receipts;
+        // Group policy `members_see_reads`: non-owners hide "Seen" when the admin turned it off.
+        let read_receipts = {
+            let mut on = state.read_receipts;
+            if on {
+                if let Some(id) = chat_id.as_deref() {
+                    if let Some(space) = state.project(id) {
+                        if space.is_people_group() && !space.members_see_reads {
+                            let me_handle = state.me_handle();
+                            let i_own = space
+                                .owner_handle
+                                .as_deref()
+                                .is_some_and(|o| o == me_handle);
+                            if !i_own {
+                                on = false;
+                            }
+                        }
+                    }
+                }
+            }
+            on
+        };
         self.chat_id = chat_id;
         let new_rows = build_rows(
             &messages,

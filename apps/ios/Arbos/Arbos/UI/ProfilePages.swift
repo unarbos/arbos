@@ -1246,6 +1246,7 @@ struct GroupProfileView: View {
 
     /// Members: Add members, Share invite link (people groups), Activity for
     /// owners/admins, then every person (name, @handle) and agent as kit rows.
+    /// Owners/admins also get a read-receipts policy card (members see who read).
     /// Banned people (owner/admin) sit under Banned with Unban.
     private var membersSections: [PaneSection] {
         var list: [AnyView] = [
@@ -1292,6 +1293,18 @@ struct GroupProfileView: View {
         }
         list += rows.map { r in AnyView(memberRow(r)) }
         var out: [PaneSection] = [.card(list, separatorInset: PaneKit.separatorInset(.glyph("")))]
+        if canManageMembers, people?.isGroup == true {
+            out.insert(.card([AnyView(PaneRow(
+                title: "Read receipts",
+                subtitle: "Members can see who has read messages",
+                trailing: AnyView(
+                    Toggle("", isOn: Binding(
+                        get: { people?.membersSeeReads ?? true },
+                        set: { v in Task { await model.setMembersSeeReads(chatId, v) } }
+                    )).labelsHidden().tint(theme.online)
+                )
+            ))]), at: 0)
+        }
         if !bannedRows.isEmpty {
             out.append(.title("Banned"))
             out.append(.card(bannedRows.map { r in AnyView(bannedRow(r)) },
