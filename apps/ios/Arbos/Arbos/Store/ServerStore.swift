@@ -80,8 +80,13 @@ extension AppModel {
     }
 
     func channelUnread(_ channel: ServerChannel) -> Bool {
-        guard visibleChatId != channel.id else { return false }
-        return (matrixChannelRow(channel)?.unread ?? 0) > 0
+        channelUnreadCount(channel) > 0
+    }
+
+    /// Unread messages in a channel for the count pill (0 while that channel is open).
+    func channelUnreadCount(_ channel: ServerChannel) -> Int {
+        guard visibleChatId != channel.id else { return 0 }
+        return Int(matrixChannelRow(channel)?.unread ?? 0)
     }
 
     /// Last activity (ms) for sorting and the time label; the relay's creation time until a row lands.

@@ -29,7 +29,7 @@ use gpui::{
 };
 
 use crate::app::AppState;
-use crate::model::{Id, MachineState, Message, Project, Role, ServerInfo};
+use crate::model::{unread_badge_label, Id, MachineState, Message, Project, Role, ServerInfo};
 use crate::search;
 use crate::ui::avatars;
 use crate::ui::composer::Composer;
@@ -459,6 +459,10 @@ struct RowView {
     selected: bool,
     streaming: bool,
     unread: bool,
+    /// Relay message count for the pill; `0` with [`Self::unread`] keeps the plain dot.
+    unread_count: u32,
+    /// Muted spaces draw the count (or dot) in muted grey, not accent.
+    muted: bool,
     typing: bool,
     preview: String,
     time: String,
@@ -608,10 +612,13 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         } else {
             p.guests().cloned().collect()
         };
+        let unread_count = state.project_unread(&p.id) as u32;
         let row = RowView {
             selected: selected.as_deref() == Some(p.id.as_str()),
             streaming,
-            unread: state.project_unread(&p.id) > 0,
+            unread: state.project_has_unread(&p.id),
+            unread_count,
+            muted: state.is_muted(&p.id),
             typing: !state.typing_in(&p.id).is_empty(),
             preview: hit.reason.unwrap_or_else(|| preview(state, p)),
             time: time_label(last_activity(state, p)),
@@ -1640,6 +1647,33 @@ pub fn channel_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     )
 }
 
+/// Small count pill for a sidebar row: accent (or muted grey), white digits, capped at 99+.
+fn unread_count_pill(count: u32, muted: bool, theme: &Theme) -> Div {
+    let label = unread_badge_label(count).unwrap_or_default();
+    let bg = if muted {
+        theme.text_muted
+    } else {
+        theme.accent
+    };
+    div()
+        .flex_shrink_0()
+        .h(px(18.0))
+        .min_w(px(18.0))
+        .px(px(if count > 9 { 6.0 } else { 0.0 }))
+        .rounded_full()
+        .bg(bg)
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .text_size(px(10.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(gpui::white())
+                .child(label),
+        )
+}
+
 fn render_row(
     row: RowView,
     shell: &Shell,
@@ -1651,6 +1685,8 @@ fn render_row(
         selected,
         streaming,
         unread,
+        unread_count,
+        muted,
         typing,
         preview,
         time,
@@ -1908,7 +1944,8 @@ fn render_row(
                         )
                         // No "agent is working" dot on rows (Jacob, 2026-10-22): the
                         // working state lives in the header / activity line. A person
-                        // typing keeps its green pulse; unread keeps its accent dot.
+                        // typing keeps its green pulse; unread shows a count pill, or
+                        // a plain dot when only the local flag is set.
                         .when(typing, |el| {
                             el.child(
                                 div()
@@ -1917,8 +1954,15 @@ fn render_row(
                                     .bg(Theme::with_alpha(theme.online, 0.35 + 0.65 * phase)),
                             )
                         })
-                        .when(!typing && unread, |el| {
-                            el.child(div().size(px(8.0)).rounded_full().bg(theme.accent))
+                        .when(!typing && unread_count > 0, |el| {
+                            el.child(unread_count_pill(unread_count, muted, theme))
+                        })
+                        .when(!typing && unread && unread_count == 0, |el| {
+                            el.child(div().size(px(8.0)).rounded_full().bg(if muted {
+                                theme.text_muted
+                            } else {
+                                theme.accent
+                            }))
                         }),
                 ),
         )

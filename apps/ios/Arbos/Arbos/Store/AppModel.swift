@@ -1105,24 +1105,34 @@ final class AppModel: ObservableObject {
     }
 
     /// Everything unread: people chats by sequence, project chats by flag.
+    /// Muted people chats and muted channels stay off the app badge.
     var unreadTotal: Int {
         // Hidden plain chats (D78: not the agent's one chat) never badge.
         if !unreadCounts.isEmpty {
-            var total = unreadCounts.reduce(0) { $0 + (isHiddenChat($1.key) ? 0 : $1.value) }
+            var total = 0
+            for (id, value) in unreadCounts {
+                if isHiddenChat(id) || badgesIgnores(id) { continue }
+                total += value
+            }
             // Live Loro rows can mark unread before /me/unread has the event.
-            for id in peopleUnread where !isHiddenChat(id) && (unreadCounts[id] ?? 0) == 0 {
+            for id in peopleUnread where !isHiddenChat(id) && !badgesIgnores(id) && (unreadCounts[id] ?? 0) == 0 {
                 total += 1
             }
             for list in chats.values {
-                for c in list where c.unread && !isHiddenChat(c.id) && (unreadCounts[c.id] ?? 0) == 0 {
+                for c in list where c.unread && !isHiddenChat(c.id) && !badgesIgnores(c.id) && (unreadCounts[c.id] ?? 0) == 0 {
                     total += 1
                 }
             }
             return total
         }
-        let people = peopleChats.reduce(0) { $0 + unreadCount(for: $1) }
+        let people = peopleChats.reduce(0) { $0 + (isPeopleChatMuted($1.id) ? 0 : unreadCount(for: $1)) }
         let projects = chats.values.flatMap { $0 }.filter { $0.unread && !isHiddenChat($0.id) }.count
         return people + projects
+    }
+
+    /// Muted people chats and channels do not contribute to the app badge.
+    private func badgesIgnores(_ chatId: String) -> Bool {
+        isPeopleChatMuted(chatId) || mutedChannelIds.contains(chatId)
     }
 
     /// Unread rows of one agent chat for its dot: none for a hidden plain chat.
@@ -1140,6 +1150,28 @@ final class AppModel: ObservableObject {
             flagged: chat.unread || peopleUnread.contains(chat.id),
             watching: chat.id == visibleChatId
         )
+    }
+
+    /// Agent / project chat unread messages for the home-row count pill.
+    func unreadCount(for chat: Chat) -> Int {
+        if isHiddenChat(chat.id) { return 0 }
+        return Self.peopleUnreadCount(
+            remote: unreadCounts[chat.id],
+            flagged: chat.unread,
+            watching: chat.id == visibleChatId
+        )
+    }
+
+    /// Sum of unread messages across an agent's chats (home row pill).
+    func unreadCount(forProject projectId: String) -> Int {
+        chats(of: projectId).reduce(0) { $0 + unreadCount(for: $1) }
+    }
+
+    /// Sidebar / home unread pill text: nil when there is no count to show.
+    nonisolated static func unreadBadgeLabel(_ count: Int) -> String? {
+        if count <= 0 { return nil }
+        if count > 99 { return "99+" }
+        return "\(count)"
     }
 
     /// #1438: one read cursor per user, kept by the relay. `remote` is `GET /me/unread`'s

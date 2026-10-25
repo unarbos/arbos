@@ -2869,11 +2869,16 @@ impl AppState {
             .any(|c| self.chat_is_streaming(&c.id))
     }
 
+    /// Unread message count for a space's visible tabs (sum of relay counts).
     pub fn project_unread(&self, project_id: &str) -> usize {
+        crate::model::unread_message_total(self.visible_tabs(project_id)) as usize
+    }
+
+    /// True when any visible tab is flagged unread or has a relay count.
+    pub fn project_has_unread(&self, project_id: &str) -> bool {
         self.visible_tabs(project_id)
             .iter()
-            .filter(|c| c.unread)
-            .count()
+            .any(|c| c.unread || c.unread_count > 0)
     }
 
     /// S8: the last assistant message ended with an `ask_user` question and
@@ -2986,19 +2991,39 @@ impl AppState {
         }
         // Agents: keep a valid tab; else primary, else last used, else first.
         if self.enforce_tab(&project_id) {
+            // enforce_tab already opened the chat — clear unread on screen now.
+            if let Some(chat_id) = self.active_tab.get(&project_id).cloned() {
+                self.clear_chat_unread_on_screen(&chat_id);
+            }
             self.sync_focus();
             cx.notify();
             return;
         }
         if let Some(chat_id) = self.active_tab.get(&project_id).cloned() {
+            self.clear_chat_unread_on_screen(&chat_id);
             self.command(ClientCommand::OpenChat { chat_id });
         } else if let Some(first) = self.tabs(&project_id).first() {
             let id = first.id.clone();
             self.active_tab.insert(project_id, id.clone());
+            self.clear_chat_unread_on_screen(&id);
             self.command(ClientCommand::OpenChat { chat_id: id });
         }
         self.sync_focus();
         cx.notify();
+    }
+
+    /// Drop the row's unread flag and count immediately (Dock + sidebar pill).
+    fn clear_chat_unread_on_screen(&mut self, chat_id: &str) {
+        if let Some(chat) = self
+            .chats
+            .values_mut()
+            .flat_map(|v| v.iter_mut())
+            .find(|c| c.id == chat_id)
+        {
+            chat.unread = false;
+            chat.unread_count = 0;
+        }
+        self.sync_badge();
     }
 
     /// Home-search row click: open the chat that holds the matching message and
@@ -3410,15 +3435,7 @@ impl AppState {
         self.sidebar_overlay = false;
         self.active_tab.insert(project_id.clone(), chat_id.clone());
         self.last_chats.insert(project_id, chat_id.clone());
-        if let Some(chat) = self
-            .chats
-            .values_mut()
-            .flat_map(|v| v.iter_mut())
-            .find(|c| c.id == chat_id)
-        {
-            chat.unread = false;
-            chat.unread_count = 0;
-        }
+        self.clear_chat_unread_on_screen(&chat_id);
         self.command(ClientCommand::OpenChat {
             chat_id: chat_id.clone(),
         });
@@ -3457,16 +3474,7 @@ impl AppState {
         };
         self.active_tab.insert(project_id.clone(), chat_id.clone());
         self.last_chats.insert(project_id, chat_id.clone());
-        if let Some(chat) = self
-            .chats
-            .values_mut()
-            .flat_map(|v| v.iter_mut())
-            .find(|c| c.id == chat_id)
-        {
-            chat.unread = false;
-            chat.unread_count = 0;
-        }
-        self.sync_badge();
+        self.clear_chat_unread_on_screen(&chat_id);
         // A job tab is client-side (`jobtabs`): nothing for the relay to open or mark.
         if !crate::jobtabs::is_job_chat(&chat_id) {
             self.command(ClientCommand::MarkRead {
@@ -7147,11 +7155,13 @@ impl AppState {
     }
 
     /// Dock badge = unread messages across chats (from `GET /me/unread`; cleared as they are read).
+    /// Muted spaces stay off the badge (same as notification banners).
     pub fn sync_badge(&self) {
         let total = self
             .chats
             .values()
             .flat_map(|v| v.iter())
+            .filter(|c| !self.is_muted(&c.project_id))
             .map(Chat::missed_count)
             .sum();
         notify::set_badge(total);

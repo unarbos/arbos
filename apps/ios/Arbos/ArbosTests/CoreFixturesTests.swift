@@ -708,6 +708,14 @@ final class CoreFixturesTests: XCTestCase {
         XCTAssertEqual(AppModel.peopleUnreadCount(remote: 0, flagged: false, watching: false), 0)
     }
 
+    /// Home-row unread pill text: none at 0, digits through 99, then "99+".
+    func testUnreadBadgeLabel() {
+        XCTAssertNil(AppModel.unreadBadgeLabel(0))
+        XCTAssertEqual(AppModel.unreadBadgeLabel(7), "7")
+        XCTAssertEqual(AppModel.unreadBadgeLabel(99), "99")
+        XCTAssertEqual(AppModel.unreadBadgeLabel(140), "99+")
+    }
+
     /// Mark-read PUT: skip same value, send after the window, delay inside it.
     /// With `force`, an unchanged value still sends outside the window / delays inside it.
     func testReadPutPlan() {

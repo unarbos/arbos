@@ -7,7 +7,8 @@ import ArbosFFI
 import SwiftUI
 
 /// A server in the home list: the D79 initials disc, the name, the newest line
-/// across its channels, the time, the unread dot (rule 1 — no counts or badges).
+/// across its channels, the time, the unread dot (rule 1 — the channel list
+/// carries the count pills).
 struct ServerRow: View {
     @Environment(\.theme) private var theme
     let server: Server
@@ -49,7 +50,8 @@ struct ServerRow: View {
 }
 
 /// A channel in the server's list: the same row as a chat, with a `#` disc for
-/// the avatar, a small lock when only admins post, the unread dot (rule 2).
+/// the avatar, a small lock when only admins post, and the unread count pill
+/// (or a plain dot when only a flag is set).
 struct ChannelRow: View {
     @Environment(\.theme) private var theme
     let channel: ServerChannel
@@ -57,6 +59,9 @@ struct ChannelRow: View {
     let preview: String
     let time: String
     let unread: Bool
+    /// Unread messages; 0 → the dot only when `unread`.
+    var count: Int = 0
+    var muted: Bool = false
 
     var body: some View {
         HStack(spacing: 15) {
@@ -91,8 +96,11 @@ struct ChannelRow: View {
                         .foregroundStyle(theme.muted)
                         .lineLimit(1)
                     Spacer(minLength: 0)
-                    if unread {
-                        Circle().fill(theme.unread).frame(width: Theme.unreadDot, height: Theme.unreadDot)
+                    if count > 0 {
+                        UnreadBadge(count: count, muted: muted)
+                    } else if unread {
+                        Circle().fill(muted ? theme.muted : theme.unread)
+                            .frame(width: Theme.unreadDot, height: Theme.unreadDot)
                     }
                 }
             }
@@ -142,7 +150,9 @@ struct ServerChannelsView: View {
                                        restricted: model.channelRestricted(channel),
                                        preview: model.channelPreview(channel),
                                        time: HomeView.timeLabel(ms: model.channelActivity(channel)),
-                                       unread: model.channelUnread(channel))
+                                       unread: model.channelUnread(channel),
+                                       count: model.channelUnreadCount(channel),
+                                       muted: model.isChannelMuted(channel))
                         }
                         .buttonStyle(.borderless)
                         // Long-press (the Mac's right-click): Archive for everyone; Delete for

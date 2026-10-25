@@ -143,6 +143,7 @@ struct HomeView: View {
                                              previewIcon: entry.hit.reason == nil ? previewIcon(project) : nil, time: timeLabel(project),
                                              streaming: model.isStreaming(project: project.id),
                                              unread: model.chats(of: project.id).contains { model.chatHasUnread($0) },
+                                             count: model.unreadCount(forProject: project.id),
                                              pinned: pinned)
                                 }
                                 .buttonStyle(.borderless)
@@ -225,7 +226,9 @@ struct HomeView: View {
                                 Button { model.open(peopleChat: chat) } label: {
                                     PeopleRow(chat: chat, preview: entry.hit.reason ?? peoplePreview(chat), time: timeLabel(ms: peopleActivity(chat)),
                                               unread: model.peopleUnread.contains(chat.id) || model.unreadCount(for: chat) > 0,
-                                              count: model.unreadCount(for: chat), me: model.user?.id,
+                                              count: model.unreadCount(for: chat),
+                                              muted: model.isPeopleChatMuted(chat.id),
+                                              me: model.user?.id,
                                               pinned: pinned)
                                 }
                                 .buttonStyle(.borderless)
@@ -1225,16 +1228,19 @@ struct AgentRow: View {
     let time: String
     let streaming: Bool
     let unread: Bool
+    /// Unread messages across the agent's chats; 0 → the dot only when `unread`.
+    var count: Int = 0
+    var muted: Bool = false
     var pinned: Bool = false
 
     var body: some View {
         // Grok home row (measured): 48 pt avatar box, text 15 pt after it, name 17
-        // semibold over a 15 pt grey preview, time right, 10 pt unread dot at the far
-        // right of the preview line, 80 pt row pitch.
+        // semibold over a 15 pt grey preview, time right, count pill (or 10 pt unread
+        // dot) at the far right of the preview line, 80 pt row pitch.
         HStack(spacing: 15) {
             // No "agent is working" indicator on rows (Jacob, 2026-10-22): the working
             // state lives in the chat header / activity line. The right edge keeps the
-            // unread dot.
+            // unread count / dot.
             AgentAvatar(project: project, theme: theme, size: Theme.rowAvatar)
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
@@ -1267,8 +1273,11 @@ struct AgentRow: View {
                         .foregroundStyle(theme.muted)
                         .lineLimit(1)
                     Spacer(minLength: 0)
-                    if unread {
-                        Circle().fill(theme.unread).frame(width: Theme.unreadDot, height: Theme.unreadDot)
+                    if count > 0 {
+                        UnreadBadge(count: count, muted: muted)
+                    } else if unread {
+                        Circle().fill(muted ? theme.muted : theme.unread)
+                            .frame(width: Theme.unreadDot, height: Theme.unreadDot)
                     }
                 }
             }
@@ -1289,6 +1298,8 @@ struct PeopleRow: View {
     let unread: Bool
     /// Unread messages (Grok/Telegram-style count pill); 0 → the dot only.
     var count: Int = 0
+    /// Muted chats draw the pill in grey (no accent) and stay off the app badge.
+    var muted: Bool = false
     let me: String?
     var pinned: Bool = false
 
@@ -1371,9 +1382,10 @@ struct PeopleRow: View {
                         .lineLimit(1)
                     Spacer(minLength: 0)
                     if count > 0 {
-                        UnreadBadge(count: count)
+                        UnreadBadge(count: count, muted: muted)
                     } else if unread {
-                        Circle().fill(theme.unread).frame(width: Theme.unreadDot, height: Theme.unreadDot)
+                        Circle().fill(muted ? theme.muted : theme.unread)
+                            .frame(width: Theme.unreadDot, height: Theme.unreadDot)
                     }
                 }
             }
@@ -1397,18 +1409,19 @@ struct PulseDot: View {
     }
 }
 
-/// Unread count pill (blue, white digits), capped at 99+.
+/// Unread count pill (blue, white digits), capped at 99+. Muted chats use grey.
 struct UnreadBadge: View {
     @Environment(\.theme) private var theme
     let count: Int
+    var muted: Bool = false
 
     var body: some View {
-        Text(count > 99 ? "99+" : "\(count)")
+        Text(AppModel.unreadBadgeLabel(count) ?? "\(count)")
             .font(theme.font(12, weight: .semibold))
             .foregroundStyle(.white)
             .padding(.horizontal, count > 9 ? 6 : 0)
             .frame(minWidth: 20, minHeight: 20)
-            .background(Capsule().fill(theme.unread))
+            .background(Capsule().fill(muted ? theme.muted : theme.unread))
             .accessibilityLabel("\(count) unread")
     }
 }

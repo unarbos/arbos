@@ -1077,6 +1077,24 @@ impl Chat {
     }
 }
 
+/// Sidebar unread pill text. `None` when there is no count to show — the row
+/// keeps a plain dot if only the local unread flag is set.
+pub fn unread_badge_label(count: u32) -> Option<String> {
+    match count {
+        0 => None,
+        1..=99 => Some(count.to_string()),
+        _ => Some("99+".into()),
+    }
+}
+
+/// Sum of relay message counts across chats (not the number of unread chats).
+pub fn unread_message_total<'a, I>(chats: I) -> u32
+where
+    I: IntoIterator<Item = &'a Chat>,
+{
+    chats.into_iter().map(|c| c.unread_count).sum()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
@@ -3564,6 +3582,49 @@ pub fn now_ms() -> u64 {
 
 pub fn new_id() -> Id {
     ulid::Ulid::new().to_string()
+}
+
+#[cfg(test)]
+mod unread_badge_tests {
+    use super::{unread_badge_label, unread_message_total, Chat, ChatKind};
+
+    fn chat(unread: bool, unread_count: u32) -> Chat {
+        Chat {
+            id: "c".into(),
+            project_id: "p".into(),
+            title: "T".into(),
+            is_pinned: false,
+            is_system: false,
+            unread,
+            unread_count,
+            last_message_at: 0,
+            archived_at: None,
+            kind: ChatKind::Chat,
+            participants: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn unread_badge_label_caps_at_99() {
+        assert_eq!(unread_badge_label(0), None);
+        assert_eq!(unread_badge_label(7).as_deref(), Some("7"));
+        assert_eq!(unread_badge_label(99).as_deref(), Some("99"));
+        assert_eq!(unread_badge_label(140).as_deref(), Some("99+"));
+    }
+
+    #[test]
+    fn unread_message_total_sums_counts_not_chats() {
+        let chats = [
+            chat(true, 5),
+            chat(true, 2),
+            chat(true, 0), // flag only — no pill count
+        ];
+        assert_eq!(unread_message_total(&chats), 7);
+        assert_eq!(
+            unread_badge_label(unread_message_total(&chats)).as_deref(),
+            Some("7")
+        );
+    }
 }
 
 #[cfg(test)]

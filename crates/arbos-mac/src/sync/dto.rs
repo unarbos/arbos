@@ -1249,6 +1249,16 @@ mod tests {
             merged_unread(2, Some(1_699_999_999_000), 1_700_000_000_000),
             2
         );
+        // A local read after the relay's last activity clears the merged count
+        // used by the sidebar pill (same rule as the Dock).
+        let cleared = merged_unread(140, Some(1_700_000_000_100), 1_700_000_000_000);
+        assert_eq!(cleared, 0);
+        assert_eq!(crate::model::unread_badge_label(cleared), None);
+        let open = merged_unread(140, None, 1_700_000_000_000);
+        assert_eq!(
+            crate::model::unread_badge_label(open).as_deref(),
+            Some("99+")
+        );
     }
 
     /// #1438: `GET /me/unread` is the user's cursor. A chat it does not list is read even when
