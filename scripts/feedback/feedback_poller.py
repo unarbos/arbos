@@ -2724,6 +2724,21 @@ class Loop:
             self.hold_for_approval(fid, st)
             return
         head = st["branch_head"]
+        # Merge-time probe (2026-10-25, #1656/#1659/#1707 and the re-landed tails #1684/#1721): the commit that
+        # merges must be the branch's LIVE head. If the author pushed after the gate run started, the gated head
+        # is stale — re-gate the new head instead of merging the old one and orphaning the tail.
+        live = self.gh.branch_head(st["branch"]) if st.get("branch") else None
+        if live and live != head:
+            st.update(branch_head=live, gated_head=None)
+            st.pop("rust_gate", None)
+            self.store.save_state(fid, st)
+            self.store.event(fid, "branch_moved_at_merge", gated=head, live=live)
+            log(f"[{fid}] branch moved {head[:8]} → {live[:8]} after the gate started; not merging the gated head — re-gating the new one")
+            if st.get("issue"):
+                with contextlib.suppress(HttpError):
+                    self.gh.comment(st["issue"], f"`{st['branch']}` moved to `{live[:8]}` after the gate run started on `{head[:8]}`; the gated head was NOT merged. "
+                                    "The new head re-gates and merges on green. (Nothing is orphaned: the loop always merges the live head, never an older one.)")
+            return
         summary = re.sub(r"\s+", " ", st.get("agent_summary") or "").strip()[:80]
         merged = self.gh.merge_into_main(head, f"Merge {st['branch']}: {summary or 'feedback fix'} [feedback {fid}]")
         if merged is None:
@@ -3411,6 +3426,10 @@ class Loop:
             self.watch_handoffs()
         except Exception as e:  # noqa: BLE001
             log(f"handoff watch failed: {e}")
+        try:
+            self.watch_late_pushes()
+        except Exception as e:  # noqa: BLE001
+            log(f"late-push watch failed: {e}")
         with contextlib.suppress(Exception):
             self.write_awaiting_doc()
         with contextlib.suppress(Exception):
@@ -3656,6 +3675,66 @@ class Loop:
                             "push a new commit to re-gate. A commit tagged `[feedback <id>]` that reaches `main` directly is tracked too.")
             self.gh.set_labels(st["issue"], [label, "in-progress"], ["shipped", "needs-human", "no-change"])
 
+    def watch_late_pushes(self) -> None:
+        """A push to `feedback/<fid>` AFTER the item merged (the loop deleted the branch; the author's next push
+        recreated it with the tail) used to be invisible — authors re-landed tails as new issues (#1684, #1721).
+        For items merged in the last 3 days: a branch with commits not on main becomes `<fid>-followupN`, same
+        issue and owner, gated and shipped like any item; the issue gets one note. Cheap: one branch_head GET
+        per recently merged item per tick, ETag-cached."""
+        cutoff = (utcnow() - dt.timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        for fid in self.store.items():
+            st = self.store.state(fid)
+            if st.get("status") not in ("pushed", "shipped") or not st.get("commit") or (st.get("pushed_at") or "") < cutoff:
+                continue
+            if "-followup" in fid or st.get("late_push_followup"):
+                continue
+            branch = f"feedback/{fid}"
+            head = self.gh.branch_head(branch)
+            if not head or head == st.get("commit"):
+                continue
+            try:
+                cmp = self.gh.compare("main", head)
+            except HttpError:
+                continue
+            if cmp.get("status") not in ("ahead", "diverged") or not cmp.get("commits"):
+                continue
+            n = 1
+            while self.store.item_dir(f"{fid}-followup{'' if n == 1 else n}").exists():
+                n += 1
+            nfid = f"{fid}-followup{'' if n == 1 else n}"
+            nbranch = f"feedback/{nfid}"
+            try:
+                self.gh.create_branch(nbranch, head)
+                c = self.gh.api("GET", f"/repos/{self.cfg.github_repo}/git/commits/{head}")
+                marker = self.gh.repo_api("POST", "/git/commits", json_body={
+                    "message": f"follow-up to {fid}: later push on {branch} after the merge [feedback {nfid}]",
+                    "tree": c["tree"]["sha"], "parents": [head]})
+                self.gh.repo_api("PATCH", f"/git/refs/heads/{nbranch}", json_body={"sha": marker["sha"], "force": False})
+            except HttpError as e:
+                log(f"[{fid}] late push on {branch} ({head[:8]}) but the follow-up branch could not be made: {e}")
+                continue
+            info = {}
+            with contextlib.suppress(Exception):
+                info = self.store.submission(fid)
+            owner = st.get("handed_off_to") or st.get("agent_id") or "operator"
+            self.register_tracked(nfid, st.get("issue") or 0, f"follow-up to {fid}: later push on {branch} after the merge ({head[:8]})",
+                                  owner, handle=(info.get("handle") or ""), target=st.get("target"))
+            st["late_push_followup"] = nfid
+            self.store.save_state(fid, st)
+            self.store.event(fid, "late_push_followup", head=head, followup=nfid)
+            # One-hour confirmation hold: the owner knows whether the tail was abandoned or re-landed elsewhere.
+            nst = self.store.state(nfid)
+            if nst:
+                nst["follow_after"] = (utcnow() + dt.timedelta(minutes=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                nst["gated_head"] = head
+                self.store.save_state(nfid, nst)
+            log(f"[{fid}] late push on {branch} ({head[:8]}, {len(cmp.get('commits', []))} commit(s) not on main) → following it as {nfid} after a 60-min confirmation hold")
+            if st.get("issue"):
+                with contextlib.suppress(HttpError):
+                    self.gh.comment(st["issue"], f"{owner}: a push landed on `{branch}` after this item merged ({head[:8]}, {len(cmp.get('commits', []))} commit(s) not on main). "
+                                    f"The loop will follow it as `{nfid}` (branch `{nbranch}`) and gate/ship it in **one hour** unless you say it was abandoned or already landed elsewhere "
+                                    f"— reply here (or ask the loop operator to `decline {nfid}`). Jacob-tier / approval rules apply by reporter as usual.")
+
     def watch_handoffs(self) -> None:
         """A handed-off item is picked up two ways: its owner pushes `feedback/<id>` (the loop gates and merges it
         like one of its own, diagnostics go to the issue instead of an agent), or tags a commit `[feedback <id>]`
@@ -3665,6 +3744,14 @@ class Loop:
             st = self.store.state(fid)
             if st.get("status") != "handed_off" or st.get("commit") or not st.get("track_commit"):
                 continue
+            # A confirmation hold (auto follow-ups, 2026-10-25): the owner has until `follow_after` to decline a
+            # tail the loop found on a merged branch; until then the branch is not followed into the pool.
+            if st.get("follow_after") and iso() < st["follow_after"]:
+                continue
+            if st.get("follow_after"):
+                st.pop("follow_after", None); st.pop("gated_head", None)
+                self.store.save_state(fid, st)
+                self.store.event(fid, "confirmation_hold_over")
             head = self.gh.branch_head(f"feedback/{fid}")
             if head and head != st.get("gated_head"):
                 cmp = self.gh.compare("main", head)
