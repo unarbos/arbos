@@ -271,7 +271,10 @@ enum Transcript {
             case .assistant, .project:
                 // Hand-off: Grok shows "Messaged ◉ <bot>" / "N messages with ◉ A, ◉ B and ◉ C"
                 // as a system line. Consecutive hand-offs merge below.
-                let handoffName = (message.turn == .new || message.turn?.isProgress == true)
+                // A background worker's spawn row draws nothing (`worker`, feedback
+                // `hide-worker-rows-and-tz-2026-10-24`); its `activity` still feeds the
+                // working line through `AppModel.currentActivity`.
+                let handoffName = (message.turn == .new || message.turn?.isProgress == true) && !message.worker
                     ? (message.subagentName ?? subagentNames[message.subagentId ?? ""]) : nil
                 if let name = handoffName {
                     let rowId = "\(message.id)#handoff"

@@ -20,4 +20,5 @@ sha2.workspace = true
 hex.workspace = true
 rand.workspace = true
 chrono.workspace = true
+iana-time-zone.workspace = true
 regex-lite.workspace = true

@@ -638,6 +638,11 @@ struct Message: Identifiable, Equatable {
     var subagentName: String?
     /// Messages exchanged with the subagent on a hand-off row (1 = brief sent, 2 = result back).
     var handoffMessages: Int? = nil
+    /// A background worker the user never named (agentd, Grok parity trait 15): the transcript
+    /// hides this spawn row — Grok shows no "N messages with …" line for its own workers — while
+    /// the working line still reads its `activity`. An agent-to-agent `send_message(to)` row
+    /// carries no flag and keeps its "Messaged ◉ X" line.
+    var worker: Bool = false
     /// Agent-to-agent messaging: this reply answered a message another agent sent into the
     /// chat; the name drawn in the "Replied to ◉ X" line under the bubble.
     var agentReplyTo: String? = nil
@@ -814,6 +819,7 @@ enum DocJSON {
             subagentId: str(m["subagentId"]),
             subagentName: str(m["subagentName"]),
             handoffMessages: int(m["handoffMessages"]).map { Int($0) },
+            worker: bool(m["worker"]),
             agentReplyTo: str(m["agentReplyTo"]).flatMap { $0.isEmpty ? nil : $0 },
             inReplyTo: str(m["inReplyTo"]),
             usage: usage,

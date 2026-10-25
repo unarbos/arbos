@@ -473,6 +473,8 @@ impl From<UserMessageOptsRecord> for doc::UserMessageOpts {
             sender_name: r.sender_name,
             sender_avatar: r.sender_avatar,
             answers_question_id: None,
+            // The phone's zone, found on the Rust side so the Swift record is unchanged.
+            tz: doc::device_time_zone(),
         }
     }
 }
