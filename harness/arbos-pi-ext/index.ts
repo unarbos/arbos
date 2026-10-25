@@ -409,8 +409,8 @@ export default function arbosPiExt(pi: ExtensionAPI) {
               {
                 type: "text",
                 text: acked
-                  ? "Route accepted: act. Your acknowledgement is on the working line. Do the work, then post the result with send_message (a comparison as conclusion, linked table, details + sources, one next-step offer — each its own call); words outside send_message are not shown. No thinking aloud, no process narration."
-                  : "Route accepted: act. Follow your plan, then post the result with send_message (several calls when the answer has parts); words outside send_message are not shown. No thinking aloud, no process narration.",
+                  ? "Route accepted: act. Your acknowledgement is on the working line. If this needs the web, several pages, a build, or more than three tool calls: post that acknowledgement with send_message, call start_job now and end the turn — do not do long work here. Otherwise do the work, then post the result with send_message (a comparison as conclusion, linked table, details + sources, one next-step offer — each its own call); words outside send_message are not shown. No thinking aloud, no process narration."
+                  : "Route accepted: act. If this needs the web, several pages, a build, or more than three tool calls: post a one-line acknowledgement with send_message, call start_job now and end the turn. Otherwise follow your plan, then post the result with send_message (several calls when the answer has parts); words outside send_message are not shown. No thinking aloud, no process narration.",
               },
             ],
             details: { action },
