@@ -943,7 +943,9 @@ impl Db {
     pub fn always_on_users(&self) -> Result<Vec<String>> {
         self.with(|c| {
             let mut st = c.prepare(
-                "SELECT user_id FROM boxes WHERE held_stopped = 0
+                // A box row without a users row is a phantom (a project id minted as a user,
+                // 2026-10-22); the sweep must never breathe life into it (#1708 follow-up).
+                "SELECT b.user_id FROM boxes b JOIN users u ON u.id = b.user_id WHERE b.held_stopped = 0
                  UNION SELECT id FROM users WHERE status = 'member' AND test = 0 AND id NOT IN (SELECT user_id FROM boxes)",
             )?;
             let rows = st.query_map([], |r| r.get(0))?;
