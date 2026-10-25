@@ -66,6 +66,101 @@ fn picture(sender: &Sender, image: Option<Arc<RenderImage>>, size: f32, theme: &
     avatars::sender(sender, size, theme)
 }
 
+/// Live state for one row in the call participants list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RosterState {
+    Speaking,
+    Muted,
+    Ringing,
+    Quiet,
+}
+
+/// One person or agent on the call roster (joined or still ringing).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RosterEntry {
+    pub identity: String,
+    pub sender: Sender,
+    pub is_self: bool,
+    pub state: RosterState,
+    /// "Host" / "Speaker" when the call uses hosted speak; otherwise `None`.
+    pub role: Option<&'static str>,
+}
+
+impl RosterEntry {
+    pub fn status_label(&self) -> &'static str {
+        match self.state {
+            RosterState::Speaking => "Speaking",
+            RosterState::Muted => "Muted",
+            RosterState::Ringing => "Ringing",
+            RosterState::Quiet => "",
+        }
+    }
+}
+
+/// Build the participants list: self first, then joined tiles, then ringing
+/// invitees not already in the room. No duplicates by LiveKit identity.
+pub fn build_roster(
+    me: &Sender,
+    me_muted: bool,
+    joined: &[CallParticipant],
+    ringing: &[Sender],
+    call: &Call,
+) -> Vec<RosterEntry> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let me_identity = me.identity();
+    out.push(RosterEntry {
+        identity: me_identity.clone(),
+        sender: me.clone(),
+        is_self: true,
+        state: if me_muted {
+            RosterState::Muted
+        } else {
+            RosterState::Quiet
+        },
+        role: call.speak_role(&me.id),
+    });
+    seen.insert(me_identity);
+    for p in joined {
+        let id = if p.identity == "local" {
+            me.identity()
+        } else {
+            p.identity.clone()
+        };
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        let state = if p.speaking {
+            RosterState::Speaking
+        } else if p.muted {
+            RosterState::Muted
+        } else {
+            RosterState::Quiet
+        };
+        out.push(RosterEntry {
+            identity: id,
+            sender: p.sender.clone(),
+            is_self: false,
+            state,
+            role: call.speak_role(&p.sender.id),
+        });
+    }
+    for s in ringing {
+        let id = s.identity();
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        out.push(RosterEntry {
+            identity: id,
+            sender: s.clone(),
+            is_self: false,
+            state: RosterState::Ringing,
+            role: call.speak_role(&s.id),
+        });
+    }
+    out
+}
+
 /// One tile: the camera when it is on, else the picture on a dark card.
 fn tile(
     id: ElementId,
@@ -333,6 +428,15 @@ pub fn screen(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Di
         });
     }
     let waiting = n == 0 && active.status == CallStatus::Connected;
+    let ringing_senders: Vec<Sender> = ringing.iter().map(|(s, _)| s.clone()).collect();
+    let roster_count = build_roster(
+        &me_tile.sender,
+        active.muted,
+        &active.participants,
+        &ringing_senders,
+        &active.call,
+    )
+    .len();
 
     // "Let <agent> see" (#1353): beside the camera while it is on in a call
     // with an agent — the one switch for the agent's `vision_enabled`.
@@ -507,6 +611,29 @@ pub fn screen(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Di
                 .child(sub),
         );
     }
+    if roster_count > 0 {
+        column = column.child(
+            div()
+                .id("call-roster-count")
+                .pt(px(8.0))
+                .px(px(12.0))
+                .py(px(4.0))
+                .rounded(px(8.0))
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.surface_2))
+                .text_size(px(TEXT_SMALL))
+                .text_color(theme.text_muted)
+                .child(format!("{roster_count} in the call"))
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.call_roster_open = !this.call_roster_open;
+                        cx.notify();
+                    }),
+                ),
+        );
+    }
     // My small self-view in the corner when others are here and my camera is on.
     if n >= 1 && active.local_video.is_some() {
         column = column.child(
@@ -608,6 +735,48 @@ pub fn bar(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> State
             .justify_center()
             .child(icon("phone", 14.0, gpui::white())),
     };
+    let me = Sender {
+        kind: "user".into(),
+        id: state.me_id(),
+        name: state
+            .account
+            .as_ref()
+            .map(|a| a.name.clone())
+            .unwrap_or_default(),
+        handle: state.me_handle(),
+        avatar: None,
+        avatar_color: None,
+        avatar_color_index: None,
+        avatar_leaf: None,
+        avatar_leaf_color: None,
+        avatar_url: state
+            .account
+            .as_ref()
+            .map(|a| a.avatar_url.clone())
+            .unwrap_or_default(),
+    };
+    let bar_ringing = if active.call.is_live() && active.status == CallStatus::Connected {
+        let expected = state
+            .project(active.call.space_id())
+            .map(|p| model::call_people(p, &state.me_id(), &active.call.agents))
+            .unwrap_or_else(|| active.call.agents.clone());
+        let in_room: Vec<String> = active
+            .participants
+            .iter()
+            .map(|p| p.identity.clone())
+            .collect();
+        model::still_ringing(&expected, &in_room)
+    } else {
+        Vec::new()
+    };
+    let roster_n = build_roster(
+        &me,
+        active.muted,
+        &active.participants,
+        &bar_ringing,
+        &active.call,
+    )
+    .len();
     let bg = match theme.appearance {
         Appearance::Light => palette.inner,
         Appearance::Dark => palette.outer,
@@ -671,6 +840,27 @@ pub fn bar(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> State
                             theme.online
                         })
                         .child(sub),
+                ),
+        )
+        .child(
+            div()
+                .id("call-bar-roster")
+                .flex_shrink_0()
+                .px(px(8.0))
+                .py(px(4.0))
+                .rounded(px(8.0))
+                .cursor_pointer()
+                .hover(|s| s.bg(Theme::with_alpha(theme.text, 0.08)))
+                .text_size(px(TEXT_TINY))
+                .text_color(theme.text_muted)
+                .child(format!("{roster_n}"))
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.call_roster_open = !this.call_roster_open;
+                        cx.notify();
+                    }),
                 ),
         )
         .child(
@@ -959,6 +1149,146 @@ pub fn ringing_line(names: &[String]) -> String {
     }
 }
 
+/// Floating participants list: avatar, name, speaking / muted / ringing, role.
+pub fn roster_popover(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Div {
+    let theme = Theme::of(cx).clone();
+    let state = shell.state.read(cx);
+    let me = Sender {
+        kind: "user".into(),
+        id: state.me_id(),
+        name: state
+            .account
+            .as_ref()
+            .map(|a| a.name.clone())
+            .unwrap_or_default(),
+        handle: state.me_handle(),
+        avatar: None,
+        avatar_color: None,
+        avatar_color_index: None,
+        avatar_leaf: None,
+        avatar_leaf_color: None,
+        avatar_url: state
+            .account
+            .as_ref()
+            .map(|a| a.avatar_url.clone())
+            .unwrap_or_default(),
+    };
+    let ringing = if active.call.is_live() && active.status == CallStatus::Connected {
+        let expected = state
+            .project(active.call.space_id())
+            .map(|p| model::call_people(p, &state.me_id(), &active.call.agents))
+            .unwrap_or_else(|| active.call.agents.clone());
+        let in_room: Vec<String> = active
+            .participants
+            .iter()
+            .map(|p| p.identity.clone())
+            .collect();
+        model::still_ringing(&expected, &in_room)
+    } else {
+        Vec::new()
+    };
+    let entries = build_roster(
+        &me,
+        active.muted,
+        &active.participants,
+        &ringing,
+        &active.call,
+    );
+    let mut card = div()
+        .w(px(300.0))
+        .max_h(px(420.0))
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .p(px(6.0))
+        .rounded(px(PANEL_RADIUS))
+        .bg(theme.card())
+        .border_1()
+        .border_color(theme.border_strong)
+        .shadow_lg()
+        .child(
+            div()
+                .px(px(8.0))
+                .py(px(4.0))
+                .text_size(px(11.0))
+                .text_color(theme.text_faint)
+                .child("IN THE CALL"),
+        );
+    let list = glass::contained_y_scroll("call-roster-scroll")
+        .flex_1()
+        .min_h_0();
+    let mut rows = div().flex().flex_col().gap(px(2.0));
+    for (i, entry) in entries.iter().enumerate() {
+        let image = sender_image(state, &entry.sender);
+        let name = if entry.is_self {
+            format!("{} (you)", entry.sender.display_name())
+        } else {
+            entry.sender.display_name()
+        };
+        let status = entry.status_label();
+        let status_color = match entry.state {
+            RosterState::Speaking => theme.online,
+            RosterState::Muted | RosterState::Ringing => theme.text_faint,
+            RosterState::Quiet => theme.text_faint,
+        };
+        rows = rows.child(
+            div()
+                .id(ElementId::Name(SharedString::from(format!(
+                    "call-roster-{i}"
+                ))))
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .px(px(8.0))
+                .py(px(6.0))
+                .rounded(px(8.0))
+                .child(picture(&entry.sender, image, 28.0, &theme))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(TEXT_SMALL))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.text)
+                                .child(name),
+                        )
+                        .when(!status.is_empty(), |el| {
+                            el.child(
+                                div()
+                                    .text_size(px(TEXT_TINY))
+                                    .text_color(status_color)
+                                    .child(status.to_string()),
+                            )
+                        }),
+                )
+                .children(entry.role.map(|role| {
+                    div()
+                        .text_size(px(TEXT_TINY))
+                        .text_color(theme.text_faint)
+                        .child(role.to_string())
+                }))
+                .when(entry.state == RosterState::Muted, |el| {
+                    el.child(icon("mic-off", 12.0, theme.text_faint))
+                }),
+        );
+    }
+    card = card.child(list.child(rows));
+    div()
+        .absolute()
+        .right(px(16.0))
+        .top(px(HEADER_HEIGHT + 8.0))
+        .child(crate::ui::frost::frosted(
+            PANEL_RADIUS,
+            crate::ui::frost::MENU_BLUR,
+            card,
+        ))
+}
+
 /// Ringing card (top-right): caller, "Incoming video call", Decline / Accept.
 pub fn ring_card(shell: &Shell, call: &Call, sender: &Sender, cx: &mut Context<Shell>) -> Div {
     let theme = Theme::of(cx).clone();
@@ -1060,4 +1390,98 @@ pub fn ring_card(shell: &Shell, call: &Call, sender: &Sender, cx: &mut Context<S
             crate::ui::frost::MENU_BLUR,
             card,
         )))
+}
+
+#[cfg(test)]
+mod roster_tests {
+    use super::{build_roster, RosterState};
+    use crate::app::CallParticipant;
+    use crate::model::{Call, Sender};
+
+    fn person(id: &str, name: &str) -> Sender {
+        Sender {
+            kind: "user".into(),
+            id: id.into(),
+            name: name.into(),
+            handle: name.to_lowercase(),
+            avatar: None,
+            avatar_color: None,
+            avatar_color_index: None,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
+            avatar_url: String::new(),
+        }
+    }
+
+    fn agent(id: &str, name: &str) -> Sender {
+        Sender {
+            kind: "agent".into(),
+            id: id.into(),
+            name: name.into(),
+            handle: name.to_lowercase(),
+            avatar: None,
+            avatar_color: None,
+            avatar_color_index: None,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
+            avatar_url: String::new(),
+        }
+    }
+
+    fn tile(sender: Sender, speaking: bool, muted: bool) -> CallParticipant {
+        CallParticipant {
+            identity: sender.identity(),
+            sender,
+            speaking,
+            muted,
+            video: None,
+        }
+    }
+
+    #[test]
+    fn roster_self_first_then_joined_then_ringing_no_duplicates() {
+        let me = person("me", "Me");
+        let alice = person("alice", "Alice");
+        let bob = person("bob", "Bob");
+        let bot = agent("proj_home", "Home");
+        let joined = vec![
+            tile(alice.clone(), true, false),
+            tile(bot.clone(), false, false),
+        ];
+        // Bob is ringing; Alice already joined so she must not appear twice.
+        let ringing = vec![bob.clone(), alice.clone()];
+        let call = Call {
+            started_by: me.clone(),
+            speak_mode: Some("hosted".into()),
+            invited_speakers: vec![alice.clone()],
+            ..Default::default()
+        };
+        let list = build_roster(&me, true, &joined, &ringing, &call);
+        assert_eq!(list.len(), 4, "self + alice + bot + bob");
+        assert!(list[0].is_self);
+        assert_eq!(list[0].state, RosterState::Muted);
+        assert_eq!(list[0].role, Some("Host"));
+        assert_eq!(list[1].sender.id, "alice");
+        assert_eq!(list[1].state, RosterState::Speaking);
+        assert_eq!(list[1].role, Some("Speaker"));
+        assert_eq!(list[2].sender.id, "proj_home");
+        assert_eq!(list[3].sender.id, "bob");
+        assert_eq!(list[3].state, RosterState::Ringing);
+        assert!(list.iter().filter(|e| e.sender.id == "alice").count() == 1);
+    }
+
+    #[test]
+    fn roster_skips_local_identity_duplicate_of_self() {
+        let me = person("me", "Me");
+        let local = CallParticipant {
+            identity: "local".into(),
+            sender: me.clone(),
+            speaking: false,
+            muted: false,
+            video: None,
+        };
+        let list = build_roster(&me, false, &[local], &[], &Call::default());
+        assert_eq!(list.len(), 1);
+        assert!(list[0].is_self);
+    }
 }

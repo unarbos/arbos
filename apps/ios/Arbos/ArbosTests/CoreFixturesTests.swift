@@ -832,4 +832,62 @@ final class CoreFixturesTests: XCTestCase {
             spendCapUsd: 0
         )
     }
+
+    // MARK: - Call roster + mute plan (feedback app-01M5TGH26ACWZHKQ0XQFFZ65AA)
+
+    private func callPerson(_ id: String, _ handle: String, agent: Bool = false) -> CallPerson {
+        CallPerson(id: id, kind: agent ? "agent" : "user", name: handle, handle: handle,
+                   avatar: nil, avatarColor: nil, avatarUrl: nil)
+    }
+
+    func testCallRosterSelfFirstNoDuplicatesWithRingingAndRoles() {
+        let me = callPerson("me", "me")
+        let alice = callPerson("alice", "alice")
+        let bob = callPerson("bob", "bob")
+        let bot = callPerson("proj_home", "Home", agent: true)
+        let call = Call(
+            callId: "c1", chatId: "chat", projectId: "people", kind: .voice,
+            room: "r", livekitUrl: "wss://x", startedBy: me, startedAt: 1,
+            participants: [alice, bot],
+            speakMode: "hosted",
+            invitedSpeakers: [alice]
+        )
+        // Alice is both a tile and in ringing: she must appear once.
+        let list = CallRoster.build(
+            me: me,
+            meMuted: true,
+            tiles: [
+                (id: "u_alice", person: alice, speaking: true, micOn: true),
+                (id: "a_proj_home", person: bot, speaking: false, micOn: true),
+            ],
+            ringing: [bob, alice],
+            call: call
+        )
+        XCTAssertEqual(list.map(\.id), ["me", "alice", "proj_home", "bob"])
+        XCTAssertTrue(list[0].isSelf)
+        XCTAssertTrue(list[0].muted)
+        XCTAssertEqual(list[0].role, "Host")
+        XCTAssertTrue(list[1].speaking)
+        XCTAssertEqual(list[1].role, "Speaker")
+        XCTAssertTrue(list[3].ringing)
+        XCTAssertEqual(list[3].statusLabel, "Ringing")
+    }
+
+    func testToggleMutePlanUsesTrackMuteNeverSetMicrophoneFalse() {
+        let mute = MicMutePlan.plan(wantMuted: true, hasMicPublication: true)
+        XCTAssertEqual(mute, .muteTrack)
+        XCTAssertFalse(mute.callsSetMicrophoneFalse)
+
+        let unmute = MicMutePlan.plan(wantMuted: false, hasMicPublication: true)
+        XCTAssertEqual(unmute, .unmuteTrack)
+        XCTAssertFalse(unmute.callsSetMicrophoneFalse)
+
+        let publish = MicMutePlan.plan(wantMuted: false, hasMicPublication: false)
+        XCTAssertEqual(publish, .publish)
+        XCTAssertFalse(publish.callsSetMicrophoneFalse)
+
+        let leave = MicMutePlan.plan(wantMuted: true, hasMicPublication: false)
+        XCTAssertEqual(leave, .leaveUnpublished)
+        XCTAssertFalse(leave.callsSetMicrophoneFalse)
+    }
 }

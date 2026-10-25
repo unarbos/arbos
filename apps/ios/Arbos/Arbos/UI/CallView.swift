@@ -32,6 +32,8 @@ struct CallScreen: View {
     var expected: [CallPerson] = []
     /// Share-screen confirmation: pick how to start (system picker chooses the content).
     @State private var showShareOptions = false
+    /// Participants list opened from "N in the call".
+    @State private var showRoster = false
 
     /// Legacy `kind` still arrives from the API; the UI no longer treats voice and
     /// video as separate call types — every call starts audio-only and the camera
@@ -263,11 +265,36 @@ struct CallScreen: View {
                     .foregroundStyle(theme.muted)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 24)
-            } else if !calls.tiles.isEmpty {
-                Text("\(calls.tiles.count + 1) in the call").font(theme.font(Theme.small)).foregroundStyle(theme.muted)
+            }
+            if !rosterEntries.isEmpty {
+                Button { showRoster = true } label: {
+                    Text("\(rosterEntries.count) in the call")
+                        .font(theme.font(Theme.small))
+                        .foregroundStyle(theme.muted)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(rosterEntries.count) in the call")
+                .accessibilityHint("Shows everyone on the call")
             }
         }
         .padding(.top, 12)
+        .sheet(isPresented: $showRoster) {
+            CallRosterSheet(entries: rosterEntries)
+                .environmentObject(model)
+                .environment(\.theme, theme)
+        }
+    }
+
+    /// Live roster: tiles + ringing invitees + self (same builder the Mac uses).
+    private var rosterEntries: [CallRosterEntry] {
+        let tiles = calls.tiles.map { (id: $0.id, person: $0.person, speaking: $0.isSpeaking, micOn: $0.micOn) }
+        return CallRoster.build(
+            me: calls.me(),
+            meMuted: calls.muted || listenOnly,
+            tiles: tiles,
+            ringing: waitingExpected,
+            call: calls.call
+        )
     }
 
     private var iAmHost: Bool {
@@ -465,6 +492,68 @@ struct AgentSeesBadge: View {
             .transition(.opacity)
             .accessibilityLabel("\(calls.seeingAgentName ?? "The agent") can see your \(calls.screenShareOn && !calls.cameraOn ? "screen" : "camera")")
         }
+    }
+}
+
+/// Participants list: avatar, name, speaking / muted / ringing, host / speaker role.
+struct CallRosterSheet: View {
+    let entries: [CallRosterEntry]
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(entries) { entry in
+                    HStack(spacing: 12) {
+                        CallPersonAvatar(person: entry.person, size: 36)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(entry.isSelf ? "\(entry.person.displayName) (you)" : entry.person.displayName)
+                                .font(theme.font(Theme.body, weight: .semibold))
+                                .foregroundStyle(theme.text)
+                                .lineLimit(1)
+                            if !entry.statusLabel.isEmpty {
+                                Text(entry.statusLabel)
+                                    .font(theme.font(Theme.tiny))
+                                    .foregroundStyle(entry.speaking ? theme.online : theme.muted)
+                            }
+                        }
+                        Spacer(minLength: 8)
+                        if let role = entry.role {
+                            Text(role)
+                                .font(theme.font(Theme.tiny, weight: .semibold))
+                                .foregroundStyle(theme.muted)
+                        }
+                        if entry.muted, !entry.ringing {
+                            Image(systemName: "mic.slash.fill")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(theme.muted)
+                        }
+                    }
+                    .listRowBackground(theme.bg)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(rosterA11y(entry))
+                }
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .background(theme.bg)
+            .navigationTitle("In the call")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                        .font(theme.font(Theme.body, weight: .semibold))
+                }
+            }
+        }
+    }
+
+    private func rosterA11y(_ entry: CallRosterEntry) -> String {
+        var parts = [entry.isSelf ? "\(entry.person.displayName), you" : entry.person.displayName]
+        if let role = entry.role { parts.append(role) }
+        if !entry.statusLabel.isEmpty { parts.append(entry.statusLabel) }
+        return parts.joined(separator: ", ")
     }
 }
 

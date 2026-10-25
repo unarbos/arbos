@@ -704,6 +704,25 @@ impl Call {
     pub fn space_id(&self) -> &str {
         space_of(&self.project_id, &self.chat_id)
     }
+
+    /// Hosted speak mode: only the host and invited speakers may publish audio.
+    pub fn is_hosted_speak(&self) -> bool {
+        self.speak_mode.as_deref() == Some("hosted")
+    }
+
+    /// "Host" / "Speaker" for a participant id when the call is hosted; otherwise `None`.
+    pub fn speak_role(&self, user_id: &str) -> Option<&'static str> {
+        if !self.is_hosted_speak() {
+            return None;
+        }
+        if self.started_by.id == user_id {
+            return Some("Host");
+        }
+        if self.invited_speakers.iter().any(|s| s.id == user_id) {
+            return Some("Speaker");
+        }
+        None
+    }
 }
 
 /// `people` (or nothing) means the chat is its own space; else the project is.

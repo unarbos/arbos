@@ -375,6 +375,8 @@ pub struct Shell {
     pub(crate) handle_input: Entity<ComposerInput>,
     pub add_agent_open: bool,
     pub members_open: bool,
+    /// Participants list on a call (opened from the call screen / bar count).
+    pub call_roster_open: bool,
     /// Double-click rename on a chat tab: the chat being edited, and its field.
     pub(crate) renaming_tab: Option<crate::model::Id>,
     pub(crate) tab_rename_input: Entity<ComposerInput>,
@@ -997,6 +999,7 @@ impl Shell {
             handle_input,
             add_agent_open: false,
             members_open: false,
+            call_roster_open: false,
             feedback,
         };
         if open_settings.is_some() {
@@ -2361,6 +2364,7 @@ impl Shell {
         }
         let floating = self.menu_open
             || self.members_open
+            || self.call_roster_open
             || self.add_agent_open
             || self.tab_menu_open
             || self.row_menu.is_some()
@@ -2533,6 +2537,7 @@ impl Shell {
         self.state.update(cx, |s, cx| s.close_tasks(cx));
         if self.menu_open
             || self.members_open
+            || self.call_roster_open
             || self.add_agent_open
             || self.tab_menu_open
             || self.row_menu.is_some()
@@ -2547,6 +2552,7 @@ impl Shell {
             self.member_menu = None;
             self.library.menu = None;
             self.members_open = false;
+            self.call_roster_open = false;
             self.add_agent_open = false;
             self.tab_menu_open = false;
             self.row_menu = None;
@@ -4467,6 +4473,13 @@ impl Render for Shell {
         let incoming = self.state.read(cx).incoming_call.clone();
         if let Some((call, sender)) = incoming.as_ref() {
             root = root.child(callview::ring_card(self, call, sender, cx));
+        }
+        if self.call_roster_open {
+            if let Some(active) = self.state.read(cx).my_call.clone() {
+                root = root.child(glass::popover(callview::roster_popover(self, &active, cx)));
+            } else {
+                self.call_roster_open = false;
+            }
         }
         if let Some(prompt) = self.render_notify_prompt(cx) {
             root = root.child(prompt);

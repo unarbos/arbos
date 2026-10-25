@@ -641,7 +641,11 @@ final class CallManager: NSObject, ObservableObject {
         if let uuid = cxUUID { provider.reportOutgoingCall(with: uuid, connectedAt: Date()) }
         // Hosted group calls: stay muted until the host invites you to speak.
         if c.canSpeak == false { muted = true }
-        try? await room.localParticipant.setMicrophone(enabled: !muted && c.canSpeak != false)
+        // Publish the mic only when we should be heard. Mute later uses track mute
+        // (never setMicrophone(false)) so the audio session / engine stay put.
+        if !muted, c.canSpeak != false {
+            try? await room.localParticipant.setMicrophone(enabled: true)
+        }
         #if DEBUG
         micInjector?.start()
         #endif
@@ -746,8 +750,24 @@ final class CallManager: NSObject, ObservableObject {
         // Listen-only on a hosted group call: the host has not invited you yet.
         if muted, call?.canSpeak == false { return }
         muted.toggle()
-        try? await room.localParticipant.setMicrophone(enabled: !muted)
+        await applyLocalMicMute(muted)
         if let uuid = cxUUID { try? await callController.request(CXTransaction(action: CXSetMutedCallAction(call: uuid, muted: muted))) }
+    }
+
+    /// Mute / unmute the published mic track (keeps the track, engine, and session as they are).
+    /// CallKit's mute action uses the same path. Never calls `setMicrophone(enabled: false)`.
+    fileprivate func applyLocalMicMute(_ wantMuted: Bool) async {
+        let pub = room.localParticipant.getTrackPublication(source: .microphone) as? LocalTrackPublication
+        switch MicMutePlan.plan(wantMuted: wantMuted, hasMicPublication: pub != nil) {
+        case .muteTrack:
+            try? await pub?.mute()
+        case .unmuteTrack:
+            try? await pub?.unmute()
+        case .publish:
+            try? await room.localParticipant.setMicrophone(enabled: true)
+        case .leaveUnpublished:
+            break
+        }
     }
 
     /// Host invites `userId` to speak (hosted group calls). Updates local call state.
@@ -781,7 +801,7 @@ final class CallManager: NSObject, ObservableObject {
         call = current
         if current.canSpeak == false, !muted {
             muted = true
-            Task { try? await room.localParticipant.setMicrophone(enabled: false) }
+            Task { await applyLocalMicMute(true) }
         }
     }
 
@@ -792,7 +812,7 @@ final class CallManager: NSObject, ObservableObject {
         call = current
         if !canPublish, !muted {
             muted = true
-            Task { try? await room.localParticipant.setMicrophone(enabled: false) }
+            Task { await applyLocalMicMute(true) }
         }
     }
 
@@ -1416,7 +1436,7 @@ extension CallManager: CXProviderDelegate {
             }
             if self.muted != action.isMuted {
                 self.muted = action.isMuted
-                try? await self.room.localParticipant.setMicrophone(enabled: !self.muted)
+                await self.applyLocalMicMute(self.muted)
             }
             action.fulfill()
         }

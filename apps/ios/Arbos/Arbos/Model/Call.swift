@@ -278,3 +278,101 @@ struct Call: Identifiable, Equatable {
 func callEndedLine(durationS: Int) -> String {
     durationS < 60 ? "Call ended" : "Call ended · \(durationS / 60) min"
 }
+
+/// One row in the in-call participants list (joined tile or still ringing).
+struct CallRosterEntry: Identifiable, Equatable {
+    var id: String
+    var person: CallPerson
+    var isSelf: Bool
+    var speaking: Bool
+    var muted: Bool
+    var ringing: Bool
+    /// "Host" / "Speaker" when the call is hosted; otherwise `nil`.
+    var role: String?
+
+    var statusLabel: String {
+        if ringing { return "Ringing" }
+        if speaking { return "Speaking" }
+        if muted { return "Muted" }
+        return ""
+    }
+}
+
+/// Pure builder: self first, then LiveKit tiles, then ringing invitees; no duplicate ids.
+enum CallRoster {
+    static func build(
+        me: CallPerson?,
+        meMuted: Bool,
+        tiles: [(id: String, person: CallPerson, speaking: Bool, micOn: Bool)],
+        ringing: [CallPerson],
+        call: Call?
+    ) -> [CallRosterEntry] {
+        var out: [CallRosterEntry] = []
+        var seen = Set<String>()
+        if let me {
+            seen.insert(me.id)
+            out.append(CallRosterEntry(
+                id: me.id,
+                person: me,
+                isSelf: true,
+                speaking: false,
+                muted: meMuted,
+                ringing: false,
+                role: call?.speakRole(of: me.id)
+            ))
+        }
+        for tile in tiles {
+            let pid = tile.person.id
+            if seen.contains(pid) { continue }
+            seen.insert(pid)
+            out.append(CallRosterEntry(
+                id: pid,
+                person: tile.person,
+                isSelf: false,
+                speaking: tile.speaking,
+                muted: !tile.micOn,
+                ringing: false,
+                role: call?.speakRole(of: pid)
+            ))
+        }
+        for person in ringing {
+            if seen.contains(person.id) { continue }
+            seen.insert(person.id)
+            out.append(CallRosterEntry(
+                id: person.id,
+                person: person,
+                isSelf: false,
+                speaking: false,
+                muted: false,
+                ringing: true,
+                role: call?.speakRole(of: person.id)
+            ))
+        }
+        return out
+    }
+}
+
+/// How mute should touch LiveKit: mute/unmute the published mic track.
+/// Never `setMicrophone(enabled: false)` — that path can reconfigure the audio engine
+/// and stop remote playback while CallKit owns the session.
+enum MicMutePlan: Equatable {
+    /// Mute the existing local mic publication.
+    case muteTrack
+    /// Unmute the existing local mic publication.
+    case unmuteTrack
+    /// No publication yet and we want to be heard: publish once (`setMicrophone(true)` only).
+    case publish
+    /// No publication and we want silence: leave unpublished (do not call setMicrophone).
+    case leaveUnpublished
+
+    /// Pure plan for the next mute toggle / CallKit mute action.
+    static func plan(wantMuted: Bool, hasMicPublication: Bool) -> MicMutePlan {
+        if hasMicPublication {
+            return wantMuted ? .muteTrack : .unmuteTrack
+        }
+        return wantMuted ? .leaveUnpublished : .publish
+    }
+
+    /// True only when this plan would call `setMicrophone(enabled: false)`.
+    var callsSetMicrophoneFalse: Bool { false }
+}
