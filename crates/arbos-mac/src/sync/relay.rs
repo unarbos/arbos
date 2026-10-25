@@ -49,7 +49,7 @@ use super::dto::{
     transcript_text, voices_from_dto,
 };
 use super::store::{self, Store};
-use super::{ClientCommand, PictureSource, PictureTarget, SyncEvent, SyncSource};
+use super::{ClientCommand, DraftPicture, PictureSource, PictureTarget, SyncEvent, SyncSource};
 use crate::model::{
     new_id, now_ms, AccountView, Attachment, AttachmentKind, BoxReport, BoxState, Call, CallEnded,
     CallLeft, CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView, Chat,
@@ -1557,10 +1557,15 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             let shared = shared.clone();
             tokio::spawn(async move { refresh_servers_list(&shared).await });
         }
-        ClientCommand::ServerCreate { name, leaf } => {
+        ClientCommand::ServerCreate {
+            name,
+            leaf,
+            picture,
+        } => {
             let shared = shared.clone();
             let name = name.clone();
             let leaf = *leaf;
+            let picture = picture.clone();
             tokio::spawn(async move {
                 let mut body = json!({ "name": name });
                 if let Some(l) = leaf {
@@ -1572,7 +1577,27 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                     .await
                     .and_then(parse_server)
                 {
-                    Ok(server) => {
+                    Ok(mut server) => {
+                        if let Some(picture) = picture {
+                            let id = server.id.clone();
+                            if adopt_draft_picture(
+                                &shared,
+                                &format!("servers:{id}"),
+                                &format!("/servers/{id}"),
+                                "server-",
+                                picture,
+                            )
+                            .await
+                            {
+                                if let Ok(fresh) = shared
+                                    .get_json(&format!("/servers/{id}"))
+                                    .await
+                                    .and_then(parse_server)
+                                {
+                                    server = fresh;
+                                }
+                            }
+                        }
                         let _ = shared
                             .events
                             .send(SyncEvent::ServerOpened(with_server_picture(
@@ -3512,19 +3537,101 @@ fn send_wake(shared: &Arc<Shared>, project_id: &str, reason: &'static str) {
 /// here; HEIC (Photos exports, iPhone shots) goes through macOS's own `sips` first, since
 /// the `image` crate has no HEIF decoder. Anything that is not an image is an error with a
 /// plain message.
-/// A picker target's picture as the avatar loader fetches it: the blob in its own slot.
-fn picture_url(shared: &Shared, target: &PictureTarget, key: Option<&str>) -> Option<String> {
-    let key = key.map(str::trim).filter(|k| !k.is_empty())?;
-    let slot = match target {
+/// The blob slot a picker target's pictures live in; the draft's is my own (`users:{me}`).
+fn picture_slot(shared: &Shared, target: &PictureTarget) -> String {
+    match target {
         PictureTarget::Agent(id) => id.clone(),
         PictureTarget::Group(id) => format!("people:{id}"),
         PictureTarget::Server(id) => format!("servers:{id}"),
-    };
+        PictureTarget::Draft => format!("users:{}", shared.me_id()),
+    }
+}
+
+/// A picker target's picture as the avatar loader fetches it: the blob in its own slot.
+fn picture_url(shared: &Shared, target: &PictureTarget, key: Option<&str>) -> Option<String> {
+    let key = key.map(str::trim).filter(|k| !k.is_empty())?;
+    let slot = picture_slot(shared, target);
     Some(format!(
         "{}/blob/{slot}/{key}?token={}",
         shared.http_url,
         shared.token()
     ))
+}
+
+/// The Create sheet's pending picture, once the entity exists: the file (or the bytes of the
+/// picture generated into my own slot) goes into the new entity's slot as a 512 px JPEG, then
+/// `PATCH <patch_path> {image_key}`. `prefix` names the key (`avatar-` / `server-`). Errors are
+/// a notice — the entity itself is already created and shows its neutral initial.
+async fn adopt_draft_picture(
+    shared: &Arc<Shared>,
+    slot: &str,
+    patch_path: &str,
+    prefix: &str,
+    picture: DraftPicture,
+) -> bool {
+    let jpeg = match picture {
+        DraftPicture::File(path) => {
+            match tokio::task::spawn_blocking(move || picture_jpeg(&path)).await {
+                Ok(Ok(j)) => j,
+                Ok(Err(err)) => {
+                    shared.notice(format!("Picture not uploaded: {err:#}"));
+                    return false;
+                }
+                Err(_) => return false,
+            }
+        }
+        DraftPicture::Generated { key } => {
+            let from = picture_url(shared, &PictureTarget::Draft, Some(&key));
+            let Some(from) = from else { return false };
+            match shared.http.get(from).send().await {
+                Ok(r) if r.status().is_success() => match r.bytes().await {
+                    Ok(b) => b.to_vec(),
+                    Err(err) => {
+                        shared.notice(format!("Generated picture not copied: {err}"));
+                        return false;
+                    }
+                },
+                Ok(r) => {
+                    shared.notice(format!("Generated picture not copied: HTTP {}", r.status()));
+                    return false;
+                }
+                Err(err) => {
+                    shared.notice(format!("Generated picture not copied: {err}"));
+                    return false;
+                }
+            }
+        }
+    };
+    let key = format!("{prefix}{}.jpg", new_id().to_lowercase());
+    let put = shared
+        .http
+        .put(format!("{}/blob/{slot}/{key}", shared.http_url))
+        .bearer_auth(shared.token())
+        .header("content-type", "image/jpeg")
+        .body(jpeg)
+        .send()
+        .await;
+    match put {
+        Ok(r) if r.status().is_success() => {}
+        Ok(r) => {
+            shared.notice(format!("Picture upload failed: HTTP {}", r.status()));
+            return false;
+        }
+        Err(err) => {
+            shared.notice(format!("Picture upload failed: {err}"));
+            return false;
+        }
+    }
+    match shared
+        .patch_json(patch_path, json!({ "image_key": key }))
+        .await
+    {
+        Ok(_) => true,
+        Err(err) => {
+            shared.notice(format!("Picture not saved: {}", people_error(&err)));
+            false
+        }
+    }
 }
 
 /// A server's `image_key` → `image_url` on every `ServerInfo` the relay client hands out.
@@ -4453,6 +4560,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             agent_ids,
             title,
             leaf,
+            picture,
         } => {
             let shared = shared.clone();
             tokio::spawn(async move {
@@ -4493,6 +4601,16 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                                 (String::new(), Vec::new())
                             }
                         };
+                        if let Some(picture) = picture.filter(|_| !chat_id.is_empty()) {
+                            adopt_draft_picture(
+                                &shared,
+                                &format!("people:{chat_id}"),
+                                &format!("/chats/{chat_id}"),
+                                "avatar-",
+                                picture,
+                            )
+                            .await;
+                        }
                         for project_id in agent_ids {
                             if chat_id.is_empty() || already.contains(&project_id) {
                                 continue;
@@ -5097,6 +5215,16 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let shared = shared.clone();
             tokio::spawn(async move { refresh_project_jobs(&shared, &project_id).await });
         }
+        ClientCommand::RolloutRefresh {
+            project_id,
+            job_id,
+            after,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(
+                async move { refresh_job_rollout(&shared, &project_id, &job_id, after).await },
+            );
+        }
         ClientCommand::React {
             chat_id,
             message_id,
@@ -5684,6 +5812,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     PictureTarget::Agent(id) => format!("/projects/{id}/avatar/generate"),
                     PictureTarget::Group(id) => format!("/chats/{id}/avatar/generate"),
                     PictureTarget::Server(id) => format!("/servers/{id}/avatar/generate"),
+                    // The Create sheet: into my own slot (#1789's route); copied on Create.
+                    PictureTarget::Draft => "/me/avatar/generate".to_owned(),
                 };
                 let result = shared.post_json(&path, json!({ "prompt": prompt })).await;
                 let event = match result {
@@ -5707,12 +5837,24 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             },
                         }
                     }
-                    Err(err) => SyncEvent::ImageGenerated {
-                        target,
-                        image_key: None,
-                        url: None,
-                        error: Some(people_error(&err)),
-                    },
+                    Err(err) => {
+                        // A relay without the own-slot route yet (#1789 not deployed): say so
+                        // instead of "HTTP 404".
+                        let error = if target == PictureTarget::Draft
+                            && err.to_string().contains("HTTP 404")
+                        {
+                            "Generate is not on this relay yet; upload a picture instead."
+                                .to_owned()
+                        } else {
+                            people_error(&err)
+                        };
+                        SyncEvent::ImageGenerated {
+                            target,
+                            image_key: None,
+                            url: None,
+                            error: Some(error),
+                        }
+                    }
                 };
                 let _ = shared.events.send(event);
             });
@@ -6208,6 +6350,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             name,
             avatar_color_index,
             leaf,
+            picture,
             source_project_id,
             description,
             color,
@@ -6236,7 +6379,21 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     body["color"] = json!(c);
                 }
                 match shared.post_json("/projects", body).await {
-                    Ok(_) => {
+                    Ok(v) => {
+                        // The Create sheet's picture goes into the new agent's own slot first,
+                        // so the list refresh already shows it.
+                        if let Some(picture) = picture {
+                            if let Some(id) = v.get("id").and_then(Value::as_str) {
+                                adopt_draft_picture(
+                                    &shared,
+                                    id,
+                                    &format!("/projects/{id}"),
+                                    "avatar-",
+                                    picture,
+                                )
+                                .await;
+                            }
+                        }
                         if let Err(err) = refresh_registry(&shared).await {
                             shared.diagnostic("refresh", format!("{err:#}"));
                         }
@@ -7263,6 +7420,61 @@ async fn refresh_project_jobs(shared: &Arc<Shared>, project_id: &str) {
         Err(err) => {
             if !format!("{err:#}").contains("HTTP 404") {
                 shared.diagnostic("project-jobs", format!("{err:#}"));
+            }
+        }
+    }
+}
+
+/// The rollout view's poll: `GET /projects/{id}/jobs/{jobId}[?after=<seq>]`. A 404 (relay
+/// before the endpoint) answers an `unavailable` placeholder so the view can say so; a
+/// transport error keeps the last document.
+async fn refresh_job_rollout(
+    shared: &Arc<Shared>,
+    project_id: &str,
+    job_id: &str,
+    after: Option<u64>,
+) {
+    let path = match after {
+        Some(seq) => format!("/projects/{project_id}/jobs/{job_id}?after={seq}"),
+        None => format!("/projects/{project_id}/jobs/{job_id}"),
+    };
+    match shared.get_json(&path).await {
+        Ok(v) => match serde_json::from_value::<crate::model::JobRollout>(v) {
+            Ok(rollout) => {
+                let _ = shared.events.send(SyncEvent::JobRollout {
+                    project_id: project_id.to_string(),
+                    job_id: job_id.to_string(),
+                    rollout,
+                });
+            }
+            Err(err) => {
+                log::warn!(target: "arbos_mac::relay", "JobRollout {job_id}: {err}");
+            }
+        },
+        Err(err) => {
+            let text = format!("{err:#}");
+            if text.contains("HTTP 404") {
+                let _ = shared.events.send(SyncEvent::JobRollout {
+                    project_id: project_id.to_string(),
+                    job_id: job_id.to_string(),
+                    rollout: crate::model::JobRollout {
+                        unavailable: true,
+                        ..crate::model::JobRollout::placeholder(
+                            &crate::model::Job {
+                                id: job_id.to_string(),
+                                title: String::new(),
+                                state: crate::model::JobState::Running,
+                                step: String::new(),
+                                elapsed_s: 0,
+                                ask_message_id: None,
+                                chat_id: None,
+                            },
+                            "",
+                        )
+                    },
+                });
+            } else {
+                shared.diagnostic("job-rollout", text);
             }
         }
     }

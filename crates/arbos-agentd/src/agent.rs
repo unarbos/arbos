@@ -2398,6 +2398,16 @@ impl Agent {
             text,
             Some(&json!({ "job_id": job.id })),
         );
+        // On the worker's own thread too, so the rollout view shows the steer in place.
+        let _ = self.store.t3_append(
+            &sid,
+            Some(&sid),
+            Some(&sid),
+            "steer",
+            Some("user"),
+            text,
+            Some(&json!({ "job_id": job.id })),
+        );
         tracing::info!(chat_id, job = %job.id, "job steered");
         Ok(json!({ "job_id": job.id, "title": job.title, "state": "steered" }))
     }
@@ -6883,7 +6893,7 @@ impl Agent {
                 }
                 AgentEvent::ReasoningDelta(_) => {}
                 AgentEvent::ToolCall { id, name, input } => {
-                    sub_tool_inputs.insert(id, input.clone());
+                    sub_tool_inputs.insert(id.clone(), input.clone());
                     let label = step_label(&name, &input);
                     let _ = self
                         .store
@@ -6916,7 +6926,7 @@ impl Agent {
                         "tool_call",
                         Some("assistant"),
                         &format!("{name} {input}"),
-                        None,
+                        Some(&json!({ "call_id": id })),
                     );
                 }
                 AgentEvent::ToolResult {
@@ -6933,7 +6943,7 @@ impl Agent {
                         "tool_output",
                         Some("tool"),
                         &format!("{name}: {output}"),
-                        None,
+                        Some(&json!({ "call_id": id, "is_error": is_error })),
                     );
                     let summary: String = output.chars().take(TOOL_OUTPUT_SUMMARY_MAX).collect();
                     let output_ref = if output.len() > TOOL_OUTPUT_SUMMARY_MAX {

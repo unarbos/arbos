@@ -1665,11 +1665,19 @@ impl Transcript {
         let had_id = seed.starts_with("agent:") || seed.starts_with("project:");
         // D92 amendment: the agent's uploaded / generated picture, once the loader has it.
         let image = a.image_key.as_deref().and_then(|url| state.avatar(url));
+        // A neutral agent (no leaf, Jacob 2026-10-25) carries the stored pair on, so every
+        // disc drawn from this identity goes through `avatars::agent`'s neutral branch.
+        let leaf = if a.neutral {
+            let n = avatars::neutral_pick();
+            (Some(n.leaf), Some(n.color))
+        } else {
+            (Some(a.leaf.leaf), Some(a.leaf.color))
+        };
         AgentIdentity {
             name: a.name,
             seed: a.id.clone(),
             color_index: Some(a.color_index),
-            leaf: (Some(a.leaf.leaf), Some(a.leaf.color)),
+            leaf,
             image,
             project_id: (a.known || had_id).then_some(a.id),
         }

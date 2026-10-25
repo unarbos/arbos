@@ -66,6 +66,115 @@ pub const ROW_SPINNER: f32 = 15.0;
 /// The one chip's key in the shell's [`ChipPointer`].
 pub const CHIP_KEY: u8 = 0;
 
+/// What the pointer is doing to the status line's link (`link`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LinkState {
+    #[default]
+    Rest,
+    Hover,
+    Pressed,
+}
+
+impl LinkState {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim() {
+            "rest" => Some(LinkState::Rest),
+            "hover" => Some(LinkState::Hover),
+            "pressed" => Some(LinkState::Pressed),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            LinkState::Rest => "rest",
+            LinkState::Hover => "hover",
+            LinkState::Pressed => "pressed",
+        }
+    }
+}
+
+/// The status line as a link to the newest open job's tab ([feedback
+/// subagent-job-tabs-mac-2026-10-25]): at rest today's muted, breathing words; under the
+/// pointer they brighten to `text` with a hairline underline; pressed they take the accent.
+/// Release selects the tab. `ARBOS_RIG_TASKS=link-hover|link-pressed` paints a state.
+pub fn link(
+    text: String,
+    state: LinkState,
+    chat_id: Id,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> Stateful<Div> {
+    let state = rig_setting()
+        .and_then(|v| v.strip_prefix("link-"))
+        .and_then(LinkState::parse)
+        .unwrap_or(state);
+    let phase = crate::ui::motion::PulseClock::phase(cx, 1100);
+    let (color, opacity) = match state {
+        LinkState::Rest => (theme.text_muted, 0.55 + 0.45 * phase),
+        LinkState::Hover => (theme.text, 1.0),
+        LinkState::Pressed => (theme.accent, 1.0),
+    };
+    div()
+        .id("presence-link")
+        .min_w_0()
+        .truncate()
+        .text_size(px(TEXT_SMALL))
+        .text_color(color)
+        .opacity(opacity)
+        .cursor_pointer()
+        .when(state != LinkState::Rest, |el| {
+            el.text_decoration_1()
+                .text_decoration_color(Theme::with_alpha(color, 0.7))
+        })
+        .debug_selector(move || format!("presence-link-{}", state.name()))
+        .child(text)
+        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+            let next = if *hovered {
+                if this.tasks_link == LinkState::Pressed {
+                    LinkState::Pressed
+                } else {
+                    LinkState::Hover
+                }
+            } else {
+                LinkState::Rest
+            };
+            if this.tasks_link != next {
+                this.tasks_link = next;
+                cx.notify();
+            }
+        }))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _, _, cx| {
+                cx.stop_propagation();
+                this.tasks_link = LinkState::Pressed;
+                cx.notify();
+            }),
+        )
+        .on_mouse_up_out(
+            MouseButton::Left,
+            cx.listener(|this, _, _, cx| {
+                this.tasks_link = LinkState::Rest;
+                cx.notify();
+            }),
+        )
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                if this.tasks_link == LinkState::Pressed {
+                    this.tasks_link = LinkState::Hover;
+                    let chat_id = chat_id.clone();
+                    this.state
+                        .update(cx, |s, cx| s.open_newest_job_tab(chat_id, cx));
+                    crate::ui::composer::Composer::focus(&this.composer, window, cx);
+                }
+                cx.notify();
+            }),
+        )
+}
+
 /// The presence row with the chip on it and, while `open`, the drawer hung
 /// over it. `jobs` is the open chat's list (`AppState::open_jobs`); empty →
 /// the plain row, no chip, no drawer.
@@ -76,6 +185,7 @@ pub fn presence_row(
     jobs: Vec<Job>,
     open: bool,
     pointer: &ChipPointer<u8>,
+    link_state: LinkState,
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> Div {
@@ -84,7 +194,14 @@ pub fn presence_row(
     }
     let count = jobs.len();
     let chip = chip(count, open, chat_id.clone(), pointer, theme, cx).into_any_element();
-    let mut row = presence::row_with_chip(presence, chip, theme, cx).relative();
+    // In a job tab the line is the job's own; elsewhere it links to the newest job's tab.
+    let words = presence::shown_text(&presence, true);
+    let mut row = if crate::jobtabs::is_job_chat(&chat_id) {
+        presence::row_with_chip(presence, chip, theme, cx).relative()
+    } else {
+        let words = link(words, link_state, chat_id.clone(), theme, cx).into_any_element();
+        presence::row_with_chip_and_words(presence, chip, words, theme, cx).relative()
+    };
     if open {
         row = row.child(
             div()
@@ -218,7 +335,13 @@ fn header(chat_id: Id, theme: &Theme, cx: &mut Context<Shell>) -> Div {
 
 /// One job: spinner (running) or a faint pause mark (queued), the title over
 /// "<step> · m:ss", then Steer (running only) and Stop.
-fn job_row(chat_id: Id, ix: usize, job: &Job, theme: &Theme, cx: &mut Context<Shell>) -> Div {
+fn job_row(
+    chat_id: Id,
+    ix: usize,
+    job: &Job,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> Stateful<Div> {
     let leading: AnyElement = match job.state {
         JobState::Running => cards::activity_spinner(ROW_SPINNER, theme, cx).into_any_element(),
         JobState::Queued => icon("pause", ROW_SPINNER, theme.text_faint).into_any_element(),
@@ -275,14 +398,28 @@ fn job_row(chat_id: Id, ix: usize, job: &Job, theme: &Theme, cx: &mut Context<Sh
                 .update(cx, |s, cx| s.stop_job(chat_id, &job_id, cx));
         })),
     );
+    // The row itself opens the job's tab (`jobtabs`): a `surface_2` wash under the pointer
+    // and a › after the title say so; the buttons stop the click before it gets here.
+    let open_job = job.id.clone();
     div()
+        .id(gpui::ElementId::Name(
+            format!("tasks-row-{}", job.id).into(),
+        ))
         .h(px(ROW_HEIGHT))
         .px(px(ROW_PAD_X))
         .rounded(px(9.0))
         .flex()
         .items_center()
         .gap(px(10.0))
+        .cursor_pointer()
+        .hover(|s| s.bg(theme.surface_2))
         .debug_selector(move || format!("tasks-row-{ix}"))
+        .on_click(cx.listener(move |this, _, window, cx| {
+            cx.stop_propagation();
+            let job_id = open_job.clone();
+            this.state.update(cx, |s, cx| s.open_job_tab(&job_id, cx));
+            crate::ui::composer::Composer::focus(&this.composer, window, cx);
+        }))
         .child(div().flex_shrink_0().size(px(ROW_SPINNER)).child(leading))
         .child(
             div()
@@ -293,11 +430,18 @@ fn job_row(chat_id: Id, ix: usize, job: &Job, theme: &Theme, cx: &mut Context<Sh
                 .gap(px(2.0))
                 .child(
                     div()
-                        .truncate()
-                        .text_size(px(TEXT_SMALL))
-                        .text_color(theme.text)
-                        .debug_selector(move || format!("tasks-row-title-{ix}"))
-                        .child(job.title.clone()),
+                        .flex()
+                        .items_center()
+                        .gap(px(4.0))
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(TEXT_SMALL))
+                                .text_color(theme.text)
+                                .debug_selector(move || format!("tasks-row-title-{ix}"))
+                                .child(job.title.clone()),
+                        )
+                        .child(icon("chevron-right", 12.0, theme.text_faint)),
                 )
                 .child(
                     div()

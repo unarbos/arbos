@@ -453,7 +453,7 @@ edits the label in place but the name through an alert.
 | Details, first | "Coding": the project with a 15 pt blue spinner, 41 pt row | **Coding** card — **hidden for now** (see the 2026-10-25 trim below): the agent's workspace — `cards::activity_spinner` (`CODING_SPINNER` 15, `accent`, eight spokes stepping every 100 ms) while a turn runs, the `code` glyph when idle; subtitle "Working · 42 s · 7 tool calls" / "Idle" / "Machine asleep" (`coding_status`); a click opens the Computer tab |
 | Details, second | "Routines": name over schedule, a 32 × 20 switch | **Routines** card (own agents) — **hidden for now**: one `kit::row` per routine, subtitle "trigger · next in …" / "Paused" (`routine_status`), a `glass::switch` that flips `routine_set_enabled`; "No routines yet" when empty. Routines still load when the pane opens (`RoutinesRefresh`) |
 | Details, then | — | **Settings** (Model · Reasoning · Voice, the hoverpick rows; Model alone on someone else's agent). No footnotes. The **Who may message X**, **Permissions** and **Profile** cards that followed it are gone (below) |
-| Library | Grok's second tab | unchanged (images · files · links) |
+| Library | Grok's second tab | the one list by day with the hover card ("Library tab" below) |
 | Computer | Grok's third tab (the bot's computer) | the agent's **box**: **Machine** card — Status (dot + "Awake · 5 h 12 m"), Where it runs, Machine spec, Image, Spend today (`GET /machine`); **Resources** — Disk / Memory "x free of y", Load, Up for; **Running now** — every workspace with a turn running (spinner, name, "42 s · 7 tool calls") or "Nothing running · N workspaces". The last two come from the box's own `/box/state` through **`GET /machine/debug`** (`ClientCommand::MachineDebugRefresh` → `SyncEvent::BoxReport` → `AppState.box_report`), fetched when the pane opens and when the tab is picked; an asleep box says "The machine did not answer · <reason>". Someone else's agent: Status + Machine class from its project |
 | Delete agent | — | not on the pane (see above) |
 
@@ -480,6 +480,42 @@ Model alone on someone else's agent) under the hero (picture, name, label).
 `details_order(mine, show)` / `AgentPane.detailsOrder(mine:showCodingRoutines:)`
 are pure and pinned for both flag states. Rig: `ARBOS_SHOW=agentrename` opens
 the iPhone rename alert (replaces `agentedit`).
+
+### Library tab: one list by day, hover preview (Jacob 2026-10-25, [feedback library-list-hover-mac-2026-10-25])
+
+**The Library tab is Grok Bot's list, not a grid: everything shared — images,
+videos, files and links together — newest first, grouped by day inside the
+pane's cards; a row is a small thumbnail or type tile, the name on one line
+and the relative time; the pointer swaps the time for a ⋯ menu; a day shows
+five rows then "Show more"; resting on a row floats a preview card over it.**
+Jacob: "make library list based with hover pop out". Built from the approved
+mock (`media/feedback/library-list/` in the project store) — Jacob sent no
+Grok Library shot, so the list's own numbers below are the mock's on Grok's
+pane metrics, not measurements. Same on the group pane (Members · Library) and
+the agent pane (Details · Library · Computer); `profiles/library.rs`.
+
+| Item | Rule | Where |
+|---|---|---|
+| Grouping | one list, `when` descending, split by local day: **Today · Yesterday · weekday (last 7 days) · "Oct 18"** (the sidebar's words; "Oct 18, 2025" in another year); each day = `kit::section_title` + one `kit::card` | `group_days`, `day_label` |
+| Row | the kit's one-line row: **41** tall, inset 16, 10 right; **32** pt thumbnail (aspect-fill, radius 7) — a play glyph over a video, the extension ("PDF") on a `surface_2` tile for files, the link glyph for links; name 13 pt one line, tail-truncated; time 11.5 pt muted, compact ("now", "42m", "13h", "2d", "3w", "4mo"); hairline hung at 58 | `ROW_H`, `THUMB`, `rel_time` |
+| Hover | row fill `surface_2`; the time gives way to a **24 pt ⋯ disc** (no layout shift) that opens the row's menu at the click: Open · Forward · Download for attachments, Open link · Copy link for links | `MORE_DISC`, `menu_items` |
+| Show more | after **5** rows a 36 pt "Show more ⌄" row unfolds the rest of that day in place ("Show less ⌃" folds it); per opened pane | `SHOW_MORE_AFTER`, `library_toggle_day` |
+| Preview card | after **300 ms** on a row: **300** wide, left **20** from the pane's edge, **8** above the row (under it when it would reach the window's top 8 pt band); padding 10, radius 12, a step over the card's fill (white in light) with the strong border and shadow; picture **278 × 156** radius 8 aspect-fill (files: the extension at 22 pt on the tile; links: a globe); type line 11.5 muted ("Image" / "Video" / "PDF" / "Link"); the full name 13 semibold on 17, up to 3 lines; the sender's 18 pt picture, name, "· Yesterday 10:06 PM" (`sidebar::stamp_label`) | `HOVER_DELAY_MS`, `CARD_*`, `card_above` |
+| Click | a row opens the viewer at its place in the chat-order album (files included: the viewer's Open / Download); a link opens in the browser — as before | `open` |
+
+The iPhone has the same list since [feedback library-list-ios-2026-10-25]
+(`apps/ios/Arbos/Arbos/UI/LibraryList.swift`: `LibraryList` is the pure twin —
+`days`, `dayLabel`, `relTime`, `visibleRows`, `kindLabel`, `menuItems` — on
+the iPhone kit's 48 pt rows with a 36 pt thumbnail; the long press is the
+system context menu with the preview card on top: Open · Forward · Save /
+Open link · Copy link; `LibraryListTests` holds the twin tests).
+
+Pinned by `library::tests` (times, labels, grouping, the five-row fold, the
+card's height and flip, the menus) and the headless `library::render_tests`
+on the real shell (one list by day, Show more, ⋯ in the time's place with no
+layout shift, the card 8 pt over the row after the delay, the menus). Rig:
+`ARBOS_OPEN_PROFILE=group:library` / `agent:library`; `ARBOS_LIBRARY_HOVER=<row>`
+draws that row hovered with its card up.
 
 ## Pane animations (Jacob 2026-10-24, [feedback right-pane-slide-2026-10-24], [feedback sidebar-slide-2026-10-24])
 
@@ -514,6 +550,35 @@ Code: `ui/slide.rs` (`PaneSlides::step` derives the motion from
 `Shell::chat_frame`; pinned by `slide::tests` (state machine, reduce-motion
 snap, mid-slide reversal, no slide on a page swap or a width drag) and
 `slide::layout_tests`.
+
+## Create sheets: Upload | Generate, neutral initial (Jacob 2026-10-25, [feedback create-sheet-avatar-upload-generate-mac-2026-10-25])
+
+**The Create New Agent / Group / Server sheets offer exactly two picture
+options — the agent avatar picker's own Upload and Generate — and never a
+leaf grid or pastel swatches. An entity created with neither gets the
+name's first letter on a neutral grey disc; no leaf is ever auto-assigned.**
+Existing agents, groups and servers keep the avatars they have (stored or
+automatic leaf, picture): nothing is migrated or re-rendered.
+
+| Item | Rule |
+|---|---|
+| Options | `avatar_picker::tab_pill` with `Tab::for_target(&Target::Draft)` = `[Upload, Generate]` (Upload first, Jacob's order); the bodies are the picker's `upload_body` / `generate_body` on the shell's `create_picker` (a `Picker` on `Target::Draft`) |
+| Where | capsules at **246** from the sheet top (where Grok's first icon row began), body 16 under; footer 12 under the taller body; the card is 461.5 tall (was 602.5 with the 4 × 4 grid and two swatch rows) |
+| Preview | the hero disc (114) shows the chosen file, the generated picture, or the neutral initial of the typed name (an empty grey disc until a name is typed) — `avatars::neutral_element` |
+| Generate before the entity exists | `POST /me/avatar/generate` into my own slot `users:{me}` (#1789); on Create the bytes are copied into the new entity's slot (`sync::relay::adopt_draft_picture`); a relay without the route says "Generate is not on this relay yet; upload a picture instead." |
+| Stored value | `avatar_leaf` = `avatar_leaf_color` = **255** (`arbos_core::avatar::leaf::NEUTRAL`), accepted by the relay's `check_leaf_pick`; `null` stays the automatic leaf, so older agents are untouched. An older client's `pick_for` ignores 255 and draws the automatic leaf |
+| Neutral disc | dark `#3A3A3A` with the letter in `#E5E5E5`; light `#E6E6E6` / `#4A4A4A` (`leaf::NEUTRAL_DARK` / `NEUTRAL_LIGHT`); one letter, semibold at `INITIALS_SCALE`; bubble-bar accent a mid grey (`leaf::neutral_accent`) |
+| Everywhere | sidebar rows, header pill, pane hero, bubbles, presence row, mention chips and the composer picker all go through `avatars::agent` / `project` / `agent_picture` / `mention::Picture::Neutral`, so the one stored value draws the one disc |
+
+Pinned by `create_entity::tests` (options, stored pair, geometry) and
+`create_entity::render_tests` (headless render of both sheets: the two
+capsules, no Bot tab, no leaf element, the footer where the constants say,
+nothing picked → no picture sent), `avatar_picker::tests::the_draft_offers_upload_and_generate_only_and_hands_over_its_pick`,
+`avatars::tests::neutral_pick_is_the_core_value_and_identity_carries_it`,
+`arbos_core::avatar::leaf::tests::neutral_is_its_own_value_…` and the relay's
+`avatar::tests::neutral_pick_is_accepted_and_the_rest_still_validates`.
+Rig: `ARBOS_OPEN_NEW_AGENT=1` / `ARBOS_OPEN_CREATE=group|server` with
+`ARBOS_NEW_AGENT_NAME=…` and `ARBOS_CREATE_PICTURE=upload|generate[:<prompt>]`.
 
 ## Delete is immediate — no confirm (Jacob 2026-10-24, [feedback remove-delete-confirms-2026-10-24])
 

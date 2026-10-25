@@ -1263,6 +1263,37 @@ pub fn paint_picture(
                 cx,
             );
         }
+        mention::Picture::Neutral { name } => {
+            let (disc, ink) = avatars::neutral_colors(crate::ui::theme::Theme::of(cx));
+            window.paint_quad(gpui::quad(
+                bounds,
+                radii,
+                disc,
+                gpui::Edges::all(px(0.0)),
+                gpui::transparent_black(),
+                gpui::BorderStyle::default(),
+            ));
+            let text = arbos_core::avatar::leaf::initial(name);
+            let font_size = d * avatars::INITIALS_SCALE;
+            let mut font = window.text_style().font();
+            font.weight = FontWeight::SEMIBOLD;
+            let run = TextRun {
+                len: text.len(),
+                font,
+                color: ink,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let line = window.text_system().shape_line(
+                SharedString::from(text.clone()),
+                font_size,
+                &[run],
+                None,
+            );
+            let x = origin.x + (d - line.width) / 2.0;
+            let _ = line.paint(point(x, origin.y), d, TextAlign::Left, None, window, cx);
+        }
     }
 }
 
