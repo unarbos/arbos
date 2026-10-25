@@ -216,6 +216,111 @@ Code: `transcript.rs` `hover_time()` (returns nothing at opacity 0), pinned by
 `layout_tests::the_time_is_hidden_at_rest_and_beside_the_bubble_on_hover`;
 iPhone `Transcript.swift` `RowView` + `SenderNameRowTests`.
 
+## Agent bubble width (Jacob 2026-10-24, [feedback bubble-width-2026-10-24])
+
+**An agent bubble is at most 560 pt wide, and never closer than 84 pt to the
+column's right edge.** Measured on Jacob's Grok Bot shots of 2026-10-24
+(`media/feedback/grok-parity-test/grok-chat-1.png`, `grok-chat-2-research.png`,
+3456 × 2172 px = 2 px/pt, a 1728 pt window with the right pane open): Grok's
+chat column is 1128 pt, its composer 960 pt, and every wrapped agent bubble
+(the three-line answer, the table, the research bullets) ends at **1120 px =
+560 pt** — 58 % of the composer, 50 % of the column; the list bubble is
+content-sized at 531. Arbos in the same window: column 1041, composer 876
+(`COLUMN_MAX_WIDTH`), bubble 792 = column − 84 (90 %). Grok's older narrow-pane
+refs (57: 612 in a 696 pill; 58: 310 in 392) show the fixed 84 pt gap governing
+below the ceiling, so the rule is the smaller of the two:
+`assistant_cap(slot) = min(slot − 84, 560)`; the crossover is a 644 pt slot.
+At our 876 pt column the bubble is 560 = 64 % of the column (Grok's composer is
+wider than ours; matching the absolute width is what reads as "the same
+bubble" side by side). Question / approval cards share the slot and the cap
+(#1374 / #1440); my own bubbles keep their 72 % rule.
+
+Code: `transcript.rs` `ASSISTANT_MAX_WIDTH`, `assistant_cap()`, the inner
+`chat-bubble-cap` frame of `assistant_slot()`; `onboarding::bubble_target`
+predicts with the same function. Pinned by
+`layout_tests::the_agent_bubble_cap_is_the_column_minus_the_grok_gap_at_most_grok_width`
+and `cards_share_the_bubbles_left_edge_and_cap`.
+
+## Markdown inside bubbles (Jacob 2026-10-24, [feedback bubble-markdown-2026-10-24])
+
+**Lists and headings read like Grok Bot's: bold headings, real bullet discs,
+Grok's line, item and block rhythm.** Measured on Jacob's `grok-chat-1.png`
+(2 px/pt) against Arbos v0.6.221 (`arbos-chat-right-pane-1.png`):
+
+| | Grok Bot | Arbos before | Rule |
+|---|---|---|---|
+| Text line (wrapped paragraph, agent and user bubbles) | 44 px = **22 pt** | 20 pt | `CHAT_LINE_HEIGHT` 22 |
+| List item pitch | 52 px = **26 pt** | 23 | `LIST_ITEM_GAP` 4 over the 22 line |
+| Block pitch (paragraph → heading → list → paragraph) | 64 px = **32 pt** | 24–26 | `BLOCK_GAP_HALF` 5 above and below every block row (10 between blocks) |
+| Bullet | **4.5 pt disc**, muted, centre 8.5 pt from the block's left; item text at **20 pt** | the font's "•" (a 3 pt dot 2 pt in), text at 24 | `BULLET_DOT` 4.5, `BULLET_CENTRE` 8.5, `LIST_INDENT` 20 (26 for two-digit numbers) |
+| Heading / `**bold**` | bold (700); "Surf gear" renders 3 % wider than the same semibold string | semibold (600) | `STRONG_WEIGHT` = `FontWeight::BOLD` for `#` headings and strong spans |
+
+Jacob's "headings" in the surf list are `**bold**` paragraphs (same glyph
+height as the body), so the weight rule covers both. `#` heading sizes (20 /
+17 / 15) are unchanged. Copy text keeps its "• " markers.
+
+Code: `transcript.rs` `render_block` (lists, headings), `inline_runs`,
+`markdown_bubble` block padding; `theme.rs` `CHAT_LINE_HEIGHT`. Pinned by
+`markdown_tests` (rhythm constants, bold runs, a headless render of a bullet
+list: disc size / place, indent, 26 pt pitch, dot on the first line's centre).
+
+## Bubble hover rail (Jacob 2026-10-24, [feedback bubble-hover-rail-2026-10-24])
+
+**The ☺ ↩ ⋯ rail is vertically centred beside the bubble and shows while the
+pointer is anywhere on the bubble.** Measured on Jacob's Grok Bot shot
+(`grok-chat-2-research.png`, 2 px/pt): the three glyphs sit at the mid-height
+of a 440 pt table bubble, the first glyph's centre 18 pt past its right edge,
+glyph centres 26 pt apart — the rail's own geometry (`RAIL_BUTTON` 24 + `RAIL_GAP`
+2, 6 pt off the bubble) already matched; only the placement did not. Before
+this rule the rail hung off the *last markdown block* of a reply — at the
+bottom of a long bubble — and appeared only while that last block was hovered.
+
+An agent reply is one transcript row per markdown block, so "the bubble" means
+all of those rows: hover is tracked per message (`HoverFade` keyed by
+`{message_id}#bubble`), and the last block places the rail at the middle of
+every block row (`Transcript::bubble_rail_centre` → `rail_centre()` from the
+list's item bounds), clamped so a bubble taller than the pane keeps its rail on
+screen under the header fade band. One-row bubbles (mine, other people's,
+media) centre the rail on their own row as before.
+
+Code: `transcript.rs` `HoverFade::set(key, row, …)`, `rail_centre()`,
+`hover_rail_frame()`; pinned by `rail_tests`.
+
+## Mac bubble text selection (Jacob 2026-10-24, [feedback bubble-selection-2026-10-24])
+
+**A press on bubble text starts a selection, whichever way the pointer then
+moves — up, down, or into another message; dragging a message never turns it
+into a reply.** Grok's behaviour, as Jacob checked side by side:
+
+- Bottom-up works: the old axis lock handed a vertical pan with no range yet
+  to drag-scroll, so a drag that started at the end of a message and went up
+  selected nothing. Now the selection owns the pointer from the press
+  (`TextSelection::is_dragging`), and the transcript arms its click-drag
+  scroll only for presses that are not on text (bubble padding, empty rows).
+- Across messages: the selection is a pair of positions, each in one bubble
+  with that bubble's transcript order (`select::BubbleAt`, `Span`). The first
+  bubble is selected from the pressed index, every bubble between whole, the
+  last up to the pointer; ⌘C copies them in transcript order whichever way the
+  drag went, one blank line between messages (`transcript::copy_across`).
+  Shift-click extends into another bubble the same way. One-bubble gestures
+  (#1389: drag through paragraphs, double-click word, triple-click paragraph)
+  are unchanged.
+- No swipe-to-reply on the Mac: the Telegram / iPhone right-swipe
+  (`ReplySwipe`) is removed from the Mac transcript; Reply is the rail's ↩,
+  the message menu and the right-click menu. The iPhone keeps its own gesture
+  under its own rule (above).
+
+Rig: `ARBOS_RIG_SELECT=across` selects from the second word of the bubble
+before the newest agent bubble to that bubble's second-to-last word.
+
+Code: `select.rs` (`BubbleAt`, `Span`, `Model::begin_at` / `extend_in` /
+`propose_in`), `transcript.rs` (`message_order`, `bubble_texts`,
+`copy_across`, the root mouse-down guard). Pinned by `select::tests::
+a_drag_across_bubbles_spans_them_in_transcript_order`,
+`a_bottom_up_drag_selects_across_two_rendered_bubbles` (a simulated pointer
+drag straight up from one rendered bubble into the one above), and
+`transcript::cross_bubble_copy_tests`.
+
 ## Own-bubble delivery (Jacob 2026-10-24, [feedback sent-state-opacity-2026-10-24])
 
 **No "sent" / "seen" caption on my bubbles — the bubble's opacity is the
@@ -319,6 +424,37 @@ window top at row 0; pane 639 px = 319.5 pt wide). Points.
 Pinned by `profiles::chrome_tests` (`the_pane_is_the_chats_surface_in_both_appearances`,
 `the_constants_are_groks`, `the_share_and_close_discs_land_on_groks_pixels`,
 `cards_are_inset_and_labelled_at_groks_margins`) and `pane::tests::every_kind_lays_out_hero_then_pill_then_options`.
+
+### Agent pane: Details · Library · Computer (Jacob 2026-10-24, [feedback agent-pane-details-tab-2026-10-24])
+
+**The agent pane's tabs are Grok Bot's — Details · Library · Computer — and
+the first tab shows live content first.** Items 23–25 of Jacob's list:
+Grok shows the name over "Add a label"; its Details tab opens with the
+coding project (spinner while the bot works) and the routines with their
+switches; ours opened with Name / Handle / Description rows and fine print.
+This supersedes the 2026-10-22 tab names (Profile · Settings · Library) for
+the Mac agent pane; the structure every pane shares — hero, then the tab
+pill, then the options — is unchanged, and every option the old tabs held is
+still on the pane. The iPhone agent pane keeps its three tabs until its own
+item lands (the per-kind "same tabs on both platforms" rule then applies).
+
+| Item | Grok Bot (measured, `grok-right-pane-details.png`) | Arbos (`profiles/agent.rs`) |
+|---|---|---|
+| Subtitle | "Add a label", 12 pt muted, under the name | the agent's **description is its label**: shown under the name (`HERO_SUBTITLE` 12, `text_muted`), `LABEL_PLACEHOLDER` "Add a label" in `text_faint` while empty (owner); a click edits it in place (the hero's `label_editor`, Done / Return commits). Someone else's agent: its label, else "Run by @owner". "working" is no longer a subtitle — the Coding row spins |
+| Tab pill | capsule **26** tall, label **13** pt, 9 pt beside it, 2 between capsules | `TAB_HEIGHT` 26 / `TEXT_SMALL` / `TAB_PAD_X` 9 / `TAB_GAP` 2 (shared `tab_bar`; was 30 / body / 14 / 4) |
+| Details, first | "Coding": the project with a 15 pt blue spinner, 41 pt row | **Coding** card: the agent's workspace — `cards::activity_spinner` (`CODING_SPINNER` 15, `accent`, eight spokes stepping every 100 ms) while a turn runs, the `code` glyph when idle; subtitle "Working · 42 s · 7 tool calls" / "Idle" / "Machine asleep" (`coding_status`); a click opens the Computer tab |
+| Details, second | "Routines": name over schedule, a 32 × 20 switch | **Routines** card (own agents): one `kit::row` per routine, subtitle "trigger · next in …" / "Paused" (`routine_status`), a `glass::switch` that flips `routine_set_enabled`; "No routines yet" when empty. Routines load when the pane opens (`RoutinesRefresh`) |
+| Details, then | — | **Settings** (Model · Reasoning · Voice, the hoverpick rows; Model alone on someone else's agent) → **Who may message X** (the grant rows + "Give a person access…") → **Profile**: one "Edit profile" row (pencil tile) that unfolds Name · Handle · Description (`Shell.agent_edit_open`); someone else's agent shows the three rows plain. No footnotes |
+| Library | Grok's second tab | unchanged (images · files · links) |
+| Computer | Grok's third tab (the bot's computer) | the agent's **box**: **Machine** card — Status (dot + "Awake · 5 h 12 m"), Where it runs, Machine spec, Image, Spend today (`GET /machine`); **Resources** — Disk / Memory "x free of y", Load, Up for; **Running now** — every workspace with a turn running (spinner, name, "42 s · 7 tool calls") or "Nothing running · N workspaces". The last two come from the box's own `/box/state` through **`GET /machine/debug`** (`ClientCommand::MachineDebugRefresh` → `SyncEvent::BoxReport` → `AppState.box_report`), fetched when the pane opens and when the tab is picked; an asleep box says "The machine did not answer · <reason>". Someone else's agent: Status + Machine class from its project |
+| Delete agent | — | not on the pane (see above) |
+
+Order pinned by `agent::tests` (`details_puts_live_content_first_and_the_edit_fields_last`,
+`computer_order_follows_the_report`, `coding_status_…`, `routine_status_…`,
+`box_report_reads_the_relay_and_the_box`) and `pane::tests::kinds_keep_their_own_tab_sets`.
+Rig: `ARBOS_OPEN_PROFILE=agent` (Details), `agent:library`, `agent:computer`;
+the fixture answers `MachineDebugRefresh` with an awake 4-core box and one
+workspace per agent (the streaming one mid-turn).
 
 ## Pane animations (Jacob 2026-10-24, [feedback right-pane-slide-2026-10-24], [feedback sidebar-slide-2026-10-24])
 
