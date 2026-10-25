@@ -15,7 +15,6 @@ use crate::app::ProfilePage;
 use crate::model::{now_ms, MachineState};
 use crate::ui::devices;
 use crate::ui::glass;
-use crate::ui::icons::icon;
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::profiles::pane::{self, Hero, Picture, ProfilePane, Section};
@@ -585,9 +584,9 @@ impl Shell {
                 .child(group)
                 .child(footnote(
                 "A banner with the sender's picture when an agent finishes or a person writes, \
-                     only while you are not looking. Read receipts show sent/seen on your \
-                     messages and tell others when you open theirs — turn them off to stop \
-                     sending and seeing that mark."
+                     only while you are not looking. Read receipts keep your bubbles lighter \
+                     until the other side has opened them, and tell others when you open \
+                     theirs — turn them off to stop sending and seeing that."
                     .into(),
                 &theme,
             ))
@@ -679,7 +678,7 @@ impl Shell {
                          you type. The open chat comes back."
                             .into()
                     } else {
-                        "Arbos only tells you about new versions; press Update in the rail to install."
+                        "Arbos only tells you about new versions; the blue update button at the bottom of the chat list installs one when you press it."
                             .into()
                     },
                     &theme,
@@ -868,9 +867,13 @@ impl Shell {
 
         // ----- a pushed page: `‹ Title` in the header, the page fills the pane ----
         if page != SettingsPage::Root {
-            let back = glass::circle("settings-back", 30.0, &theme)
-                .child(icon("chevron-left", 14.0, theme.text))
-                .on_click(cx.listener(|this, _, _, cx| this.settings_back(cx)));
+            let back = glass::control_disc(
+                "settings-back",
+                "chevron-left",
+                crate::ui::theme::CONTROL_GLYPH,
+                &theme,
+            )
+            .on_click(cx.listener(|this, _, _, cx| this.settings_back(cx)));
             let body: Div = if page.is_content() {
                 let content = match page {
                     SettingsPage::Credits => credits_body,
@@ -924,6 +927,7 @@ impl Shell {
                 Some((page.title(), back)),
                 None,
                 body,
+                None,
                 None,
                 Some(&self.settings_scroll),
                 &theme,
@@ -1041,6 +1045,7 @@ impl Shell {
             badge: None,
             subtitle: Some(who.clone().into()),
             subtitle_color: theme.text_muted,
+            subtitle_click: None,
             editor,
         };
 
@@ -1196,6 +1201,7 @@ impl Shell {
                 body,
                 footer,
                 done: None,
+                share: None,
             },
             self,
             cx,

@@ -28,9 +28,9 @@ use crate::model::{
     Voice,
 };
 use crate::model::{
-    Attachment, BoxState, ChannelsView, Chat, ConnectorsView, DeviceView, Effort, Id, Link,
-    LinkState, LocalView, Machine, Message, NewSecret, Project, ProjectDocView, ProjectSecrets,
-    Routine, RoutineRun, RoutineTrigger, SecretsView, Skill,
+    Attachment, BoxReport, BoxState, ChannelsView, Chat, ConnectorsView, DeviceView, Effort, Id,
+    Link, LinkState, LocalView, Machine, Message, NewSecret, Project, ProjectDocView,
+    ProjectSecrets, Routine, RoutineRun, RoutineTrigger, SecretsView, Skill,
 };
 
 /// Something the source learned; the UI applies it to its mirror.
@@ -263,6 +263,12 @@ pub enum SyncEvent {
     RelayLink(LinkState),
     /// Short user-facing notice (errors from HTTP calls, etc.).
     Notice(String),
+    /// A room's pushes were refused (`not_available`) or an ACK cleared that refusal.
+    /// `refused: true` → show one notice and keep a per-room flag; `false` → clear both.
+    PushRefused {
+        chat_id: Id,
+        refused: bool,
+    },
     /// Settings → Connectors: catalog + connected accounts (F1).
     Connectors(ConnectorsView),
     /// An OAuth flow started: open this URL in the browser; the relay finishes the callback.
@@ -279,10 +285,24 @@ pub enum SyncEvent {
         project_id: Id,
         view: ProjectSecrets,
     },
+    /// One agent's standing shell approvals (#1544).
+    ShellGrants {
+        project_id: Id,
+        items: Vec<crate::model::ShellGrant>,
+    },
     /// Routines of one project (Settings → Routines).
     Routines {
         project_id: Id,
         routines: Vec<Routine>,
+    },
+    /// The box as `GET /machine/debug` reports it (the agent pane's Computer tab).
+    BoxReport(BoxReport),
+    /// The agent's open background jobs as the relay's activity record lists them
+    /// (`GET /projects/{id}` → `activity.jobs[]`, duplex §2.4) — the tasks chip and
+    /// drawer. Empty when nothing runs or the relay predates the field.
+    ProjectJobs {
+        project_id: Id,
+        jobs: Vec<crate::model::Job>,
     },
     /// Run history of one routine, newest first.
     RoutineRuns {
@@ -533,6 +553,19 @@ pub enum ClientCommand {
     Stop {
         chat_id: Id,
     },
+    /// The tasks drawer's per-job Stop (duplex D7): `stop { jobId, messageId }` halts
+    /// that job only; the running turn and the other jobs go on.
+    StopJob {
+        chat_id: Id,
+        job_id: String,
+        /// The newest user message of the chat, or empty — what the box binds the
+        /// command to, as the Stop button's `stop` does.
+        message_id: String,
+    },
+    /// Poll the agent's open jobs (`GET /projects/{id}` → `activity.jobs[]`).
+    JobsRefresh {
+        project_id: Id,
+    },
     /// Toggle my emoji reaction on a message (written into the chat doc).
     React {
         chat_id: Id,
@@ -548,6 +581,9 @@ pub enum ClientCommand {
     Approve {
         chat_id: Id,
         approval_id: String,
+        /// #1544: card option B/C — the path class to allow from now on (`scratch`,
+        /// `workspace`, `anywhere`); `None` is a one-time approve.
+        grant: Option<String>,
     },
     Reject {
         chat_id: Id,
@@ -809,6 +845,15 @@ pub enum ClientCommand {
     ProjectSecretsRefresh {
         project_id: Id,
     },
+    /// The agent pane opened: its standing shell approvals (#1544).
+    ShellGrantsRefresh {
+        project_id: Id,
+    },
+    /// Settings › Shell approvals: switch a grant off; the agent asks again next time.
+    ShellGrantRevoke {
+        project_id: Id,
+        grant_id: String,
+    },
     /// Add a secret; the value goes to the relay once.
     SecretAdd {
         item: NewSecret,
@@ -938,6 +983,8 @@ pub enum ClientCommand {
     },
     /// Settings → This Mac opened or needs a refresh.
     LocalRefresh,
+    /// The agent pane opened (or its Computer tab was picked): fetch `GET /machine/debug`.
+    MachineDebugRefresh,
     /// Per-device "Allow reads without asking".
     LocalSetAllowReads {
         device_id: Id,

@@ -14,7 +14,7 @@
         "file": "{D}/sandboxing.md"
       },
       "rubric": {
-        "criteria": "Covers gVisor, Firecracker, Kata and two hosted services with correct basic facts; has sections and a comparison; cites real URLs; reads as a coherent report.",
+        "criteria": "Only the first 3,000 characters of the report are shown here (word count and URL checks are programmatic — see the check output). Judge coverage and quality from the shown part and the reply's abstract: sections, a comparison of isolation/startup/cost, gVisor + Firecracker + Kata + two hosted services named, real-looking citations. Do not call the file truncated because the excerpt ends mid-sentence.",
         "min": 3
       },
       "timeout_s": 1500

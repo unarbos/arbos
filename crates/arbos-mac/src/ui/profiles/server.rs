@@ -121,6 +121,7 @@ pub(super) fn page(
         badge: None,
         subtitle: Some(subtitle.into()),
         subtitle_color: theme.text_muted,
+        subtitle_click: None,
         editor: None,
     };
 
@@ -158,6 +159,7 @@ pub(super) fn page(
             body,
             footer,
             done: None,
+            share: None,
         },
         shell,
         cx,

@@ -528,6 +528,10 @@ struct Attachment: Codable, Equatable {
 struct ChoiceOption: Equatable, Hashable {
     var id: String
     var label: String
+    /// #1544: a muted line at the row's trailing edge ("scratch only: /tmp and /work/tmp").
+    var hint: String? = nil
+    /// Drawn in red (Deny).
+    var destructive: Bool = false
 }
 
 /// A `question` part (design §10 widgets): what the agent asked, the answer
@@ -548,6 +552,8 @@ struct Question: Equatable {
     var approvalId: String? = nil
     /// D83: the relay request the card decides (`payload.secretRequestId`).
     var secretRequestId: String? = nil
+    /// #1544: a destructive-shell card with standing options; its footer names Settings.
+    var shellCard: Bool = false
 
     var hasChoices: Bool { !options.isEmpty }
 }
@@ -626,6 +632,116 @@ struct MessageReaction: Equatable, Hashable {
     }
 }
 
+/// The `job` map on a background job's hidden row (duplex §2.3). Only the id and the
+/// title are read; `kind` / `touches` are the box's business.
+struct JobRef: Equatable {
+    var id: String
+    var title: String
+
+    init?(_ raw: Any?) {
+        guard let m = raw as? [String: Any], let id = m["id"] as? String, !id.isEmpty else { return nil }
+        self.id = id
+        self.title = (m["title"] as? String) ?? ""
+    }
+}
+
+/// Where an open job is in its life — the two states the relay lists
+/// (`activity.jobs[].state`, duplex §2.4). Finished, failed, cancelled and interrupted
+/// jobs are not listed: their outcome is a bubble in the chat.
+enum JobState: String, Equatable {
+    /// Waiting for a slot or a resource lock; not steerable yet.
+    case queued
+    case running
+}
+
+/// One open background job as the relay's activity record lists it
+/// (`GET /projects/{id}` → `activity.jobs[]`): the rows of the tasks sheet.
+struct Job: Identifiable, Equatable {
+    var id: String
+    var title: String
+    var state: JobState
+    /// The job's newest step in plain words ("Reading tripadvisor.com"); empty while it
+    /// starts; "Waiting for <title>" while it queues behind a lock.
+    var step: String
+    var elapsedS: Int
+    /// The user message that asked for it: Steer prefills a reply to it.
+    var askMessageId: String?
+    var chatId: String?
+
+    init(id: String, title: String, state: JobState, step: String, elapsedS: Int,
+         askMessageId: String? = nil, chatId: String? = nil) {
+        self.id = id
+        self.title = title
+        self.state = state
+        self.step = step
+        self.elapsedS = elapsedS
+        self.askMessageId = askMessageId
+        self.chatId = chatId
+    }
+
+    /// One relay row; nil when it has no id. Unknown states read as running.
+    init?(_ raw: Any) {
+        guard let m = raw as? [String: Any], let id = m["id"] as? String, !id.isEmpty else { return nil }
+        self.id = id
+        self.title = (m["title"] as? String) ?? ""
+        self.state = JobState(rawValue: (m["state"] as? String) ?? "") ?? .running
+        self.step = (m["step"] as? String) ?? ""
+        self.elapsedS = Int((m["elapsed_s"] as? NSNumber)?.int64Value ?? 0)
+        self.askMessageId = (m["ask_message_id"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        self.chatId = (m["chat_id"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    /// `activity.jobs` as the relay sends it — `null`, missing or not a list all read as
+    /// "no open jobs"; a row that does not parse is skipped, never fatal (the sheet must
+    /// degrade to nothing on an older relay).
+    static func list(fromActivity activity: Any?) -> [Job] {
+        guard let a = activity as? [String: Any], let rows = a["jobs"] as? [Any] else { return [] }
+        return rows.compactMap { Job($0) }
+    }
+
+    /// Only a running job has a session to steer; a queued one has not started.
+    var canSteer: Bool { state == .running && askMessageId != nil }
+
+    /// The row's second line (contract, "Drawer, per state"): the live step, "Working" for a
+    /// running job with no step yet, "Starting" for a queued job with no step, the
+    /// "Waiting for <title>" step as the box wrote it.
+    var statusLine: String {
+        let s = step.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !s.isEmpty { return s }
+        switch state {
+        case .queued: return "Starting"
+        case .running: return "Working"
+        }
+    }
+
+    /// `elapsed_s` as m:ss (an hour and more as h:mm:ss).
+    var elapsedLabel: String {
+        let s = max(0, elapsedS)
+        if s >= 3600 {
+            return String(format: "%d:%02d:%02d", s / 3600, (s / 60) % 60, s % 60)
+        }
+        return String(format: "%d:%02d", s / 60, s % 60)
+    }
+
+    /// "1 task" / "N tasks": the chip's words.
+    static func countLabel(_ n: Int) -> String {
+        n == 1 ? "1 task" : "\(n) tasks"
+    }
+
+    /// The presence text without the box's "· N tasks" suffix — the chip carries the
+    /// count, so the words are not said twice on one line.
+    static func stripCountSuffix(_ text: String) -> String {
+        guard let range = text.range(of: " · ", options: .backwards) else { return text }
+        let tail = String(text[range.upperBound...])
+        let head = String(text[..<range.lowerBound])
+        for suffix in [" tasks", " task"] where tail.hasSuffix(suffix) {
+            let n = tail.dropLast(suffix.count)
+            if !n.isEmpty, n.allSatisfy(\.isNumber) { return head }
+        }
+        return text
+    }
+}
+
 struct Message: Identifiable, Equatable {
     var id: Id
     var chatId: Id
@@ -638,6 +754,17 @@ struct Message: Identifiable, Equatable {
     var subagentName: String?
     /// Messages exchanged with the subagent on a hand-off row (1 = brief sent, 2 = result back).
     var handoffMessages: Int? = nil
+    /// A background worker the user never named (agentd, Grok parity trait 15): the transcript
+    /// hides this spawn row — Grok shows no "N messages with …" line for its own workers — while
+    /// the working line still reads its `activity`. An agent-to-agent `send_message(to)` row
+    /// carries no flag and keeps its "Messaged ◉ X" line.
+    var worker: Bool = false
+    /// Duplex design §2.3: the background job this row stands for (`job: { id, title, kind,
+    /// touches }`). Wordless and `hidden`; it exists so the presence line can read its
+    /// `activity` and so the client knows a job is live in this chat.
+    var job: JobRef? = nil
+    /// The box asks the transcript to draw nothing for this row (job rows).
+    var hidden: Bool = false
     /// Agent-to-agent messaging: this reply answered a message another agent sent into the
     /// chat; the name drawn in the "Replied to ◉ X" line under the bubble.
     var agentReplyTo: String? = nil
@@ -814,6 +941,9 @@ enum DocJSON {
             subagentId: str(m["subagentId"]),
             subagentName: str(m["subagentName"]),
             handoffMessages: int(m["handoffMessages"]).map { Int($0) },
+            worker: bool(m["worker"]),
+            job: JobRef(m["job"]),
+            hidden: bool(m["hidden"]),
             agentReplyTo: str(m["agentReplyTo"]).flatMap { $0.isEmpty ? nil : $0 },
             inReplyTo: str(m["inReplyTo"]),
             usage: usage,
@@ -950,13 +1080,37 @@ enum DocJSON {
     /// are the card's four rows for a secret request (`payload.answers`), else Approve / Reject.
     /// `decidedBy` carries the relay's decision (`arbos:secrets:allowed_always`) so an answered
     /// card can show which row was picked.
-    static func approval(_ pm: [String: Any]) -> Question {
+    static func approval(_ pm: [String: Any], agentName: String? = nil) -> Question {
         let approvalId = str(pm["approvalId"]) ?? id(pm)
         let payload = pm["payload"] as? [String: Any]
         var options: [ChoiceOption] = []
         for o in (payload?["answers"] as? [Any]) ?? [] {
             guard let om = o as? [String: Any], let oid = str(om["id"]) else { continue }
             options.append(ChoiceOption(id: oid, label: str(om["label"]) ?? oid))
+        }
+        // #1544: a destructive-shell card offers A Allow once · B Always allow <agent> in <class>
+        // · C … anywhere · D Deny (`payload.grant_options`); the agent's name comes in `agentName`.
+        let grantOptions = (payload?["grant_options"] as? [Any]) ?? []
+        var shellCard = false
+        if options.isEmpty, !grantOptions.isEmpty {
+            shellCard = true
+            // The card fills in the agent's name when it draws ("Always allow Doug in /tmp").
+            let agent = agentName ?? "{agent}"
+            let rawClass = str(payload?["class"]) ?? "this"
+            let ruleClass = rawClass == "file-delete" ? "file deletes" : rawClass
+            options = [ChoiceOption(id: "once", label: "Allow once")]
+            for o in grantOptions {
+                guard let om = o as? [String: Any], let cls = str(om["path_class"]) else { continue }
+                let label = str(om["label"]) ?? cls
+                let detail = str(om["detail"]) ?? ""
+                if cls == "anywhere" {
+                    options.append(ChoiceOption(id: "grant:anywhere", label: "Always allow \(agent) anywhere",
+                                                hint: "no more cards for \(ruleClass) from \(agent), in \(detail)"))
+                } else {
+                    options.append(ChoiceOption(id: "grant:\(cls)", label: "Always allow \(agent) in \(label)", hint: detail))
+                }
+            }
+            options.append(ChoiceOption(id: "deny", label: "Deny", destructive: true))
         }
         if options.isEmpty {
             options = [ChoiceOption(id: "approve", label: "Approve"), ChoiceOption(id: "reject", label: "Reject")]
@@ -965,6 +1119,8 @@ enum DocJSON {
         let decidedBy = str(pm["decidedBy"]) ?? ""
         var picked: [String] = []
         switch state {
+        case "approved" where shellCard:
+            if let g = str(pm["grant"]), !g.isEmpty { picked = ["grant:\(g)"] } else { picked = ["once"] }
         case "approved":
             if decidedBy.hasSuffix(":allowed_once") { picked = ["once"] }
             else if decidedBy.hasSuffix(":allowed_chat") { picked = ["chat"] }
@@ -990,7 +1146,8 @@ enum DocJSON {
             answer: picked,
             open: state == "pending",
             approvalId: approvalId,
-            secretRequestId: str(payload?["secretRequestId"])
+            secretRequestId: str(payload?["secretRequestId"]),
+            shellCard: shellCard
         )
     }
 

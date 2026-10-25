@@ -616,7 +616,7 @@ pub fn tool_specs() -> Vec<Value> {
     ]
 }
 
-async fn relay_get(agent: &Agent, path: &str) -> Result<Value, String> {
+pub(crate) async fn relay_get(agent: &Agent, path: &str) -> Result<Value, String> {
     let r = agent
         .http_client()
         .get(format!("{}{}", agent.cfg.relay_url, path))
@@ -642,7 +642,11 @@ fn relay_error(status: reqwest::StatusCode, text: &str, path: &str) -> String {
     }
 }
 
-async fn relay_post(agent: &Agent, path: &str, body: &Value) -> Result<(u16, Value), String> {
+pub(crate) async fn relay_post(
+    agent: &Agent,
+    path: &str,
+    body: &Value,
+) -> Result<(u16, Value), String> {
     let r = agent
         .http_client()
         .post(format!("{}{}", agent.cfg.relay_url, path))

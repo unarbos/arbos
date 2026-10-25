@@ -51,6 +51,7 @@ mod room_health;
 mod rooms;
 mod routines;
 mod secrets;
+mod shell_grants;
 mod signin;
 mod skills;
 mod smoke;
@@ -899,6 +900,18 @@ async fn main() -> anyhow::Result<()> {
         .route("/me/secrets/settings", put(secrets::put_settings))
         .route("/box/secrets", get(secrets::box_list))
         .route("/box/secrets/env", get(secrets::box_env))
+        .route(
+            "/box/shell-grants",
+            get(shell_grants::box_list).post(shell_grants::box_create),
+        )
+        .route(
+            "/projects/{id}/shell-grants",
+            get(shell_grants::list).post(shell_grants::create),
+        )
+        .route(
+            "/projects/{id}/shell-grants/{grant}",
+            delete(shell_grants::revoke),
+        )
         .route("/box/secrets/{id}/scrub", get(secrets::box_scrub))
         .route("/box/secrets/request", post(secrets::box_request))
         .route(

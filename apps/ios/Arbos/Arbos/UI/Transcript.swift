@@ -125,7 +125,8 @@ enum RowKind: Equatable {
     /// `questionId` is nil for a legacy `waiting_user` status line (no `question` part).
     /// `lane`: in a people chat the card sits after the sender's avatar lane, like the bubble it
     /// belongs to (#1440 follow-up: the card must share the bubble's left edge and cap width).
-    case question(questionId: String?, text: String, options: [ChoiceOption], multi: Bool, picked: [String], open: Bool, lane: Bool)
+    /// `shellCard`: a destructive-shell card with standing options (#1544).
+    case question(questionId: String?, text: String, options: [ChoiceOption], multi: Bool, picked: [String], open: Bool, lane: Bool, shellCard: Bool = false)
     /// A file card; tap opens the media viewer on it (Open → Quick Look).
     /// `caption` is an optional description bar under a video when the sender typed
     /// one with the attachment — not a separate text bubble.
@@ -146,7 +147,7 @@ struct Row: Identifiable, Equatable {
     var kind: RowKind
     /// Emoji reactions shown under this bubble (stamped on the last prose/media row of a message).
     var reactions: [MessageReaction] = []
-    /// How many messages reply to this one via `replyTo` (swipe / long-press Reply); shown top-right when > 0.
+    /// How many messages reply to this one via `replyTo` (long-press Reply); shown top-right when > 0.
     var replyCount: Int = 0
     /// The message's `createdAt` (ms), so the swipe-revealed time needs no lookup.
     var createdAt: Int64 = 0
@@ -192,6 +193,10 @@ enum Transcript {
             // Voice-call transcript lines stay in the doc for the agent; they are not
             // chat bubbles (Grok: typed prose, attachments, and call start/end notes only).
             if message.voice { continue }
+            // A background job's row (duplex §2.3, `job` + `hidden`) is wordless by design:
+            // its status parts feed the presence line and the tasks sheet, never a bubble —
+            // not while it runs, not the "no answer" stock line when it ends.
+            if message.hidden || message.job != nil { continue }
             // Build this message's visible rows first. Date separators only land when
             // something actually renders — otherwise an empty/hidden-only message leaves
             // a lone "Today 5:45 PM" in a blank chat.
@@ -271,7 +276,10 @@ enum Transcript {
             case .assistant, .project:
                 // Hand-off: Grok shows "Messaged ◉ <bot>" / "N messages with ◉ A, ◉ B and ◉ C"
                 // as a system line. Consecutive hand-offs merge below.
-                let handoffName = (message.turn == .new || message.turn?.isProgress == true)
+                // A background worker's spawn row draws nothing (`worker`, feedback
+                // `hide-worker-rows-and-tz-2026-10-24`); its `activity` still feeds the
+                // working line through `AppModel.currentActivity`.
+                let handoffName = (message.turn == .new || message.turn?.isProgress == true) && !message.worker
                     ? (message.subagentName ?? subagentNames[message.subagentId ?? ""]) : nil
                 if let name = handoffName {
                     let rowId = "\(message.id)#handoff"
@@ -330,7 +338,7 @@ enum Transcript {
                         chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
                                          kind: .question(questionId: q.questionId, text: q.question, options: q.options,
                                                          multi: q.multi, picked: q.answer, open: q.open,
-                                                         lane: people && message.senderHandle != nil)))
+                                                         lane: people && message.senderHandle != nil, shellCard: q.shellCard)))
                     case .status(let id, .handoff, let text):
                         // Legacy status line; the turn-based row above already covers it.
                         if handoffName == nil {
@@ -922,25 +930,18 @@ struct RowView: View, Equatable {
     var onQuoteTap: ((Id) -> Void)? = nil
     /// Briefly tinted after a quote tap landed on this row's message.
     var highlighted: Bool = false
-    /// Swipe right on this bubble → reply (same as the long-press Reply item).
-    /// Nil on system / channel / non-message rows.
-    var onReply: (() -> Void)? = nil
-    /// ChatView sets this while a reply swipe is locked so swipe-right-to-back does not fire.
-    var replySwipeActive: Binding<Bool> = .constant(false)
     /// Shared mention table from ChatView (built once per directory sync).
     let mentions: MentionTable
 
+    /// Which reaction chip is expanded to show who used that emoji under the bubble.
+    @State private var selectedReactionEmoji: String? = nil
+
     /// Trailing column width for swipe-revealed times (fits "12:59 PM").
     static let timeRevealWidth: CGFloat = 56
-    /// How far a right swipe pulls the bubble before reply arms (Telegram-style).
-    static let replySwipeWidth: CGFloat = 56
-
-    @State private var replyDrag: CGFloat = 0
-    @State private var replyLocked = false
 
     /// Skip re-drawing when the parent re-evaluates for an unrelated reason
-    /// (composer keystrokes, presence ticks). Closures / the swipe binding are
-    /// not compared — they stay valid for the open chat.
+    /// (composer keystrokes, presence ticks). Closures are not compared — they
+    /// stay valid for the open chat.
     static func == (lhs: RowView, rhs: RowView) -> Bool {
         let same = lhs.row == rhs.row
             && lhs.chatId == rhs.chatId
@@ -987,6 +988,10 @@ struct RowView: View, Equatable {
             bubble
             if !row.reactions.isEmpty {
                 reactionChips
+                if let emoji = selectedReactionEmoji,
+                   let reaction = row.reactions.first(where: { $0.emoji == emoji }) {
+                    reactionSenders(reaction)
+                }
             }
         }
         // Quote tap landed here: a soft accent wash that fades out (Mac parity).
@@ -996,8 +1001,8 @@ struct RowView: View, Equatable {
                 .padding(-4)
         )
         .animation(.easeInOut(duration: 0.35), value: highlighted)
-        // iMessage: drag left → times; Telegram: drag right → reply. Mutually exclusive.
-        .offset(x: replyDrag - timeReveal)
+        // iMessage: drag left → times. Reply is long-press only (swipe fought vertical scroll).
+        .offset(x: -timeReveal)
         .overlay(alignment: .trailing) {
             if let time = swipeTimeLabel, timeReveal > 0.5 {
                 Text(time)
@@ -1010,67 +1015,16 @@ struct RowView: View, Equatable {
                     .accessibilityHidden(timeReveal < 12)
             }
         }
-        .overlay(alignment: .leading) {
-            if onReply != nil, replyDrag > 0.5 {
-                Image(systemName: "arrowshape.turn.up.left")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(theme.accent)
-                    .frame(width: Self.replySwipeWidth, alignment: .leading)
-                    .offset(x: replyDrag - Self.replySwipeWidth)
-                    .opacity(Double(min(1, replyDrag / (Self.replySwipeWidth * 0.55))))
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(replyDrag < 12)
-            }
-        }
-        .simultaneousGesture(replySwipeGesture)
-    }
-
-    /// Drag right on a message to reply. Locks only after a clear horizontal-right
-    /// pan so vertical scroll and swipe-left time reveal stay free.
-    private var replySwipeGesture: some Gesture {
-        DragGesture(minimumDistance: 12, coordinateSpace: .local)
-            .onChanged { value in
-                guard onReply != nil else { return }
-                let dx = value.translation.width
-                let dy = value.translation.height
-                if !replyLocked {
-                    guard abs(dx) + abs(dy) >= 12 else { return }
-                    // Vertical scroll or swipe-left time peek: do not steal.
-                    guard dx > 0, abs(dx) > abs(dy) * 1.15 else { return }
-                    replyLocked = true
-                    replySwipeActive.wrappedValue = true
-                }
-                let raw = max(0, dx)
-                let w = Self.replySwipeWidth
-                let reveal = raw <= w ? raw : w + min(24, (raw - w) * 0.2)
-                var t = Transaction()
-                t.disablesAnimations = true
-                withTransaction(t) { replyDrag = reveal }
-            }
-            .onEnded { _ in
-                let triggered = replyLocked && replyDrag >= Self.replySwipeWidth * 0.7
-                replyLocked = false
-                withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
-                    replyDrag = 0
-                }
-                if triggered {
-                    Haptics.pick()
-                    onReply?()
-                }
-                // Keep the back-swipe suppress flag until after ChatView's simultaneous
-                // swipe-right-to-Home onEnded has run (same drag).
-                DispatchQueue.main.async {
-                    replySwipeActive.wrappedValue = false
-                }
-            }
     }
 
     @ViewBuilder
     private var bubble: some View {
         switch row.kind {
         case .user(let text, let pending, let quote):
-            HStack {
-                Spacer(minLength: 0)
+            // My bubble: its delivery state is its opacity (pending < sent < seen), a
+            // failed one is full with a red mark on its outer edge; no caption
+            // (Jacob, 2026-10-24, feedback sent-state-opacity-2026-10-24).
+            DeliveryFade(model: model, chatId: chatId, messageId: row.messageId, pending: pending) {
                 VStack(alignment: .leading, spacing: 6) {
                     if let quote {
                         quoteHeader(quote, color: theme.userText)
@@ -1088,7 +1042,6 @@ struct RowView: View, Equatable {
                 .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleUser))
                 .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: true) }
                 .frame(maxWidth: maxBubble, alignment: .trailing)
-                .opacity(pending ? 0.6 : 1)
             }
         case .other(let text, let handle, let avatar, let named, let quote):
             let openPerson = { model.openPersonProfile(handle: handle, avatarUrl: avatar, chatId: chatId) }
@@ -1212,13 +1165,13 @@ struct RowView: View, Equatable {
             .foregroundStyle(theme.muted)
             .frame(maxWidth: .infinity)
             .multilineTextAlignment(.center)
-        case .question(let questionId, let text, let options, let multi, let picked, let open, let lane):
+        case .question(let questionId, let text, let options, let multi, let picked, let open, let lane, let shellCard):
             // The card is a transcript row like a bubble: the same left edge (after the avatar
             // lane in a people chat) and the same cap width as an incoming bubble.
             HStack(spacing: 0) {
                 if lane { Color.clear.frame(width: Theme.memberLane(composerInset: composerInset), height: 1) }
                 QuestionCard(rowId: row.id, chatId: chatId, questionId: questionId, title: text, options: options,
-                             multi: multi, picked: picked, open: open)
+                             multi: multi, picked: picked, open: open, shellCard: shellCard)
                     .frame(maxWidth: lane ? maxBubble - Theme.memberLane(composerInset: composerInset) : maxBubble, alignment: .leading)
                 Spacer(minLength: 0)
             }
@@ -1280,15 +1233,17 @@ struct RowView: View, Equatable {
         }
     }
 
-    /// Compact chips under the bubble (iMessage-style). Tap toggles your own reaction.
+    /// Compact chips under the bubble (iMessage-style). Tap shows who used that
+    /// emoji below the message; add/remove stays on the long-press capsule.
     private var reactionChips: some View {
         let mine = model.myUserId
         return HStack(spacing: 4) {
             if row.role == .user { Spacer(minLength: 0) }
             ForEach(row.reactions, id: \.emoji) { reaction in
                 let mineOn = mine.map { reaction.senders.contains($0) } ?? false
+                let selected = selectedReactionEmoji == reaction.emoji
                 Button {
-                    model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: reaction.emoji)
+                    selectedReactionEmoji = selected ? nil : reaction.emoji
                 } label: {
                     HStack(spacing: 3) {
                         Text(reaction.emoji).font(theme.font(14))
@@ -1302,26 +1257,71 @@ struct RowView: View, Equatable {
                     .padding(.vertical, 4)
                     .background(
                         Capsule(style: .continuous)
-                            .fill(mineOn ? theme.accent.opacity(0.22) : theme.card)
+                            .fill((mineOn || selected) ? theme.accent.opacity(0.22) : theme.card)
                     )
                     .overlay(
                         Capsule(style: .continuous)
-                            .strokeBorder(mineOn ? theme.accent.opacity(0.55) : theme.separator, lineWidth: 1)
+                            .strokeBorder(
+                                (mineOn || selected) ? theme.accent.opacity(0.55) : theme.separator,
+                                lineWidth: 1
+                            )
                     )
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("\(reaction.emoji) reaction, \(reaction.senders.count)")
+                .accessibilityHint("Shows who used this emoji")
             }
             if row.role != .user { Spacer(minLength: 0) }
         }
         .padding(.leading, reactionLeading)
     }
 
+    /// Names of everyone who used `reaction`'s emoji, under the chips.
+    private func reactionSenders(_ reaction: MessageReaction) -> some View {
+        let names = reaction.senders.map(reactionSenderLabel).joined(separator: ", ")
+        return HStack(spacing: 0) {
+            if row.role == .user { Spacer(minLength: 0) }
+            Text(names)
+                .font(theme.font(12))
+                .foregroundStyle(theme.muted)
+                .multilineTextAlignment(row.role == .user ? .trailing : .leading)
+                .fixedSize(horizontal: false, vertical: true)
+            if row.role != .user { Spacer(minLength: 0) }
+        }
+        .padding(.leading, reactionLeading)
+        .accessibilityLabel("\(reaction.emoji) from \(names)")
+    }
+
+    /// Display name for a reaction sender id (`user:…` / `agent:…`).
+    private func reactionSenderLabel(_ sender: String) -> String {
+        if sender == model.myUserId { return "You" }
+        if let member = model.peopleChat(chatId)?.members.first(where: { $0.member == sender }) {
+            return member.displayName
+        }
+        if sender.hasPrefix("agent:"),
+           let id = sender.split(separator: ":", maxSplits: 1).last.map(String.init) {
+            if let project = model.project(id) ?? model.foreignAgent(id) {
+                return project.name
+            }
+        }
+        if sender.hasPrefix("user:"),
+           let id = sender.split(separator: ":", maxSplits: 1).last.map(String.init) {
+            if let me = model.user, me.id == id { return "You" }
+            if let person = model.directory.first(where: { $0.id == id }) {
+                return person.displayName
+            }
+        }
+        if let bare = sender.split(separator: ":", maxSplits: 1).last.map(String.init), !bare.isEmpty {
+            return bare
+        }
+        return sender
+    }
+
     /// Match the avatar offset used by people-chat bubbles (26 pt + 8 pt gap).
     private var reactionLeading: CGFloat {
         switch row.kind {
         case .other, .member: return Theme.memberLane(composerInset: composerInset)
-        case .question(_, _, _, _, _, _, let lane): return lane ? Theme.memberLane(composerInset: composerInset) : 0
+        case .question(_, _, _, _, _, _, let lane, _): return lane ? Theme.memberLane(composerInset: composerInset) : 0
         default: return 0
         }
     }
@@ -1527,15 +1527,93 @@ struct BlockView: View {
                 .padding(10)
             }
             .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.bg.opacity(0.6)))
-        case .code(_, let code):
+        case .code(let lang, let code):
+            CodeCard(lang: lang, code: code)
+        }
+    }
+}
+
+/// A fenced ``` block: the language and a Copy pill in the header (the Mac's
+/// code card), the mono body under it. Copy puts the block on the pasteboard,
+/// tints while pressed and reads "Copied" for 1.5 s (Jacob 2026-10-24: the
+/// Mac pill showed no click effect; the iPhone card had no Copy at all).
+struct CodeCard: View {
+    @Environment(\.theme) private var theme
+    let lang: String
+    let code: String
+    /// Screenshot rig (`ARBOS_RIG_CODE_COPY=pressed|copied`): the simulator
+    /// cannot hold a touch through a capture, and "Copied" lasts 1.5 s.
+    private static let rig = ProcessInfo.processInfo.environment["ARBOS_RIG_CODE_COPY"]
+    @State private var copied = CodeCard.rig == "copied"
+
+    static let copiedFor: Duration = .seconds(1.5)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text(lang.isEmpty ? "code" : lang)
+                    .font(theme.font(Theme.tiny))
+                    .foregroundStyle(theme.muted)
+                Spacer(minLength: 8)
+                Button {
+                    UIPasteboard.general.string = code
+                    Haptics.pick()
+                    copied = true
+                    Task { @MainActor in
+                        try? await Task.sleep(for: Self.copiedFor)
+                        copied = false
+                    }
+                } label: {
+                    HStack(spacing: 3) {
+                        if copied {
+                            Image(systemName: "checkmark").font(theme.font(11, weight: .semibold))
+                        }
+                        Text(copied ? "Copied" : "Copy")
+                            .font(theme.font(Theme.tiny, weight: .medium))
+                    }
+                    .foregroundStyle(copied ? theme.online : theme.muted)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(copied ? theme.online.opacity(0.14) : .clear)
+                    )
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(CopyPillPress(tint: theme.accent, forced: CodeCard.rig == "pressed"))
+                .accessibilityLabel(copied ? "Copied" : "Copy code")
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .overlay(alignment: .bottom) { Rectangle().fill(theme.separator).frame(height: 0.5) }
             ScrollView(.horizontal, showsIndicators: false) {
                 Text(code)
                     .font(theme.font(14, design: .monospaced))
                     .foregroundStyle(theme.text)
                     .padding(10)
             }
-            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.bg.opacity(0.6)))
         }
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.bg.opacity(0.6)))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
+/// The Copy pill while the finger is down: the chips' pressed tint (Mac
+/// `mention::PILL_ALPHA_PRESSED`, accent at 30 %) and the label in the accent.
+struct CopyPillPress: ButtonStyle {
+    let tint: Color
+    var forced = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        let pressed = configuration.isPressed || forced
+        configuration.label
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(pressed ? tint.opacity(0.30) : .clear)
+            )
+            .foregroundStyle(pressed ? tint : Color.primary)
+            .scaleEffect(pressed ? 0.96 : 1.0)
+            .animation(.easeOut(duration: 0.12), value: pressed)
     }
 }
 
@@ -1547,6 +1625,100 @@ private extension View {
             Rectangle().fill(color.opacity(0.7)).frame(width: 2)
         }
         .clipShape(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous))
+    }
+}
+
+/// Where one of my own bubbles is on its way. No caption says it (Jacob,
+/// 2026-10-24: "remove these 'sent' items, just use coloring"): the bubble's
+/// opacity does — the same values as the Mac (`transcript.rs` `Delivery`,
+/// docs/mac-design-rules.md § Own-bubble delivery).
+enum Delivery: Equatable {
+    /// Not yet acknowledged by the relay.
+    case pending
+    /// The relay refused it: full opacity plus a red mark.
+    case failed
+    /// Acknowledged, nobody has opened past it yet.
+    case sent
+    /// A peer's read watermark covers it, or an agent answered after it.
+    case seen
+
+    /// Whole-bubble alpha. 0.72 keeps white text at 4.9 : 1 (dark) / 7.7 : 1 (light) on
+    /// its fill while the bubble reads clearly lighter than a seen one; pending sits lower.
+    static let sentAlpha: CGFloat = 0.72
+    static let pendingAlpha: CGFloat = 0.5
+
+    var opacity: CGFloat {
+        switch self {
+        case .pending: return Delivery.pendingAlpha
+        case .sent: return Delivery.sentAlpha
+        case .failed, .seen: return 1
+        }
+    }
+
+    /// `receipts`: peer handle → newest message id that peer has opened past (presence `seen`).
+    /// Seen when any watermark is at or after `message`, or an agent / project answered after it.
+    static func of(_ message: Message, in messages: [Message], receipts: [String: Id]) -> Delivery {
+        if message.pending { return .pending }
+        if message.status == .error { return .failed }
+        guard let ix = messages.lastIndex(where: { $0.id == message.id }) else { return .sent }
+        for seenId in receipts.values {
+            if seenId == message.id { return .seen }
+            if let six = messages.lastIndex(where: { $0.id == seenId }), six >= ix { return .seen }
+        }
+        if messages[(ix + 1)...].contains(where: { $0.role == .assistant || $0.role == .project }) { return .seen }
+        return .sent
+    }
+}
+
+/// Peers' read watermarks per people chat (presence `seen`, the Mac's `message_receipts`).
+/// Observed only by [`DeliveryFade`] on my own bubbles, like [`SenderAccents`], so a presence
+/// tick never invalidates every row.
+final class ReadReceipts: ObservableObject {
+    static let shared = ReadReceipts()
+
+    /// chat id → peer handle → newest message id that peer has opened past.
+    @Published private(set) var seen: [Id: [String: Id]] = [:]
+
+    func note(_ header: [String: Any], chatId: Id) {
+        guard let handle = header["handle"] as? String, !handle.isEmpty,
+              let id = header["seen"] as? String, !id.isEmpty else { return }
+        if seen[chatId]?[handle] == id { return }
+        seen[chatId, default: [:]][handle] = id
+    }
+
+    func clear() { seen = [:] }
+}
+
+/// My bubble at its delivery opacity, with the red mark beside a failed one.
+private struct DeliveryFade<Content: View>: View {
+    @ObservedObject private var receipts = ReadReceipts.shared
+    let model: AppModel
+    let chatId: Id
+    let messageId: Id
+    let pending: Bool
+    @ViewBuilder let content: () -> Content
+
+    private var delivery: Delivery {
+        if pending { return .pending }
+        let list = model.messages[chatId] ?? []
+        guard let message = list.last(where: { $0.id == messageId }) else { return .seen }
+        return Delivery.of(message, in: list, receipts: receipts.seen[chatId] ?? [:])
+    }
+
+    var body: some View {
+        let state = delivery
+        HStack(spacing: 8) {
+            Spacer(minLength: 0)
+            if state == .failed {
+                Image(systemName: "exclamationmark.circle.fill")
+                    .font(.system(size: 16))
+                    .foregroundStyle(.red)
+                    .accessibilityLabel("Not sent")
+            }
+            content()
+                .opacity(state.opacity)
+                .accessibilityIdentifier("own-bubble-\(state)")
+        }
     }
 }
 

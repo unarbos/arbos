@@ -31,13 +31,17 @@ Code: `sidebar.rs` module docs and `strip_controls()` (pinned by
 `strip_tests::the_strip_holds_exactly_search_plus_collapse`); the right pane's
 shared layout is `profiles/pane.rs` (`layout()` + every kind's `TABS`).
 
-## Chat-list top strip (approved mock 2026-10-24, [feedback sidebar-strip-filter-2026-10-24]; sized to Grok Bot [feedback search-palette-2026-10-24])
+## Chat-list top strip (approved mock 2026-10-24, [feedback sidebar-strip-filter-2026-10-24]; sized to Grok Bot [feedback search-palette-2026-10-24]; placed like Grok Bot [feedback topbar-grok-parity-2026-10-24])
 
-Points at 1×; the Mac draws at 2 px/pt.
+Points at 1×; the Mac draws at 2 px/pt. Vertical numbers are from the
+window's top edge.
 
 | Item | Value |
 |---|---|
-| Strip height | 44 (`HEADER_HEIGHT`), controls centred on the traffic lights' line (20.75) |
+| Strip height | **60** (`HEADER_HEIGHT` = 2 × `CONTROL_LINE`); the chat header and the right pane's header are the same band |
+| Traffic lights | macOS's own, at `TRAFFIC_LIGHT_POSITION` 15 / 15: 14 pt discs centred **22** from the top (position + 7, measured), 23 apart — Grok's spot (was 14 / 21) |
+| Discs' line | centred **30** (`CONTROL_LINE`): disc top 12, bottom 48 — Grok's; 8 pt under the lights' line (they are not one line in Grok either; Jacob's "too high" was the discs centred at 21 in a 44 band) |
+| Under the strip | the filter capsules start at **64** (`FILTER_TOP` 4 after the 60 strip) — where Grok's first chat card starts, 16 under the discs; the capsule row ends at 104 (`FILTER_BOTTOM` 8) |
 | Buttons, left to right | search · + · collapse — three round discs, right-aligned |
 | Disc | **36** (`STRIP_BUTTON` = `theme::CONTROL`), fill `surface_2`, glyph in `text` |
 | Glyphs | `CONTROL_GLYPH` 19 for search and + (visible marks 14.3 / 12.7 at a 1.6 stroke); `CONTROL_GLYPH_WIDE` 17 for the collapse rect (visible box 14.2) |
@@ -52,14 +56,72 @@ The sidebar's three discs, the folded-sidebar toggle in the chat header **and
 the chat header's pill** (avatar + name, every chat kind) are one family at
 Grok Bot's size: all `theme::CONTROL` = 36 tall (`header::metrics::PILL_HEIGHT`
 = `CONTROL`, picture `AVATAR_HEADER` = `CONTROL − 8` = 28, pill and toggle
-centred on the same line, `PILL_TOP` = 3). Pinned by
-`sidebar::strip_tests::the_three_discs_are_groks_size` and
+centred on the same line, `PILL_TOP` = 12 = Grok's disc top). Pinned by
+`sidebar::strip_tests::the_three_discs_are_groks_size`,
+`sidebar::strip_tests::the_strip_is_groks_height_and_the_discs_sit_on_groks_line`,
+`sidebar::strip_tests::the_discs_and_the_filter_land_on_groks_pixels` and
 `header::tests::every_kind_has_the_same_bar_height_and_pill_position`.
 
 Measured on `media/feedback/search-palette/ref-grok-round-search-plus.png`
-(project store, 2 px/pt): disc 72 px, glyph stroke 3 px, magnifier box 28 px,
-plus box 26 px, 16 px between discs, disc fill `#1F1F1F` on `#0E0E0E`, glyph
-`#E0E0E0`. The before shot (v0.6.206) had 64 px discs 20 px apart.
+(project store, 2 px/pt, window top at image row 2): disc 72 px, glyph stroke
+3 px, magnifier box 28 px, plus box 26 px, 16 px between discs, disc fill
+`#1F1F1F` on `#0E0E0E`, glyph `#E0E0E0`; discs at rows 24–96 px (12–48 pt),
+lights at rows 32–59 px (centre 22 pt, red at x 30–57 px → left edge 15),
+first chat card at row 130 px (64 pt). The before shots: v0.6.206 had 64 px
+discs 20 px apart; v0.6.212–0.6.214 had the right discs centred at 21 pt
+(top 3) in a 44 pt band with the filter capsules at 50 — 9 pt too high
+against Grok, Jacob's "the top bar on mac is now too high".
+
+## Sidebar footer (Jacob 2026-10-24, [feedback footer-avatar-grok-size-2026-10-24])
+
+**The footer is the top strip mirrored at the window's bottom edge: a 60 pt
+band whose 36 pt discs are centred 30 from the bottom.** Jacob: "Make the
+profile picture at the bottom here the same size as it is on grok."
+
+Measured on Jacob's Oct-2026 Grok Bot Mac refs
+(`media/group-chat-redesign/refs/1-agent-chat-topbutton-sidebar.png` and
+`2-agent-chat-info-pane.png` in the project store; 2520 × 1670 px at 2 px/pt,
+lights 28 px / discs 72 px as in the strip measurement, window bottom at the
+image's last row, sidebar divider at x 553 px → 276.5 pt wide). Points from
+the sidebar's left edge and the window's bottom edge.
+
+| Item | Grok Bot | Arbos (`sidebar.rs` `FOOTER_*`) |
+|---|---|---|
+| Band | avatar, "Connect apps" pill and update disc all on rows 1574–1645 px → 36 tall, 12 above the bottom, centre 30 | `FOOTER_HEIGHT` = `HEADER_HEIGHT` 60; everything centred → centre `CONTROL_LINE` 30 |
+| My avatar | 72 px disc at x 26–97 → **36**, left edge **13**, bottom **12** | `FOOTER_AVATAR` = `CONTROL` 36 at `FOOTER_INSET` 13, `FOOTER_BOTTOM` 12 (was 28 at x 18, 16 above the bottom) |
+| Machine dot | — (Grok has none) | scales with the avatar: 9 pt dot in a 13 pt ring of the sidebar colour, 2 pt past the bottom-right edge (`FOOTER_DOT` / `FOOTER_DOT_RING` / `FOOTER_DOT_OVERHANG`; was 7 / 11 / 2) |
+| Hover card | — | 44 tall, inset 8 like the rows, pad 5 so the avatar lands at 13; name `TEXT_SMALL` + 1, 10 after the avatar |
+| "Connect apps" pill | 36 tall, x 114–432 px, 8 after the avatar, 8 before the update disc, fill `#1F1F1F`, 1 px `#2C2C2C` rim, text `#B8B8B8` | not built (no connectors pill in Arbos's footer; the name sits there) |
+| Update disc | 72 px solid circle at x 449–520 px (the same x as the strip's "+" disc), same rows → **36**, right inset 16.5 in a 276.5 sidebar, fill **`#326CCB`**, glyph `#F5F5F5` cloud-with-arrow boxed 26 × 28 px → **13 × 14**, ~2.5 px stroke | `FOOTER_DISC` = `CONTROL` 36 at `FOOTER_DISC_INSET` = `STRIP_INSET` 12 (under our strip's last disc, as Grok's sits under its "+"), `STRIP_GAP` 8 after the hover card; `theme.update_disc` / `on_update_disc`; icon `cloud-download` at `FOOTER_DISC_GLYPH` 20 (traced path, 15.6 × 16.2 on the 24 grid at a 1.5 stroke) |
+
+Pinned by `sidebar::footer_tests::the_footer_avatar_is_groks_size_inset_and_line`
+(constants vs the table) and `the_footer_avatar_lands_on_groks_pixels` (gpui
+layout of `footer_frame` + `footer_row_frame`: avatar left 13, bottom 12,
+centre 30, dot overhang 2). `row_bounds_tests` builds the same frame under the
+list, so the list still ends above it.
+
+### Update button (Jacob 2026-10-24, [feedback footer-update-button-grok-2026-10-24])
+
+**The only update control in the app's chrome is Grok Bot's disc at the
+footer's right end** — "Give us the same update button as grok also." It
+replaced the full-width "Update" pill under the chat list (D42 / #1458's
+rail button). Settings → Updates (version, check, automatic toggle, install)
+stays as the detail page.
+
+| Item | Rule |
+|---|---|
+| Drawn when | `UpdateState::disc_action() != Hidden`: automatic updates **off** (the default) → the moment the feed has a newer build (one click downloads, verifies, installs, relaunches; the disc pulses at `DISC_BUSY_ALPHA_MIN`…1 while it works); automatic updates **on** → only once the build is installed and waiting for its safe relaunch (one click restarts now); after a failed install (click = retry); from a translocated / read-only copy (click = move to Applications) |
+| Never drawn | up to date, checking, or a background download / install with automatic updates on |
+| Click | `AppState::install_update` → `click_action()` — the same path the automatic install and Settings → Install use |
+| Hover / pressed | the fill lifted `DISC_HOVER_LIFT` 0.06 / `DISC_PRESSED_LIFT` 0.12 in lightness (brighter under the hand, brighter still while down — the chip rule); busy = inert |
+| No label, no countdown text | the notice line carries the words ("… press the blue update button at the bottom of the chat list …") |
+| Rig | `ARBOS_UPDATE_STATE=available\|downloading\|installed\|failed` starts the fixture in that phase for a fake 0.6.999 build (the worker stays off) |
+
+Pinned by `update::disc_tests` (hidden until ready; click → install /
+relaunch; the click action is never gated by the automatic toggle) and
+`sidebar::footer_tests::the_update_disc_is_groks_size_colour_and_placement`
++ `the_update_disc_lands_on_groks_pixels` (36 at the strip's inset, on the
+footer's line, 8 after the card, fills `#326CCB` / `#F5F5F5`).
 
 ## Command palette ([feedback search-palette-2026-10-24], Grok Bot's)
 
@@ -78,16 +140,27 @@ Esc, a click outside, or opening a row closes it. Send Feedback moved from
 | Shortcut badge | ⌘1–⌘9 on the first nine rows: 27 × 19, radius 6, 8 from the row's right edge |
 | Keys | ↑↓ move the highlight (`ComposerInput::on_arrow`), ⏎ opens, ⌘1–9 open that row, Esc closes |
 
-Results (`crate::palette`, matching through #1477's `search` module — display
-name, @handle, title, member, message; case and diacritics folded): **People &
-agents** (DM or agent by name) → **Chats** (groups; member, chat-title and
-message hits with the reason as subtitle) → **Servers & channels** (a server
-and each matching channel as its own row) → **Files, media & links** (every
-attachment and `http(s)` link in loaded chats, "Kind · size · who in where").
-Newest first inside a section, name hits before indirect ones, 8 per section.
-Empty query: **Recent** — chats and servers by activity, no files — with the
-⌘ badges. Rig hooks: `ARBOS_SEARCH=<text>`, `ARBOS_PALETTE=1`,
-`ARBOS_PALETTE_SELECT=<n>`.
+Results are **app-wide whatever chat is open** ([feedback
+search-palette-app-wide-2026-10-24], Jacob): `crate::palette`, matching through
+#1477's `search` module (display name, @handle, title, member, chat title; case
+and diacritics folded) plus the local **`crate::search_index`** — every chat doc
+on this Mac (agent chats, DMs, groups, server channels) indexed as it arrives
+and re-indexed on every snapshot, upsert and channel page: message text,
+attachments (name + title) and `http(s)` links, folded once and scanned in
+memory on each keystroke, never a relay round trip.
+
+**People & agents** (DMs and agents by name; people met in a group, a shared
+project or the directory who have no DM yet — opening one starts the DM) →
+**Chats** (groups; member and chat-title hits with the reason as subtitle) →
+**Servers & channels** (a server and each matching channel as its own row) →
+**Messages** (message text anywhere; row = the chat's name over "who · …snippet…";
+opening it jumps to the message in its chat or channel) → **Files, media &
+links** ("Kind · size · who in where"). Inside a section: a name that starts
+with the query, then one that contains it, then indirect hits; newest first;
+8 per section. Empty query: **Recent** — chats and servers by activity, no
+files or messages — with the ⌘ badges. Rig hooks: `ARBOS_SEARCH=<text>`,
+`ARBOS_PALETTE=1`, `ARBOS_PALETTE_SELECT=<n>`, `ARBOS_PALETTE_OPEN=1` (open
+the highlighted row once the rows are there).
 
 ## Chat-list filter (the iPhone home's `PaneTabs`)
 
@@ -113,8 +186,9 @@ Server rows draw their picture as a rounded square (corner 11/36 of the size,
 **Chat header: one centred pill (avatar + name) for every chat kind — #1130/#1336;
 tester preference does not override.** The pill sits on the chat column's
 centre line at the button family's size ([feedback search-palette-2026-10-24],
-Jacob 13:52): **36 tall** (`PILL_HEIGHT` = `CONTROL`), its top 3 pt under the
-window edge so it shares the sidebar toggle's line, picture **28**
+Jacob 13:52): **36 tall** (`PILL_HEIGHT` = `CONTROL`), its top **12** pt under
+the window edge so it shares the sidebar discs' line (`CONTROL_LINE` 30, in
+the 60 pt band — [feedback topbar-grok-parity-2026-10-24]), picture **28**
 (`AVATAR_HEADER` = `CONTROL − 8`), name 13 pt semibold (`TEXT_SMALL`); the only other things
 in the bar are the sidebar expand disc (folded sidebar) and the connection
 capsule under the pill. #1493 moved it top-left on a tester's "personal
@@ -138,10 +212,148 @@ after the text) and v0.6.203 (#1496, a tester's request for an always-visible
 bottom-right footer time). The sent/seen label on my own bubbles is a separate
 element and may stay in the footer.
 
-Code: `transcript.rs` `hover_time()` (returns nothing at opacity 0) and
-`bubble_footer()` (receipt only), pinned by
+Code: `transcript.rs` `hover_time()` (returns nothing at opacity 0), pinned by
 `layout_tests::the_time_is_hidden_at_rest_and_beside_the_bubble_on_hover`;
 iPhone `Transcript.swift` `RowView` + `SenderNameRowTests`.
+
+## Agent bubble width (Jacob 2026-10-24, [feedback bubble-width-2026-10-24])
+
+**An agent bubble is at most 560 pt wide, and never closer than 84 pt to the
+column's right edge.** Measured on Jacob's Grok Bot shots of 2026-10-24
+(`media/feedback/grok-parity-test/grok-chat-1.png`, `grok-chat-2-research.png`,
+3456 × 2172 px = 2 px/pt, a 1728 pt window with the right pane open): Grok's
+chat column is 1128 pt, its composer 960 pt, and every wrapped agent bubble
+(the three-line answer, the table, the research bullets) ends at **1120 px =
+560 pt** — 58 % of the composer, 50 % of the column; the list bubble is
+content-sized at 531. Arbos in the same window: column 1041, composer 876
+(`COLUMN_MAX_WIDTH`), bubble 792 = column − 84 (90 %). Grok's older narrow-pane
+refs (57: 612 in a 696 pill; 58: 310 in 392) show the fixed 84 pt gap governing
+below the ceiling, so the rule is the smaller of the two:
+`assistant_cap(slot) = min(slot − 84, 560)`; the crossover is a 644 pt slot.
+At our 876 pt column the bubble is 560 = 64 % of the column (Grok's composer is
+wider than ours; matching the absolute width is what reads as "the same
+bubble" side by side). Question / approval cards share the slot and the cap
+(#1374 / #1440); my own bubbles keep their 72 % rule.
+
+Code: `transcript.rs` `ASSISTANT_MAX_WIDTH`, `assistant_cap()`, the inner
+`chat-bubble-cap` frame of `assistant_slot()`; `onboarding::bubble_target`
+predicts with the same function. Pinned by
+`layout_tests::the_agent_bubble_cap_is_the_column_minus_the_grok_gap_at_most_grok_width`
+and `cards_share_the_bubbles_left_edge_and_cap`.
+
+## Markdown inside bubbles (Jacob 2026-10-24, [feedback bubble-markdown-2026-10-24])
+
+**Lists and headings read like Grok Bot's: bold headings, real bullet discs,
+Grok's line, item and block rhythm.** Measured on Jacob's `grok-chat-1.png`
+(2 px/pt) against Arbos v0.6.221 (`arbos-chat-right-pane-1.png`):
+
+| | Grok Bot | Arbos before | Rule |
+|---|---|---|---|
+| Text line (wrapped paragraph, agent and user bubbles) | 44 px = **22 pt** | 20 pt | `CHAT_LINE_HEIGHT` 22 |
+| List item pitch | 52 px = **26 pt** | 23 | `LIST_ITEM_GAP` 4 over the 22 line |
+| Block pitch (paragraph → heading → list → paragraph) | 64 px = **32 pt** | 24–26 | `BLOCK_GAP_HALF` 5 above and below every block row (10 between blocks) |
+| Bullet | **4.5 pt disc**, muted, centre 8.5 pt from the block's left; item text at **20 pt** | the font's "•" (a 3 pt dot 2 pt in), text at 24 | `BULLET_DOT` 4.5, `BULLET_CENTRE` 8.5, `LIST_INDENT` 20 (26 for two-digit numbers) |
+| Heading / `**bold**` | bold (700); "Surf gear" renders 3 % wider than the same semibold string | semibold (600) | `STRONG_WEIGHT` = `FontWeight::BOLD` for `#` headings and strong spans |
+
+Jacob's "headings" in the surf list are `**bold**` paragraphs (same glyph
+height as the body), so the weight rule covers both. `#` heading sizes (20 /
+17 / 15) are unchanged. Copy text keeps its "• " markers.
+
+Code: `transcript.rs` `render_block` (lists, headings), `inline_runs`,
+`markdown_bubble` block padding; `theme.rs` `CHAT_LINE_HEIGHT`. Pinned by
+`markdown_tests` (rhythm constants, bold runs, a headless render of a bullet
+list: disc size / place, indent, 26 pt pitch, dot on the first line's centre).
+
+## Bubble hover rail (Jacob 2026-10-24, [feedback bubble-hover-rail-2026-10-24])
+
+**The ☺ ↩ ⋯ rail is vertically centred beside the bubble and shows while the
+pointer is anywhere on the bubble.** Measured on Jacob's Grok Bot shot
+(`grok-chat-2-research.png`, 2 px/pt): the three glyphs sit at the mid-height
+of a 440 pt table bubble, the first glyph's centre 18 pt past its right edge,
+glyph centres 26 pt apart — the rail's own geometry (`RAIL_BUTTON` 24 + `RAIL_GAP`
+2, 6 pt off the bubble) already matched; only the placement did not. Before
+this rule the rail hung off the *last markdown block* of a reply — at the
+bottom of a long bubble — and appeared only while that last block was hovered.
+
+An agent reply is one transcript row per markdown block, so "the bubble" means
+all of those rows: hover is tracked per message (`HoverFade` keyed by
+`{message_id}#bubble`), and the last block places the rail at the middle of
+every block row (`Transcript::bubble_rail_centre` → `rail_centre()` from the
+list's item bounds), clamped so a bubble taller than the pane keeps its rail on
+screen under the header fade band. One-row bubbles (mine, other people's,
+media) centre the rail on their own row as before.
+
+Code: `transcript.rs` `HoverFade::set(key, row, …)`, `rail_centre()`,
+`hover_rail_frame()`; pinned by `rail_tests`.
+
+## Mac bubble text selection (Jacob 2026-10-24, [feedback bubble-selection-2026-10-24])
+
+**A press on bubble text starts a selection, whichever way the pointer then
+moves — up, down, or into another message; dragging a message never turns it
+into a reply.** Grok's behaviour, as Jacob checked side by side:
+
+- Bottom-up works: the old axis lock handed a vertical pan with no range yet
+  to drag-scroll, so a drag that started at the end of a message and went up
+  selected nothing. Now the selection owns the pointer from the press
+  (`TextSelection::is_dragging`), and the transcript arms its click-drag
+  scroll only for presses that are not on text (bubble padding, empty rows).
+- Across messages: the selection is a pair of positions, each in one bubble
+  with that bubble's transcript order (`select::BubbleAt`, `Span`). The first
+  bubble is selected from the pressed index, every bubble between whole, the
+  last up to the pointer; ⌘C copies them in transcript order whichever way the
+  drag went, one blank line between messages (`transcript::copy_across`).
+  Shift-click extends into another bubble the same way. One-bubble gestures
+  (#1389: drag through paragraphs, double-click word, triple-click paragraph)
+  are unchanged.
+- No swipe-to-reply on the Mac: the Telegram / iPhone right-swipe
+  (`ReplySwipe`) is removed from the Mac transcript; Reply is the rail's ↩,
+  the message menu and the right-click menu. The iPhone keeps its own gesture
+  under its own rule (above).
+
+Rig: `ARBOS_RIG_SELECT=across` selects from the second word of the bubble
+before the newest agent bubble to that bubble's second-to-last word.
+
+Code: `select.rs` (`BubbleAt`, `Span`, `Model::begin_at` / `extend_in` /
+`propose_in`), `transcript.rs` (`message_order`, `bubble_texts`,
+`copy_across`, the root mouse-down guard). Pinned by `select::tests::
+a_drag_across_bubbles_spans_them_in_transcript_order`,
+`a_bottom_up_drag_selects_across_two_rendered_bubbles` (a simulated pointer
+drag straight up from one rendered bubble into the one above), and
+`transcript::cross_bubble_copy_tests`.
+
+## Own-bubble delivery (Jacob 2026-10-24, [feedback sent-state-opacity-2026-10-24])
+
+**No "sent" / "seen" caption on my bubbles — the bubble's opacity is the
+state.** Grok Bot's user bubble carries no delivery label (refs 03/web-01), and
+Jacob asked for "coloring" only: "remove these 'sent' items, just use coloring
+to make it clear, make the bubble less opaque."
+
+| State | Meaning | Whole-bubble alpha | Extra |
+|---|---|---|---|
+| Pending | not yet ACKed by the relay | **0.50** (`BUBBLE_ALPHA_PENDING`) | — |
+| Failed | the relay refused it | 1.00 | red ⓘ-style `exclamation` glyph (16 pt, `danger`) on the bubble's outer edge, always visible |
+| Sent | ACKed, nobody opened past it yet | **0.72** (`BUBBLE_ALPHA_SENT`) | — |
+| Seen | a peer's read watermark covers it, an agent answered after it, or read receipts are off | 1.00 | — |
+
+Why 0.72 and not a lighter fill: whole-bubble alpha dims the text with the fill,
+which is what makes the difference read in dark mode (fill L* 39 → 30, text
+L* 100 → 76). Measured contrast of the composited text on its composited fill:
+dark 4.9 : 1, light 7.7 : 1 (≥ 4.5 AA); pending 3.4 : 1 / 3.6 : 1 (transient).
+The fill alone at 0.72 would move dark only 8 L* and read as "slightly
+different grey". Same values on the iPhone (`Delivery.sentAlpha` /
+`pendingAlpha`); its own bubble colours are the Mac's (`#5C5C5C` / `#111111`,
+white text).
+
+The "seen" caption from #1496 went with the "sent" one (same component); full
+opacity carries it. With read receipts **off** every ACKed bubble is full at
+once — there is nothing to wait for, and a transcript that is lighter forever
+would read as broken.
+
+Code: `transcript.rs` `Delivery` + `delivery_state()` + `own_bubble()` +
+`failed_glyph()`, pinned by `delivery_tests`; iPhone `Transcript.swift`
+`Delivery` / `ReadReceipts` / `DeliveryFade` + `DeliveryStateTests`. The iPhone
+also sends the `seen` watermark in its presence header now (`SessionRoom
+.newestMessageId`), so a Mac bubble read on a phone goes full.
 
 ## iPhone bubble gestures (Jacob 2026-10-24, [feedback iphone-open-scroll-block-2026-10-24] #1645 + #1629)
 
@@ -163,22 +375,125 @@ does not re-create the window of bubbles (#1645; first-scrollable after open
 Code: `MessageActions.swift` `messageRowGestures`, `Transcript.swift` `RowView`,
 `AppModel.swift` `requestSnapshot` / `applySnapshot`.
 
-## Full screen (Jacob 2026-10-24, [feedback fullscreen-traffic-lights-2026-10-24])
+## Full screen (Jacob 2026-10-24, [feedback fullscreen-traffic-lights-2026-10-24] → [feedback topbar-grok-parity-2026-10-24])
 
-Native full screen looks like Chrome's: the window just grows to the screen.
+**The traffic lights are macOS's own standard window buttons, always. The
+app never draws, imitates or re-parents them** (Jacob, 18:3x UTC: "this
+should be real mac os feature not custom buttons"; private-API tricks such
+as Chrome's `NSThemeFrame` overrides count as custom).
 
 | Item | Rule |
 |---|---|
-| Traffic lights | Stay visible, top left, on the strip's line (centre 21 pt from the top, close at x 14 — the windowed position) |
-| Strip and filter | Exactly where they are in windowed mode: no band above, no layout jump |
-| Hover at the top edge | macOS still slides its own title bar in with the menu bar; that is the system's, we add nothing |
+| Windowed | The real buttons at `TRAFFIC_LIGHT_POSITION` (centre 22 from the top, Grok's spot) |
+| Full screen | Stock macOS: the window grows to the screen, the lights hide with the title bar and come back — real buttons, in macOS's own bar — when the pointer reaches the top edge |
+| Strip and filter | Exactly where they are in windowed mode: no band above, no layout jump (`top_strip(true) == top_strip(false)`, pinned by `sidebar::strip_tests::full_screen_adds_no_band_above_the_strip`) |
 
-macOS hides a full-screen window's real buttons and shows them only in that
-slide-in bar, so in full screen the shell paints its own three lights
-(`ui/traffic_lights.rs`, `LightsGeometry`) in the 72 pt the strip already
-keeps clear for them (`TRAFFIC_LIGHTS_INSET`), wired to close / leave full
-screen (minimise is disabled in full screen, as AppKit disables it). Pinned by
-`traffic_lights::tests` (`full_screen_adds_no_band_above_the_strip`).
+v0.6.213 painted three lights of its own in full screen (`ui/traffic_lights.rs`,
+#1637); they changed shape and glyphs against the real ones and were removed
+on Jacob's ask. Supported AppKit has no way to keep the real buttons on
+screen in full screen: an `NSToolbar` keeps the title bar on screen but the
+buttons in it at alpha 0, an `NSTitlebarAccessoryViewController` shows its
+own view there but not the buttons, and the AppKit-owned alpha / view tree is
+reset on every reveal (the #1637 probes, `media/feedback/fullscreen-traffic-lights/appkit-probes/`).
+
+## Right info pane chrome (Jacob 2026-10-24, [feedback info-pane-chrome-2026-10-24])
+
+**The right pane is the window, not a panel: the chat's surface on both sides
+of the join, no hairline between them, Grok Bot's two round discs (share ·
+close) at its top right, a plain hero picture, inset cards under section
+labels, and no "Delete agent" button.** Jacob's side-by-side of a fresh Grok
+Bot and a fresh Arbos agent (2026-10-24, `media/feedback/grok-parity-test/` in
+the project store; items 19–22, 26–27 of `docs/arbos-vs-grok-traits.md`).
+
+Measured on `grok-right-pane-details.png` and `grok-chat-1.png` (2 px/pt,
+window top at row 0; pane 639 px = 319.5 pt wide). Points.
+
+| Item | Grok Bot | Arbos (`profiles/mod.rs`, `profiles/kit.rs`, `theme.rs`) |
+|---|---|---|
+| Pane fill | `#121212` — the chat's own colour; sidebar `#0E0E0E` | `Theme::pane()` = `chat_wash()` (nothing on matte / dark glass, the white wash on light glass); `theme.pane` is gone |
+| Join | a half-point `#1F1F1F` line (+13) that reads as none | **no border** (`border_l_1` removed from the pane and the mid-slide blank) |
+| Cards | `#1F1F1F` on `#121212` (+13), inset **16 / 16**, radius **12** | `pane_card` `#232323` on `#141414` (+15), `kit::INSET` 16, `kit::CARD_RADIUS` 12 (was `PANEL_RADIUS` 14); light: `#F2F2F2` on `#FCFCFC` (white on white was no card) |
+| Rows | one-line **41**, two-line **51**, 13 pt title / 13 pt muted subtitle | `kit::ROW_MIN_H` 41 (was 48); a title + subtitle row lands on 51–52 by its own padding; row type unchanged (`TEXT_BODY` / `TEXT_SMALL`) |
+| Section label | "Coding" / "Routines": text **28** from the pane edge, 13.5 pt `#A5A5A5`; glyphs 24 under the pill, 26 under the card before, 10 over the card after | `kit::section_title`: `INSET + SECTION_TITLE_INDENT` 28, `TEXT_SMALL` muted on a 16 pt line, padding 10 / 8 over `CARD_GAP` 14; a leading label pulls the fade spacer in by `pane::FIRST_TITLE_PULL` 7 |
+| Share · close discs | **36** each, fill `#1F1F1F`, glyph `#E0E0E0`; **8** apart, **12** from the pane edge, centred on the strip discs' line (top 12 in the 60 band; `grok-chat-1.png` rows 28–99 for both sets) | `glass::control_disc` — the strip's disc (`CONTROL` 36, `surface_2`, `text`); `top_bar()` pads `PANE_DISC_INSET` 12, gaps `CONTROL_GAP` 8; close `xmark` at `PANE_CLOSE_GLYPH` 22 → 11 pt mark (Grok 11); share `share` at `PANE_SHARE_GLYPH` 21 → 14 pt (Grok 14). Before: a 30 pt `glass::circle` with a 6.5 pt × at top 17, inset 10 |
+| Share disc action | — | the invite sheet (agent: let a person in on this agent; group: Add members). Pages with nothing to share (person, channel, server, own profile) draw the × alone |
+| Top bar fill | none | none (was `card()`); the body still fades under the pinned hero + pill |
+| Hero picture | plain bot mark, 58 pt, 73.5 under the window top | `HERO_TOP` 14 under the 60 band (was 4); the agent's leaf **without its pastel disc** (`avatars::project_hero_bare`: the hue's pastel as ink on dark, its ink on light) and **no presence dot** — presence stays on the sidebar row; `HERO_AVATAR` 72 kept (Jacob's mock b) |
+| Delete agent | — | **gone from the pane** (footer and `Shell.agent_delete_armed` removed). Deleting an agent is the sidebar row's menu → Delete, at once (`sidebar::row_menu`, the Delete-is-immediate rule below) |
+
+Pinned by `profiles::chrome_tests` (`the_pane_is_the_chats_surface_in_both_appearances`,
+`the_constants_are_groks`, `the_share_and_close_discs_land_on_groks_pixels`,
+`cards_are_inset_and_labelled_at_groks_margins`) and `pane::tests::every_kind_lays_out_hero_then_pill_then_options`.
+
+### Agent pane: Details · Library · Computer (Jacob 2026-10-24, [feedback agent-pane-details-tab-2026-10-24])
+
+**The agent pane's tabs are Grok Bot's — Details · Library · Computer — and
+the first tab shows live content first.** Items 23–25 of Jacob's list:
+Grok shows the name over "Add a label"; its Details tab opens with the
+coding project (spinner while the bot works) and the routines with their
+switches; ours opened with Name / Handle / Description rows and fine print.
+This supersedes the 2026-10-22 tab names (Profile · Settings · Library) for
+the Mac agent pane; the structure every pane shares — hero, then the tab
+pill, then the options — is unchanged, and every option the old tabs held is
+still on the pane. The iPhone agent pane has the same three tabs and the same
+content model since [feedback iphone-agent-pane-tabs-2026-10-25] (#1694:
+`PaneKinds.agent`, `AgentProfileView`, `Model/AgentPane.swift` — the pure
+order / copy twins of this file's functions, pinned by
+`ProfilePaneStructureTests`); where the Mac geometry does not translate it
+keeps the iPhone's shared pill and 48 pt rows, uses the system spinner, and
+edits the label in place but the name through an alert.
+
+| Item | Grok Bot (measured, `grok-right-pane-details.png`) | Arbos (`profiles/agent.rs`) |
+|---|---|---|
+| Subtitle | "Add a label", 12 pt muted, under the name | the agent's **description is its label**: shown under the name (`HERO_SUBTITLE` 12, `text_muted`), `LABEL_PLACEHOLDER` "Add a label" in `text_faint` while empty (owner); a click edits it in place (the hero's `label_editor`, Done / Return commits). Someone else's agent: its label, else "Run by @owner". "working" is no longer a subtitle — the Coding row spins |
+| Tab pill | capsule **26** tall, label **13** pt, 9 pt beside it, 2 between capsules | `TAB_HEIGHT` 26 / `TEXT_SMALL` / `TAB_PAD_X` 9 / `TAB_GAP` 2 (shared `tab_bar`; was 30 / body / 14 / 4) |
+| Details, first | "Coding": the project with a 15 pt blue spinner, 41 pt row | **Coding** card: the agent's workspace — `cards::activity_spinner` (`CODING_SPINNER` 15, `accent`, eight spokes stepping every 100 ms) while a turn runs, the `code` glyph when idle; subtitle "Working · 42 s · 7 tool calls" / "Idle" / "Machine asleep" (`coding_status`); a click opens the Computer tab |
+| Details, second | "Routines": name over schedule, a 32 × 20 switch | **Routines** card (own agents): one `kit::row` per routine, subtitle "trigger · next in …" / "Paused" (`routine_status`), a `glass::switch` that flips `routine_set_enabled`; "No routines yet" when empty. Routines load when the pane opens (`RoutinesRefresh`) |
+| Details, then | — | **Settings** (Model · Reasoning · Voice, the hoverpick rows; Model alone on someone else's agent) → **Who may message X** (the grant rows + "Give a person access…") → **Profile**: one "Edit profile" row (pencil tile) that unfolds Name · Handle · Description (`Shell.agent_edit_open`); someone else's agent shows the three rows plain. No footnotes |
+| Library | Grok's second tab | unchanged (images · files · links) |
+| Computer | Grok's third tab (the bot's computer) | the agent's **box**: **Machine** card — Status (dot + "Awake · 5 h 12 m"), Where it runs, Machine spec, Image, Spend today (`GET /machine`); **Resources** — Disk / Memory "x free of y", Load, Up for; **Running now** — every workspace with a turn running (spinner, name, "42 s · 7 tool calls") or "Nothing running · N workspaces". The last two come from the box's own `/box/state` through **`GET /machine/debug`** (`ClientCommand::MachineDebugRefresh` → `SyncEvent::BoxReport` → `AppState.box_report`), fetched when the pane opens and when the tab is picked; an asleep box says "The machine did not answer · <reason>". Someone else's agent: Status + Machine class from its project |
+| Delete agent | — | not on the pane (see above) |
+
+Order pinned by `agent::tests` (`details_puts_live_content_first_and_the_edit_fields_last`,
+`computer_order_follows_the_report`, `coding_status_…`, `routine_status_…`,
+`box_report_reads_the_relay_and_the_box`) and `pane::tests::kinds_keep_their_own_tab_sets`.
+Rig: `ARBOS_OPEN_PROFILE=agent` (Details), `agent:library`, `agent:computer`;
+the fixture answers `MachineDebugRefresh` with an awake 4-core box and one
+workspace per agent (the streaming one mid-turn).
+
+## Pane animations (Jacob 2026-10-24, [feedback right-pane-slide-2026-10-24], [feedback sidebar-slide-2026-10-24])
+
+**The right info pane and the left chat sidebar slide; they never pop.**
+Jacob: "on the mac the side bar appears when you click the top button. I
+want it to slide animate out like it does on grok. Same for the left bar
+when you click the close side bar button." Grok Bot's desktop app could not
+be run on the rig (no install), so its right pane was measured frame by
+frame on xAI's own 30 fps screen recording (the "How I run multiple teams
+of Grok Bots" guide video, t = 51.8 s open / 55.1 s close; strips and CSV in
+the project store's `media/feedback/pane-slide/grok-reference/`): open
+≈ 200 ms (6 moving frames, soft start, long tail — ease-out cubic RMS 0.022,
+a 0.21 s / 0.9 spring 0.015), close ≈ 150–175 ms (4 frames, no slow start —
+ease-out quad RMS 0.008), the pane **translates** with its content. Its
+sidebar toggle is in no public video; it gets the same motion. Numbers,
+recorded here so they do not drift:
+
+| Item | Value |
+|---|---|
+| Duration | **200 ms open, 170 ms close** (`slide::OPEN_MS` / `CLOSE_MS`); a click mid-slide turns round from where the pane is, in the time the remaining distance deserves |
+| Curve | open **ease-out cubic** (`motion::ease_out_cubic`, the composer drop's curve), close **ease-out quad** (`slide::Motion::ease`): fast off the mark, soft landing, never symmetric ease-in-out |
+| Right pane | its left edge comes in from the window's right edge and goes back out the same way; the pane keeps its layout and moves with its edge (not a reveal, not a fade) |
+| Left sidebar | its right edge slides to the window's left edge and back; the strip's discs leave with it, and the header's expand disc appears at its resting spot (72 + 12) as soon as the sidebar no longer covers it — never two discs at once |
+| Chat column | a flex sibling, so its slot follows every frame: the header pill and the composer re-centre live. The **transcript keeps the width it had when the slide began** and is clipped/offset — centred when the rows are capped at both widths (`COLUMN_MAX_WIDTH`: then nothing moves at the end), else pinned to the edge away from the moving pane — and is laid out once more at the end. Never re-measure every bubble per frame. (Grok re-lays its list out every frame; its list is short rows, ours is a markdown transcript whose `list()` drops every item height on a width change — the one deliberate difference) |
+| Frame rate | one redraw per display refresh (`request_animation_frame`), 12 / 10 frames at 60 Hz |
+| Reduce Motion | macOS Accessibility → Display → Reduce motion (`cx.reduce_motion()`): no slide, both panes snap as before |
+| At rest | the layout is today's static layout — the clips exist only while a slide runs (`slide::layout_tests::at_rest_the_clipped_layout_is_the_static_layout`); strip, filter, folded toggle and header pill geometry unchanged |
+
+Code: `ui/slide.rs` (`PaneSlides::step` derives the motion from
+`AppState::profile` / `rail_collapsed` each frame; `sidebar_clip`,
+`pane_clip`, `transcript_clip`), wired in `Shell::render` and
+`Shell::chat_frame`; pinned by `slide::tests` (state machine, reduce-motion
+snap, mid-slide reversal, no slide on a page swap or a width drag) and
+`slide::layout_tests`.
 
 ## Delete is immediate — no confirm (Jacob 2026-10-24, [feedback remove-delete-confirms-2026-10-24])
 

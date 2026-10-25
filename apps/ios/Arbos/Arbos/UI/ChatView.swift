@@ -97,6 +97,7 @@ private struct ChatSessionHost: View {
             .onReceive(model.$models) { _ in tick &+= 1 }
             .onReceive(model.$notice) { _ in tick &+= 1 }
             .onReceive(model.$lastSeen) { _ in tick &+= 1 }
+            .onReceive(model.$jobs) { _ in tick &+= 1 }
     }
 }
 
@@ -207,10 +208,10 @@ private struct ChatSession: View {
     @State private var timeReveal: CGFloat = 0
     /// Once the pan is more horizontal-left than vertical, lock so scroll does not steal it.
     @State private var timeRevealLocked = false
-    /// True while a message's swipe-right-to-reply is locked — blocks swipe-right-to-Home.
-    @State private var replySwipeActive = false
     /// Long-press → Forward: the text to send and who wrote it (Forward sheet).
     @State private var pendingForward: PendingForward?
+    /// The tasks sheet (duplex §2.4): open while the user looks at the agent's jobs.
+    @State private var showTasks = false
     @State private var pendingThread: PendingThread?
 
     /// Rows after the in-chat search filter (profile "search").
@@ -340,8 +341,8 @@ private struct ChatSession: View {
         calls.isActive && !calls.isPresented && calls.call?.kind == .voice && calls.call?.chatId == chatId
     }
     private var headerExtra: CGFloat { (hasCallBar ? 52 : 0) + (hasInCallBar ? 56 : 0) + (showSearch ? 46 : 0) }
-    /// Member chips under the header: groups only. A 1:1 DM already names the peer in the pill.
-    private var showsMemberChips: Bool { people?.isGroup == true }
+    /// Member chips under the header — off on iPhone (feedback ABDgl8tFlqeUlwP4DihfYhk).
+    private var showsMemberChips: Bool { false }
 
     private func startCall(_ kind: CallKind, ring: [String]? = nil) {
         Task { await calls.start(chatId: chatId, projectId: isPeople ? nil : projectId, kind: kind, title: callTitle, ring: ring) }
@@ -781,9 +782,9 @@ private struct ChatSession: View {
         .toolbar(.hidden, for: .tabBar)
         .navigationBarBackButtonHidden(true)
         // Hiding the system back button also disables the edge-swipe pop; re-enable it
-        // except while the composer is focused (or a reply swipe is locked) so editing
-        // / selecting text in the bar cannot edge-swipe back to Home.
-        .background(InteractivePopGestureEnabler(enabled: !composerFocused && !replySwipeActive))
+        // except while the composer is focused so editing / selecting text in the bar
+        // cannot edge-swipe back to Home.
+        .background(InteractivePopGestureEnabler(enabled: !composerFocused))
         // Full-chat swipes: right → previous agent chat (or Home), left → next (or create), up → archive + previous.
         .simultaneousGesture(chatNavSwipe)
         .fullScreenCover(item: $rigViewer) { v in
@@ -830,6 +831,28 @@ private struct ChatSession: View {
         .sheet(item: $pendingThread) { pending in
             MessageThreadSheet(root: pending.root, replies: pending.replies)
                 .environment(\.theme, theme)
+        }
+        .sheet(isPresented: $showTasks) {
+            TasksSheet(jobs: model.openJobs(chatId),
+                       onSteer: { job in steerJob(job) },
+                       onStop: { job in model.stopJob(chatId: chatId, jobId: job.id) },
+                       onStopAll: { showTasks = false; stop() })
+                .environment(\.theme, theme)
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+                .presentationBackground(theme.bg)
+                .preferredColorScheme(theme.isDark ? .dark : .light)
+        }
+        .task(id: chatId) {
+            // Polls the open chat's jobs while one is live (`AppModel.pollJobsIfNeeded`);
+            // cancelled with the view. The sheet lists live work only: nothing open → it
+            // closes itself.
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(AppModel.jobsPollMs))
+                guard !Task.isCancelled else { break }
+                model.pollJobsIfNeeded(chatId: chatId)
+                if showTasks, model.openJobs(chatId).isEmpty { showTasks = false }
+            }
         }
         .task {
             guard DebugHooks.liveDemo, !model.demoStarted, DebugHooks.openChat == chatId || DebugHooks.openChat == nil, let text = DebugHooks.autoSend else { return }
@@ -946,10 +969,14 @@ private struct ChatSession: View {
                     case "agentsecrets": showAgentSecrets = true
                     case "voice": startCall(.voice)
                     case "model": showModelPicker = true
-                    case "profile": openHeaderProfile()
+                    // `agentvoice | agentlabel | agentedit`: the agent pane, which opens the Voice
+                    // picker / edits the label / unfolds Edit profile on appear.
+                    case "profile", "agentvoice", "agentlabel", "agentedit": openHeaderProfile()
                     // `avatarpicker[-generate|-upload]`: the agent pane, which opens the sheet on that tab.
                     case let s where s.hasPrefix("avatarpicker"): openHeaderProfile()
                     case "edit": showProfile = true
+                    // `tasks`: the tasks sheet over the presence row (needs `ARBOS_FIXTURE_JOBS`).
+                    case "tasks": if !model.openJobs(chatId).isEmpty { showTasks = true }
                     case "userprofile": if let c = counterpart { model.showProfile(.user(ProfilePerson(c))) }
                     // `addmembers`: the group pane opens its Add members sheet on appear.
                     case "groupprofile", "addmembers", "removemember": model.showProfile(.group(chatId: chatId, projectId: isPeople ? nil : projectId))
@@ -1010,6 +1037,14 @@ private struct ChatSession: View {
                             model.fixtureAppendAssistant(chatId: chatId, text: AppModel.longReview)
                             replyTo = model.messages[chatId]?.last { $0.role == .assistant }
                             composerFocused = true
+                        }
+                        #endif
+                    case "code-block":
+                        // Rig: a finished reply with a fenced ```rust block, for the code
+                        // card's Copy pill shots (fixture only).
+                        #if DEBUG
+                        if model.isFixture {
+                            model.fixtureAppendAssistant(chatId: chatId, text: AppModel.codeReply)
                         }
                         #endif
                     case "agent-message", "agent-message-received":
@@ -1282,6 +1317,15 @@ private struct ChatSession: View {
         withAnimation(.easeOut(duration: 0.3)) { scroller?.scrollTo("bottom", anchor: .bottom) }
     }
 
+    /// After a send: stick to the end now and again once the optimistic row has height.
+    private func scrollAfterSend() {
+        scroller?.scrollTo("bottom", anchor: .bottom)
+        DispatchQueue.main.async { scroller?.scrollTo("bottom", anchor: .bottom) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            withAnimation(.easeOut(duration: 0.2)) { scroller?.scrollTo("bottom", anchor: .bottom) }
+        }
+    }
+
     /// Grok's scroll-to-bottom control: a 36 pt field-coloured circle with a
     /// chevron, right-aligned with the composer, 18 pt above it.
     /// UIKit `UIControl` (not SwiftUI `Button`) so a tap still fires while the
@@ -1340,8 +1384,6 @@ private struct ChatSession: View {
         // Selecting or dragging in the focused composer is a horizontal pan;
         // do not treat it as swipe-right → Home.
         guard !composerFocused else { return }
-        // A message reply swipe owns this drag; do not leave the chat.
-        guard !replySwipeActive else { return }
         let dx = value.translation.width
         let absX = abs(dx), absY = abs(value.translation.height)
         let vx = value.velocity.width, vy = value.velocity.height
@@ -1459,10 +1501,8 @@ private struct ChatSession: View {
                         highlightedMessage: highlightedMessage,
                         rowsCount: rows.count,
                         messagesCount: messages.count,
-                        replySwipeActive: $replySwipeActive,
                         canReply: { isMessageRow($0) },
                         onQuoteTap: { revealQuoted($0) },
-                        onReply: { beginReply(to: $0) },
                         onMenu: { runMessageMenu($0, row: $1) },
                         actionsRowId: actionsRow?.id,
                         onLongPress: { row in
@@ -1788,7 +1828,7 @@ private struct ChatSession: View {
     }
 
     /// Reply to this row: composer preview + focus (people chats also address the agent).
-    /// Shared by the long-press Reply item and swipe-right-to-reply on the bubble.
+    /// Long-press → Reply on the bubble.
     private func beginReply(to row: Row) {
         guard let m = messageById[row.messageId] else { return }
         editing = nil
@@ -1965,13 +2005,33 @@ private struct ChatSession: View {
         TimelineView(.periodic(from: .now, by: 1)) { _ in
             let participants = presenceParticipants
             if !participants.isEmpty {
+                // The tasks chip rides on the row while the agent has background jobs
+                // open in this chat (duplex §2.4); a tap opens the sheet.
+                let jobs = model.openJobs(chatId)
+                let openTasks: (() -> Void)? = jobs.isEmpty ? nil : { showTasks = true }
                 PresenceRow(participants: participants,
                             detail: model.currentActivity(chatId),
-                            queued: false)
+                            queued: false,
+                            taskCount: jobs.count,
+                            onTasks: openTasks)
                     .padding(.horizontal, 16)
                     .padding(.bottom, 4)
             }
         }
+    }
+
+    /// Steer a job (contract: no command of its own): the composer becomes a reply to
+    /// the job's ask and the user types the correction; the agent binds a correction
+    /// that quotes the ask to that job.
+    private func steerJob(_ job: Job) {
+        guard let askId = job.askMessageId, let ask = messageById[askId] ?? messages.first(where: { $0.id == askId }) else {
+            model.notice = Notice(text: "That task's request is not in this chat any more.")
+            return
+        }
+        showTasks = false
+        editing = nil
+        replyTo = ask
+        composerFocused = true
     }
 
     // MARK: Composer
@@ -2532,6 +2592,8 @@ private struct ChatSession: View {
             clearDraft()
             replyTo = nil
             sentOnce = true
+            // After the optimistic row is in `messages` (channel path paints inline).
+            scrollAfterSend()
             return
         }
         if isPeople {
@@ -2546,6 +2608,8 @@ private struct ChatSession: View {
             mentionQuery = nil
             pinTalkTo(afterSending: address, chipMentions: chips)
             sentOnce = true
+            // After paintLocalUserMessage so scrollTo sees the new bubble.
+            scrollAfterSend()
             return
         }
         if needsAnswer && pending.isEmpty {
@@ -2557,6 +2621,8 @@ private struct ChatSession: View {
         clearDraft()
         replyTo = nil
         sentOnce = true
+        // After paintLocalUserMessage so scrollTo sees the new bubble.
+        scrollAfterSend()
     }
 
     private func stop() {
@@ -2870,10 +2936,8 @@ private struct TranscriptRows: View, Equatable {
     let highlightedMessage: Id?
     let rowsCount: Int
     let messagesCount: Int
-    var replySwipeActive: Binding<Bool>
     let canReply: (Row) -> Bool
     let onQuoteTap: (Id) -> Void
-    let onReply: (Row) -> Void
     let onMenu: (MessageMenuItem, Row) -> Void
     /// The bubble whose long-press actions are open (it alone reports its frame).
     let actionsRowId: String?
@@ -2911,8 +2975,6 @@ private struct TranscriptRows: View, Equatable {
             RowView(model: model, theme: theme, composerInset: composerInset, row: row, chatId: chatId, width: width, timeReveal: timeReveal,
                     onQuoteTap: onQuoteTap,
                     highlighted: highlightedMessage == row.messageId,
-                    onReply: reply ? { onReply(row) } : nil,
-                    replySwipeActive: replySwipeActive,
                     mentions: mentions)
                 .equatable()
                 .padding(.top, row.id == firstId ? 0 : row.gapBefore)

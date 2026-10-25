@@ -1281,6 +1281,10 @@ pub async fn machine_start(State(state): State<AppState>, principal: Principal) 
         return Ok(crate::credits::refused_response(&r));
     }
     let _ = state.db.set_box_held(&user_id, false);
+    // The stop's secrets pause was for the downtime: starting lifts it (a user-set pause stays).
+    if crate::secrets::resume_after_stop(&state, &user_id).await {
+        tracing::info!(user = %user_id, "machine start: secrets pause set by stop_machine lifted");
+    }
     if state.db.user_box(&user_id).map_err(internal)?.is_none() {
         let provider = boxes::default_provider(&state);
         match boxes::ensure_user_box(&state, &user_id, provider).await {
@@ -1782,6 +1786,9 @@ pub struct BoxHelloBody {
     /// Sandbox image version (`ARBOS_IMAGE_VERSION`).
     #[serde(default)]
     pub image: Option<String>,
+    /// `.source-sha` of the pi-ext seed under the box's `/etc` (#1708): what its projects run.
+    #[serde(default)]
+    pub seed_sha: Option<String>,
 }
 
 /// One project as the box sees it: settings, chats, and the pushes queued for it.
@@ -1823,12 +1830,13 @@ pub async fn box_hello(
     let Principal::Box { user_id } = &principal else {
         return Err((StatusCode::FORBIDDEN, "box only".into()));
     };
-    tracing::info!(user = %user_id, version = ?b.version, sha = ?b.sha, image = ?b.image, "box hello");
+    tracing::info!(user = %user_id, version = ?b.version, sha = ?b.sha, image = ?b.image, seed_sha = ?b.seed_sha, "box hello");
     let _ = state.db.set_box_agentd(
         user_id,
         b.sha.as_deref(),
         b.version.as_deref(),
         b.image.as_deref(),
+        b.seed_sha.as_deref(),
     );
     if b.proto.unwrap_or(arbos_core::PROTO_VERSION) != arbos_core::PROTO_VERSION {
         return Err((
@@ -2028,6 +2036,9 @@ pub struct ActivityBody {
     pub chat_id: String,
     #[serde(default)]
     pub text: Option<String>,
+    /// Jobs in flight for the chip (duplex §2.4); `null` or missing when none.
+    #[serde(default)]
+    pub jobs: Option<serde_json::Value>,
 }
 
 /// `POST /projects/{id}/activity` (box): what the agent is doing right now, in plain words
@@ -2043,6 +2054,9 @@ pub async fn set_activity(
         return Err((StatusCode::FORBIDDEN, "not your project".into()));
     }
     let mut map = state.activity.lock().await;
+    let jobs = b
+        .jobs
+        .filter(|j| j.as_array().is_some_and(|a| !a.is_empty()));
     match b.text.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
         Some(text) => {
             map.insert(
@@ -2051,6 +2065,7 @@ pub async fn set_activity(
                     chat_id: b.chat_id,
                     text: text.chars().take(80).collect(),
                     at: arbos_core::ids::now_ms(),
+                    jobs,
                 },
             );
         }

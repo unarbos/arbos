@@ -151,6 +151,21 @@ pub fn finish_cleanly(text: &str, truncated: bool) -> Option<String> {
     (!kept.is_empty()).then(|| kept.to_owned())
 }
 
+/// What the model's reading becomes. A `[status]` answer must read as a whole sentence
+/// (`finish_cleanly`), else it is not posted and the message queues (`Task`, `None`). A
+/// `[guide]` is a steer whatever the quick line looks like — the line is never shown, so a
+/// missing full stop must not demote the steer to a silent job (#1657). A `[task]` has no line.
+pub fn settle_quick(kind: SideKind, text: &str, truncated: bool) -> (SideKind, Option<String>) {
+    match kind {
+        SideKind::Status => match finish_cleanly(text, truncated) {
+            Some(clean) => (SideKind::Status, Some(clean)),
+            None => (SideKind::Task, None),
+        },
+        SideKind::Guide => (SideKind::Guide, None),
+        SideKind::Task => (SideKind::Task, None),
+    }
+}
+
 /// What the running work looks like, for the quick call.
 #[derive(Debug, Default, Clone)]
 pub struct BusySnapshot {
@@ -554,9 +569,10 @@ impl Agent {
                             .and_then(serde_json::Value::as_i64),
                         "quick reply from the model"
                     );
-                    match finish_cleanly(&text, truncated) {
-                        Some(clean) => (kind, clean),
-                        None => {
+                    match settle_quick(kind, &text, truncated) {
+                        (k, Some(clean)) => (k, clean),
+                        (SideKind::Guide, None) => (SideKind::Guide, String::new()),
+                        (_, None) => {
                             tracing::warn!(
                                 chat_id,
                                 truncated,
@@ -616,7 +632,9 @@ impl Agent {
             return QuickOutcome::Queued;
         }
         let text = crate::store::redact(text.trim());
-        if text.is_empty() {
+        // Only a status answer needs words; a guide has none to show and still steers (#1657:
+        // this early return demoted every guide whose line was dropped to a silent queue).
+        if kind == SideKind::Status && text.is_empty() {
             return QuickOutcome::Queued;
         }
         // The decision row for debugging readers (`inspect`, kind `quick_reply`): which side the
@@ -742,6 +760,39 @@ impl Agent {
 pub(crate) mod tests {
     use super::*;
 
+    /// #1657: a `[guide]` whose quick line lacks a full stop was demoted to a silent job; a guide
+    /// steers regardless of the line. A fragment `[status]` still queues instead of posting.
+    #[test]
+    fn a_guide_steers_whatever_its_line_looks_like() {
+        assert_eq!(
+            settle_quick(
+                SideKind::Guide,
+                "Stopping at 20 instead of 40 for the run that is going",
+                false
+            ),
+            (SideKind::Guide, None)
+        );
+        assert_eq!(
+            settle_quick(SideKind::Guide, "", false),
+            (SideKind::Guide, None)
+        );
+        assert_eq!(
+            settle_quick(SideKind::Status, "The run is at step 12 of 40,", true),
+            (SideKind::Task, None)
+        );
+        assert_eq!(
+            settle_quick(SideKind::Status, "The run is at step 12 of 40.", false),
+            (
+                SideKind::Status,
+                Some("The run is at step 12 of 40.".to_owned())
+            )
+        );
+        assert_eq!(
+            settle_quick(SideKind::Task, "Noted.", false),
+            (SideKind::Task, None)
+        );
+    }
+
     #[test]
     fn tags_parse_and_default_to_task() {
         assert_eq!(
@@ -840,7 +891,13 @@ pub(crate) mod tests {
     async fn mock_quick(axum::Json(body): axum::Json<Value>) -> axum::Json<Value> {
         tokio::time::sleep(Duration::from_millis(300)).await;
         let user = body["messages"][1]["content"].as_str().unwrap_or("");
-        let (content, finish) = if user.contains("did the logger") {
+        let (content, finish) = if user.contains("stop at 20, not 40") {
+            // The b7 shape: a guide whose one line has no full stop.
+            (
+                "[guide]\nStopping the run at 20 instead of 40 as you asked",
+                "stop",
+            )
+        } else if user.contains("did the logger") {
             ("[status]\nWhen I last reported, the 15-second UTC logger had started at 04:15:49Z with 3 lines written,", "length")
         } else if user.contains("what is going on") {
             (
@@ -864,11 +921,28 @@ pub(crate) mod tests {
         }))
     }
 
+    /// Every activity text the stub relay received (`POST /projects/{id}/activity`), in order.
+    /// A log, not a last-value slot: tests run in parallel and another chat's act ack can land
+    /// between a test's own post and its read.
+    static ACTIVITY_LOG: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    async fn mock_activity(axum::Json(body): axum::Json<Value>) -> axum::http::StatusCode {
+        if let Some(t) = body.get("text").and_then(Value::as_str) {
+            ACTIVITY_LOG.lock().unwrap().push(t.to_owned());
+        }
+        axum::http::StatusCode::NO_CONTENT
+    }
+
     pub(crate) async fn test_agent() -> (Arc<Agent>, std::path::PathBuf) {
-        let app = axum::Router::new().route(
-            "/proxy/v1/chat/completions",
-            axum::routing::post(mock_quick),
-        );
+        let app = axum::Router::new()
+            .route(
+                "/proxy/v1/chat/completions",
+                axum::routing::post(mock_quick),
+            )
+            .route(
+                "/projects/{id}/activity",
+                axum::routing::post(mock_activity),
+            );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
@@ -1162,6 +1236,388 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Duplex step 1 (`docs/duplex-agent-design.md` §2.1): with the send tool on, prose the
+    /// model writes outside `send_message` is not posted; a turn that posted nothing gets its
+    /// leftover prose once as the fallback (`On`), never under `Strict`; a `send_message`
+    /// bubble carries `replyTo` when asked and never trips the fallback.
+    #[tokio::test]
+    async fn send_tool_holds_leftover_prose_and_posts_the_fallback_once() {
+        use crate::config::SendTool;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000007";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        let user_msg = "m-busy";
+        // A: `On`, nothing posted → the leftover prose is the one fallback bubble, once.
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.ack_text.clear();
+            t.activity = None;
+            t.send_tool = SendTool::On;
+            agent.test_open_row(&host, t).await;
+            agent
+                .test_prose_then_finish(&host, t, "The tests pass now.")
+                .await;
+            assert!(t.posted_fallback);
+            assert_eq!(t.streamed_text.trim(), "The tests pass now.");
+            // a second pass changes nothing
+            agent.test_prose_then_finish(&host, t, "").await;
+            assert_eq!(t.streamed_text.trim(), "The tests pass now.");
+        }
+        let rows = reply_rows(&host, user_msg);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text().trim(), "The tests pass now.");
+        // B: `Strict`, nothing posted → silence; the words stay out of the doc.
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.streamed_text.clear();
+            t.posted_fallback = false;
+            t.send_tool = SendTool::Strict;
+            agent.test_open_row(&host, t).await;
+            agent
+                .test_prose_then_finish(&host, t, "Thinking about what to do next.")
+                .await;
+            assert!(!t.posted_fallback);
+            assert!(t.streamed_text.trim().is_empty());
+            assert_eq!(t.unposted_text.trim(), "Thinking about what to do next.");
+        }
+        let rows = reply_rows(&host, user_msg);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[1].text().trim(),
+            "",
+            "strict: leftover prose never posted"
+        );
+        // C: `On`, the model posted with `send_message` → leftover prose is notes, not a bubble.
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.streamed_text.clear();
+            t.unposted_text.clear();
+            t.send_tool = SendTool::On;
+            agent.test_open_row(&host, t).await;
+        }
+        {
+            // the ask exists as a row, so an explicit reply_to can point at it
+            let h = host.lock().await;
+            h.doc
+                .append_user_message(
+                    user_msg,
+                    "rename it everywhere",
+                    "dev-mac",
+                    &arbos_core::doc::UserMessageOpts::default(),
+                )
+                .unwrap();
+        }
+        agent
+            .hook_send_message("Three files use that name.", None, Some(user_msg))
+            .await
+            .unwrap();
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            agent
+                .test_prose_then_finish(&host, t, "I should also mention the tests.")
+                .await;
+            assert!(!t.posted_fallback, "a turn that posted does not fall back");
+            assert!(t.streamed_text.trim().is_empty());
+        }
+        let rows = reply_rows(&host, user_msg);
+        let posted: Vec<String> = rows
+            .iter()
+            .map(|r| r.text().trim().to_owned())
+            .filter(|t| !t.is_empty())
+            .collect();
+        assert_eq!(
+            posted,
+            vec![
+                "The tests pass now.".to_owned(),
+                "Three files use that name.".to_owned()
+            ]
+        );
+        let bubble = rows
+            .iter()
+            .find(|r| r.text().trim() == "Three files use that name.")
+            .unwrap();
+        assert_eq!(
+            bubble.rest.get("replyTo").and_then(Value::as_str),
+            Some(user_msg),
+            "send_message(reply_to) threads the bubble under the ask"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Duplex step 2: `start_job` returns at once with a job row the working set and `list_jobs`
+    /// show; the per-chat cap refuses the fourth job with a reason the model can relay.
+    #[tokio::test]
+    async fn start_job_returns_at_once_and_caps_per_chat() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000008";
+        let _host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        let t0 = Instant::now();
+        let brief = "Find the three best-reviewed surf schools near Santa Teresa; return each with its page URL, group and private prices, the sources, and what could not be checked.";
+        let mut ids = Vec::new();
+        for title in [
+            "Searching for surf schools",
+            "Comparing hosting prices",
+            "Checking the weather",
+        ] {
+            let v = agent
+                .hook_start_job(title, brief, "research", vec![])
+                .await
+                .unwrap();
+            ids.push(v["job_id"].as_str().unwrap().to_owned());
+        }
+        assert!(
+            t0.elapsed() < Duration::from_secs(2),
+            "start_job must not wait for the worker"
+        );
+        let err = agent
+            .hook_start_job("A fourth one", brief, "research", vec![])
+            .await
+            .unwrap_err();
+        assert!(err.contains("cap"), "{err}");
+        let listed = agent.hook_list_jobs().await.unwrap();
+        let jobs = listed["jobs"].as_array().unwrap();
+        assert_eq!(jobs.len(), 3);
+        assert!(jobs
+            .iter()
+            .all(|j| j["state"] == "queued" || j["state"] == "running" || j["state"] == "failed"));
+        // The worker cannot start in this test box, so a job may already have failed; while any
+        // job is open the working set names it.
+        let row = agent.store.jobs_for_chat(chat).unwrap();
+        if row.iter().any(|j| j.is_open()) {
+            let ws = agent.working_set_text(chat);
+            assert!(ws.contains("Jobs running in this chat"), "{ws}");
+        }
+        assert_eq!(row.len(), 3);
+        assert_eq!(row[0].kind, "research");
+        assert_eq!(row[0].ask_message_id, "m-busy");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Duplex D5 / D7: two jobs on the same path queue behind each other and the second runs
+    /// once the first releases; a `stop` with no job id cancels every open job of the chat and
+    /// the chat gets one plain "Stopped: …" line.
+    #[tokio::test]
+    async fn job_locks_queue_and_stop_all_cancels_the_chat_jobs() {
+        use crate::agent::JobSpec;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000009";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let a = JobSpec {
+            id: "job-a".into(),
+            title: "Fixing the tests".into(),
+            kind: "code".into(),
+            touches: vec!["path:/work/p/src".into()],
+        };
+        let b = JobSpec {
+            id: "job-b".into(),
+            title: "Renaming a symbol".into(),
+            kind: "code".into(),
+            touches: vec!["path:/work/p".into()],
+        };
+        let c = JobSpec {
+            id: "job-c".into(),
+            title: "Searching the web".into(),
+            kind: "research".into(),
+            touches: vec![],
+        };
+        agent
+            .store
+            .insert_job(
+                "job-a",
+                chat,
+                "m-busy",
+                &a.title,
+                "code",
+                "brief enough for the worker",
+                &a.touches,
+            )
+            .unwrap();
+        agent
+            .store
+            .insert_job(
+                "job-b",
+                chat,
+                "m-busy",
+                &b.title,
+                "code",
+                "brief enough for the worker",
+                &b.touches,
+            )
+            .unwrap();
+        let held = agent.acquire_job_locks(&a).await;
+        assert_eq!(held, vec!["path:/work/p/src".to_owned()]);
+        // c touches nothing: never waits
+        assert!(agent.acquire_job_locks(&c).await.is_empty());
+        // b conflicts with a (parent path): blocked until a releases
+        let a2 = agent.clone();
+        let b2 = b.clone();
+        let waiter = tokio::spawn(async move { a2.acquire_job_locks(&b2).await });
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(!waiter.is_finished(), "b must wait for a");
+        assert_eq!(
+            agent
+                .store
+                .jobs_for_chat(chat)
+                .unwrap()
+                .iter()
+                .find(|j| j.id == "job-b")
+                .unwrap()
+                .last_step,
+            "Waiting for Fixing the tests"
+        );
+        agent.release_job_locks("job-a").await;
+        let got = tokio::time::timeout(Duration::from_secs(3), waiter)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got, vec!["path:/work/p".to_owned()]);
+        agent.release_job_locks("job-b").await;
+        // stop-all: both jobs (queued / running, no worker yet) are cancelled; one plain line
+        agent.store.set_job_state("job-a", "running", None).unwrap();
+        let (msg_id, _cmd) = send_cmd(&host, "stop");
+        let stop = CommandView {
+            id: ulid(),
+            kind: "stop".into(),
+            payload: json!({ "messageId": msg_id }),
+            issued_by: "dev-mac".into(),
+            issued_at: arbos_core::ids::now_ms(),
+            status: "pending".into(),
+        };
+        agent.handle_command(chat, stop).await.unwrap();
+        let jobs = agent.store.jobs_for_chat(chat).unwrap();
+        assert!(jobs.iter().all(|j| j.state == "cancelled"), "{jobs:?}");
+        let rows = reply_rows(&host, &msg_id);
+        assert_eq!(rows.len(), 1, "one stop line");
+        let text = rows[0].text();
+        assert!(text.starts_with("Stopped: "), "{text}");
+        assert!(
+            text.contains("fixing the tests") && text.contains("renaming a symbol"),
+            "{text}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// py-06 on image 0.1.121 (parity after-run, 2026-10-25 02:11 UTC): an `act` turn computed the
+    /// answer and wrote it as prose; the ack ("Checking the file now.") sat on the working row,
+    /// counted as "posted", and the fallback never ran — the user got an empty row. An act ack is
+    /// status, not words the user read.
+    #[tokio::test]
+    async fn act_ack_on_the_working_row_does_not_swallow_the_fallback() {
+        use crate::config::SendTool;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000010";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.ack_text.clear();
+            t.activity = None;
+            t.send_tool = SendTool::On;
+            agent.test_open_row(&host, t).await;
+        }
+        agent
+            .hook_route(&json!({ "action": "act", "ack": "Counting the rows in the file.", "plan": "count the rows" }))
+            .await
+            .unwrap();
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            assert_eq!(
+                t.activity.as_deref(),
+                Some("Counting the rows in the file.")
+            );
+            assert!(
+                !t.ack_posted,
+                "an act ack is working-row status, not a bubble"
+            );
+            agent
+                .test_prose_then_finish(&host, t, "500 orders, total 161,095.09.")
+                .await;
+            assert!(t.posted_fallback, "the answer must reach the user");
+            assert_eq!(t.streamed_text.trim(), "500 orders, total 161,095.09.");
+        }
+        let rows = reply_rows(&host, "m-busy");
+        assert_eq!(
+            rows.iter().filter(|r| !r.text().trim().is_empty()).count(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Parity after steps 1–3 (0.1.125): `ack_first` 0/13 because an act ack is working-row status
+    /// while Grok Bot posts it. After `ARBOS_ACT_ACK_BUBBLE_SECS` with nothing posted the ack
+    /// becomes the first bubble; a quick act that answered first never gets one.
+    #[tokio::test]
+    async fn long_act_turn_promotes_its_ack_to_a_bubble() {
+        use crate::config::SendTool;
+        std::env::set_var("ARBOS_ACT_ACK_BUBBLE_SECS", "1");
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000011";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.ack_text.clear();
+            t.activity = None;
+            t.send_tool = SendTool::On;
+            agent.test_open_row(&host, t).await;
+        }
+        agent
+            .hook_route(&json!({ "action": "act", "ack": "Looking up the top-rated surf schools around Santa Teresa now.", "plan": "search, read, compare" }))
+            .await
+            .unwrap();
+        assert!(
+            reply_rows(&host, "m-busy")
+                .iter()
+                .all(|r| r.text().trim().is_empty()),
+            "status first, no bubble yet"
+        );
+        tokio::time::sleep(Duration::from_millis(1600)).await;
+        let rows = reply_rows(&host, "m-busy");
+        let acks: Vec<_> = rows
+            .iter()
+            .filter(|r| {
+                r.text().trim() == "Looking up the top-rated surf schools around Santa Teresa now."
+            })
+            .collect();
+        assert_eq!(
+            acks.len(),
+            1,
+            "the ack became one bubble: {:?}",
+            rows.iter().map(|r| r.text()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            acks[0].rest.get("turnRole").and_then(Value::as_str),
+            Some("ack")
+        );
+        {
+            let tl = agent.turn.lock().await;
+            let t = tl.as_ref().unwrap();
+            assert!(t.ack_posted);
+            assert!(!t.row_closed, "a fresh result row is open for the answer");
+        }
+        std::env::remove_var("ARBOS_ACT_ACK_BUBBLE_SECS");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The send-tool switch: default on, `off` restores streamed prose, `strict` drops the fallback.
+    #[test]
+    fn send_tool_switch_parses() {
+        use crate::config::{parse_send_tool, SendTool};
+        assert_eq!(parse_send_tool("on"), Some(SendTool::On));
+        assert_eq!(parse_send_tool(" OFF "), Some(SendTool::Off));
+        assert_eq!(parse_send_tool("strict"), Some(SendTool::Strict));
+        assert_eq!(parse_send_tool("maybe"), None);
+    }
+
     /// Doug, 2026-10-22: the relay turn for a failed `continue-act` child routed `act`, ran
     /// tools for 13 minutes and held every chat. A relay turn may only `reply`, and the same
     /// limit line is written once.
@@ -1431,6 +1887,111 @@ pub(crate) mod tests {
         let rows = reply_rows(&host, "m-busy");
         let text: String = rows.iter().map(|r| r.text()).collect();
         assert_eq!(text.matches("Staging host").count(), 1, "{text}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #1657: a tool with no plain-words label (`sleep 25 && echo ok`) must not clear the working
+    /// row — the act ack stays as the activity; with no ack, a generic line is posted.
+    #[tokio::test]
+    async fn unlabelled_tool_keeps_the_working_row_activity() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000009";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.ack_text.clear();
+            t.activity = None;
+            agent.test_open_row(&host, t).await;
+        }
+        agent
+            .hook_route(&json!({ "action": "act", "ack": "Waiting 25 seconds, then checking.", "plan": "sleep" }))
+            .await
+            .unwrap();
+        let ev = arbos_core::rpc::Event::ToolExecutionStart {
+            tool_call_id: "c1".into(),
+            tool_name: "bash".into(),
+            args: json!({ "command": "sleep 25 && echo ok" }),
+            parent_tool_call_id: None,
+        };
+        agent.test_fold(chat, &host, &ev).await;
+        assert_eq!(
+            agent
+                .turn
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .activity
+                .as_deref(),
+            Some("Waiting 25 seconds, then checking.")
+        );
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.activity = None;
+        }
+        agent.test_fold(chat, &host, &ev).await;
+        assert_eq!(
+            agent
+                .turn
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .activity
+                .as_deref(),
+            Some("Running a command")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The exact b7 shape (#1657): a foreground turn runs; the user writes "stop at 20, not 40";
+    /// the quick model reads it as `[guide]` with a line that has no full stop. It must be
+    /// steered (not queued as a job) and the working row must say "Steering: …".
+    #[tokio::test]
+    async fn b7_guide_without_full_stop_is_steered_and_shown_on_the_working_row() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000010";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        ACTIVITY_LOG.lock().unwrap().clear();
+        let (msg_id, cmd) = send_cmd(
+            &host,
+            "Change of plan: stop at 20, not 40. Please apply that to the run that is going now.",
+        );
+        let outcome = agent.quick_reply(chat, &host, &cmd).await;
+        // No pi child in the test harness, so the steer itself cannot land; the decision must
+        // still be the steer path (never `Answered`, never a job), with nothing in the transcript.
+        assert!(
+            matches!(outcome, QuickOutcome::Steered | QuickOutcome::Queued),
+            "{outcome:?}"
+        );
+        assert!(
+            reply_rows(&host, &msg_id).is_empty(),
+            "no bubble for a steer"
+        );
+        let t0 = Instant::now();
+        // The stub relay's log is process-wide: another test's act ack can land in between,
+        // so look for this chat's own "Steering: …" line.
+        let seen = loop {
+            if let Some(a) = ACTIVITY_LOG
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|a| a.starts_with("Steering:"))
+                .cloned()
+            {
+                break a;
+            }
+            assert!(
+                t0.elapsed() < Duration::from_secs(5),
+                "no steering activity posted"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert!(seen.starts_with("Steering: Change of plan"), "{seen}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

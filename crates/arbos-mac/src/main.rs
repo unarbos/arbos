@@ -9,6 +9,7 @@ mod model;
 mod onboarding;
 mod palette;
 mod search;
+mod search_index;
 mod sign_in;
 mod sync;
 mod ui;
@@ -29,8 +30,9 @@ use crate::ui::media_viewer;
 use crate::ui::motion::{self, PulseClock};
 use crate::ui::palette as palette_ui;
 use crate::ui::shell::{self, Shell};
-use crate::ui::theme::{reapply_window_background, AppearancePref, Surface, Theme};
-use crate::ui::traffic_lights;
+use crate::ui::theme::{
+    reapply_window_background, AppearancePref, Surface, Theme, TRAFFIC_LIGHT_POSITION,
+};
 use crate::ui::transcript;
 use crate::ui::widgets;
 
@@ -136,11 +138,11 @@ fn main() {
                     titlebar: Some(TitlebarOptions {
                         title: Some("Arbos".into()),
                         appears_transparent: cfg!(target_os = "macos"),
-                        // Full screen paints its own lights at the same spot
-                        // (`ui::traffic_lights`); keep the two in step.
+                        // Grok Bot's spot (lights centred 22 pt from the top);
+                        // the sidebar strip's discs sit 8 pt under that line.
                         traffic_light_position: Some(point(
-                            px(traffic_lights::TRAFFIC_LIGHT_POSITION),
-                            px(traffic_lights::TRAFFIC_LIGHT_POSITION),
+                            px(TRAFFIC_LIGHT_POSITION),
+                            px(TRAFFIC_LIGHT_POSITION),
                         )),
                     }),
                     app_owns_titlebar_drag: cfg!(target_os = "macos"),
@@ -159,7 +161,8 @@ fn main() {
         // Some X servers (Xvfb, no compositor) do not present the first frame
         // until an event arrives; nudge a second frame shortly after launch.
         // Rig: `ARBOS_FULLSCREEN=1` enters native full screen once the window
-        // is up (screenshots without a pointer).
+        // is up (screenshots without a pointer). Full screen is macOS's own:
+        // the lights hide with the title bar and return on the top-edge hover.
         let enter_fullscreen = std::env::var("ARBOS_FULLSCREEN").is_ok_and(|v| v == "1");
         cx.spawn(async move |cx| {
             cx.background_executor()

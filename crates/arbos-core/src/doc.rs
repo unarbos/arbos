@@ -289,6 +289,20 @@ pub struct UserMessageOpts {
     pub sender_name: Option<String>,
     pub sender_avatar: Option<String>,
     pub answers_question_id: Option<String>,
+    /// The sender's IANA time zone (`"Europe/London"`), written as `tz` so the
+    /// agent can answer for the user's moment ("4:28 PM where you are") —
+    /// Grok parity trait 1 (agentd reads `tz` / `timeZone` / `timezone`).
+    /// Clients pass [`device_time_zone`]; fixtures and tests leave it unset.
+    pub tz: Option<String>,
+}
+
+/// The device's IANA time zone, if the platform names one (macOS and iOS via
+/// CoreFoundation, Linux via /etc/localtime).
+pub fn device_time_zone() -> Option<String> {
+    iana_time_zone::get_timezone()
+        .ok()
+        .map(|z| z.trim().to_string())
+        .filter(|z| !z.is_empty())
 }
 
 /// One attachment part on a client user message (`name` / `mime` / optional `kind` / `ref`).
@@ -632,6 +646,9 @@ impl ChatDoc {
         }
         if let Some(q) = opts.answers_question_id.as_deref() {
             loro_err(m.insert("answersQuestionId", q))?;
+        }
+        if let Some(tz) = opts.tz.as_deref().map(str::trim).filter(|z| !z.is_empty()) {
+            loro_err(m.insert("tz", tz))?;
         }
         loro_err(m.insert("status", MessageStatus::Done.as_str()))?;
         loro_err(m.insert("deviceId", device_id))?;
@@ -1503,6 +1520,15 @@ impl ChatDoc {
         Some(msg_id)
     }
 
+    /// The standing choice made on a destructive-shell card (#1544): `grant` = the path class
+    /// the owner allowed from now on, so an answered card shows which row was picked.
+    pub fn set_approval_grant(&self, approval_id: &str, path_class: &str) -> Option<String> {
+        let (msg_id, p) = self.approval_part(approval_id)?;
+        p.insert("grant", path_class).ok();
+        self.commit_now();
+        Some(msg_id)
+    }
+
     /// Plain JSON of one approval part, if present.
     pub fn approval(&self, approval_id: &str) -> Option<Value> {
         self.approval_part(approval_id)
@@ -1948,6 +1974,47 @@ mod tests {
         assert!(!msgs[0].text().contains("sk-live-"));
         assert!(msgs[1].text().contains("[REDACTED:vault]"));
         assert!(!msgs[1].text().contains("sk-live-"));
+    }
+
+    /// Grok parity trait 1 ([feedback hide-worker-rows-and-tz-2026-10-24]): a
+    /// client writes the device's IANA zone as `tz` on its user rows so the
+    /// agent can answer for the user's moment; nothing is written when the
+    /// client has none (fixtures, tests), and a blank zone is not a zone.
+    #[test]
+    fn user_rows_carry_the_senders_time_zone_when_known() {
+        let doc = ChatDoc::new(None, false);
+        doc.transact(|d| {
+            d.append_user_message(
+                "m1",
+                "what time is it there?",
+                "dev:mac",
+                &UserMessageOpts {
+                    tz: Some("Europe/London".into()),
+                    ..UserMessageOpts::default()
+                },
+            )
+            .unwrap();
+            d.append_user_message("m2", "and now?", "dev:fixture", &UserMessageOpts::default())
+                .unwrap();
+            d.append_user_message(
+                "m3",
+                "blank",
+                "dev:odd",
+                &UserMessageOpts {
+                    tz: Some("  ".into()),
+                    ..UserMessageOpts::default()
+                },
+            )
+            .unwrap();
+        });
+        let rows = &doc.to_json()["messages"];
+        assert_eq!(rows[0]["tz"], "Europe/London");
+        assert!(rows[1].get("tz").is_none(), "no zone, no field");
+        assert!(rows[2].get("tz").is_none(), "a blank zone is not written");
+        // The helper answers something IANA-shaped or nothing — never a blank.
+        if let Some(zone) = device_time_zone() {
+            assert!(!zone.trim().is_empty() && !zone.contains(' '), "{zone}");
+        }
     }
 
     #[test]

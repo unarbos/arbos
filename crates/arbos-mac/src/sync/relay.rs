@@ -51,10 +51,11 @@ use super::dto::{
 use super::store::{self, Store};
 use super::{ClientCommand, PictureSource, PictureTarget, SyncEvent, SyncSource};
 use crate::model::{
-    new_id, now_ms, AccountView, Attachment, AttachmentKind, BoxState, Call, CallEnded, CallLeft,
-    CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView, Chat, Effort, Id,
-    Link, LinkState, Machine, MachineState, Message, Part, Person, Project, ProjectDocView,
-    ProjectSecrets, Reachable, Role, Routine, RoutineRun, Sender, ServerInfo, ThreadInfo,
+    new_id, now_ms, AccountView, Attachment, AttachmentKind, BoxReport, BoxState, Call, CallEnded,
+    CallLeft, CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView, Chat,
+    Effort, Id, Link, LinkState, Machine, MachineState, Message, Part, Person, Project,
+    ProjectDocView, ProjectSecrets, Reachable, Role, Routine, RoutineRun, Sender, ServerInfo,
+    ThreadInfo,
 };
 use crate::update;
 
@@ -168,6 +169,9 @@ struct Shared {
     chats: Mutex<Vec<Chat>>,
     /// Client-minted message ids whose push the relay has not `ACK`ed (S3).
     unacked: Mutex<HashSet<Id>>,
+    /// Rooms whose pushes were refused with `not_available` on the live connection.
+    /// Cleared by the next ACK for that room (not by draining `unacked`, which is global).
+    push_refused: Mutex<HashSet<Id>>,
     events: mpsc::UnboundedSender<SyncEvent>,
     subscriptions: Mutex<Vec<loro::Subscription>>,
     machine: Mutex<Machine>,
@@ -707,6 +711,7 @@ impl SyncSource for RelaySource {
                 projects: Mutex::new(Vec::new()),
                 chats: Mutex::new(Vec::new()),
                 unacked: Mutex::new(HashSet::new()),
+                push_refused: Mutex::new(HashSet::new()),
                 events: events.clone(),
                 subscriptions: Mutex::new(Vec::new()),
                 machine: Mutex::new(Machine::default()),
@@ -3259,6 +3264,30 @@ async fn perform_room_actions(
                     if !had.is_empty() && room_chat != PROJECT_DOC_CHAT_ID {
                         emit_snapshot(shared, key);
                     }
+                    // Per-room refusal flag (not `unacked`: that set is global and any
+                    // room's ACK drains it, so it cannot tell which chat was refused).
+                    if shared.push_refused.lock().unwrap().remove(room_chat) {
+                        let _ = shared.events.send(SyncEvent::PushRefused {
+                            chat_id: room_chat.to_string(),
+                            refused: false,
+                        });
+                    }
+                }
+                RoomAction::PushRefused { batch_id: _ } => {
+                    if room_chat != PROJECT_DOC_CHAT_ID
+                        && shared
+                            .push_refused
+                            .lock()
+                            .unwrap()
+                            .insert(room_chat.to_string())
+                    {
+                        // One notice per refusal stretch; the room link stays live.
+                        shared.notice("Messages in this chat are not being delivered");
+                        let _ = shared.events.send(SyncEvent::PushRefused {
+                            chat_id: room_chat.to_string(),
+                            refused: true,
+                        });
+                    }
                 }
                 RoomAction::BoxState {
                     state,
@@ -3895,6 +3924,7 @@ async fn send_message(
                 None
             },
             answers_question_id: answer.as_ref().map(|(qid, _)| qid.clone()),
+            tz: arbos_core::doc::device_time_zone(),
         };
         let payload = match &answer {
             Some((qid, value)) => {
@@ -5037,6 +5067,27 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 });
             }
         }
+        ClientCommand::StopJob {
+            chat_id,
+            job_id,
+            message_id,
+        } => {
+            let docs = shared.docs.lock().unwrap();
+            if let Some(doc) = docs.get(&chat_id) {
+                let device = shared.device_id();
+                doc.core.transact(|d| {
+                    d.push_command(
+                        "stop",
+                        json!({ "jobId": job_id, "messageId": message_id }),
+                        &device,
+                    );
+                });
+            }
+        }
+        ClientCommand::JobsRefresh { project_id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move { refresh_project_jobs(&shared, &project_id).await });
+        }
         ClientCommand::React {
             chat_id,
             message_id,
@@ -5101,12 +5152,17 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         ClientCommand::Approve {
             chat_id,
             approval_id,
+            grant,
         } => {
             let docs = shared.docs.lock().unwrap();
             if let Some(doc) = docs.get(&chat_id) {
                 let device = shared.device_id();
+                let mut payload = json!({ "approvalId": approval_id });
+                if let Some(g) = grant {
+                    payload["grant"] = json!(g);
+                }
                 doc.core.transact(|d| {
-                    d.push_command("approve", json!({ "approvalId": approval_id }), &device);
+                    d.push_command("approve", payload, &device);
                 });
             }
         }
@@ -6330,8 +6386,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     }
                     Err(err) => {
                         // Nobody asked for this fetch: no toast, no bubble. The card shows
-                        // "No preview"; the error goes to the log and the silent report.
-                        shared.diagnostic("thumbnail", format!("{key}: {err:#}"));
+                        // "No preview". A missing blob (deleted, never uploaded, stale ref)
+                        // is not a Mac bug — same quiet 404 treatment as routines / voices.
+                        // Other failures still go to the silent weekly report.
+                        let detail = format!("{key}: {err:#}");
+                        if detail.to_ascii_lowercase().contains("http 404") {
+                            log::warn!(target: "arbos_mac::diagnostic", "thumbnail: {detail}");
+                        } else {
+                            shared.diagnostic("thumbnail", detail);
+                        }
                         let _ = shared.events.send(SyncEvent::ThumbnailFailed { key });
                     }
                 }
@@ -6485,6 +6548,27 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let shared = shared.clone();
             tokio::spawn(async move {
                 refresh_project_secrets(&shared, &project_id).await;
+            });
+        }
+        ClientCommand::ShellGrantsRefresh { project_id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                refresh_shell_grants(&shared, &project_id).await;
+            });
+        }
+        ClientCommand::ShellGrantRevoke {
+            project_id,
+            grant_id,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .delete(&format!("/projects/{project_id}/shell-grants/{grant_id}"))
+                    .await
+                {
+                    shared.notice(format!("Shell approvals: {}", relay_message(&err)));
+                }
+                refresh_shell_grants(&shared, &project_id).await;
             });
         }
         ClientCommand::SecretAdd { item } => {
@@ -6781,6 +6865,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         ClientCommand::LocalRefresh => {
             let shared = shared.clone();
             tokio::spawn(async move { refresh_local(&shared).await });
+        }
+        ClientCommand::MachineDebugRefresh => {
+            let shared = shared.clone();
+            tokio::spawn(async move { refresh_machine_debug(&shared).await });
         }
         ClientCommand::LocalSetAllowReads { device_id, allow } => {
             let shared = shared.clone();
@@ -7123,6 +7211,42 @@ async fn refresh_routines(shared: &Arc<Shared>, project_id: &str) {
     }
 }
 
+/// `GET /machine/debug` → the Computer tab's report. A relay without the route (404) or an
+/// unreachable box is not a bug: the tab says so from the report's own fields.
+/// The tasks chip's poll: `GET /projects/{id}` → `activity.jobs[]` (duplex §2.4).
+/// A relay without the field or a `null` activity reads as "no open jobs" (the
+/// drawer degrades to nothing); a transport error keeps the last answer rather
+/// than blinking the list away on a blip.
+async fn refresh_project_jobs(shared: &Arc<Shared>, project_id: &str) {
+    match shared.get_json(&format!("/projects/{project_id}")).await {
+        Ok(v) => {
+            let _ = shared.events.send(SyncEvent::ProjectJobs {
+                project_id: project_id.to_string(),
+                jobs: crate::model::Job::list_from_activity(v.get("activity")),
+            });
+        }
+        Err(err) => {
+            if !format!("{err:#}").contains("HTTP 404") {
+                shared.diagnostic("project-jobs", format!("{err:#}"));
+            }
+        }
+    }
+}
+
+async fn refresh_machine_debug(shared: &Arc<Shared>) {
+    match shared.get_json("/machine/debug").await {
+        Ok(v) => {
+            let report = BoxReport::from_debug(&v, now_ms());
+            let _ = shared.events.send(SyncEvent::BoxReport(report));
+        }
+        Err(err) => {
+            if !format!("{err:#}").contains("HTTP 404") {
+                shared.diagnostic("machine-debug", format!("{err:#}"));
+            }
+        }
+    }
+}
+
 async fn refresh_routine_runs(shared: &Arc<Shared>, project_id: &str, routine_id: &str) {
     match shared
         .get_json(&format!(
@@ -7265,6 +7389,30 @@ async fn refresh_project_secrets(shared: &Arc<Shared>, project_id: &str) {
         Err(err) => {
             if !format!("{err:#}").contains("HTTP 404") {
                 shared.notice(format!("Secrets: {}", relay_message(&err)));
+            }
+        }
+    }
+}
+
+/// One agent's standing shell approvals (`GET /projects/{id}/shell-grants`, #1544).
+async fn refresh_shell_grants(shared: &Arc<Shared>, project_id: &str) {
+    match shared
+        .get_json(&format!("/projects/{project_id}/shell-grants"))
+        .await
+    {
+        Ok(v) => {
+            let items: Vec<crate::model::ShellGrant> = v
+                .get("items")
+                .and_then(|i| serde_json::from_value(i.clone()).ok())
+                .unwrap_or_default();
+            let _ = shared.events.send(SyncEvent::ShellGrants {
+                project_id: project_id.to_string(),
+                items,
+            });
+        }
+        Err(err) => {
+            if !format!("{err:#}").contains("HTTP 404") {
+                shared.notice(format!("Shell approvals: {}", relay_message(&err)));
             }
         }
     }

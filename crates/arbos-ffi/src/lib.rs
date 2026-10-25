@@ -99,6 +99,10 @@ pub enum RoomAction {
         code: String,
         message: String,
     },
+    /// A `not_available` push refusal on this connection (`batchId` from the error).
+    PushRefused {
+        batch_id: Option<String>,
+    },
     Presence {
         device: Option<String>,
         handle: Option<String>,
@@ -153,6 +157,7 @@ impl From<ClientAction> for RoomAction {
                 after_ms: after.as_millis() as u64,
             },
             ClientAction::SessionError { code, message } => Self::SessionError { code, message },
+            ClientAction::PushRefused { batch_id } => Self::PushRefused { batch_id },
             ClientAction::Presence {
                 device,
                 handle,
@@ -473,6 +478,8 @@ impl From<UserMessageOptsRecord> for doc::UserMessageOpts {
             sender_name: r.sender_name,
             sender_avatar: r.sender_avatar,
             answers_question_id: None,
+            // The phone's zone, found on the Rust side so the Swift record is unchanged.
+            tz: doc::device_time_zone(),
         }
     }
 }

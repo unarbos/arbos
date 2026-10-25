@@ -35,7 +35,7 @@
     },
     {
       "prompt": "Did the sleep command finish? What did it print?",
-      "pre_wait_s": 95,
+      "pre_wait_s": 100,
       "reply_regex": "SLEEP_FINISHED",
       "timeout_s": 240,
       "chat": "first"

@@ -1,0 +1,34 @@
+{
+  "id": "py-03-one-liner-rewrite",
+  "lane": "a",
+  "category": "parity",
+  "categories": [
+    "parity",
+    "one-liner"
+  ],
+  "title": "Rewrite a sentence in plain English",
+  "parity": true,
+  "timeout_s": 90,
+  "settle_s": 12,
+  "turns": [
+    {
+      "prompt": "Rewrite this in plain English: \"Leverage synergies to operationalize our roadmap.\"",
+      "shape": {
+        "messages_min": 1,
+        "messages_max": 1,
+        "ack_first": false,
+        "table": false,
+        "links_min": 0,
+        "offer": false,
+        "first_bubble_max_s": 5,
+        "no_handle": true,
+        "worker_rows": 0,
+        "reply_to_ask": false
+      },
+      "reply_regex_not": "@\\w+|unarbos|lt-eval",
+      "judge": {
+        "criteria": "One short plain-English rewrite, optionally one alternative. No preamble, no explanation of the task."
+      }
+    }
+  ]
+}

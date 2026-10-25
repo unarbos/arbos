@@ -8,7 +8,7 @@
 //! the space, media / files / voice / links from the loaded chat docs,
 //! presence from the room frames.
 
-mod agent;
+pub(crate) mod agent;
 mod channel;
 mod group;
 pub(crate) mod kit;
@@ -30,12 +30,30 @@ use crate::model::{now_ms, Attachment, AttachmentKind, Chat, Id, Message, Part};
 use crate::ui::glass;
 use crate::ui::icons::icon;
 use crate::ui::shell::Shell;
-use crate::ui::theme::{Theme, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
+use crate::ui::theme::{Theme, CONTROL_GAP, CONTROL_GLYPH, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
 /// The right pane's width (mockups b, d, g: a quarter of the window).
 pub const SHEET_WIDTH: f32 = 340.0;
 /// Mocks b/d/g: the picture is about a fifth of the pane's width.
 pub(super) const HERO_AVATAR: f32 = 72.0;
+/// The share / close discs' inset from the pane's right edge — the sidebar
+/// strip's `STRIP_INSET`: Grok's close disc ends 24 px = 12 pt before the
+/// window edge (`grok-right-pane-details.png`).
+pub(crate) const PANE_DISC_INSET: f32 = crate::ui::sidebar::STRIP_INSET;
+/// Top bar → hero picture: Grok's avatar starts 73.5 pt under the window edge
+/// (rows 147–264 at 2 px/pt), 13.5 under its 60 pt band → 14.
+pub(crate) const HERO_TOP: f32 = 14.0;
+/// The hero subtitle ("Add a label"): Grok's is 12 pt (ascender band 18 px at
+/// 2 px/pt), a step under the 13 pt section labels.
+pub(crate) const HERO_SUBTITLE: f32 = 12.0;
+/// The tab pill ([feedback agent-pane-details-tab-2026-10-24], measured on
+/// `grok-right-pane-details.png`): the selected capsule is 26 pt tall (rows
+/// 436–487 px), its label 13 pt (cap height 18 px) with 9 pt beside it, the
+/// next label 11.5 pt after the capsule → 2 pt between capsules. Jacob's
+/// mock b/g had a 30 pt capsule with body-size labels.
+pub(crate) const TAB_HEIGHT: f32 = 26.0;
+pub(crate) const TAB_PAD_X: f32 = 9.0;
+pub(crate) const TAB_GAP: f32 = 2.0;
 
 /// The open page, if any — rendered as the right pane.
 pub fn pane(page: &ProfilePage, shell: &Shell, cx: &mut Context<Shell>) -> Option<Stateful<Div>> {
@@ -64,16 +82,26 @@ pub(super) fn pushed_frame(
     pinned: Option<Div>,
     body: Div,
     right: Option<Stateful<Div>>,
+    share: Option<HeroClick>,
     scroll: Option<&ScrollHandle>,
     shell: &Shell,
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> Stateful<Div> {
     if shell.state.read(cx).profile_stack.is_empty() {
-        return pane_frame(SHEET_WIDTH, None, pinned, body, right, scroll, theme, cx);
+        return pane_frame(
+            SHEET_WIDTH,
+            None,
+            pinned,
+            body,
+            right,
+            share,
+            scroll,
+            theme,
+            cx,
+        );
     }
-    let back = glass::circle("profile-back", 30.0, theme)
-        .child(icon("chevron-left", 14.0, theme.text))
+    let back = glass::control_disc("profile-back", "chevron-left", CONTROL_GLYPH, theme)
         .on_click(cx.listener(|this, _, _, cx| this.back_profile(cx)));
     pane_frame(
         SHEET_WIDTH,
@@ -81,10 +109,43 @@ pub(super) fn pushed_frame(
         pinned,
         body,
         right,
+        share,
         scroll,
         theme,
         cx,
     )
+}
+
+/// The right pane's top bar: the chat header's band, Grok Bot's share and
+/// close discs at its right end — [`CONTROL`] 36 pt, [`CONTROL_GAP`] 8 apart,
+/// [`PANE_DISC_INSET`] 12 from the pane's edge, centred on [`CONTROL_LINE`]
+/// (measured on `grok-right-pane-details.png`, 2 px/pt: discs at rows 30–101
+/// = top 15 / centre 33 in a shot whose strip discs sit on the same line; in
+/// `grok-chat-1.png` both sets share rows 28–99). No fill of its own: the pane
+/// blends with the chat behind it ([feedback info-pane-chrome-2026-10-24]).
+pub(crate) fn top_bar() -> Div {
+    div()
+        .h(px(crate::ui::theme::HEADER_HEIGHT))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .gap(px(CONTROL_GAP))
+        .px(px(PANE_DISC_INSET))
+        .debug_selector(|| "profile-top-bar".into())
+}
+
+/// The share disc of a page that has something to share (an agent, a group:
+/// the invite sheet). Left of the close disc, Grok's order.
+pub(crate) fn share_disc(theme: &Theme, on_click: HeroClick) -> Stateful<Div> {
+    glass::control_disc("profile-share", "share", glass::PANE_SHARE_GLYPH, theme)
+        .debug_selector(|| "profile-share".into())
+        .on_click(move |e, w, cx| on_click(e, w, cx))
+}
+
+/// The close disc: `×` at [`glass::PANE_CLOSE_GLYPH`].
+pub(crate) fn close_disc(theme: &Theme) -> Stateful<Div> {
+    glass::control_disc("profile-close", "xmark", glass::PANE_CLOSE_GLYPH, theme)
+        .debug_selector(|| "profile-close".into())
 }
 
 /// The pane with a pushed page: `‹` back and the page title lead the header.
@@ -131,25 +192,20 @@ pub(crate) fn pane_frame(
     pinned: Option<Div>,
     body: Div,
     right: Option<Stateful<Div>>,
+    share: Option<HeroClick>,
     scroll: Option<&ScrollHandle>,
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> Stateful<Div> {
-    let close = glass::circle("profile-close", 30.0, theme)
-        .child(icon("xmark", 13.0, theme.text))
+    let close = close_disc(theme)
         .on_click(cx.listener(|this, _, window, cx| this.close_profile(window, cx)));
-    // The top bar: no hairline under it (Jacob, Oct 22). `pinned` (a page's
-    // hero + tab pill, D93) sits under it and stays while the body scrolls
-    // beneath, fading out over `PANE_FADE_BAND` like the chat under its header.
-    let mut header = div()
-        .h(px(crate::ui::theme::HEADER_HEIGHT))
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .gap(px(6.0))
-        .px(px(10.0))
-        .bg(theme.card())
-        .debug_selector(|| "profile-top-bar".into());
+    let share = share.map(|f| share_disc(theme, f));
+    // The top bar: no hairline under it (Jacob, Oct 22) and no fill of its
+    // own — the pane is the chat's surface ([feedback info-pane-chrome-2026-10-24]).
+    // `pinned` (a page's hero + tab pill, D93) sits under it and stays while
+    // the body scrolls beneath, fading out over `PANE_FADE_BAND` like the chat
+    // under its header.
+    let mut header = top_bar();
     if let Some((title, back)) = back {
         header = header.child(back).child(
             div()
@@ -164,8 +220,12 @@ pub(crate) fn pane_frame(
     } else {
         header = header.child(div().flex_1());
     }
-    let header = header.children(right).child(close);
+    let header = header.children(right).children(share).child(close);
     let has_pinned = pinned.is_some();
+    // No hairline between the pane and the chat, and the chat's own surface:
+    // Grok's pane is the window (`#121212` on both sides of the join, a
+    // half-point `#1F1F1F` line that reads as nothing); ours was a lighter
+    // panel (`#1E1E1E` on `#141414`) behind a 1 pt `border` line.
     div()
         .id("profile-pane")
         .w(px(width))
@@ -173,8 +233,6 @@ pub(crate) fn pane_frame(
         .h_full()
         .flex()
         .flex_col()
-        .border_l_1()
-        .border_color(theme.border)
         .bg(theme.pane())
         .child(header)
         .children(pinned.map(|p| p.flex_shrink_0()))
@@ -189,21 +247,41 @@ pub(crate) fn pane_frame(
         )
 }
 
-/// Big avatar, name, status line.
+/// Big avatar, name, status line (the agent's label — clickable when
+/// `status_click` is given: Grok's "Add a label").
 pub(super) fn hero(
     avatar: AnyElement,
     name: AnyElement,
     status: &str,
     status_color: Hsla,
-    _theme: &Theme,
+    status_click: Option<HeroClick>,
+    theme: &Theme,
 ) -> Div {
+    let subtitle = div()
+        .id("hero-subtitle")
+        .px(px(8.0))
+        .py(px(2.0))
+        .rounded(px(6.0))
+        .max_w(px(SHEET_WIDTH - 64.0))
+        .truncate()
+        .text_size(px(HERO_SUBTITLE))
+        .text_color(status_color)
+        .debug_selector(|| "hero-subtitle".into())
+        .child(status.to_string());
+    let subtitle = match status_click {
+        Some(f) => subtitle
+            .cursor_text()
+            .hover(|s| s.bg(theme.field))
+            .on_click(move |e, w, cx| f(e, w, cx)),
+        None => subtitle,
+    };
     div()
         .flex_shrink_0()
         .flex()
         .flex_col()
         .items_center()
         .gap(px(6.0))
-        .pt(px(4.0))
+        .pt(px(HERO_TOP))
         .pb(px(18.0))
         .child(div().size(px(HERO_AVATAR)).child(avatar))
         .child(
@@ -215,12 +293,7 @@ pub(super) fn hero(
                 .justify_center()
                 .child(name),
         )
-        .child(
-            div()
-                .text_size(px(TEXT_SMALL))
-                .text_color(status_color)
-                .child(status.to_string()),
-        )
+        .child(subtitle)
 }
 
 /// A click handler a page hands the shared hero (`cx.listener(..)`, boxed).
@@ -320,7 +393,8 @@ pub(super) fn tab_bar(
         .mb(px(18.0))
         .flex()
         .justify_center()
-        .gap(px(4.0));
+        .gap(px(TAB_GAP))
+        .debug_selector(|| "profile-tab-pill".into());
     for (i, name) in tabs.iter().enumerate() {
         let on = i == current;
         bar = bar.child(
@@ -328,13 +402,14 @@ pub(super) fn tab_bar(
                 .id(ElementId::Name(SharedString::from(format!(
                     "profile-tab-{name}"
                 ))))
-                .h(px(30.0))
-                .px(px(14.0))
+                .debug_selector(move || format!("profile-tab-{name}"))
+                .h(px(TAB_HEIGHT))
+                .px(px(TAB_PAD_X))
                 .rounded_full()
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px(TEXT_BODY))
+                .text_size(px(TEXT_SMALL))
                 .font_weight(if on {
                     FontWeight::SEMIBOLD
                 } else {
@@ -874,5 +949,223 @@ mod frame_tests {
                 }
             }
         }
+    }
+}
+
+/// Grok Bot's right-pane chrome ([feedback info-pane-chrome-2026-10-24]):
+/// the numbers measured on `grok-right-pane-details.png` / `grok-chat-1.png`
+/// (project store, 2 px/pt) that the pane must keep.
+#[cfg(test)]
+mod chrome_tests {
+    use gpui::{div, prelude::*, px, TestAppContext};
+
+    use super::pane::{first_spacer, Section, FIRST_TITLE_PULL};
+    use super::{close_disc, kit, share_disc, top_bar, HERO_TOP, PANE_DISC_INSET, SHEET_WIDTH};
+    use crate::ui::theme::{
+        AppearancePref, Surface, Theme, CONTROL, CONTROL_GAP, CONTROL_LINE, HEADER_HEIGHT,
+    };
+
+    /// Grok, pt from the window's top / the pane's edges.
+    mod grok {
+        /// Share and close discs: 72 px.
+        pub const DISC: f32 = 36.0;
+        /// 16 px between the discs.
+        pub const DISC_GAP: f32 = 8.0;
+        /// The close disc ends 24 px before the window edge.
+        pub const DISC_INSET: f32 = 12.0;
+        /// Both discs centred on the strip discs' line (rows 28–99 in
+        /// `grok-chat-1.png`, where the strip's search / + discs sit too).
+        pub const DISC_TOP: f32 = 12.0;
+        /// Cards: 31 / 32 px in from the pane's edges.
+        pub const CARD_INSET: f32 = 16.0;
+        /// Section label text 56 px from the pane's edge.
+        pub const LABEL_LEFT: f32 = 28.0;
+        /// The avatar starts 147 px under the window edge → 13.5 under the band.
+        pub const HERO_TOP: f32 = 14.0;
+    }
+
+    fn set_theme(cx: &mut TestAppContext, pref: AppearancePref) {
+        cx.update(|cx| {
+            let theme = Theme::for_pref(pref, Surface::Matte, cx);
+            cx.set_global(theme);
+        });
+    }
+
+    #[test]
+    fn the_pane_is_the_chats_surface_in_both_appearances() {
+        for pref in [AppearancePref::Dark, AppearancePref::Light] {
+            for surface in [Surface::Matte, Surface::Glass] {
+                let theme = Theme::with(pref.resolve(gpui::WindowAppearance::Dark), surface);
+                assert_eq!(
+                    theme.pane(),
+                    theme.chat_wash(),
+                    "{pref:?} {surface:?}: the pane paints what the chat column paints"
+                );
+                // The cards still read on it: lighter on dark, darker on light.
+                let card_l = theme.pane_card.l;
+                let bg_l = theme.bg.l;
+                if theme.is_light() {
+                    assert!(
+                        card_l < bg_l - 0.02,
+                        "{pref:?}: light card {card_l} on {bg_l}"
+                    );
+                } else {
+                    assert!(
+                        card_l > bg_l + 0.04,
+                        "{pref:?}: dark card {card_l} on {bg_l}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_constants_are_groks() {
+        assert_eq!(CONTROL, grok::DISC);
+        assert_eq!(CONTROL_GAP, grok::DISC_GAP);
+        assert_eq!(PANE_DISC_INSET, grok::DISC_INSET);
+        assert_eq!(CONTROL_LINE - CONTROL / 2.0, grok::DISC_TOP);
+        assert_eq!(kit::INSET, grok::CARD_INSET);
+        assert_eq!(kit::INSET + kit::SECTION_TITLE_INDENT, grok::LABEL_LEFT);
+        assert_eq!(HERO_TOP, grok::HERO_TOP);
+        assert_eq!(kit::CARD_RADIUS, 12.0, "card corners: Grok's 24 px");
+        assert_eq!(kit::ROW_MIN_H, 41.0, "one-line row: Grok's 82 px");
+        // A leading label's glyphs land 24 under the pill: 18 − 7 + 10 + ~3.
+        assert_eq!(
+            first_spacer(Some(&Section::Title("Coding".into()))),
+            18.0 - FIRST_TITLE_PULL
+        );
+        assert_eq!(first_spacer(Some(&Section::Card(Vec::new()))), 18.0);
+        assert_eq!(first_spacer(None), 18.0);
+    }
+
+    struct Bar;
+
+    impl gpui::Render for Bar {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
+            let share = share_disc(&theme, Box::new(|_, _, _| {}));
+            div()
+                .w(px(SHEET_WIDTH))
+                .h(px(400.0))
+                .flex()
+                .flex_col()
+                .child(
+                    top_bar()
+                        .child(div().flex_1())
+                        .child(share)
+                        .child(close_disc(&theme)),
+                )
+        }
+    }
+
+    /// The share and close discs: 36 pt each, on the strip discs' line
+    /// (top 12 in the 60 band), 8 apart, the close disc 12 from the pane's
+    /// right edge — Grok's pixels. Before: a 30 pt bare × at top 17, inset 10.
+    #[gpui::test]
+    fn the_share_and_close_discs_land_on_groks_pixels(cx: &mut TestAppContext) {
+        set_theme(cx, AppearancePref::Dark);
+        let (_view, vcx) = cx.add_window_view(|_, _| Bar);
+        vcx.run_until_parked();
+        let bar = vcx.debug_bounds("profile-top-bar").expect("bar");
+        let share = vcx.debug_bounds("profile-share").expect("share");
+        let close = vcx.debug_bounds("profile-close").expect("close");
+        let f = |p: gpui::Pixels| -> f32 { p.into() };
+        assert_eq!(f(bar.size.height), HEADER_HEIGHT);
+        for (name, b) in [("share", share), ("close", close)] {
+            assert_eq!(f(b.size.width), grok::DISC, "{name} width");
+            assert_eq!(f(b.size.height), grok::DISC, "{name} height");
+            assert_eq!(f(b.origin.y), grok::DISC_TOP, "{name} top");
+        }
+        assert_eq!(
+            f(close.right()),
+            SHEET_WIDTH - grok::DISC_INSET,
+            "close right edge"
+        );
+        assert_eq!(
+            f(close.origin.x) - f(share.right()),
+            grok::DISC_GAP,
+            "share → close"
+        );
+    }
+
+    struct Cards;
+
+    impl gpui::Render for Cards {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
+            let row = |label: &str| {
+                kit::row(
+                    label.to_string(),
+                    kit::Leading::None,
+                    label.to_string(),
+                    None,
+                    None,
+                    None,
+                    true,
+                    &theme,
+                )
+                .into_any_element()
+            };
+            div()
+                .w(px(SHEET_WIDTH))
+                .h(px(600.0))
+                .flex()
+                .flex_col()
+                .child(
+                    kit::card(&theme)
+                        .debug_selector(|| "card-a".into())
+                        .child(row("ArbosThree")),
+                )
+                .child(kit::section_title("Routines", &theme))
+                .child(
+                    kit::card(&theme)
+                        .debug_selector(|| "card-b".into())
+                        .child(row("TestFlight fix audit")),
+                )
+        }
+    }
+
+    /// Cards inset 16 from both edges; a one-line row 41 tall; the label's
+    /// box starts 28 in and the next card starts `SECTION_TITLE_BOTTOM` under
+    /// it; card → label box = `CARD_GAP`.
+    #[gpui::test]
+    fn cards_are_inset_and_labelled_at_groks_margins(cx: &mut TestAppContext) {
+        set_theme(cx, AppearancePref::Dark);
+        let (_view, vcx) = cx.add_window_view(|_, _| Cards);
+        vcx.run_until_parked();
+        let a = vcx.debug_bounds("card-a").expect("card a");
+        let b = vcx.debug_bounds("card-b").expect("card b");
+        let label = vcx.debug_bounds("section-title").expect("label");
+        let f = |p: gpui::Pixels| -> f32 { p.into() };
+        assert_eq!(f(a.origin.x), grok::CARD_INSET, "card left inset");
+        assert_eq!(
+            f(a.right()),
+            SHEET_WIDTH - grok::CARD_INSET,
+            "card right inset"
+        );
+        assert_eq!(f(a.size.height), kit::ROW_MIN_H, "one-line row height");
+        assert_eq!(
+            f(label.origin.y) - f(a.bottom()),
+            kit::CARD_GAP,
+            "card → label box"
+        );
+        assert_eq!(f(b.origin.y), f(label.bottom()), "label box → next card");
+        // The label's text: its box is the pane width, padded to 28 on the left.
+        assert_eq!(f(label.origin.x), 0.0);
+        assert_eq!(f(label.size.width), SHEET_WIDTH);
+        assert_eq!(
+            f(label.size.height),
+            kit::SECTION_TITLE_TOP + kit::SECTION_TITLE_BOTTOM + kit::SECTION_TITLE_LINE,
+            "label box is its padding + one 16 pt line"
+        );
     }
 }
