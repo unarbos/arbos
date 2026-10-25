@@ -1239,6 +1239,9 @@ pub struct TurnState {
     pub unposted_text: String,
     /// The turn ended with nothing posted and `SendTool::On` posted the leftover prose once.
     pub posted_fallback: bool,
+    /// The route's `ack` became a bubble (`new` / `wake`). An `act` ack is working-row status
+    /// only, so it does not count as words the user read (duplex step 1 fallback rule).
+    pub ack_posted: bool,
 }
 
 /// How the model call failed, as pi reported it.
@@ -1360,6 +1363,7 @@ impl TurnState {
             send_tool: crate::config::SendTool::Off,
             unposted_text: String::new(),
             posted_fallback: false,
+            ack_posted: false,
         }
     }
 }
@@ -3647,6 +3651,7 @@ impl Agent {
             send_tool: self.cfg.send_tool(),
             unposted_text: String::new(),
             posted_fallback: false,
+            ack_posted: false,
         });
         self.turn_running.store(true, Ordering::SeqCst);
         let keepalive = self.spawn_keepalive();
@@ -4727,6 +4732,7 @@ impl Agent {
             h.doc
                 .append_text(&t.assistant_msg_id, &t.text_part_id, &t.ack_text);
         }
+        t.ack_posted = true;
         t.ack_split = true;
         match action.as_str() {
             "reply" => {}
@@ -5130,7 +5136,7 @@ impl Agent {
     /// Did this turn put any words in front of the user (a bubble, an ack, a progress note)?
     fn posted_anything(t: &TurnState) -> bool {
         !t.streamed_text.trim().is_empty()
-            || !t.ack_text.trim().is_empty()
+            || t.ack_posted
             || t.progress_texts.iter().any(|p| !p.trim().is_empty())
     }
 
