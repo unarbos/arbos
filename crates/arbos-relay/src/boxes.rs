@@ -438,6 +438,17 @@ async fn start_docker(
 /// Start (wake) an existing box. Returns once the start call is accepted; the box's own
 /// room dial marks it awake.
 pub async fn start_box(state: &AppState, user_id: &str) -> Result<()> {
+    // No users row ⇒ never real: a stale box row (phantom minted for a project id) must not
+    // get a container back, whatever asked for it.
+    if state.db.user(user_id)?.is_none() {
+        let _ = state.db.finish_wake_job(user_id);
+        state
+            .set_box_state(user_id, BoxState::Error, Some("no such user"))
+            .await;
+        return Err(anyhow!(
+            "start_box: {user_id} has no users row; not creating a box"
+        ));
+    }
     let mut sb = match state.db.user_box(user_id)? {
         Some(sb) => sb,
         None => {

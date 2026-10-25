@@ -561,9 +561,16 @@ const ETC_SEED_MARKER: &str = ".arbos-seed-image";
 /// First boot (no `passwd` yet): the whole `/etc`. Later: everything except the box-owned
 /// account files, with the image-owned trees replaced exactly (#1708: the pi-ext seed under
 /// `/etc/arbos` stayed at the first image's version for the life of the box).
-pub fn etc_refresh_script(first_boot: bool) -> String {
+pub fn etc_refresh_script(first_boot: bool, image: &str) -> String {
+    // The marker is written here, by the seed container's root: the persisted /etc is
+    // root-owned and the relay process (user `arbos`) cannot write into it (05:10 UTC outage:
+    // every recreate died on that write after the old container was already gone).
+    let mark = format!(
+        "printf '%s\\n' '{}' > /seed/{ETC_SEED_MARKER}",
+        image.replace('\'', "")
+    );
     if first_boot {
-        return "set -e; cp -a /etc/. /seed/".to_owned();
+        return format!("set -e; cp -a /etc/. /seed/; {mark}");
     }
     let keep: Vec<String> = ETC_BOX_OWNED
         .iter()
@@ -578,7 +585,7 @@ pub fn etc_refresh_script(first_boot: bool) -> String {
         .map(|t| format!("rm -rf /seed/{t}; [ -e /etc/{t} ] && cp -a /etc/{t} /seed/{t} || true"))
         .collect();
     format!(
-        "set -e; mkdir -p /tmp/keep; {keep}; {trees}; cp -a /etc/. /seed/; {restore}",
+        "set -e; mkdir -p /tmp/keep; {keep}; {trees}; cp -a /etc/. /seed/; {restore}; {mark}",
         keep = keep.join("; "),
         trees = trees.join("; "),
         restore = restore.join("; "),
@@ -613,10 +620,9 @@ async fn seed_etc(mnt: &Path, image: &str) -> Result<()> {
         "sh".into(),
         image.into(),
         "-c".into(),
-        etc_refresh_script(first_boot),
+        etc_refresh_script(first_boot, image),
     ])
     .await?;
-    std::fs::write(&marker, format!("{image}\n"))?;
     tracing::info!(image, first_boot, mnt = %mnt.display(), "sandbox /etc seeded from the image");
     Ok(())
 }
@@ -1406,8 +1412,17 @@ mod tests {
 
     #[test]
     fn etc_refresh_keeps_accounts_and_replaces_image_trees() {
-        assert_eq!(etc_refresh_script(true), "set -e; cp -a /etc/. /seed/");
-        let s = etc_refresh_script(false);
+        let first = etc_refresh_script(true, "img:1");
+        assert!(first.starts_with("set -e; cp -a /etc/. /seed/; printf"));
+        assert!(
+            first.ends_with("'img:1' > /seed/.arbos-seed-image"),
+            "{first}"
+        );
+        let s = etc_refresh_script(false, "img:1");
+        assert!(
+            s.ends_with("> /seed/.arbos-seed-image"),
+            "marker written by the seed container's root, last"
+        );
         assert!(s.contains("cp -a /seed/passwd /tmp/keep/passwd"));
         assert!(s.contains("cp -a /tmp/keep/group /seed/group"));
         assert!(s.contains("rm -rf /seed/arbos; [ -e /etc/arbos ] && cp -a /etc/arbos /seed/arbos"));
