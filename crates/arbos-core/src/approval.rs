@@ -579,9 +579,49 @@ fn bare_truncate_target<'a>(words: &[&'a str]) -> Option<&'a str> {
 /// `rsync --delete` act on the repository / destination; `mv … /dev/null` on its sources;
 /// Python `os.remove`/`shutil.rmtree` cannot be read statically and count as anywhere.
 pub fn delete_targets(command: &str) -> Option<PathClass> {
+    delete_targets_with(command, &|_| true)
+}
+
+/// Whether a path on the box is an existing, non-empty file. agentd passes a real `stat`; the
+/// pure form (`delete_targets`) assumes yes. Only the truncation idioms consult it: `: > f` on
+/// a file that does not exist (or is empty) creates it and deletes nothing (#1719).
+pub type FileHasContent<'a> = &'a dyn Fn(&str) -> bool;
+
+/// Words of a non-existence guard in the same command: `[ ! -e f ]`, `[ ! -f f ]`,
+/// `[[ ! -e f ]]`, `test ! -e f`, `test ! -f f` — the path that must be absent.
+fn absence_guard<'a>(words: &[&'a str]) -> Option<&'a str> {
+    let head = *words.first()?;
+    if !matches!(head, "[" | "[[" | "test") {
+        return None;
+    }
+    let bang = words.iter().position(|w| *w == "!")?;
+    let op = *words.get(bang + 1)?;
+    if !matches!(op, "-e" | "-f" | "-s" | "-a") {
+        return None;
+    }
+    words.get(bang + 2).copied()
+}
+
+/// The parent directory of `path` (`/a/b/c.txt` → `/a/b`).
+fn parent_dir(path: &str) -> &str {
+    match path.rfind('/') {
+        Some(0) => "/",
+        Some(i) => &path[..i],
+        None => "",
+    }
+}
+
+/// `delete_targets` with a real view of the box: truncation idioms count as deletes only when
+/// the file exists with content, is not guarded by `[ ! -e f ]` / `test ! -e f` in the same
+/// command, and its parent is not created by a `mkdir -p` in the same command.
+pub fn delete_targets_with(command: &str, has_content: FileHasContent<'_>) -> Option<PathClass> {
     let mut cwd = WORKSPACE_ROOT.to_owned();
     let mut widest: Option<PathClass> = None;
     let mut pipeline_paths: Vec<String> = Vec::new();
+    // Truncation idioms, decided at the end: (resolved path, raw word).
+    let mut truncations: Vec<(String, String)> = Vec::new();
+    let mut guarded_absent: Vec<String> = Vec::new();
+    let mut made_dirs: Vec<String> = Vec::new();
     let note = |widest: &mut Option<PathClass>, class: PathClass| {
         *widest = Some(widest.map_or(class, |c| c.max(class)));
     };
@@ -764,10 +804,24 @@ pub fn delete_targets(command: &str) -> Option<PathClass> {
                 }
             }
             "cp" => {
-                // `cp /dev/null f` empties f.
+                // `cp /dev/null f` empties f — a truncation idiom, decided below.
                 let args = plain_args(&rest);
                 if args.first().is_some_and(|s| s == "/dev/null") {
-                    classify_all(&mut widest, &args[1..]);
+                    for t in &args[1..] {
+                        truncations.push((resolve_path(&cwd, t), t.clone()));
+                    }
+                }
+            }
+            "mkdir" => {
+                for d in plain_args(&rest) {
+                    made_dirs.push(resolve_path(&cwd, &d));
+                }
+            }
+            "[" | "[[" | "test" => {
+                let mut all: Vec<&str> = vec![head];
+                all.extend(rest.iter().copied());
+                if let Some(g) = absence_guard(&all) {
+                    guarded_absent.push(resolve_path(&cwd, g));
                 }
             }
             _ => {}
@@ -776,12 +830,24 @@ pub fn delete_targets(command: &str) -> Option<PathClass> {
             let mut all: Vec<&str> = vec![head];
             all.extend(rest.iter().copied());
             if let Some(t) = bare_truncate_target(&all) {
-                note(&mut widest, classify_path(&resolve_path(&cwd, t)));
+                truncations.push((resolve_path(&cwd, t), t.to_owned()));
             }
         }
         if head != "find" {
             pipeline_paths.clear();
         }
+    }
+    for (path, _raw) in truncations {
+        if guarded_absent.contains(&path) {
+            continue;
+        }
+        if made_dirs.iter().any(|d| *d == parent_dir(&path)) {
+            continue;
+        }
+        if !has_content(&path) {
+            continue;
+        }
+        note(&mut widest, classify_path(&path));
     }
     widest
 }
@@ -805,7 +871,12 @@ pub fn rm_targets(command: &str) -> Option<(PathClass, bool)> {
 /// card carries the path class so a standing grant can cover it (#1544, #1712). The regex
 /// rules (force-push, DROP TABLE, cloud deletes, …) follow.
 pub fn classify_shell(command: &str) -> Option<RiskMatch> {
-    if let Some(class) = delete_targets(command) {
+    classify_shell_with(command, &|_| true)
+}
+
+/// `classify_shell` with the box's view of which files exist with content (#1719).
+pub fn classify_shell_with(command: &str, has_content: FileHasContent<'_>) -> Option<RiskMatch> {
+    if let Some(class) = delete_targets_with(command, has_content) {
         if class != PathClass::Scratch {
             return Some(RiskMatch {
                 class: FILE_DELETE,
@@ -852,6 +923,16 @@ fn connector_subject(args: &Value) -> Option<String> {
 /// Flag a tool call (name + JSON args) that is on the risky list. Reads, searches, drafts and
 /// box-local edits return `None`.
 pub fn classify_tool(tool: &str, args: &Value) -> Option<RiskMatch> {
+    classify_tool_with(tool, args, &|_| true)
+}
+
+/// `classify_tool` with the box's view of which files exist with content (#1719): agentd,
+/// which runs on the box, passes a `stat`.
+pub fn classify_tool_with(
+    tool: &str,
+    args: &Value,
+    has_content: FileHasContent<'_>,
+) -> Option<RiskMatch> {
     if NOT_RISKY_TOOLS.contains(&tool) {
         return None;
     }
@@ -861,7 +942,7 @@ pub fn classify_tool(tool: &str, args: &Value) -> Option<RiskMatch> {
             .or_else(|| args.get("cmd"))
             .and_then(Value::as_str)
             .unwrap_or("");
-        return classify_shell(cmd);
+        return classify_shell_with(cmd, has_content);
     }
     let is_connector = tool == "connector_call";
     let connector_subject = if is_connector {
@@ -1140,6 +1221,14 @@ mod tests {
             ("cp /dev/null /work/p/app.log", Some(Workspace)),
             ("echo -n '' > /work/p/app.log", Some(Workspace)),
             ("echo hello > /work/p/notes.txt", None),
+            // #1719: create-an-empty-file idioms are not deletes — guarded by `[ ! -e f ]`,
+            // or the parent made by `mkdir -p` in the same command.
+            ("cd /work/p && D=lt-b8 && mkdir -p $D && ls -A $D && [ ! -e $D/count.txt ] && : > $D/count.txt && for i in $(seq 1 40); do echo $i >> $D/count.txt; sleep 3; done", None),
+            ("[ ! -e /work/p/app.log ] && : > /work/p/app.log", None),
+            ("test ! -e /work/p/app.log && > /work/p/app.log", None),
+            ("[[ ! -f /work/p/app.log ]] && true > /work/p/app.log", None),
+            ("mkdir -p /work/p/out && : > /work/p/out/run.log", None),
+            ("mkdir -p out && cp /dev/null out/run.log", None),
             ("cargo build > /work/tmp/build.log 2>&1", None),
             ("ls > /dev/null", None),
             // git: clean -f, checkout -- / ., restore, reset --hard, stash drop.
@@ -1191,6 +1280,32 @@ mod tests {
                 .expect("force push")
                 .path_class,
             None
+        );
+        // With the box's view (#1719): a truncation of a file that does not exist, or is
+        // empty, creates it — no card; the same idiom on a file with content is a delete.
+        let missing = |_: &str| false;
+        for cmd in [
+            ": > /work/p/app.log",
+            "> /work/p/app.log",
+            "cat /dev/null > /work/p/app.log",
+            "cp /dev/null /work/p/app.log",
+        ] {
+            assert_eq!(
+                classify_shell_with(cmd, &missing),
+                None,
+                "{cmd} on a missing file"
+            );
+        }
+        let present = |p: &str| p == "/work/p/app.log";
+        assert_eq!(
+            classify_shell_with(": > /work/p/app.log", &present).and_then(|h| h.path_class),
+            Some(Workspace)
+        );
+        assert_eq!(classify_shell_with(": > /work/p/other.log", &present), None);
+        // The view never softens a real delete.
+        assert_eq!(
+            classify_shell_with("rm -rf /work/p/build", &missing).and_then(|h| h.path_class),
+            Some(Workspace)
         );
     }
 
