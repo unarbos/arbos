@@ -261,6 +261,10 @@ WorkingDirectory=$DATA_DIR
 ExecStart=/usr/local/bin/arbos-relay serve
 Restart=always
 RestartSec=2
+# Every client room websocket is one Caddy -> relay loopback socket. systemd's default soft limit is 1024;
+# the relay hit it on 2026-10-25 02:00 UTC (975 ESTAB + db + listener) and accept() failed with EMFILE for
+# 12 min — new sessions 502, chats empty, healthz still 200 on kept-alive connections. 65536 soft+hard.
+LimitNOFILE=65536
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
