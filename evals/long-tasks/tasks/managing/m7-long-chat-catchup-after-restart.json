@@ -1,6 +1,6 @@
 {
   "id": "m7-long-chat-catchup-after-restart",
-  "lane": "a",
+  "lane": "e",
   "category": "managing",
   "title": "Long chat survives a box restart: facts from 30 turns ago and the running thread are intact",
   "turns": [
