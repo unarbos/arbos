@@ -442,13 +442,34 @@ class GitHub:
         p = re.sub(r"/heads/[^/]+$", "/heads/<branch>", p)
         return p
 
+    # Budget guard (2026-10-25 15:1x, the shared PAT at 0/5000 with Jacob's P0 gating): below BUDGET_FLOOR
+    # remaining, only merges and the gate's branch writes go out; reads and comments wait for the reset. The
+    # remaining count is logged per call while low so the consumer of the budget is visible.
+    BUDGET_FLOOR = 500
+    ESSENTIAL = ("/merges", "/git/refs", "/git/commits", "/actions/workflows/ci.yml/dispatches")
+
     def api(self, method: str, path: str, **kw: Any) -> Any:
         url = path if path.startswith("http") else f"{GITHUB_API}{path}"
         shape = f"{method} {self.endpoint_shape(url)}"
         row = self.ledger.setdefault(shape, [0, 0])
+        low = self.rate_remaining is not None and self.rate_remaining < self.BUDGET_FLOOR
+        essential = method != "GET" and any(seg in url for seg in self.ESSENTIAL)
+        if low and not essential:
+            if not self.ledger.get("_budget_refusals"):
+                self.ledger["_budget_refusals"] = [0, 0]
+                log(f"GitHub budget guard: {self.rate_remaining} remaining < {self.BUDGET_FLOOR}; refusing non-essential calls until the reset (merges and gate writes still go out)")
+            self.ledger["_budget_refusals"][0] += 1
+            raise HttpError(429, f"budget guard: {self.rate_remaining} remaining", url)
         if method != "GET":
             row[0] += 1
-            return http_json(method, url, headers=self.h, **kw)
+            status, headers, body = http(method, url, headers=self.h, **kw)
+            with contextlib.suppress(ValueError, TypeError):
+                self.rate_remaining = int(headers.get("x-ratelimit-remaining", ""))
+            if low:
+                log(f"GitHub call while low: {shape} → remaining {self.rate_remaining}")
+            if status == 204 or not body:
+                return None
+            return json.loads(body)
         cached = self.etags.get(url)
         hdrs = dict(self.h)
         if cached and time.time() - cached.get("at", 0) < self.ETAG_TTL_S:
@@ -465,6 +486,8 @@ class GitHub:
         row[0] += 1
         with contextlib.suppress(ValueError, TypeError):
             self.rate_remaining = int(headers.get("x-ratelimit-remaining", ""))
+        if self.rate_remaining is not None and self.rate_remaining < self.BUDGET_FLOOR * 2:
+            log(f"GitHub call: {shape} → remaining {self.rate_remaining}")
         if status == 204 or not body:
             return None
         data = json.loads(body)
