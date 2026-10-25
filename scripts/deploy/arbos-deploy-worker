@@ -586,6 +586,20 @@ finish_roll() {
     rm -f "$STATE/agentd.rolling" "$QUEUE/agentd.rolling"
     event agentd "$sha" deployed "snapshot $snapshot on every box; real_min_sha $seen"
     log "agentd: deployed — real_min_sha $seen contains $sha, snapshot $snapshot everywhere"
+    # #1708: every box must also RUN this commit's pi-ext seed (machine.agentd.seed_sha from its
+    # hello). A box whose persisted /etc kept an older seed is named here, loudly.
+    local stale
+    stale="$(admin_users | python3 -c '
+import sys, json
+sha = sys.argv[1]
+for u in json.load(sys.stdin):
+    a = ((u.get("machine") or {}).get("agentd") or {})
+    if a.get("image") and a.get("seed_sha") and not (sha.startswith(a["seed_sha"]) or a["seed_sha"].startswith(sha)):
+        print(f"{u[\"id\"]}:{a[\"seed_sha\"][:8]}")' "$sha" 2>/dev/null | tr '\n' ' ')"
+    if [[ -n "$stale" ]]; then
+      event agentd "$sha" seed_stale_in_boxes "boxes running an older pi-ext seed than $sha: $stale"
+      log "agentd: WARNING — boxes still run an older pi-ext seed (persisted /etc?): $stale"
+    fi
     return 0
   fi
   printf 'sha=%s\nsnapshot=%s\nat=%s\n' "$sha" "$snapshot" "$(date -u +%s)" > "$STATE/agentd.rolling"

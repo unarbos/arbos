@@ -1786,6 +1786,9 @@ pub struct BoxHelloBody {
     /// Sandbox image version (`ARBOS_IMAGE_VERSION`).
     #[serde(default)]
     pub image: Option<String>,
+    /// `.source-sha` of the pi-ext seed under the box's `/etc` (#1708): what its projects run.
+    #[serde(default)]
+    pub seed_sha: Option<String>,
 }
 
 /// One project as the box sees it: settings, chats, and the pushes queued for it.
@@ -1827,12 +1830,13 @@ pub async fn box_hello(
     let Principal::Box { user_id } = &principal else {
         return Err((StatusCode::FORBIDDEN, "box only".into()));
     };
-    tracing::info!(user = %user_id, version = ?b.version, sha = ?b.sha, image = ?b.image, "box hello");
+    tracing::info!(user = %user_id, version = ?b.version, sha = ?b.sha, image = ?b.image, seed_sha = ?b.seed_sha, "box hello");
     let _ = state.db.set_box_agentd(
         user_id,
         b.sha.as_deref(),
         b.version.as_deref(),
         b.image.as_deref(),
+        b.seed_sha.as_deref(),
     );
     if b.proto.unwrap_or(arbos_core::PROTO_VERSION) != arbos_core::PROTO_VERSION {
         return Err((
