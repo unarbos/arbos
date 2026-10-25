@@ -16,6 +16,16 @@ pub fn spinner(theme: &Theme, cx: &App) -> Div {
         .bg(Theme::with_alpha(theme.accent, 0.35 + 0.65 * phase))
 }
 
+/// Grok Bot's activity spinner — the blue eight-spoke dial that steps round
+/// while an agent works (measured 15 pt, `#6098F5`-ish, on the Coding row of
+/// `grok-right-pane-details.png`). One step per eighth of the clock's period.
+pub fn activity_spinner(size: f32, theme: &Theme, cx: &App) -> gpui::Svg {
+    let step = (PulseClock::ramp(cx, 800) * 8.0).floor() / 8.0;
+    crate::ui::icons::icon("spinner", size, theme.accent).with_transformation(
+        gpui::Transformation::rotate(gpui::radians(step * std::f32::consts::TAU)),
+    )
+}
+
 /// The chat's single working indicator: a pulsing dot that breathes a short
 /// shimmer line beside it. Amber while the message is queued for a sleeping
 /// box. No words.

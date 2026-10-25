@@ -2801,6 +2801,129 @@ impl Machine {
     }
 }
 
+/// The box as `GET /machine/debug` reports it — the relay's view plus the
+/// box's own `GET /box/state` (image, uptime, load, memory, disk, every
+/// workspace with its turn lock). The agent pane's **Computer** tab
+/// ([feedback agent-pane-details-tab-2026-10-24]) reads this; nothing else.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BoxReport {
+    pub fetched_at: u64,
+    /// `relay.state`: awake / waking / asleep / stopped / error.
+    pub state: String,
+    pub awake_for_s: Option<u64>,
+    /// `relay.agentd.image` → the image the box booted (e.g. `arbos-agent-0.1.114`).
+    pub image: Option<String>,
+    /// `box.reachable`: the box answered `/box/state`; the rest is `None` when it did not.
+    pub reachable: bool,
+    pub unreachable_reason: Option<String>,
+    pub uptime_s: Option<u64>,
+    /// 1-minute load average.
+    pub load_1m: Option<f64>,
+    pub mem_total_mb: Option<u64>,
+    pub mem_available_mb: Option<u64>,
+    pub disk_total_mb: Option<u64>,
+    pub disk_available_mb: Option<u64>,
+    pub workspaces: Vec<BoxWorkspace>,
+}
+
+/// One agent's workspace on the box.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BoxWorkspace {
+    pub project_id: Id,
+    pub name: String,
+    pub healthy: bool,
+    /// A turn is running right now (`turn.running`).
+    pub running: bool,
+    /// How long the current turn has run (`turn.current.elapsed_ms`).
+    pub elapsed_ms: Option<u64>,
+    pub tool_calls: Option<u64>,
+}
+
+impl BoxReport {
+    /// `GET /machine/debug` → the report. Lenient: every field is optional on
+    /// the wire (older relays, an unreachable box), nothing here fails.
+    pub fn from_debug(v: &serde_json::Value, now: u64) -> BoxReport {
+        let relay = &v["relay"];
+        let on_box = &v["box"];
+        let st = &on_box["state"];
+        let mut out = BoxReport {
+            fetched_at: now,
+            state: relay["state"].as_str().unwrap_or("unknown").to_owned(),
+            awake_for_s: relay["awake_for_s"].as_u64(),
+            image: relay["agentd"]["image"]
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| st["image_version"].as_str().map(str::to_owned)),
+            reachable: on_box["reachable"].as_bool().unwrap_or(false),
+            unreachable_reason: on_box["error"].as_str().map(str::to_owned),
+            ..Default::default()
+        };
+        if !out.reachable {
+            return out;
+        }
+        out.uptime_s = st["uptime_s"].as_u64();
+        out.load_1m = st["load"].get(0).and_then(|l| l.as_f64());
+        out.mem_total_mb = st["memory_mb"]["total"].as_u64();
+        out.mem_available_mb = st["memory_mb"]["available"].as_u64();
+        out.disk_total_mb = st["disk"]["total_mb"].as_u64();
+        out.disk_available_mb = st["disk"]["available_mb"].as_u64();
+        out.workspaces = st["workspaces"]
+            .as_array()
+            .map(|ws| {
+                ws.iter()
+                    .map(|w| BoxWorkspace {
+                        project_id: w["project_id"].as_str().unwrap_or_default().to_owned(),
+                        name: w["name"].as_str().unwrap_or_default().to_owned(),
+                        healthy: w["healthy"].as_bool().unwrap_or(false),
+                        running: w["turn"]["running"].as_bool().unwrap_or(false),
+                        elapsed_ms: w["turn"]["current"]["elapsed_ms"].as_u64(),
+                        tool_calls: w["turn"]["current"]["tool_calls"].as_u64(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        out
+    }
+
+    /// The workspace of one agent, if the box lists it.
+    pub fn workspace(&self, project_id: &str) -> Option<&BoxWorkspace> {
+        self.workspaces.iter().find(|w| w.project_id == project_id)
+    }
+
+    /// Workspaces with a turn running right now — the box's running jobs.
+    pub fn running(&self) -> impl Iterator<Item = &BoxWorkspace> {
+        self.workspaces.iter().filter(|w| w.running)
+    }
+}
+
+/// "12.4 GB" / "840 MB" from megabytes.
+pub fn size_mb(mb: u64) -> String {
+    if mb >= 1024 {
+        let gb = mb as f64 / 1024.0;
+        if gb >= 10.0 {
+            format!("{gb:.0} GB")
+        } else {
+            format!("{gb:.1} GB")
+        }
+    } else {
+        format!("{mb} MB")
+    }
+}
+
+/// "3 d 4 h" / "2 h 10 m" / "45 s" from seconds.
+pub fn duration_s(s: u64) -> String {
+    let (d, h, m) = (s / 86_400, (s % 86_400) / 3600, (s % 3600) / 60);
+    if d > 0 {
+        format!("{d} d {h} h")
+    } else if h > 0 {
+        format!("{h} h {m} m")
+    } else if m > 0 {
+        format!("{m} m")
+    } else {
+        format!("{s} s")
+    }
+}
+
 /// Settings → Account: who is signed in and what is left (`GET /me`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AccountView {

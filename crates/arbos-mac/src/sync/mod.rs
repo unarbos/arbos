@@ -28,9 +28,9 @@ use crate::model::{
     Voice,
 };
 use crate::model::{
-    Attachment, BoxState, ChannelsView, Chat, ConnectorsView, DeviceView, Effort, Id, Link,
-    LinkState, LocalView, Machine, Message, NewSecret, Project, ProjectDocView, ProjectSecrets,
-    Routine, RoutineRun, RoutineTrigger, SecretsView, Skill,
+    Attachment, BoxReport, BoxState, ChannelsView, Chat, ConnectorsView, DeviceView, Effort, Id,
+    Link, LinkState, LocalView, Machine, Message, NewSecret, Project, ProjectDocView,
+    ProjectSecrets, Routine, RoutineRun, RoutineTrigger, SecretsView, Skill,
 };
 
 /// Something the source learned; the UI applies it to its mirror.
@@ -284,6 +284,8 @@ pub enum SyncEvent {
         project_id: Id,
         routines: Vec<Routine>,
     },
+    /// The box as `GET /machine/debug` reports it (the agent pane's Computer tab).
+    BoxReport(BoxReport),
     /// Run history of one routine, newest first.
     RoutineRuns {
         routine_id: Id,
@@ -938,6 +940,8 @@ pub enum ClientCommand {
     },
     /// Settings → This Mac opened or needs a refresh.
     LocalRefresh,
+    /// The agent pane opened (or its Computer tab was picked): fetch `GET /machine/debug`.
+    MachineDebugRefresh,
     /// Per-device "Allow reads without asking".
     LocalSetAllowReads {
         device_id: Id,

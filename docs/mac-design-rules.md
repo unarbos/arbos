@@ -425,6 +425,37 @@ Pinned by `profiles::chrome_tests` (`the_pane_is_the_chats_surface_in_both_appea
 `the_constants_are_groks`, `the_share_and_close_discs_land_on_groks_pixels`,
 `cards_are_inset_and_labelled_at_groks_margins`) and `pane::tests::every_kind_lays_out_hero_then_pill_then_options`.
 
+### Agent pane: Details · Library · Computer (Jacob 2026-10-24, [feedback agent-pane-details-tab-2026-10-24])
+
+**The agent pane's tabs are Grok Bot's — Details · Library · Computer — and
+the first tab shows live content first.** Items 23–25 of Jacob's list:
+Grok shows the name over "Add a label"; its Details tab opens with the
+coding project (spinner while the bot works) and the routines with their
+switches; ours opened with Name / Handle / Description rows and fine print.
+This supersedes the 2026-10-22 tab names (Profile · Settings · Library) for
+the Mac agent pane; the structure every pane shares — hero, then the tab
+pill, then the options — is unchanged, and every option the old tabs held is
+still on the pane. The iPhone agent pane keeps its three tabs until its own
+item lands (the per-kind "same tabs on both platforms" rule then applies).
+
+| Item | Grok Bot (measured, `grok-right-pane-details.png`) | Arbos (`profiles/agent.rs`) |
+|---|---|---|
+| Subtitle | "Add a label", 12 pt muted, under the name | the agent's **description is its label**: shown under the name (`HERO_SUBTITLE` 12, `text_muted`), `LABEL_PLACEHOLDER` "Add a label" in `text_faint` while empty (owner); a click edits it in place (the hero's `label_editor`, Done / Return commits). Someone else's agent: its label, else "Run by @owner". "working" is no longer a subtitle — the Coding row spins |
+| Tab pill | capsule **26** tall, label **13** pt, 9 pt beside it, 2 between capsules | `TAB_HEIGHT` 26 / `TEXT_SMALL` / `TAB_PAD_X` 9 / `TAB_GAP` 2 (shared `tab_bar`; was 30 / body / 14 / 4) |
+| Details, first | "Coding": the project with a 15 pt blue spinner, 41 pt row | **Coding** card: the agent's workspace — `cards::activity_spinner` (`CODING_SPINNER` 15, `accent`, eight spokes stepping every 100 ms) while a turn runs, the `code` glyph when idle; subtitle "Working · 42 s · 7 tool calls" / "Idle" / "Machine asleep" (`coding_status`); a click opens the Computer tab |
+| Details, second | "Routines": name over schedule, a 32 × 20 switch | **Routines** card (own agents): one `kit::row` per routine, subtitle "trigger · next in …" / "Paused" (`routine_status`), a `glass::switch` that flips `routine_set_enabled`; "No routines yet" when empty. Routines load when the pane opens (`RoutinesRefresh`) |
+| Details, then | — | **Settings** (Model · Reasoning · Voice, the hoverpick rows; Model alone on someone else's agent) → **Who may message X** (the grant rows + "Give a person access…") → **Profile**: one "Edit profile" row (pencil tile) that unfolds Name · Handle · Description (`Shell.agent_edit_open`); someone else's agent shows the three rows plain. No footnotes |
+| Library | Grok's second tab | unchanged (images · files · links) |
+| Computer | Grok's third tab (the bot's computer) | the agent's **box**: **Machine** card — Status (dot + "Awake · 5 h 12 m"), Where it runs, Machine spec, Image, Spend today (`GET /machine`); **Resources** — Disk / Memory "x free of y", Load, Up for; **Running now** — every workspace with a turn running (spinner, name, "42 s · 7 tool calls") or "Nothing running · N workspaces". The last two come from the box's own `/box/state` through **`GET /machine/debug`** (`ClientCommand::MachineDebugRefresh` → `SyncEvent::BoxReport` → `AppState.box_report`), fetched when the pane opens and when the tab is picked; an asleep box says "The machine did not answer · <reason>". Someone else's agent: Status + Machine class from its project |
+| Delete agent | — | not on the pane (see above) |
+
+Order pinned by `agent::tests` (`details_puts_live_content_first_and_the_edit_fields_last`,
+`computer_order_follows_the_report`, `coding_status_…`, `routine_status_…`,
+`box_report_reads_the_relay_and_the_box`) and `pane::tests::kinds_keep_their_own_tab_sets`.
+Rig: `ARBOS_OPEN_PROFILE=agent` (Details), `agent:library`, `agent:computer`;
+the fixture answers `MachineDebugRefresh` with an awake 4-core box and one
+workspace per agent (the streaming one mid-turn).
+
 ## Pane animations (Jacob 2026-10-24, [feedback right-pane-slide-2026-10-24], [feedback sidebar-slide-2026-10-24])
 
 **The right info pane and the left chat sidebar slide; they never pop.**

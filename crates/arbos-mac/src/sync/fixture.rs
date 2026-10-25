@@ -29,14 +29,14 @@ use crate::model::{
 use super::doc::ChatDoc;
 use super::{ClientCommand, PictureSource, SyncEvent, SyncSource};
 use crate::model::{
-    new_id, now_ms, ApprovalRisk, ApprovalState, Attachment, AttachmentKind, BoxState,
-    ChannelBinding, ChannelPairing, ChannelPlatform, ChannelPlatformState, ChannelsView, Chat,
-    ChatKind, ChoiceOption, Connector, ConnectorAction, ConnectorProvider, ConnectorStatus,
-    ConnectorsView, DeviceView, Effort, FieldKind, FormField, Id, Link, LocalDevice, LocalView,
-    Message, MessageStatus, Part, Project, QuestionState, Role, Routine, RoutineRun,
-    RoutineRunStatus, RoutineTrigger, Secret, SecretActivity, SecretAgent, SecretDirector,
-    SecretRequest, SecretScope, SecretsView, ServerChannel, ServerInfo, Skill, StatusKind,
-    ToolCall, ToolStatus, TurnKind, Widget,
+    new_id, now_ms, ApprovalRisk, ApprovalState, Attachment, AttachmentKind, BoxReport, BoxState,
+    BoxWorkspace, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelPlatformState,
+    ChannelsView, Chat, ChatKind, ChoiceOption, Connector, ConnectorAction, ConnectorProvider,
+    ConnectorStatus, ConnectorsView, DeviceView, Effort, FieldKind, FormField, Id, Link,
+    LocalDevice, LocalView, Message, MessageStatus, Part, Project, QuestionState, Role, Routine,
+    RoutineRun, RoutineRunStatus, RoutineTrigger, Secret, SecretActivity, SecretAgent,
+    SecretDirector, SecretRequest, SecretScope, SecretsView, ServerChannel, ServerInfo, Skill,
+    StatusKind, ToolCall, ToolStatus, TurnKind, Widget,
 };
 
 pub const STREAM_FRAME_MS: u64 = arbos_core::STREAM_COMMIT_MS;
@@ -1926,6 +1926,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             emit_channels(shared);
         }
         ClientCommand::LocalRefresh => emit_local(shared),
+        ClientCommand::MachineDebugRefresh => emit_box_report(shared),
         ClientCommand::LocalSetAllowReads { device_id, allow } => {
             if let Some(d) = shared
                 .local
@@ -2491,6 +2492,72 @@ fn seed_connectors() -> ConnectorsView {
         items,
         loaded: true,
     }
+}
+
+/// The Computer tab's report, scripted from the fixture's machine: an awake box with the
+/// fixture's spec, one workspace per agent project, the streaming one mid-turn.
+fn emit_box_report(shared: &Shared) {
+    let machine = shared.machine.lock().unwrap().clone();
+    let streaming: Vec<Id> = shared
+        .running
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, on)| on.load(Ordering::SeqCst))
+        .map(|(chat, _)| chat.clone())
+        .collect();
+    let chats = shared.chats.lock().unwrap().clone();
+    // `ARBOS_FIXTURE_WORKING=<n>`: the first n agents are mid-turn here too.
+    let working_n = fixture_working_count();
+    let state = match machine.shown_state() {
+        MachineState::Awake => "awake",
+        MachineState::Waking => "waking",
+        MachineState::Stopped => "stopped",
+        MachineState::Error => "error",
+        MachineState::Asleep | MachineState::Unknown => "asleep",
+    };
+    let reachable = machine.shown_state() == MachineState::Awake;
+    let workspaces: Vec<BoxWorkspace> = shared
+        .projects
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|p| !p.is_people())
+        .enumerate()
+        .map(|(i, p)| {
+            let running = i < working_n
+                || streaming
+                    .iter()
+                    .any(|c| chats.iter().any(|ch| &ch.id == c && ch.project_id == p.id));
+            BoxWorkspace {
+                project_id: p.id.clone(),
+                name: p.name.clone(),
+                healthy: true,
+                running,
+                elapsed_ms: running.then_some(42_000),
+                tool_calls: running.then_some(7),
+            }
+        })
+        .collect();
+    let report = BoxReport {
+        fetched_at: now_ms(),
+        state: state.into(),
+        awake_for_s: reachable.then_some(5 * 3600 + 12 * 60),
+        image: machine
+            .image
+            .clone()
+            .or_else(|| Some("arbos-agent-0.1.114".into())),
+        reachable,
+        unreachable_reason: (!reachable).then(|| "box has no url yet (asleep or starting)".into()),
+        uptime_s: reachable.then_some(5 * 3600 + 12 * 60),
+        load_1m: reachable.then_some(0.42),
+        mem_total_mb: reachable.then_some(8 * 1024),
+        mem_available_mb: reachable.then_some(5_300),
+        disk_total_mb: reachable.then_some(10 * 1024),
+        disk_available_mb: reachable.then_some(6_900),
+        workspaces: if reachable { workspaces } else { Vec::new() },
+    };
+    let _ = shared.events.send(SyncEvent::BoxReport(report));
 }
 
 fn emit_routines(shared: &Shared, project_id: &str) {

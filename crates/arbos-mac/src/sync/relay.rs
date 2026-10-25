@@ -51,10 +51,11 @@ use super::dto::{
 use super::store::{self, Store};
 use super::{ClientCommand, PictureSource, PictureTarget, SyncEvent, SyncSource};
 use crate::model::{
-    new_id, now_ms, AccountView, Attachment, AttachmentKind, BoxState, Call, CallEnded, CallLeft,
-    CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView, Chat, Effort, Id,
-    Link, LinkState, Machine, MachineState, Message, Part, Person, Project, ProjectDocView,
-    ProjectSecrets, Reachable, Role, Routine, RoutineRun, Sender, ServerInfo, ThreadInfo,
+    new_id, now_ms, AccountView, Attachment, AttachmentKind, BoxReport, BoxState, Call, CallEnded,
+    CallLeft, CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView, Chat,
+    Effort, Id, Link, LinkState, Machine, MachineState, Message, Part, Person, Project,
+    ProjectDocView, ProjectSecrets, Reachable, Role, Routine, RoutineRun, Sender, ServerInfo,
+    ThreadInfo,
 };
 use crate::update;
 
@@ -6789,6 +6790,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let shared = shared.clone();
             tokio::spawn(async move { refresh_local(&shared).await });
         }
+        ClientCommand::MachineDebugRefresh => {
+            let shared = shared.clone();
+            tokio::spawn(async move { refresh_machine_debug(&shared).await });
+        }
         ClientCommand::LocalSetAllowReads { device_id, allow } => {
             let shared = shared.clone();
             tokio::spawn(async move {
@@ -7125,6 +7130,22 @@ async fn refresh_routines(shared: &Arc<Shared>, project_id: &str) {
             // Gone project, people space, or older relay without routines — not a bug.
             if !format!("{err:#}").contains("HTTP 404") {
                 shared.diagnostic("routines", format!("{err:#}"));
+            }
+        }
+    }
+}
+
+/// `GET /machine/debug` → the Computer tab's report. A relay without the route (404) or an
+/// unreachable box is not a bug: the tab says so from the report's own fields.
+async fn refresh_machine_debug(shared: &Arc<Shared>) {
+    match shared.get_json("/machine/debug").await {
+        Ok(v) => {
+            let report = BoxReport::from_debug(&v, now_ms());
+            let _ = shared.events.send(SyncEvent::BoxReport(report));
+        }
+        Err(err) => {
+            if !format!("{err:#}").contains("HTTP 404") {
+                shared.diagnostic("machine-debug", format!("{err:#}"));
             }
         }
     }
