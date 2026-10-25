@@ -2638,7 +2638,7 @@ impl Agent {
                 rt.partial.trim().to_owned()
             };
             let prompt = format!(
-                "{stamp}\n{body}\n\n[Interrupted call: `{}` {cmd_hint}\nOutput so far:\n{partial}]",
+                "{stamp}\n{body}\n\n[Interrupted call: `{}` {cmd_hint}\nOutput so far (continue from here):\n{partial}]",
                 rt.tool_name
             );
             {
@@ -7489,7 +7489,7 @@ pub(crate) fn steer_stamp(running: Option<(&str, Duration)>, interrupted: bool) 
     let now = chrono_like_utc_hms();
     match running {
         Some((tool, age)) if interrupted => format!(
-            "{STEER_PREFIX} the user sent this at {now} UTC, {} s into your `{tool}` call, which was stopped so it could reach you at once. It is not late: act on it now, with the call's output so far below. This is the same turn, continued: do not call `route` again.]",
+            "{STEER_PREFIX} the user sent this at {now} UTC, {} s into your `{tool}` call. Arbos stopped that call so this could reach you at once; its process is gone, nothing of it still runs. It is not late. Act on it now: resume the interrupted work yourself from where its output (below) stops, with the change applied, and finish it; ask only if the change itself is ambiguous. When you mention timing, use the time above. This is the same turn, continued: do not call `route` again.]",
             age.as_secs()
         ),
         Some((tool, age)) => format!(
@@ -8464,8 +8464,22 @@ mod tests {
         assert!(pending.starts_with(STEER_PREFIX), "{pending}");
         assert!(pending.contains("10 s into your `bash` call"), "{pending}");
         assert!(pending.contains("use 5 seconds, not 120"), "{pending}");
-        assert!(pending.contains("Output so far:\n1\n2\n3"), "{pending}");
+        assert!(
+            pending.contains("Output so far (continue from here):\n1\n2\n3"),
+            "{pending}"
+        );
         assert!(pending.contains("do not call `route` again"), "{pending}");
+        // #1704: the model must resume the killed work toward the new target, not report it dead.
+        assert!(pending.contains("its process is gone"), "{pending}");
+        assert!(
+            pending.contains("resume the interrupted work yourself"),
+            "{pending}"
+        );
+        assert!(
+            pending.contains("ask only if the change itself is ambiguous"),
+            "{pending}"
+        );
+        assert!(pending.contains("use the time above"), "{pending}");
         assert!(!t.escalate);
         assert!(!t.stopped, "an interrupt is not a stop");
         pi.shutdown().await;
