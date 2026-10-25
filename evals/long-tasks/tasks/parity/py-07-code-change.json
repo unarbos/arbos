@@ -1,0 +1,75 @@
+{
+  "id": "py-07-code-change",
+  "lane": "b",
+  "category": "parity",
+  "categories": [
+    "parity",
+    "code-change"
+  ],
+  "title": "Fix a failing test; then a vague follow-up",
+  "parity": true,
+  "timeout_s": 900,
+  "settle_s": 12,
+  "turns": [
+    {
+      "prompt": "There is a small Python package in {D}/slugkit. Run its tests with `python3 -m unittest discover -s tests -t .` from that directory, fix the bug the failing test points at (do not change the tests), and tell me what was wrong.",
+      "seed": "mkdir -p {D}/slugkit/slugkit {D}/slugkit/tests && cd {D}/slugkit && cat > slugkit/__init__.py <<'EOF'\nimport re\n\ndef slugify(text, max_len=40):\n    \"\"\"Lowercase, words joined by single hyphens, trimmed to max_len without a trailing hyphen.\"\"\"\n    s = re.sub(r\"[^a-z0-9]+\", \"-\", text.lower()).strip(\"-\")\n    s = s[:max_len + 1]\n    return s.rstrip(\"-\")\nEOF\ncat > tests/test_slugify.py <<'EOF'\nimport unittest\nfrom slugkit import slugify\n\nclass T(unittest.TestCase):\n    def test_basic(self):\n        self.assertEqual(slugify(\"Hello, World!\"), \"hello-world\")\n    def test_max_len(self):\n        self.assertEqual(slugify(\"abcdefghij\", max_len=5), \"abcde\")\n    def test_max_len_hyphen(self):\n        self.assertEqual(slugify(\"abc defgh\", max_len=4), \"abc\")\n\nif __name__ == \"__main__\":\n    unittest.main()\nEOF\ntouch tests/__init__.py && sha256sum tests/test_slugify.py | cut -d\" \" -f1 > ../.test_sha",
+      "shape": {
+        "messages_min": 1,
+        "messages_max": 4,
+        "ack_first": true,
+        "table": false,
+        "links_min": 0,
+        "offer": false,
+        "first_bubble_max_s": 5,
+        "no_handle": true,
+        "worker_rows": 0,
+        "reply_to_ask": true
+      },
+      "verify": "cd {D}/slugkit && out=$(python3 -m unittest discover -s tests -t . 2>&1 | tail -3); echo \"SHOW $out\"; sha=$(sha256sum tests/test_slugify.py | cut -d' ' -f1); if echo \"$out\" | grep -q '^OK' && [ \"$sha\" = \"$(cat ../.test_sha)\" ]; then echo PASS; else echo \"FAIL: $out\"; fi",
+      "wait_done": true,
+      "timeout_s": 420
+    },
+    {
+      "prompt": "How does slugify handle unicode?",
+      "shape": {
+        "messages_min": 1,
+        "messages_max": 2,
+        "ack_first": false,
+        "table": false,
+        "links_min": 0,
+        "offer": false,
+        "first_bubble_max_s": 8,
+        "no_handle": true,
+        "worker_rows": 0,
+        "reply_to_ask": false
+      },
+      "judge": {
+        "criteria": "Answers from the file (names slugkit/__init__.py or the regex), one short paragraph. No tool narration."
+      },
+      "wait_done": true,
+      "timeout_s": 180
+    },
+    {
+      "prompt": "Make it better.",
+      "shape": {
+        "messages_min": 1,
+        "messages_max": 2,
+        "ack_first": false,
+        "table": false,
+        "links_min": 0,
+        "offer": false,
+        "first_bubble_max_s": 8,
+        "no_handle": true,
+        "worker_rows": 0,
+        "reply_to_ask": false,
+        "question": true
+      },
+      "judge": {
+        "criteria": "A vague ask: one clarifying question with a recommendation (what 'better' should mean), not a silent change and not three questions."
+      },
+      "wait_done": true,
+      "timeout_s": 180
+    }
+  ]
+}

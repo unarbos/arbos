@@ -1,0 +1,50 @@
+{
+  "id": "py-15-steer-mid-task",
+  "lane": "b",
+  "category": "parity",
+  "categories": [
+    "parity",
+    "mid-task-interruption"
+  ],
+  "title": "Steer a running research task after 8 s",
+  "parity": true,
+  "timeout_s": 480,
+  "settle_s": 20,
+  "turns": [
+    {
+      "prompt": "Find me the 3 best-reviewed surf schools near Santa Teresa and compare their prices.",
+      "shape": {
+        "messages_min": 3,
+        "messages_max": 8,
+        "ack_first": true,
+        "table": true,
+        "links_min": 1,
+        "offer": true,
+        "first_bubble_max_s": 5,
+        "no_handle": true,
+        "worker_rows": 0,
+        "reply_to_ask": true
+      }
+    },
+    {
+      "prompt": "Actually, only schools that offer group lessons under $70.",
+      "at_s": 8,
+      "shape": {
+        "messages_min": 1,
+        "messages_max": 3,
+        "ack_first": false,
+        "table": false,
+        "links_min": 0,
+        "offer": false,
+        "first_bubble_max_s": 5,
+        "no_handle": true,
+        "worker_rows": 0,
+        "reply_to_ask": false,
+        "steer": true
+      },
+      "judge": {
+        "criteria": "The correction is acknowledged within one short line that names what changed (group lessons under $70), and the final comparison reflects the filter. No second full comparison that ignores it."
+      }
+    }
+  ]
+}

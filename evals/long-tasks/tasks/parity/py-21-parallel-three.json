@@ -1,0 +1,67 @@
+{
+  "id": "py-21-parallel-three",
+  "lane": "b",
+  "category": "parity",
+  "categories": [
+    "parity",
+    "parallel-asks"
+  ],
+  "title": "Research, a fact and a reminder fired within two seconds",
+  "parity": true,
+  "timeout_s": 480,
+  "settle_s": 20,
+  "turns": [
+    {
+      "prompt": "Find me the 3 best-reviewed surf schools near Santa Teresa and compare their prices.",
+      "shape": {
+        "messages_min": 3,
+        "messages_max": 8,
+        "ack_first": true,
+        "table": true,
+        "links_min": 0,
+        "offer": false,
+        "first_bubble_max_s": 5,
+        "no_handle": true,
+        "worker_rows": 0,
+        "reply_to_ask": true
+      }
+    },
+    {
+      "prompt": "17 × 23?",
+      "at_s": 1,
+      "shape": {
+        "messages_min": 1,
+        "messages_max": 1,
+        "ack_first": false,
+        "table": false,
+        "links_min": 0,
+        "offer": false,
+        "first_bubble_max_s": 5,
+        "no_handle": true,
+        "worker_rows": 0,
+        "reply_to_ask": true
+      },
+      "reply_regex": "391"
+    },
+    {
+      "prompt": "Remind me in 3 minutes to stretch.",
+      "at_s": 2,
+      "shape": {
+        "messages_min": 1,
+        "messages_max": 2,
+        "ack_first": false,
+        "table": false,
+        "links_min": 0,
+        "offer": false,
+        "first_bubble_max_s": 8,
+        "no_handle": true,
+        "worker_rows": 0,
+        "reply_to_ask": true
+      },
+      "routine": {
+        "count": 1
+      }
+    }
+  ],
+  "cleanup_routines": true
+}

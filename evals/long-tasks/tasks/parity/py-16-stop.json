@@ -1,0 +1,38 @@
+{
+  "id": "py-16-stop",
+  "lane": "b",
+  "category": "parity",
+  "categories": [
+    "parity",
+    "stop"
+  ],
+  "title": "Stop a running research task",
+  "parity": true,
+  "timeout_s": 150,
+  "settle_s": 20,
+  "turns": [
+    {
+      "prompt": "Compare the three cheapest ways to host a static website, with prices.",
+      "shape": {
+        "messages_min": 1,
+        "messages_max": 3,
+        "ack_first": true,
+        "table": false,
+        "links_min": 0,
+        "offer": false,
+        "first_bubble_max_s": 5,
+        "no_handle": true,
+        "worker_rows": 0,
+        "reply_to_ask": false
+      }
+    },
+    {
+      "kind": "stop",
+      "at_s": 8,
+      "shape": {
+        "stop_within_s": 3,
+        "no_result_after": true
+      }
+    }
+  ]
+}
