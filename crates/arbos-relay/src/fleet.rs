@@ -75,7 +75,10 @@ impl Default for FleetCfg {
             evict_max_swap_gb: 20.0,
             evict_load: 100.0,
             box_cpus: 2.0,
-            box_mem_gb: 2,
+            // 3 GiB (was 2): a box with four workspaces, a Sonnet helper and Chrome reached the
+            // 2 GiB cgroup limit and the host killed the whole sandbox (#1777). 80 × 3 GiB still
+            // fits the 256 GiB sandbox budget even if every box sat at its cap.
+            box_mem_gb: 3,
             box_work_gb: 2,
             box_pids: 512,
             box_network: "arbos-boxes".into(),
@@ -962,6 +965,28 @@ pub async fn spawn_fleet_tasks(state: AppState) {
             sample_fleet(&st2, &mut last_alert).await;
         }
     });
+    let st3 = state.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(10));
+        let mut last_mem: HashMap<String, f64> = HashMap::new();
+        let mut n: u32 = 0;
+        loop {
+            tick.tick().await;
+            // Memory per box every 30 s (one `docker stats`), so a death can be read as OOM.
+            if n % 3 == 0 {
+                let stats = docker_stats().await;
+                for b in st3.db.list_boxes().unwrap_or_default() {
+                    if let Some(v) = b.sandbox_id.as_ref().and_then(|nm| stats.get(nm)) {
+                        if let Some(m) = v.get("MemUsage").and_then(Value::as_str) {
+                            last_mem.insert(b.user_id.clone(), parse_mib(m));
+                        }
+                    }
+                }
+            }
+            n = n.wrapping_add(1);
+            watch_containers(&st3, &last_mem).await;
+        }
+    });
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(60));
         loop {
@@ -994,6 +1019,140 @@ pub(crate) fn machine_ready_push() -> PushEventDto {
     PushEventDto::MachineReady(MachineReadyPayloadDto {
         message: "Your Arbos computer is ready.".into(),
     })
+}
+
+// ---- container watch (#1777) ------------------------------------------------------------------
+
+/// What `docker inspect` says about one sandbox container.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainerFate {
+    pub running: bool,
+    pub exit_code: i64,
+    pub oom_killed: bool,
+    pub gone: bool,
+}
+
+/// The one line the user sees. The host's memory-cgroup OOM killer takes the gVisor sentry
+/// (the whole box) with SIGKILL; docker does not always flag `OOMKilled` for it, so a 137 with
+/// the last sample near the cap is read as out of memory too.
+pub fn death_reason(f: &ContainerFate, last_mem_mib: Option<f64>, cap_gb: u64) -> String {
+    let near_cap = last_mem_mib.is_some_and(|m| m >= cap_gb as f64 * 1024.0 * 0.85);
+    if f.gone {
+        return "the machine's container disappeared".into();
+    }
+    if f.oom_killed || (f.exit_code == 137 && near_cap) {
+        return format!(
+            "out of memory (the machine used all of its {cap_gb} GB; close heavy tools or split the work)"
+        );
+    }
+    if f.exit_code == 137 {
+        return "the machine was killed (signal 9)".into();
+    }
+    format!("the machine stopped unexpectedly (exit {})", f.exit_code)
+}
+
+async fn inspect_fate(name: &str) -> ContainerFate {
+    match docker(&s(&[
+        "inspect",
+        "--format",
+        "{{.State.Status}} {{.State.ExitCode}} {{.State.OOMKilled}}",
+        name,
+    ]))
+    .await
+    {
+        Ok(out) => {
+            let mut it = out.split_whitespace();
+            let status = it.next().unwrap_or("");
+            ContainerFate {
+                running: status == "running",
+                exit_code: it.next().and_then(|v| v.parse().ok()).unwrap_or(-1),
+                oom_killed: it.next() == Some("true"),
+                gone: false,
+            }
+        }
+        Err(_) => ContainerFate {
+            running: false,
+            exit_code: -1,
+            oom_killed: false,
+            gone: true,
+        },
+    }
+}
+
+/// Every 10 s: a sandbox the relay believes awake or waking whose container is not running has
+/// died. Record it, tell the clients why, and restart it at once — not after the box's half-open
+/// sockets finally time out (16 minutes of silence on 2026-10-25, #1777).
+async fn watch_containers(state: &AppState, last_mem: &HashMap<String, f64>) {
+    let boxes = state.db.list_boxes().unwrap_or_default();
+    for b in boxes.into_iter().filter(|b| b.provider == "gvisor") {
+        let (st, _) = state.box_state(&b.user_id).await;
+        if !matches!(st, BoxState::Awake | BoxState::Waking) {
+            continue;
+        }
+        if state.upgrading.lock().await.contains_key(&b.user_id) {
+            continue;
+        }
+        let Some(name) = b.sandbox_id.clone() else {
+            continue;
+        };
+        let fate = inspect_fate(&name).await;
+        if fate.running {
+            continue;
+        }
+        if fate.gone && st == BoxState::Waking {
+            // A create in flight has no container yet.
+            continue;
+        }
+        let reason = death_reason(
+            &fate,
+            last_mem.get(&b.user_id).copied(),
+            state.cfg.fleet.box_mem_gb,
+        );
+        tracing::error!(user_id = %b.user_id, name, exit = fate.exit_code, oom = fate.oom_killed, gone = fate.gone, %reason, "sandbox container died; restarting");
+        let _ = state.db.fleet_event(
+            "died",
+            Some(&b.user_id),
+            &format!(
+                "{reason}; exit {}, oom_killed {}, last sample {} MiB",
+                fate.exit_code,
+                fate.oom_killed,
+                last_mem
+                    .get(&b.user_id)
+                    .map(|m| format!("{m:.0}"))
+                    .unwrap_or_else(|| "?".into())
+            ),
+        );
+        state.box_conns.lock().await.remove(&b.user_id);
+        state.box_http_seen.lock().await.remove(&b.user_id);
+        state.turn_running.lock().await.remove(&b.user_id);
+        state
+            .set_box_state(
+                &b.user_id,
+                BoxState::Waking,
+                Some(&format!("Machine restarted: {reason}")),
+            )
+            .await;
+        let _ = state.db.push_user(
+            &b.user_id,
+            "machine_restarted",
+            &json!({ "message": format!("Your Arbos computer restarted: {reason}.") }),
+            None,
+        );
+        // `ensure_awake` sees Waking and only runs the stale check; go straight to the start.
+        let st2 = state.clone();
+        let user = b.user_id.clone();
+        tokio::spawn(async move {
+            if let Err(e) = boxes::start_box(&st2, &user).await {
+                tracing::warn!(user_id = %user, error = %e, "restart after container death failed");
+                st2.set_box_state(
+                    &user,
+                    BoxState::Error,
+                    Some(&format!("restart failed: {e}")),
+                )
+                .await;
+            }
+        });
+    }
 }
 
 /// The fleet only runs where gvisor is the default provider or at least one gvisor box exists.
@@ -1346,8 +1505,8 @@ mod tests {
             "--network arbos-boxes",
             "--read-only",
             "--cpus=2",
-            "--memory=2g",
-            "--memory-swap=2g",
+            "--memory=3g",
+            "--memory-swap=3g",
             "--pids-limit=512",
             "--security-opt=no-new-privileges",
             "--cap-drop=NET_RAW",
@@ -1382,6 +1541,42 @@ mod tests {
             "my-registry/agent:test",
             "an explicit image pins"
         );
+    }
+
+    #[test]
+    fn death_reasons_read_oom_from_flag_or_137_near_the_cap() {
+        let oom = ContainerFate {
+            running: false,
+            exit_code: 137,
+            oom_killed: true,
+            gone: false,
+        };
+        assert!(death_reason(&oom, None, 3).contains("out of memory"));
+        let sentry = ContainerFate {
+            running: false,
+            exit_code: 137,
+            oom_killed: false,
+            gone: false,
+        };
+        assert!(
+            death_reason(&sentry, Some(2900.0), 3).contains("out of memory"),
+            "137 at 94 % of 3 GiB"
+        );
+        assert!(death_reason(&sentry, Some(900.0), 3).contains("signal 9"));
+        let crash = ContainerFate {
+            running: false,
+            exit_code: 1,
+            oom_killed: false,
+            gone: false,
+        };
+        assert!(death_reason(&crash, None, 3).contains("exit 1"));
+        let gone = ContainerFate {
+            running: false,
+            exit_code: -1,
+            oom_killed: false,
+            gone: true,
+        };
+        assert!(death_reason(&gone, None, 3).contains("disappeared"));
     }
 
     #[test]
