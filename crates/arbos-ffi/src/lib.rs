@@ -99,6 +99,10 @@ pub enum RoomAction {
         code: String,
         message: String,
     },
+    /// A `not_available` push refusal on this connection (`batchId` from the error).
+    PushRefused {
+        batch_id: Option<String>,
+    },
     Presence {
         device: Option<String>,
         handle: Option<String>,
@@ -153,6 +157,7 @@ impl From<ClientAction> for RoomAction {
                 after_ms: after.as_millis() as u64,
             },
             ClientAction::SessionError { code, message } => Self::SessionError { code, message },
+            ClientAction::PushRefused { batch_id } => Self::PushRefused { batch_id },
             ClientAction::Presence {
                 device,
                 handle,

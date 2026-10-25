@@ -52,6 +52,10 @@ pub const BACKOFF_RESET_AFTER: Duration = Duration::from_secs(30);
 pub const RATE_LIMIT_RETRY_DEFAULT: Duration = Duration::from_secs(5);
 /// Cap on the doubled wait between `rate_limited` refusals.
 pub const RATE_LIMIT_RETRY_MAX: Duration = Duration::from_secs(60);
+/// First wait before resending after `not_available` on this connection.
+pub const PUSH_REFUSE_RETRY_DEFAULT: Duration = Duration::from_secs(60);
+/// Cap on the doubled wait between `not_available` retries (10 min).
+pub const PUSH_REFUSE_RETRY_MAX: Duration = Duration::from_secs(600);
 /// Pending batch ids for history heals start with this prefix so a resend keeps `heal: true`.
 pub const HEAL_BATCH_PREFIX: &str = "heal-";
 
@@ -99,8 +103,12 @@ pub enum RoomAction {
     /// Socket died or handshake failed; host should reconnect after `after`.
     ScheduleReconnect { after: Duration },
     /// Relay error the host should know about. `lagging` is handled inside the session;
-    /// `rate_limited` stays Live (no this action); `not_available` stops pushes with no redial.
+    /// `rate_limited` stays Live (no this action); `not_available` refuses pushes with no redial
+    /// and also emits [`RoomAction::PushRefused`].
     SessionError { code: String, message: String },
+    /// A `not_available` refusal for a push on this connection (`batchId` from the error header).
+    /// Host: keep the room link live; show a per-chat notice. Cleared by the next [`RoomAction::Ack`].
+    PushRefused { batch_id: Option<String> },
     /// Another device's presence / call / typing (host maps to UI events).
     /// `header` is the full inbound PRESENCE header (Swift reads `user` / `at`).
     Presence {
@@ -167,8 +175,14 @@ pub struct RoomSession {
     /// Wait used for the next `rate_limited` schedule; 0 → take `retryS` (or 5 s) from the error.
     /// Doubles up to [`RATE_LIMIT_RETRY_MAX`] after each timed resend; reset on ACK.
     rate_limit_backoff_ms: u64,
-    /// `not_available`: do not push (or redial) for this room.
-    pushes_stopped: bool,
+    /// `not_available` on this connection: queue local commits, do not PUSH until cleared.
+    /// Cleared by any ACK or by [`Self::prepare_reconnect`] (refusal is per connection).
+    push_refused: bool,
+    /// Host clock when to resend pending after `not_available` (one timer per connection).
+    push_refuse_resend_at_ms: Option<u64>,
+    /// Wait used for the next `not_available` schedule; 0 → [`PUSH_REFUSE_RETRY_DEFAULT`].
+    /// Doubles up to [`PUSH_REFUSE_RETRY_MAX`] after each timed resend; reset on ACK.
+    push_refuse_backoff_ms: u64,
     /// Lowest row seq whose import Loro parked as *pending* (its dependencies are not in the
     /// doc yet). Parked ops live only in memory: a relaunch loses them, so the persisted cursor
     /// never passes this row and the next catch-up re-requests it (Loro drops what it already
@@ -205,7 +219,9 @@ impl RoomSession {
             awaiting_heal: false,
             rate_limit_resend_at_ms: None,
             rate_limit_backoff_ms: 0,
-            pushes_stopped: false,
+            push_refused: false,
+            push_refuse_resend_at_ms: None,
+            push_refuse_backoff_ms: 0,
             first_pending_seq: None,
             pending_this_session: false,
         }
@@ -434,8 +450,12 @@ impl RoomSession {
 
     /// Resend every unACKed pending batch. Heal batches keep `heal: true` via the
     /// [`HEAL_BATCH_PREFIX`] on their id (no store format change).
+    ///
+    /// Callers that must not send while this connection has a live `not_available`
+    /// refusal (fresh local commits) skip the send themselves; the timed retry
+    /// and post-handshake heal path call this even while refused.
     fn resend_pending(&mut self) {
-        if self.pushes_stopped || self.phase != Phase::Live || self.awaiting_heal {
+        if self.phase != Phase::Live || self.awaiting_heal {
             return;
         }
         let pending = self.pending.clone();
@@ -574,6 +594,10 @@ impl RoomSession {
             self.rate_limit_backoff_ms = 0;
             self.rate_limit_resend_at_ms = None;
         }
+        // Any ACK in the room clears a `not_available` refusal so the next push goes out.
+        self.push_refused = false;
+        self.push_refuse_backoff_ms = 0;
+        self.push_refuse_resend_at_ms = None;
         self.push(RoomAction::Ack {
             batch_id: header.batch_id,
             seq: header.seq,
@@ -632,8 +656,21 @@ impl RoomSession {
             return;
         }
         if header.code == "not_available" {
-            self.pushes_stopped = true;
+            // Stay Live; keep pending; no redial. Refusal is for this connection only.
+            self.push_refused = true;
             self.rate_limit_resend_at_ms = None;
+            if self.push_refuse_resend_at_ms.is_none() && self.phase == Phase::Live {
+                let wait_ms = if self.push_refuse_backoff_ms > 0 {
+                    self.push_refuse_backoff_ms
+                } else {
+                    PUSH_REFUSE_RETRY_DEFAULT.as_millis() as u64
+                };
+                self.push_refuse_backoff_ms = wait_ms;
+                self.push_refuse_resend_at_ms = Some(self.last_now_ms.saturating_add(wait_ms));
+            }
+            self.push(RoomAction::PushRefused {
+                batch_id: header.batch_id,
+            });
             self.push(RoomAction::SessionError {
                 code: header.code,
                 message: header.message,
@@ -667,10 +704,10 @@ impl RoomSession {
 
     /// Local Loro commit bytes → `PUSH` (or queue if not live yet — host should
     /// only call this while a session is open; pending is resent after catch-up).
+    ///
+    /// Always appends to pending and emits [`RoomAction::Pending`]. While this
+    /// connection has a live `not_available` refusal, the frame is not sent.
     pub fn on_local_commit(&mut self, bytes: Vec<u8>) {
-        if self.pushes_stopped {
-            return;
-        }
         if bytes.len() > ROW_MAX {
             self.push(RoomAction::DroppedOversize { bytes: bytes.len() });
             return;
@@ -678,7 +715,7 @@ impl RoomSession {
         let batch_id = ulid();
         self.pending.push((batch_id.clone(), bytes.clone()));
         self.push(RoomAction::Pending(self.pending.clone()));
-        if self.phase == Phase::Live && !self.awaiting_heal {
+        if self.phase == Phase::Live && !self.awaiting_heal && !self.push_refused {
             let header = serde_json::to_value(PushHeader {
                 batch_id,
                 heal: false,
@@ -693,7 +730,7 @@ impl RoomSession {
     }
 
     /// Host clock tick: enforce HELLO deadline; mark live-since on first live tick;
-    /// fire the single `rate_limited` pending resend when due.
+    /// fire the single `rate_limited` / `not_available` pending resend when due.
     pub fn on_tick(&mut self, now_ms: u64) {
         self.last_now_ms = now_ms;
         if self.phase == Phase::WaitState {
@@ -720,6 +757,18 @@ impl RoomSession {
                     self.rate_limit_backoff_ms = used
                         .saturating_mul(2)
                         .min(RATE_LIMIT_RETRY_MAX.as_millis() as u64);
+                    self.resend_pending();
+                }
+            }
+            if let Some(at) = self.push_refuse_resend_at_ms {
+                if now_ms >= at {
+                    let used = self
+                        .push_refuse_backoff_ms
+                        .max(PUSH_REFUSE_RETRY_DEFAULT.as_millis() as u64);
+                    self.push_refuse_resend_at_ms = None;
+                    self.push_refuse_backoff_ms = used
+                        .saturating_mul(2)
+                        .min(PUSH_REFUSE_RETRY_MAX.as_millis() as u64);
                     self.resend_pending();
                 }
             }
@@ -784,8 +833,12 @@ impl RoomSession {
         self.healed = false;
         self.awaiting_heal = false;
         self.rate_limit_resend_at_ms = None;
-        // `pushes_stopped` and `rate_limit_backoff_ms` stay: the room refusal and
-        // the doubling chain outlive one socket.
+        // `rate_limit_backoff_ms` stays: the doubling chain outlives one socket.
+        // `push_refused` is per connection: clear so the next dial's heal / pending
+        // resend run as normal; another `not_available` re-applies the same rule.
+        self.push_refused = false;
+        self.push_refuse_resend_at_ms = None;
+        self.push_refuse_backoff_ms = 0;
     }
 
     pub fn wake(&mut self, reason: impl Into<String>) {
@@ -1607,7 +1660,7 @@ mod tests {
     }
 
     #[test]
-    fn not_available_stops_pushes_without_reconnect() {
+    fn not_available_queues_local_commits_and_retries_without_reconnect() {
         let mut s = RoomSession::new("dev:me", "proj/chat", 0, Vec::new());
         s.on_open(1_000);
         let _ = s.drain_actions();
@@ -1628,12 +1681,118 @@ mod tests {
             .any(|a| matches!(a, RoomAction::ScheduleReconnect { .. })));
         assert!(actions.iter().any(|a| matches!(
             a,
+            RoomAction::PushRefused { batch_id: Some(id) } if id == "b1"
+        )));
+        assert!(actions.iter().any(|a| matches!(
+            a,
             RoomAction::SessionError { code, .. } if code == "not_available"
         )));
 
-        s.on_local_commit(b"nope".to_vec());
-        assert!(s.drain_actions().is_empty());
+        // Local commits stay in pending and emit Pending, but send no PUSH.
+        s.on_local_commit(b"held".to_vec());
+        let after = s.drain_actions();
+        assert!(after
+            .iter()
+            .any(|a| matches!(a, RoomAction::Pending(p) if p.len() == 1)));
+        assert!(take_sends(&after).iter().all(|f| f.ty != FrameType::Push));
+        assert_eq!(s.pending().len(), 1);
+        assert!(!after
+            .iter()
+            .any(|a| matches!(a, RoomAction::ScheduleReconnect { .. })));
+
+        // Before 60 s: nothing. At 60 s: one pending resend; next wait doubles to 120 s.
+        s.on_tick(1_000 + 59_999);
+        assert!(take_sends(&s.drain_actions())
+            .iter()
+            .all(|f| f.ty != FrameType::Push));
+        s.on_tick(1_000 + 60_000);
+        let pushes: Vec<_> = take_sends(&s.drain_actions())
+            .into_iter()
+            .filter(|f| f.ty == FrameType::Push)
+            .collect();
+        assert_eq!(pushes.len(), 1, "one timed resend after 60 s");
+        assert_eq!(pushes[0].payload.as_ref(), b"held");
+
+        // Refused again: next wait is 120 s (doubled), capped at 10 min.
+        s.on_frame(&error_frame(
+            "not_available",
+            "still not available",
+            json!({ "batchId": "b1" }),
+        ));
+        let _ = s.drain_actions();
+        s.on_tick(1_000 + 60_000 + 119_999);
+        assert!(take_sends(&s.drain_actions())
+            .iter()
+            .all(|f| f.ty != FrameType::Push));
+        s.on_tick(1_000 + 60_000 + 120_000);
+        let pushes: Vec<_> = take_sends(&s.drain_actions())
+            .into_iter()
+            .filter(|f| f.ty == FrameType::Push)
+            .collect();
+        assert_eq!(pushes.len(), 1, "second resend after 120 s");
+
+        // An ACK clears the refusal so the next local commit is pushed at once.
+        s.on_frame(&ack_frame(&s.pending()[0].0, 1));
+        let _ = s.drain_actions();
         assert!(s.pending().is_empty());
+        s.on_local_commit(b"now".to_vec());
+        let pushes: Vec<_> = take_sends(&s.drain_actions())
+            .into_iter()
+            .filter(|f| f.ty == FrameType::Push)
+            .collect();
+        assert_eq!(pushes.len(), 1);
+        assert_eq!(pushes[0].payload.as_ref(), b"now");
+    }
+
+    #[test]
+    fn not_available_clears_on_reconnect_so_heal_and_pending_resend() {
+        let pending = vec![("batch-1".into(), b"x".to_vec())];
+        let mut s = RoomSession::new("dev:me", "proj/chat", 0, pending);
+        s.on_open(1_000);
+        let _ = s.drain_actions();
+        s.on_frame(&state_frame(0, Vec::new()));
+        let _ = s.drain_actions();
+        s.on_frame(&rows_done_with_vv(0, b"relay-vv"));
+        let actions = s.drain_actions();
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, RoomAction::HealCheck { .. })));
+
+        s.on_heal(b"heal-ops".to_vec());
+        let _ = s.drain_actions();
+
+        s.on_frame(&error_frame(
+            "not_available",
+            "this chat is not available",
+            json!({ "batchId": "batch-1" }),
+        ));
+        let _ = s.drain_actions();
+        assert!(s.push_refused);
+
+        // Transport close (not a refusal redial): next connection clears refusal.
+        s.on_close(2_000);
+        let _ = s.drain_actions();
+        s.prepare_reconnect();
+        assert!(!s.push_refused);
+
+        s.on_open(3_000);
+        let _ = s.drain_actions();
+        s.on_frame(&state_frame(0, Vec::new()));
+        let _ = s.drain_actions();
+        s.on_frame(&rows_done_with_vv(0, b"relay-vv-2"));
+        let actions = s.drain_actions();
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, RoomAction::HealCheck { .. })));
+        s.on_heal(Vec::new());
+        let pushes: Vec<_> = take_sends(&s.drain_actions())
+            .into_iter()
+            .filter(|f| f.ty == FrameType::Push)
+            .collect();
+        assert!(
+            !pushes.is_empty(),
+            "pending resend goes out again on the new connection"
+        );
     }
 
     /// A parked row (deps missing) never moves the persisted cursor past itself: a relaunch

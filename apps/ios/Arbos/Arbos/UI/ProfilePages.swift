@@ -915,7 +915,18 @@ struct GroupProfileView: View {
         })])]
     }
 
-    var body: some View {
+    /// Split from `body` so the type checker finishes (swift-core-check / Xcode 26).
+    private var paneBodySections: [PaneSection] {
+        tab == "Members" ? membersSections + groupInviteSections : librarySections
+    }
+
+    private var paneFooterSections: [PaneSection] { muteFooter + leaveFooter }
+
+    private var memberSubtitle: String {
+        "\(memberCount) member\(memberCount == 1 ? "" : "s")"
+    }
+
+    @ViewBuilder private var mainStack: some View {
         ZStack(alignment: .top) {
             theme.bg.ignoresSafeArea()
             ScrollView {
@@ -929,182 +940,195 @@ struct GroupProfileView: View {
                         hero: PaneHero(
                             picture: .image(AnyView(heroPicture)),
                             name: title,
-                            subtitle: "\(memberCount) member\(memberCount == 1 ? "" : "s")"
+                            subtitle: memberSubtitle
                         ),
                         tabs: PaneKinds.group,
                         selected: $tab,
-                        body: tab == "Members" ? membersSections + groupInviteSections : librarySections,
-                        footer: muteFooter + leaveFooter
+                        body: paneBodySections,
+                        footer: paneFooterSections
                     )
                     Color.clear.frame(height: 40)
                 }
             }
             ProfileTopBar { EmptyView() }
         }
-        .confirmationDialog(
-            "Mute notifications",
-            isPresented: $showMuteOptions,
-            titleVisibility: .visible
-        ) {
-            ForEach(ChatMuteDuration.allCases) { duration in
-                Button(duration.title) { model.mutePeopleChat(chatId, for: duration) }
+    }
+
+    var body: some View {
+        // Modifiers live in a helper so `body` itself stays a small expression.
+        withSheets(withDialogs(mainStack))
+    }
+
+    private func withDialogs<Content: View>(_ content: Content) -> some View {
+        content
+            .confirmationDialog(
+                "Mute notifications",
+                isPresented: $showMuteOptions,
+                titleVisibility: .visible
+            ) {
+                ForEach(ChatMuteDuration.allCases) { duration in
+                    Button(duration.title) { model.mutePeopleChat(chatId, for: duration) }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("No banners from this group for the time you pick.")
             }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("No banners from this group for the time you pick.")
-        }
-        .confirmationDialog(
-            pendingRemoveName.map { "Remove \($0) from \(title)?" } ?? "Remove from chat?",
-            isPresented: Binding(
-                get: { pendingRemoveId != nil },
-                set: { if !$0 { pendingRemoveId = nil; pendingRemoveName = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button("Remove", role: .destructive) {
-                if let id = pendingRemoveId {
-                    if rows.first(where: { $0.id == id })?.agent != nil {
-                        model.removeAgent(chatId: chatId, projectId: id)
-                    } else {
-                        model.removeMember(chatId: chatId, userId: id, ban: false)
+            .confirmationDialog(
+                pendingRemoveName.map { "Remove \($0) from \(title)?" } ?? "Remove from chat?",
+                isPresented: Binding(
+                    get: { pendingRemoveId != nil },
+                    set: { if !$0 { pendingRemoveId = nil; pendingRemoveName = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("Remove", role: .destructive) {
+                    if let id = pendingRemoveId {
+                        if rows.first(where: { $0.id == id })?.agent != nil {
+                            model.removeAgent(chatId: chatId, projectId: id)
+                        } else {
+                            model.removeMember(chatId: chatId, userId: id, ban: false)
+                        }
+                    }
+                    pendingRemoveId = nil
+                    pendingRemoveName = nil
+                }
+                Button("Cancel", role: .cancel) {
+                    pendingRemoveId = nil
+                    pendingRemoveName = nil
+                }
+            } message: {
+                Text("They can be added again later.")
+            }
+            .confirmationDialog(
+                pendingBanName.map { "Ban \($0) from \(title)?" } ?? "Ban from chat?",
+                isPresented: Binding(
+                    get: { pendingBanId != nil },
+                    set: { if !$0 { pendingBanId = nil; pendingBanName = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("Ban", role: .destructive) {
+                    if let id = pendingBanId {
+                        model.removeMember(chatId: chatId, userId: id, ban: true)
+                    }
+                    pendingBanId = nil
+                    pendingBanName = nil
+                }
+                Button("Cancel", role: .cancel) {
+                    pendingBanId = nil
+                    pendingBanName = nil
+                }
+            } message: {
+                Text("They are removed and cannot rejoin.")
+            }
+            .confirmationDialog(
+                "Leave \(title)?",
+                isPresented: $confirmLeave,
+                titleVisibility: .visible
+            ) {
+                Button("Leave group chat", role: .destructive) {
+                    model.leavePeopleChat(chatId)
+                    dismiss()
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("You leave the group. It stays for everyone else.")
+            }
+            .confirmationDialog(
+                "Delete \(title)?",
+                isPresented: $confirmDelete,
+                titleVisibility: .visible
+            ) {
+                Button("Delete group chat", role: .destructive) {
+                    model.deletePeopleChat(chatId)
+                    dismiss()
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Deletes the group for everyone in it.")
+            }
+            .confirmationDialog(
+                memberActions.map { $0.displayName } ?? "Member",
+                isPresented: Binding(
+                    get: { memberActions != nil },
+                    set: { if !$0 { memberActions = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("Send private message") {
+                    guard let handle = memberActions?.handle else { return }
+                    memberActions = nil
+                    Task {
+                        if await model.openDM(handle: handle) != nil { dismiss() }
                     }
                 }
-                pendingRemoveId = nil
-                pendingRemoveName = nil
-            }
-            Button("Cancel", role: .cancel) {
-                pendingRemoveId = nil
-                pendingRemoveName = nil
-            }
-        } message: {
-            Text("They can be added again later.")
-        }
-        .confirmationDialog(
-            pendingBanName.map { "Ban \($0) from \(title)?" } ?? "Ban from chat?",
-            isPresented: Binding(
-                get: { pendingBanId != nil },
-                set: { if !$0 { pendingBanId = nil; pendingBanName = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button("Ban", role: .destructive) {
-                if let id = pendingBanId {
-                    model.removeMember(chatId: chatId, userId: id, ban: true)
+                Button("View profile") {
+                    if let p = memberActions { model.showProfile(.user(p)) }
+                    memberActions = nil
                 }
-                pendingBanId = nil
-                pendingBanName = nil
+                Button("Cancel", role: .cancel) { memberActions = nil }
             }
-            Button("Cancel", role: .cancel) {
-                pendingBanId = nil
-                pendingBanName = nil
-            }
-        } message: {
-            Text("They are removed and cannot rejoin.")
-        }
-        .confirmationDialog(
-            "Leave \(title)?",
-            isPresented: $confirmLeave,
-            titleVisibility: .visible
-        ) {
-            Button("Leave group chat", role: .destructive) {
-                model.leavePeopleChat(chatId)
-                dismiss()
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("You leave the group. It stays for everyone else.")
-        }
-        .confirmationDialog(
-            "Delete \(title)?",
-            isPresented: $confirmDelete,
-            titleVisibility: .visible
-        ) {
-            Button("Delete group chat", role: .destructive) {
-                model.deletePeopleChat(chatId)
-                dismiss()
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Deletes the group for everyone in it.")
-        }
-        .confirmationDialog(
-            memberActions.map { $0.displayName } ?? "Member",
-            isPresented: Binding(
-                get: { memberActions != nil },
-                set: { if !$0 { memberActions = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button("Send private message") {
-                guard let handle = memberActions?.handle else { return }
-                memberActions = nil
-                Task {
-                    if await model.openDM(handle: handle) != nil { dismiss() }
+    }
+
+    private func withSheets<Content: View>(_ content: Content) -> some View {
+        content
+            .sheet(isPresented: $showAdd) {
+                if let project {
+                    ProjectMembersSheet(project: project).environmentObject(model).environment(\.theme, theme)
+                } else {
+                    // The New group picker aimed at this group: its members show as
+                    // already in, Add puts the picks into it (not into a new group).
+                    // A sheet over the profile sheet, like GroupEditSheet: no
+                    // presentation / colour-scheme modifiers here — they unseat
+                    // the presenting sheet.
+                    NavigationStack {
+                        NewGroupView(onDone: { showAdd = false }, addTo: chatId)
+                    }
+                    .tint(theme.text)
+                    .environmentObject(model)
+                    .environment(\.theme, theme)
                 }
             }
-            Button("View profile") {
-                if let p = memberActions { model.showProfile(.user(p)) }
-                memberActions = nil
+            .sheet(isPresented: $showEdit) {
+                GroupEditSheet(chatId: chatId).environmentObject(model).environment(\.theme, theme)
             }
-            Button("Cancel", role: .cancel) { memberActions = nil }
-        }
-        .sheet(isPresented: $showAdd) {
-            if let project {
-                ProjectMembersSheet(project: project).environmentObject(model).environment(\.theme, theme)
-            } else {
-                // The New group picker aimed at this group: its members show as
-                // already in, Add puts the picks into it (not into a new group).
-                // A sheet over the profile sheet, like GroupEditSheet: no
-                // presentation / colour-scheme modifiers here — they unseat
-                // the presenting sheet.
-                NavigationStack {
-                    NewGroupView(onDone: { showAdd = false }, addTo: chatId)
-                }
-                .tint(theme.text)
-                .environmentObject(model)
-                .environment(\.theme, theme)
+            .sheet(isPresented: $showActivity) {
+                // Admin-only activity log (joined / removed / left / deleted messages).
+                // A sheet over the profile sheet — no presentation modifiers here.
+                GroupActivityView(chatId: chatId)
+                    .environmentObject(model)
+                    .environment(\.theme, theme)
             }
-        }
-        .sheet(isPresented: $showEdit) {
-            GroupEditSheet(chatId: chatId).environmentObject(model).environment(\.theme, theme)
-        }
-        .sheet(isPresented: $showActivity) {
-            // Admin-only activity log (joined / removed / left / deleted messages).
-            // A sheet over the profile sheet — no presentation modifiers here.
-            GroupActivityView(chatId: chatId)
-                .environmentObject(model)
-                .environment(\.theme, theme)
-        }
-        .task {
-            if let projectId { projectMembers = await model.projectMembers(projectId) }
-            if projectId == nil, people?.kind == "group" {
-                groupInvites = await model.groupInvites(chatId)
-            }
-        }
-        .onAppear {
-            // Rig: `ARBOS_SHOW=removemember` arms the Remove confirm for the first other member.
-            if DebugHooks.show == "removemember", let r = rows.first(where: { canRemove($0) }) {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                    pendingRemoveId = r.person.id
-                    pendingRemoveName = r.agent?.name ?? "@\(r.person.handle)"
+            .task {
+                if let projectId { projectMembers = await model.projectMembers(projectId) }
+                if projectId == nil, people?.kind == "group" {
+                    groupInvites = await model.groupInvites(chatId)
                 }
             }
-            // Rig: `ARBOS_SHOW=addmembers` lands on the Add members picker;
-            // `ARBOS_PANEL_TAB=Library` lands on the Library tab (the media grid).
-            if DebugHooks.show == "addmembers", project == nil {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showAdd = true }
-            }
-            // Rig: `ARBOS_SHOW=groupavatar[-generate|-upload]` opens the avatar picker on that tab.
-            if let show = DebugHooks.show, show.hasPrefix("groupavatar"), project == nil {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-                    showAvatarPicker = show.hasSuffix("generate") ? .generate : (show.hasSuffix("upload") ? .upload : .bot)
+            .onAppear {
+                // Rig: `ARBOS_SHOW=removemember` arms the Remove confirm for the first other member.
+                if DebugHooks.show == "removemember", let r = rows.first(where: { canRemove($0) }) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        pendingRemoveId = r.person.id
+                        pendingRemoveName = r.agent?.name ?? "@\(r.person.handle)"
+                    }
                 }
+                // Rig: `ARBOS_SHOW=addmembers` lands on the Add members picker;
+                // `ARBOS_PANEL_TAB=Library` lands on the Library tab (the media grid).
+                if DebugHooks.show == "addmembers", project == nil {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showAdd = true }
+                }
+                // Rig: `ARBOS_SHOW=groupavatar[-generate|-upload]` opens the avatar picker on that tab.
+                if let show = DebugHooks.show, show.hasPrefix("groupavatar"), project == nil {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                        showAvatarPicker = show.hasSuffix("generate") ? .generate : (show.hasSuffix("upload") ? .upload : .bot)
+                    }
+                }
+                if let t = DebugHooks.panelTab, PaneKinds.group.contains(t) { tab = t }
             }
-            if let t = DebugHooks.panelTab, PaneKinds.group.contains(t) { tab = t }
-        }
-        .sheet(item: $showAvatarPicker) { initial in
-            AvatarPickerSheet(target: .group(chatId), initialTab: initial).environmentObject(model).environment(\.theme, theme)
-        }
+            .sheet(item: $showAvatarPicker) { initial in
+                AvatarPickerSheet(target: .group(chatId), initialTab: initial).environmentObject(model).environment(\.theme, theme)
+            }
     }
 
     /// Invite links for a people group (not a shared project chat): mint, copy, share, revoke.

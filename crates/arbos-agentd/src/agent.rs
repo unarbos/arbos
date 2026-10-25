@@ -1434,6 +1434,11 @@ pub struct Agent {
     /// Per chat: budget refusals (daily cap, credits, read-only) and the short block that stops
     /// every send from costing a refused model call (`budget.rs`).
     pub(crate) budget: crate::budget::BudgetState,
+    /// Resource locks held by running jobs (duplex design D5): key → job id. Two jobs that touch
+    /// the same path, the git repo, the routines or one secret never run together.
+    pub(crate) job_locks: Mutex<HashMap<String, String>>,
+    /// Woken when a job releases its locks, so a queued job re-checks its keys.
+    pub(crate) job_locks_changed: tokio::sync::Notify,
 }
 
 impl Agent {
@@ -1517,6 +1522,8 @@ impl Agent {
             job_cap: std::sync::Mutex::new(None),
             quick_noted: std::sync::Mutex::new(HashMap::new()),
             budget: crate::budget::BudgetState::default(),
+            job_locks: Mutex::new(HashMap::new()),
+            job_locks_changed: tokio::sync::Notify::new(),
         })
     }
 
@@ -2057,7 +2064,7 @@ impl Agent {
             (_, crate::status::QuickOutcome::Answered)
             | (_, crate::status::QuickOutcome::Steered) => Ok(()),
             ("send", _) => self.handle_send(chat_id, &host, &cmd).await,
-            ("stop", _) => self.handle_stop(chat_id).await,
+            ("stop", _) => self.handle_stop_cmd(chat_id, &cmd).await,
             // Guide: inject into the running turn (no turn_lock). Same as stop — mid-task.
             ("steer", _) | ("guide", _) => self.handle_steer(chat_id, &host, &cmd).await,
             ("answer", _) => self.handle_send(chat_id, &host, &cmd).await,
@@ -2234,6 +2241,240 @@ impl Agent {
 
     /// `stop` runs out of band (its own task, no turn lock): abort the pi turn now, mark the turn
     /// stopped so no hand-off follows, and tell the chat.
+    /// `stop` from the Stop button (no job) halts the running turn **and** every job of the chat
+    /// (duplex D7); `stop { jobId }` from the chip halts that job only.
+    async fn handle_stop_cmd(self: &Arc<Self>, chat_id: &str, cmd: &CommandView) -> Result<()> {
+        if let Some(job_id) = cmd.payload.get("jobId").and_then(Value::as_str) {
+            let stopped = self.stop_jobs(chat_id, Some(job_id)).await;
+            tracing::info!(chat_id, job_id, stopped = stopped.len(), "stop: one job");
+            return Ok(());
+        }
+        let turn = self.handle_stop(chat_id).await;
+        let stopped = self.stop_jobs(chat_id, None).await;
+        if !stopped.is_empty() {
+            let line = format!(
+                "Stopped: {}.",
+                stopped
+                    .iter()
+                    .map(|t| t.to_lowercase())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            if let Some(host) = self.sync.host(chat_id).await {
+                let h = host.lock().await;
+                let id = ulid();
+                let anchor = cmd
+                    .payload
+                    .get("messageId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                h.doc
+                    .start_assistant_message(&id, anchor, &self.cfg.device_id);
+                if let Some(attr) = self.people_reply_fields(chat_id) {
+                    h.doc.set_message_fields(&id, &attr.fields);
+                }
+                if let Some(p) = h.doc.add_text_part(&id, "text") {
+                    h.doc.append_text(&id, &p, &line);
+                }
+                h.doc.finish_message(&id, MessageStatus::Done);
+            }
+        }
+        turn
+    }
+
+    /// Cancel running or queued jobs of `chat_id` — one when `only` names it, else all. Returns
+    /// the titles stopped. The job's own task sees the abort, marks it cancelled, frees its locks
+    /// and refreshes the status line; no result turn runs for a cancelled job.
+    pub(crate) async fn stop_jobs(
+        self: &Arc<Self>,
+        chat_id: &str,
+        only: Option<&str>,
+    ) -> Vec<String> {
+        let mut stopped = Vec::new();
+        for j in self.store.jobs_for_chat(chat_id).unwrap_or_default() {
+            if !j.is_open() || only.is_some_and(|id| id != j.id) {
+                continue;
+            }
+            let _ = self
+                .store
+                .set_job_state(&j.id, "cancelled", Some("stopped by the user"));
+            if let Some(sid) = &j.subagent_id {
+                if let Ok(Some(row)) = self.store.subagent(sid) {
+                    let h = match row.harness.as_str() {
+                        "pi" => Harness::Pi,
+                        "claude_code" => Harness::ClaudeCode,
+                        _ => Harness::Prime,
+                    };
+                    let adapter = self.adapter(h);
+                    if let Err(e) = adapter.cancel(sid).await {
+                        tracing::debug!(job = %j.id, error = %e, "cancel: falling back to stop");
+                        let _ = adapter.stop(sid).await;
+                    }
+                }
+            }
+            self.release_job_locks(&j.id).await;
+            stopped.push(j.title.clone());
+        }
+        if !stopped.is_empty() {
+            self.refresh_job_activity(chat_id).await;
+        }
+        stopped
+    }
+
+    /// `steer_job(job_id | "latest", text)` from the main turn: the words go into the running
+    /// job's session as a steer; the model acks in the chat itself.
+    pub async fn hook_steer_job(
+        self: &Arc<Self>,
+        job_id: &str,
+        text: &str,
+    ) -> Result<Value, String> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err("nothing to steer with".into());
+        }
+        let chat_id = {
+            let tl = self.turn.lock().await;
+            tl.as_ref()
+                .map(|t| t.chat_id.clone())
+                .ok_or("no turn is running")?
+        };
+        let job = self.resolve_job(&chat_id, job_id)?;
+        if job.state != "running" {
+            return Err(format!(
+                "job {} ({}) is {}: steer a running job, or start a new one",
+                job.id, job.title, job.state
+            ));
+        }
+        let sid = job.subagent_id.clone().ok_or("the job has no worker yet")?;
+        let adapter = self.adapter(Harness::Pi);
+        adapter
+            .steer(&sid, text)
+            .await
+            .map_err(|e| format!("steer failed: {e}"))?;
+        let _ = self
+            .store
+            .set_job_step(&job.id, "Taking your correction into account");
+        let _ = self.store.t3_append(
+            &chat_id,
+            None,
+            Some(&chat_id),
+            "job_steer",
+            Some("user"),
+            text,
+            Some(&json!({ "job_id": job.id })),
+        );
+        tracing::info!(chat_id, job = %job.id, "job steered");
+        Ok(json!({ "job_id": job.id, "title": job.title, "state": "steered" }))
+    }
+
+    /// `stop_job(job_id | "latest" | "all")` from the main turn.
+    pub async fn hook_stop_job(self: &Arc<Self>, job_id: &str) -> Result<Value, String> {
+        let chat_id = {
+            let tl = self.turn.lock().await;
+            tl.as_ref()
+                .map(|t| t.chat_id.clone())
+                .ok_or("no turn is running")?
+        };
+        let stopped = if job_id.trim().eq_ignore_ascii_case("all") {
+            self.stop_jobs(&chat_id, None).await
+        } else {
+            let job = self.resolve_job(&chat_id, job_id)?;
+            self.stop_jobs(&chat_id, Some(&job.id)).await
+        };
+        if stopped.is_empty() {
+            return Err("no running job matched".into());
+        }
+        Ok(json!({ "stopped": stopped }))
+    }
+
+    /// A job of this chat by id, or the newest running one for `latest` / an empty id
+    /// (binding rule, design §2.4).
+    fn resolve_job(&self, chat_id: &str, job_id: &str) -> Result<crate::store::JobRow, String> {
+        let id = job_id.trim();
+        if !id.is_empty() && !id.eq_ignore_ascii_case("latest") {
+            return match self.store.job(id) {
+                Ok(Some(j)) if j.chat_id == chat_id => Ok(j),
+                Ok(Some(_)) => Err("that job belongs to another chat".into()),
+                _ => Err(format!("unknown job {id}; list_jobs shows the ids")),
+            };
+        }
+        self.store
+            .jobs_for_chat(chat_id)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|j| j.state == "running")
+            .ok_or_else(|| "no job is running in this chat".to_owned())
+    }
+
+    /// Resource keys a job holds while it runs (design D5): the declared `touches`, or the
+    /// defaults for its kind — `code` → the project folder and git; `ops` → the routines;
+    /// `research` / `other` → none.
+    pub(crate) fn job_lock_keys(&self, job: &JobSpec) -> Vec<String> {
+        if !job.touches.is_empty() {
+            return job.touches.iter().map(|t| normalize_lock_key(t)).collect();
+        }
+        match job.kind.as_str() {
+            "code" => vec!["path:/".to_owned(), "git".to_owned()],
+            "ops" => vec!["routines".to_owned()],
+            _ => Vec::new(),
+        }
+    }
+
+    /// Wait until no other job holds a conflicting key, then take the keys. A `path:` key
+    /// conflicts with any `path:` that is its prefix or child.
+    pub(crate) async fn acquire_job_locks(&self, job: &JobSpec) -> Vec<String> {
+        let keys = self.job_lock_keys(job);
+        if keys.is_empty() {
+            return keys;
+        }
+        loop {
+            let blocker = {
+                let locks = self.job_locks.lock().await;
+                locks
+                    .iter()
+                    .find(|(k, owner)| {
+                        **owner != job.id && keys.iter().any(|mine| lock_conflicts(mine, k))
+                    })
+                    .map(|(_, owner)| owner.clone())
+            };
+            match blocker {
+                None => {
+                    let mut locks = self.job_locks.lock().await;
+                    for k in &keys {
+                        locks.insert(k.clone(), job.id.clone());
+                    }
+                    return keys;
+                }
+                Some(owner) => {
+                    let title = self
+                        .store
+                        .job(&owner)
+                        .ok()
+                        .flatten()
+                        .map(|j| j.title)
+                        .unwrap_or_else(|| "another job".into());
+                    let _ = self
+                        .store
+                        .set_job_step(&job.id, &format!("Waiting for {title}"));
+                    tokio::select! {
+                        _ = self.job_locks_changed.notified() => {}
+                        _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn release_job_locks(&self, job_id: &str) {
+        let mut locks = self.job_locks.lock().await;
+        let before = locks.len();
+        locks.retain(|_, owner| owner != job_id);
+        if locks.len() != before {
+            drop(locks);
+            self.job_locks_changed.notify_waiters();
+        }
+    }
+
     async fn handle_stop(&self, chat_id: &str) -> Result<()> {
         let target = {
             let mut tl = self.turn.lock().await;
@@ -5874,6 +6115,26 @@ impl Agent {
                 .add_status_part(&msg_id, "working", "Waiting for a free slot…");
         }
         self.write_threads_index().await;
+        if let Some(j) = &job {
+            let keys = self.acquire_job_locks(j).await;
+            if !keys.is_empty() {
+                tracing::info!(job = %j.id, ?keys, "job holds its resource locks");
+            }
+            // A stop that landed while this job waited for a lock or a slot ends it here.
+            if self
+                .store
+                .job(&j.id)
+                .ok()
+                .flatten()
+                .is_some_and(|row| row.state == "cancelled")
+            {
+                self.release_job_locks(&j.id).await;
+                let h = host.lock().await;
+                h.doc.add_status_part(&msg_id, "stopped", "Stopped");
+                h.doc.finish_message(&msg_id, MessageStatus::Cancelled);
+                return Ok(());
+            }
+        }
         let _slot = self
             .subagent_slots
             .clone()
@@ -6083,14 +6344,22 @@ impl Agent {
                     // 14: "Searching for surf schools" instead of "<agent> is working"); a job
                     // also records the step for `list_jobs` and the working set.
                     if let Some(live) = crate::activity::label(&name, &input) {
-                        if let Some(j) = &job {
-                            let _ = self.store.set_job_step(&j.id, &live);
-                        }
+                        let shown = match &job {
+                            Some(j) => {
+                                let _ = self.store.set_job_step(&j.id, &live);
+                                self.with_task_count(chat_id, live)
+                            }
+                            None => live,
+                        };
                         {
                             let h = host.lock().await;
-                            h.doc.set_activity(&msg_id, Some(&live));
+                            h.doc.set_activity(&msg_id, Some(&shown));
                         }
-                        self.post_activity(chat_id, Some(live));
+                        if job.is_some() {
+                            self.refresh_job_activity(chat_id).await;
+                        } else {
+                            self.post_activity(chat_id, Some(shown));
+                        }
                     }
                     let _ = self.store.t3_append(
                         &subagent_id,
@@ -6245,15 +6514,25 @@ impl Agent {
             );
         }
         self.subagent_msgs.lock().await.remove(&subagent_id);
+        let mut job_cancelled = false;
         if let Some(j) = &job {
+            let already_cancelled = self
+                .store
+                .job(&j.id)
+                .ok()
+                .flatten()
+                .is_some_and(|row| row.state == "cancelled");
             let final_state = match (&done_err, status.as_str()) {
+                _ if already_cancelled => "cancelled",
                 (Some(e), _) if e.contains("aborted") => "cancelled",
                 (Some(_), _) | (None, "blocked") => "failed",
                 _ => "done",
             };
+            job_cancelled = final_state == "cancelled";
             let _ = self
                 .store
                 .set_job_state(&j.id, final_state, done_err.as_deref());
+            self.release_job_locks(&j.id).await;
             {
                 let h = host.lock().await;
                 h.doc.set_activity(&msg_id, None);
@@ -6365,6 +6644,10 @@ impl Agent {
                 )
                 .await;
         }
+        if job_cancelled {
+            // The user stopped it: the stop line already said so; nothing to deliver.
+            return Ok(());
+        }
         let r = self
             .run_result_turn(
                 chat_id,
@@ -6409,9 +6692,68 @@ impl Agent {
                     j.last_step.clone()
                 }
             });
+        let chip: Vec<Value> = open
+            .iter()
+            .map(|j| {
+                json!({ "id": j.id, "title": j.title, "state": j.state, "step": j.last_step, "elapsed_s": j.elapsed_s(), "ask_message_id": j.ask_message_id, "chat_id": j.chat_id })
+            })
+            .collect();
+        // Several jobs: the presence row says so ("Reading tripadvisor.com · 2 tasks").
+        let text = text.map(|t| {
+            if chip.len() > 1 {
+                format!("{t} · {} tasks", chip.len())
+            } else {
+                t
+            }
+        });
         if text.is_some() || self.turn.lock().await.is_none() {
-            self.post_activity(chat_id, text);
+            self.post_activity_with_jobs(chat_id, text, chip);
         }
+    }
+
+    /// "Reading tripadvisor.com · 2 tasks": the presence text carries the count when more than
+    /// one job runs in the chat (the text chip; the clickable drawer is the clients' half).
+    pub(crate) fn with_task_count(&self, chat_id: &str, text: String) -> String {
+        let n = self
+            .store
+            .jobs_for_chat(chat_id)
+            .unwrap_or_default()
+            .iter()
+            .filter(|j| j.state == "running")
+            .count();
+        if n > 1 {
+            format!("{text} · {n} tasks")
+        } else {
+            text
+        }
+    }
+
+    /// `post_activity` plus the job chip for the clients (duplex §2.4).
+    pub(crate) fn post_activity_with_jobs(
+        &self,
+        chat_id: &str,
+        activity: Option<String>,
+        jobs: Vec<Value>,
+    ) {
+        let url = format!(
+            "{}/projects/{}/activity",
+            self.cfg.relay_url, self.cfg.project_id
+        );
+        let body = json!({ "chat_id": chat_id, "text": activity, "jobs": jobs });
+        let http = self.http.clone();
+        let token = self.cfg.box_token.clone();
+        tokio::spawn(async move {
+            if let Err(e) = http
+                .post(url)
+                .bearer_auth(token)
+                .json(&body)
+                .timeout(Duration::from_secs(5))
+                .send()
+                .await
+            {
+                tracing::debug!(error = %e, "post activity to relay failed");
+            }
+        });
     }
 
     /// The one answer bubble of a job: the subagent's raw output turned into the agent's own
@@ -6573,7 +6915,7 @@ impl Agent {
             let Some(host) = self.sync.host(&j.chat_id).await else {
                 continue;
             };
-            let restartable = j.kind == "research" && j.touches.is_empty() && j.restarts < 1;
+            let restartable = j.restarts < 1 && job_restart_allowed(&j, &self.cfg.project_id);
             let line = if restartable {
                 format!(
                     "A restart cut off \"{}\"; I'm picking it up again now.",
@@ -6880,6 +7222,58 @@ pub(crate) fn subagent_start_failure_line(err: &str) -> String {
     }
 }
 
+/// A resource key as the lock table stores it: `path:<abs or project-relative>` with no
+/// trailing slash, `git`, `routines`, `secret:<name>`; anything else verbatim, lower-cased.
+fn normalize_lock_key(key: &str) -> String {
+    let k = key.trim();
+    if let Some(p) = k.strip_prefix("path:") {
+        let p = p.trim().trim_end_matches('/');
+        return format!("path:{}", if p.is_empty() { "/" } else { p });
+    }
+    if k.starts_with('/') || k.starts_with("./") {
+        return format!("path:{}", k.trim_end_matches('/'));
+    }
+    if let Some(s) = k.strip_prefix("secret:") {
+        return format!("secret:{}", s.trim());
+    }
+    k.to_ascii_lowercase()
+}
+
+/// Two keys conflict when equal, or when both are paths and one is a prefix of the other.
+fn lock_conflicts(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a.strip_prefix("path:"), b.strip_prefix("path:")) {
+        (Some(pa), Some(pb)) => {
+            pa == "/"
+                || pb == "/"
+                || pa.starts_with(&format!("{pb}/"))
+                || pb.starts_with(&format!("{pa}/"))
+        }
+        _ => false,
+    }
+}
+
+/// Restart after a box restart without asking (Jacob, 2026-10-24): work inside the box —
+/// research, edits in the project folder, git on a branch, routines — is reversible and goes
+/// again; a job that uses a secret restarts only when the owner's standing "Always allow"
+/// grant covers it (`vault::enabled_grant_names`); anything that leaves the box as the user
+/// (`external:`, `send`, `pay`, `local:`) waits for a go.
+fn job_restart_allowed(job: &crate::store::JobRow, project_id: &str) -> bool {
+    let grants = crate::vault::enabled_grant_names(project_id);
+    job.touches.iter().all(|t| {
+        let k = normalize_lock_key(t);
+        if let Some(name) = k.strip_prefix("secret:") {
+            return grants.iter().any(|g| g.eq_ignore_ascii_case(name));
+        }
+        !(k.starts_with("external")
+            || k.starts_with("send")
+            || k.starts_with("pay")
+            || k.starts_with("local"))
+    })
+}
+
 /// Subagents started by `start_job_for_send` are named `ask-…`; they answer directly.
 fn is_job_name(name: &str) -> bool {
     name.starts_with("ask-")
@@ -7035,7 +7429,7 @@ pub fn base_system_prompt_with(code_mode: bool, jobs: bool) -> String {
 
 /// Duplex step 2 (`docs/duplex-agent-design.md` §2.3): work that takes more than a few seconds
 /// is a job the main agent starts and then steps away from; the chat stays open for the user.
-pub const JOBS_SECTION: &str = "## Jobs: longer work runs beside the chat\n\nAnything that takes more than about ten seconds — research across several pages, a comparison of options or prices, a build, a test run, a long script, a report — is a **job**, never work inside your turn. Route `act`, post one short acknowledgement with `send_message` naming the first step (\"Looking up the top-rated surf schools around Santa Teresa and their prices now.\"), then call `start_job(title, brief, kind)` and end the turn. `title`: two to five words, present tense — the status line the user watches (\"Searching for surf schools\"). `brief`: the exact instruction for the worker — what to find or build, for whom, the acceptance criterion, what to return (for a comparison: each item with its page URL, the compared facts, sources, what could not be checked). `kind`: `research`, `code`, `ops` or `other`. The result returns later as an `[Arbos] Job … finished` message: deliver it then with `send_message` (in parts for a comparison, `reply_to` the user's message), as your own work. Up to three jobs run at once per chat; meanwhile answer every new message in a short turn, never start the same work twice (your working set lists jobs in flight), and answer \"how is it going?\" from `list_jobs`. `route new` / `wake` stay for a long-lived named thread; one piece of work is a job. `act` is for what you finish in a few tool calls.";
+pub const JOBS_SECTION: &str = "## Jobs: longer work runs beside the chat\n\nAnything over about ten seconds — research across pages, a comparison of options or prices, a build, a test run, a long script, a report — is a **job**, never work inside your turn. Route `act`, post one short acknowledgement with `send_message` naming the first step (\"Looking up the top-rated surf schools around Santa Teresa and their prices now.\"), call `start_job(title, brief, kind)`, end the turn. `title`: two to five words, present tense — the status line the user watches (\"Searching for surf schools\"). `brief`: the exact instruction for the worker — what to find or build, for whom, the acceptance criterion, what to return (a comparison: each item with its page URL, the compared facts, sources, what could not be checked). `kind`: `research`, `code`, `ops` or `other`. The result returns later as an `[Arbos] Job … finished` message: deliver it then with `send_message` (parts for a comparison, `reply_to` the user's message) as your own work. Up to three jobs run per chat; meanwhile answer every new message in a short turn, never start the same work twice (the working set lists jobs in flight), answer \"how is it going?\" from `list_jobs`. `route new`/`wake` stay for a long-lived named thread; `act` is for what you finish in a few tool calls.\n\nA correction while a job runs (\"only schools under $70\") is a steer: bind it to the job it names (title words, the ask it quotes), else the newest running job, call `steer_job(job_id, text)` and ack in one line naming the job. \"Stop\" / \"cancel that\" → `stop_job(job_id)`, or `stop_job(\"all\")` when several run and none is named; confirm in one line. A steer matching no running job becomes a new job; say so.";
 
 #[cfg(test)]
 impl Agent {
@@ -7088,6 +7482,65 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Duplex D5: lock keys normalise, paths conflict with their parents and children, other
+    /// keys only with themselves.
+    #[test]
+    fn job_lock_keys_and_conflicts() {
+        assert_eq!(normalize_lock_key("path:/work/p/src/"), "path:/work/p/src");
+        assert_eq!(normalize_lock_key("/work/p"), "path:/work/p");
+        assert_eq!(normalize_lock_key(" GIT "), "git");
+        assert_eq!(
+            normalize_lock_key("secret: STRIPE_KEY"),
+            "secret:STRIPE_KEY"
+        );
+        assert!(lock_conflicts("path:/work/p", "path:/work/p/src"));
+        assert!(lock_conflicts("path:/work/p/src/a.rs", "path:/work/p"));
+        assert!(lock_conflicts("path:/", "path:/work/q"));
+        assert!(!lock_conflicts("path:/work/p", "path:/work/q"));
+        assert!(lock_conflicts("git", "git"));
+        assert!(!lock_conflicts("git", "routines"));
+    }
+
+    /// Jacob's rule 3: reversible work inside the box restarts itself after a box restart; a
+    /// secret restarts only under a standing grant; anything that leaves the box waits.
+    #[test]
+    fn job_restart_rule() {
+        let row = |kind: &str, touches: &[&str]| crate::store::JobRow {
+            id: "j".into(),
+            chat_id: "c".into(),
+            ask_message_id: "m".into(),
+            subagent_id: None,
+            title: "t".into(),
+            kind: kind.into(),
+            brief: "b".into(),
+            touches: touches.iter().map(|s| s.to_string()).collect(),
+            state: "interrupted".into(),
+            last_step: String::new(),
+            last_step_at: None,
+            created_at: 0,
+            started_at: None,
+            ended_at: None,
+            error: None,
+            delivered_key: None,
+            restarts: 0,
+        };
+        assert!(job_restart_allowed(&row("research", &[]), "p"));
+        assert!(job_restart_allowed(
+            &row("code", &["path:/work/p", "git"]),
+            "p"
+        ));
+        assert!(job_restart_allowed(&row("ops", &["routines"]), "p"));
+        assert!(
+            !job_restart_allowed(&row("other", &["secret:STRIPE_KEY"]), "p"),
+            "no standing grant in a test box"
+        );
+        assert!(!job_restart_allowed(
+            &row("other", &["external:email"]),
+            "p"
+        ));
+        assert!(!job_restart_allowed(&row("ops", &["pay"]), "p"));
+    }
 
     /// D91: the window size pi would start the next turn from, as pi counts it.
     #[test]
