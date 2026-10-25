@@ -1383,6 +1383,11 @@ class Loop:
 
     def freeze_allows(self, fid: str, st: dict, fz: dict) -> bool:
         allow = {a.lower().lstrip("@") for a in fz.get("allow", []) if a}
+        # `approval_required` beats every exemption: set on follow-ups whose SOURCE item's reporter is outside
+        # (2026-10-25 13:40 — "silence is not a yes": an auto follow-up of a tester item must not inherit the
+        # coordinator-owner exemption through its owner id).
+        if st.get("approval_required"):
+            return False
         # Structural exemptions (owner scope, 2026-10-24 00:35): the freeze is for tester-filed reports whose
         # reporter is not on the allow list. Anything owned by a coordinator worker (`handed_off_to` bc-…; loop
         # agents are `agent_id`, not owners), anything tracked/registered by the coordinator (`track_commit`,
@@ -3722,18 +3727,41 @@ class Loop:
             st["late_push_followup"] = nfid
             self.store.save_state(fid, st)
             self.store.event(fid, "late_push_followup", head=head, followup=nfid)
-            # One-hour confirmation hold: the owner knows whether the tail was abandoned or re-landed elsewhere.
+            # The follow-up inherits the SOURCE item's reporter and tier. Outside source (reporter not Jacob,
+            # not a coordinator-owned item) → the follow-up needs Jacob's per-item approve like any outside fix:
+            # it waits as awaiting_jacob, no timer, no owner-confirm shortcut. Jacob/coordinator source → the
+            # one-hour owner-confirm hold, then the pool.
             nst = self.store.state(nfid)
             if nst:
-                nst["follow_after"] = (utcnow() + dt.timedelta(minutes=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
-                nst["gated_head"] = head
+                for k in ("tester", "tester_key", "tier", "target"):
+                    if st.get(k) is not None:
+                        nst[k] = st[k]
+                outside = not self.freeze_allows(fid, st, {"allow": self.APPROVAL_DEFAULT_ALLOW})
+                nst["source_item"] = fid
+                if outside:
+                    nst.update(approval_required=True, status="awaiting_jacob", branch=nbranch, branch_head=marker["sha"], gated_head=marker["sha"],
+                               awaiting={"since": iso(), "ready": False, "main_head": self.gh.branch_head("main") or "", "conflict": False, "needs_gate": True})
+                else:
+                    nst["follow_after"] = (utcnow() + dt.timedelta(minutes=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    nst["gated_head"] = head
                 self.store.save_state(nfid, nst)
-            log(f"[{fid}] late push on {branch} ({head[:8]}, {len(cmp.get('commits', []))} commit(s) not on main) → following it as {nfid} after a 60-min confirmation hold")
+                self.store.event(nfid, "followup_registered", source=fid, outside=outside)
+            else:
+                outside = False
+            log(f"[{fid}] late push on {branch} ({head[:8]}, {len(cmp.get('commits', []))} commit(s) not on main) → following it as {nfid} "
+                + ("(outside reporter: awaiting Jacob's per-item approve)" if outside else "(after a 60-min owner-confirm hold)"))
             if st.get("issue"):
                 with contextlib.suppress(HttpError):
-                    self.gh.comment(st["issue"], f"{owner}: a push landed on `{branch}` after this item merged ({head[:8]}, {len(cmp.get('commits', []))} commit(s) not on main). "
-                                    f"The loop will follow it as `{nfid}` (branch `{nbranch}`) and gate/ship it in **one hour** unless you say it was abandoned or already landed elsewhere "
-                                    f"— reply here (or ask the loop operator to `decline {nfid}`). Jacob-tier / approval rules apply by reporter as usual.")
+                    if outside:
+                        self.gh.ensure_label("awaiting-jacob", "0E8A16", "Gate green; merges and ships when Jacob approves (release-approval gate)")
+                        self.gh.set_labels(st["issue"], ["awaiting-jacob"], [])
+                        self.gh.comment(st["issue"], f"A push landed on `{branch}` after this item merged ({head[:8]}, {len(cmp.get('commits', []))} commit(s) not on main). "
+                                        f"The loop follows it as `{nfid}` (branch `{nbranch}`). Reporter is outside Jacob's own asks, so it waits for **Jacob's per-item approve** "
+                                        f"(`arbos-feedback approve {nfid}`) before it gates and merges — no timer.")
+                    else:
+                        self.gh.comment(st["issue"], f"{owner}: a push landed on `{branch}` after this item merged ({head[:8]}, {len(cmp.get('commits', []))} commit(s) not on main). "
+                                        f"The loop will follow it as `{nfid}` (branch `{nbranch}`) and gate/ship it in **one hour** unless you say it was abandoned or already landed elsewhere "
+                                        f"— reply here (or ask the loop operator to `decline {nfid}`).")
 
     def watch_handoffs(self) -> None:
         """A handed-off item is picked up two ways: its owner pushes `feedback/<id>` (the loop gates and merges it
