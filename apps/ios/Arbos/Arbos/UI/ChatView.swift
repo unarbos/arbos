@@ -2573,10 +2573,6 @@ private struct ChatSession: View {
         awayFromBottom = false
         newBelowCount = 0
         resetWindowToTail()
-        // Scroll now (and once more after the optimistic row lays out). Relying only
-        // on `onChange(of: rows.last)` raced scroll-geometry unpin and left the
-        // new bubble below the fold with a "New messages" pill.
-        scrollAfterSend()
         if let edit = editing {
             // Save the edit in place — no new bubble, no send command.
             guard !text.isEmpty else { return }
@@ -2596,6 +2592,8 @@ private struct ChatSession: View {
             clearDraft()
             replyTo = nil
             sentOnce = true
+            // After the optimistic row is in `messages` (channel path paints inline).
+            scrollAfterSend()
             return
         }
         if isPeople {
@@ -2610,6 +2608,8 @@ private struct ChatSession: View {
             mentionQuery = nil
             pinTalkTo(afterSending: address, chipMentions: chips)
             sentOnce = true
+            // After paintLocalUserMessage so scrollTo sees the new bubble.
+            scrollAfterSend()
             return
         }
         if needsAnswer && pending.isEmpty {
@@ -2621,6 +2621,8 @@ private struct ChatSession: View {
         clearDraft()
         replyTo = nil
         sentOnce = true
+        // After paintLocalUserMessage so scrollTo sees the new bubble.
+        scrollAfterSend()
     }
 
     private func stop() {

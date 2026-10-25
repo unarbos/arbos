@@ -2977,6 +2977,11 @@ final class AppModel: ObservableObject {
             notice = Notice(text: "Could not write the message: \(error.localizedDescription)")
             return
         }
+        // Bubble at once — same as channels / optimistic new chats. onChange still
+        // reconciles; live coalesce + async full re-reads must not gate the send.
+        paintLocalUserMessage(chatId: chatId, messageId: messageId, text: text,
+                              attachments: attachments, replyTo: reply, forwardedFrom: forwardedFrom,
+                              author: author, mentions: mentions)
         doc.commit()
         announce(chatId: chatId, projectId: nil, messageId: messageId, text: text)
         if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i].lastActivityAt = nowMs() }
@@ -4568,10 +4573,11 @@ final class AppModel: ObservableObject {
             return
         }
         let messageId = presetId ?? newId()
+        let author = projectAuthor(projectId: chat.projectId)
         markUnacked(chatId: chatId, messageId: messageId)
         do {
             try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments,
-                                      author: projectAuthor(projectId: chat.projectId), replyTo: replyTo,
+                                      author: author, replyTo: replyTo,
                                       forwardedFrom: forwardedFrom)
             try doc.pushCommand(command, payload: extra.merging(["messageId": messageId]) { _, new in new }, device: deviceId)
             if !chat.isPinned && chat.title == "New chat" {
@@ -4584,12 +4590,53 @@ final class AppModel: ObservableObject {
             notice = Notice(text: "Could not write the message: \(error.localizedDescription)")
             return
         }
+        // Bubble at once — same as channels / optimistic new chats. onChange still
+        // reconciles; live coalesce + async full re-reads must not gate the send.
+        paintLocalUserMessage(chatId: chatId, messageId: messageId, text: text,
+                              attachments: attachments, replyTo: replyTo, forwardedFrom: forwardedFrom,
+                              author: author)
         doc.commit()
         markActivity(chatId: chatId)
         if command == "send" { announce(chatId: chatId, projectId: chat.projectId, messageId: messageId, text: text) }
         if let p = project(chat.projectId), p.state.isAsleep || p.state == .error {
             wake(projectId: p.id, reason: "send")
         }
+    }
+
+    /// Append a just-written user row to `messages` so the bubble appears in the
+    /// same turn as Send — before onChange's coalesced / async snapshot lands.
+    /// Without this, a send is on the wire at once but the chat stays blank until
+    /// a scroll forces a layout pass (feedback app-01M5S3V2823WNP081K5FT16ANQ).
+    private func paintLocalUserMessage(
+        chatId: Id, messageId: Id, text: String, attachments: [Attachment],
+        replyTo: Id? = nil, forwardedFrom: String? = nil,
+        author: CoreChatDoc.Author? = nil, mentions: [String] = []
+    ) {
+        if messages[chatId]?.contains(where: { $0.id == messageId }) == true { return }
+        var parts: [Part] = attachments.map { .attachment(id: newId(), attachment: $0) }
+        if !text.isEmpty {
+            parts.append(.text(id: "\(messageId)-t", text: text))
+        }
+        if parts.isEmpty {
+            parts = [.text(id: "\(messageId)-t", text: text)]
+        }
+        var m = Message(
+            id: messageId, chatId: chatId, role: .user,
+            sender: author?.sender ?? "user",
+            status: .done, turn: nil, decision: nil, subagentId: nil, subagentName: nil,
+            inReplyTo: nil, usage: [:], model: nil,
+            createdAt: nowMs(), completedAt: nowMs(), pending: true,
+            parts: parts, hiddenCount: 0
+        )
+        m.replyTo = replyTo
+        m.forwardedFrom = forwardedFrom
+        m.senderHandle = author?.handle
+        m.senderName = author?.name
+        m.senderAvatar = author?.avatar
+        m.mentions = mentions
+        var next = messages
+        next[chatId, default: []].append(m)
+        messages = next
     }
 
     /// Author fields for a row in a project chat (API §3/§7, same as the Mac): always the
