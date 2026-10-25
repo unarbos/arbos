@@ -1520,6 +1520,15 @@ impl ChatDoc {
         Some(msg_id)
     }
 
+    /// The standing choice made on a destructive-shell card (#1544): `grant` = the path class
+    /// the owner allowed from now on, so an answered card shows which row was picked.
+    pub fn set_approval_grant(&self, approval_id: &str, path_class: &str) -> Option<String> {
+        let (msg_id, p) = self.approval_part(approval_id)?;
+        p.insert("grant", path_class).ok();
+        self.commit_now();
+        Some(msg_id)
+    }
+
     /// Plain JSON of one approval part, if present.
     pub fn approval(&self, approval_id: &str) -> Option<Value> {
         self.approval_part(approval_id)

@@ -31,6 +31,8 @@ enum DebugHooks {
     /// Seed the connected 1Password vault and the connect flow (`features.vault_connect` on).
     /// Default off, like the shipped relay flag.
     static var fixtureVault: Bool { value("ARBOS_FIXTURE_VAULT") == "1" }
+    /// #1544 rig: the Comms chat ends with a destructive-shell card (four standing rows).
+    static var fixtureShellCard: Bool { value("ARBOS_FIXTURE_SHELL_CARD") == "1" }
     /// With `ARBOS_OPEN_CHAT`: that chat ends with a several-block agent reply (#1389 rigs).
     static var fixtureLongReply: Bool { value("ARBOS_FIXTURE_LONG_REPLY") == "1" }
     /// Presence-row rig (typing-indicator-left-2026-10-23): n agents working in the fixture group.

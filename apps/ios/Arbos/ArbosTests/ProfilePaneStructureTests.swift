@@ -33,7 +33,7 @@ final class ProfilePaneStructureTests: XCTestCase {
     /// The agent pane's Details tab puts live content first and the edit fields last, and
     /// its copy is the Mac's (`agent::tests` in `profiles/agent.rs`).
     func testAgentDetailsPutsLiveContentFirstAndReadsLikeTheMac() {
-        XCTAssertEqual(AgentPane.detailsOrder(mine: true), [.coding, .routines, .settings, .access, .profile])
+        XCTAssertEqual(AgentPane.detailsOrder(mine: true), [.coding, .routines, .settings, .access, .permissions, .profile])
         XCTAssertEqual(AgentPane.detailsOrder(mine: false), [.coding, .settings, .profile])
         XCTAssertEqual(AgentPane.subtitle(description: "", mine: true, ownerHandle: nil), "Add a label")
         XCTAssertEqual(AgentPane.subtitle(description: " Drafts before it sends. ", mine: true, ownerHandle: nil), "Drafts before it sends.")

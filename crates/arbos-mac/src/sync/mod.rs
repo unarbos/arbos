@@ -285,6 +285,11 @@ pub enum SyncEvent {
         project_id: Id,
         view: ProjectSecrets,
     },
+    /// One agent's standing shell approvals (#1544).
+    ShellGrants {
+        project_id: Id,
+        items: Vec<crate::model::ShellGrant>,
+    },
     /// Routines of one project (Settings → Routines).
     Routines {
         project_id: Id,
@@ -576,6 +581,9 @@ pub enum ClientCommand {
     Approve {
         chat_id: Id,
         approval_id: String,
+        /// #1544: card option B/C — the path class to allow from now on (`scratch`,
+        /// `workspace`, `anywhere`); `None` is a one-time approve.
+        grant: Option<String>,
     },
     Reject {
         chat_id: Id,
@@ -836,6 +844,15 @@ pub enum ClientCommand {
     /// An agent's Secrets page opened.
     ProjectSecretsRefresh {
         project_id: Id,
+    },
+    /// The agent pane opened: its standing shell approvals (#1544).
+    ShellGrantsRefresh {
+        project_id: Id,
+    },
+    /// Settings › Shell approvals: switch a grant off; the agent asks again next time.
+    ShellGrantRevoke {
+        project_id: Id,
+        grant_id: String,
     },
     /// Add a secret; the value goes to the relay once.
     SecretAdd {

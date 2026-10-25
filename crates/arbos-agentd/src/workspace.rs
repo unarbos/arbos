@@ -259,6 +259,9 @@ impl Supervisor {
         if let Err(e) = crate::vault::refresh_all(&agent).await {
             tracing::info!(project = %project_id, error = %e, "secrets: no grants yet");
         }
+        if let Err(e) = agent.refresh_shell_grants().await {
+            tracing::info!(project = %project_id, error = %e, "shell grants: none yet");
+        }
         tasks.push(agent.spawn_tree_builder());
 
         // Prime ask_user marker directory (D64 skill) → InputRequested.

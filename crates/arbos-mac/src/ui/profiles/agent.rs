@@ -399,6 +399,9 @@ pub(crate) enum DetailsBlock {
     Settings,
     /// "Access": who may message this agent (owner only).
     Access,
+    /// "Permissions": Shell approvals — the standing grants from destructive-shell cards
+    /// (#1544), one switch each (owner only).
+    Permissions,
     /// "Profile": the Edit profile row; Name · Handle · Description under it when open.
     Profile,
 }
@@ -410,6 +413,7 @@ pub(crate) fn details_order(mine: bool) -> Vec<DetailsBlock> {
             DetailsBlock::Routines,
             DetailsBlock::Settings,
             DetailsBlock::Access,
+            DetailsBlock::Permissions,
             DetailsBlock::Profile,
         ]
     } else {
@@ -608,6 +612,9 @@ fn details_sections(
                     ));
                     body.push(Section::Card(rows));
                 }
+            }
+            DetailsBlock::Permissions => {
+                body.extend(shell_grant_sections(shell, project, theme, cx));
             }
             DetailsBlock::Profile => {
                 body.push(Section::Title("Profile".into()));
@@ -1052,6 +1059,88 @@ fn capitalise(s: &str) -> String {
         Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
         None => String::new(),
     }
+}
+
+/// "Permissions" (#1544): the Shell approvals row (value = the active grants), then one switch
+/// per standing grant made on a destructive-shell card; off = revoked, the agent asks again.
+fn shell_grant_sections(
+    shell: &Shell,
+    project: &Project,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> Vec<Section> {
+    let grants: Vec<crate::model::ShellGrant> = shell
+        .state
+        .read(cx)
+        .shell_grants
+        .get(&project.id)
+        .cloned()
+        .unwrap_or_default();
+    let mut body = vec![
+        Section::Title("Permissions".into()),
+        Section::Card(vec![kit::row(
+            "agent-shell-approvals-row",
+            Leading::Tile("terminal"),
+            "Shell approvals",
+            None,
+            Some(crate::model::ShellGrant::summary(&grants).into()),
+            None,
+            false,
+            theme,
+        )
+        .into_any_element()]),
+        Section::Footnote(
+            format!(
+                "{} asks before destructive shell commands outside /work/tmp. Standing answers from the cards land here.",
+                project.name
+            )
+            .into(),
+        ),
+    ];
+    if grants.is_empty() {
+        return body;
+    }
+    body.push(Section::Title(
+        format!("Shell approvals · {}", project.name).into(),
+    ));
+    let mut rows: Vec<gpui::AnyElement> = Vec::new();
+    for g in &grants {
+        let pid = project.id.clone();
+        let gid = g.id.clone();
+        let mut sub = format!("{} · {}", g.rule_class, g.detail);
+        if g.chat_id.is_some() {
+            sub.push_str(" · this chat only");
+        }
+        rows.push(
+            kit::row(
+                gpui::ElementId::Name(format!("shell-grant-{}", g.id).into()),
+                Leading::Glyph("terminal"),
+                g.label.clone(),
+                Some(sub.into()),
+                None,
+                Some(glass::switch(true, theme).into_any_element()),
+                false,
+                theme,
+            )
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.surface_2))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let (pid, gid) = (pid.clone(), gid.clone());
+                this.state
+                    .update(cx, |s, cx| s.shell_grant_revoke(pid, gid, cx));
+            }))
+            .into_any_element(),
+        );
+    }
+    body.push(Section::Card(rows));
+    body.push(Section::Footnote(
+        format!(
+            "Turn one off and {} asks again next time. Every allowed run is in Activity.",
+            project.name
+        )
+        .into(),
+    ));
+    body
 }
 
 /// The rows of "Who may message X": one per grant (person or agent of another owner) with a

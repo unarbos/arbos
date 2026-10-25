@@ -528,6 +528,10 @@ struct Attachment: Codable, Equatable {
 struct ChoiceOption: Equatable, Hashable {
     var id: String
     var label: String
+    /// #1544: a muted line at the row's trailing edge ("scratch only: /tmp and /work/tmp").
+    var hint: String? = nil
+    /// Drawn in red (Deny).
+    var destructive: Bool = false
 }
 
 /// A `question` part (design §10 widgets): what the agent asked, the answer
@@ -548,6 +552,8 @@ struct Question: Equatable {
     var approvalId: String? = nil
     /// D83: the relay request the card decides (`payload.secretRequestId`).
     var secretRequestId: String? = nil
+    /// #1544: a destructive-shell card with standing options; its footer names Settings.
+    var shellCard: Bool = false
 
     var hasChoices: Bool { !options.isEmpty }
 }
@@ -1074,13 +1080,37 @@ enum DocJSON {
     /// are the card's four rows for a secret request (`payload.answers`), else Approve / Reject.
     /// `decidedBy` carries the relay's decision (`arbos:secrets:allowed_always`) so an answered
     /// card can show which row was picked.
-    static func approval(_ pm: [String: Any]) -> Question {
+    static func approval(_ pm: [String: Any], agentName: String? = nil) -> Question {
         let approvalId = str(pm["approvalId"]) ?? id(pm)
         let payload = pm["payload"] as? [String: Any]
         var options: [ChoiceOption] = []
         for o in (payload?["answers"] as? [Any]) ?? [] {
             guard let om = o as? [String: Any], let oid = str(om["id"]) else { continue }
             options.append(ChoiceOption(id: oid, label: str(om["label"]) ?? oid))
+        }
+        // #1544: a destructive-shell card offers A Allow once · B Always allow <agent> in <class>
+        // · C … anywhere · D Deny (`payload.grant_options`); the agent's name comes in `agentName`.
+        let grantOptions = (payload?["grant_options"] as? [Any]) ?? []
+        var shellCard = false
+        if options.isEmpty, !grantOptions.isEmpty {
+            shellCard = true
+            // The card fills in the agent's name when it draws ("Always allow Doug in /tmp").
+            let agent = agentName ?? "{agent}"
+            let rawClass = str(payload?["class"]) ?? "this"
+            let ruleClass = rawClass == "file-delete" ? "file deletes" : rawClass
+            options = [ChoiceOption(id: "once", label: "Allow once")]
+            for o in grantOptions {
+                guard let om = o as? [String: Any], let cls = str(om["path_class"]) else { continue }
+                let label = str(om["label"]) ?? cls
+                let detail = str(om["detail"]) ?? ""
+                if cls == "anywhere" {
+                    options.append(ChoiceOption(id: "grant:anywhere", label: "Always allow \(agent) anywhere",
+                                                hint: "no more cards for \(ruleClass) from \(agent), in \(detail)"))
+                } else {
+                    options.append(ChoiceOption(id: "grant:\(cls)", label: "Always allow \(agent) in \(label)", hint: detail))
+                }
+            }
+            options.append(ChoiceOption(id: "deny", label: "Deny", destructive: true))
         }
         if options.isEmpty {
             options = [ChoiceOption(id: "approve", label: "Approve"), ChoiceOption(id: "reject", label: "Reject")]
@@ -1089,6 +1119,8 @@ enum DocJSON {
         let decidedBy = str(pm["decidedBy"]) ?? ""
         var picked: [String] = []
         switch state {
+        case "approved" where shellCard:
+            if let g = str(pm["grant"]), !g.isEmpty { picked = ["grant:\(g)"] } else { picked = ["once"] }
         case "approved":
             if decidedBy.hasSuffix(":allowed_once") { picked = ["once"] }
             else if decidedBy.hasSuffix(":allowed_chat") { picked = ["chat"] }
@@ -1114,7 +1146,8 @@ enum DocJSON {
             answer: picked,
             open: state == "pending",
             approvalId: approvalId,
-            secretRequestId: str(payload?["secretRequestId"])
+            secretRequestId: str(payload?["secretRequestId"]),
+            shellCard: shellCard
         )
     }
 
