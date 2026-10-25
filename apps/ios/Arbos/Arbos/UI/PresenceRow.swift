@@ -192,7 +192,7 @@ struct TasksSheet: View {
     static let rowPadY: CGFloat = 10
     /// Steer / Stop capsules.
     static let buttonHeight: CGFloat = 28
-    static let buttonPadX: CGFloat = 12
+    static let buttonPadX: CGFloat = 10
 
     var body: some View {
         NavigationStack {
@@ -244,15 +244,24 @@ struct TasksSheet: View {
             }
             .frame(width: Self.glyph, height: Self.glyph)
             VStack(alignment: .leading, spacing: 2) {
+                // The title may take two lines on a phone; the step truncates but the
+                // elapsed clock never does.
                 Text(job.title)
                     .font(theme.font(Theme.small, weight: .medium))
                     .foregroundStyle(theme.text)
-                    .lineLimit(1)
-                Text("\(job.statusLine) · \(job.elapsedLabel)")
-                    .font(theme.font(Theme.tiny))
-                    .foregroundStyle(job.state == .queued ? theme.placeholder : theme.muted)
-                    .lineLimit(1)
+                    .lineLimit(2)
+                HStack(spacing: 0) {
+                    Text(job.statusLine)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Text(" · \(job.elapsedLabel)")
+                        .fixedSize()
+                        .accessibilityIdentifier("tasks-row-elapsed")
+                }
+                .font(theme.font(Theme.tiny))
+                .foregroundStyle(job.state == .queued ? theme.placeholder : theme.muted)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             Spacer(minLength: 8)
             if job.canSteer {
                 capsule("Steer", color: theme.text) { onSteer(job) }
