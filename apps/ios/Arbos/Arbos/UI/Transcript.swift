@@ -2085,6 +2085,9 @@ struct ImageBubble: View {
 
     var body: some View {
         Button { viewer = MediaOpen.state(for: item, chatId: chatId, model: model) } label: {
+            // Picture keeps its fitted size; with a description the caption bar
+            // uses the full chat column width (not the picture width).
+            let barWidth = captionText == nil ? size.width : maxWidth
             VStack(alignment: .leading, spacing: 0) {
                 ZStack {
                     fill
@@ -2101,6 +2104,7 @@ struct ImageBubble: View {
                     }
                 }
                 .frame(width: size.width, height: size.height)
+                .frame(maxWidth: .infinity, alignment: fromUser ? .trailing : .leading)
                 if let captionText {
                     Text(captionText)
                         .font(theme.font(Theme.body))
@@ -2108,10 +2112,12 @@ struct ImageBubble: View {
                         .multilineTextAlignment(.leading)
                         .padding(.horizontal, Theme.bubbleHPad)
                         .padding(.vertical, Theme.bubbleVPad)
-                        .frame(width: size.width, alignment: .leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .background(fill)
                 }
             }
+            .frame(width: barWidth, alignment: .leading)
+            .background(captionText == nil ? Color.clear : fill)
             .clipShape(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous))
         }
         .buttonStyle(.plain)
