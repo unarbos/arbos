@@ -268,6 +268,33 @@ extension AppModel {
                 messages[c, default: []].append(streaming("fx-working-agent", c, at: now - 5_000))
             }
         }
+        // `ARBOS_FIXTURE_JOBS=<n>`: background jobs open in the opened agent chat — each with
+        // its hidden `job` row (what agentd writes) and its entry in the relay's
+        // `activity.jobs[]` (what the poll would answer): the tasks chip and sheet.
+        if DebugHooks.fixtureJobs > 0, let c = DebugHooks.openChat, let projectId = chat(c)?.projectId,
+           peopleChat(c) == nil {
+            let ask = messages[c]?.last { $0.role == .user }?.id
+            let seeds: [(id: String, title: String, state: JobState, step: String, elapsed: Int)] = [
+                ("fx-job-surf", "Searching for surf schools", .running, "Reading tripadvisor.com", 41),
+                ("fx-job-tests", "Fixing the flaky tests", .running, "", 125),
+                ("fx-job-rename", "Renaming the config module", .queued, "Waiting for Fixing the flaky tests", 12),
+            ]
+            let n = DebugHooks.fixtureJobs
+            var list: [Job] = []
+            for (i, seed) in seeds.prefix(n).enumerated() {
+                let activity = seed.step.isEmpty ? seed.title : seed.step
+                var row = streaming("fx-job-row-\(i)", c, at: now - Int64(seed.elapsed) * 1000)
+                row.job = JobRef(["id": seed.id, "title": seed.title])
+                row.worker = true
+                row.hidden = true
+                row.inReplyTo = ask
+                row.activity = n > 1 ? "\(activity) · \(n) tasks" : activity
+                messages[c, default: []].append(row)
+                list.append(Job(id: seed.id, title: seed.title, state: seed.state, step: seed.step, elapsedS: seed.elapsed,
+                                askMessageId: ask, chatId: c))
+            }
+            jobs[projectId] = list
+        }
         // `ARBOS_FIXTURE_TYPING=1|<handle>[,<handle>…]`: those people type in every fixture
         // people chat for the whole launch (`1` = the DM's other person / the group's first).
         if let spec = DebugHooks.fixtureTyping {

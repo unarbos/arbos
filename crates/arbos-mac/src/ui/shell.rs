@@ -377,6 +377,8 @@ pub struct Shell {
     pub(crate) tab_rename_input: Entity<ComposerInput>,
     /// The tab strip's "+" dropdown: New chat + the agent's previous chats.
     pub(crate) tab_menu_open: bool,
+    /// The tasks chip's pointer state (rest / hover / pressed fade, `ui::tasks`).
+    pub(crate) tasks_chip: crate::ui::mention::ChipPointer<u8>,
     /// The tab strip's scroll row, so a new or reopened tab comes into view.
     pub(crate) tabs_scroll: ScrollHandle,
     /// Per-agent call voice picker sheet ("…" menu → Voice, profile → voice).
@@ -920,6 +922,7 @@ impl Shell {
             renaming_tab: None,
             tab_rename_input,
             tab_menu_open: false,
+            tasks_chip: crate::ui::mention::ChipPointer::default(),
             tabs_scroll: ScrollHandle::new(),
             voice_picker_open: false,
             pip_offset: (24.0, 96.0),
@@ -2277,7 +2280,8 @@ impl Shell {
             || self.row_menu.is_some()
             || self.chat_menu.is_some()
             || self.message_menu.is_some()
-            || self.reaction_capsule.is_some();
+            || self.reaction_capsule.is_some()
+            || self.state.read(cx).tasks_open.is_some();
         self.close_popovers(cx);
         if floating {
             return;
@@ -2440,6 +2444,7 @@ impl Shell {
     /// Everything that floats closes on a click elsewhere.
     pub(crate) fn close_popovers(&mut self, cx: &mut Context<Self>) {
         self.close_agent_pick(None, cx);
+        self.state.update(cx, |s, cx| s.close_tasks(cx));
         if self.menu_open
             || self.members_open
             || self.add_agent_open
@@ -3027,8 +3032,26 @@ impl Shell {
             // Transcript above, composer pinned at the bottom. On the first
             // send the composer slides down from the centre over 220 ms using
             // a relative `top` inset (GPUI has no transform).
-            let presence_row = presence
-                .map(|p| column_row(crate::ui::presence::row(p, &theme, cx).into_any_element()));
+            // The tasks chip and drawer ride on the row while the agent has
+            // background jobs open in this chat (`ui::tasks`, duplex §2.4).
+            let presence_row = presence.map(|p| {
+                let row = match chat_id.clone() {
+                    Some(id) => {
+                        let (jobs, open) = crate::ui::tasks::for_chat(self.state.read(cx), &id);
+                        crate::ui::tasks::presence_row(
+                            p,
+                            id,
+                            jobs,
+                            open,
+                            &self.tasks_chip,
+                            &theme,
+                            cx,
+                        )
+                    }
+                    None => crate::ui::presence::row(p, &theme, cx),
+                };
+                column_row(row.into_any_element())
+            });
             let composer_row = div()
                 .w_full()
                 .flex()

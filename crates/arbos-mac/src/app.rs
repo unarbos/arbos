@@ -20,8 +20,8 @@ use crate::model::{
 };
 use crate::model::{
     new_id, now_ms, Attachment, AttachmentKind, BoxReport, BoxState, ChannelSel, ChannelsView,
-    Chat, ChatKind, ConnectorsView, DevicesView, Effort, Id, Link, LinkState, LocalView, Machine,
-    Message, MessageStatus, NewSecret, Part, Project, ProjectDocView, ProjectSecrets,
+    Chat, ChatKind, ConnectorsView, DevicesView, Effort, Id, Job, Link, LinkState, LocalView,
+    Machine, Message, MessageStatus, NewSecret, Part, Project, ProjectDocView, ProjectSecrets,
     QuestionState, Role, Routine, RoutineRun, RoutineTrigger, SecretDirector, SecretScope,
     SecretsView, ServerInfo, Skill, StatusKind,
 };
@@ -35,6 +35,10 @@ use crate::ui::tones::{SamplePlayer, Tone, TonePlayer};
 
 /// How often held notification batches are re-checked.
 const NOTIFY_TICK_MS: u64 = 5_000;
+/// How often the open chat's background jobs are polled (`GET /projects/{id}`
+/// → `activity.jobs[]`) while a job row is live or the drawer lists one —
+/// the design's "chip updates on the next poll" (duplex §2.4, stop ≤ 3 s).
+pub const JOBS_POLL_MS: u64 = 1_500;
 /// A link state must hold this long before the header pill shows it.
 pub const LINK_PILL_GRACE_MS: u64 = 1_200;
 /// The ring card and its sound give up after this long.
@@ -536,6 +540,12 @@ pub struct AppState {
     /// Computer tab ([feedback agent-pane-details-tab-2026-10-24]); fetched
     /// when an agent pane opens and when its Computer tab is picked.
     pub box_report: Option<BoxReport>,
+    /// The agent's open background jobs per project, as the relay's activity
+    /// record last listed them (duplex §2.4) — the tasks chip and drawer. A
+    /// project with no entry or an empty list has no open job.
+    pub jobs: HashMap<Id, Vec<Job>>,
+    /// The tasks drawer is open over the presence row of this chat.
+    pub tasks_open: Option<Id>,
     /// Run history per routine, newest first.
     pub routine_runs: HashMap<Id, Vec<RoutineRun>>,
     /// System notifications (D49); the Shell flips `window_active`.
@@ -682,6 +692,7 @@ pub struct AppState {
     call_commands: mpsc::UnboundedSender<CallCmd>,
     _pump: Task<()>,
     _notify_tick: Task<()>,
+    _jobs_tick: Task<()>,
     _update_pump: Task<()>,
     _call_pump: Task<()>,
 }
@@ -803,6 +814,15 @@ impl AppState {
                 .timer(std::time::Duration::from_millis(NOTIFY_TICK_MS))
                 .await;
             if this.update(cx, |state, cx| state.notify_tick(cx)).is_err() {
+                break;
+            }
+        });
+
+        let jobs_tick = cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(JOBS_POLL_MS))
+                .await;
+            if this.update(cx, |state, _| state.jobs_tick()).is_err() {
                 break;
             }
         });
@@ -933,6 +953,8 @@ impl AppState {
             project_secrets: std::collections::HashMap::new(),
             routines: HashMap::new(),
             box_report: None,
+            jobs: HashMap::new(),
+            tasks_open: None,
             routine_runs: HashMap::new(),
             notifier: Notifier::new(),
             window_active: true,
@@ -1002,6 +1024,7 @@ impl AppState {
             channel_pending_room: None,
             _pump: pump,
             _notify_tick: notify_tick,
+            _jobs_tick: jobs_tick,
             _update_pump: update_pump,
             _call_pump: call_pump,
         }
@@ -1292,7 +1315,16 @@ impl AppState {
         }
     }
 
-    fn apply(&mut self, event: SyncEvent, cx: &mut Context<Self>) {
+    /// Headless tests: swap the source's command channel for one the test reads,
+    /// so what the UI sent (`stop { jobId }`, …) can be asserted.
+    #[cfg(test)]
+    pub(crate) fn take_command_channel(&mut self) -> mpsc::UnboundedReceiver<ClientCommand> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.commands = tx;
+        rx
+    }
+
+    pub(crate) fn apply(&mut self, event: SyncEvent, cx: &mut Context<Self>) {
         match event {
             SyncEvent::NeedsPairing { relay_url } => {
                 let mode = self
@@ -2296,6 +2328,34 @@ impl AppState {
                 self.box_report = Some(report);
                 cx.notify();
             }
+            SyncEvent::ProjectJobs { project_id, jobs } => {
+                if self.jobs.get(&project_id).is_some_and(|j| *j == jobs) {
+                    return;
+                }
+                if jobs.is_empty() {
+                    self.jobs.remove(&project_id);
+                } else {
+                    self.jobs.insert(project_id, jobs);
+                }
+                // The drawer lists live work only: nothing open → it closes itself.
+                if self
+                    .tasks_open
+                    .as_deref()
+                    .is_some_and(|chat| self.open_jobs(chat).is_empty())
+                {
+                    self.tasks_open = None;
+                }
+                // Rig: `ARBOS_RIG_TASKS=open` opens the drawer on the first listing.
+                if self.tasks_open.is_none() && crate::ui::tasks::rig_setting() == Some("open") {
+                    if let Some(chat) = self
+                        .active_chat_id()
+                        .filter(|c| !self.open_jobs(c).is_empty())
+                    {
+                        self.tasks_open = Some(chat);
+                    }
+                }
+                cx.notify();
+            }
             SyncEvent::RoutineRuns { routine_id, runs } => {
                 self.routine_runs.insert(routine_id, runs);
                 cx.notify();
@@ -2793,6 +2853,7 @@ impl AppState {
         // A chat replaces the channel in the centre (D88).
         self.selected_channel = None;
         if switching {
+            self.tasks_open = None;
             self.search_chat = None;
             // The right pane belongs to the chat it was opened from; a new
             // chat starts without one.
@@ -3274,6 +3335,9 @@ impl AppState {
         if self.search_chat.as_deref() != Some(chat_id.as_str()) {
             self.search_chat = None;
         }
+        if self.tasks_open.as_deref() != Some(chat_id.as_str()) {
+            self.tasks_open = None;
+        }
         self.reveal_message = None;
         self.highlight_message = None;
         // Single-chat: an agent has one chat, whichever one was asked for.
@@ -3597,6 +3661,8 @@ impl AppState {
                 subagent_name: None,
                 handoff_messages: None,
                 worker: false,
+                job: None,
+                hidden: false,
                 agent_reply_to: None,
                 reactions: Default::default(),
                 in_reply_to: None,
@@ -4324,6 +4390,8 @@ impl AppState {
                 subagent_name: None,
                 handoff_messages: None,
                 worker: false,
+                job: None,
+                hidden: false,
                 agent_reply_to: None,
                 reactions: Default::default(),
                 in_reply_to: None,
@@ -4726,6 +4794,8 @@ impl AppState {
                 subagent_name: None,
                 handoff_messages: None,
                 worker: false,
+                job: None,
+                hidden: false,
                 agent_reply_to: None,
                 reactions: Default::default(),
                 in_reply_to: None,
@@ -4801,8 +4871,126 @@ impl AppState {
 
     pub fn stop(&mut self, cx: &mut Context<Self>) {
         if let Some(chat_id) = self.active_chat_id() {
+            self.stop_all_jobs(&chat_id);
             self.command(ClientCommand::Stop { chat_id });
         }
+        cx.notify();
+    }
+
+    // ----- tasks chip and drawer (duplex §2.4, D7) ------------------------------
+
+    /// The open background jobs of `chat_id`, newest step first as the relay
+    /// lists them. Empty when the relay predates `activity.jobs[]`, when no job
+    /// runs, or when every job row of the chat has closed (the box finished them;
+    /// the next poll confirms).
+    pub fn open_jobs(&self, chat_id: &str) -> Vec<Job> {
+        let Some(project_id) = self.project_of_chat(chat_id).map(|p| p.id.clone()) else {
+            return Vec::new();
+        };
+        let Some(jobs) = self.jobs.get(&project_id) else {
+            return Vec::new();
+        };
+        jobs.iter()
+            .filter(|j| j.chat_id.as_deref().is_none_or(|c| c == chat_id))
+            .cloned()
+            .collect()
+    }
+
+    /// Something to poll for: a job row of the open chat still streams, the
+    /// relay listed a job last time, or the drawer is up.
+    fn jobs_poll_wanted(&self) -> Option<Id> {
+        let chat_id = self.active_chat_id()?;
+        let project = self.project_of_chat(&chat_id)?;
+        if project.is_people() {
+            return None;
+        }
+        let project_id = project.id.clone();
+        let live = Message::chat_has_live_job(self.messages_of(&chat_id), now_ms());
+        let listed = self.jobs.get(&project_id).is_some_and(|j| !j.is_empty());
+        (live || listed || self.tasks_open.is_some()).then_some(project_id)
+    }
+
+    fn jobs_tick(&mut self) {
+        if let Some(project_id) = self.jobs_poll_wanted() {
+            self.command(ClientCommand::JobsRefresh { project_id });
+        }
+    }
+
+    /// The chip was clicked: the drawer opens over the presence row (or closes).
+    pub fn toggle_tasks(&mut self, chat_id: Id, cx: &mut Context<Self>) {
+        if self.tasks_open.as_deref() == Some(chat_id.as_str()) {
+            self.tasks_open = None;
+        } else if !self.open_jobs(&chat_id).is_empty() {
+            self.tasks_open = Some(chat_id);
+        }
+        cx.notify();
+    }
+
+    pub fn close_tasks(&mut self, cx: &mut Context<Self>) {
+        if self.tasks_open.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Steer a job (contract: no command of its own): the composer becomes a
+    /// reply to the job's ask and the user types the correction; the agent
+    /// binds a correction that quotes the ask to that job.
+    pub fn steer_job(&mut self, chat_id: Id, job: &Job, cx: &mut Context<Self>) -> bool {
+        let Some(ask) = job.ask_message_id.clone().filter(|a| !a.is_empty()) else {
+            return false;
+        };
+        self.set_reply_to(chat_id, ask, cx);
+        self.tasks_open = None;
+        cx.notify();
+        true
+    }
+
+    /// `stop { jobId }`: that job only. The row leaves the drawer at once; the
+    /// next poll is the box's word.
+    pub fn stop_job(&mut self, chat_id: Id, job_id: &str, cx: &mut Context<Self>) {
+        let message_id = self
+            .messages_of(&chat_id)
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::User)
+            .map(|m| m.id.clone())
+            .unwrap_or_default();
+        if let Some(project_id) = self.project_of_chat(&chat_id).map(|p| p.id.clone()) {
+            if let Some(jobs) = self.jobs.get_mut(&project_id) {
+                jobs.retain(|j| j.id != job_id);
+                if jobs.is_empty() {
+                    self.jobs.remove(&project_id);
+                    self.tasks_open = None;
+                }
+            }
+        }
+        self.command(ClientCommand::StopJob {
+            chat_id,
+            job_id: job_id.to_string(),
+            message_id,
+        });
+        cx.notify();
+    }
+
+    /// The drawer's Stop all = the Stop button: `stop {}` halts the turn and
+    /// every job of the chat (D7). Forgets the chat's jobs at once.
+    fn stop_all_jobs(&mut self, chat_id: &str) {
+        if let Some(project_id) = self.project_of_chat(chat_id).map(|p| p.id.clone()) {
+            if let Some(jobs) = self.jobs.get_mut(&project_id) {
+                jobs.retain(|j| j.chat_id.as_deref().is_some_and(|c| c != chat_id));
+                if jobs.is_empty() {
+                    self.jobs.remove(&project_id);
+                }
+            }
+        }
+        if self.tasks_open.as_deref() == Some(chat_id) {
+            self.tasks_open = None;
+        }
+    }
+
+    pub fn stop_all(&mut self, chat_id: Id, cx: &mut Context<Self>) {
+        self.stop_all_jobs(&chat_id);
+        self.command(ClientCommand::Stop { chat_id });
         cx.notify();
     }
 
@@ -5988,6 +6176,8 @@ impl AppState {
                 subagent_name: None,
                 handoff_messages: None,
                 worker: false,
+                job: None,
+                hidden: false,
                 agent_reply_to: None,
                 reactions: Default::default(),
                 in_reply_to: None,
@@ -6119,6 +6309,8 @@ impl AppState {
                 subagent_name: None,
                 handoff_messages: None,
                 worker: false,
+                job: None,
+                hidden: false,
                 agent_reply_to: None,
                 reactions: Default::default(),
                 in_reply_to: None,

@@ -291,6 +291,14 @@ final class AppModel: ObservableObject {
         if a.isEmpty { return true }
         return a.withUnsafeBufferPointer { pa in b.withUnsafeBufferPointer { pb in pa.baseAddress == pb.baseAddress } }
     }
+    /// The agent's open background jobs per project, as the relay's activity record last
+    /// listed them (duplex §2.4) — the tasks chip and sheet. No entry = no open job.
+    @Published var jobs: [Id: [Job]] = [:]
+    private var jobsPolledAt: [Id: Int64] = [:]
+    private var jobsPolling: Set<Id> = []
+    /// How often the open chat's jobs are polled while one is live (the design's "chip
+    /// updates on the next poll"; stop ≤ 3 s).
+    static let jobsPollMs: Int64 = 1_500
     @Published var caughtUp: Set<Id> = [] {
         didSet {
             #if DEBUG
@@ -4245,7 +4253,15 @@ final class AppModel: ObservableObject {
     /// message's `activity`, else the latest working/step status part with a
     /// real message; nil → "<name> is working".
     func currentActivity(_ chatId: Id) -> String? {
-        guard let m = messages(of: chatId).last(where: { $0.role == .assistant && $0.isStreaming }) else { return nil }
+        // The newest live row that has words: a short main turn streaming with no activity
+        // yet must not blank a job's "Reading … · 2 tasks" under it (duplex §2.4).
+        for m in messages(of: chatId).reversed() where m.role == .assistant && m.isStreaming {
+            if let words = Self.activityWords(m) { return words }
+        }
+        return nil
+    }
+
+    private static func activityWords(_ m: Message) -> String? {
         if let a = m.activity?.trimmingCharacters(in: .whitespacesAndNewlines), !a.isEmpty { return a }
         for part in m.parts.reversed() {
             if case .status(_, let code, let text) = part, code == .working || code == .step {
@@ -4268,6 +4284,8 @@ final class AppModel: ObservableObject {
     struct ChatActivity {
         /// `createdAt` of the newest assistant row still streaming with no user line after it.
         var liveStreamAt: Int64?
+        /// `createdAt` of the newest job row (`job` set) still streaming, user lines or not.
+        var liveJobAt: Int64?
         /// Open hand-off rows: (streaming, createdAt, completedAt ?? createdAt).
         var openHandoffs: [(streaming: Bool, createdAt: Int64, finishedAt: Int64)] = []
         /// `createdAt` of the last row when it is the user's.
@@ -4284,6 +4302,7 @@ final class AppModel: ObservableObject {
                 if m.role == .user { userAfter = true }
                 if m.role == .assistant, m.isStreaming, !userAfter { out.liveStreamAt = m.createdAt }
             }
+            if out.liveJobAt == nil, m.role == .assistant, m.job != nil, m.isStreaming { out.liveJobAt = m.createdAt }
             if m.role == .assistant, m.subagentId != nil || m.subagentName != nil,
                m.turn == .new || m.turn == .spawn || m.turn == .wake,
                (m.handoffMessages ?? 1) < 2 {
@@ -4296,8 +4315,11 @@ final class AppModel: ObservableObject {
     }
 
     func isStreaming(_ chatId: Id) -> Bool {
-        guard let at = activity(chatId).liveStreamAt else { return false }
-        return at >= nowMs() - 15 * 60 * 1000
+        let recent = nowMs() - 15 * 60 * 1000
+        if let at = activity(chatId).liveStreamAt, at >= recent { return true }
+        // A background job's row streams until the box finishes it, whatever the user
+        // typed since (duplex §2.3).
+        return activity(chatId).liveJobAt.map { $0 >= recent } ?? false
     }
 
     func isStreaming(project projectId: Id) -> Bool {
@@ -4607,9 +4629,74 @@ final class AppModel: ObservableObject {
     }
 
     func stop(chatId: Id) {
+        forgetJobs(chatId: chatId)
         guard let doc = docs[chatId] else { return }
         try? doc.pushCommand("stop", payload: [:], device: deviceId)
         doc.commit()
+    }
+
+    // MARK: Tasks chip and sheet (duplex §2.4, D7)
+
+    /// The open background jobs of `chatId`, newest step first as the relay lists them.
+    /// Empty when the relay predates `activity.jobs[]` or nothing runs.
+    func openJobs(_ chatId: Id) -> [Job] {
+        guard let chat = chat(chatId), let list = jobs[chat.projectId] else { return [] }
+        return list.filter { $0.chatId == nil || $0.chatId == chatId }
+    }
+
+    /// A background job's row still runs (duplex §2.3): jobs are independent of the turn,
+    /// so a newer user line does not end one — only the box finishing the row does, or
+    /// the freshness window (a dead box).
+    func hasLiveJob(_ chatId: Id) -> Bool {
+        let recent = nowMs() - 15 * 60 * 1000
+        return messages(of: chatId).contains { $0.role == .assistant && $0.job != nil && $0.isStreaming && $0.createdAt >= recent }
+    }
+
+    /// Poll `GET /projects/{id}` for the open chat's jobs while a job row is live or the relay
+    /// listed one last time; called from the chat view's one-second tick. Transport errors keep
+    /// the last answer rather than blinking the list away.
+    func pollJobsIfNeeded(chatId: Id) {
+        guard !isFixture, let chat = chat(chatId), peopleChat(chatId) == nil else { return }
+        let projectId = chat.projectId
+        let listed = !(jobs[projectId] ?? []).isEmpty
+        guard listed || hasLiveJob(chatId) else { return }
+        let now = nowMs()
+        guard now - (jobsPolledAt[projectId] ?? 0) >= AppModel.jobsPollMs, !jobsPolling.contains(projectId) else { return }
+        jobsPolledAt[projectId] = now
+        jobsPolling.insert(projectId)
+        let api = self.api
+        Task { @MainActor [weak self] in
+            defer { self?.jobsPolling.remove(projectId) }
+            guard let fresh = try? await api.projectJobs(projectId: projectId) else { return }
+            self?.applyJobs(projectId: projectId, fresh)
+        }
+    }
+
+    func applyJobs(projectId: Id, _ fresh: [Job]) {
+        if fresh.isEmpty {
+            if jobs[projectId] != nil { jobs.removeValue(forKey: projectId) }
+        } else if jobs[projectId] != fresh {
+            jobs[projectId] = fresh
+        }
+    }
+
+    /// `stop { jobId }`: that job only. The row leaves the sheet at once; the next poll is
+    /// the box's word.
+    func stopJob(chatId: Id, jobId: String) {
+        if let chat = chat(chatId), var list = jobs[chat.projectId] {
+            list.removeAll { $0.id == jobId }
+            applyJobs(projectId: chat.projectId, list)
+        }
+        guard let doc = docs[chatId] else { return }
+        let messageId = messages(of: chatId).last { $0.role == .user }?.id ?? ""
+        try? doc.pushCommand("stop", payload: ["jobId": jobId, "messageId": messageId], device: deviceId)
+        doc.commit()
+    }
+
+    /// The Stop button / Stop all halts every job of the chat (D7): forget them at once.
+    private func forgetJobs(chatId: Id) {
+        guard let chat = chat(chatId), let list = jobs[chat.projectId] else { return }
+        applyJobs(projectId: chat.projectId, list.filter { $0.chatId != nil && $0.chatId != chatId })
     }
 
     func retry(chatId: Id, messageId: Id) {
