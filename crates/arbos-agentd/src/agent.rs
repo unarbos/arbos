@@ -1221,6 +1221,13 @@ pub struct TurnState {
     /// the first attempt is the answer; the corrective `route reply` must add nothing (#1446:
     /// a second, contradictory answer glued on; #1648: the same answer twice after a restart).
     pub route_correcting: bool,
+    /// Duplex step 1 (`docs/duplex-agent-design.md` §2.1): how this turn's words reach the chat.
+    pub send_tool: crate::config::SendTool,
+    /// Prose the model wrote outside `send_message` / `route.reply` while the send tool is on:
+    /// kept for T3 and the one fallback bubble, never streamed to the doc.
+    pub unposted_text: String,
+    /// The turn ended with nothing posted and `SendTool::On` posted the leftover prose once.
+    pub posted_fallback: bool,
 }
 
 /// How the model call failed, as pi reported it.
@@ -1339,6 +1346,9 @@ impl TurnState {
             relay_fallback: String::new(),
             route_reply_text: None,
             route_correcting: false,
+            send_tool: crate::config::SendTool::Off,
+            unposted_text: String::new(),
+            posted_fallback: false,
         }
     }
 }
@@ -3141,26 +3151,11 @@ impl Agent {
                     // where attribution matters (groups, channels, people chats, a row
                     // another agent sent), in a 1:1 only when the answer is to an earlier
                     // message than the latest (#1521).
-                    if let Some(source) = h.doc.message(user_msg_id) {
-                        let shared = self.people.is_people_chat(chat_id)
-                            || self.groups.kind_of(chat_id).is_some_and(|k| k != "chat");
-                        let later_exists = h
-                            .doc
-                            .messages()
-                            .iter()
-                            .skip_while(|m| m.id != source.id)
-                            .skip(1)
-                            .any(|m| m.role == "user" || m.role == "project");
-                        if reply_to_wanted(
-                            shared,
-                            later_exists,
-                            source.rest.get("agentMessage").is_some(),
-                        ) {
-                            h.doc.set_message_fields(
-                                &assistant_msg_id,
-                                &[("replyTo", json!(user_msg_id))],
-                            );
-                        }
+                    if self.reply_to_wanted_for(&h.doc, chat_id, user_msg_id) {
+                        h.doc.set_message_fields(
+                            &assistant_msg_id,
+                            &[("replyTo", json!(user_msg_id))],
+                        );
                     }
                 }
                 TurnKind::SubagentResult {
@@ -3387,6 +3382,9 @@ impl Agent {
             relay_fallback: relay_fallback_line(&kind),
             route_reply_text: None,
             route_correcting: false,
+            send_tool: self.cfg.send_tool(),
+            unposted_text: String::new(),
+            posted_fallback: false,
         });
         self.turn_running.store(true, Ordering::SeqCst);
         let keepalive = self.spawn_keepalive();
@@ -3426,6 +3424,7 @@ impl Agent {
             if let Some(t) = tl.as_mut() {
                 self.flush_staged_text(host, t).await;
                 self.write_route_reply_if_missing(host, t).await;
+                self.post_fallback_if_silent(host, t).await;
             }
         }
         let turn = self.turn.lock().await.take();
@@ -3563,10 +3562,17 @@ impl Agent {
             );
         }
         // One notification per turn: the result, or the ack when the turn ended on it.
-        let announce = if turn.streamed_text.trim().is_empty() {
-            turn.ack_text.as_str()
-        } else {
+        let announce = if !turn.streamed_text.trim().is_empty() {
             turn.streamed_text.as_str()
+        } else if let Some(last) = turn
+            .progress_texts
+            .iter()
+            .rev()
+            .find(|p| !p.trim().is_empty())
+        {
+            last.as_str()
+        } else {
+            turn.ack_text.as_str()
         };
         if matches!(final_status, MessageStatus::Done) && !announce.trim().is_empty() {
             self.announce_reply(&room_name, &assistant_msg_id, announce);
@@ -3612,6 +3618,12 @@ impl Agent {
         }
         if turn.metrics.route_corrected {
             usage_rec["route_corrected"] = json!(true);
+        }
+        if turn.posted_fallback {
+            usage_rec["send_tool_fallback"] = json!(true);
+        }
+        if !turn.unposted_text.trim().is_empty() {
+            usage_rec["unposted_chars"] = json!(turn.unposted_text.chars().count());
         }
         let _ = self.store.record_turn(
             chat_id,
@@ -3704,7 +3716,7 @@ impl Agent {
             prompt.push_str(&format!("\nThe run ended with an error: {e}\n"));
         }
         prompt.push_str(&format!(
-            "\nSubagent output (for you only; the user has not seen it):\n<<<\n{raw_trim}\n>>>\n\nRoute `reply` and write the update for the user like a colleague in chat: what got done and the outcome, what changed that they care about, and what is open or needs their answer. Speak as if you did the work; do not mention the subagent, its name, the harness, the model, tool calls, commands, scratch paths, or token counts. No JSON, no quoted output, no list of steps. Two to five sentences."
+            "\nSubagent output (for you only; the user has not seen it):\n<<<\n{raw_trim}\n>>>\n\nRoute `reply`, then deliver the update with `send_message` like a colleague in chat: what got done and the outcome, what changed that they care about, and what is open or needs their answer. Research or a comparison comes in parts, each its own `send_message`: the conclusion in one or two sentences; a markdown table with one row per item (name linked to its page, the compared facts as columns); then details and caveats, the sources used and what could not be checked, ending with one concrete next-step offer. Anything else is one short message. Speak as if you did the work; do not mention the subagent, its name, the harness, the model, tool calls, commands, scratch paths, or token counts. No JSON, no quoted output, no list of steps."
         ));
         let kind = TurnKind::SubagentResult {
             subagent_id: subagent_id.to_owned(),
@@ -4127,12 +4139,16 @@ impl Agent {
                                 self.write_ack(host, t, &ack).await;
                             }
                             self.maybe_split_ack(host, t, false).await;
-                            let text = t.reply_extractor.feed(delta);
-                            if !text.is_empty() {
-                                self.append_text(host, t, &text).await;
-                            }
-                            if t.reply_extractor.is_done() {
-                                self.flush_staged_text(host, t).await;
+                            // Send tool on: the `reply` argument is posted whole from the route
+                            // hook (one bubble, no token stream); streaming it here would double it.
+                            if t.send_tool == crate::config::SendTool::Off {
+                                let text = t.reply_extractor.feed(delta);
+                                if !text.is_empty() {
+                                    self.append_text(host, t, &text).await;
+                                }
+                                if t.reply_extractor.is_done() {
+                                    self.flush_staged_text(host, t).await;
+                                }
                             }
                         }
                     }
@@ -4446,6 +4462,33 @@ impl Agent {
         tracing::info!(chat_id = %t.chat_id, action, ack_chars = t.ack_text.chars().count(), "ack bubble");
     }
 
+    /// The #1521 rule for one answer row: quote the message it answers always in a shared chat
+    /// (groups, channels, people chats, a row another agent sent), in a 1:1 only when a later
+    /// user message exists — so every bubble of a turn threads under its ask (duplex design D6).
+    fn reply_to_wanted_for(
+        &self,
+        doc: &arbos_core::doc::ChatDoc,
+        chat_id: &str,
+        user_msg_id: &str,
+    ) -> bool {
+        let Some(source) = doc.message(user_msg_id) else {
+            return false;
+        };
+        let shared = self.people.is_people_chat(chat_id)
+            || self.groups.kind_of(chat_id).is_some_and(|k| k != "chat");
+        let later_exists = doc
+            .messages()
+            .iter()
+            .skip_while(|m| m.id != source.id)
+            .skip(1)
+            .any(|m| m.role == "user" || m.role == "project");
+        reply_to_wanted(
+            shared,
+            later_exists,
+            source.rest.get("agentMessage").is_some(),
+        )
+    }
+
     /// Open a fresh streaming assistant row for this turn (after an ack or a progress bubble).
     async fn open_row(&self, host: &SharedHost, t: &mut TurnState, role: &str) {
         let id = ulid();
@@ -4455,6 +4498,10 @@ impl Agent {
             .start_assistant_message(&id, &t.user_msg_id, &self.cfg.device_id);
         h.doc.add_status_part(&id, "working", "Working…");
         h.doc.set_message_fields(&id, &[("turnRole", json!(role))]);
+        if self.reply_to_wanted_for(&h.doc, &t.chat_id, &t.user_msg_id) {
+            h.doc
+                .set_message_fields(&id, &[("replyTo", json!(t.user_msg_id))]);
+        }
         if let Some(attr) = self.people_reply_fields(&t.chat_id) {
             h.doc.set_message_fields(&id, &attr.fields);
         }
@@ -4517,12 +4564,15 @@ impl Agent {
         });
     }
 
-    /// `send_message(text, activity?)` from the main agent: a progress bubble now, as its own
-    /// row, while the turn keeps running (agent-flow contract §1).
+    /// `send_message(text, activity?, reply_to?)` from the main agent: a bubble now, as its own
+    /// row, while the turn keeps running (agent-flow contract §1; duplex step 1 makes this the
+    /// way every answer is posted). `reply_to` threads the bubble under that message; without
+    /// it the #1521 rule applies (the ask, when the chat is shared or moved on).
     pub async fn hook_send_message(
         &self,
         text: &str,
         activity: Option<&str>,
+        reply_to: Option<&str>,
     ) -> Result<(), String> {
         let text = ProseFilter::clean_prose(text.trim());
         let text = text.trim();
@@ -4565,6 +4615,20 @@ impl Agent {
                 }
                 h.doc
                     .append_text(&t.assistant_msg_id, &t.text_part_id, text);
+                match reply_to.map(str::trim).filter(|r| !r.is_empty()) {
+                    Some(target) if h.doc.message(target).is_some() => {
+                        h.doc
+                            .set_message_fields(&t.assistant_msg_id, &[("replyTo", json!(target))]);
+                    }
+                    _ => {
+                        if self.reply_to_wanted_for(&h.doc, &t.chat_id, &t.user_msg_id) {
+                            h.doc.set_message_fields(
+                                &t.assistant_msg_id,
+                                &[("replyTo", json!(t.user_msg_id))],
+                            );
+                        }
+                    }
+                }
             }
             t.progress_texts.push(text.to_owned());
             self.close_row(&host, t, "progress").await;
@@ -4594,7 +4658,9 @@ impl Agent {
         t.act_buffer.push_str(text);
     }
 
-    /// Judge held prose and write the staged buffer as one complete bubble.
+    /// Judge held prose and write the staged buffer as one complete bubble. With the send tool
+    /// on (duplex step 1) the words are kept instead: only `send_message` and `route.reply`
+    /// post, and `post_fallback_if_silent` decides at turn end whether this prose is shown.
     async fn flush_staged_text(&self, host: &SharedHost, t: &mut TurnState) {
         let held = t.prose.flush();
         if !held.is_empty() {
@@ -4602,9 +4668,56 @@ impl Agent {
         }
         let final_text = std::mem::take(&mut t.act_buffer);
         let cleaned = ProseFilter::clean_prose(final_text.trim());
-        if !cleaned.is_empty() {
-            self.write_text(host, t, &cleaned).await;
+        if cleaned.is_empty() {
+            return;
         }
+        if t.send_tool == crate::config::SendTool::Off {
+            self.write_text(host, t, &cleaned).await;
+            return;
+        }
+        if !t.unposted_text.is_empty() {
+            t.unposted_text.push_str("\n\n");
+        }
+        t.unposted_text.push_str(&cleaned);
+        let _ = self.store.t3_append(
+            &t.chat_id,
+            None,
+            Some(&t.chat_id),
+            "interim",
+            Some("assistant"),
+            &cleaned,
+            Some(&json!({ "unposted": true })),
+        );
+        tracing::info!(chat_id = %t.chat_id, chars = cleaned.chars().count(), "prose outside send_message kept out of the chat");
+    }
+
+    /// Did this turn put any words in front of the user (a bubble, an ack, a progress note)?
+    fn posted_anything(t: &TurnState) -> bool {
+        !t.streamed_text.trim().is_empty()
+            || !t.ack_text.trim().is_empty()
+            || t.progress_texts.iter().any(|p| !p.trim().is_empty())
+    }
+
+    /// Turn end, send tool `On`: a turn that posted nothing, started no background work and
+    /// still holds prose posts that prose once, so a model that forgot the tool never leaves
+    /// the user with silence. `Strict` never posts it; silence is a valid outcome.
+    async fn post_fallback_if_silent(&self, host: &SharedHost, t: &mut TurnState) {
+        if t.send_tool != crate::config::SendTool::On || t.stopped || t.routine_turn {
+            return;
+        }
+        if Self::posted_anything(t) || t.unposted_text.trim().is_empty() {
+            return;
+        }
+        if matches!(
+            t.route,
+            Some(ValidRoute::New { .. }) | Some(ValidRoute::Wake { .. })
+        ) {
+            return;
+        }
+        let text = std::mem::take(&mut t.unposted_text);
+        t.posted_fallback = true;
+        tracing::info!(chat_id = %t.chat_id, chars = text.chars().count(), "send tool: leftover prose posted as the fallback bubble");
+        self.write_text(host, t, &text).await;
     }
 
     /// End of turn, every event folded: a `route reply {reply}` text that never streamed is
@@ -4705,9 +4818,21 @@ impl Agent {
                 // stream the same text may still be queued behind it in the event channel
                 // (#1373: deciding here wrote the reply twice).
                 if let Some(ValidRoute::Reply { reply: Some(text) }) = &t.route {
-                    let text = text.trim();
-                    if !text.is_empty() && !(t.route_correcting && t.has_prose()) {
-                        t.route_reply_text = Some(text.to_owned());
+                    let text = text.trim().to_owned();
+                    let answered =
+                        t.route_correcting && (t.has_prose() || Self::posted_anything(t));
+                    if !text.is_empty() && !answered {
+                        if t.send_tool == crate::config::SendTool::Off {
+                            t.route_reply_text = Some(text);
+                        } else {
+                            // An explicit answer: one whole bubble now, nothing at turn end.
+                            let cleaned = ProseFilter::clean_prose(&text);
+                            if let Some(host) = self.sync.host(&t.chat_id).await {
+                                if !cleaned.trim().is_empty() {
+                                    self.write_text(&host, t, &cleaned).await;
+                                }
+                            }
+                        }
                     }
                 }
                 if action != "reply" {
@@ -5998,7 +6123,7 @@ impl Agent {
         let address = self.owner_address_note(chat_id, host, in_reply_to).await;
         let (talking_model, _) = self.live_models().await;
         let system = format!(
-            "{} You answer a message the user sent while you were busy with something else; the work for it is done (notes below). Write the answer the user should read, like a colleague in chat: what they asked for, what came out, what is open. First person, plain prose, two to five sentences at most, shorter when the answer is short. Never mention a side task, helper, subagent, tool, command, model or that you were busy. If the notes hold no answer, say plainly what you could not do.{}",
+            "{} You answer a message the user sent while you were busy with something else; the work for it is done (notes below). Write the answer the user should read, like a colleague in chat: what they asked for, what came out, what is open. First person; short when the answer is short; a markdown table with linked names when it compares several items, and then one line offering a concrete next step. Never mention a side task, helper, subagent, tool, command, model or that you were busy. If the notes hold no answer, say plainly what you could not do.{}",
             if self.cfg.project_name.trim().is_empty() {
                 "You are this user's agent in Arbos.".to_owned()
             } else {
@@ -6535,6 +6660,20 @@ impl Agent {
     pub(crate) async fn test_finish_text(&self, host: &SharedHost, t: &mut TurnState) {
         self.flush_staged_text(host, t).await;
         self.write_route_reply_if_missing(host, t).await;
+    }
+
+    /// Test seam: stage model prose as `append_text` would, then the turn-end writers including
+    /// the send-tool fallback (duplex step 1).
+    pub(crate) async fn test_prose_then_finish(
+        &self,
+        host: &SharedHost,
+        t: &mut TurnState,
+        prose: &str,
+    ) {
+        self.stage_text(host, t, prose).await;
+        self.flush_staged_text(host, t).await;
+        self.write_route_reply_if_missing(host, t).await;
+        self.post_fallback_if_silent(host, t).await;
     }
 
     /// Test seam: fold one pi event into the held turn.
