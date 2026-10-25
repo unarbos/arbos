@@ -1602,7 +1602,7 @@ impl Agent {
             ),
         };
         let mut prelude = format!(
-            "[People chat with {}. You are @{my_slug} (the agent of {owner_spoken}'s Project \"{}\"){}.{} {from_clause}. Your reply is read by everyone in the chat.{secrets_rule}]\n",
+            "[People chat with {}. You are @{my_slug} (the agent of {owner_spoken}'s Project \"{}\"){}.{} {from_clause}. Your reply is read by everyone in the chat. If this message is for someone else, say nothing: route `reply` with `reply` empty and no words.{secrets_rule}]\n",
             people.join(", "),
             self.cfg.project_id,
             others_clause,
