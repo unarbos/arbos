@@ -21,6 +21,7 @@ mod isolation;
 mod jobs_view;
 mod llm;
 mod local;
+mod markdown_tables;
 mod mcp;
 mod media;
 mod memory;

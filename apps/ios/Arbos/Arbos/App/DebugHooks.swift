@@ -12,6 +12,8 @@ enum DebugHooks {
     static var openServer: String? { value("ARBOS_OPEN_SERVER") }
     /// Home search opened with this query (search-name-matching rig).
     static var search: String? { value("ARBOS_SEARCH").flatMap { $0.isEmpty ? nil : $0 } }
+    /// With `ARBOS_SEARCH`: open the n-th result row (1-based, list order) once the rows are up.
+    static var searchOpen: Int? { value("ARBOS_SEARCH_OPEN").flatMap { Int($0) } }
     /// Home list segment selected at launch: all | agents | people | servers (screenshot rig).
     static var homeFilter: String? { value("ARBOS_HOME_FILTER") }
     /// With `ARBOS_OPEN_SERVER=…:panel`: the server page's tab to land on (Channels | Members | Settings).
@@ -48,9 +50,6 @@ enum DebugHooks {
     /// #1592 rig: the fixture group holds someone else's agent ("TestAgent", run by @sami —
     /// in the roster, not in my projects) with one bubble; with `ARBOS_FIXTURE_WORKING` it works.
     static var fixtureForeignAgent: Bool { value("ARBOS_FIXTURE_FOREIGN_AGENT") == "1" }
-    /// `ARBOS_FIXTURE_SEEN=<handle>:<messageId>[,…]`: peers' read watermarks in the fixture DM
-    /// (sent-state-opacity rig: a seen bubble at full opacity next to a sent one).
-    static var fixtureSeen: String? { value("ARBOS_FIXTURE_SEEN").flatMap { $0.isEmpty ? nil : $0 } }
     /// Presence-row rig: `1` (the chat's other person) or comma-separated handles typing.
     static var fixtureTyping: String? { value("ARBOS_FIXTURE_TYPING").flatMap { $0.isEmpty || $0 == "0" ? nil : $0 } }
     /// Join a call seen via presence automatically (two-simulator relay tests).

@@ -73,13 +73,8 @@ struct SettingsView: View {
                     }
                 }
                 .scrollIndicators(.visible)
-                // Sheet: dismiss closes Settings. Tab root: dismiss is a no-op — return to Chats.
-                ProfileTopBar(onBack: {
-                    dismiss()
-                    if model.mainTab == .settings {
-                        model.mainTab = .chats
-                    }
-                }) { EmptyView() }
+                // Settings is a sheet (from Home's account circle): back closes it.
+                ProfileTopBar(onBack: { dismiss() }) { EmptyView() }
             }
             .toolbar(.hidden, for: .navigationBar)
             .navigationBarBackButtonHidden(true)
