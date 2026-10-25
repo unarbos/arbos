@@ -388,7 +388,9 @@ private struct ChatSession: View {
     @State private var talkTo: Set<String> = []
 
     private var project: Project? { model.project(projectId) }
-    private var chat: Chat? { model.chat(chatId) }
+    private var chat: Chat? { model.chat(chatId) ?? model.jobTab(chatId) }
+    /// A background job's tab (`JobTabs`): the job's exchange as a chat screen.
+    private var isJobTab: Bool { JobTabs.isJobChat(chatId) }
     private var people: PeopleChat? { model.peopleChat(chatId) }
     private var isPeople: Bool { people != nil }
     /// D88: a server channel rendered with this same view (`projectId == channelSlot`).
@@ -409,6 +411,7 @@ private struct ChatSession: View {
         if let people { return counterpart.map { "@\($0.handle)" } ?? people.title }
         if let chat, chat.isGroup, !chat.title.isEmpty { return chat.title }
         if let chat, chat.isSystem { return "\(project?.name ?? "Arbos") · Projects" }
+        if isJobTab, let chat { return chat.title }
         return project?.name ?? "Arbos"
     }
     /// Everyone on the presence row over the composer, newest first: people
@@ -494,6 +497,7 @@ private struct ChatSession: View {
         if pending.contains(where: Self.isCaptionablePending) { return "Add a description…" }
         if transcribing { return "Transcribing…" }
         if let channel { return "Message #\(channel.name)" }
+        if isJobTab { return "Steer this task" }
         if !isPeople { return needsAnswer ? "Answer \(name)" : "Ask \(name)" }
         if talkingToEveryone { return "Message everyone" }
         if talkToAgents.count > 1 { return "Message \(talkToAgents.count) agents" }
@@ -857,7 +861,8 @@ private struct ChatSession: View {
             TasksSheet(jobs: model.openJobs(chatId),
                        onSteer: { job in steerJob(job) },
                        onStop: { job in model.stopJob(chatId: chatId, jobId: job.id) },
-                       onStopAll: { showTasks = false; stop() })
+                       onStopAll: { showTasks = false; stop() },
+                       onOpen: { job in showTasks = false; model.openJobTab(job.id) })
                 .environment(\.theme, theme)
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
@@ -868,10 +873,12 @@ private struct ChatSession: View {
             // Polls the open chat's jobs while one is live (`AppModel.pollJobsIfNeeded`);
             // cancelled with the view. The sheet lists live work only: nothing open → it
             // closes itself.
+            if isJobTab { model.pollRolloutIfNeeded(chatId: chatId, force: true) }
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(AppModel.jobsPollMs))
                 guard !Task.isCancelled else { break }
                 model.pollJobsIfNeeded(chatId: chatId)
+                if isJobTab { model.pollRolloutIfNeeded(chatId: chatId) }
                 if showTasks, model.openJobs(chatId).isEmpty { showTasks = false }
             }
         }
@@ -998,6 +1005,8 @@ private struct ChatSession: View {
                     case "edit": showProfile = true
                     // `tasks`: the tasks sheet over the presence row (needs `ARBOS_FIXTURE_JOBS`).
                     case "tasks": if !model.openJobs(chatId).isEmpty { showTasks = true }
+                    // `jobtab`: the newest job's tab (needs `ARBOS_FIXTURE_JOBS`).
+                    case "jobtab": model.openNewestJobTab(from: chatId)
                     case "userprofile": if let c = counterpart { model.showProfile(.user(ProfilePerson(c))) }
                     // `addmembers`: the group pane opens its Add members sheet on appear.
                     case "groupprofile", "addmembers", "removemember": model.showProfile(.group(chatId: chatId, projectId: isPeople ? nil : projectId))
@@ -1248,6 +1257,12 @@ private struct ChatSession: View {
                             if people.isGroup, let url = groupImageURL(people) {
                                 // Custom group picture.
                                 PersonAvatar(url: url, handle: people.title, size: Theme.avatar, name: people.title, id: people.id)
+                                Text(people.title)
+                                    .font(.system(size: Theme.body, weight: .semibold))
+                                    .foregroundStyle(theme.text)
+                                    .lineLimit(1)
+                            } else if people.isGroup, people.isNeutralAvatar {
+                                NeutralAvatar(name: people.title, size: Theme.avatar)
                                 Text(people.title)
                                     .font(.system(size: Theme.body, weight: .semibold))
                                     .foregroundStyle(theme.text)
@@ -2109,11 +2124,14 @@ private struct ChatSession: View {
                 // open in this chat (duplex §2.4); a tap opens the sheet.
                 let jobs = model.openJobs(chatId)
                 let openTasks: (() -> Void)? = jobs.isEmpty ? nil : { showTasks = true }
+                // The words link to the newest job's tab (not inside a job tab); the chip opens the list.
+                let openNewest: (() -> Void)? = (jobs.isEmpty || isJobTab) ? nil : { model.openNewestJobTab(from: chatId) }
                 PresenceRow(participants: participants,
                             detail: model.currentActivity(chatId),
                             queued: false,
                             taskCount: jobs.count,
-                            onTasks: openTasks)
+                            onTasks: openTasks,
+                            onWords: openNewest)
                     .padding(.horizontal, 16)
                     .padding(.bottom, 4)
             }

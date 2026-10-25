@@ -383,15 +383,18 @@ pub enum PictureTarget {
     /// generated before the entity exists lands in my own slot (`POST /me/avatar/generate` →
     /// `users:{me}`) and is copied into the new entity's slot on Create.
     Draft,
+    /// My own profile picture (the id is my user id; `/me/avatar…` routes).
+    Me(Id),
 }
 
 impl PictureTarget {
     /// The entity's id; the draft has none yet.
     pub fn id(&self) -> Option<&Id> {
         match self {
-            PictureTarget::Agent(id) | PictureTarget::Group(id) | PictureTarget::Server(id) => {
-                Some(id)
-            }
+            PictureTarget::Agent(id)
+            | PictureTarget::Group(id)
+            | PictureTarget::Server(id)
+            | PictureTarget::Me(id) => Some(id),
             PictureTarget::Draft => None,
         }
     }
@@ -717,6 +720,11 @@ pub enum ClientCommand {
     /// avatar everywhere the relay serves me.
     SetMyAvatar {
         path: std::path::PathBuf,
+    },
+    /// My own picture from a key the relay already holds in my `users:{id}` slot (the avatar
+    /// picker's Generate tab): `PUT /me/avatar {image_key}`.
+    SetMyAvatarKey {
+        key: String,
     },
     /// Back to the GitHub picture (`DELETE /me/avatar`).
     RemoveMyAvatar,

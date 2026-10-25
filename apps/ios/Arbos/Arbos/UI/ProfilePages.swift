@@ -1260,7 +1260,7 @@ struct GroupProfileView: View {
             AgentAvatar(project: project, theme: theme, size: PaneKit.heroAvatar, idle: true)
         } else {
             Button { showEdit = true } label: {
-                AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL, leaf: people?.leafPick)
+                AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL, leaf: people?.leafPick, neutralName: people?.isNeutralAvatar == true ? people?.title : nil)
                     .frame(width: PaneKit.heroAvatar, height: PaneKit.heroAvatar)
                     .paneCrayon()
                     .contentShape(Rectangle())
@@ -2366,7 +2366,7 @@ struct GroupEditSheet: View {
                     // leaf, Upload = a photo; changes apply on Set avatar).
                     Button { showAvatarPicker = true } label: {
                         ZStack(alignment: .bottomTrailing) {
-                            AvatarCluster(members: clusterMembers, size: 72, imageUrl: existingImageURL, leaf: people?.leafPick)
+                            AvatarCluster(members: clusterMembers, size: 72, imageUrl: existingImageURL, leaf: people?.leafPick, neutralName: people?.isNeutralAvatar == true ? people?.title : nil)
                                 .frame(width: 112, height: 112)
                             GlassCircle(size: 36) {
                                 Image(systemName: "camera.fill")
