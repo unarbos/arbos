@@ -158,6 +158,9 @@ final class AppModel: ObservableObject {
     /// Chat ids with unread rows: the relay's per-user `unread` flag plus live rows from
     /// others that landed while the chat was off screen (never `head_seq > read_seq`, #1438).
     @Published var peopleUnread: Set<String> = []
+    /// Chat id → emoji: someone else reacted to one of my messages while the chat was
+    /// off screen (Telegram-style heart in the home list). Cleared when the chat is opened.
+    @Published private(set) var unseenReactions: [String: String] = [:]
     @Published private(set) var blocked: [Person] = []
     /// Every Arbos user the relay knows (members + invited), for the New Message sheet.
     /// Restored from the device store at launch and refreshed in the registry loop, so
@@ -1390,6 +1393,7 @@ final class AppModel: ObservableObject {
         unacked = [:]
         peopleChats = []
         peopleUnread = []
+        unseenReactions = [:]
         unreadCounts = [:]
         stopMatrix()
         servers = []
@@ -2210,11 +2214,17 @@ final class AppModel: ObservableObject {
         guard let doc = docs[chatId] else { return }
         var list = messages[chatId] ?? []
         var needSnapshot = false
+        var freshReaction: String? = nil
         let pendingIds = unacked[chatId] ?? []
+        let me = myUserId
         for ix in indexes.sorted() {
             guard var m = doc.readMessage(ix) else { continue }
             if m.role == .user { m.pending = pendingIds.contains(m.id) }
             if ix < list.count, list[ix].id == m.id {
+                if freshReaction == nil,
+                   let emoji = AppModel.newForeignReaction(before: list[ix], after: m, me: me) {
+                    freshReaction = emoji
+                }
                 list[ix] = m
             } else if ix == list.count {
                 list.append(m)
@@ -2236,7 +2246,116 @@ final class AppModel: ObservableObject {
                 SendTrace.markIfPresent("messages-has-row", ids: list.map(\.id), detail: "via=indexes rows=\(list.count)")
             }
             #endif
+            // Live reaction on my line while off this chat: home-list ❤️ (and unread) until opened.
+            if caughtUp.contains(chatId), let emoji = freshReaction {
+                noteUnseenReaction(chatId: chatId, emoji: emoji)
+            }
         }
+    }
+
+    /// A new emoji from someone else on one of my messages (`before` → `after`).
+    nonisolated static func newForeignReaction(before: Message, after: Message, me: String?) -> String? {
+        guard AppModel.isOwnListMessage(after, me: me) else { return nil }
+        var prior: Set<String> = []
+        for r in before.reactions {
+            for s in r.senders { prior.insert("\(s)|\(r.emoji)") }
+        }
+        for r in after.reactions where !r.emoji.isEmpty {
+            for s in r.senders {
+                if let me, s == me { continue }
+                if !prior.contains("\(s)|\(r.emoji)") { return r.emoji }
+            }
+        }
+        return nil
+    }
+
+    /// My bubble in the home-list sense: people `user:…` rows, or the user's project-chat lines.
+    nonisolated static func isOwnListMessage(_ m: Message, me: String?) -> Bool {
+        if let me, m.sender == me { return true }
+        if m.role == .user, m.sender == "user" || m.sender.isEmpty { return true }
+        return false
+    }
+
+    /// Someone else reacted while this chat is off screen: remember the emoji for the
+    /// home row and light unread so the cue clears when the chat is opened.
+    private func noteUnseenReaction(chatId: Id, emoji: String) {
+        guard !isHiddenChat(chatId), !emoji.isEmpty else { return }
+        if isWatching(chatId) { return }
+        if unseenReactions[chatId] != emoji {
+            var next = unseenReactions
+            next[chatId] = emoji
+            unseenReactions = next
+        }
+        var changed = false
+        if peopleChat(chatId) != nil {
+            if !peopleUnread.contains(chatId) {
+                peopleUnread.insert(chatId)
+                changed = true
+            }
+            if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+                var next = peopleChats
+                next[i].lastActivityAt = nowMs()
+                if next[i].headSeq <= next[i].readSeq {
+                    next[i].headSeq = next[i].readSeq + 1
+                    changed = true
+                }
+                peopleChats = next
+            }
+        } else {
+            for (pid, list) in chats {
+                if let i = list.firstIndex(where: { $0.id == chatId }), !list[i].unread {
+                    var updated = list
+                    updated[i].unread = true
+                    chats[pid] = updated
+                    changed = true
+                    break
+                }
+            }
+        }
+        if changed {
+            applyBadge()
+            unarchiveOnActivity(chatId: chatId)
+        }
+    }
+
+    /// Home list: Telegram-style `@` when an unread chat has a reply to me or an @mention of me.
+    func chatListMention(chatId: Id) -> Bool {
+        guard let me = myUserId else { return false }
+        let unread: Bool = {
+            if let c = peopleChat(chatId) {
+                return peopleUnread.contains(chatId) || unreadCount(for: c) > 0
+            }
+            if let c = chat(chatId) { return chatHasUnread(c) }
+            return unseenReactions[chatId] != nil
+        }()
+        guard unread else { return false }
+        let msgs = messages(of: chatId)
+        guard !msgs.isEmpty else { return false }
+        var byId: [Id: Message] = [:]
+        byId.reserveCapacity(msgs.count)
+        for m in msgs { byId[m.id] = m }
+        for m in msgs {
+            if AppModel.isOwnListMessage(m, me: me) { continue }
+            if m.mentions.contains(me) { return true }
+            if let parentId = m.replyTo, !parentId.isEmpty,
+               let parent = byId[parentId], AppModel.isOwnListMessage(parent, me: me) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// `@` for any unread chat under this agent.
+    func projectListMention(projectId: Id) -> Bool {
+        chats(of: projectId).contains { chatListMention(chatId: $0.id) }
+    }
+
+    /// Unseen reaction emoji for any chat under this agent (home row).
+    func projectListReaction(projectId: Id) -> String? {
+        for c in chats(of: projectId) {
+            if let e = unseenReactions[c.id] { return e }
+        }
+        return nil
     }
 
     private func markUnacked(chatId: Id, messageId: Id) {
@@ -3222,6 +3341,11 @@ final class AppModel: ObservableObject {
         let hadRemote = (unreadCounts[chatId] ?? 0) > 0
         let hadLocalFlag = peopleUnread.contains(chatId)
         peopleUnread.remove(chatId)
+        if unseenReactions[chatId] != nil {
+            var next = unseenReactions
+            next.removeValue(forKey: chatId)
+            unseenReactions = next
+        }
         if unreadCounts[chatId] != nil { unreadCounts[chatId] = 0 }
         PushManager.shared.clearDelivered(chatId: chatId)
         defer { applyBadge() }
@@ -5393,6 +5517,12 @@ final class AppModel: ObservableObject {
     func markRead(chatId: Id, force: Bool = false) {
         if JobTabs.isJobChat(chatId) { return }
         let hadRemote = (unreadCounts[chatId] ?? 0) > 0
+        let hadReaction = unseenReactions[chatId] != nil
+        if hadReaction {
+            var next = unseenReactions
+            next.removeValue(forKey: chatId)
+            unseenReactions = next
+        }
         if unreadCounts[chatId] != nil { unreadCounts[chatId] = 0 }
         PushManager.shared.clearDelivered(chatId: chatId)
         var hadLocal = false
@@ -5404,7 +5534,7 @@ final class AppModel: ObservableObject {
                 hadLocal = true
             }
         }
-        if hadRemote || hadLocal { applyBadge() }
+        if hadRemote || hadLocal || hadReaction { applyBadge() }
         // §7c: PUT /chats/{id}/read takes project chat ids too; the relay
         // clears the user's events for it and badges their other devices.
         if !isFixture, chat(chatId) != nil {

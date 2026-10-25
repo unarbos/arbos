@@ -302,6 +302,8 @@ struct HomeView: View {
                                              previewIcon: entry.hit.reason == nil ? previewIcon(project) : nil, time: timeLabel(project),
                                              streaming: model.isStreaming(project: project.id),
                                              unread: model.chats(of: project.id).contains { model.chatHasUnread($0) },
+                                             mentionMark: model.projectListMention(projectId: project.id),
+                                             reactionMark: model.projectListReaction(projectId: project.id),
                                              pinned: pinned)
                                 }
                                 .buttonStyle(.borderless)
@@ -385,6 +387,8 @@ struct HomeView: View {
                                     PeopleRow(chat: chat, preview: entry.hit.reason ?? peoplePreview(chat), time: timeLabel(ms: peopleActivity(chat)),
                                               unread: model.peopleUnread.contains(chat.id) || model.unreadCount(for: chat) > 0,
                                               count: model.unreadCount(for: chat), me: model.user?.id,
+                                              mentionMark: model.chatListMention(chatId: chat.id),
+                                              reactionMark: model.unseenReactions[chat.id],
                                               pinned: pinned)
                                 }
                                 .buttonStyle(.borderless)
@@ -1184,6 +1188,10 @@ struct AgentRow: View {
     let time: String
     let streaming: Bool
     let unread: Bool
+    /// Telegram-style `@` when someone replied to / @mentioned me (unread).
+    var mentionMark: Bool = false
+    /// Unseen emoji reaction on one of my lines (e.g. ❤️), cleared when opened.
+    var reactionMark: String? = nil
     var pinned: Bool = false
 
     var body: some View {
@@ -1215,6 +1223,17 @@ struct AgentRow: View {
                         .fixedSize()
                 }
                 HStack(spacing: 6) {
+                    if mentionMark {
+                        Text("@")
+                            .font(theme.font(Theme.small, weight: .semibold))
+                            .foregroundStyle(theme.unread)
+                            .accessibilityLabel("Reply to you")
+                    }
+                    if let reactionMark {
+                        Text(reactionMark)
+                            .font(theme.font(Theme.small))
+                            .accessibilityLabel("Reaction \(reactionMark)")
+                    }
                     if let previewIcon {
                         Image(systemName: previewIcon)
                             .font(theme.font(13, weight: .regular))
@@ -1249,6 +1268,10 @@ struct PeopleRow: View {
     /// Unread messages (Grok/Telegram-style count pill); 0 → the dot only.
     var count: Int = 0
     let me: String?
+    /// Telegram-style `@` when someone replied to / @mentioned me (unread).
+    var mentionMark: Bool = false
+    /// Unseen emoji reaction on one of my lines (e.g. ❤️), cleared when opened.
+    var reactionMark: String? = nil
     var pinned: Bool = false
 
     private var other: ChatMember? { chat.counterpart(me: me) }
@@ -1324,6 +1347,17 @@ struct PeopleRow: View {
                         .fixedSize()
                 }
                 HStack(spacing: 6) {
+                    if mentionMark {
+                        Text("@")
+                            .font(theme.font(Theme.small, weight: .semibold))
+                            .foregroundStyle(theme.unread)
+                            .accessibilityLabel("Reply to you")
+                    }
+                    if let reactionMark {
+                        Text(reactionMark)
+                            .font(theme.font(Theme.small))
+                            .accessibilityLabel("Reaction \(reactionMark)")
+                    }
                     Text(preview)
                         .font(theme.font(Theme.small))
                         .foregroundStyle(theme.muted)
