@@ -72,6 +72,25 @@ if [[ -x scripts/build-xcframework.sh ]]; then
     *) echo "== xcframework: FAILS (simulator library missing arm64; got: ${arches})"; exit 1 ;;
   esac
   echo "== xcframework: ok"
+  # Xcode does not rebuild the ArbosFFI package framework in derived data when only the binary target
+  # (the .a inside the xcframework) or the generated ArbosFFI.swift changed: #1544's MessageGrantDto
+  # landed in the Rust FFI and the Debug product kept a 4-day-old ArbosFFI.framework (dyld: Symbol not
+  # found _$s8ArbosFFI15MessageGrantDtoVMn on every simulator, 2026-10-25 22:00). Fingerprint the FFI
+  # inputs; when they moved, drop the framework's products and intermediates so this build recreates
+  # them. Also drop any top-level Products/<cfg>-iphonesimulator/ArbosFFI.framework: an older layout
+  # left one there (Oct 21) and it shadows PackageFrameworks/ on the debug dylib's rpath.
+  ffi_fp=$(cat "$SIM_LIB" "$PKG_SWIFT" | md5 -q 2>/dev/null || cat "$SIM_LIB" "$PKG_SWIFT" | md5sum | cut -c1-32)
+  for cfg in Release Debug; do
+    dd="$HOME/arbos-gate-dd-$cfg"
+    [[ -d "$dd/Build" ]] || continue
+    rm -rf "$dd/Build/Products/$cfg-iphonesimulator/ArbosFFI.framework"
+    if [[ "$(cat "$dd/arbos-ffi.fingerprint" 2>/dev/null)" != "$ffi_fp" ]]; then
+      rm -rf "$dd/Build/Products/$cfg-iphonesimulator/PackageFrameworks/ArbosFFI.framework" \
+             "$dd/Build/Products/$cfg-iphonesimulator/ArbosFFI.o" "$dd/Build/Products/$cfg-iphonesimulator/ArbosFFI.swiftmodule" \
+             "$dd/Build/Products/$cfg-iphonesimulator/libarbos_ffi.a" "$dd/Build/Intermediates.noindex/ArbosFFI.build"
+      echo "== xcframework: FFI inputs changed since the last $cfg build; ArbosFFI framework will be rebuilt"
+    fi
+  done
 fi
 cd apps/ios/Arbos || exit 2
 # TestFlight archives the Release configuration: a `#if DEBUG` type used unconditionally compiles in
@@ -97,6 +116,16 @@ for config in Release Debug; do
     if [[ ! -d "$fw" ]]; then
       echo "== $config: ArbosFFI.framework not embedded"
       rc=1
+    elif [[ -n "${ffi_fp:-}" ]]; then
+      # The product must link the FFI it was built against: every Swift type the generated ArbosFFI.swift
+      # declares as a struct has its metadata symbol in the framework; check the newest one by name.
+      newest=$(grep -oE '^public struct [A-Za-z0-9_]+' "$ROOT/$PKG_SWIFT" | grep -v FfiConverter | tail -1 | awk '{print $3}')
+      if [[ -n "$newest" ]] && ! nm -gU "$fw/ArbosFFI" 2>/dev/null | grep -q "8ArbosFFI[0-9]*${newest}VMn"; then
+        echo "== $config: embedded ArbosFFI.framework is stale (no metadata for ${newest})"
+        rc=1
+      else
+        echo "$ffi_fp" >"$HOME/arbos-gate-dd-$config/arbos-ffi.fingerprint"
+      fi
     fi
   else
     rc=1
