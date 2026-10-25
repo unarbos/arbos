@@ -4861,7 +4861,7 @@ impl Agent {
     /// result row opens; `new`/`wake` → the ack row closes and the turn has nothing more to
     /// show; `reply` → one row, as before. `force` treats a still-open ack string as complete
     /// (the arguments have finished streaming by the time a tool runs).
-    async fn maybe_split_ack(&self, host: &SharedHost, t: &mut TurnState, force: bool) {
+    async fn maybe_split_ack(self: &Arc<Self>, host: &SharedHost, t: &mut TurnState, force: bool) {
         if t.ack_split || t.ack_text.trim().is_empty() {
             return;
         }
@@ -4888,6 +4888,7 @@ impl Agent {
                 t.ack_text = cleaned.trim().to_owned();
                 self.set_activity(host, t, Some(t.ack_text.clone())).await;
                 tracing::info!(chat_id = %t.chat_id, ack_chars = t.ack_text.chars().count(), "ack on the working row");
+                self.spawn_act_ack_promotion(t);
             } else {
                 t.ack_text.clear();
                 tracing::info!(chat_id = %t.chat_id, action, routine_turn = t.routine_turn, "ack bubble dropped");
@@ -4941,6 +4942,72 @@ impl Agent {
             later_exists,
             source.rest.get("agentMessage").is_some(),
         )
+    }
+
+    /// An `act` ack is working-row status while the work is quick. When the turn is still at it
+    /// after `act_ack_bubble_after()` with nothing posted, the same sentence becomes the first
+    /// bubble — Grok Bot acks long work as a message ("Looking up the top-rated surf schools …
+    /// now."), and the parity trait `ack_first` reads bubbles, not the status line.
+    fn spawn_act_ack_promotion(self: &Arc<Self>, t: &TurnState) {
+        let after = act_ack_bubble_after();
+        if after.is_zero() {
+            return;
+        }
+        let me = self.clone();
+        let chat = t.chat_id.clone();
+        let user_msg = t.user_msg_id.clone();
+        let started = t.started;
+        tokio::spawn(async move {
+            tokio::time::sleep(after).await;
+            let Some(host) = me.sync.host(&chat).await else {
+                return;
+            };
+            let mut tl = me.turn.lock().await;
+            let Some(t) = tl.as_mut() else {
+                return;
+            };
+            if t.chat_id != chat || t.user_msg_id != user_msg || t.started != started {
+                return;
+            }
+            if t.stopped
+                || t.ack_posted
+                || !matches!(t.route, Some(ValidRoute::Act { .. }))
+                || Self::posted_anything(t)
+            {
+                return;
+            }
+            let ack = t.ack_text.trim().to_owned();
+            if ack.is_empty() {
+                return;
+            }
+            if t.row_closed {
+                me.open_row(&host, t, "ack").await;
+            }
+            {
+                let h = host.lock().await;
+                if t.text_part_dirty {
+                    if let Some(p) = h.doc.add_text_part(&t.assistant_msg_id, "text") {
+                        t.text_part_id = p;
+                    }
+                    t.text_part_dirty = false;
+                }
+                h.doc
+                    .append_text(&t.assistant_msg_id, &t.text_part_id, &ack);
+            }
+            t.ack_posted = true;
+            me.close_row(&host, t, "ack").await;
+            me.open_row(&host, t, "result").await;
+            let _ = me.store.t3_append(
+                &chat,
+                None,
+                Some(&chat),
+                "assistant",
+                Some("assistant"),
+                &ack,
+                Some(&json!({ "ack": true, "promoted_after_ms": after.as_millis() as i64 })),
+            );
+            tracing::info!(chat_id = %chat, after_ms = after.as_millis() as i64, "act ack promoted to a bubble: the work is taking a while");
+        });
     }
 
     /// Open a fresh streaming assistant row for this turn (after an ack or a progress bubble).
@@ -5182,7 +5249,7 @@ impl Agent {
     /// way every answer is posted). `reply_to` threads the bubble under that message; without
     /// it the #1521 rule applies (the ask, when the chat is shared or moved on).
     pub async fn hook_send_message(
-        &self,
+        self: &Arc<Self>,
         text: &str,
         activity: Option<&str>,
         reply_to: Option<&str>,
@@ -5380,7 +5447,7 @@ impl Agent {
     /// tool-arg deltas. Many providers deliver the full `route` arguments only when the
     /// tool runs, so `ToolcallDelta` never feeds `ack_extractor`; without this, the chat
     /// shows a bare "Working…" line until the result (agent-flow contract §1).
-    pub async fn hook_route(&self, args: &Value) -> Result<(), String> {
+    pub async fn hook_route(self: &Arc<Self>, args: &Value) -> Result<(), String> {
         let mut tl = self.turn.lock().await;
         let Some(t) = tl.as_mut() else {
             return Err("no turn is running".into());
@@ -5675,7 +5742,7 @@ impl Agent {
     }
 
     /// Post a one- or two-sentence hard-limit notice into the live chat row (never silent).
-    async fn post_limit_notice(&self, host: &SharedHost, text: &str) {
+    async fn post_limit_notice(self: &Arc<Self>, host: &SharedHost, text: &str) {
         let mut tl = self.turn.lock().await;
         let Some(t) = tl.as_mut() else {
             return;
@@ -7449,6 +7516,17 @@ fn job_restart_allowed(job: &crate::store::JobRow, project_id: &str) -> bool {
             || k.starts_with("pay")
             || k.starts_with("local"))
     })
+}
+
+/// How long an `act` turn may run before its ack becomes a bubble (`ARBOS_ACT_ACK_BUBBLE_SECS`,
+/// default 4; `0` keeps the ack on the working row only). Four seconds: a quick act answers inside
+/// it and shows one bubble; longer work shows the ack where Grok Bot shows it.
+fn act_ack_bubble_after() -> Duration {
+    let secs = std::env::var("ARBOS_ACT_ACK_BUBBLE_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(4);
+    Duration::from_secs(secs)
 }
 
 /// Subagents started by `start_job_for_send` are named `ask-…`; they answer directly.
