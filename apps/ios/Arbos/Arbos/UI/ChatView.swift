@@ -946,7 +946,9 @@ private struct ChatSession: View {
                     case "agentsecrets": showAgentSecrets = true
                     case "voice": startCall(.voice)
                     case "model": showModelPicker = true
-                    case "profile": openHeaderProfile()
+                    // `agentvoice | agentlabel | agentedit`: the agent pane, which opens the Voice
+                    // picker / edits the label / unfolds Edit profile on appear.
+                    case "profile", "agentvoice", "agentlabel", "agentedit": openHeaderProfile()
                     // `avatarpicker[-generate|-upload]`: the agent pane, which opens the sheet on that tab.
                     case let s where s.hasPrefix("avatarpicker"): openHeaderProfile()
                     case "edit": showProfile = true

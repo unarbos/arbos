@@ -435,8 +435,13 @@ switches; ours opened with Name / Handle / Description rows and fine print.
 This supersedes the 2026-10-22 tab names (Profile · Settings · Library) for
 the Mac agent pane; the structure every pane shares — hero, then the tab
 pill, then the options — is unchanged, and every option the old tabs held is
-still on the pane. The iPhone agent pane keeps its three tabs until its own
-item lands (the per-kind "same tabs on both platforms" rule then applies).
+still on the pane. The iPhone agent pane has the same three tabs and the same
+content model since [feedback iphone-agent-pane-tabs-2026-10-25] (#1694:
+`PaneKinds.agent`, `AgentProfileView`, `Model/AgentPane.swift` — the pure
+order / copy twins of this file's functions, pinned by
+`ProfilePaneStructureTests`); where the Mac geometry does not translate it
+keeps the iPhone's shared pill and 48 pt rows, uses the system spinner, and
+edits the label in place but the name through an alert.
 
 | Item | Grok Bot (measured, `grok-right-pane-details.png`) | Arbos (`profiles/agent.rs`) |
 |---|---|---|

@@ -396,6 +396,47 @@ extension AppModel {
                                                             "requests": [request], "activity": activity])
     }
 
+    /// The agent pane's Routines card (the Mac fixture's three: a weekday stand-up, a paused
+    /// digest, a webhook that last fired 40 min ago). Comms owns them; other agents have none.
+    func fixtureRoutines(_ projectId: Id) -> [Routine] {
+        guard projectId == "fx-comms" else { return [] }
+        let now = nowMs()
+        return [
+            Routine(id: "fx-rt-standup", projectId: projectId, name: "Morning stand-up",
+                    trigger: .cron(expr: "0 9 * * 1-5", tz: "Europe/Berlin"), enabled: true,
+                    lastRunAt: now - 20 * 3_600_000, nextRunAt: now + 4 * 3_600_000),
+            Routine(id: "fx-rt-digest", projectId: projectId, name: "Open PR digest",
+                    trigger: .cron(expr: "0 * * * *", tz: "UTC"), enabled: false, lastRunAt: nil, nextRunAt: nil),
+            Routine(id: "fx-rt-deploy", projectId: projectId, name: "Deploy finished",
+                    trigger: .webhook, enabled: true, lastRunAt: now - 40 * 60_000, nextRunAt: nil),
+        ]
+    }
+
+    /// `GET /machine/debug` as the rig answers it: an awake 4-core box up 5 h 12 m, one
+    /// workspace per agent, Comms mid-turn (42 s, 7 tool calls) and — with
+    /// `ARBOS_FIXTURE_WORKING=n` — the next agents too. Goes through the real parser.
+    func fixtureBoxReport() -> BoxReport {
+        let working = Set(["fx-comms"] + projects.dropFirst().prefix(max(0, DebugHooks.fixtureWorking - 1)).map(\.id))
+        let workspaces: [[String: Any]] = projects.filter { $0.id != peopleSlot }.map { p in
+            var turn: [String: Any] = ["running": working.contains(p.id)]
+            if working.contains(p.id) {
+                turn["current"] = ["elapsed_ms": p.id == "fx-comms" ? 42_000 : 128_000, "tool_calls": p.id == "fx-comms" ? 7 : 3]
+            }
+            return ["project_id": p.id, "name": p.name, "healthy": true, "turn": turn]
+        }
+        let debug: [String: Any] = [
+            "relay": ["state": "awake", "awake_for_s": 5 * 3600 + 12 * 60, "provider": "gvisor",
+                      "agentd": ["image": "arbos-agent-0.1.7"]],
+            "box": ["reachable": true, "state": [
+                "uptime_s": 5 * 3600 + 12 * 60, "load": [0.42, 0.38, 0.35],
+                "memory_mb": ["total": 8192, "available": 5325],
+                "disk": ["total_mb": 10240, "available_mb": 6861],
+                "workspaces": workspaces,
+            ]],
+        ]
+        return BoxReport(debug: debug, now: nowMs())
+    }
+
     /// Two sample message notifications (an agent, a person) for screenshots.
     func postSampleNotifications() {
         let affine = projects.first { $0.id == "fx-affine" }

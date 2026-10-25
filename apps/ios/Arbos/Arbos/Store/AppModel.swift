@@ -2722,6 +2722,65 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: Agent pane — routines and the box report ([feedback iphone-agent-pane-tabs-2026-10-25])
+
+    /// Each owned agent's routines, as last listed (the Details tab's Routines card).
+    @Published private(set) var routines: [Id: [Routine]] = [:]
+    /// The box as `GET /machine/debug` last reported it (the Computer tab, the Coding row).
+    @Published private(set) var boxReport: BoxReport?
+
+    /// `GET /projects/{id}/routines` when an owned agent's pane opens.
+    func refreshRoutines(_ projectId: Id) async {
+        if isFixture {
+            #if DEBUG
+            routines[projectId] = fixtureRoutines(projectId)
+            #endif
+            return
+        }
+        guard let list = try? await api.routines(projectId) else { return }
+        routines[projectId] = list
+    }
+
+    /// The row's switch: flip at once, PATCH, read back on failure.
+    func setRoutineEnabled(_ projectId: Id, routineId: Id, enabled: Bool) {
+        if var list = routines[projectId], let i = list.firstIndex(where: { $0.id == routineId }) {
+            list[i].enabled = enabled
+            if !enabled { list[i].nextRunAt = nil }
+            routines[projectId] = list
+        }
+        guard !isFixture else { return }
+        Task {
+            do {
+                try await api.setRoutineEnabled(projectId, routineId: routineId, enabled: enabled)
+            } catch {
+                notice = Notice(text: "Routine: \(error.localizedDescription)")
+            }
+            await refreshRoutines(projectId)
+        }
+    }
+
+    /// `GET /machine/debug` when the pane opens and when the Computer tab is picked. A relay
+    /// without the route (404) leaves the last report alone; any other failure is shown as
+    /// "The machine did not answer" with the reason.
+    func refreshBoxReport() async {
+        if isFixture {
+            #if DEBUG
+            boxReport = fixtureBoxReport()
+            #endif
+            return
+        }
+        do {
+            boxReport = try await api.machineDebug()
+        } catch let error as RelayError where error.status == 404 {
+            return
+        } catch {
+            var r = BoxReport(debug: [String: Any](), now: nowMs())
+            r.state = machine.state.rawValue
+            r.unreachableReason = error.localizedDescription
+            boxReport = r
+        }
+    }
+
     func updateProject(_ projectId: Id, name: String? = nil, color: String? = nil, icon: String? = nil, avatar: String? = nil, avatarColor: String? = nil, description: String? = nil) {
         if let i = projects.firstIndex(where: { $0.id == projectId }) {
             if let description { projects[i].description = description }
