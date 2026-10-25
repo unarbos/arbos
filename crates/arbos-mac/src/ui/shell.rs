@@ -320,6 +320,9 @@ pub struct Shell {
     )>,
     /// The channel menu's Delete was clicked once: it shows "Delete #name?" with Cancel / Delete.
     pub(crate) channel_delete_armed: bool,
+    /// Agent pane › Details › "Edit profile" unfolded the Name · Handle ·
+    /// Description rows ([feedback agent-pane-details-tab-2026-10-24]).
+    pub(crate) agent_edit_open: bool,
     /// Group pane › Members: the row whose ✕ was clicked (`user:<id>` or
     /// `agent:<project>`); it shows "Remove … ?" with Cancel / Remove.
     pub(crate) member_remove_armed: Option<String>,
@@ -901,6 +904,7 @@ impl Shell {
             row_menu: None,
             channel_menu: None,
             channel_delete_armed: false,
+            agent_edit_open: false,
             member_remove_armed: None,
             device_revoke_armed: None,
             member_menu: None,
@@ -1830,19 +1834,23 @@ impl Shell {
             input.set_text_center(true);
             input.set_text(name, cx);
         });
+        // The label ("Add a label") edits alone, in the hero; the name edits
+        // alone too ([feedback agent-pane-details-tab-2026-10-24]).
         if description {
             self.description_input
                 .update(cx, |input, cx| input.set_text(about, cx));
+            self.state
+                .update(cx, |s, cx| s.set_profile_editing_description(true, cx));
+            let handle = self.description_input.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        } else {
+            self.state.update(cx, |s, cx| {
+                s.profile_editing_name = true;
+                cx.notify();
+            });
+            let handle = self.agent_name_input.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
         }
-        self.state.update(cx, |s, cx| {
-            s.profile_editing_name = true;
-            if description {
-                s.set_profile_editing_description(true, cx);
-            }
-            cx.notify();
-        });
-        let handle = self.agent_name_input.read(cx).focus_handle(cx);
-        window.focus(&handle, cx);
         cx.notify();
     }
 
@@ -1906,6 +1914,7 @@ impl Shell {
     pub(crate) fn close_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.hide_settings_page(cx);
         self.profile_edit_open = false;
+        self.agent_edit_open = false;
         self.member_remove_armed = None;
         self.server_member_armed = None;
         self.server_leave_armed = false;

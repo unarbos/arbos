@@ -8,7 +8,7 @@
 //! the space, media / files / voice / links from the loaded chat docs,
 //! presence from the room frames.
 
-mod agent;
+pub(crate) mod agent;
 mod channel;
 mod group;
 pub(crate) mod kit;
@@ -43,6 +43,17 @@ pub(crate) const PANE_DISC_INSET: f32 = crate::ui::sidebar::STRIP_INSET;
 /// Top bar → hero picture: Grok's avatar starts 73.5 pt under the window edge
 /// (rows 147–264 at 2 px/pt), 13.5 under its 60 pt band → 14.
 pub(crate) const HERO_TOP: f32 = 14.0;
+/// The hero subtitle ("Add a label"): Grok's is 12 pt (ascender band 18 px at
+/// 2 px/pt), a step under the 13 pt section labels.
+pub(crate) const HERO_SUBTITLE: f32 = 12.0;
+/// The tab pill ([feedback agent-pane-details-tab-2026-10-24], measured on
+/// `grok-right-pane-details.png`): the selected capsule is 26 pt tall (rows
+/// 436–487 px), its label 13 pt (cap height 18 px) with 9 pt beside it, the
+/// next label 11.5 pt after the capsule → 2 pt between capsules. Jacob's
+/// mock b/g had a 30 pt capsule with body-size labels.
+pub(crate) const TAB_HEIGHT: f32 = 26.0;
+pub(crate) const TAB_PAD_X: f32 = 9.0;
+pub(crate) const TAB_GAP: f32 = 2.0;
 
 /// The open page, if any — rendered as the right pane.
 pub fn pane(page: &ProfilePage, shell: &Shell, cx: &mut Context<Shell>) -> Option<Stateful<Div>> {
@@ -236,14 +247,34 @@ pub(crate) fn pane_frame(
         )
 }
 
-/// Big avatar, name, status line.
+/// Big avatar, name, status line (the agent's label — clickable when
+/// `status_click` is given: Grok's "Add a label").
 pub(super) fn hero(
     avatar: AnyElement,
     name: AnyElement,
     status: &str,
     status_color: Hsla,
-    _theme: &Theme,
+    status_click: Option<HeroClick>,
+    theme: &Theme,
 ) -> Div {
+    let subtitle = div()
+        .id("hero-subtitle")
+        .px(px(8.0))
+        .py(px(2.0))
+        .rounded(px(6.0))
+        .max_w(px(SHEET_WIDTH - 64.0))
+        .truncate()
+        .text_size(px(HERO_SUBTITLE))
+        .text_color(status_color)
+        .debug_selector(|| "hero-subtitle".into())
+        .child(status.to_string());
+    let subtitle = match status_click {
+        Some(f) => subtitle
+            .cursor_text()
+            .hover(|s| s.bg(theme.field))
+            .on_click(move |e, w, cx| f(e, w, cx)),
+        None => subtitle,
+    };
     div()
         .flex_shrink_0()
         .flex()
@@ -262,12 +293,7 @@ pub(super) fn hero(
                 .justify_center()
                 .child(name),
         )
-        .child(
-            div()
-                .text_size(px(TEXT_SMALL))
-                .text_color(status_color)
-                .child(status.to_string()),
-        )
+        .child(subtitle)
 }
 
 /// A click handler a page hands the shared hero (`cx.listener(..)`, boxed).
@@ -367,7 +393,8 @@ pub(super) fn tab_bar(
         .mb(px(18.0))
         .flex()
         .justify_center()
-        .gap(px(4.0));
+        .gap(px(TAB_GAP))
+        .debug_selector(|| "profile-tab-pill".into());
     for (i, name) in tabs.iter().enumerate() {
         let on = i == current;
         bar = bar.child(
@@ -375,13 +402,14 @@ pub(super) fn tab_bar(
                 .id(ElementId::Name(SharedString::from(format!(
                     "profile-tab-{name}"
                 ))))
-                .h(px(30.0))
-                .px(px(14.0))
+                .debug_selector(move || format!("profile-tab-{name}"))
+                .h(px(TAB_HEIGHT))
+                .px(px(TAB_PAD_X))
                 .rounded_full()
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px(TEXT_BODY))
+                .text_size(px(TEXT_SMALL))
                 .font_weight(if on {
                     FontWeight::SEMIBOLD
                 } else {

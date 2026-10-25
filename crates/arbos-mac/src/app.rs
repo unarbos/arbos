@@ -19,11 +19,11 @@ use crate::model::{
     CallKind, CallMissed, Person, Reachable, Sender, Voice,
 };
 use crate::model::{
-    new_id, now_ms, Attachment, AttachmentKind, BoxState, ChannelSel, ChannelsView, Chat, ChatKind,
-    ConnectorsView, DevicesView, Effort, Id, Link, LinkState, LocalView, Machine, Message,
-    MessageStatus, NewSecret, Part, Project, ProjectDocView, ProjectSecrets, QuestionState, Role,
-    Routine, RoutineRun, RoutineTrigger, SecretDirector, SecretScope, SecretsView, ServerInfo,
-    Skill, StatusKind,
+    new_id, now_ms, Attachment, AttachmentKind, BoxReport, BoxState, ChannelSel, ChannelsView,
+    Chat, ChatKind, ConnectorsView, DevicesView, Effort, Id, Link, LinkState, LocalView, Machine,
+    Message, MessageStatus, NewSecret, Part, Project, ProjectDocView, ProjectSecrets,
+    QuestionState, Role, Routine, RoutineRun, RoutineTrigger, SecretDirector, SecretScope,
+    SecretsView, ServerInfo, Skill, StatusKind,
 };
 use crate::palette;
 use crate::search;
@@ -529,6 +529,10 @@ pub struct AppState {
     pub project_secrets: std::collections::HashMap<Id, ProjectSecrets>,
     /// Settings → Routines, per project (F3).
     pub routines: HashMap<Id, Vec<Routine>>,
+    /// The box as `GET /machine/debug` last reported it — the agent pane's
+    /// Computer tab ([feedback agent-pane-details-tab-2026-10-24]); fetched
+    /// when an agent pane opens and when its Computer tab is picked.
+    pub box_report: Option<BoxReport>,
     /// Run history per routine, newest first.
     pub routine_runs: HashMap<Id, Vec<RoutineRun>>,
     /// System notifications (D49); the Shell flips `window_active`.
@@ -893,6 +897,7 @@ impl AppState {
             devices: DevicesView::default(),
             project_secrets: std::collections::HashMap::new(),
             routines: HashMap::new(),
+            box_report: None,
             routine_runs: HashMap::new(),
             notifier: Notifier::new(),
             window_active: true,
@@ -1817,6 +1822,14 @@ impl AppState {
                             if self.agent_pick == Some(AgentPick::Voice) {
                                 self.fetch_voices();
                             }
+                            // `agent:library` / `agent:computer` land on that tab.
+                            match rest {
+                                ":library" => self
+                                    .set_profile_tab(crate::ui::profiles::agent::TAB_LIBRARY, cx),
+                                ":computer" => self
+                                    .set_profile_tab(crate::ui::profiles::agent::TAB_COMPUTER, cx),
+                                _ => {}
+                            }
                             // `agent:avatar[:generate|:upload]` opens the avatar picker sheet
                             // (D92 amendment) on that tab.
                             if let Some(tab) = rest.strip_prefix(":avatar") {
@@ -2227,6 +2240,10 @@ impl AppState {
                 routines,
             } => {
                 self.routines.insert(project_id, routines);
+                cx.notify();
+            }
+            SyncEvent::BoxReport(report) => {
+                self.box_report = Some(report);
                 cx.notify();
             }
             SyncEvent::RoutineRuns { routine_id, runs } => {
@@ -5209,6 +5226,19 @@ impl AppState {
                 server_id: server_id.clone(),
             });
         }
+        if let ProfilePage::Agent { project_id } = &page {
+            // The Details tab's live cards (routines) and the Computer tab's
+            // box report ([feedback agent-pane-details-tab-2026-10-24]).
+            if self
+                .project(project_id)
+                .is_some_and(|p| !p.is_people() && !p.is_guest())
+            {
+                self.command(ClientCommand::RoutinesRefresh {
+                    project_id: project_id.clone(),
+                });
+                self.command(ClientCommand::MachineDebugRefresh);
+            }
+        }
         self.profile = Some(page);
         self.profile_opened = self.profile_opened.wrapping_add(1);
         self.profile_from_name = false;
@@ -5375,6 +5405,12 @@ impl AppState {
 
     pub fn set_profile_tab(&mut self, tab: usize, cx: &mut Context<Self>) {
         self.profile_tab = tab;
+        // The agent pane's Computer tab shows the box as of now.
+        if tab == crate::ui::profiles::agent::TAB_COMPUTER
+            && matches!(self.profile, Some(ProfilePage::Agent { .. }))
+        {
+            self.command(ClientCommand::MachineDebugRefresh);
+        }
         cx.notify();
     }
 

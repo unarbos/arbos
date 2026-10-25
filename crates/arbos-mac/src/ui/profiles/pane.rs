@@ -50,6 +50,8 @@ pub struct Hero {
     pub badge: Option<&'static str>,
     pub subtitle: Option<SharedString>,
     pub subtitle_color: Hsla,
+    /// A click on the subtitle (the agent's "Add a label": edit it in place).
+    pub subtitle_click: Option<HeroClick>,
     /// Mac only: inline controls under the subtitle while the name is being
     /// edited (the own profile's handle field with Cancel / Save). The iPhone
     /// edits in a sheet, so its hero has no twin field.
@@ -276,6 +278,7 @@ pub fn render(pane: ProfilePane, shell: &Shell, cx: &mut Context<Shell>) -> Stat
             name_el,
             &subtitle,
             pane.hero.subtitle_color,
+            pane.hero.subtitle_click,
             &theme,
         )
         .children(pane.hero.editor),
@@ -373,8 +376,11 @@ mod tests {
 
     #[test]
     fn kinds_keep_their_own_tab_sets() {
+        // Grok Bot's agent tabs (Jacob 2026-10-24, [feedback agent-pane-details-tab-2026-10-24]).
         let agent: Vec<&str> = super::super::agent::TABS.to_vec();
-        assert_eq!(agent, ["Profile", "Settings", "Library"]);
+        assert_eq!(agent, ["Details", "Library", "Computer"]);
+        assert_eq!(agent[super::super::agent::TAB_LIBRARY], "Library");
+        assert_eq!(agent[super::super::agent::TAB_COMPUTER], "Computer");
         assert_eq!(super::super::me::TABS, ["Profile", "Settings"]);
         assert_eq!(super::super::user::TABS, ["Links", "Groups"]);
         assert_eq!(super::super::group::TABS, ["Members", "Library"]);
