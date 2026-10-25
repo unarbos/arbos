@@ -5,6 +5,29 @@
 # detached, and builds the iPhone app twice (Release, then Debug; generic simulator, no signing). Prints the
 # compiler errors; exit 0 = both compile, 1 = one does not, 2 = infrastructure trouble (fetch/checkout).
 set -uo pipefail
+
+# The embedded ArbosFFI framework is current when it carries the metadata symbol of the newest struct
+# the generated ArbosFFI.swift declares (#1811: a stale framework made the Debug product die in dyld).
+# No pipe into `grep -q`: under pipefail, grep closing the pipe on its first match kills nm with SIGPIPE
+# (141) and the pipeline reads as "missing" — that failed every iOS gate 22:12–22:27 Oct 25. Sets FFI_NEWEST.
+ffi_framework_current() {
+  local bin=$1 swift=$2 syms
+  FFI_NEWEST=$(grep -oE '^public struct [A-Za-z0-9_]+' "$swift" | grep -v FfiConverter | tail -n 1 | awk '{print $3}')
+  [[ -n "$FFI_NEWEST" ]] || return 0
+  syms=$(nm -gU "$bin" 2>/dev/null) || return 1
+  [[ "$syms" == *"8ArbosFFI"*"${FFI_NEWEST}VMn"* ]] || grep -qE "8ArbosFFI[0-9]*${FFI_NEWEST}VMn" <<< "$syms"
+}
+
+# `ios-gate.sh selftest`: run the staleness check against the gate's current Debug product and tree
+# (prints the newest struct and the verdict; exit 0 current, 1 stale, 2 nothing to check).
+if [[ "${1:-}" == "selftest" ]]; then
+  bin=$HOME/arbos-gate-dd-Debug/Build/Products/Debug-iphonesimulator/Arbos.app/Frameworks/ArbosFFI.framework/ArbosFFI
+  swift=$HOME/arbos-gate/packages/ArbosFFI/Sources/ArbosFFI/ArbosFFI.swift
+  [[ -f "$bin" && -f "$swift" ]] || { echo "selftest: no Debug product or generated ArbosFFI.swift to check"; exit 2; }
+  if ffi_framework_current "$bin" "$swift"; then echo "selftest: ArbosFFI.framework current (newest struct ${FFI_NEWEST})"; exit 0; fi
+  echo "selftest: ArbosFFI.framework STALE (no metadata for ${FFI_NEWEST})"; exit 1
+fi
+
 branch=$1; sha=$2
 # xcodebuild boots a simulator to resolve the generic destination and leaves it running; six of them
 # (launchd_sim + assetsd + siriknowledged each) were idling on the EC2 Mac on 2026-10-21 while the
@@ -119,12 +142,11 @@ for config in Release Debug; do
     elif [[ -n "${ffi_fp:-}" ]]; then
       # The product must link the FFI it was built against: every Swift type the generated ArbosFFI.swift
       # declares as a struct has its metadata symbol in the framework; check the newest one by name.
-      newest=$(grep -oE '^public struct [A-Za-z0-9_]+' "$ROOT/$PKG_SWIFT" | grep -v FfiConverter | tail -1 | awk '{print $3}')
-      if [[ -n "$newest" ]] && ! nm -gU "$fw/ArbosFFI" 2>/dev/null | grep -q "8ArbosFFI[0-9]*${newest}VMn"; then
-        echo "== $config: embedded ArbosFFI.framework is stale (no metadata for ${newest})"
-        rc=1
-      else
+      if ffi_framework_current "$fw/ArbosFFI" "$ROOT/$PKG_SWIFT"; then
         echo "$ffi_fp" >"$HOME/arbos-gate-dd-$config/arbos-ffi.fingerprint"
+      else
+        echo "== $config: embedded ArbosFFI.framework is stale (no metadata for ${FFI_NEWEST:-?})"
+        rc=1
       fi
     fi
   else
