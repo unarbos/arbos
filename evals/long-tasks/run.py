@@ -588,6 +588,8 @@ def main():
     ap.add_argument("--run-id", default=time.strftime("%Y%m%dT%H%M"))
     ap.add_argument("--out", default="")
     ap.add_argument("--dry-run", action="store_true", help="list the tasks per lane and exit")
+    ap.add_argument("--allow-stale-seed", action="store_true", help="run even when the box's pi-ext seed does not match its image commit (#1702)")
+    ap.add_argument("--refresh-stale-seed", action="store_true", help="when the seed is stale, re-copy /etc/arbos from the image into the box's persisted /etc and restart it (test box only)")
     args = ap.parse_args()
     only = set(args.tasks.split(",")) if args.tasks else None
     if args.subset:
@@ -616,6 +618,30 @@ def main():
     print(f"preflight: /work free {free_mib} MiB", flush=True)
     if 0 <= free_mib < 300:
         raise SystemExit(f"preflight: only {free_mib} MiB free on /work — clean the box first (#1641)")
+    # #1702: the box must run the pi extension its image was built from; a stale seed measures the wrong code
+    seed = box.pi_seed(HERE.parent.parent)
+    seed_line = lambda s: f"pi-ext seed {'ok' if s['ok'] else 'MISMATCH' if s['ok'] is False else 'unverified'} — {s['reason']} (image {s['image']}, source_sha {str(s.get('source_sha'))[:12]}, tag commit {str(s.get('tag_commit'))[:12]})"  # noqa: E731
+    print(f"preflight: {seed_line(seed)}", flush=True)
+    if seed["ok"] is False and args.refresh_stale_seed:
+        # the persisted /etc of a host-sandbox box keeps the seed of the image that created it (fleet.rs
+        # seed_etc runs once); re-copy /etc/arbos from the current image and restart so agentd re-seeds
+        code, out = box.refresh_etc_arbos()
+        print(f"preflight: refreshed /etc/arbos from the image (rc={code}): {out[-200:]}", flush=True)
+        rl.ctl("machine", "stop", "--force", timeout=180)
+        time.sleep(5)
+        rl.ctl("machine", "start", timeout=180)
+        for _ in range(30):
+            if rl.machine().get("state") == "awake":
+                break
+            time.sleep(10)
+        rl.relay("PUT", "/me/secrets/settings", {"paused": False})
+        time.sleep(20)
+        box = bx.Box()
+        seed = box.pi_seed(HERE.parent.parent)
+        seed["refreshed"] = True
+        print(f"preflight: after refresh, {seed_line(seed)}", flush=True)
+    if seed["ok"] is not True and not args.allow_stale_seed:
+        raise SystemExit(f"preflight: blocked — {seed['reason']}; not a result (pass --allow-stale-seed to run anyway)")
     spent, cap = rl.spent_today()
     if cap and cap - spent < args.budget_usd:
         print(f"WARNING: daily cap headroom ${cap - spent:.2f} < budget ${args.budget_usd}; the relay will stop the agent first", flush=True)
@@ -635,6 +661,7 @@ def main():
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "image": box.image,
         "agentd": box.agentd_sha(),
+        "pi_seed": seed,
         "provider": box.provider,
         "user": box.user,
         "projects": projects,

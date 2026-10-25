@@ -3,6 +3,7 @@ host, `docker exec` into `arbos-box-<user>`) and a Daytona box (toolbox API). Th
 touches the dedicated test user's sandbox."""
 
 import base64
+import hashlib
 import json
 import os
 import shlex
@@ -113,3 +114,57 @@ class Box:
     def agentd_sha(self):
         code, out = self.root("cat /opt/arbos/agentd.sha 2>/dev/null || arbos-agentd --version 2>/dev/null || cat /etc/arbos-image 2>/dev/null; true")
         return out.strip()[:80]
+
+    def refresh_etc_arbos(self):
+        """Re-copy `/etc/arbos` (pi-seed, claude-seed, prime-seed, AGENTS.md) from the box's current
+        image into its persisted `/etc` (fleet.rs `seed_etc` copies the image's /etc only on the
+        box's first boot, so a host-sandbox box keeps the seed of the image that created it). Test
+        box only; the box must be restarted afterwards so agentd re-seeds the project pi dirs."""
+        if self.provider == "daytona":
+            return 1, "refresh is for host sandboxes only"
+        etc = f"/var/lib/arbos-relay/boxes/{self.user}/mnt/.etc"
+        image = subprocess.run(
+            ["ssh", "-i", SSH_KEY, "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", SSH_HOST,
+             f"docker inspect {shlex.quote(self.container)} --format '{{{{.Config.Image}}}}'"],
+            capture_output=True, text=True, timeout=60,
+        ).stdout.strip()
+        if not image:
+            return 1, "could not read the box's image"
+        cmd = (f"docker run --rm -u 0 --network none --mount type=bind,src={shlex.quote(etc)},dst=/seed "
+               f"--entrypoint sh {shlex.quote(image)} -c 'rm -rf /seed/arbos && cp -a /etc/arbos /seed/arbos && cat /seed/arbos/pi-seed/extensions/arbos-pi-ext/.source-sha'")
+        p = subprocess.run(["ssh", "-i", SSH_KEY, "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", SSH_HOST, cmd], capture_output=True, text=True, timeout=180)
+        return p.returncode, (p.stdout + p.stderr).strip()
+
+    def pi_seed(self, repo_root):
+        """The arbos-pi-ext seed the box runs vs the commit its image was built from (#1702: images
+        0.1.121–0.1.124 shipped a three-day-old seed next to a fresh agentd). Returns a dict with
+        `ok`: True when `.source-sha` equals the image tag's commit, or — for images that predate the
+        marker — when index.ts in the box is byte-identical to the file at that commit. A mismatch
+        means the run would measure the wrong pi extension and must not count as a result."""
+        version = (self.image or "").replace("arbos-agent-", "")
+        rec = {"image": self.image, "tag": f"image-v{version}" if version else None, "tag_commit": None, "source_sha": None,
+               "index_sha256_box": None, "index_sha256_repo": None, "ok": None, "reason": ""}
+        if not version:
+            rec["reason"] = "box image unknown"
+            return rec
+        try:
+            rec["tag_commit"] = subprocess.run(["git", "-C", str(repo_root), "rev-parse", f"{rec['tag']}^{{commit}}"], capture_output=True, text=True, timeout=30).stdout.strip() or None
+            rec["index_sha256_repo"] = hashlib.sha256(subprocess.run(["git", "-C", str(repo_root), "show", f"{rec['tag']}:harness/arbos-pi-ext/index.ts"], capture_output=True, timeout=30).stdout).hexdigest()
+        except Exception as e:  # noqa: BLE001
+            rec["reason"] = f"repo lookup: {e}"
+        code, out = self.root("D=/etc/arbos/pi-seed/extensions/arbos-pi-ext; cat $D/.source-sha 2>/dev/null | tr -d '[:space:]'; echo; sha256sum $D/index.ts 2>/dev/null | cut -d' ' -f1; true")
+        lines = (out or "").split("\n")
+        rec["source_sha"] = (lines[0].strip() or None) if lines else None
+        rec["index_sha256_box"] = (lines[1].strip() or None) if len(lines) > 1 else None
+        if not rec["tag_commit"]:
+            rec["reason"] = rec["reason"] or f"no local tag {rec['tag']} (fetch refs/tags/image-v*)"
+            return rec
+        if rec["source_sha"]:
+            rec["ok"] = rec["source_sha"] == rec["tag_commit"]
+            rec["reason"] = "seed .source-sha matches the image commit" if rec["ok"] else f"seed from {rec['source_sha'][:12]} but image built from {rec['tag_commit'][:12]}"
+        elif rec["index_sha256_box"]:
+            rec["ok"] = rec["index_sha256_box"] == rec["index_sha256_repo"]
+            rec["reason"] = "no .source-sha marker (pre-#1703 image); index.ts identical to the image commit's" if rec["ok"] else "no .source-sha marker and index.ts differs from the image commit's — stale seed"
+        else:
+            rec["reason"] = "could not read the seed in the box"
+        return rec
