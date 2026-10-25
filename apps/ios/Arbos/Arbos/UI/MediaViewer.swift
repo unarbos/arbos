@@ -7,8 +7,10 @@ import UIKit
 // The media viewer (feedback media-viewer-2026-10-23, #1381): one full-screen
 // viewer for every chat kind, opened from an image / file bubble or a Library
 // tile. Black backdrop; the album (the chat's pictures and videos in order)
-// pages with a swipe; swipe down or × closes. Caption top-centre (who, when),
-// counter top-right, Download and Forward pills at the bottom. Video plays
+// pages with a swipe; swipe down, ×, or the Close pill closes. Caption
+// top-centre (who, when), counter top-right, Close · Download · Forward pills
+// at the bottom ([feedback ABUo19aGqPpSnnw4Ha6F6H0] — the top × was easy to
+// miss / not hittable over the paged image; Close matches Mac). Video plays
 // inline after Play; a file shows its tile with Open (Quick Look). Forward is a
 // sheet of DMs, agents and groups; one tap sends the item there as a new message.
 
@@ -126,6 +128,7 @@ struct ForwardTarget: Identifiable, Equatable {
 struct MediaViewer: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
     let album: [MediaItem]
     @State var index: Int
     let onClose: () -> Void
@@ -156,7 +159,14 @@ struct MediaViewer: View {
             } else if let item {
                 page(item).ignoresSafeArea()
             }
-            chrome.opacity(1 - Double(dismissProgress))
+        }
+        // Overlays sit above the UIKit page TabView (which can punch through a
+        // ZStack sibling and eat the top × hits — feedback ABUo19aGqPpSnnw4Ha6F6H0).
+        .overlay(alignment: .top) {
+            topBar.opacity(1 - Double(dismissProgress))
+        }
+        .overlay(alignment: .bottom) {
+            bottomBar.opacity(1 - Double(dismissProgress))
         }
         .statusBarHidden(false)
         .preferredColorScheme(.dark)
@@ -177,56 +187,71 @@ struct MediaViewer: View {
         .sheet(item: $shareURL) { file in
             ActivityView(items: [file.url])
         }
-        .accessibilityAction(.escape, onClose)
+        .accessibilityAction(.escape, close)
+    }
+
+    /// Dismiss the cover: clear the caller's item binding and the environment dismiss.
+    private func close() {
+        onClose()
+        dismiss()
     }
 
     @ViewBuilder
     private func page(_ item: MediaItem) -> some View {
         switch item.kind {
         case .image:
-            ZoomableImagePage(item: item, dismissProgress: $dismissProgress, onClose: onClose)
+            ZoomableImagePage(item: item, dismissProgress: $dismissProgress, onClose: close)
         case .video:
-            VideoPage(item: item, dismissProgress: $dismissProgress, onClose: onClose)
+            VideoPage(item: item, dismissProgress: $dismissProgress, onClose: close)
         case .file:
-            FilePage(item: item, dismissProgress: $dismissProgress, onClose: onClose)
+            FilePage(item: item, dismissProgress: $dismissProgress, onClose: close)
         }
     }
 
     // ----- top bar, pills, dots ----------------------------------------------
 
-    private var chrome: some View {
-        VStack(spacing: 0) {
-            ZStack {
-                if let item {
-                    VStack(spacing: 2) {
-                        Text(item.by).font(theme.font(15, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
-                        Text(item.whenLabel).font(theme.font(13)).foregroundStyle(.white.opacity(0.67)).lineLimit(1)
-                    }
-                    .padding(.horizontal, 64)
-                }
-                HStack {
-                    Button(action: onClose) {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .frame(width: 36, height: 36)
-                            .background(Circle().fill(Color.white.opacity(0.18)))
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Close")
-                    Spacer()
-                    if album.count > 1 {
-                        Text("\(index + 1) of \(album.count)")
-                            .font(theme.font(13, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.67))
-                            .monospacedDigit()
-                    }
-                }
-                .padding(.horizontal, 16)
+    private var topBar: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Button(action: close) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 36, height: 36)
+                    .background(Circle().fill(Color.white.opacity(0.22)))
+                    .contentShape(Circle())
             }
-            .frame(height: 44)
-            .padding(.top, 8)
-            Spacer()
+            .buttonStyle(.plain)
+            .accessibilityLabel("Close")
+
+            Spacer(minLength: 0)
+
+            if let item {
+                VStack(spacing: 2) {
+                    Text(item.by).font(theme.font(15, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
+                    Text(item.whenLabel).font(theme.font(13)).foregroundStyle(.white.opacity(0.67)).lineLimit(1)
+                }
+            }
+
+            Spacer(minLength: 0)
+
+            if album.count > 1 {
+                Text("\(index + 1) of \(album.count)")
+                    .font(theme.font(13, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.67))
+                    .monospacedDigit()
+                    .frame(minWidth: 36, alignment: .trailing)
+            } else {
+                Color.clear.frame(width: 36, height: 36)
+            }
+        }
+        .padding(.horizontal, 16)
+        .frame(height: 44)
+        .padding(.top, 8)
+        .padding(.bottom, 4)
+    }
+
+    private var bottomBar: some View {
+        VStack(spacing: 0) {
             if let toast {
                 Text(toast)
                     .font(theme.font(13, weight: .medium))
@@ -246,12 +271,17 @@ struct MediaViewer: View {
                 .accessibilityHidden(true)
             }
             HStack(spacing: 12) {
+                // Close beside Download / Forward — same as Mac; always exits even
+                // when swipe-down or the top × lose the gesture race with zoom/paging.
+                pill("Close", system: "xmark") { close() }
                 pill("Download", system: "arrow.down.to.line") { Task { await download() } }
+                    .disabled(!canAct || busy)
+                    .opacity(canAct ? 1 : 0.5)
                 pill("Forward", system: "arrowshape.turn.up.right") { showForward = true }
+                    .disabled(!canAct || busy)
+                    .opacity(canAct ? 1 : 0.5)
             }
             .padding(.bottom, 14)
-            .disabled(!canAct || busy)
-            .opacity(canAct ? 1 : 0.5)
         }
         .animation(.easeOut(duration: 0.2), value: toast)
     }
