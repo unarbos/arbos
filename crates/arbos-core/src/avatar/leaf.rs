@@ -26,6 +26,39 @@ use super::{Accent, Rgb};
 pub const LEAF_COUNT: u8 = 16;
 /// Number of hues (disc + ink pairs).
 pub const COLOR_COUNT: u8 = 10;
+/// "No leaf" (Jacob, 2026-10-25): an agent, group or server created from the Create sheet
+/// without an uploaded or generated picture is stored with `avatar_leaf` **and**
+/// `avatar_leaf_color` = `NEUTRAL` and draws as **the name's first letter on a neutral grey
+/// disc** — never an automatic leaf. Distinct from `null` (= the id's automatic leaf), so
+/// every existing agent keeps the leaf it has. The relay accepts the value; [`pick_for`]
+/// ignores it, so an older client draws the automatic leaf instead of failing.
+pub const NEUTRAL: u8 = 255;
+/// Neutral disc fill and the letter's ink: dark appearance `(disc, ink)`, light appearance
+/// `(disc, ink)`. The picker's own "unselected" grey, so the sheets and the lists agree.
+pub const NEUTRAL_DARK: (Rgb, Rgb) = (Rgb(0x3A, 0x3A, 0x3A), Rgb(0xE5, 0xE5, 0xE5));
+pub const NEUTRAL_LIGHT: (Rgb, Rgb) = (Rgb(0xE6, 0xE6, 0xE6), Rgb(0x4A, 0x4A, 0x4A));
+
+/// Is this stored pick the neutral one (no leaf: initial on a grey disc)?
+pub fn is_neutral(leaf: Option<u8>) -> bool {
+    leaf == Some(NEUTRAL)
+}
+
+/// The one letter a neutral disc carries: the first letter or digit of the name, upper-cased;
+/// `?` for an empty name. One letter, not D79's two — Jacob's "the name's initial".
+pub fn initial(name: &str) -> String {
+    name.chars()
+        .find(|c| c.is_alphanumeric())
+        .map(|c| c.to_uppercase().collect::<String>())
+        .unwrap_or_else(|| "?".to_owned())
+}
+
+/// The bubble-bar accent of a neutral agent: a mid grey in both appearances.
+pub fn neutral_accent() -> Accent {
+    Accent {
+        dark: Rgb(0x8A, 0x8A, 0x8A),
+        light: Rgb(0x6E, 0x6E, 0x6E),
+    }
+}
 /// The SVG box as a share of the disc diameter: the glyph already spans 71 of the box's 100
 /// units, centred, so the box is drawn edge to edge.
 pub const LEAF_SCALE: f32 = 1.0;
@@ -729,6 +762,26 @@ mod tests {
             (p.leaf, p.color),
             (leaf, LEAVES[leaf as usize].default_color)
         );
+    }
+
+    /// Jacob, 2026-10-25: the Create sheets' fallback is the name's initial on a neutral disc,
+    /// stored as `NEUTRAL` so it is told apart from `null` (the automatic leaf every existing
+    /// agent keeps). An older client's `pick_for` must not choke on it.
+    #[test]
+    fn neutral_is_its_own_value_and_old_clients_fall_back_to_the_automatic_leaf() {
+        assert!(is_neutral(Some(NEUTRAL)));
+        assert!(!is_neutral(None));
+        assert!(!is_neutral(Some(0)));
+        assert_eq!(
+            pick_for("01M5X", Some(NEUTRAL), Some(NEUTRAL)),
+            default_pick("01M5X")
+        );
+        assert_eq!(initial("Field notes"), "F");
+        assert_eq!(initial("  @ops-bot"), "O");
+        assert_eq!(initial("élan"), "É");
+        assert_eq!(initial("42 things"), "4");
+        assert_eq!(initial(""), "?");
+        assert_eq!(initial("—"), "?");
     }
 
     #[test]

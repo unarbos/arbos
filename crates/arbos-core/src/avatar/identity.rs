@@ -60,8 +60,11 @@ pub struct AgentIdentity {
     pub name: String,
     /// `@slug` (without the `@`).
     pub handle: String,
-    /// The leaf in effect (owner's picks or the automatic pair).
+    /// The leaf in effect (owner's picks or the automatic pair). Meaningless while `neutral`.
     pub leaf: LeafPick,
+    /// The card says "no leaf" (`leaf::NEUTRAL`, Jacob 2026-10-25): draw the name's initial on
+    /// a neutral disc instead of `leaf`.
+    pub neutral: bool,
     /// D79 colour index when the leaf set is off.
     pub color_index: u8,
     /// The picture that wins over the leaf, when the agent has one.
@@ -134,6 +137,7 @@ pub fn resolve<'c>(
                 name: display_name(Some(&card.name), handle),
                 handle: card_handle,
                 leaf: leaf::pick_for(&card.id, card.leaf, card.leaf_color),
+                neutral: leaf::is_neutral(card.leaf),
                 color_index: super::index_for(&card.id, card.color_index),
                 image_key: card.image_key.clone().filter(|k| !k.is_empty()),
                 known: true,
@@ -156,6 +160,7 @@ pub fn resolve<'c>(
                     .or_else(|| name.map(agent_slug))
                     .unwrap_or_default(),
                 leaf: leaf::default_pick(seed),
+                neutral: false,
                 color_index: super::color_index(seed),
                 image_key: None,
                 known: false,
@@ -359,6 +364,24 @@ mod tests {
         );
         assert_eq!(r.handle, "rail-layout-bot");
         assert_eq!(r.image_key, None);
+        assert!(!r.neutral);
+
+        // 9. A neutral card (Create sheet, nothing picked) says so; its `leaf` is not drawn.
+        let neutral = [AgentCard {
+            leaf: Some(leaf::NEUTRAL),
+            leaf_color: Some(leaf::NEUTRAL),
+            ..card("01N", "Field notes")
+        }];
+        let r = resolve(
+            &AgentQuery {
+                sender: "agent:01N",
+                handle: None,
+                name: None,
+            },
+            &neutral,
+        );
+        assert!(r.neutral);
+        assert_eq!(r.name, "Field notes");
     }
 
     #[test]

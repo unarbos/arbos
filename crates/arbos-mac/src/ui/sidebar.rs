@@ -1119,6 +1119,9 @@ pub fn server_picture(server: &ServerInfo, state: &AppState, size: f32, theme: &
                     .object_fit(gpui::ObjectFit::Cover),
             );
     }
+    if avatars::leaf::is_neutral(server.avatar_leaf) {
+        return avatars::neutral_element(&server.name, size, theme);
+    }
     if let (true, Some(leaf), Some(color)) = (
         avatars::leaf_avatars_on(),
         server.avatar_leaf,

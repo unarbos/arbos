@@ -551,6 +551,35 @@ Code: `ui/slide.rs` (`PaneSlides::step` derives the motion from
 snap, mid-slide reversal, no slide on a page swap or a width drag) and
 `slide::layout_tests`.
 
+## Create sheets: Upload | Generate, neutral initial (Jacob 2026-10-25, [feedback create-sheet-avatar-upload-generate-mac-2026-10-25])
+
+**The Create New Agent / Group / Server sheets offer exactly two picture
+options — the agent avatar picker's own Upload and Generate — and never a
+leaf grid or pastel swatches. An entity created with neither gets the
+name's first letter on a neutral grey disc; no leaf is ever auto-assigned.**
+Existing agents, groups and servers keep the avatars they have (stored or
+automatic leaf, picture): nothing is migrated or re-rendered.
+
+| Item | Rule |
+|---|---|
+| Options | `avatar_picker::tab_pill` with `Tab::for_target(&Target::Draft)` = `[Upload, Generate]` (Upload first, Jacob's order); the bodies are the picker's `upload_body` / `generate_body` on the shell's `create_picker` (a `Picker` on `Target::Draft`) |
+| Where | capsules at **246** from the sheet top (where Grok's first icon row began), body 16 under; footer 12 under the taller body; the card is 461.5 tall (was 602.5 with the 4 × 4 grid and two swatch rows) |
+| Preview | the hero disc (114) shows the chosen file, the generated picture, or the neutral initial of the typed name (an empty grey disc until a name is typed) — `avatars::neutral_element` |
+| Generate before the entity exists | `POST /me/avatar/generate` into my own slot `users:{me}` (#1789); on Create the bytes are copied into the new entity's slot (`sync::relay::adopt_draft_picture`); a relay without the route says "Generate is not on this relay yet; upload a picture instead." |
+| Stored value | `avatar_leaf` = `avatar_leaf_color` = **255** (`arbos_core::avatar::leaf::NEUTRAL`), accepted by the relay's `check_leaf_pick`; `null` stays the automatic leaf, so older agents are untouched. An older client's `pick_for` ignores 255 and draws the automatic leaf |
+| Neutral disc | dark `#3A3A3A` with the letter in `#E5E5E5`; light `#E6E6E6` / `#4A4A4A` (`leaf::NEUTRAL_DARK` / `NEUTRAL_LIGHT`); one letter, semibold at `INITIALS_SCALE`; bubble-bar accent a mid grey (`leaf::neutral_accent`) |
+| Everywhere | sidebar rows, header pill, pane hero, bubbles, presence row, mention chips and the composer picker all go through `avatars::agent` / `project` / `agent_picture` / `mention::Picture::Neutral`, so the one stored value draws the one disc |
+
+Pinned by `create_entity::tests` (options, stored pair, geometry) and
+`create_entity::render_tests` (headless render of both sheets: the two
+capsules, no Bot tab, no leaf element, the footer where the constants say,
+nothing picked → no picture sent), `avatar_picker::tests::the_draft_offers_upload_and_generate_only_and_hands_over_its_pick`,
+`avatars::tests::neutral_pick_is_the_core_value_and_identity_carries_it`,
+`arbos_core::avatar::leaf::tests::neutral_is_its_own_value_…` and the relay's
+`avatar::tests::neutral_pick_is_accepted_and_the_rest_still_validates`.
+Rig: `ARBOS_OPEN_NEW_AGENT=1` / `ARBOS_OPEN_CREATE=group|server` with
+`ARBOS_NEW_AGENT_NAME=…` and `ARBOS_CREATE_PICTURE=upload|generate[:<prompt>]`.
+
 ## Delete is immediate — no confirm (Jacob 2026-10-24, [feedback remove-delete-confirms-2026-10-24])
 
 **Delete in the message menu and Delete in the chat-list row menu act at

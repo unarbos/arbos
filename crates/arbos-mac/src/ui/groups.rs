@@ -112,6 +112,7 @@ pub fn tab_glyphs(chat: &Chat, projects: &[Project], theme: &Theme) -> Option<Di
                 .text_color(theme.text_muted)
                 .child("⇄"),
         ),
-        ChatKind::Chat | ChatKind::Other => None,
+        // A job tab's glyph is drawn by the header from the job's state (`header::job_tab_glyph`).
+        ChatKind::Job | ChatKind::Chat | ChatKind::Other => None,
     }
 }
