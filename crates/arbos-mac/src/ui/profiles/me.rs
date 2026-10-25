@@ -62,7 +62,6 @@ impl Shell {
         let account = state.account.clone();
         let account_image = account.as_ref().and_then(|a| state.avatar(&a.avatar_url));
         let profile_tab = state.profile_tab;
-        let custom_avatar = state.has_custom_avatar();
         let notify_on = state.notifier.enabled;
         let read_receipts = state.read_receipts;
         let secrets_value = if state.secrets.loaded {
@@ -965,7 +964,8 @@ impl Shell {
                 .bg(theme.surface_2),
         }
         .into_any_element();
-        // The crayon: pick a picture, it replaces the GitHub one everywhere.
+        // The crayon: the agents' avatar picker (Generate | Upload, Reset) for my picture; it
+        // replaces the GitHub one everywhere and on every device.
         let pic_click = account.is_some().then(|| {
             let f = cx.listener(|this, _: &gpui::ClickEvent, _, cx| this.pick_my_avatar(cx));
             Box::new(f) as profiles::HeroClick
@@ -1053,7 +1053,7 @@ impl Shell {
         let mut footer: Vec<Section> = Vec::new();
         if tab == 0 {
             // ----- Profile: who I am on the relay -------------------------------------
-            let mut rows: Vec<gpui::AnyElement> = vec![
+            let rows: Vec<gpui::AnyElement> = vec![
                 kit::value_row("me-name-row", "Name", display_name.clone(), &theme)
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.surface_2))
@@ -1069,15 +1069,6 @@ impl Shell {
                     )
                     .into_any_element(),
             ];
-            if custom_avatar {
-                rows.push(
-                    kit::danger_row("me-remove-picture", "Remove picture", &theme)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.state.update(cx, |s, cx| s.remove_my_avatar(cx));
-                        }))
-                        .into_any_element(),
-                );
-            }
             body.push(Section::Card(rows));
             body.push(Section::Footnote(
                 "Your name, handle and picture are what other people and their agents see, here and on the iPhone. Signed in with GitHub.".into(),

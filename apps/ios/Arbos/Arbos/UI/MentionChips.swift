@@ -81,7 +81,9 @@ final class MentionTable {
                 let slug = mentionSlug(chat.title)
                 guard !slug.isEmpty else { continue }
                 let picture: AnyView
-                if let leaf = chat.leafPick, LeafAvatarsFlag.shared.on {
+                if chat.isNeutralAvatar {
+                    picture = AnyView(NeutralAvatar(name: chat.title, size: Self.picture))
+                } else if let leaf = chat.leafPick, LeafAvatarsFlag.shared.on {
                     picture = AnyView(LeafAvatar(pick: leaf, size: Self.picture))
                 } else {
                     picture = AnyView(PersonAvatar(url: nil, handle: chat.title, size: Self.picture, name: chat.title, id: chat.id))

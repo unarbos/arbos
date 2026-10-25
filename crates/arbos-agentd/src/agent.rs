@@ -1067,6 +1067,55 @@ pub struct JobSpec {
     pub title: String,
     pub kind: String,
     pub touches: Vec<String>,
+    /// 0 on the first worker, 1 on the one retry a failed worker gets (`JOB_WORKER_RETRIES`).
+    pub attempt: u8,
+}
+
+/// How many fresh workers a job gets after its first one fails (Jacob, 2026-10-25: a job that
+/// fails retries once, then falls back to the main agent doing the work inline — the user is
+/// never asked "should I try again?" on a first failure).
+pub(crate) const JOB_WORKER_RETRIES: u8 = 1;
+
+/// A job worker ended without a usable result on an attempt that still has a retry; the
+/// worker task (`spawn_subagent_task`) starts the next attempt with a fresh worker.
+#[derive(Debug)]
+pub(crate) struct JobWorkerFailed {
+    pub job_id: String,
+    pub error: String,
+}
+
+impl std::fmt::Display for JobWorkerFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "job {} worker failed: {}", self.job_id, self.error)
+    }
+}
+
+impl std::error::Error for JobWorkerFailed {}
+
+/// Why a worker's run counts as failed once its stream closed, and whether a fresh worker is
+/// worth a try. `text` is what the worker wrote, `tool_calls` how many tools it ran.
+///
+/// A worker that settles with no words, no tool call and no error did no work at all (a crash
+/// before the first model call: the unwritable session dir of 2026-10-25); it is a failure, not
+/// an empty success. A cancel is not retried, nor is the 60-minute cap (the next run would hit
+/// it again); a `blocked` return contract is the worker's own answer and is delivered as is.
+pub(crate) fn worker_failure(
+    done_err: Option<&str>,
+    text: &str,
+    tool_calls: u32,
+    status: &str,
+) -> Option<(String, bool)> {
+    match done_err {
+        Some(e) if e.contains("aborted") => Some((e.to_owned(), false)),
+        Some(e) if e.contains("exceeded 60 minutes") => Some((e.to_owned(), false)),
+        Some(e) => Some((e.to_owned(), true)),
+        None if text.trim().is_empty() && tool_calls == 0 => Some((
+            "worker ended without output (no reply, no tool call)".to_owned(),
+            true,
+        )),
+        None if status == "blocked" => Some(("blocked".to_owned(), false)),
+        None => None,
+    }
 }
 
 /// Why the main pi session is being prompted.
@@ -1085,6 +1134,9 @@ pub enum TurnKind {
     /// An approval card was decided after its turn ended (feature `approve`): the main agent
     /// dispatches or acknowledges, in prose.
     ApprovalOutcome { approval_id: String, title: String },
+    /// A job failed on every worker it got: the main agent does the user's ask itself, here,
+    /// with its own tools (`act` allowed, no job conversion, no new job for the same ask).
+    JobFallback { job_id: String, title: String },
 }
 
 /// What one main-agent turn produced, for the caller's follow-ups (memory pass, hand-offs).
@@ -1253,6 +1305,9 @@ pub struct TurnState {
     /// Duplex step 4: this act turn was cut at `act_to_job_after()` and its remainder becomes a
     /// job after the turn ends (`handle_send`); no fallback bubble, no escalation subagent.
     pub act_to_job: bool,
+    /// A `TurnKind::JobFallback` turn: the job path already failed for this ask, so the work
+    /// stays inline — no act→job conversion and `start_job` is refused.
+    pub job_fallback: bool,
 }
 
 /// The direct tool call a turn is inside right now.
@@ -1390,6 +1445,7 @@ impl TurnState {
             ack_posted: false,
             web_tool_used: false,
             act_to_job: false,
+            job_fallback: false,
         }
     }
 }
@@ -3163,20 +3219,11 @@ impl Agent {
                 )
                 .await
             {
-                tracing::warn!(error = %e, "subagent run failed");
-                if let Some(j) = &job {
-                    let _ = me
-                        .store
-                        .set_job_state(&j.id, "failed", Some(&e.to_string()));
-                    me.refresh_job_activity(&chat).await;
-                }
                 let label = if name.is_empty() {
                     existing.clone().unwrap_or_else(|| "subagent".into())
                 } else {
                     name.clone()
                 };
-                // Clear leftover `running`/`queued` and any streaming progress row
-                // so a failed start cannot pin the working indicator or working set.
                 let sub_id = existing
                     .clone()
                     .or_else(|| {
@@ -3187,47 +3234,95 @@ impl Agent {
                             .map(|r| r.id)
                     })
                     .unwrap_or_default();
+                // A job whose worker failed (crashed, settled empty, never started) gets one
+                // fresh worker before anyone hears of it: same brief, same job row, `attempt + 1`
+                // (`JOB_WORKER_RETRIES`). Its rows are settled quietly; no line in the chat.
+                let retry_job = job.as_ref().filter(|j| {
+                    j.attempt < JOB_WORKER_RETRIES
+                        && !me
+                            .store
+                            .job(&j.id)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|row| row.state == "cancelled")
+                });
+                if let Some(j) = retry_job {
+                    if e.downcast_ref::<JobWorkerFailed>().is_none() {
+                        // A failed start (spawn, prompt): counted like a crashed worker.
+                        let _ = me.store.bump_job_restarts(&j.id);
+                        let _ = me
+                            .store
+                            .set_job_state(&j.id, "queued", Some(&e.to_string()));
+                    }
+                    me.settle_failed_worker_rows(
+                        &host2,
+                        &sub_id,
+                        Some(&j.id),
+                        None,
+                        &e.to_string(),
+                    )
+                    .await;
+                    tracing::warn!(job = %j.id, error = %e, attempt = j.attempt, "job worker failed; fresh worker");
+                    me.spawn_subagent_task(
+                        &chat,
+                        &host2,
+                        &user_msg,
+                        None,
+                        format!(
+                            "job-retry-{}",
+                            j.id[j.id.len().saturating_sub(4)..].to_lowercase()
+                        ),
+                        purpose.clone(),
+                        brief.clone(),
+                        Some(Harness::Pi),
+                        false,
+                        false,
+                        Some(JobSpec {
+                            attempt: j.attempt + 1,
+                            ..j.clone()
+                        }),
+                    );
+                    return;
+                }
+                tracing::warn!(error = %e, "subagent run failed");
+                if let Some(j) = &job {
+                    let cancelled = me
+                        .store
+                        .job(&j.id)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|row| row.state == "cancelled");
+                    if !cancelled {
+                        let _ = me
+                            .store
+                            .set_job_state(&j.id, "failed", Some(&e.to_string()));
+                    }
+                    me.refresh_job_activity(&chat).await;
+                    me.settle_failed_worker_rows(
+                        &host2,
+                        &sub_id,
+                        Some(&j.id),
+                        None,
+                        &e.to_string(),
+                    )
+                    .await;
+                    if !cancelled && e.downcast_ref::<JobWorkerFailed>().is_none() {
+                        // Out of workers: the main agent does the work itself, inline.
+                        if let Err(e2) = me
+                            .run_job_fallback_turn(&chat, &host2, &user_msg, j, &e.to_string(), "")
+                            .await
+                        {
+                            tracing::warn!(error = %e2, job = %j.id, "job fallback turn");
+                        }
+                    }
+                    return;
+                }
                 // One plain line in the chat, on the helper's own progress row when it has one,
                 // else on a new row — never both (Doug, 2026-10-22: the raw rpc error showed twice).
                 let line = subagent_start_failure_line(&e.to_string());
-                let mut told = false;
-                if !sub_id.is_empty() {
-                    me.subagent_msgs.lock().await.remove(&sub_id);
-                    let _ = me.store.set_subagent_status(&sub_id, "idle");
-                    let _ = me.store.set_subagent_last_status(&sub_id, "failed");
-                    {
-                        let h = host2.lock().await;
-                        let stale: Vec<String> = h
-                            .doc
-                            .messages()
-                            .into_iter()
-                            .filter(|m| {
-                                m.role == "assistant"
-                                    && m.status == "streaming"
-                                    && m.rest.get("subagentId").and_then(|v| v.as_str())
-                                        == Some(sub_id.as_str())
-                            })
-                            .map(|m| m.id)
-                            .collect();
-                        for id in stale {
-                            h.doc.add_status_part(&id, "failed", "Failed");
-                            if !told {
-                                h.doc.add_error_part(&id, "subagent_failed", &line);
-                                h.doc.add_hidden_part(
-                                    &id,
-                                    "subagent_failed_detail",
-                                    &e.to_string(),
-                                    &json!({ "subagentId": sub_id }),
-                                );
-                                told = true;
-                            }
-                            h.doc.finish_message(&id, MessageStatus::Error);
-                            h.doc
-                                .set_message_fields(&id, &[("handoffMessages", json!(2))]);
-                        }
-                    }
-                    me.write_threads_index().await;
-                }
+                let told = me
+                    .settle_failed_worker_rows(&host2, &sub_id, None, Some(&line), &e.to_string())
+                    .await;
                 if !told {
                     let h = host2.lock().await;
                     let id = ulid();
@@ -3256,7 +3351,7 @@ impl Agent {
                         0,
                         "(the subagent did not start)",
                         Some(&e.to_string()),
-                        job.as_ref(),
+                        None,
                     )
                     .await
                 {
@@ -3264,6 +3359,70 @@ impl Agent {
                 }
             }
         });
+    }
+
+    /// A helper that failed before it finished: clear its `running`/`queued` state and settle
+    /// any streaming progress row it left, so a failed start cannot pin the working indicator
+    /// or the working set. With `line`, the first settled row also carries it as the error the
+    /// user sees; returns whether that happened. Without, the rows close quietly (a job worker
+    /// about to be retried).
+    async fn settle_failed_worker_rows(
+        &self,
+        host: &SharedHost,
+        sub_id: &str,
+        job_id: Option<&str>,
+        line: Option<&str>,
+        detail: &str,
+    ) -> bool {
+        if sub_id.is_empty() && job_id.is_none() {
+            return false;
+        }
+        let mut told = false;
+        if !sub_id.is_empty() {
+            self.subagent_msgs.lock().await.remove(sub_id);
+            let _ = self.store.set_subagent_status(sub_id, "idle");
+            let _ = self.store.set_subagent_last_status(sub_id, "failed");
+        }
+        {
+            let h = host.lock().await;
+            // A hand-off row names its subagent; a job's hidden worker row names the job.
+            let stale: Vec<String> = h
+                .doc
+                .messages()
+                .into_iter()
+                .filter(|m| {
+                    m.role == "assistant"
+                        && m.status == "streaming"
+                        && ((!sub_id.is_empty()
+                            && m.rest.get("subagentId").and_then(|v| v.as_str()) == Some(sub_id))
+                            || (job_id.is_some()
+                                && m.rest
+                                    .get("job")
+                                    .and_then(|j| j.get("id"))
+                                    .and_then(|v| v.as_str())
+                                    == job_id))
+                })
+                .map(|m| m.id)
+                .collect();
+            for id in stale {
+                h.doc.add_status_part(&id, "failed", "Failed");
+                if let (Some(line), false) = (line, told) {
+                    h.doc.add_error_part(&id, "subagent_failed", line);
+                    told = true;
+                }
+                h.doc.add_hidden_part(
+                    &id,
+                    "subagent_failed_detail",
+                    detail,
+                    &json!({ "subagentId": sub_id }),
+                );
+                h.doc.finish_message(&id, MessageStatus::Error);
+                h.doc
+                    .set_message_fields(&id, &[("handoffMessages", json!(2))]);
+            }
+        }
+        self.write_threads_index().await;
+        told
     }
 
     /// Memory write pass + compaction, off the reply path (design §6.9).
@@ -3584,6 +3743,18 @@ impl Agent {
                         ],
                     );
                 }
+                TurnKind::JobFallback { job_id, title } => {
+                    // The agent picks the job's work up itself; the row threads under the
+                    // ask and names the job for the Details drawer.
+                    h.doc.add_status_part(&assistant_msg_id, "working", title);
+                    h.doc.set_message_fields(
+                        &assistant_msg_id,
+                        &[
+                            ("replyTo", json!(user_msg_id)),
+                            ("jobFallback", json!(job_id)),
+                        ],
+                    );
+                }
                 TurnKind::ApprovalOutcome { approval_id, title } => {
                     h.doc.add_status_part(
                         &assistant_msg_id,
@@ -3778,12 +3949,14 @@ impl Agent {
             routine_turn,
             prompt_text: match &kind {
                 TurnKind::User => prompt_text.to_owned(),
-                TurnKind::SubagentResult { .. } | TurnKind::ApprovalOutcome { .. } => String::new(),
+                TurnKind::SubagentResult { .. }
+                | TurnKind::ApprovalOutcome { .. }
+                | TurnKind::JobFallback { .. } => String::new(),
             },
             skills_used: Vec::new(),
             model_error: None,
             session_rotated: false,
-            reply_only: !matches!(kind, TurnKind::User),
+            reply_only: !matches!(kind, TurnKind::User | TurnKind::JobFallback { .. }),
             preempted: false,
             notices: Vec::new(),
             relay_fallback: relay_fallback_line(&kind),
@@ -3797,6 +3970,7 @@ impl Agent {
             ack_posted: false,
             web_tool_used: false,
             act_to_job: false,
+            job_fallback: matches!(kind, TurnKind::JobFallback { .. }),
         });
         self.turn_running.store(true, Ordering::SeqCst);
         let keepalive = self.spawn_keepalive();
@@ -3896,6 +4070,7 @@ impl Agent {
             TurnKind::User => route_name,
             TurnKind::SubagentResult { .. } => "subagent_result",
             TurnKind::ApprovalOutcome { .. } => "approval_outcome",
+            TurnKind::JobFallback { .. } => "job_fallback",
         };
         let (mut final_status, err_text) = match &result {
             Ok(()) => (MessageStatus::Done, None),
@@ -4237,7 +4412,9 @@ impl Agent {
             prompt.push_str(&format!("\nRecent turns in this chat:\n{recent}\n"));
         }
         if let Some(e) = error {
-            prompt.push_str(&format!("\nThe run ended with an error: {e}\n"));
+            prompt.push_str(&format!(
+                "\nThe run ended with an error: {e}\nSay plainly what was found and what is still missing, then name the concrete next step you will take or offer. Never ask the user whether to try again, and never say that something \"stopped\".\n"
+            ));
         }
         prompt.push_str(&format!(
             "\nSubagent output (for you only; the user has not seen it):\n<<<\n{raw_trim}\n>>>\n\nRoute `reply`, then deliver the update with `send_message` like a colleague in chat: what got done and the outcome, what changed that they care about, and what is open or needs their answer. Research or a comparison comes in parts, each its own `send_message`: the conclusion in one or two sentences; a markdown table with one row per item (name linked to its page, the compared facts as columns); then details and caveats, the sources used and what could not be checked, ending with one concrete next-step offer. Anything else is one short message. Speak as if you did the work; do not mention the subagent, its name, the harness, the model, tool calls, commands, scratch paths, or token counts. No JSON, no quoted output, no list of steps."
@@ -4273,6 +4450,76 @@ impl Agent {
             chat_id,
             &outcome.assistant_msg_id,
             &format!("[subagent {name} finished: {status}]"),
+            &outcome.turn.streamed_text,
+        );
+        outcome.result
+    }
+
+    /// A job ran out of workers (`JOB_WORKER_RETRIES` fresh starts all failed): the main agent
+    /// does the ask itself in this turn, with its own tools, and delivers the answer under the
+    /// ask. The user hears of the failure only if that is impossible too — never "it stopped,
+    /// should I try again?" (Jacob, 2026-10-25).
+    async fn run_job_fallback_turn(
+        self: &Arc<Self>,
+        chat_id: &str,
+        host: &SharedHost,
+        user_msg_id: &str,
+        job: &JobSpec,
+        error: &str,
+        partial: &str,
+    ) -> Result<()> {
+        self.let_user_sends_go_first().await;
+        let _guard = self.turn_lock.lock().await;
+        let ask = {
+            let h = host.lock().await;
+            h.doc
+                .message(user_msg_id)
+                .map(|m| m.text())
+                .unwrap_or_default()
+        };
+        let brief = self
+            .store
+            .job(&job.id)
+            .ok()
+            .flatten()
+            .map(|r| r.brief)
+            .unwrap_or_default();
+        let prompt = job_fallback_prompt(job, user_msg_id, &ask, &brief, error, partial);
+        tracing::warn!(chat_id, job = %job.id, error, "job out of workers; main agent does the work inline");
+        let _ = self.store.t3_append(
+            chat_id,
+            None,
+            Some(chat_id),
+            "job_fallback",
+            Some("system"),
+            &format!(
+                "job {} failed on every worker ({error}); inline fallback",
+                job.id
+            ),
+            Some(&json!({ "job_id": job.id, "message_id": user_msg_id })),
+        );
+        let outcome = self
+            .drive_turn(
+                chat_id,
+                host,
+                user_msg_id,
+                &prompt,
+                TurnKind::JobFallback {
+                    job_id: job.id.clone(),
+                    title: job.title.clone(),
+                },
+                PendingMemory::none(),
+            )
+            .await?;
+        if outcome.result.is_ok() {
+            let _ = self
+                .store
+                .set_job_delivered(&job.id, &format!("job:{}:fallback", job.id));
+        }
+        self.spawn_memory_pass(
+            chat_id,
+            &outcome.assistant_msg_id,
+            &format!("[job {} failed; answered inline]", job.title),
             &outcome.turn.streamed_text,
         );
         outcome.result
@@ -5218,6 +5465,7 @@ impl Agent {
             || t.stopped
             || t.escalate
             || t.reply_only
+            || t.job_fallback
             || t.routine_turn
             || t.from_voice
             || !matches!(t.route, Some(ValidRoute::Act { .. }))
@@ -5419,6 +5667,11 @@ impl Agent {
         let (chat_id, user_msg_id) = {
             let tl = self.turn.lock().await;
             match tl.as_ref() {
+                Some(t) if t.job_fallback => {
+                    return Err(
+                        "the job path already failed for this ask: do the work here, now, with your own tools (web_search, web_fetch, bash), and deliver it with send_message".into(),
+                    )
+                }
                 Some(t) if !t.reply_only => (t.chat_id.clone(), t.user_msg_id.clone()),
                 Some(_) => {
                     return Err(
@@ -5495,6 +5748,7 @@ impl Agent {
             title: title.clone(),
             kind: kind.to_owned(),
             touches,
+            attempt: 0,
         };
         let _ = self.store.t3_append(
             chat_id,
@@ -6872,6 +7126,7 @@ impl Agent {
         let mut usage_total = json!({});
         let mut first_delta: Option<i64> = None;
         let mut done_err: Option<String> = None;
+        let mut tool_calls: u32 = 0;
         let deadline = Instant::now() + Duration::from_secs(60 * 60);
         loop {
             let ev = tokio::select! {
@@ -6893,6 +7148,7 @@ impl Agent {
                 }
                 AgentEvent::ReasoningDelta(_) => {}
                 AgentEvent::ToolCall { id, name, input } => {
+                    tool_calls += 1;
                     sub_tool_inputs.insert(id.clone(), input.clone());
                     let label = step_label(&name, &input);
                     let _ = self
@@ -7022,16 +7278,32 @@ impl Agent {
         self.post_activity(chat_id, None);
         let total_ms = t0.elapsed().as_millis() as i64;
         let contract = extract_return_contract(&text);
-        let status = contract
+        let contract_status = contract
             .as_ref()
             .and_then(|c| c.get("status"))
             .and_then(Value::as_str)
-            .unwrap_or(if done_err.is_some() {
-                "blocked"
+            .map(str::to_owned);
+        // A worker that settled with nothing — no words, no tool call, no error — did no work
+        // (2026-10-25: pi died on its first session write and settled clean); that is a
+        // failure to retry, never an empty "done" the main agent has to explain away.
+        if let Some((e, _)) = worker_failure(
+            done_err.as_deref(),
+            &text,
+            tool_calls,
+            contract_status.as_deref().unwrap_or("done"),
+        ) {
+            if done_err.is_none() && e != "blocked" {
+                tracing::warn!(subagent = %subagent_id, total_ms, "worker ended without output");
+                done_err = Some(e);
+            }
+        }
+        let status = contract_status.unwrap_or_else(|| {
+            if done_err.is_some() {
+                "blocked".to_owned()
             } else {
-                "done"
-            })
-            .to_owned();
+                "done".to_owned()
+            }
+        });
         let failed = done_err.is_some() || status == "blocked";
         {
             let h = host.lock().await;
@@ -7073,6 +7345,8 @@ impl Agent {
         }
         self.subagent_msgs.lock().await.remove(&subagent_id);
         let mut job_cancelled = false;
+        let mut job_retry: Option<JobWorkerFailed> = None;
+        let mut job_fallback: Option<String> = None;
         if let Some(j) = &job {
             let already_cancelled = self
                 .store
@@ -7087,9 +7361,34 @@ impl Agent {
                 _ => "done",
             };
             job_cancelled = final_state == "cancelled";
-            let _ = self
-                .store
-                .set_job_state(&j.id, final_state, done_err.as_deref());
+            // A worker that crashed (not one that answered "blocked") gets one fresh worker;
+            // after that the main agent does the work inline. Either way the user hears of a
+            // failure only once nothing else worked (Jacob, 2026-10-25).
+            if let Some(e) = done_err.as_deref().filter(|_| !job_cancelled) {
+                let retryable = worker_failure(Some(e), &text, tool_calls, &status)
+                    .is_some_and(|(_, retry)| retry);
+                if retryable && j.attempt < JOB_WORKER_RETRIES {
+                    job_retry = Some(JobWorkerFailed {
+                        job_id: j.id.clone(),
+                        error: e.to_owned(),
+                    });
+                } else if retryable {
+                    job_fallback = Some(e.to_owned());
+                }
+                // Not retryable (the 60-minute cap): what the worker had goes to the user
+                // through the result turn, with the error named.
+            }
+            if job_retry.is_some() {
+                // Back in the queue, not ended: the fresh worker continues the same job row.
+                let _ = self.store.bump_job_restarts(&j.id);
+                let _ = self
+                    .store
+                    .set_job_state(&j.id, "queued", done_err.as_deref());
+            } else {
+                let _ = self
+                    .store
+                    .set_job_state(&j.id, final_state, done_err.as_deref());
+            }
             self.release_job_locks(&j.id).await;
             {
                 let h = host.lock().await;
@@ -7205,6 +7504,27 @@ impl Agent {
         if job_cancelled {
             // The user stopped it: the stop line already said so; nothing to deliver.
             return Ok(());
+        }
+        if let (Some(j), Some(f)) = (&job, job_retry) {
+            let _ = self.store.t3_append(
+                chat_id,
+                None,
+                Some(chat_id),
+                "job_retry",
+                Some("system"),
+                &format!(
+                    "job {} worker failed ({}); retrying with a fresh worker",
+                    j.id, f.error
+                ),
+                Some(&json!({ "job_id": j.id, "attempt": j.attempt + 1 })),
+            );
+            tracing::warn!(job = %j.id, error = %f.error, attempt = j.attempt, "job worker failed; retrying with a fresh worker");
+            return Err(f.into());
+        }
+        if let (Some(j), Some(e)) = (&job, job_fallback) {
+            return self
+                .run_job_fallback_turn(chat_id, host, in_reply_to, j, &e, &text)
+                .await;
         }
         let r = self
             .run_result_turn(
@@ -7510,6 +7830,7 @@ impl Agent {
                     title: j.title.clone(),
                     kind: j.kind.clone(),
                     touches: j.touches.clone(),
+                    attempt: 0,
                 };
                 tracing::info!(job = %j.id, "research job restarted after a box restart");
                 self.spawn_subagent_task(
@@ -8100,6 +8421,40 @@ pub(crate) fn relay_turn_deadline_secs() -> u64 {
 /// How long a relay turn may keep a waiting user message behind it before it is cut short.
 pub(crate) const RELAY_TURN_YIELD_SECS: u64 = 15;
 
+/// The prompt of a `TurnKind::JobFallback` turn: the job is gone, do the ask here and now.
+pub(crate) fn job_fallback_prompt(
+    job: &JobSpec,
+    user_msg_id: &str,
+    ask: &str,
+    brief: &str,
+    error: &str,
+    partial: &str,
+) -> String {
+    let mut p = format!(
+        "[Arbos] Job \"{}\" ({}) could not be run: its worker failed {} times without a result (last error: {error}). The user has heard nothing about this.\n\nThe user originally asked (message id {user_msg_id}): {}\n",
+        job.title,
+        job.id,
+        u32::from(JOB_WORKER_RETRIES) + 1,
+        if ask.trim().is_empty() { "(see the brief)" } else { ask.trim() },
+    );
+    if !brief.trim().is_empty() {
+        p.push_str(&format!(
+            "\nThe brief the worker had:\n<<<\n{}\n>>>\n",
+            brief.trim()
+        ));
+    }
+    let partial: String = partial.trim().chars().take(4000).collect();
+    if !partial.is_empty() {
+        p.push_str(&format!(
+            "\nWhat the last worker had written before it stopped (unverified):\n<<<\n{partial}\n>>>\n"
+        ));
+    }
+    p.push_str(&format!(
+        "\nDo this work yourself now, in this turn: route `act` and use your own tools directly (web_search and web_fetch for anything on the web, bash and files for the rest), then deliver the answer with send_message, reply_to = {user_msg_id}, in the shape the finished job would have had: for research or a comparison the conclusion in one or two sentences, a markdown table with one row per item, then sources and caveats and one concrete next-step offer; anything else one short message. Do not call start_job for this ask. Do not say that anything stopped, failed, was retried or ran in the background, and do not ask whether to try again. Only if the work truly cannot be done here, say in one plain sentence what you could not do and what you need from the user."
+    ));
+    p
+}
+
 /// The plain line agentd writes for a relay turn the model did not finish.
 pub(crate) fn relay_fallback_line(kind: &TurnKind) -> String {
     match kind {
@@ -8112,6 +8467,9 @@ pub(crate) fn relay_fallback_line(kind: &TurnKind) -> String {
         TurnKind::ApprovalOutcome { title, .. } => {
             format!("Noted your decision on “{title}”.")
         }
+        // Not a relay turn: it works like a user turn and ends with its own words or the
+        // user-turn fallback.
+        TurnKind::JobFallback { .. } => String::new(),
     }
 }
 
@@ -8282,6 +8640,93 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 2026-10-25 (Jacob's San José ask): a worker that settles with no words, no tool call and
+    /// no error did no work — a failure that gets a fresh worker, never an empty "done". A
+    /// cancel and the 60-minute cap are not retried; a `blocked` return contract is the
+    /// worker's own answer; real output is a success.
+    #[test]
+    fn worker_failure_classes() {
+        assert_eq!(
+            worker_failure(None, "", 0, "done"),
+            Some((
+                "worker ended without output (no reply, no tool call)".to_owned(),
+                true
+            ))
+        );
+        assert_eq!(
+            worker_failure(None, "  \n", 0, "done").map(|f| f.1),
+            Some(true)
+        );
+        // It ran tools but wrote nothing: not a crash (the result turn relays the tool work).
+        assert_eq!(worker_failure(None, "", 3, "done"), None);
+        assert_eq!(worker_failure(None, "Found 5 places.", 0, "done"), None);
+        assert_eq!(
+            worker_failure(Some("child exited"), "", 0, "done"),
+            Some(("child exited".to_owned(), true))
+        );
+        assert_eq!(
+            worker_failure(Some("provider error: 529"), "partial", 2, "done"),
+            Some(("provider error: 529".to_owned(), true))
+        );
+        assert_eq!(
+            worker_failure(Some("aborted"), "", 0, "done").map(|f| f.1),
+            Some(false)
+        );
+        assert_eq!(
+            worker_failure(Some("subagent exceeded 60 minutes"), "x", 9, "done").map(|f| f.1),
+            Some(false)
+        );
+        assert_eq!(
+            worker_failure(None, "{\"status\":\"blocked\"}", 0, "blocked"),
+            Some(("blocked".to_owned(), false))
+        );
+    }
+
+    /// The inline fallback: `act` allowed, no new job for the same ask, and the user is never
+    /// asked whether to try again.
+    #[test]
+    fn job_fallback_turn_shape() {
+        let kind = TurnKind::JobFallback {
+            job_id: "j1".into(),
+            title: "Searching San José restaurants".into(),
+        };
+        assert_eq!(relay_fallback_line(&kind), "");
+        let job = JobSpec {
+            id: "j1".into(),
+            title: "Searching San José restaurants".into(),
+            kind: "research".into(),
+            touches: vec![],
+            attempt: JOB_WORKER_RETRIES,
+        };
+        let p = job_fallback_prompt(
+            &job,
+            "m-ask",
+            "Find me a restaurant in San Jose",
+            "Find 5-6 well-rated restaurants in San José.",
+            "worker ended without output (no reply, no tool call)",
+            "",
+        );
+        assert!(p.contains("failed 2 times without a result"));
+        assert!(p.contains("Find me a restaurant in San Jose"));
+        assert!(p.contains("route `act`"));
+        assert!(p.contains("reply_to = m-ask"));
+        assert!(p.contains("Do not call start_job"));
+        assert!(p.contains("do not ask whether to try again"));
+        assert!(!p.contains("What the last worker had written"));
+        let p2 = job_fallback_prompt(&job, "m-ask", "", "", "child exited", "Soda Tapia — ");
+        assert!(p2.contains("(see the brief)"));
+        assert!(p2.contains("Soda Tapia"));
+        // The retry budget: one fresh worker, then inline.
+        assert_eq!(JOB_WORKER_RETRIES, 1);
+        let e: anyhow::Error = JobWorkerFailed {
+            job_id: "j1".into(),
+            error: "child exited".into(),
+        }
+        .into();
+        assert!(e.downcast_ref::<JobWorkerFailed>().is_some());
+        assert_eq!(e.to_string(), "job j1 worker failed: child exited");
+    }
 
     /// Duplex D5: lock keys normalise, paths conflict with their parents and children, other
     /// keys only with themselves.

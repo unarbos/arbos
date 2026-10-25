@@ -81,12 +81,19 @@ enum DebugHooks {
     static var showDelayMs: Int { value("ARBOS_SHOW_DELAY_MS").flatMap(Int.init) ?? 600 }
     /// With `ARBOS_SHOW=newagent`: prefill the Create agent name (the "named" state on the rig).
     static var newAgentName: String? { value("ARBOS_NEW_AGENT_NAME") }
+    /// With a Create screen open: `upload | generate[:<prompt>]` picks the picture option (and
+    /// types the prompt).
+    static var createPicture: String? { value("ARBOS_CREATE_PICTURE") }
     static var onboardingStage: String? { value("ARBOS_ONBOARDING_STAGE") }
     static var onboardingAutoplay: Bool { value("ARBOS_ONBOARDING_AUTOPLAY") == "1" }
     /// With `ARBOS_SHOW=onboarding`: also present the name/handle sheet over the terminal (rig).
     static var onboardingProfile: Bool { value("ARBOS_ONBOARDING_PROFILE") == "1" }
-    /// With `ARBOS_SHOW=settings`: the Settings page to land on — appearance, textsize, connectors, secrets, machine, credits, notifications, about, relay.
+    /// With `ARBOS_SHOW=settings`: the Settings page to land on — appearance, textsize, connectors, secrets, machine, credits, notifications, about, relay;
+    /// `avatar[-generate|-upload]` opens the avatar picker over my picture.
     static var settingsPage: String? { value("ARBOS_SETTINGS_PAGE") }
+    /// With the avatar picker open on Generate: type this prompt and press Generate (a shot
+    /// shows prompt → result).
+    static var avatarPrompt: String? { value("ARBOS_AVATAR_PROMPT") }
     /// With a Settings page open: scroll to the card with this id (e.g. `people` on a Secret page).
     static var settingsScroll: String? { value("ARBOS_SETTINGS_SCROLL") }
     /// On a Secret page: open a sheet at once — `people` (Give a person access), `person` (the

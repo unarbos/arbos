@@ -236,6 +236,17 @@ enum WorkspaceState: String, Codable, Equatable {
     }
 }
 
+/// The Create sheet's pending picture, applied once the entity exists (Jacob, 2026-10-25: the
+/// sheet offers Upload and Generate only; with neither the entity is stored neutral —
+/// `avatar_leaf` = `LeafArt.neutral`, the name's initial on a grey disc — never an automatic
+/// leaf).
+enum DraftPicture: Equatable {
+    /// The photo as chosen, already a 512 px JPEG; uploaded into the new entity's slot.
+    case jpeg(Data)
+    /// A picture the relay already holds in my own slot (`users:{me}`): copied over.
+    case generated(key: String)
+}
+
 struct Project: Identifiable, Equatable, Codable {
     var id: Id
     var name: String

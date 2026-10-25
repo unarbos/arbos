@@ -317,6 +317,7 @@ pub(super) fn editable_picture(
     let editable = on_click.is_some();
     div()
         .id(id)
+        .debug_selector(move || id.to_owned())
         .group("hero-picture")
         .relative()
         .size(px(HERO_AVATAR))

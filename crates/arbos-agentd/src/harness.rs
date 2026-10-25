@@ -356,7 +356,10 @@ impl PrimeAdapter {
         extra: &[String],
         cwd: &std::path::Path,
     ) -> Result<Arc<RpcChild>> {
-        std::fs::create_dir_all(self.cfg.prime_dir().join("sessions"))?;
+        crate::isolation::ensure_worker_dir(
+            &self.cfg.prime_dir().join("sessions"),
+            self.cfg.run_as.as_ref(),
+        )?;
         let mut args: Vec<String> = vec![
             "--mode".into(),
             "rpc".into(),
@@ -643,13 +646,16 @@ impl PiAdapter {
         system_prompt: &str,
     ) -> Result<Arc<RpcChild>> {
         let sessions_dir = self.cfg.pi_dir().join("subagent-sessions");
-        std::fs::create_dir_all(&sessions_dir)?;
+        crate::isolation::ensure_worker_dir(&sessions_dir, self.cfg.run_as.as_ref())?;
         let prompt_path = self
             .cfg
             .state_dir
             .join("packs")
             .join(format!("{session_id}.md"));
-        std::fs::create_dir_all(prompt_path.parent().unwrap())?;
+        crate::isolation::ensure_worker_dir(
+            prompt_path.parent().unwrap(),
+            self.cfg.run_as.as_ref(),
+        )?;
         std::fs::write(&prompt_path, system_prompt)?;
         let mut args = Self::common_args(
             &self.cfg,
