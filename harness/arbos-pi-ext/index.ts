@@ -111,8 +111,6 @@ export default function arbosPiExt(pi: ExtensionAPI) {
   let routed = false;
   let routeCorrections = 0;
   let correcting = false;
-  // A `[Arbos steer:` prompt continuing a routed turn (#1690): the next run starts routed.
-  let steerResume = false;
   let sessionId = "";
   const handles = new Map<string, Handle>();
   const scratch = new Map<string, string>();
@@ -152,8 +150,10 @@ export default function arbosPiExt(pi: ExtensionAPI) {
   // ---- 4b. working-set section, refreshed every run and after compaction -----------------
   pi.on("before_agent_start", async (event) => {
     routeAttempts = 0;
-    routed = steerResume;
-    steerResume = false;
+    // #1704: a run whose prompt is a stamped steer continues the turn agentd interrupted (#1690);
+    // that turn already routed, so the route-first guard does not apply again. Read from the
+    // prompt itself: state carried from the `input` hook can miss when the hooks run apart.
+    routed = event.messageType === "user" && event.prompt.startsWith(STEER_PREFIX);
     routeCorrections = 0;
     correcting = false;
     if (STABLE_PREFIX) return; // D87: the context rides in the user turn (see the `input` hook)
@@ -674,12 +674,9 @@ export default function arbosPiExt(pi: ExtensionAPI) {
   pi.on("input", async (event) => {
     if (SESSION_ROLE !== "main" || event.source === "extension" || event.text.startsWith("/")) return { action: "continue" };
     if (event.text.startsWith(ROUTE_PREFIX)) return { action: "continue" };
-    if (event.text.startsWith(STEER_PREFIX)) {
-      // Mid-run this is pi's steer and `routed` already holds; after an abort it is the
-      // continuation prompt, and the run it starts inherits the routed state.
-      steerResume = routed;
-      return { action: "continue" };
-    }
+    // A stamped steer (#1690): pi's steer inside a routed run, or the prompt that continues the
+    // turn after an abort (`before_agent_start` keeps that run routed). No route reminder.
+    if (event.text.startsWith(STEER_PREFIX)) return { action: "continue" };
     // D87: the per-turn context goes here, after the stable prefix, instead of into the system prompt.
     const context = STABLE_PREFIX ? await turnContextBlock() : "";
     return { action: "transform", text: `${ROUTE_PREFIX}${context}${event.text}`, images: event.images };
@@ -711,12 +708,6 @@ export default function arbosPiExt(pi: ExtensionAPI) {
         },
       ],
     };
-  });
-
-  // A steer that pi delivered inside the run must not carry `routed` into the next, unrelated
-  // run; the continuation prompt after an abort sets the flag again, after this.
-  pi.on("agent_settled", async () => {
-    steerResume = false;
   });
 
   pi.on("session_compact", async () => {

@@ -108,7 +108,7 @@ jobs:
           test "$deps" = $'arbos-ffi' || test "$deps" = $'arbos-ffi\narbos-mac'
 
   harness:
-    name: harness (arbos-pi-ext typecheck + build)
+    name: harness (arbos-pi-ext typecheck + build + test)
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -126,6 +126,8 @@ jobs:
       - run: pnpm -r typecheck
         working-directory: harness
       - run: pnpm -r build
+        working-directory: harness
+      - run: pnpm -r test
         working-directory: harness
 
   image:
