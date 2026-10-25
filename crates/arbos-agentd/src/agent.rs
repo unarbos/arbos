@@ -3805,7 +3805,16 @@ impl Agent {
                                 t.route = None;
                             }
                         }
-                        result = self.run_main_turn(chat_id, host, prompt_text).await;
+                        // The fresh window holds none of this chat (#1722: "Done? What was the
+                        // last number?" retried on a fresh session was answered from other
+                        // chats' memory records): the retry carries this chat's recent turns,
+                        // placed after the memory block so they are the nearest context.
+                        let recap = {
+                            let h = host.lock().await;
+                            chat_recap(&h.doc.messages(), user_msg_id, &self.name())
+                        };
+                        let retry_prompt = with_chat_recap(prompt_text, &recap);
+                        result = self.run_main_turn(chat_id, host, &retry_prompt).await;
                     }
                     Err(e) => {
                         tracing::warn!(chat_id, reason, error = %e, "fresh session after empty turn")
@@ -7341,6 +7350,77 @@ pub fn route_name(r: &ValidRoute) -> &'static str {
 
 /// Main-turn wall-clock deadline in seconds. `ARBOS_TURN_DEADLINE_SECS` (default 900).
 /// A user row from a voice-call tool (`ask_agent` / `look`): `voice: true` and/or `source: "voice"`.
+/// How many of this chat's recent rows the fresh-session retry carries, and how much of each.
+const RECAP_ROWS: usize = 8;
+const RECAP_ROW_CHARS: usize = 500;
+
+/// This chat's recent turns as a short labelled block for a retry on a fresh pi session (#1722).
+/// Rows before `current_user_msg_id` only (the question itself follows), newest last; empty when
+/// the chat has no earlier words.
+pub(crate) fn chat_recap(
+    rows: &[arbos_core::doc::MessageView],
+    current_user_msg_id: &str,
+    agent_name: &str,
+) -> String {
+    let end = rows
+        .iter()
+        .position(|m| m.id == current_user_msg_id)
+        .unwrap_or(rows.len());
+    let mut lines: Vec<String> = Vec::new();
+    for m in rows[..end].iter().rev() {
+        if lines.len() >= RECAP_ROWS {
+            break;
+        }
+        let text: String = m.text().split_whitespace().collect::<Vec<_>>().join(" ");
+        if text.trim().is_empty() {
+            continue;
+        }
+        let who = match m.role.as_str() {
+            "user" => "user".to_owned(),
+            _ => {
+                let n = agent_name.trim();
+                if n.is_empty() {
+                    "you".to_owned()
+                } else {
+                    format!("you ({n})")
+                }
+            }
+        };
+        let body: String = text.chars().take(RECAP_ROW_CHARS).collect();
+        let cut = if text.chars().count() > RECAP_ROW_CHARS {
+            "…"
+        } else {
+            ""
+        };
+        lines.push(format!("- {who}: {body}{cut}"));
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    lines.reverse();
+    format!(
+        "[This chat so far, newest last — these are the facts about this chat and outrank any retrieved memory from other chats; \"done?\", \"the last number\" and the like refer to this chat's work:]\n{}\n[End of this chat so far]\n\n",
+        lines.join("\n")
+    )
+}
+
+/// The retry prompt: the recap goes right after the memory block when there is one (nearest to
+/// the question), else in front of everything.
+pub(crate) fn with_chat_recap(prompt_text: &str, recap: &str) -> String {
+    if recap.is_empty() {
+        return prompt_text.to_owned();
+    }
+    const END: &str = "[End of retrieved memory]";
+    match prompt_text.find(END) {
+        Some(i) => {
+            let split = i + END.len();
+            let (head, tail) = prompt_text.split_at(split);
+            format!("{head}\n\n{recap}{}", tail.trim_start())
+        }
+        None => format!("{recap}{prompt_text}"),
+    }
+}
+
 /// The IANA time zone a client wrote on the user row (`tz` / `timeZone` / `timezone`), if any.
 fn message_time_zone(m: &arbos_core::doc::MessageView) -> Option<String> {
     ["tz", "timeZone", "timezone"]
@@ -8160,6 +8240,69 @@ mod tests {
         assert!(!JOBS_SECTION.to_lowercase().contains("delete"));
         // The rule must be in the prefix for every configuration.
         assert!(base_system_prompt_with(false, false).contains("is the request, not the yes"));
+    }
+
+    /// #1722: a retry on a fresh session carries this chat's own turns, after the memory block
+    /// and before the question, so "Done? What was the last number?" binds to this chat's run
+    /// and not to another chat's record pulled from memory.
+    #[test]
+    fn fresh_session_retry_carries_this_chats_turns_after_the_memory_block() {
+        let row = |id: &str, role: &str, text: &str| -> arbos_core::doc::MessageView {
+            serde_json::from_value(json!({
+                "id": id, "role": role, "status": "done",
+                "parts": [{ "kind": "text", "text": text }]
+            }))
+            .unwrap()
+        };
+        let rows = vec![
+            row(
+                "u1",
+                "user",
+                "Write the numbers 1 to 40 to count.txt as a detached job",
+            ),
+            row(
+                "a1",
+                "assistant",
+                "The count is running as a detached job. At 08:42:03Z the file held 1 and 2.",
+            ),
+            row("u2", "user", "Change of plan: stop at 20, not 40"),
+            row(
+                "a2",
+                "assistant",
+                "Done: the run stops at 20. The file ends at 20, verified 08:42:58Z.",
+            ),
+            row("u3", "user", "Done? What was the last number?"),
+        ];
+        let recap = chat_recap(&rows, "u3", "lane-c");
+        assert!(recap.starts_with("[This chat so far, newest last"));
+        assert!(recap.contains("- user: Write the numbers 1 to 40"));
+        assert!(recap.contains("- you (lane-c): Done: the run stops at 20."));
+        assert!(
+            !recap.contains("What was the last number?"),
+            "the question itself is not recapped"
+        );
+        assert!(recap.ends_with("[End of this chat so far]\n\n"));
+        let prompt = "(Arbos: call `route` first.) [Memory retrieved for this message …]\n## b7 rerun9 [thread X — another chat]\n[08:00] assistant: approval rejected, folder never created\n[End of retrieved memory]\n\nDone? What was the last number?";
+        let out = with_chat_recap(prompt, &recap);
+        let i_mem = out.find("[End of retrieved memory]").unwrap();
+        let i_recap = out.find("[This chat so far").unwrap();
+        let i_q = out.rfind("Done? What was the last number?").unwrap();
+        assert!(
+            i_mem < i_recap && i_recap < i_q,
+            "memory, then this chat, then the question"
+        );
+        assert!(out.ends_with("Done? What was the last number?"));
+        // No memory block: the recap leads.
+        assert!(with_chat_recap("Done?", &recap).starts_with("[This chat so far"));
+        // Nothing earlier in the chat: the prompt is unchanged.
+        assert_eq!(
+            with_chat_recap("hi", &chat_recap(&rows[4..], "u3", "lane-c")),
+            "hi"
+        );
+        // The router tells the model the same precedence.
+        assert!(ROUTER_PROMPT.contains(
+            "this chat's own turns and the current state of your folder and jobs outrank them"
+        ));
     }
 
     /// The code-mode prompt names the exact script identifiers of the project tools, so the model
