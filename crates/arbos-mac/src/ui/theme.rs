@@ -353,6 +353,12 @@ pub struct Theme {
     /// contrast — dark: the D80 grey (+15 over `bg`, Grok's `#1F1F1F` is +13
     /// over its `#121212`); light: a grey card on the white page.
     pub pane_card: Hsla,
+    /// The hairline on the right pane's left edge — Grok Bot's: one device
+    /// pixel of `#1F1F1F` on its `#121212` page (+13, ≈ 5 % toward white),
+    /// full height ([feedback info-pane-left-hairline-2026-10-25], Jacob
+    /// 2026-10-25). Dark: the same step over `bg`; light: the same step toward
+    /// black. A colour, not `border`'s alpha, so it reads the same on glass.
+    pub pane_edge: Hsla,
     /// Cards, sheets, rows that lift off the background (iPhone `card`).
     pub surface_1: Hsla,
     /// Hover / selected fills and chips (the assistant-bubble grey).
@@ -416,6 +422,7 @@ impl Theme {
             bg: hex(0x141414),
             sidebar: hex(0x1a1a1a),
             pane_card: hex(0x232323),
+            pane_edge: hex(0x212121),
             surface_1: hex(0x1e1e1e),
             surface_2: hex(0x262626),
             border: hex_a(0xffffff, 0.08),
@@ -462,6 +469,7 @@ impl Theme {
             // The pane is the chat's `#FCFCFC` now, so the card takes the
             // grey the pane had (white on white was no card at all).
             pane_card: hex(0xf2f2f2),
+            pane_edge: hex(0xefefef),
             surface_1: grey(1.0),
             surface_2: hex(0xe8e8e8),
             border: hex_a(0x000000, 0.10),
