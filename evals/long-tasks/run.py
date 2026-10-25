@@ -135,8 +135,14 @@ class Lane(threading.Thread):
                 if rl.machine().get("state") == "awake":
                     break
                 time.sleep(10)
-            # D83: `POST /machine/stop` pauses every secret of the user (paused_by: stop_machine) and
-            # a start does not lift it; the eval user is shared by the other lanes, so lift it here
+            # D83: `POST /machine/stop` pauses every secret of the user (paused_by: stop_machine); since
+            # #1664 (relay 04783c40) `machine/start` lifts that pause. Record whether it did, then lift it
+            # anyway: the eval user is shared by the other lanes.
+            time.sleep(5)
+            _, sec = rl.relay("GET", "/secrets")
+            st["secrets_paused_after_start"] = bool((sec or {}).get("paused"))
+            if st["secrets_paused_after_start"]:
+                st.setdefault("action_findings", []).append("secrets still paused after machine start (#1664 not effective); the harness lifted the pause")
             rl.relay("PUT", "/me/secrets/settings", {"paused": False})
             time.sleep(act.get("settle_s", 60))
         elif kind == "capped_user_turn":
@@ -286,7 +292,15 @@ class Lane(threading.Thread):
                 self.say(f"{tid} peer turn {i}: {'ok' if g['ok'] else 'FAIL ' + str(g['reasons'])[:160]} | ttfr {ttfr}")
                 continue
             decided = []
-            activity_seen = {"before": rl.project_activity(self.project) if turn.get("expect_activity_change_s") else None, "changed_at": None, "text": None, "t0": time.time()}
+            activity_seen = {"before": rl.project_activity(self.project) if turn.get("expect_activity_change_s") else None, "changed_at": None, "text": None, "t0": time.time(), "mid_turn": None}
+            if turn.get("expect_activity_change_s"):
+                # the guide path (#1657) only exists while a user turn of this chat is running; a steer that
+                # lands after the agent finished is a plain new turn, so the activity check does not apply
+                try:
+                    pre = rl.chat_dump(self.project, chat_id)
+                    activity_seen["mid_turn"] = any(m.get("role") == "assistant" and m.get("status") == "streaming" for m in pre.get("messages", []))
+                except Exception:  # noqa: BLE001
+                    activity_seen["mid_turn"] = None
 
             def on_poll():
                 if turn.get("expect_activity_change_s") and activity_seen["changed_at"] is None:
@@ -309,6 +323,7 @@ class Lane(threading.Thread):
                 until_first_reply=bool(turn.get("background")),
                 on_poll=on_poll if (turn.get("secret_decide") or turn.get("expect_activity_change_s")) else None,
                 skip_secret_cards=bool(turn.get("secret_decide")),
+                tight_s=(turn["expect_activity_change_s"] + 5) if turn.get("expect_activity_change_s") else 2.0,
             )
             res["secret_requests_decided"] = decided
             if turn.get("after_s"):
@@ -330,9 +345,15 @@ class Lane(threading.Thread):
             if turn.get("expect_activity_change_s"):
                 g["truth"]["activity_changed_s"] = activity_seen["changed_at"]
                 g["truth"]["activity_text"] = (activity_seen["text"] or "")[:80]
-                if activity_seen["changed_at"] is None or activity_seen["changed_at"] > turn["expect_activity_change_s"]:
+                g["truth"]["steer_mid_turn"] = activity_seen["mid_turn"]
+                if activity_seen["mid_turn"] is False:
+                    g["truth"]["activity_note"] = "the agent's turn had already ended when the steer was sent; the guide path was not exercised"
+                elif activity_seen["changed_at"] is None or activity_seen["changed_at"] > turn["expect_activity_change_s"]:
                     g["ok"] = False
                     g["reasons"].append(f"the working row's activity did not change within {turn['expect_activity_change_s']} s of the steer (changed at {activity_seen['changed_at']}, text {activity_seen['text']!r})")
+                elif turn.get("expect_activity_regex") and not re.search(turn["expect_activity_regex"], activity_seen["text"] or ""):
+                    g["ok"] = False
+                    g["reasons"].append(f"the working row changed to {activity_seen['text']!r}, not the steer line /{turn['expect_activity_regex']}/")
             if turn.get("expect_secret_request") and not res.get("secret_requests_decided"):
                 g["ok"] = False
                 g["reasons"].append("no secret access request (approval card) appeared for the driver to decide")
@@ -434,6 +455,7 @@ class Lane(threading.Thread):
                     answered = [m for m in recent if m.get("role") == "assistant" and m.get("inReplyTo") in ids]
                     if not answered:
                         reasons.append("lane-b's answer does not reply-to the agent message")
+        reasons += task_state.get("action_findings") or []
         dc = task.get("doc_checks")
         if dc:
             checks = doc_checks(all_docs, after_ms=task_state.get("renamed_at_ms"))
@@ -604,9 +626,9 @@ def main():
     projects = {ln: rl.ensure_project(f"lane-{ln}") for ln in LANES}
     run_state["projects"] = projects
     late = [t for t in tasks if t["lane"] in LATE_LANES]
+    tasks = [t for t in tasks if t["lane"] not in LATE_LANES]
     for t in late:
         t["lane"] = "a"  # late tasks run on lane a's project, after the parallel lanes
-    tasks = [t for t in tasks if t["lane"] not in LATE_LANES]
     projects = {ln: pid for ln, pid in projects.items() if any(t["lane"] == ln for t in tasks + late)}
     meta = {
         "run_id": args.run_id,
