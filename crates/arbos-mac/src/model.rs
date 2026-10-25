@@ -1555,6 +1555,12 @@ pub struct Message {
     /// Messages exchanged with the subagent on a hand-off row (1 = brief sent, 2 = result back).
     #[serde(default)]
     pub handoff_messages: Option<u32>,
+    /// A background worker the user never named (agentd, Grok parity trait 15): the
+    /// transcript hides this spawn row — Grok shows no "N messages with …" line for its own
+    /// workers — while the working line still reads its `activity`. An agent-to-agent
+    /// `send_message(to)` row carries no flag and keeps its "Messaged ◉ X" line.
+    #[serde(default)]
+    pub worker: bool,
     /// Agent-to-agent messaging: this reply answered a message another agent sent into the
     /// chat; the name drawn in the "Replied to ◉ X" line under the bubble.
     #[serde(default)]
