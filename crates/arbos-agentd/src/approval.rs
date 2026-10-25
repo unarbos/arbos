@@ -17,9 +17,22 @@ use serde_json::{json, Value};
 use tokio::sync::{oneshot, Mutex};
 
 use arbos_core::approval::{
-    classify_tool, describe_tool, may_dispatch, ApprovalOutcome, ApprovalRequest, ApprovalState,
-    PathClass, Risk, RiskMatch, ShellGrant, APPROVAL_TTL_MS, GRANTABLE_CLASSES,
+    classify_tool_with, describe_tool, may_dispatch, ApprovalOutcome, ApprovalRequest,
+    ApprovalState, PathClass, Risk, RiskMatch, ShellGrant, APPROVAL_TTL_MS, GRANTABLE_CLASSES,
 };
+
+/// The box's view for the classifier (#1719): a truncation idiom (`: > f`, `> f`,
+/// `cp /dev/null f`) deletes something only if `f` already exists with content. agentd runs
+/// on the box, so it can look. Unresolvable paths (`$D/x`) do not exist → not a delete.
+fn file_has_content(path: &str) -> bool {
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.len() > 0)
+        .unwrap_or(false)
+}
+
+fn classify_tool(tool: &str, args: &Value) -> Option<RiskMatch> {
+    classify_tool_with(tool, args, &file_has_content)
+}
 use arbos_core::doc::MessageStatus;
 use arbos_core::ids::{now_ms, ulid};
 
