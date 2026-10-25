@@ -366,6 +366,9 @@ pub struct Shell {
     /// Rig: `ARBOS_OPEN_SETTINGS=bottom` — my pane opens scrolled to its end
     /// (Sign out) each time it fills the pane.
     settings_open_at_bottom: bool,
+    /// Rig: `ARBOS_PROFILE_SCROLL=bottom` — a freshly opened agent pane starts scrolled to
+    /// its end (Permissions · Profile sit below the fold on the 1440×900 rig display).
+    profile_open_at_bottom: bool,
     /// Settings header: editing my display name and handle (`PATCH /me`).
     pub(crate) profile_edit_open: bool,
     pub(crate) name_input: Entity<ComposerInput>,
@@ -965,6 +968,8 @@ impl Shell {
             // page's People / Activity cards sit below the fold on the rig).
             settings_open_at_bottom: open_settings.as_deref() == Some("bottom")
                 || std::env::var("ARBOS_OPEN_SETTINGS_BOTTOM").is_ok_and(|v| v == "1"),
+            profile_open_at_bottom: std::env::var("ARBOS_PROFILE_SCROLL")
+                .is_ok_and(|v| v == "bottom"),
             profile_edit_open: false,
             name_input,
             handle_input,
@@ -4073,6 +4078,13 @@ impl Render for Shell {
                 if page == ProfilePage::Me && self.settings_open_at_bottom {
                     self.profile_scroll.scroll_to_bottom();
                 }
+                if matches!(page, ProfilePage::Agent { .. }) && self.profile_open_at_bottom {
+                    self.profile_scroll.scroll_to_bottom();
+                }
+            } else if matches!(page, ProfilePage::Agent { .. }) && self.profile_open_at_bottom {
+                // Rig only: the pane's rows arrive after it opened (grants, routines); keep
+                // the end in view.
+                self.profile_scroll.scroll_to_bottom();
             } else if page == ProfilePage::Me
                 && self.settings_open_at_bottom
                 && std::env::var("ARBOS_OPEN_SETTINGS_BOTTOM").is_ok_and(|v| v == "1")
