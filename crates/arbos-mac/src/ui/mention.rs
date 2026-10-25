@@ -251,6 +251,10 @@ pub enum Picture {
     },
     /// D92 leaf disc.
     Leaf(LeafPick),
+    /// The neutral disc (Jacob, 2026-10-25): the name's first letter on plain grey.
+    Neutral {
+        name: String,
+    },
 }
 
 pub struct Mention {
@@ -473,6 +477,9 @@ impl Mentions {
                 server.avatar_leaf,
                 server.avatar_leaf_color,
             ) {
+                (_, Some(avatars::leaf::NEUTRAL), _) => Picture::Neutral {
+                    name: server.name.clone(),
+                },
                 (true, Some(leaf), Some(color)) => Picture::Leaf(LeafPick { leaf, color }),
                 _ => initials(
                     &server.id,
@@ -757,6 +764,11 @@ fn identity_picture(s: &AppState, a: &avatars::AgentIdentity, theme: &Theme) -> 
     if let Some(image) = a.image_key.as_deref().and_then(|url| s.avatar(url)) {
         return Picture::Image(image);
     }
+    if a.neutral {
+        return Picture::Neutral {
+            name: a.name.clone(),
+        };
+    }
     if avatars::leaf_avatars_on() {
         Picture::Leaf(a.leaf)
     } else {
@@ -767,6 +779,11 @@ fn identity_picture(s: &AppState, a: &avatars::AgentIdentity, theme: &Theme) -> 
 fn project_picture(s: &AppState, p: &Project, theme: &Theme) -> Picture {
     if let Some(image) = p.image_url.as_deref().and_then(|url| s.avatar(url)) {
         return Picture::Image(image);
+    }
+    if avatars::leaf::is_neutral(p.avatar_leaf) {
+        return Picture::Neutral {
+            name: p.name.clone(),
+        };
     }
     if p.is_people_group() {
         return match (

@@ -207,9 +207,9 @@ pub struct Shell {
     pub(crate) project_input: Entity<ComposerInput>,
     /// D79: the swatch picked for the agent being created; `None` = automatic.
     pub(crate) new_agent_color: Option<u8>,
-    /// D93 Create screen: the leaf and colour clicked; `None` = the sheet's default pick.
-    pub(crate) create_leaf: Option<u8>,
-    pub(crate) create_leaf_color: Option<u8>,
+    /// D93 Create screen (Jacob, 2026-10-25): the draft's picture — the picker's own
+    /// Upload | Generate state on a `Target::Draft`; nothing picked = the neutral initial.
+    pub(crate) create_picker: avatar_picker::Picker,
     /// Create group, step 1 (picture + name) showing over the New Message backdrop.
     pub(crate) create_group_open: bool,
     /// The avatar picker sheet (D92 amendment) while it is open: whose picture, which tab,
@@ -328,6 +328,9 @@ pub struct Shell {
     /// A member row's menu on the group pane (Shift-click / right-click): View
     /// profile, Remove from group → arms `member_remove_armed`.
     pub(crate) member_menu: Option<member_menu::MemberMenu>,
+    /// The Library tab's hover, unfolded days and ⋯ menu
+    /// ([feedback library-list-hover-mac-2026-10-25], `profiles/library.rs`).
+    pub(crate) library: crate::ui::profiles::library::LibraryUi,
     /// Right-click menu on a session row of the header's tab dropdown: the
     /// chat whose row carries it (#1256: anchored to the row, the dropdown
     /// stays open with the row highlighted).
@@ -379,6 +382,8 @@ pub struct Shell {
     pub(crate) tab_menu_open: bool,
     /// The tasks chip's pointer state (rest / hover / pressed fade, `ui::tasks`).
     pub(crate) tasks_chip: crate::ui::mention::ChipPointer<u8>,
+    /// The status line's link state (`tasks::link`: rest / hover / pressed).
+    pub(crate) tasks_link: crate::ui::tasks::LinkState,
     /// The tab strip's scroll row, so a new or reopened tab comes into view.
     pub(crate) tabs_scroll: ScrollHandle,
     /// Per-agent call voice picker sheet ("…" menu → Voice, profile → voice).
@@ -474,7 +479,7 @@ impl Shell {
                 }
             }
             if let Some(done) = state.update(cx, |s, _| s.avatar_generated.take()) {
-                if let Some(pk) = this.avatar_picker.as_mut() {
+                if let Some(pk) = this.pending_picker_mut() {
                     if pk.target == done.target {
                         pk.generating = false;
                         match (done.image_key, done.url) {
@@ -761,6 +766,19 @@ impl Shell {
                 project_input.update(cx, |input, cx| input.set_text(name, cx));
             }
         }
+        // Rig: `ARBOS_CREATE_PICTURE=upload|generate[:<prompt>]` opens the Create sheet on that
+        // option (and types the prompt into the Generate field).
+        let mut create_picker = avatar_picker::Picker::new(avatar_picker::Target::Draft);
+        if let Ok(spec) = std::env::var("ARBOS_CREATE_PICTURE") {
+            let (option, prompt) = spec.split_once(':').unwrap_or((spec.as_str(), ""));
+            if option == "generate" {
+                create_picker.tab = avatar_picker::Tab::Generate;
+                if !prompt.is_empty() {
+                    avatar_prompt_input
+                        .update(cx, |input, cx| input.set_text(prompt.to_owned(), cx));
+                }
+            }
+        }
         // Rig: `ARBOS_OPEN_CREATE=group|server` opens the D93 Create screen for that entity
         // (group = step 1; `ARBOS_OPEN_NEW_GROUP=1` is step 2); `ARBOS_NEW_AGENT_NAME` prefills.
         let open_create = std::env::var("ARBOS_OPEN_CREATE").ok();
@@ -869,8 +887,7 @@ impl Shell {
             pairing_input,
             project_input,
             new_agent_color: None,
-            create_leaf: None,
-            create_leaf_color: None,
+            create_picker,
             create_group_open,
             avatar_picker: None,
             avatar_prompt_input,
@@ -909,6 +926,7 @@ impl Shell {
             member_remove_armed: None,
             device_revoke_armed: None,
             member_menu: None,
+            library: Default::default(),
             chat_menu: None,
             chat_delete_armed: false,
             message_menu: None,
@@ -920,8 +938,10 @@ impl Shell {
             rig_reaction_capsule: reactions::rig_anchor(),
             renaming_tab: None,
             tab_rename_input,
-            tab_menu_open: false,
+            // Rig: `ARBOS_RIG_TABMENU=1` starts with the tab dropdown open (job tab shots).
+            tab_menu_open: std::env::var("ARBOS_RIG_TABMENU").is_ok_and(|v| v == "1"),
             tasks_chip: crate::ui::mention::ChipPointer::default(),
+            tasks_link: crate::ui::tasks::LinkState::default(),
             tabs_scroll: ScrollHandle::new(),
             voice_picker_open: false,
             pip_offset: (24.0, 96.0),
@@ -1273,24 +1293,57 @@ impl Shell {
         }
         self.project_input.update(cx, |input, cx| input.clear(cx));
         let color = self.new_agent_color.take();
-        // D92: the Create sheet always shows a definite leaf + colour; send that pair so the
-        // new agent looks exactly like its preview.
-        let pick = create_entity::current_pick(self, CreateKind::Agent, cx);
-        self.create_leaf = None;
-        self.create_leaf_color = None;
+        // Jacob, 2026-10-25: the sheet's Upload / Generate pick travels with the create; the
+        // stored leaf pair is the neutral one, never an automatic leaf.
+        let picture = self.take_create_picture(cx);
         self.state.update(cx, |s, cx| {
             s.new_project_open = false;
             s.close_new_chat(cx);
-            s.create_project(name, color, Some(pick), cx);
+            s.create_project(name, color, Some(create_entity::stored_leaf()), picture, cx);
         });
         Composer::focus(&self.composer, window, cx);
+    }
+
+    /// A Create sheet is opening: a fresh draft picture (Upload tab, no prompt).
+    pub(crate) fn reset_create_picture(&mut self, cx: &mut Context<Self>) {
+        self.create_picker = avatar_picker::Picker::new(avatar_picker::Target::Draft);
+        self.avatar_prompt_input
+            .update(cx, |input, cx| input.set_text(String::new(), cx));
+    }
+
+    /// The Create sheet's pending picture for the entity being created, and a fresh draft.
+    pub(crate) fn take_create_picture(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<crate::sync::DraftPicture> {
+        let picture = self.create_picker.draft_picture();
+        self.reset_create_picture(cx);
+        picture
+    }
+
+    /// The picker whose Generate / Upload actions and answers apply: the avatar picker sheet
+    /// while it is open, else the Create sheet's draft (the two are never up together).
+    pub(crate) fn pending_picker_mut(&mut self) -> Option<&mut avatar_picker::Picker> {
+        Some(
+            self.avatar_picker
+                .as_mut()
+                .unwrap_or(&mut self.create_picker),
+        )
+    }
+
+    /// "New agent" in the New Message sheet: the Create New Agent screen with a fresh draft.
+    pub(crate) fn open_create_agent(&mut self, cx: &mut Context<Self>) {
+        self.reset_create_picture(cx);
+        self.state.update(cx, |s, cx| {
+            s.new_project_open = true;
+            cx.notify();
+        });
     }
 
     /// Open the Create group screen (step 1) over the New Message backdrop.
     pub(crate) fn open_create_group(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.create_group_open = true;
-        self.create_leaf = None;
-        self.create_leaf_color = None;
+        self.reset_create_picture(cx);
         // Agent create wins the sheet if both flags are set; clear it so New
         // group never opens as Create New Agent.
         self.state.update(cx, |s, _| s.new_project_open = false);
@@ -1318,16 +1371,18 @@ impl Shell {
                 if name.is_empty() {
                     return;
                 }
-                let pick = create_entity::current_pick(self, kind, cx);
+                let picture = self.take_create_picture(cx);
                 self.create_group_open = false;
-                self.create_leaf = None;
-                self.create_leaf_color = None;
                 self.project_input.update(cx, |input, cx| input.clear(cx));
                 self.people_input.update(cx, |input, _| {
                     input.set_placeholder("Add people or agents");
                 });
                 self.state.update(cx, |s, cx| {
-                    s.new_group_draft = Some((name, pick));
+                    s.new_group_draft = Some(crate::app::GroupDraft {
+                        title: name,
+                        leaf: Some(create_entity::stored_leaf()),
+                        picture,
+                    });
                     s.open_new_group(cx);
                 });
                 let handle = self.people_input.read(cx).focus_handle(cx);
@@ -1338,9 +1393,10 @@ impl Shell {
                 if name.is_empty() {
                     return;
                 }
-                let pick = create_entity::current_pick(self, kind, cx);
-                self.state
-                    .update(cx, |s, cx| s.create_server(name, Some(pick), cx));
+                let picture = self.take_create_picture(cx);
+                self.state.update(cx, |s, cx| {
+                    s.create_server(name, Some(create_entity::stored_leaf()), picture, cx)
+                });
             }
         }
     }
@@ -1378,7 +1434,7 @@ impl Shell {
     /// Generate tab: ask the relay for a picture from the prompt (preview only; Set applies).
     pub(crate) fn generate_avatar(&mut self, cx: &mut Context<Self>) {
         let prompt = self.avatar_prompt_input.read(cx).text().trim().to_string();
-        let Some(pk) = self.avatar_picker.as_mut() else {
+        let Some(pk) = self.pending_picker_mut() else {
             return;
         };
         if prompt.is_empty() || pk.generating {
@@ -1402,7 +1458,7 @@ impl Shell {
                 return;
             };
             let _ = this.update(cx, |this, cx| {
-                if let Some(pk) = this.avatar_picker.as_mut() {
+                if let Some(pk) = this.pending_picker_mut() {
                     pk.upload = Some(path);
                     pk.reset = false;
                     pk.error = None;
@@ -1418,7 +1474,10 @@ impl Shell {
         let Some(pk) = self.avatar_picker.take() else {
             return;
         };
-        let id = pk.target.id().clone();
+        // The draft never reaches this sheet (`avatar_picker::sheet` draws nothing for it).
+        let Some(id) = pk.target.id().cloned() else {
+            return;
+        };
         self.state.update(cx, |s, cx| match &pk.target {
             avatar_picker::Target::Agent(_) => {
                 if pk.reset {
@@ -1525,6 +1584,7 @@ impl Shell {
                     }
                 }
             }
+            avatar_picker::Target::Draft => {}
         });
         cx.notify();
     }
@@ -1706,6 +1766,7 @@ impl Shell {
     /// Cancel / click outside / Escape on a server sheet.
     pub(crate) fn close_server_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.server_input.update(cx, |input, cx| input.clear(cx));
+        self.reset_create_picture(cx);
         self.state.update(cx, |s, cx| {
             s.close_server_sheet(cx);
         });
@@ -1746,9 +1807,14 @@ impl Shell {
         };
         let restricted = self.new_channel_restricted;
         // Enter in the Create screen: same as its action button.
-        let server_pick = create_entity::current_pick(self, CreateKind::Server, cx);
+        let picture = match sheet {
+            ServerSheet::NewServer => self.take_create_picture(cx),
+            ServerSheet::JoinServer | ServerSheet::NewChannel { .. } => None,
+        };
         self.state.update(cx, |s, cx| match sheet {
-            ServerSheet::NewServer => s.create_server(text, Some(server_pick), cx),
+            ServerSheet::NewServer => {
+                s.create_server(text, Some(create_entity::stored_leaf()), picture, cx)
+            }
             ServerSheet::JoinServer => s.join_server(text, cx),
             ServerSheet::NewChannel { server_id } => {
                 s.create_channel(server_id, text, restricted, cx)
@@ -1917,6 +1983,7 @@ impl Shell {
 
     pub(crate) fn close_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.hide_settings_page(cx);
+        self.library_reset();
         self.profile_edit_open = false;
         self.member_remove_armed = None;
         self.server_member_armed = None;
@@ -1970,8 +2037,7 @@ impl Shell {
     pub(crate) fn close_new_chat_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.people_input
             .update(cx, |input, _| input.set_placeholder("Search people"));
-        self.create_leaf = None;
-        self.create_leaf_color = None;
+        self.reset_create_picture(cx);
         self.create_group_open = false;
         self.project_input.update(cx, |input, cx| {
             input.set_placeholder(CreateKind::Agent.placeholder());
@@ -2454,10 +2520,12 @@ impl Shell {
             || self.chat_menu.is_some()
             || self.message_menu.is_some()
             || self.member_menu.is_some()
+            || self.library.menu.is_some()
             || self.reaction_capsule.is_some()
         {
             self.menu_open = false;
             self.member_menu = None;
+            self.library.menu = None;
             self.members_open = false;
             self.add_agent_open = false;
             self.tab_menu_open = false;
@@ -3044,6 +3112,7 @@ impl Shell {
                             jobs,
                             open,
                             &self.tasks_chip,
+                            self.tasks_link,
                             &theme,
                             cx,
                         )
@@ -4210,6 +4279,9 @@ impl Render for Shell {
             }
         }
         if let Some(menu) = member_menu::render(self, window, cx) {
+            root = root.child(menu);
+        }
+        if let Some(menu) = crate::ui::profiles::library::menu(self, window, cx) {
             root = root.child(menu);
         }
         if let Some(space) = people_space {

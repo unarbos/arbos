@@ -69,6 +69,51 @@ pub fn leaf_pick(seed: &str, leaf_override: Option<u8>, color_override: Option<u
     leaf::pick_for(seed, leaf_override, color_override)
 }
 
+// ----- Neutral default (Jacob, 2026-10-25) -------------------------------------------
+
+/// The pair the Create sheets store when nothing was uploaded or generated: "no leaf".
+pub fn neutral_pick() -> LeafPick {
+    LeafPick {
+        leaf: leaf::NEUTRAL,
+        color: leaf::NEUTRAL,
+    }
+}
+
+/// Neutral disc fill and letter ink for the appearance.
+pub fn neutral_colors(theme: &Theme) -> (Hsla, Hsla) {
+    let (disc, ink) = match theme.appearance {
+        Appearance::Dark => leaf::NEUTRAL_DARK,
+        Appearance::Light => leaf::NEUTRAL_LIGHT,
+    };
+    (rgb([disc.0, disc.1, disc.2]), rgb([ink.0, ink.1, ink.2]))
+}
+
+/// The neutral avatar: the name's first letter, semibold, on a plain grey disc (no gradient,
+/// no leaf). `name` empty = an empty disc (the Create sheet before a name is typed).
+pub fn neutral_element(name: &str, size: f32, theme: &Theme) -> Div {
+    let (disc, ink) = neutral_colors(theme);
+    let font = size * INITIALS_SCALE;
+    let letter = if name.trim().is_empty() {
+        String::new()
+    } else {
+        leaf::initial(name)
+    };
+    div()
+        .size(px(size))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(disc)
+        .text_size(px(font))
+        .line_height(px(font))
+        .pb(px(size * 0.02))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(ink)
+        .child(letter)
+}
+
 /// The leaf ink on disc colour `index`: the darker same hue (v2 rule).
 pub fn leaf_ink(index: u8) -> Hsla {
     let Rgb(r, g, b) = leaf::COLORS[(index % leaf::COLOR_COUNT) as usize].ink;
@@ -317,6 +362,7 @@ pub fn leaf_hover(pick: LeafPick, size: f32, key: u64) -> Div {
     disc(pick, size).child(
         div()
             .id(ElementId::NamedInteger("leaf-hover".into(), key))
+            .debug_selector(|| "leaf-hover".into())
             .size_full()
             .flex()
             .items_center()
@@ -327,12 +373,6 @@ pub fn leaf_hover(pick: LeafPick, size: f32, key: u64) -> Div {
             })
             .child(glyph),
     )
-}
-
-/// The profile hero: idle sway, and the ruffle when the pointer is over it.
-/// Still under Reduce Motion.
-pub fn leaf_hero(pick: LeafPick, size: f32, key: u64) -> Div {
-    leaf_hero_in(disc(pick, size), pick, size, key, leaf_ink(pick.color))
 }
 
 /// The profile hero with no disc behind the leaf (Jacob, [feedback
@@ -368,6 +408,7 @@ fn leaf_hero_in(container: Div, pick: LeafPick, size: f32, key: u64, ink: Hsla) 
     container.child(
         div()
             .id(ElementId::NamedInteger("leaf-hero".into(), key))
+            .debug_selector(|| "leaf-hero".into())
             .size_full()
             .flex()
             .items_center()
@@ -380,7 +421,8 @@ fn leaf_hero_in(container: Div, pick: LeafPick, size: f32, key: u64, ink: Hsla) 
     )
 }
 
-/// An agent's avatar: the leaf (D92) while the flag is on, else the D79 disc.
+/// An agent's avatar: the leaf (D92) while the flag is on, else the D79 disc — or the neutral
+/// initial when the agent was created with no leaf (Jacob, 2026-10-25).
 pub fn agent(
     seed: &str,
     name: &str,
@@ -390,6 +432,9 @@ pub fn agent(
     size: f32,
     theme: &Theme,
 ) -> Div {
+    if leaf::is_neutral(leaf_override) {
+        return neutral_element(name, size, theme);
+    }
     if leaf_avatars_on() {
         let key = hover_key(seed, size);
         rig_gust(seed, name, key);
@@ -407,6 +452,9 @@ pub fn agent(
 /// info-pane-chrome-2026-10-24]): the swaying leaf with no disc behind it;
 /// the D79 initials disc stays when the leaf flag is off (initials need a fill).
 pub fn project_hero_bare(p: &Project, size: f32, theme: &Theme) -> Div {
+    if leaf::is_neutral(p.avatar_leaf) {
+        return neutral_element(&p.name, size, theme);
+    }
     if leaf_avatars_on() && !p.is_people() {
         leaf_hero_bare(project_leaf(p), size, hover_key(&p.id, size), theme)
     } else {
@@ -414,7 +462,8 @@ pub fn project_hero_bare(p: &Project, size: f32, theme: &Theme) -> Div {
     }
 }
 
-/// The bubble-bar accent of an agent: its leaf disc colour (D92), else D79.
+/// The bubble-bar accent of an agent: its leaf disc colour (D92), else D79; a mid grey for a
+/// neutral agent.
 pub fn agent_accent(
     seed: &str,
     color_index: Option<u8>,
@@ -422,6 +471,9 @@ pub fn agent_accent(
     leaf_color_override: Option<u8>,
     theme: &Theme,
 ) -> Hsla {
+    if leaf::is_neutral(leaf_override) {
+        return accent_color(leaf::neutral_accent(), theme);
+    }
     if leaf_avatars_on() {
         accent_color(
             leaf::accent(leaf_pick(seed, leaf_override, leaf_color_override)),
@@ -530,6 +582,9 @@ pub fn element(seed: &str, name: &str, index: Option<u8>, size: f32, theme: &The
 /// its D79 initials — never an id-derived leaf.
 pub fn project(p: &Project, size: f32, theme: &Theme) -> Div {
     if p.is_people() {
+        if leaf::is_neutral(p.avatar_leaf) {
+            return neutral_element(&p.name, size, theme);
+        }
         if let (true, Some(leaf), Some(color)) =
             (leaf_avatars_on(), p.avatar_leaf, p.avatar_leaf_color)
         {
@@ -671,6 +726,9 @@ pub fn agent_picture(
                     .object_fit(gpui::ObjectFit::Cover),
             );
     }
+    if a.neutral {
+        return neutral_element(&a.name, size, theme);
+    }
     agent(
         &a.id,
         &a.name,
@@ -811,6 +869,34 @@ fn draw_initials(out: &mut image::RgbaImage, text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Jacob, 2026-10-25: the stored neutral pair is told apart from the automatic leaf, and a
+    /// neutral identity never draws a leaf.
+    #[test]
+    fn neutral_pick_is_the_core_value_and_identity_carries_it() {
+        let n = neutral_pick();
+        assert!(leaf::is_neutral(Some(n.leaf)));
+        assert!(!leaf::is_neutral(None));
+        let card = AgentCard {
+            id: "01N".into(),
+            name: "Field notes".into(),
+            handle: "field-notes".into(),
+            leaf: Some(leaf::NEUTRAL),
+            leaf_color: Some(leaf::NEUTRAL),
+            color_index: None,
+            image_key: None,
+        };
+        let who = arbos_core::avatar::identity::resolve(
+            &AgentQuery {
+                sender: "agent:01N",
+                handle: None,
+                name: None,
+            },
+            &[card],
+        );
+        assert!(who.neutral);
+        assert_eq!(leaf::initial(&who.name), "F");
+    }
 
     #[test]
     fn initials_follow_the_rule() {
