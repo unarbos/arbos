@@ -1359,6 +1359,15 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
             | PushEventDto::ServerMemberJoined(_)
             | PushEventDto::ServerMemberRemoved(_)
             | PushEventDto::ServerDeleted(_) => refresh_servers = true,
+            // Someone's profile picture changed: mine (another device set it → re-read /me)
+            // or a person I share a chat or server with (their card comes with the lists).
+            PushEventDto::ProfileUpdated(payload) => {
+                if payload.user_id == shared.me_id() {
+                    refresh_me(shared).await;
+                }
+                refresh = true;
+                refresh_servers = true;
+            }
             PushEventDto::PeopleMessage(_)
             | PushEventDto::PeopleChatDeleted(_)
             | PushEventDto::ProjectMemberRemoved(_)

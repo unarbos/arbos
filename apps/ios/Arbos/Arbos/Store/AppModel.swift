@@ -4001,6 +4001,12 @@ final class AppModel: ObservableObject {
             case .serverUpdated, .serverMemberJoined, .serverMemberRemoved, .serverDeleted:
                 // D88: the relay is the control plane for servers — re-read the list.
                 needServers = true
+            case .profileUpdated(let payload):
+                // Someone's picture changed: mine on another device (re-read /me) or a person I
+                // share a chat or a server with (their card comes with the lists).
+                if payload.user_id == user?.id { await refreshAccount() }
+                needChats = true
+                needServers = true
             case .chatArchived(let payload):
                 // Another device of mine archived / unarchived a people chat.
                 if peopleChat(payload.chat_id) != nil {

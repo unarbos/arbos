@@ -586,6 +586,16 @@ const SPRING_DAMPING: f32 = 0.55;
 pub const STICK_THRESHOLD_PX: f32 = 70.0;
 /// How far above the end the user must be before the ↓ button shows.
 const JUMP_BUTTON_AFTER_PX: f32 = 160.0;
+/// ↓ from this close to the end (in viewport heights), with every row between
+/// already laid out, glides on the spring; from further away it lands on the
+/// newest page at once ([`Transcript::jump_to_latest`]).
+const JUMP_GLIDE_MAX_VIEWPORTS: f32 = 2.5;
+/// The landing: the newest page settles in over this long, rising
+/// [`JUMP_ARRIVE_RISE_PX`] and fading from [`JUMP_ARRIVE_FROM_ALPHA`] — a
+/// short "arrived" cue instead of a crawl, Grok Mac's own timing class.
+const JUMP_ARRIVE_MS: u64 = 150;
+const JUMP_ARRIVE_RISE_PX: f32 = 24.0;
+const JUMP_ARRIVE_FROM_ALPHA: f32 = 0.35;
 
 /// The hover rail's buttons: Grok Mac's 24 pt hit target, 16 pt glyph, 2 pt apart.
 pub const RAIL_BUTTON: f32 = 24.0;
@@ -629,6 +639,12 @@ pub struct Transcript {
     /// One stateful card per typed question, keyed by question id; dropped with its row.
     cards: HashMap<String, Entity<QuestionCard>>,
     pinned_to_bottom: bool,
+    /// When ↓ last landed on the newest page from far away: drives the
+    /// [`JUMP_ARRIVE_MS`] settle of the list (rise + fade), then cleared.
+    arrived_at: Option<Instant>,
+    /// Row layouts the list has asked for, in total (every `render_row`
+    /// call: visible rows and the overdraw). The budget the jump test holds.
+    pub(crate) rows_laid_out: u64,
     /// Reveal request (`AppState::reveal_nonce`) we already scrolled for.
     revealed: Option<u64>,
     spring: StickSpring,
@@ -704,6 +720,8 @@ impl Transcript {
             veils: HashMap::new(),
             cards: HashMap::new(),
             pinned_to_bottom: true,
+            arrived_at: None,
+            rows_laid_out: 0,
             revealed: None,
             spring: StickSpring::default(),
             repin_check_pending: false,
@@ -1101,6 +1119,65 @@ impl Transcript {
         self.drag_scroll = None;
     }
 
+    /// The ↓ button (and anything else that wants "back to the newest row"):
+    /// re-pin, and land on the newest page.
+    ///
+    /// The stick spring moves a fraction of the *known* distance to the end
+    /// each frame, and the list only knows the height of rows it has laid
+    /// out — a row never scrolled past counts as zero. From deep in a long
+    /// chat the known distance is therefore never more than one overdraw
+    /// ahead, so the spring crawled through the whole history one page per
+    /// frame, laying out every row on the way (Jacob, 2026-10-25: 1 682 rows
+    /// took 11.8 s, [feedback jump-to-latest-instant-mac-2026-10-25]). Now the
+    /// spring only glides when the end is close and every row between is
+    /// already laid out; otherwise the list goes straight to its end — the
+    /// same path a chat opens on — so only the newest page is laid out, and a
+    /// [`JUMP_ARRIVE_MS`] settle marks the landing.
+    pub fn jump_to_latest(&mut self, cx: &mut Context<Self>) {
+        self.pinned_to_bottom = true;
+        self.repin_check_pending = false;
+        self.spring.velocity = 0.0;
+        if !self.end_is_near_and_laid_out() {
+            self.snap_to_end(!cx.reduce_motion());
+        }
+        cx.notify();
+    }
+
+    /// Whether the spring can glide to the end without laying out history:
+    /// the known distance is under [`JUMP_GLIDE_MAX_VIEWPORTS`] and no row
+    /// from the viewport to the end is still unmeasured.
+    fn end_is_near_and_laid_out(&self) -> bool {
+        let max = f32::from(self.list.max_offset_for_scrollbar().y);
+        let cur = -f32::from(self.list.scroll_px_offset_for_scrollbar().y);
+        let viewport = f32::from(self.list.viewport_bounds().size.height).max(1.0);
+        if max - cur > JUMP_GLIDE_MAX_VIEWPORTS * viewport {
+            return false;
+        }
+        let top = self.list.logical_scroll_top().item_ix;
+        // `bounds_for_item` answers only for rows the list has measured.
+        (top..self.rows.len()).all(|ix| self.list.bounds_for_item(ix).is_some())
+    }
+
+    /// Put the list at its end: the next layout walks back from the newest
+    /// row and measures one page, nothing above it. `settle` plays the
+    /// arrival cue (not on a chat open, not under Reduce Motion).
+    fn snap_to_end(&mut self, settle: bool) {
+        self.list.scroll_to_end();
+        self.spring.velocity = 0.0;
+        self.arrived_at = settle.then(Instant::now);
+    }
+
+    /// Progress of the landing cue, `None` once it is over (or never started).
+    fn arrive_progress(&mut self) -> Option<f32> {
+        let started = self.arrived_at?;
+        let t = started.elapsed().as_secs_f32() / (JUMP_ARRIVE_MS as f32 / 1000.0);
+        if t >= 1.0 {
+            self.arrived_at = None;
+            return None;
+        }
+        Some(crate::ui::motion::ease_out_cubic(t))
+    }
+
     /// One spring step per frame while pinned and not yet at the end.
     fn step_spring(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
         if self.repin_check_pending {
@@ -1117,7 +1194,9 @@ impl Transcript {
         let max = f32::from(self.list.max_offset_for_scrollbar().y);
         let cur = -f32::from(self.list.scroll_px_offset_for_scrollbar().y);
         let remaining = max - cur;
-        if remaining.abs() < 0.5 && self.spring.velocity.abs() < 0.5 {
+        // At the end (or anchored past it, the frame after `snap_to_end`
+        // before the list has laid that page out): nothing to glide.
+        if remaining <= 0.5 {
             self.spring.velocity = 0.0;
             return;
         }
@@ -1222,7 +1301,8 @@ impl Transcript {
             self.list.reset(self.rows.len());
             self.pinned_to_bottom = true;
             self.revealed = None;
-            self.list.scroll_to_end();
+            // Open at the bottom: the same landing as ↓, without the cue.
+            self.snap_to_end(false);
             // `ARBOS_SCROLL_UP=1`: open at the top instead (screenshot rig; the
             // GUI session accepts no synthetic wheel events).
             if std::env::var("ARBOS_SCROLL_UP").is_ok_and(|v| v == "1")
@@ -1879,6 +1959,7 @@ impl Transcript {
     }
 
     fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        self.rows_laid_out += 1;
         let Some(row) = self.rows.get(ix).cloned() else {
             return div().into_any_element();
         };
@@ -2564,10 +2645,22 @@ impl Render for Transcript {
         self.step_spring(window, cx);
         let theme = Theme::of(cx).clone();
         // Grok Mac (ref 58): a 40 pt ↓ circle centred above the composer once
-        // the user has scrolled up; clicking re-pins and the spring glides down.
+        // the user has scrolled up; clicking re-pins and lands on the newest
+        // page (`jump_to_latest`).
         let max = f32::from(self.list.max_offset_for_scrollbar().y);
         let cur = -f32::from(self.list.scroll_px_offset_for_scrollbar().y);
         let show_jump = !self.pinned_to_bottom && max - cur > JUMP_BUTTON_AFTER_PX;
+        // The landing cue: the newest page rises into place and brightens.
+        let arrive = self.arrive_progress();
+        if arrive.is_some() {
+            window.request_animation_frame();
+        }
+        let (arrive_rise, arrive_alpha) = arrive.map_or((0.0, 1.0), |e| {
+            (
+                (1.0 - e) * JUMP_ARRIVE_RISE_PX,
+                JUMP_ARRIVE_FROM_ALPHA + (1.0 - JUMP_ARRIVE_FROM_ALPHA) * e,
+            )
+        });
         self.apply_rig_select(window, cx);
         // A selection lives as long as the transcript keeps keyboard focus:
         // clicking into the composer (or anywhere else) drops the highlight,
@@ -2624,12 +2717,19 @@ impl Render for Transcript {
             // band): the list runs up under the floating pill and fades out
             // over `HEADER_FADE_BAND` — Grok's text is gone at the window edge
             // and fully readable ~50 pt down ([feedback mac-header-fade-grok]).
-            .child(edge_faded(
-                HEADER_FADE_BAND,
-                true,
-                false,
-                list(self.list.clone(), cx.processor(Self::render_row)).size_full(),
-            ))
+            .child(
+                div()
+                    .relative()
+                    .size_full()
+                    .top(px(arrive_rise))
+                    .opacity(arrive_alpha)
+                    .child(edge_faded(
+                        HEADER_FADE_BAND,
+                        true,
+                        false,
+                        list(self.list.clone(), cx.processor(Self::render_row)).size_full(),
+                    )),
+            )
             .when(show_jump, |el| {
                 el.child(
                     div()
@@ -2654,11 +2754,7 @@ impl Render for Transcript {
                                 .cursor_pointer()
                                 .hover(|s| s.bg(theme.surface_2))
                                 .child(icon("arrow-down", 15.0, theme.text))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.pinned_to_bottom = true;
-                                    this.repin_check_pending = false;
-                                    cx.notify();
-                                }))
+                                .on_click(cx.listener(|this, _, _, cx| this.jump_to_latest(cx)))
                                 .with_animation(
                                     "jump-in",
                                     Animation::new(Duration::from_millis(180)),
@@ -5967,6 +6063,25 @@ mod transcript_smoke_tests {
         Entity<AppState>,
         Entity<Transcript>,
     ) {
+        let t = 1_700_000_000_000u64;
+        mount_with(
+            cx,
+            vec![
+                message("m1", "user", "How did the review go?", t),
+                message("m2", "assistant", LONG_REPLY, t + 2_000),
+            ],
+        )
+    }
+
+    /// `mount` over any message list (the long-chat tests).
+    fn mount_with(
+        cx: &mut TestAppContext,
+        messages: Vec<Message>,
+    ) -> (
+        tokio::runtime::Runtime,
+        Entity<AppState>,
+        Entity<Transcript>,
+    ) {
         // A runtime nobody drives: the state's tokio workers (source, updater,
         // calls) are parked for good, so no other thread ever touches gpui's
         // deterministic test scheduler.
@@ -5997,13 +6112,7 @@ mod transcript_smoke_tests {
             }))
             .expect("chat");
             s.chats.insert("p1".into(), vec![chat]);
-            s.messages.insert(
-                "c1".into(),
-                vec![
-                    message("m1", "user", "How did the review go?", t),
-                    message("m2", "assistant", LONG_REPLY, t + 2_000),
-                ],
-            );
+            s.messages.insert("c1".into(), messages);
             s.selected_project = Some("p1".into());
             s.active_tab.insert("p1".into(), "c1".into());
             cx.notify();
@@ -6079,6 +6188,160 @@ mod transcript_smoke_tests {
         assert!(
             hovered.as_ref().is_some_and(|(k, _)| k == "m2#bubble"),
             "the bubble is the hovered key: {hovered:?}"
+        );
+    }
+
+    /// Jacob, 2026-10-25 ([feedback jump-to-latest-instant-mac-2026-10-25]):
+    /// from the top of a 1 500-row chat, ↓ lands on the newest page in a
+    /// frame, and the history in between is never laid out — before, the
+    /// stick spring crawled through every row (11.8 s on 1 682 rows).
+    #[gpui::test]
+    fn jump_to_latest_from_deep_history_lays_out_only_the_newest_page(cx: &mut TestAppContext) {
+        const ROWS: usize = 1_500;
+        let t = 1_700_000_000_000u64;
+        let messages: Vec<Message> = (0..ROWS)
+            .map(|i| {
+                let role = if i % 3 == 0 { "user" } else { "assistant" };
+                let text =
+                    format!("synthetic history line {i} — lorem ipsum dolor sit amet, consectetur");
+                message(&format!("m{i}"), role, &text, t + i as u64 * 1_000)
+            })
+            .collect();
+        let (_rt, _state, transcript) = mount_with(cx, messages);
+        let (_host, vcx) = cx.add_window_view(|_, _| Host {
+            transcript: transcript.clone(),
+        });
+        vcx.run_until_parked();
+        // `measured` keeps every row it ever saw: forget them before a frame so
+        // `painted` speaks for that frame alone.
+        let frame = |vcx: &mut gpui::VisualTestContext| {
+            transcript.update(vcx, |t, cx| {
+                t.measured.borrow_mut().rows.clear();
+                cx.notify();
+            });
+            vcx.run_until_parked();
+        };
+        // Whether any row of the message with this id was painted last frame.
+        let painted = |vcx: &gpui::VisualTestContext, message_id: &str| {
+            transcript.read_with(vcx, |t, _| {
+                let m = t.measured.borrow();
+                t.rows
+                    .iter()
+                    .any(|r| r.message_id == message_id && m.rows.contains_key(&r.id))
+            })
+        };
+        // Opened at the bottom: the newest row is on screen and the open laid
+        // out one page, not the chat (the open shares the jump's landing).
+        assert!(
+            painted(vcx, &format!("m{}", ROWS - 1)),
+            "opens on the newest row"
+        );
+        let opened = transcript.read_with(&*vcx, |t, _| t.rows_laid_out);
+        assert!(
+            opened < 120,
+            "opening a {ROWS}-row chat laid out {opened} rows"
+        );
+
+        // Up to the very top, the way a search hit or scrollbar drag lands
+        // there: the rows between are unmeasured, as in a real long chat.
+        transcript.update(vcx, |t, _| {
+            t.pinned_to_bottom = false;
+            t.list.scroll_to(gpui::ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.0),
+            });
+        });
+        frame(vcx);
+        assert!(painted(vcx, "m0"), "at the top");
+        assert!(!painted(vcx, &format!("m{}", ROWS - 1)));
+        let middle = transcript.read_with(&*vcx, |t, _| t.list.bounds_for_item(ROWS / 2));
+        assert!(
+            middle.is_none(),
+            "the middle of the chat is not laid out yet"
+        );
+        let before_jump = transcript.read_with(&*vcx, |t, _| t.rows_laid_out);
+
+        // ↓ — one frame later the newest row is on screen.
+        transcript.update(vcx, |t, cx| t.jump_to_latest(cx));
+        frame(vcx);
+        assert!(
+            painted(vcx, &format!("m{}", ROWS - 1)),
+            "the newest row is on screen after one frame"
+        );
+        assert!(!painted(vcx, "m0"));
+        let landed = transcript.read_with(&*vcx, |t, _| t.rows_laid_out) - before_jump;
+        assert!(
+            landed < 120,
+            "the jump laid out {landed} rows, not one page"
+        );
+        // The landing cue runs its course without the position moving, and
+        // the history between was never laid out — no page-by-page crawl.
+        for _ in 0..12 {
+            std::thread::sleep(Duration::from_millis(20));
+            frame(vcx);
+            assert!(
+                painted(vcx, &format!("m{}", ROWS - 1)),
+                "stays on the newest row"
+            );
+        }
+        let settled = transcript.read_with(&*vcx, |t, _| {
+            (
+                t.arrived_at.is_none(),
+                t.pinned_to_bottom,
+                t.list.bounds_for_item(ROWS / 2).is_none(),
+                t.list.bounds_for_item(ROWS / 4).is_none(),
+                t.rows_laid_out - before_jump,
+            )
+        });
+        assert_eq!(
+            (settled.0, settled.1, settled.2, settled.3),
+            (true, true, true, true),
+            "cue over, pinned, middle rows still unmeasured: {settled:?}"
+        );
+        assert!(
+            settled.4 < ROWS as u64 / 4,
+            "the whole jump laid out {} row frames, a crawl would be ≥ {ROWS}",
+            settled.4
+        );
+    }
+
+    /// Close to the end with every row between already laid out, ↓ still
+    /// glides on the spring (no snap, no cue) — the short hop stays smooth.
+    #[gpui::test]
+    fn jump_to_latest_from_nearby_glides_instead_of_snapping(cx: &mut TestAppContext) {
+        let t = 1_700_000_000_000u64;
+        let messages: Vec<Message> = (0..12)
+            .map(|i| {
+                message(
+                    &format!("m{i}"),
+                    "assistant",
+                    &format!("line {i}"),
+                    t + i as u64 * 1_000,
+                )
+            })
+            .collect();
+        let (_rt, _state, transcript) = mount_with(cx, messages);
+        let (_host, vcx) = cx.add_window_view(|_, _| Host {
+            transcript: transcript.clone(),
+        });
+        vcx.run_until_parked();
+        // Every row is on screen (12 short lines fit a test window), so the end is near and measured.
+        transcript.update(vcx, |t, cx| {
+            t.pinned_to_bottom = false;
+            t.list.scroll_to(gpui::ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.0),
+            });
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        transcript.update(vcx, |t, cx| t.jump_to_latest(cx));
+        let (pinned, cue) =
+            transcript.read_with(&*vcx, |t, _| (t.pinned_to_bottom, t.arrived_at.is_some()));
+        assert!(pinned);
+        assert!(
+            !cue,
+            "a nearby jump glides; the landing cue is for the long way"
         );
     }
 }
