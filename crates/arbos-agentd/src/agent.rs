@@ -807,7 +807,9 @@ impl ProseFilter {
         if without_tail.trim().is_empty() {
             return String::new();
         }
-        Self::fix_glued_spaces(&without_tail)
+        // Tables reach the apps as plain GFM (no fence, no indent, a separator row) — the
+        // renderers draw nothing else as a table.
+        crate::markdown_tables::normalize_tables(&Self::fix_glued_spaces(&without_tail))
     }
 
     /// Put the whitespace that surrounded `original` back around `cleaned`, so what the filter
@@ -4417,7 +4419,7 @@ impl Agent {
             ));
         }
         prompt.push_str(&format!(
-            "\nSubagent output (for you only; the user has not seen it):\n<<<\n{raw_trim}\n>>>\n\nRoute `reply`, then deliver the update with `send_message` like a colleague in chat: what got done and the outcome, what changed that they care about, and what is open or needs their answer. Research or a comparison comes in parts, each its own `send_message`: the conclusion in one or two sentences; a markdown table with one row per item (name linked to its page, the compared facts as columns); then details and caveats, the sources used and what could not be checked, ending with one concrete next-step offer. Anything else is one short message. Speak as if you did the work; do not mention the subagent, its name, the harness, the model, tool calls, commands, scratch paths, or token counts. No JSON, no quoted output, no list of steps."
+            "\nSubagent output (for you only; the user has not seen it):\n<<<\n{raw_trim}\n>>>\n\nRoute `reply`, then deliver the update with `send_message` like a colleague in chat: what got done and the outcome, what changed that they care about, and what is open or needs their answer. Research or a comparison comes in parts, each its own `send_message`: the conclusion in one or two sentences; a plain GitHub-flavoured markdown table with one row per item (header row, then the `| --- |` separator row, every row starting and ending with `|`, no indentation, no code fence; the name an inline `[Name](https://…)` link, the compared facts as columns); then details and caveats, the sources used and what could not be checked, ending with one concrete next-step offer. Anything else is one short message. Speak as if you did the work; do not mention the subagent, its name, the harness, the model, tool calls, commands, scratch paths, or token counts. No JSON, no quoted output, no list of steps."
         ));
         if job.is_some() {
             prompt.push_str(&format!(
@@ -7658,7 +7660,7 @@ impl Agent {
         let address = self.owner_address_note(chat_id, host, in_reply_to).await;
         let (talking_model, _) = self.live_models().await;
         let system = format!(
-            "{} You answer a message the user sent while you were busy with something else; the work for it is done (notes below). Write the answer the user should read, like a colleague in chat: what they asked for, what came out, what is open. First person; short when the answer is short; a markdown table with linked names when it compares several items, and then one line offering a concrete next step. Never mention a side task, helper, subagent, tool, command, model or that you were busy. If the notes hold no answer, say plainly what you could not do.{}",
+            "{} You answer a message the user sent while you were busy with something else; the work for it is done (notes below). Write the answer the user should read, like a colleague in chat: what they asked for, what came out, what is open. First person; short when the answer is short; a plain GitHub-flavoured markdown table (header row, `| --- |` separator row, rows starting and ending with `|`, no code fence) with `[Name](https://…)` links when it compares several items, and then one line offering a concrete next step. Never mention a side task, helper, subagent, tool, command, model or that you were busy. If the notes hold no answer, say plainly what you could not do.{}",
             if self.cfg.project_name.trim().is_empty() {
                 "You are this user's agent in Arbos.".to_owned()
             } else {
@@ -8555,10 +8557,11 @@ pub const ROUTER_PROMPT: &str = include_str!("../prompts/router.md");
 /// cheap: about 6k tokens (21.4 KB on 2026-10-23; 24.2 KB after agent-to-agent `to` disambiguation
 /// on 2026-10-24; 25.7 KB after the Grok-parity rules — moment, naming, research delivery —
 /// the same day; 28.2 KB on 2026-10-25 with the jobs section's steer/stop rule (#1692) and the
-/// steer rule — short waits, `[Arbos steer:` is never late — of #1690). The unit test fails when
-/// a prompt edit crosses it, so growth is a decision, not drift.
+/// steer rule — short waits, `[Arbos steer:` is never late — of #1690; 28.7 KB after the table and
+/// link format rule of [feedback markdown-tables-agentd-2026-10-25]). The unit test fails when a
+/// prompt edit crosses it, so growth is a decision, not drift.
 #[cfg(test)]
-pub const BASE_PROMPT_MAX_BYTES: usize = 28_400;
+pub const BASE_PROMPT_MAX_BYTES: usize = 28_800;
 
 /// The byte-stable part of the main agent's system prompt: core, then routing, then code mode
 /// when it is on. Everything per project (folder, model, instructions, memory) comes after it.
@@ -9299,6 +9302,27 @@ mod tests {
             cleaned.trim(),
             "Cloning RaoFoundation/subtensor into this project now."
         );
+    }
+
+    /// Jacob's Lima bookstore table ([feedback markdown-tables-agentd-2026-10-25]): a
+    /// comparison bubble reaches the doc as plain GFM — a fenced or indented table comes
+    /// out unfenced at column one with its separator row — and the router prompt spells the
+    /// same rule out for the model.
+    #[test]
+    fn clean_prose_delivers_tables_as_plain_gfm_and_the_prompt_says_so() {
+        let table = "| Store | Area |\n| --- | --- |\n| [Librería El Virrey](https://www.elvirrey.com/) | Miraflores |\n| [Communitas](https://www.communitas.pe/) | San Isidro |";
+        assert_eq!(ProseFilter::clean_prose(table), table);
+        let fenced = "```markdown\n  | Store | Area |\n  | [Librería El Virrey](https://www.elvirrey.com/) | Miraflores |\n  | [Communitas](https://www.communitas.pe/) | San Isidro |\n```";
+        assert_eq!(ProseFilter::clean_prose(fenced), table);
+        for rule in [
+            "Table and link format, exactly",
+            "plain GitHub-flavoured markdown",
+            "the separator row `| --- | --- |`",
+            "every row starts and ends with `|` at column one, never inside a code fence",
+            "an inline markdown link `[Name](https://…)`",
+        ] {
+            assert!(ROUTER_PROMPT.contains(rule), "router prompt lost: {rule}");
+        }
     }
 
     /// Meta-steering echoed before a greeting (bold-wrapped) leaves only the greeting.
