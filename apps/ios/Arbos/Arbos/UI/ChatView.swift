@@ -208,6 +208,8 @@ private struct ChatSession: View {
     @State private var timeReveal: CGFloat = 0
     /// Once the pan is more horizontal-left than vertical, lock so scroll does not steal it.
     @State private var timeRevealLocked = false
+    /// True while a message's swipe-right-to-reply is locked — blocks swipe-right-to-Home.
+    @State private var replySwipeActive = false
     /// Long-press → Forward: the text to send and who wrote it (Forward sheet).
     @State private var pendingForward: PendingForward?
     /// The tasks sheet (duplex §2.4): open while the user looks at the agent's jobs.
@@ -782,9 +784,9 @@ private struct ChatSession: View {
         .toolbar(.hidden, for: .tabBar)
         .navigationBarBackButtonHidden(true)
         // Hiding the system back button also disables the edge-swipe pop; re-enable it
-        // except while the composer is focused so editing / selecting text in the bar
-        // cannot edge-swipe back to Home.
-        .background(InteractivePopGestureEnabler(enabled: !composerFocused))
+        // except while the composer is focused (or a reply swipe is locked) so editing
+        // / selecting text in the bar cannot edge-swipe back to Home.
+        .background(InteractivePopGestureEnabler(enabled: !composerFocused && !replySwipeActive))
         // Full-chat swipes: right → previous agent chat (or Home), left → next (or create), up → archive + previous.
         .simultaneousGesture(chatNavSwipe)
         .fullScreenCover(item: $rigViewer) { v in
@@ -1384,6 +1386,8 @@ private struct ChatSession: View {
         // Selecting or dragging in the focused composer is a horizontal pan;
         // do not treat it as swipe-right → Home.
         guard !composerFocused else { return }
+        // A message reply swipe owns this drag; do not leave the chat.
+        guard !replySwipeActive else { return }
         let dx = value.translation.width
         let absX = abs(dx), absY = abs(value.translation.height)
         let vx = value.velocity.width, vy = value.velocity.height
@@ -1501,8 +1505,10 @@ private struct ChatSession: View {
                         highlightedMessage: highlightedMessage,
                         rowsCount: rows.count,
                         messagesCount: messages.count,
+                        replySwipeActive: $replySwipeActive,
                         canReply: { isMessageRow($0) },
                         onQuoteTap: { revealQuoted($0) },
+                        onReply: { beginReply(to: $0) },
                         onMenu: { runMessageMenu($0, row: $1) },
                         actionsRowId: actionsRow?.id,
                         onLongPress: { row in
@@ -1828,7 +1834,7 @@ private struct ChatSession: View {
     }
 
     /// Reply to this row: composer preview + focus (people chats also address the agent).
-    /// Long-press → Reply on the bubble.
+    /// Shared by the long-press Reply item and swipe-right-to-reply on the bubble.
     private func beginReply(to row: Row) {
         guard let m = messageById[row.messageId] else { return }
         editing = nil
@@ -2934,8 +2940,10 @@ private struct TranscriptRows: View, Equatable {
     let highlightedMessage: Id?
     let rowsCount: Int
     let messagesCount: Int
+    var replySwipeActive: Binding<Bool>
     let canReply: (Row) -> Bool
     let onQuoteTap: (Id) -> Void
+    let onReply: (Row) -> Void
     let onMenu: (MessageMenuItem, Row) -> Void
     /// The bubble whose long-press actions are open (it alone reports its frame).
     let actionsRowId: String?
@@ -2973,6 +2981,8 @@ private struct TranscriptRows: View, Equatable {
             RowView(model: model, theme: theme, composerInset: composerInset, row: row, chatId: chatId, width: width, timeReveal: timeReveal,
                     onQuoteTap: onQuoteTap,
                     highlighted: highlightedMessage == row.messageId,
+                    onReply: reply ? { onReply(row) } : nil,
+                    replySwipeActive: replySwipeActive,
                     mentions: mentions)
                 .equatable()
                 .padding(.top, row.id == firstId ? 0 : row.gapBefore)
