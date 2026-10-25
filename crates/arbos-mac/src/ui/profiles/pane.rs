@@ -308,12 +308,13 @@ pub fn render(pane: ProfilePane, shell: &Shell, cx: &mut Context<Shell>) -> Stat
             body = body.child(section(part, shell, &theme, cx));
         }
     }
+    let share = pane.share.filter(|_| share_disc_allowed(&pane.page));
     pushed_frame(
         &title,
         Some(pinned),
         body,
         pane.done,
-        pane.share,
+        share,
         Some(&shell.profile_scroll),
         shell,
         &theme,
@@ -327,6 +328,21 @@ pub fn render(pane: ProfilePane, shell: &Shell, cx: &mut Context<Shell>) -> Stat
 /// (`grok-right-pane-details.png`: pill bottom 244, "Coding" top 268).
 pub(crate) const FIRST_TITLE_PULL: f32 = 7.0;
 
+/// Which panes may carry Grok's share disc beside the ×: the agent pane (its
+/// owner's invite sheet) and no other. Jacob 2026-10-25: "remove this button
+/// from side bar on group/" — groups and servers draw the × alone, like the
+/// person, channel and own-profile panes ([feedback info-pane-no-share-disc-groups-2026-10-25]).
+pub(crate) fn share_disc_allowed(page: &ProfilePage) -> bool {
+    match page {
+        ProfilePage::Agent { .. } => true,
+        ProfilePage::Group { .. }
+        | ProfilePage::Server { .. }
+        | ProfilePage::Channel { .. }
+        | ProfilePage::User { .. }
+        | ProfilePage::Me => false,
+    }
+}
+
 /// The spacer over the first section: the fade band, pulled in when a section
 /// label leads (see [`FIRST_TITLE_PULL`]).
 pub(crate) fn first_spacer(first: Option<&Section>) -> f32 {
@@ -338,7 +354,7 @@ pub(crate) fn first_spacer(first: Option<&Section>) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{child_index_of_row, layout, Block};
+    use super::{child_index_of_row, layout, share_disc_allowed, Block};
 
     /// Every kind's tab set (the same labels and order as the iPhone page of
     /// that kind — `ArbosTests/ProfilePaneStructureTests.swift` holds the twin).
@@ -396,6 +412,29 @@ mod tests {
                 "{kind}: a tab label appears once"
             );
         }
+    }
+
+    /// Which panes carry Grok's share disc beside the ×: the agent pane (its
+    /// owner's invite sheet) and no other — Jacob 2026-10-25, "remove this
+    /// button from side bar on group/" ([feedback info-pane-no-share-disc-groups-2026-10-25]).
+    #[test]
+    fn only_the_agent_pane_may_have_a_share_disc() {
+        use crate::app::ProfilePage;
+        let id = || "x".to_string();
+        assert!(share_disc_allowed(&ProfilePage::Agent { project_id: id() }));
+        assert!(!share_disc_allowed(&ProfilePage::Group { space_id: id() }));
+        assert!(!share_disc_allowed(&ProfilePage::Server {
+            server_id: id()
+        }));
+        assert!(!share_disc_allowed(&ProfilePage::Channel {
+            server_id: id(),
+            channel_id: id()
+        }));
+        assert!(!share_disc_allowed(&ProfilePage::User {
+            handle: id(),
+            space_id: None
+        }));
+        assert!(!share_disc_allowed(&ProfilePage::Me));
     }
 
     /// Kit cards are one child per row (hairlines hang from the rows), so
