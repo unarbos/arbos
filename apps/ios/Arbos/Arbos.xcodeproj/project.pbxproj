@@ -16,6 +16,7 @@
 		A17DC1D0E22C9438EC90011C /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F0A4FDC36335E86EDA8A5F /* AppModel.swift */; };
 		A1D0C5B0E1F2A3B4C5D6E703 /* LaunchClock.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D0C5B0E1F2A3B4C5D6E704 /* LaunchClock.swift */; };
 		A1BF00000000000000000002 /* PerfLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BF00000000000000000001 /* PerfLog.swift */; };
+		A1BF00000000000000000012 /* SendTrace.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BF00000000000000000011 /* SendTrace.swift */; };
 		A1D0C5B0E1F2A3B4C5D6E701 /* DeviceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D0C5B0E1F2A3B4C5D6E702 /* DeviceStore.swift */; };
 		A16CDC927A9BCBA23734AFF8 /* CallManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E06B8AB50C3A04CA1B1326 /* CallManager.swift */; };
 		A17F7FD4D50498CC4760775E /* Feedback.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EA51EFDDA9FCC9D359DDAD /* Feedback.swift */; };
@@ -90,6 +91,7 @@
 		A15E00000000000000000004 /* HomeSearchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15E00000000000000000003 /* HomeSearchTests.swift */; };
 		A1C100000000000000000002 /* SenderNameRowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C100000000000000000001 /* SenderNameRowTests.swift */; };
 		A1D100000000000000000002 /* DeliveryStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D100000000000000000001 /* DeliveryStateTests.swift */; };
+		A1D100000000000000000012 /* OptimisticSendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D100000000000000000011 /* OptimisticSendTests.swift */; };
 		A1E100000000000000000002 /* HiddenWorkerRowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E100000000000000000001 /* HiddenWorkerRowTests.swift */; };
 		A1C5440000000000000004 /* ShellApprovalCardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C5440000000000000003 /* ShellApprovalCardTests.swift */; };
 		A1BD00000000000000000002 /* NewMessageSheetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BD00000000000000000001 /* NewMessageSheetTests.swift */; };
@@ -155,6 +157,7 @@
 		A1F0A4FDC36335E86EDA8A5F /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		A1D0C5B0E1F2A3B4C5D6E704 /* LaunchClock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchClock.swift; sourceTree = "<group>"; };
 		A1BF00000000000000000001 /* PerfLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerfLog.swift; sourceTree = "<group>"; };
+		A1BF00000000000000000011 /* SendTrace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendTrace.swift; sourceTree = "<group>"; };
 		A1D0C5B0E1F2A3B4C5D6E702 /* DeviceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceStore.swift; sourceTree = "<group>"; };
 		A1E06B8AB50C3A04CA1B1326 /* CallManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallManager.swift; sourceTree = "<group>"; };
 		A1EA51EFDDA9FCC9D359DDAD /* Feedback.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Feedback.swift; sourceTree = "<group>"; };
@@ -228,6 +231,7 @@
 		A15E00000000000000000003 /* HomeSearchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeSearchTests.swift; sourceTree = "<group>"; };
 		A1C100000000000000000001 /* SenderNameRowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SenderNameRowTests.swift; sourceTree = "<group>"; };
 		A1D100000000000000000001 /* DeliveryStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeliveryStateTests.swift; sourceTree = "<group>"; };
+		A1D100000000000000000011 /* OptimisticSendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OptimisticSendTests.swift; sourceTree = "<group>"; };
 		A1E100000000000000000001 /* HiddenWorkerRowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HiddenWorkerRowTests.swift; sourceTree = "<group>"; };
 		A1C5440000000000000003 /* ShellApprovalCardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellApprovalCardTests.swift; sourceTree = "<group>"; };
 		A1BD00000000000000000001 /* NewMessageSheetTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewMessageSheetTests.swift; sourceTree = "<group>"; };
@@ -353,6 +357,7 @@
 				A1D0C5B0E1F2A3B4C5D6E702,
 				A1D0C5B0E1F2A3B4C5D6E704,
 				A1BF00000000000000000001,
+				A1BF00000000000000000011,
 				A1E06B8AB50C3A04CA1B1326,
 				A1EA51EFDDA9FCC9D359DDAD,
 				A1C69DB7C444253D783D4156,
@@ -443,6 +448,7 @@
 				A15E00000000000000000003 /* HomeSearchTests.swift */,
 				A1C100000000000000000001 /* SenderNameRowTests.swift */,
 				A1D100000000000000000001 /* DeliveryStateTests.swift */,
+				A1D100000000000000000011 /* OptimisticSendTests.swift */,
 				A1E100000000000000000001 /* HiddenWorkerRowTests.swift */,
 				A1A9D0000000000000000003 /* AgentIdentityTests.swift */,
 				A1C5440000000000000003 /* ShellApprovalCardTests.swift */,
@@ -617,6 +623,7 @@
 				A1D8800000000000000000F2 /* MediaViewer.swift in Sources */,
 				A1D0C5B0E1F2A3B4C5D6E703 /* LaunchClock.swift in Sources */,
 				A1BF00000000000000000002 /* PerfLog.swift in Sources */,
+				A1BF00000000000000000012 /* SendTrace.swift in Sources */,
 				A1D0C5B0E1F2A3B4C5D6E701 /* DeviceStore.swift in Sources */,
 				A16CDC927A9BCBA23734AFF8 /* CallManager.swift in Sources */,
 				A17F7FD4D50498CC4760775E /* Feedback.swift in Sources */,
@@ -690,6 +697,7 @@
 				A15E00000000000000000004 /* HomeSearchTests.swift in Sources */,
 				A1C100000000000000000002 /* SenderNameRowTests.swift in Sources */,
 				A1D100000000000000000002 /* DeliveryStateTests.swift in Sources */,
+				A1D100000000000000000012 /* OptimisticSendTests.swift in Sources */,
 				A1E100000000000000000002 /* HiddenWorkerRowTests.swift in Sources */,
 				A1A9D0000000000000000004 /* AgentIdentityTests.swift in Sources */,
 				A1C5440000000000000004 /* ShellApprovalCardTests.swift in Sources */,

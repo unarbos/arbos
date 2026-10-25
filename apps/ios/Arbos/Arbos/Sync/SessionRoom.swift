@@ -171,6 +171,11 @@ final class SessionRoom {
         )
         doc.onLocalUpdate { [weak self] bytes in
             Task { @MainActor in
+                #if DEBUG
+                if let self, SendTrace.traces(self.key) {
+                    SendTrace.mark("push-queued", detail: "bytes=\(bytes.count) live=\(self.session.isLive())")
+                }
+                #endif
                 self?.session.onLocalCommit(bytes: bytes)
                 self?.drain()
             }
@@ -439,7 +444,10 @@ final class SessionRoom {
             }
         case .droppedOversize(let bytes):
             NSLog("relay room \(roomChat): local update \(bytes) bytes exceeds row cap; dropped")
-        case .ack(_, _):
+        case .ack(_, let seq):
+            #if DEBUG
+            if SendTrace.traces(key) { SendTrace.mark("relay-ack", detail: "seq=\(seq)") }
+            #endif
             onAcked?()
             onCursorMoved?()
         }
