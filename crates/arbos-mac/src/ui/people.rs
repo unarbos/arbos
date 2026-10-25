@@ -218,10 +218,7 @@ pub fn new_chat_sheet(
                 .child(icon("chevron-right", 13.0, theme.text_faint))
                 // D93: opens the Create screen (`create_entity::sheet`) in place of this one.
                 .on_click(cx.listener(|this, _, window, cx| {
-                    this.state.update(cx, |s, cx| {
-                        s.new_project_open = true;
-                        cx.notify();
-                    });
+                    this.open_create_agent(cx);
                     let handle = this.project_input.read(cx).focus_handle(cx);
                     window.focus(&handle, cx);
                 }));

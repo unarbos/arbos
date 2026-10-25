@@ -760,6 +760,26 @@ fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl
         if let Some(glyphs) = groups::tab_glyphs(&chat, &projects, &theme) {
             row = row.child(glyphs);
         }
+        // A job tab (`jobtabs`): the job's glyph before the title — the spinner while it
+        // runs, a check when done — and its state instead of a time at the right.
+        let job_doc = crate::jobtabs::job_id(&chat.id)
+            .and_then(|jid| state.rollouts.get(jid))
+            .cloned();
+        let job_running = crate::jobtabs::job_id(&chat.id).is_some()
+            && job_doc.as_ref().is_none_or(|r| r.is_running());
+        if chat.kind == crate::model::ChatKind::Job {
+            let glyph: gpui::AnyElement = if job_running {
+                crate::ui::cards::activity_spinner(13.0, &theme, cx).into_any_element()
+            } else {
+                icon("check", 12.0, theme.online).into_any_element()
+            };
+            row = row.child(div().flex_shrink_0().size(px(14.0)).child(glyph));
+        }
+        let trailing = match &job_doc {
+            Some(r) => r.status_short(),
+            None if chat.kind == crate::model::ChatKind::Job => "Running".to_string(),
+            None => crate::ui::sidebar::time_label(chat.last_message_at),
+        };
         row = row
             .child(
                 div()
@@ -776,7 +796,7 @@ fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl
                     .flex_shrink_0()
                     .text_size(px(TEXT_TINY))
                     .text_color(theme.text_faint)
-                    .child(crate::ui::sidebar::time_label(chat.last_message_at)),
+                    .child(trailing),
             );
         if closable {
             row = row.child(
@@ -826,7 +846,10 @@ fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl
                         this.open_chat_menu(ctrl_chat_id.clone(), cx);
                         return;
                     }
-                    if event.click_count >= 2 && this.renaming_tab.as_ref() != Some(&rename_id) {
+                    if event.click_count >= 2
+                        && this.renaming_tab.as_ref() != Some(&rename_id)
+                        && !crate::jobtabs::is_job_chat(&rename_id)
+                    {
                         this.begin_tab_rename(rename_id.clone(), rename_label.clone(), window, cx);
                     }
                 }),

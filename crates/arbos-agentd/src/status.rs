@@ -1413,18 +1413,21 @@ pub(crate) mod tests {
             title: "Fixing the tests".into(),
             kind: "code".into(),
             touches: vec!["path:/work/p/src".into()],
+            attempt: 0,
         };
         let b = JobSpec {
             id: "job-b".into(),
             title: "Renaming a symbol".into(),
             kind: "code".into(),
             touches: vec!["path:/work/p".into()],
+            attempt: 0,
         };
         let c = JobSpec {
             id: "job-c".into(),
             title: "Searching the web".into(),
             kind: "research".into(),
             touches: vec![],
+            attempt: 0,
         };
         agent
             .store

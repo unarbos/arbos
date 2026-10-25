@@ -614,6 +614,31 @@ pub async fn server_avatar_generate(
     generate_into(&state, target, &body.prompt).await
 }
 
+/// Blob slot prefix for a person's own generated previews: `users:{user_id}`.
+pub const USER_BLOB_PREFIX: &str = "users:";
+
+/// `POST /me/avatar/generate {prompt}` — the same for the signed-in person's own profile picture
+/// (Jacob, 2026-10-25: the own-profile avatar opens the agents' picker). The picture lands in
+/// `users:{id}`, which only that person reads, and "Set avatar" sends
+/// `PUT /me/avatar {image_key}`. The person asking pays; 20 a day like every other target.
+pub async fn me_avatar_generate(
+    State(state): State<AppState>,
+    principal: Principal,
+    Json(body): Json<AvatarGenerateBody>,
+) -> Response {
+    let Principal::Device { user_id, .. } = &principal else {
+        return avatar_error(StatusCode::FORBIDDEN, "forbidden", "device token required");
+    };
+    let slot = format!("{USER_BLOB_PREFIX}{user_id}");
+    let target = AvatarTarget {
+        slot: slot.clone(),
+        payer: user_id.clone(),
+        spend_cap_daily: None,
+        meter_id: slot,
+    };
+    generate_into(&state, target, &body.prompt).await
+}
+
 async fn generate_into(state: &AppState, target: AvatarTarget, prompt: &str) -> Response {
     let prompt: String = prompt.trim().chars().take(400).collect();
     if prompt.is_empty() {
@@ -1070,6 +1095,169 @@ mod avatar_generate_tests {
             2,
             "one provider call per picture"
         );
+    }
+
+    /// The own-profile picker (2026-10-25): Generate lands in `users:{me}` (mine to read, nobody
+    /// else's), `PUT /me/avatar {image_key}` makes it the profile picture, and the change fans out
+    /// as `profile_updated` to my other devices and to everyone who shares a chat or a server with
+    /// me — never to the device that made the change, never to a stranger.
+    #[tokio::test]
+    async fn own_profile_generates_into_users_slot_sets_and_fans_out() {
+        use crate::people::tests_support::dm;
+        use axum::http::{header, HeaderMap, HeaderValue};
+        let (base, _seen) = stub(&[]).await;
+        let state = state_against(&base);
+        let (alice, alice_dev) = person(&state, 87);
+        let (bob, bob_dev) = person(&state, 88);
+        let (_carol, carol_dev) = person(&state, 89);
+        let (dave, dave_dev) = person(&state, 90);
+        state.db.grant_credits(&alice, 5.0, "test", "test").unwrap();
+        // Alice's second device (her phone), a DM with Bob, a server with Dave.
+        let alice_phone = arbos_core::ids::ulid();
+        state
+            .db
+            .insert_device(
+                &alice_phone,
+                "phone",
+                &arbos_core::ids::ulid(),
+                &alice,
+                "github",
+            )
+            .unwrap();
+        let _dm = dm(&state, &alice, &bob);
+        let server = crate::matrix::servers_db::Server {
+            id: arbos_core::ids::ulid(),
+            name: "Crew".into(),
+            owner_user_id: alice.clone(),
+            image_key: None,
+            invite_code: "crew8790".into(),
+            space_room_id: None,
+            created_at: arbos_core::ids::now_ms(),
+            is_open: false,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
+        };
+        state.db.insert_server(&server).unwrap();
+        state
+            .db
+            .add_server_member(&server.id, &dave, &alice)
+            .unwrap();
+        let device_id = |p: &Principal| match p {
+            Principal::Device { id, .. } => id.clone(),
+            _ => unreachable!(),
+        };
+        let drain = |dev: &str| {
+            state
+                .db
+                .take_user_pushes(dev)
+                .unwrap()
+                .into_iter()
+                .filter(|(_, kind, _, _)| kind == "profile_updated")
+                .map(|(_, _, payload, _)| payload)
+                .collect::<Vec<Value>>()
+        };
+
+        // Generate: a JPEG in `users:{alice}`, which only Alice's devices read.
+        let r = me_avatar_generate(
+            State(state.clone()),
+            alice_dev.clone(),
+            Json(AvatarGenerateBody {
+                prompt: "a fox".into(),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let key = v["image_key"].as_str().unwrap().to_owned();
+        let slot = format!("{USER_BLOB_PREFIX}{alice}");
+        assert!(matches!(
+            crate::blobs::stored_image(&state, &slot, &key).await,
+            crate::blobs::StoredImage::Image(crate::image_sniff::ImageKind::Jpeg)
+        ));
+        assert!(state.allows(&alice_dev, &slot));
+        assert!(!state.allows(&bob_dev, &slot));
+        assert!(!state.allows(&carol_dev, &slot));
+        assert_eq!(
+            state
+                .db
+                .usage_count_since(&slot, "openai-images", "avatar:", 0)
+                .unwrap(),
+            1
+        );
+        // A box token may not generate for a person.
+        let r = me_avatar_generate(
+            State(state.clone()),
+            Principal::Box {
+                user_id: alice.clone(),
+            },
+            Json(AvatarGenerateBody {
+                prompt: "a fox".into(),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+
+        // Set avatar: `PUT /me/avatar {image_key}` copies the preview into the profile picture.
+        let mut json_headers = HeaderMap::new();
+        json_headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        let put = |key: &str| {
+            let state = state.clone();
+            let who = alice_dev.clone();
+            let headers = json_headers.clone();
+            let body = json!({ "image_key": key }).to_string();
+            async move { crate::signin::put_avatar(State(state), who, headers, body.into()).await }
+        };
+        let r = put("avatar-gen-nothing.jpg").await;
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST, "unknown key");
+        assert!(
+            drain(&alice_phone).is_empty(),
+            "a refused set fans out nothing"
+        );
+        let r = put(&key).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let url = v["avatar_url"].as_str().unwrap().to_owned();
+        assert!(url.contains(&format!("/avatars/{alice}.jpg")), "{url}");
+        let stored = state.db.user(&alice).unwrap().unwrap().avatar_url;
+        assert_eq!(stored.as_deref(), Some(url.as_str()));
+
+        // Fan-out: her phone, Bob (DM) and Dave (server) hear it; her Mac and Carol do not.
+        let phone = drain(&alice_phone);
+        assert_eq!(phone.len(), 1, "{phone:?}");
+        assert_eq!(phone[0]["user_id"], alice);
+        assert_eq!(phone[0]["avatar_url"], url);
+        assert!(
+            drain(&device_id(&alice_dev)).is_empty(),
+            "the caller already knows"
+        );
+        assert_eq!(drain(&device_id(&bob_dev)).len(), 1);
+        assert_eq!(drain(&device_id(&dave_dev)).len(), 1);
+        assert!(
+            drain(&device_id(&carol_dev)).is_empty(),
+            "a stranger hears nothing"
+        );
+        let mut audience = crate::signin::profile_audience(&state, &alice);
+        audience.sort();
+        let mut expected = vec![bob.clone(), dave.clone()];
+        expected.sort();
+        assert_eq!(audience, expected);
+
+        // Reset: back to the GitHub picture, and the same people hear about it.
+        let r = crate::signin::delete_avatar(State(state.clone()), alice_dev.clone()).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let phone = drain(&alice_phone);
+        assert_eq!(phone.len(), 1);
+        assert!(phone[0]["avatar_url"]
+            .as_str()
+            .unwrap()
+            .contains("avatars.githubusercontent.com"));
+        assert_eq!(drain(&device_id(&bob_dev)).len(), 1);
+        assert!(drain(&device_id(&alice_dev)).is_empty());
     }
 
     /// One REAL generation against api.openai.com with `OPENAI_API_KEY` (≈ $0.005). Off unless

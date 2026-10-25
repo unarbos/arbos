@@ -528,19 +528,9 @@ struct AgentProfileView: View {
     // MARK: Library — everything the agent's chats hold
 
     private func librarySections(_ project: Project) -> [PaneSection] {
-        let media = items.filter { $0.kind == .media }
-        let files = items.filter { $0.kind == .file }
-        let voice = items.filter { $0.kind == .voice }
-        let links = items.filter { $0.kind == .link }
-        if media.isEmpty && files.isEmpty && voice.isEmpty && links.isEmpty {
-            return [.empty("Nothing shared in \(project.name)'s chats yet.")]
-        }
-        var out: [PaneSection] = []
-        if !media.isEmpty { out += [.title("Images · \(media.count)"), .grid(media)] }
-        if !files.isEmpty { out += [.title("Files · \(files.count)"), .custom(AnyView(ChatItemsList(items: files, kind: .file, empty: "")))] }
-        if !voice.isEmpty { out += [.title("Voice · \(voice.count)"), .custom(AnyView(ChatItemsList(items: voice, kind: .voice, empty: "")))] }
-        if !links.isEmpty { out += [.title("Links · \(links.count)"), .custom(AnyView(ChatItemsList(items: links, kind: .link, empty: "")))] }
-        return out
+        // One list by day with the long-press preview — the Mac's `profiles/library.rs`
+        // ([feedback library-list-ios-2026-10-25]).
+        LibraryList.sections(items: items, empty: "Nothing shared in \(project.name)'s chats yet.")
     }
 
     // MARK: Computer — the agent's box

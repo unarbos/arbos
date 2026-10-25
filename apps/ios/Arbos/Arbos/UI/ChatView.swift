@@ -388,7 +388,9 @@ private struct ChatSession: View {
     @State private var talkTo: Set<String> = []
 
     private var project: Project? { model.project(projectId) }
-    private var chat: Chat? { model.chat(chatId) }
+    private var chat: Chat? { model.chat(chatId) ?? model.jobTab(chatId) }
+    /// A background job's tab (`JobTabs`): the job's exchange as a chat screen.
+    private var isJobTab: Bool { JobTabs.isJobChat(chatId) }
     private var people: PeopleChat? { model.peopleChat(chatId) }
     private var isPeople: Bool { people != nil }
     /// D88: a server channel rendered with this same view (`projectId == channelSlot`).
@@ -409,6 +411,7 @@ private struct ChatSession: View {
         if let people { return counterpart.map { "@\($0.handle)" } ?? people.title }
         if let chat, chat.isGroup, !chat.title.isEmpty { return chat.title }
         if let chat, chat.isSystem { return "\(project?.name ?? "Arbos") · Projects" }
+        if isJobTab, let chat { return chat.title }
         return project?.name ?? "Arbos"
     }
     /// Everyone on the presence row over the composer, newest first: people
@@ -494,6 +497,7 @@ private struct ChatSession: View {
         if pending.contains(where: Self.isCaptionablePending) { return "Add a description…" }
         if transcribing { return "Transcribing…" }
         if let channel { return "Message #\(channel.name)" }
+        if isJobTab { return "Steer this task" }
         if !isPeople { return needsAnswer ? "Answer \(name)" : "Ask \(name)" }
         if talkingToEveryone { return "Message everyone" }
         if talkToAgents.count > 1 { return "Message \(talkToAgents.count) agents" }
@@ -857,7 +861,8 @@ private struct ChatSession: View {
             TasksSheet(jobs: model.openJobs(chatId),
                        onSteer: { job in steerJob(job) },
                        onStop: { job in model.stopJob(chatId: chatId, jobId: job.id) },
-                       onStopAll: { showTasks = false; stop() })
+                       onStopAll: { showTasks = false; stop() },
+                       onOpen: { job in showTasks = false; model.openJobTab(job.id) })
                 .environment(\.theme, theme)
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
@@ -868,10 +873,12 @@ private struct ChatSession: View {
             // Polls the open chat's jobs while one is live (`AppModel.pollJobsIfNeeded`);
             // cancelled with the view. The sheet lists live work only: nothing open → it
             // closes itself.
+            if isJobTab { model.pollRolloutIfNeeded(chatId: chatId, force: true) }
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(AppModel.jobsPollMs))
                 guard !Task.isCancelled else { break }
                 model.pollJobsIfNeeded(chatId: chatId)
+                if isJobTab { model.pollRolloutIfNeeded(chatId: chatId) }
                 if showTasks, model.openJobs(chatId).isEmpty { showTasks = false }
             }
         }
@@ -998,6 +1005,8 @@ private struct ChatSession: View {
                     case "edit": showProfile = true
                     // `tasks`: the tasks sheet over the presence row (needs `ARBOS_FIXTURE_JOBS`).
                     case "tasks": if !model.openJobs(chatId).isEmpty { showTasks = true }
+                    // `jobtab`: the newest job's tab (needs `ARBOS_FIXTURE_JOBS`).
+                    case "jobtab": model.openNewestJobTab(from: chatId)
                     case "userprofile": if let c = counterpart { model.showProfile(.user(ProfilePerson(c))) }
                     // `addmembers`: the group pane opens its Add members sheet on appear.
                     case "groupprofile", "addmembers", "removemember": model.showProfile(.group(chatId: chatId, projectId: isPeople ? nil : projectId))
@@ -1252,6 +1261,12 @@ private struct ChatSession: View {
                                     .font(.system(size: Theme.body, weight: .semibold))
                                     .foregroundStyle(theme.text)
                                     .lineLimit(1)
+                            } else if people.isGroup, people.isNeutralAvatar {
+                                NeutralAvatar(name: people.title, size: Theme.avatar)
+                                Text(people.title)
+                                    .font(.system(size: Theme.body, weight: .semibold))
+                                    .foregroundStyle(theme.text)
+                                    .lineLimit(1)
                             } else if people.isGroup, let leaf = people.leafPick, LeafAvatarsFlag.shared.on {
                                 // D92 amendment: the leaf picked on the Create screen.
                                 LeafAvatar(pick: leaf, size: Theme.avatar)
@@ -1333,12 +1348,39 @@ private struct ChatSession: View {
     }
 
     /// Jump to the latest row and resume stick-to-bottom.
+    ///
+    /// From deep in history — the window slid past the tail (`windowSkipEnd > 0`) —
+    /// the window is re-cut to the newest `windowInitial` rows, the slice a chat
+    /// opens on, and the scroll lands at once: rebuilding the full 360-row window
+    /// and then animating through it took ~0.75 s (Debug simulator) on a 1 700-row
+    /// group ([feedback jump-to-latest-instant-ios-2026-10-25]; the Mac's ↓ had the
+    /// same shape of bug). Within the tail window the short animated hop stays.
     private func jumpToLatest() {
         pinnedToBottom = true
         awayFromBottom = false
         newBelowCount = 0
-        resetWindowToTail()
-        withAnimation(.easeOut(duration: 0.3)) { scroller?.scrollTo("bottom", anchor: .bottom) }
+        let landing = Self.windowAfterJump(count: windowCount, skipEnd: windowSkipEnd)
+        if landing.count == windowCount, landing.skipEnd == windowSkipEnd {
+            withAnimation(.easeOut(duration: 0.3)) { scroller?.scrollTo("bottom", anchor: .bottom) }
+            return
+        }
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            windowSkipEnd = landing.skipEnd
+            windowCount = landing.count
+        }
+        // The first scrollTo runs before layout knows the re-cut content's size.
+        scroller?.scrollTo("bottom", anchor: .bottom)
+        DispatchQueue.main.async { scroller?.scrollTo("bottom", anchor: .bottom) }
+    }
+
+    /// The window ↓ lands on. Unchanged while the window still ends at the tail
+    /// (a short animated hop over rows that are already built); once it has slid
+    /// into history, the newest `windowInitial` rows — one opening page to build,
+    /// not `windowMax` bubbles — and the reader grows it again by scrolling up.
+    static func windowAfterJump(count: Int, skipEnd: Int) -> (count: Int, skipEnd: Int) {
+        skipEnd > 0 ? (windowInitial, 0) : (min(count, windowMax), 0)
     }
 
     /// After a send: stick to the end now and again once the optimistic row has height.
@@ -1665,6 +1707,55 @@ private struct ChatSession: View {
             withAnimation(.easeInOut(duration: 0.6)) { scroller?.scrollTo("bottom", anchor: .bottom) }
             try? await Task.sleep(for: .seconds(2))
             PerfLog.mark("phase scroll end", ms: 0)
+        }
+        if drive.contains("jump") {
+            // Deep into history (the window has slid past its cap, or the top is
+            // reached), then the ↓ button's own action; "stable" = at the bottom
+            // and the scroll geometry quiet for 250 ms. Bubble bodies built on the
+            // way come out of the counters (`rowBody`).
+            for _ in 0..<100 where rows.isEmpty || scroller == nil {
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+            try? await Task.sleep(for: .seconds(2))
+            var hops = 0
+            while hops < 80 {
+                let shown = windowedRows
+                guard let proxy = scroller, let topId = shown.first?.id else { break }
+                let target = shown[max(0, shown.count - 1 - (hops + 1) * 12)].id
+                withAnimation(.easeInOut(duration: 0.35)) { proxy.scrollTo(target, anchor: .top) }
+                try? await Task.sleep(for: .milliseconds(500))
+                hops += 1
+                if windowSkipEnd >= 300 || (target == topId && windowCount + windowSkipEnd >= visibleRows.count) { break }
+            }
+            if DebugHooks.perfDrive.contains("deep"), windowSkipEnd < 300 {
+                // A reader 600 rows into history after the window slid: the state
+                // `growWindow` leaves behind, set directly so a run stays short.
+                var t = Transaction()
+                t.disablesAnimations = true
+                withTransaction(t) {
+                    windowSkipEnd = min(600, max(0, visibleRows.count - Self.windowMax - 1))
+                    windowCount = Self.windowMax
+                }
+                try? await Task.sleep(for: .milliseconds(600))
+                if let first = windowedRows.first?.id { scroller?.scrollTo(first, anchor: .top) }
+            }
+            try? await Task.sleep(for: .milliseconds(1500))
+            _ = PerfCounters.drain()
+            PerfLog.mark("jump tap skipEnd=\(windowSkipEnd) window=\(windowCount) rows=\(rows.count) away=\(awayFromBottom)", ms: 0)
+            let t0 = Date()
+            PerfDriveProbe.lastScrollGeometry = t0
+            jumpToLatest()
+            var stableAt: Date?
+            for _ in 0..<400 {
+                try? await Task.sleep(for: .milliseconds(16))
+                let last = PerfDriveProbe.lastScrollGeometry
+                if !awayFromBottom, Date().timeIntervalSince(last) >= 0.25 {
+                    stableAt = last
+                    break
+                }
+            }
+            let ms = (stableAt ?? Date()).timeIntervalSince(t0) * 1000
+            PerfLog.mark("jump stable\(stableAt == nil ? " (timeout)" : "") skipEnd=\(windowSkipEnd) window=\(windowCount) \(PerfCounters.drain())", ms: ms)
         }
         if drive.contains("type") {
             PerfLog.mark("phase type begin", ms: 0)
@@ -2033,11 +2124,14 @@ private struct ChatSession: View {
                 // open in this chat (duplex §2.4); a tap opens the sheet.
                 let jobs = model.openJobs(chatId)
                 let openTasks: (() -> Void)? = jobs.isEmpty ? nil : { showTasks = true }
+                // The words link to the newest job's tab (not inside a job tab); the chip opens the list.
+                let openNewest: (() -> Void)? = (jobs.isEmpty || isJobTab) ? nil : { model.openNewestJobTab(from: chatId) }
                 PresenceRow(participants: participants,
                             detail: model.currentActivity(chatId),
                             queued: false,
                             taskCount: jobs.count,
-                            onTasks: openTasks)
+                            onTasks: openTasks,
+                            onWords: openNewest)
                     .padding(.horizontal, 16)
                     .padding(.bottom, 4)
             }
@@ -3094,6 +3188,7 @@ private struct AwayFromBottomReporter: ViewModifier {
             } action: { old, new in
                 let grew = new.height > old.height + 0.5
                 #if DEBUG
+                PerfDriveProbe.lastScrollGeometry = Date()
                 if SendTrace.recent {
                     SendTrace.mark("scroll-geometry", detail: "grew=\(grew) distance=\(Int(new.distance)) pinned=\(pinned)", once: false)
                     // The "bottom" spacer and padding sit ~60 pt under the last bubble.

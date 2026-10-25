@@ -5,6 +5,7 @@ mod audio;
 mod auth;
 mod calls;
 mod image_picker;
+mod jobtabs;
 mod model;
 mod onboarding;
 mod palette;

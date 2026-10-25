@@ -134,6 +134,8 @@ struct MediaViewer: View {
     let onClose: () -> Void
     /// Rig: open with the Forward sheet already up (`ARBOS_SHOW=media-forward`).
     var openForward = false
+    /// The Library row's "Save": open and download at once (Photos / share sheet).
+    var openDownload = false
 
     /// Fades the chrome and backdrop while a swipe-down is in flight (0…1).
     @State private var dismissProgress: CGFloat = 0
@@ -170,7 +172,10 @@ struct MediaViewer: View {
         }
         .statusBarHidden(false)
         .preferredColorScheme(.dark)
-        .onAppear { if openForward { showForward = true } }
+        .onAppear {
+            if openForward { showForward = true }
+            if openDownload { Task { await download() } }
+        }
         .sheet(isPresented: $showForward) {
             if let item {
                 ForwardSheet(fromName: item.by, attachmentNote: true) { target in
@@ -685,7 +690,7 @@ struct ForwardSheet: View {
             AgentAvatar(project: p, theme: theme, size: 44, still: true)
         case .people(let c):
             if c.isGroup {
-                AvatarCluster(members: c.humans, size: 44, leaf: c.leafPick)
+                AvatarCluster(members: c.humans, size: 44, leaf: c.leafPick, neutralName: c.isNeutralAvatar ? c.title : nil)
             } else {
                 let other = c.counterpart(me: model.user?.id)
                 PersonAvatar(url: other?.avatarUrl, handle: other?.handle ?? "?", size: 44, name: other?.name, id: other?.id, colorIndex: other?.avatarColorIndex)

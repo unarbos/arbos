@@ -545,6 +545,7 @@ final class CoreFixturesTests: XCTestCase {
             "push_secret_request_secret.json",
             "push_secrets_paused.json",
             "push_secret_expiring.json",
+            "push_profile_updated.json",
         ]
         for name in names {
             let item = try XCTUnwrap(PushItem.parse(try apiFixtureJSON(name)), name)
@@ -577,6 +578,11 @@ final class CoreFixturesTests: XCTestCase {
         XCTAssertEqual(s.request_id, "req_secret_fixture")
         XCTAssertEqual(s.host, "api.stripe.com")
         XCTAssertNil(s.vault_id)
+
+        let profile = try XCTUnwrap(PushItem.parse(try apiFixtureJSON("push_profile_updated.json")))
+        guard case .profileUpdated(let p) = profile.event else { return XCTFail("profile_updated") }
+        XCTAssertEqual(p.user_id, "gh_201")
+        XCTAssertEqual(p.avatar_url, "https://relay.example/avatars/gh_201.jpg?v=1700000000000")
 
         XCTAssertNil(PushItem.parse(try apiFixtureJSON("push_unknown_kind.json")))
         XCTAssertNil(PushItem.parse([

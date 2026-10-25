@@ -14,7 +14,6 @@
 // Page #FCFCFC / #141414, cards = the assistant-bubble grey, our circular back
 // button, 17 pt labels, muted monochrome icon tiles, hairlines inset past the tile.
 
-import PhotosUI
 import SwiftUI
 import UIKit
 import UserNotifications
@@ -28,10 +27,9 @@ struct SettingsView: View {
     @State private var confirmUnpair = false
     /// Connector errors — the root `notice` alert sits under this sheet and looks like a silent fail.
     @State private var connectorError: String?
-    @State private var avatarItem: PhotosPickerItem?
-    @State private var avatarBusy = false
-    /// Image waiting in Move and Scale before `PUT /me/avatar`.
-    @State private var avatarCrop: AvatarCropPayload?
+    /// The avatar picker (Generate | Upload, Reset) over my picture — the agents' sheet
+    /// (Jacob, 2026-10-25); `ARBOS_SETTINGS_PAGE=avatar[-generate|-upload]` opens it (rig).
+    @State private var showAvatarPicker: AvatarPickerTab?
     @State private var showProfileEdit = false
     /// Profile | Settings — the same pill as the person and group panes.
     /// Settings is the landing tab; `ARBOS_SETTINGS_PAGE=profile` lands on Profile.
@@ -99,6 +97,11 @@ struct SettingsView: View {
                 Task { await model.refreshSecrets() }
                 Task { await model.refreshDevices() }
                 Task { await model.refreshGoals() }
+                if let page = DebugHooks.settingsPage, page.hasPrefix("avatar") {
+                    tab = "Profile"
+                    let initial: AvatarPickerTab = page.hasSuffix("upload") ? .upload : .generate
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { showAvatarPicker = initial }
+                }
             }
             // After Google OAuth in Safari, refresh so "Needs sign-in" flips to Connected.
             .onChange(of: scenePhase) { _, phase in
@@ -126,24 +129,8 @@ struct SettingsView: View {
             } message: {
                 Text(connectorError ?? "")
             }
-            .onChange(of: avatarItem) { _, item in
-                guard let item else { return }
-                Task { await beginAvatarCrop(item) }
-            }
-            .sheet(item: $avatarCrop) { payload in
-                AvatarCropSheet(
-                    image: payload.image,
-                    onCancel: { avatarCrop = nil },
-                    onUse: { cropped in
-                        avatarCrop = nil
-                        Task { await uploadAvatar(cropped) }
-                    }
-                )
-                .environment(\.theme, theme)
-                .presentationDetents([.large])
-                .presentationDragIndicator(.visible)
-                .presentationBackground(theme.bg)
-                .preferredColorScheme(theme.isDark ? .dark : .light)
+            .sheet(item: $showAvatarPicker) { initial in
+                AvatarPickerSheet(target: .me, initialTab: initial).environmentObject(model).environment(\.theme, theme)
             }
             .navigationDestination(isPresented: $showAppearancePage) { AppearancePage() }
             .navigationDestination(isPresented: $showTextSizePage) { TextSizePage() }
@@ -266,7 +253,7 @@ struct SettingsView: View {
     /// Remove picture when one was uploaded; the Mac me pane's Profile tab.
     private var profileSections: [PaneSection] {
         let canEdit = model.user != nil && !model.isFixture
-        var rows: [AnyView] = [
+        let rows: [AnyView] = [
             AnyView(Button { editProfile() } label: {
                 PaneRow(title: "Name", value: model.user?.name ?? model.user?.login ?? "Arbos", valueTint: theme.text)
             }
@@ -278,13 +265,6 @@ struct SettingsView: View {
             .buttonStyle(.plain)
             .disabled(!canEdit)),
         ]
-        if model.hasCustomAvatar {
-            rows.append(AnyView(PaneDangerRow(title: "Remove picture") {
-                avatarBusy = true
-                Task { _ = await model.removeUserAvatar(); avatarBusy = false }
-            }
-            .disabled(avatarBusy)))
-        }
         return [
             .card(rows),
             .footnote("Your name, handle and picture are what other people and their agents see, here and on the Mac. Signed in with GitHub."),
@@ -298,33 +278,18 @@ struct SettingsView: View {
 
     // MARK: Profile picture
 
-    /// The hero picture with the crayon: tap to pick a new one.
+    /// The hero picture with the crayon: tap → the avatar picker (Generate | Upload, Reset),
+    /// the same sheet an agent's picture opens.
     private var profilePicture: some View {
-        PhotosPicker(selection: $avatarItem, matching: .images) {
+        Button { showAvatarPicker = .generate } label: {
             PersonAvatar(url: model.user?.avatarUrl, handle: model.user?.login ?? "?", size: PaneKit.heroAvatar,
                          name: model.user?.name, id: model.user?.id,
                          colorIndex: model.user?.avatarColorIndexEffective)
-                .opacity(avatarBusy ? 0.55 : 1)
-                .paneCrayon(model.user != nil && !model.isFixture)
+                .paneCrayon(model.user != nil)
         }
         .buttonStyle(.plain)
-        .disabled(model.user == nil || avatarBusy || model.isFixture)
+        .disabled(model.user == nil)
         .accessibilityLabel("Change profile picture")
-    }
-
-    /// Load the pick, then open Move and Scale so the user frames the circle.
-    private func beginAvatarCrop(_ item: PhotosPickerItem) async {
-        defer { avatarItem = nil }
-        guard let data = try? await item.loadTransferable(type: Data.self),
-              let img = UIImage(data: data) else { return }
-        avatarCrop = AvatarCropPayload(image: img)
-    }
-
-    private func uploadAvatar(_ image: UIImage) async {
-        avatarBusy = true
-        defer { avatarBusy = false }
-        guard let jpeg = image.jpegData(compressionQuality: 0.85) else { return }
-        _ = await model.setUserAvatar(jpeg: jpeg)
     }
 
     // MARK: Row summaries
@@ -392,149 +357,6 @@ struct SettingsView: View {
     }
 }
 
-/// One picked photo waiting for Move and Scale (sheet `item:` needs `Identifiable`).
-private struct AvatarCropPayload: Identifiable {
-    let id = UUID()
-    let image: UIImage
-}
-
-/// Pinch and drag to frame the picture in the profile circle, then Use.
-private struct AvatarCropSheet: View {
-    let image: UIImage
-    let onCancel: () -> Void
-    let onUse: (UIImage) -> Void
-    @Environment(\.theme) private var theme
-
-    @State private var scale: CGFloat = 1
-    @State private var baseScale: CGFloat = 1
-    @State private var offset: CGSize = .zero
-    @State private var baseOffset: CGSize = .zero
-    @State private var hole: CGFloat = 280
-
-    private let outputSide: CGFloat = 512
-
-    var body: some View {
-        NavigationStack {
-            GeometryReader { geo in
-                let nextHole = min(min(geo.size.width, geo.size.height) - 48, 300)
-                let base = fittedSize(for: hole)
-                ZStack {
-                    theme.bg.ignoresSafeArea()
-                    Image(uiImage: image)
-                        .resizable()
-                        .frame(width: base.width * scale, height: base.height * scale)
-                        .offset(offset)
-                        .frame(width: geo.size.width, height: geo.size.height)
-                        .contentShape(Rectangle())
-                        .gesture(panGesture.simultaneously(with: magnifyGesture))
-                        .clipped()
-                    // Dim outside the circle so the profile crop is obvious.
-                    Rectangle()
-                        .fill(Color.black.opacity(0.55))
-                        .frame(width: geo.size.width, height: geo.size.height)
-                        .overlay {
-                            Circle()
-                                .frame(width: hole, height: hole)
-                                .blendMode(.destinationOut)
-                        }
-                        .compositingGroup()
-                        .allowsHitTesting(false)
-                    Circle()
-                        .strokeBorder(Color.white.opacity(0.85), lineWidth: 1)
-                        .frame(width: hole, height: hole)
-                        .allowsHitTesting(false)
-                }
-                .onAppear { hole = nextHole }
-                .onChange(of: nextHole) { _, value in hole = value }
-            }
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel", action: onCancel).foregroundStyle(theme.text)
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Use") { onUse(render()) }
-                        .font(theme.font(Theme.small, weight: .semibold))
-                        .foregroundStyle(theme.text)
-                }
-            }
-            .navigationTitle("Move and Scale")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(theme.bg, for: .navigationBar)
-            .toolbarBackground(.visible, for: .navigationBar)
-        }
-    }
-
-    /// At scale 1 the shorter side fills the hole (cover the circle).
-    private func fittedSize(for hole: CGFloat) -> CGSize {
-        let s = image.size
-        guard s.width > 0, s.height > 0 else { return CGSize(width: hole, height: hole) }
-        if s.width >= s.height {
-            return CGSize(width: hole * (s.width / s.height), height: hole)
-        }
-        return CGSize(width: hole, height: hole * (s.height / s.width))
-    }
-
-    private var magnifyGesture: some Gesture {
-        MagnifyGesture()
-            .onChanged { value in
-                scale = max(1, baseScale * value.magnification)
-            }
-            .onEnded { _ in
-                baseScale = scale
-                clampOffset()
-                baseOffset = offset
-            }
-    }
-
-    private var panGesture: some Gesture {
-        DragGesture()
-            .onChanged { value in
-                offset = CGSize(
-                    width: baseOffset.width + value.translation.width,
-                    height: baseOffset.height + value.translation.height
-                )
-            }
-            .onEnded { _ in
-                clampOffset()
-                baseOffset = offset
-            }
-    }
-
-    /// Keep the circle covered: no empty edges inside the hole.
-    private func clampOffset() {
-        let base = fittedSize(for: hole)
-        let w = base.width * scale
-        let h = base.height * scale
-        let maxX = max(0, (w - hole) / 2)
-        let maxY = max(0, (h - hole) / 2)
-        offset.width = min(max(offset.width, -maxX), maxX)
-        offset.height = min(max(offset.height, -maxY), maxY)
-    }
-
-    /// Rasterise the circle's square into a 512×512 upload image.
-    private func render() -> UIImage {
-        let base = fittedSize(for: hole)
-        let display = CGSize(width: base.width * scale, height: base.height * scale)
-        // Crop square centred in the view; image centre sits at `offset` from that centre.
-        let origin = CGPoint(
-            x: display.width / 2 - offset.width - hole / 2,
-            y: display.height / 2 - offset.height - hole / 2
-        )
-        let sx = image.size.width / max(display.width, 1)
-        let sy = image.size.height / max(display.height, 1)
-        let crop = CGRect(x: origin.x * sx, y: origin.y * sy, width: hole * sx, height: hole * sy)
-        let renderer = UIGraphicsImageRenderer(size: CGSize(width: outputSide, height: outputSide))
-        return renderer.image { _ in
-            let dest = CGRect(
-                x: -crop.origin.x / max(crop.width, 1) * outputSide,
-                y: -crop.origin.y / max(crop.height, 1) * outputSide,
-                width: image.size.width / max(crop.width, 1) * outputSide,
-                height: image.size.height / max(crop.height, 1) * outputSide
-            )
-            image.draw(in: dest)
-        }
-    }
-}
 
 // MARK: - Building blocks (Apple structure, Arbos skin)
 

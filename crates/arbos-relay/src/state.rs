@@ -345,6 +345,16 @@ impl AppState {
                 crate::auth::Principal::Box { .. } => false,
             };
         }
+        // A person's own picture slot (`users:{id}`): the generated previews of the avatar
+        // picker's Generate tab. Only that person's devices (and the admin) read it; `PUT
+        // /me/avatar {image_key}` is what makes one of them the profile picture.
+        if let Some(user_id) = project_id.strip_prefix(crate::images::USER_BLOB_PREFIX) {
+            return match principal {
+                crate::auth::Principal::Device { user_id: me, .. } => me == user_id,
+                crate::auth::Principal::Admin => true,
+                crate::auth::Principal::Box { .. } => false,
+            };
+        }
         match self.user_of(project_id) {
             Some(u) if principal.can_access_project(&u) => true,
             // Projects together (D72 step 3): a person the owner invited drives the project too.

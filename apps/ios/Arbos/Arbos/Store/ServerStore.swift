@@ -218,9 +218,17 @@ extension AppModel {
     }
 
     /// Rule 8: "Server" in the `+` menu → `POST /servers {name}`, then its channel list.
-    func createServer(name: String, leaf: LeafPick? = nil) async -> Bool {
+    func createServer(name: String, leaf: LeafPick? = nil, picture: DraftPicture? = nil) async -> Bool {
         do {
-            let s = try await relay.createServer(name: name, leaf: leaf)
+            var s = try await relay.createServer(name: name, leaf: leaf)
+            if let picture, let jpeg = await draftJpeg(picture) {
+                let key = "server-\(Int(Date().timeIntervalSince1970 * 1000)).jpg"
+                if (try? await relay.putBlob(projectId: "servers:\(s.id)", key: key, mime: "image/jpeg", data: jpeg)) != nil,
+                   (try? await relay.patchServer(s.id, imageKey: key)) != nil,
+                   let fresh = try? await relay.server(s.id) {
+                    s = fresh
+                }
+            }
             upsert(server: s)
             open(server: s)
             await startMatrixIfNeeded()

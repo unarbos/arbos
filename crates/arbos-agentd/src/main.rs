@@ -18,6 +18,7 @@ mod http;
 mod identity;
 mod inspect;
 mod isolation;
+mod jobs_view;
 mod llm;
 mod local;
 mod mcp;

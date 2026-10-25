@@ -20,10 +20,10 @@ use crate::model::{
 };
 use crate::model::{
     new_id, now_ms, Attachment, AttachmentKind, BoxReport, BoxState, ChannelSel, ChannelsView,
-    Chat, ChatKind, ConnectorsView, DevicesView, Effort, Id, Job, Link, LinkState, LocalView,
-    Machine, Message, MessageStatus, NewSecret, Part, Project, ProjectDocView, ProjectSecrets,
-    QuestionState, Role, Routine, RoutineRun, RoutineTrigger, SecretDirector, SecretScope,
-    SecretsView, ServerInfo, Skill, StatusKind,
+    Chat, ChatKind, ConnectorsView, DevicesView, Effort, Id, Job, JobRollout, Link, LinkState,
+    LocalView, Machine, Message, MessageStatus, NewSecret, Part, Project, ProjectDocView,
+    ProjectSecrets, QuestionState, Role, Routine, RoutineRun, RoutineTrigger, SecretDirector,
+    SecretScope, SecretsView, ServerInfo, Skill, StatusKind,
 };
 use crate::palette;
 use crate::search;
@@ -38,7 +38,7 @@ const NOTIFY_TICK_MS: u64 = 5_000;
 /// How often the open chat's background jobs are polled (`GET /projects/{id}`
 /// → `activity.jobs[]`) while a job row is live or the drawer lists one —
 /// the design's "chip updates on the next poll" (duplex §2.4, stop ≤ 3 s).
-pub const JOBS_POLL_MS: u64 = 1_500;
+pub const JOBS_POLL_MS: u64 = 1_000;
 /// A link state must hold this long before the header pill shows it.
 pub const LINK_PILL_GRACE_MS: u64 = 1_200;
 /// The ring card and its sound give up after this long.
@@ -370,6 +370,16 @@ pub struct ChatUi {
 /// Rows per history page the shared Matrix client fetches (`arbos_matrix::client::HISTORY_PAGE`).
 const CHANNEL_PAGE: usize = 50;
 
+/// What the Create group screen (step 1) hands to the member picker (step 2).
+#[derive(Clone, Debug, PartialEq)]
+pub struct GroupDraft {
+    pub title: String,
+    /// The leaf pair to store: the neutral pair since 2026-10-25 (no leaf grid on the sheet).
+    pub leaf: Option<crate::ui::avatars::LeafPick>,
+    /// The sheet's uploaded / generated picture, if any.
+    pub picture: Option<crate::sync::DraftPicture>,
+}
+
 /// The relay's answer to the avatar picker's Generate tab.
 #[derive(Clone, Debug)]
 pub struct AvatarGenerated {
@@ -391,8 +401,8 @@ pub struct AppState {
     pub new_chat_open: bool,
     /// New Message → New group: multi-select people (and optional agents).
     pub new_group_open: bool,
-    /// D93 Create group step 1 → 2: the name and leaf picked, sent with the members on Create.
-    pub new_group_draft: Option<(String, crate::ui::avatars::LeafPick)>,
+    /// D93 Create group step 1 → 2: the name and picture chosen, sent with the members on Create.
+    pub new_group_draft: Option<GroupDraft>,
     pub new_group_picked: Vec<Person>,
     pub new_group_agents: Vec<Id>,
     pub people_query: String,
@@ -548,6 +558,16 @@ pub struct AppState {
     pub jobs: HashMap<Id, Vec<Job>>,
     /// The tasks drawer is open over the presence row of this chat.
     pub tasks_open: Option<Id>,
+    /// Each job's exchange as last fetched (`GET /projects/{id}/jobs/{jobId}`), by job id —
+    /// the job tab's transcript is synthesised from it (`jobtabs::messages`).
+    pub rollouts: HashMap<String, JobRollout>,
+    /// Job tabs per agent project (`jobtabs`): one `job:<id>` chat per job the agent started,
+    /// kept until the user closes it.
+    pub job_tabs: HashMap<Id, Vec<Chat>>,
+    /// Job tabs the user closed: not re-opened by the next listing (a link re-opens them).
+    pub closed_job_tabs: HashSet<String>,
+    /// Steers typed in a job tab the box has not echoed yet, by job id.
+    pub pending_steers: HashMap<String, Vec<Message>>,
     /// Run history per routine, newest first.
     pub routine_runs: HashMap<Id, Vec<RoutineRun>>,
     /// System notifications (D49); the Shell flips `window_active`.
@@ -572,6 +592,9 @@ pub struct AppState {
         crate::ui::avatar_picker::Target,
         crate::ui::avatar_picker::Tab,
     )>,
+    /// Rig: a prompt the shell types into the opened picker's Generate field and runs at once
+    /// (`ARBOS_OPEN_PROFILE=me:avatar:generate=<prompt>`), so a shot can show prompt → result.
+    pub avatar_rig_prompt: Option<String>,
     /// The Generate tab's answer, for the shell's open picker.
     pub avatar_generated: Option<AvatarGenerated>,
     /// Agent page: which settings row (model / reasoning / voice) is dropped down.
@@ -958,6 +981,10 @@ impl AppState {
             box_report: None,
             jobs: HashMap::new(),
             tasks_open: None,
+            rollouts: HashMap::new(),
+            job_tabs: HashMap::new(),
+            closed_job_tabs: HashSet::new(),
+            pending_steers: HashMap::new(),
             routine_runs: HashMap::new(),
             notifier: Notifier::new(),
             window_active: true,
@@ -967,6 +994,7 @@ impl AppState {
             profile_stack: Vec::new(),
             profile_opened: 0,
             avatar_picker_request: None,
+            avatar_rig_prompt: None,
             avatar_generated: None,
             agent_pick: None,
             profile_editing_description: false,
@@ -1732,6 +1760,7 @@ impl AppState {
                             name: "Home".into(),
                             avatar_color_index: None,
                             leaf: None,
+                            picture: None,
                             source_project_id: None,
                             description: None,
                             color: None,
@@ -2003,8 +2032,31 @@ impl AppState {
                                     self.rig_unblock = Some(person);
                                 }
                             }
-                        } else if spec == "me" {
+                        } else if let Some(rest) = spec.strip_prefix("me") {
                             self.open_profile(ProfilePage::Me, cx);
+                            // `me:avatar[:generate[=<prompt>]|:upload]` — the avatar picker for
+                            // my own picture (Generate | Upload, Reset); with `=<prompt>` the
+                            // shell types the prompt and presses Generate.
+                            if let Some(tab) = rest.strip_prefix(":avatar") {
+                                use crate::ui::avatar_picker::{Tab, Target};
+                                let tab = match tab {
+                                    ":upload" => Tab::Upload,
+                                    t => {
+                                        if let Some(prompt) = t.strip_prefix(":generate=") {
+                                            if !prompt.trim().is_empty() {
+                                                self.avatar_rig_prompt = Some(prompt.to_owned());
+                                            }
+                                        }
+                                        Tab::Generate
+                                    }
+                                };
+                                let me = self
+                                    .account
+                                    .as_ref()
+                                    .map(|a| a.id.clone())
+                                    .unwrap_or_default();
+                                self.open_avatar_picker(Target::Me(me), tab, cx);
+                            }
                         }
                     } else if std::env::var_os("ARBOS_OPEN_SETTINGS").is_some() {
                         self.open_profile(ProfilePage::Me, cx);
@@ -2370,7 +2422,34 @@ impl AppState {
                         self.tasks_open = Some(chat);
                     }
                 }
+                // Every listed job has its tab (`jobtabs`).
+                for project_id in self.jobs.keys().cloned().collect::<Vec<_>>() {
+                    self.sync_job_tabs(&project_id);
+                }
+                // Rig: `ARBOS_RIG_JOBTAB=open` selects the newest job's tab once.
+                if self.rollouts.is_empty()
+                    && std::env::var("ARBOS_RIG_JOBTAB").is_ok_and(|v| v == "open")
+                {
+                    if let Some(chat) = self
+                        .active_chat_id()
+                        .filter(|c| !self.open_jobs(c).is_empty())
+                    {
+                        self.open_newest_job_tab(chat, cx);
+                    }
+                }
                 cx.notify();
+            }
+            SyncEvent::JobRollout {
+                project_id,
+                job_id,
+                rollout,
+            } => {
+                // A document for a job no listing named yet still gets its tab.
+                if self.job_project(&job_id).is_none() && !rollout.unavailable {
+                    let tab = crate::jobtabs::tab(&project_id, &job_id, &rollout.title, now_ms());
+                    self.job_tabs.entry(project_id).or_default().push(tab);
+                }
+                self.apply_rollout(&job_id, rollout, cx);
             }
             SyncEvent::RoutineRuns { routine_id, runs } => {
                 self.routine_runs.insert(routine_id, runs);
@@ -2506,10 +2585,12 @@ impl AppState {
         let primary = self.primary_chat(project_id);
         if self.multi_chat {
             // Archived chats leave the strip; the pinned "Main" chat never does.
+            // Job tabs (`jobtabs`) follow the agent's chats.
             return self
                 .tabs(project_id)
                 .iter()
                 .filter(|c| c.is_pinned || !self.archived_chats.contains(&c.id))
+                .chain(self.job_tabs.get(project_id).into_iter().flatten())
                 .collect();
         }
         let mut out: Vec<&Chat> = primary.into_iter().collect();
@@ -2710,7 +2791,10 @@ impl AppState {
     pub fn active_chat(&self) -> Option<&Chat> {
         let project_id = self.selected_project.as_deref()?;
         let chat_id = self.active_tab.get(project_id)?;
-        self.tabs(project_id).iter().find(|c| &c.id == chat_id)
+        self.tabs(project_id)
+            .iter()
+            .chain(self.job_tabs.get(project_id).into_iter().flatten())
+            .find(|c| &c.id == chat_id)
     }
 
     /// The chat the centre shows: a channel's room id when one is open (D88), else the
@@ -2726,6 +2810,7 @@ impl AppState {
     pub fn space_of_chat(&self, chat_id: &str) -> Id {
         self.chats
             .iter()
+            .chain(self.job_tabs.iter())
             .find(|(_, tabs)| tabs.iter().any(|c| c.id == chat_id))
             .map(|(space, _)| space.clone())
             .unwrap_or_else(|| chat_id.to_owned())
@@ -3382,10 +3467,13 @@ impl AppState {
             chat.unread_count = 0;
         }
         self.sync_badge();
-        self.command(ClientCommand::MarkRead {
-            chat_id: chat_id.clone(),
-        });
-        self.command(ClientCommand::OpenChat { chat_id });
+        // A job tab is client-side (`jobtabs`): nothing for the relay to open or mark.
+        if !crate::jobtabs::is_job_chat(&chat_id) {
+            self.command(ClientCommand::MarkRead {
+                chat_id: chat_id.clone(),
+            });
+            self.command(ClientCommand::OpenChat { chat_id });
+        }
         self.sync_focus();
         cx.notify();
     }
@@ -3458,6 +3546,9 @@ impl AppState {
     pub fn close_tab(&mut self, chat_id: Id, cx: &mut Context<Self>) -> bool {
         if !self.multi_chat {
             return false;
+        }
+        if crate::jobtabs::is_job_chat(&chat_id) {
+            return self.close_job_tab(&chat_id, cx);
         }
         let Some(project_id) = self.project_of_chat(&chat_id).map(|p| p.id.clone()) else {
             return false;
@@ -3561,6 +3652,10 @@ impl AppState {
         let Some(chat_id) = self.active_chat_id() else {
             return;
         };
+        if crate::jobtabs::is_job_chat(&chat_id) {
+            self.steer_from_job_tab(&chat_id, text, cx);
+            return;
+        }
         if self.selected_channel.is_some() {
             self.send_to_channel(
                 chat_id,
@@ -3945,6 +4040,7 @@ impl AppState {
         &mut self,
         name: String,
         leaf: Option<crate::ui::avatars::LeafPick>,
+        picture: Option<crate::sync::DraftPicture>,
         cx: &mut Context<Self>,
     ) {
         let name = name.trim().chars().take(64).collect::<String>();
@@ -3953,7 +4049,11 @@ impl AppState {
         }
         self.server_busy = true;
         self.server_error = None;
-        self.command(ClientCommand::ServerCreate { name, leaf });
+        self.command(ClientCommand::ServerCreate {
+            name,
+            leaf,
+            picture,
+        });
         cx.notify();
     }
 
@@ -4887,6 +4987,13 @@ impl AppState {
 
     pub fn stop(&mut self, cx: &mut Context<Self>) {
         if let Some(chat_id) = self.active_chat_id() {
+            if let Some(job_id) = crate::jobtabs::job_id(&chat_id).map(str::to_owned) {
+                // A job tab's Stop halts that job only (`stop { jobId }`).
+                if let Some(parent) = self.job_parent_chat(&job_id) {
+                    self.stop_job(parent, &job_id, cx);
+                }
+                return;
+            }
             self.stop_all_jobs(&chat_id);
             self.command(ClientCommand::Stop { chat_id });
         }
@@ -4900,10 +5007,21 @@ impl AppState {
     /// runs, or when every job row of the chat has closed (the box finished them;
     /// the next poll confirms).
     pub fn open_jobs(&self, chat_id: &str) -> Vec<Job> {
-        let Some(project_id) = self.project_of_chat(chat_id).map(|p| p.id.clone()) else {
+        let Some(project) = self.project_of_chat(chat_id) else {
             return Vec::new();
         };
-        let Some(jobs) = self.jobs.get(&project_id) else {
+        if project.is_people() {
+            // A group / DM: the jobs any agent in it started from this chat (each agent's
+            // own listing names the chat).
+            return self
+                .jobs
+                .values()
+                .flatten()
+                .filter(|j| j.chat_id.as_deref() == Some(chat_id))
+                .cloned()
+                .collect();
+        }
+        let Some(jobs) = self.jobs.get(&project.id) else {
             return Vec::new();
         };
         jobs.iter()
@@ -4912,24 +5030,294 @@ impl AppState {
             .collect()
     }
 
+    /// The agent projects whose listings the open chat needs: its own agent, or every
+    /// agent in a group / DM.
+    fn jobs_projects_for(&self, chat_id: &str) -> Vec<Id> {
+        let Some(project) = self.project_of_chat(chat_id) else {
+            return Vec::new();
+        };
+        if project.is_people() {
+            project
+                .agents
+                .iter()
+                .map(|a| a.project_id.clone())
+                .filter(|pid| self.projects.iter().any(|p| &p.id == pid && !p.is_people()))
+                .collect()
+        } else {
+            vec![project.id.clone()]
+        }
+    }
+
     /// Something to poll for: a job row of the open chat still streams, the
     /// relay listed a job last time, or the drawer is up.
-    fn jobs_poll_wanted(&self) -> Option<Id> {
-        let chat_id = self.active_chat_id()?;
-        let project = self.project_of_chat(&chat_id)?;
-        if project.is_people() {
-            return None;
+    fn jobs_poll_wanted(&self) -> Vec<Id> {
+        let Some(chat_id) = self.active_chat_id() else {
+            return Vec::new();
+        };
+        let projects = self.jobs_projects_for(&chat_id);
+        if projects.is_empty() {
+            return Vec::new();
         }
-        let project_id = project.id.clone();
         let live = Message::chat_has_live_job(self.messages_of(&chat_id), now_ms());
-        let listed = self.jobs.get(&project_id).is_some_and(|j| !j.is_empty());
-        (live || listed || self.tasks_open.is_some()).then_some(project_id)
+        let listed = projects
+            .iter()
+            .any(|pid| self.jobs.get(pid).is_some_and(|j| !j.is_empty()));
+        if live || listed || self.tasks_open.is_some() {
+            projects
+        } else {
+            Vec::new()
+        }
     }
 
     fn jobs_tick(&mut self) {
-        if let Some(project_id) = self.jobs_poll_wanted() {
+        for project_id in self.jobs_poll_wanted() {
             self.command(ClientCommand::JobsRefresh { project_id });
         }
+        self.rollout_tick();
+    }
+
+    // ----- job tabs (the sub-agent's rollout as a chat tab, `jobtabs`) --------------
+
+    /// The project a job belongs to: the one whose listing or tabs hold it.
+    pub fn job_project(&self, job_id: &str) -> Option<Id> {
+        if let Some((pid, _)) = self
+            .jobs
+            .iter()
+            .find(|(_, jobs)| jobs.iter().any(|j| j.id == job_id))
+        {
+            return Some(pid.clone());
+        }
+        let chat = crate::jobtabs::chat_id(job_id);
+        self.job_tabs
+            .iter()
+            .find(|(_, tabs)| tabs.iter().any(|c| c.id == chat))
+            .map(|(pid, _)| pid.clone())
+    }
+
+    /// The chip's row for a job, wherever it is listed.
+    fn job_row(&self, job_id: &str) -> Option<&Job> {
+        self.jobs.values().flatten().find(|j| j.id == job_id)
+    }
+
+    /// The chat the job was asked in (its parent chat): the document's word, else the chip's.
+    fn job_parent_chat(&self, job_id: &str) -> Option<Id> {
+        self.rollouts
+            .get(job_id)
+            .and_then(|r| r.chat_id.clone())
+            .or_else(|| self.job_row(job_id).and_then(|j| j.chat_id.clone()))
+    }
+
+    /// The listing changed: every job the agent runs has a tab (unless the user closed it);
+    /// tabs of finished jobs stay until closed.
+    fn sync_job_tabs(&mut self, project_id: &Id) {
+        let now = now_ms();
+        let listed: Vec<Job> = self.jobs.get(project_id).cloned().unwrap_or_default();
+        let closed = self.closed_job_tabs.clone();
+        let tabs = self.job_tabs.entry(project_id.clone()).or_default();
+        for job in listed {
+            if closed.contains(&job.id) {
+                continue;
+            }
+            let id = crate::jobtabs::chat_id(&job.id);
+            match tabs.iter_mut().find(|c| c.id == id) {
+                Some(tab) => {
+                    if !job.title.trim().is_empty() {
+                        tab.title = job.title.clone();
+                    }
+                }
+                None => tabs.push(crate::jobtabs::tab(project_id, &job.id, &job.title, now)),
+            }
+        }
+    }
+
+    /// Open (and select) the tab of `job_id`: from a group chat this jumps to the agent's
+    /// own space first. A tab the user closed comes back.
+    pub fn open_job_tab(&mut self, job_id: &str, cx: &mut Context<Self>) {
+        let Some(project_id) = self.job_project(job_id) else {
+            return;
+        };
+        self.closed_job_tabs.remove(job_id);
+        let title = self
+            .job_row(job_id)
+            .map(|j| j.title.clone())
+            .or_else(|| self.rollouts.get(job_id).map(|r| r.title.clone()))
+            .unwrap_or_default();
+        let chat_id = crate::jobtabs::chat_id(job_id);
+        let tabs = self.job_tabs.entry(project_id.clone()).or_default();
+        if !tabs.iter().any(|c| c.id == chat_id) {
+            tabs.push(crate::jobtabs::tab(&project_id, job_id, &title, now_ms()));
+        }
+        self.tasks_open = None;
+        if self.selected_project.as_deref() != Some(project_id.as_str())
+            || self.selected_channel.is_some()
+        {
+            self.select_project(project_id.clone(), cx);
+        }
+        self.select_tab(chat_id.clone(), cx);
+        self.refresh_job_tab(&chat_id);
+        cx.notify();
+    }
+
+    /// The status line's link: the newest open job of the chat.
+    pub fn open_newest_job_tab(&mut self, chat_id: Id, cx: &mut Context<Self>) {
+        if let Some(job) = self.open_jobs(&chat_id).into_iter().next() {
+            self.open_job_tab(&job.id, cx);
+        }
+    }
+
+    /// Close a job tab: back to the agent's chat; the job itself goes on.
+    fn close_job_tab(&mut self, chat_id: &str, cx: &mut Context<Self>) -> bool {
+        let Some(job_id) = crate::jobtabs::job_id(chat_id).map(str::to_owned) else {
+            return false;
+        };
+        let Some(project_id) = self.job_project(&job_id) else {
+            return false;
+        };
+        if let Some(tabs) = self.job_tabs.get_mut(&project_id) {
+            tabs.retain(|c| c.id != chat_id);
+        }
+        self.closed_job_tabs.insert(job_id.clone());
+        self.messages.remove(chat_id);
+        self.pending_steers.remove(&job_id);
+        if self.active_tab.get(&project_id).map(String::as_str) == Some(chat_id) {
+            if let Some(primary) = self.primary_chat(&project_id).map(|c| c.id.clone()) {
+                self.select_tab(primary, cx);
+            }
+        }
+        cx.notify();
+        true
+    }
+
+    /// Ask for the tab's exchange: the whole document first, then only the entries past
+    /// the newest one held.
+    fn refresh_job_tab(&self, chat_id: &str) {
+        let Some(job_id) = crate::jobtabs::job_id(chat_id) else {
+            return;
+        };
+        let Some(project_id) = self.job_project(job_id) else {
+            return;
+        };
+        let after = self
+            .rollouts
+            .get(job_id)
+            .filter(|r| !r.entries.is_empty())
+            .map(|r| r.next_seq.saturating_sub(1));
+        self.command(ClientCommand::RolloutRefresh {
+            project_id,
+            job_id: job_id.to_string(),
+            after,
+        });
+    }
+
+    /// Each tick: the active job tab polls while its job runs (or until its document arrives).
+    fn rollout_tick(&mut self) {
+        let Some(chat_id) = self.active_chat_id() else {
+            return;
+        };
+        let Some(job_id) = crate::jobtabs::job_id(&chat_id) else {
+            return;
+        };
+        let wanted = match self.rollouts.get(job_id) {
+            Some(r) => !r.unavailable && r.is_running(),
+            None => true,
+        };
+        if wanted {
+            self.refresh_job_tab(&chat_id);
+        }
+    }
+
+    /// A job document arrived: the tab's transcript is rebuilt from it.
+    pub(crate) fn apply_rollout(
+        &mut self,
+        job_id: &str,
+        rollout: JobRollout,
+        cx: &mut Context<Self>,
+    ) {
+        match self.rollouts.get_mut(job_id) {
+            Some(held) if rollout.unavailable => held.unavailable = true,
+            Some(held) => held.merge(rollout),
+            None => {
+                self.rollouts.insert(job_id.to_string(), rollout);
+            }
+        }
+        let chat_id = crate::jobtabs::chat_id(job_id);
+        let Some(doc) = self.rollouts.get(job_id).cloned() else {
+            return;
+        };
+        let pending = self.pending_steers.get(job_id).cloned().unwrap_or_default();
+        let messages = crate::jobtabs::messages(&doc, &pending);
+        if let Some(project_id) = self.job_project(job_id) {
+            if let Some(tab) = self
+                .job_tabs
+                .get_mut(&project_id)
+                .and_then(|tabs| tabs.iter_mut().find(|c| c.id == chat_id))
+            {
+                if !doc.title.trim().is_empty() {
+                    tab.title = doc.title.clone();
+                }
+                if let Some(last) = messages.iter().map(|m| m.created_at).max() {
+                    tab.last_message_at = tab.last_message_at.max(last);
+                }
+            }
+        }
+        self.messages.insert(chat_id.clone(), messages);
+        cx.emit(AppEvent::TranscriptChanged { chat_id });
+        cx.notify();
+    }
+
+    /// Typing in a job tab steers the job: the words go to the parent chat as a reply to the
+    /// job's ask (the wire the drawer's Steer uses) and show in the tab at once.
+    fn steer_from_job_tab(&mut self, chat_id: &Id, text: String, cx: &mut Context<Self>) {
+        let Some(job_id) = crate::jobtabs::job_id(chat_id).map(str::to_owned) else {
+            return;
+        };
+        let parent_chat = self.job_parent_chat(&job_id);
+        let ask = self
+            .rollouts
+            .get(&job_id)
+            .and_then(|r| r.ask_message_id.clone())
+            .or_else(|| self.job_row(&job_id).and_then(|j| j.ask_message_id.clone()));
+        let (Some(parent_chat), Some(ask)) = (parent_chat, ask) else {
+            self.push_notice(
+                "This task cannot be steered from here yet — reply to your request in the chat instead.",
+            );
+            cx.notify();
+            return;
+        };
+        let message_id = new_id();
+        let echo = crate::jobtabs::typed_steer(chat_id, &message_id, &text, &ask);
+        self.pending_steers
+            .entry(job_id.clone())
+            .or_default()
+            .push(echo.clone());
+        self.messages
+            .entry(chat_id.clone())
+            .or_default()
+            .push(echo.clone());
+        // The parent chat carries the real message: a reply under the ask.
+        self.messages
+            .entry(parent_chat.clone())
+            .or_default()
+            .push(Message {
+                chat_id: parent_chat.clone(),
+                status: MessageStatus::Queued,
+                ..echo
+            });
+        self.command(ClientCommand::Send {
+            chat_id: parent_chat.clone(),
+            message_id,
+            text,
+            attachments: Vec::new(),
+            reply_to: Some(ask),
+            mentions: Vec::new(),
+        });
+        cx.emit(AppEvent::TranscriptChanged {
+            chat_id: chat_id.clone(),
+        });
+        cx.emit(AppEvent::TranscriptChanged {
+            chat_id: parent_chat,
+        });
+        cx.notify();
     }
 
     /// The chip was clicked: the drawer opens over the presence row (or closes).
@@ -5626,6 +6014,12 @@ impl AppState {
     /// A picked file becomes my picture everywhere (`PUT /me/avatar`).
     pub fn set_my_avatar(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
         self.command(ClientCommand::SetMyAvatar { path });
+        cx.notify();
+    }
+
+    /// The avatar picker's generated preview becomes my picture (`PUT /me/avatar {image_key}`).
+    pub fn set_my_avatar_key(&mut self, key: String, cx: &mut Context<Self>) {
+        self.command(ClientCommand::SetMyAvatarKey { key });
         cx.notify();
     }
 
@@ -7441,15 +7835,16 @@ impl AppState {
         self.people_busy = true;
         self.people_error = None;
         self.awaiting_group = Some(handles.clone());
-        let (title, leaf) = match self.new_group_draft.take() {
-            Some((t, l)) => (Some(t), Some(l)),
-            None => (None, None),
+        let (title, leaf, picture) = match self.new_group_draft.take() {
+            Some(d) => (Some(d.title), d.leaf, d.picture),
+            None => (None, None, None),
         };
         self.command(ClientCommand::CreatePeopleGroup {
             handles,
             agent_ids,
             title,
             leaf,
+            picture,
         });
         cx.notify();
     }
@@ -7568,6 +7963,7 @@ impl AppState {
         let pid = self
             .chats
             .values()
+            .chain(self.job_tabs.values())
             .flat_map(|v| v.iter())
             .find(|c| c.id == chat_id)
             .map(|c| c.project_id.clone())?;
@@ -7740,6 +8136,7 @@ impl AppState {
         name: String,
         avatar_color_index: Option<u8>,
         leaf: Option<crate::ui::avatars::LeafPick>,
+        picture: Option<crate::sync::DraftPicture>,
         cx: &mut Context<Self>,
     ) {
         self.new_project_open = false;
@@ -7748,6 +8145,7 @@ impl AppState {
             name,
             avatar_color_index,
             leaf,
+            picture,
             source_project_id: None,
             description: None,
             color: None,
@@ -7774,13 +8172,18 @@ impl AppState {
             &src.id,
             src.avatar_color_override.or(src.avatar_color_index),
         ));
-        // D92: the fork keeps the source's leaf and colour too.
-        let leaf = Some(crate::ui::avatars::project_leaf(src));
+        // D92: the fork keeps the source's leaf and colour too — or its neutral disc.
+        let leaf = Some(if crate::ui::avatars::leaf::is_neutral(src.avatar_leaf) {
+            crate::ui::avatars::neutral_pick()
+        } else {
+            crate::ui::avatars::project_leaf(src)
+        });
         self.awaiting_new_project = true;
         self.command(ClientCommand::CreateProject {
             name,
             avatar_color_index,
             leaf,
+            picture: None,
             source_project_id: Some(project_id),
             description,
             color,

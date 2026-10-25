@@ -492,6 +492,13 @@ struct ChatItem: Identifiable, Equatable {
     var mime: String
     /// The viewer's entry for an attachment (media-viewer-2026-10-23); nil for links.
     var media: MediaItem? = nil
+    /// Who shared it, for the Library's preview card ("Samir Haddad", "You", the
+    /// agent's name) and their picture: a person's avatar URL and id, or the
+    /// agent's project id ([feedback library-list-ios-2026-10-25]).
+    var by: String = ""
+    var fromAvatar: String? = nil
+    var fromId: String? = nil
+    var agentId: String? = nil
 }
 
 enum ChatMedia {
@@ -501,6 +508,10 @@ enum ChatMedia {
     static func items(messages: [Message], slot: String, model: AppModel) -> [ChatItem] {
         var out: [ChatItem] = []
         for m in messages {
+            let by = MediaAlbum.senderName(m, projectName: { model.project($0)?.name })
+            let agentId = m.sender.hasPrefix("agent:") ? String(m.sender.dropFirst(6))
+                : m.sender.hasPrefix("project:") ? String(m.sender.dropFirst(8)) : nil
+            let fromId = m.sender.hasPrefix("user:") ? String(m.sender.dropFirst(5)) : nil
             for part in m.parts {
                 switch part {
                 case .attachment(let id, let a):
@@ -515,14 +526,15 @@ enum ChatMedia {
                     }
                     out.append(ChatItem(id: "\(m.id)#\(id)", kind: kind, title: a.name,
                                         subtitle: a.mime, url: url, at: m.createdAt, fromHandle: m.senderHandle, mime: a.mime,
-                                        media: media))
+                                        media: media, by: by, fromAvatar: m.senderAvatar, fromId: fromId, agentId: agentId))
                 case .text(let id, let text):
                     guard let detector else { continue }
                     let ns = text as NSString
                     for match in detector.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
                         guard let url = match.url, url.scheme?.hasPrefix("http") == true else { continue }
                         out.append(ChatItem(id: "\(m.id)#\(id)#\(match.range.location)", kind: .link, title: url.host() ?? url.absoluteString,
-                                            subtitle: url.absoluteString, url: url, at: m.createdAt, fromHandle: m.senderHandle, mime: "text/uri-list"))
+                                            subtitle: url.absoluteString, url: url, at: m.createdAt, fromHandle: m.senderHandle, mime: "text/uri-list",
+                                            by: by, fromAvatar: m.senderAvatar, fromId: fromId, agentId: agentId))
                     }
                 default: continue
                 }
@@ -1248,7 +1260,7 @@ struct GroupProfileView: View {
             AgentAvatar(project: project, theme: theme, size: PaneKit.heroAvatar, idle: true)
         } else {
             Button { showEdit = true } label: {
-                AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL, leaf: people?.leafPick)
+                AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL, leaf: people?.leafPick, neutralName: people?.isNeutralAvatar == true ? people?.title : nil)
                     .frame(width: PaneKit.heroAvatar, height: PaneKit.heroAvatar)
                     .paneCrayon()
                     .contentShape(Rectangle())
@@ -1587,23 +1599,11 @@ struct GroupProfileView: View {
         return parts.joined(separator: " · ")
     }
 
-    /// Library: every image, then every file shared in the chat — one place.
+    /// Library: one list of everything shared here by day — the Mac's
+    /// `profiles/library.rs` ([feedback library-list-ios-2026-10-25]; links as in
+    /// the agent pane, [feedback group-library-links-2026-10-23]).
     private var librarySections: [PaneSection] {
-        let media = items.filter { $0.kind == .media }
-        let files = items.filter { $0.kind == .file }
-        let voice = items.filter { $0.kind == .voice }
-        // Links shared in the group, as in the agent pane's Library (DaWizzaa's ask,
-        // [feedback group-library-links-2026-10-23]).
-        let links = items.filter { $0.kind == .link }
-        if media.isEmpty && files.isEmpty && voice.isEmpty && links.isEmpty {
-            return [.empty("Nothing shared here yet.")]
-        }
-        var out: [PaneSection] = []
-        if !media.isEmpty { out += [.title("Images · \(media.count)"), .grid(media)] }
-        if !files.isEmpty { out += [.title("Files · \(files.count)"), .files(files)] }
-        if !voice.isEmpty { out += [.title("Voice · \(voice.count)"), .voice(voice)] }
-        if !links.isEmpty { out += [.title("Links · \(links.count)"), .links(links)] }
-        return out
+        LibraryList.sections(items: items, empty: "Nothing shared here yet.")
     }
 
 }
@@ -2353,7 +2353,7 @@ struct GroupEditSheet: View {
                     // leaf, Upload = a photo; changes apply on Set avatar).
                     Button { showAvatarPicker = true } label: {
                         ZStack(alignment: .bottomTrailing) {
-                            AvatarCluster(members: clusterMembers, size: 72, imageUrl: existingImageURL, leaf: people?.leafPick)
+                            AvatarCluster(members: clusterMembers, size: 72, imageUrl: existingImageURL, leaf: people?.leafPick, neutralName: people?.isNeutralAvatar == true ? people?.title : nil)
                                 .frame(width: 112, height: 112)
                             GlassCircle(size: 36) {
                                 Image(systemName: "camera.fill")
@@ -2477,14 +2477,6 @@ enum PaneSection {
     case title(String)
     /// Rows; the card draws separators between them only.
     case card([AnyView], separatorInset: CGFloat = PaneKit.inset)
-    /// Media thumbnails, three square tiles per row.
-    case grid([ChatItem])
-    /// The Library's file rows (the Mac's `Section::Files`).
-    case files([ChatItem])
-    /// The Library's link rows (the Mac's `Section::Links`).
-    case links([ChatItem])
-    /// Voice notes — iPhone only; the Mac Library has no voice section.
-    case voice([ChatItem])
     /// Centred muted line for an empty tab.
     case empty(String)
     case footnote(String)
@@ -2609,14 +2601,6 @@ struct ProfilePane: View {
             ProfileCard(separatorInset: inset) {
                 ForEach(Array(rows.enumerated()), id: \.offset) { _, r in r }
             }
-        case .grid(let items):
-            ChatItemsList(items: items, kind: .media, empty: "No photos or videos yet.")
-        case .files(let items):
-            ChatItemsList(items: items, kind: .file, empty: "No files shared yet.")
-        case .links(let items):
-            ChatItemsList(items: items, kind: .link, empty: "No links shared yet.")
-        case .voice(let items):
-            ChatItemsList(items: items, kind: .voice, empty: "No voice notes yet.")
         case .empty(let t):
             Text(t).font(theme.font(Theme.small)).foregroundStyle(theme.muted)
                 .frame(maxWidth: .infinity).padding(.top, 36).padding(.horizontal, 32).multilineTextAlignment(.center)
