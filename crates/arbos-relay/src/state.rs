@@ -279,6 +279,10 @@ pub struct ProjectActivity {
     pub chat_id: String,
     pub text: String,
     pub at: i64,
+    /// Background jobs in flight for the chip ("N tasks running"; duplex design §2.4):
+    /// `{ id, title, state, step, elapsed_s }` each. Absent when none run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jobs: Option<serde_json::Value>,
 }
 
 /// An activity older than this is stale (the box died mid-turn) and is not shown.

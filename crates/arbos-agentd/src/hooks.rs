@@ -94,6 +94,32 @@ async fn start_job(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value>)
     }
 }
 
+async fn steer_job(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value>) -> Response {
+    if !authed(&a, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let s = |k: &str| b.get(k).and_then(Value::as_str).unwrap_or("").to_owned();
+    match a.hook_steer_job(&s("job_id"), &s("text")).await {
+        Ok(v) => Json(json!({ "ok": true, "job": v })).into_response(),
+        Err(e) => err(e),
+    }
+}
+
+async fn stop_job(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value>) -> Response {
+    if !authed(&a, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let job_id = b
+        .get("job_id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    match a.hook_stop_job(&job_id).await {
+        Ok(v) => Json(json!({ "ok": true, "result": v })).into_response(),
+        Err(e) => err(e),
+    }
+}
+
 async fn list_jobs(State(a): State<S>, headers: HeaderMap) -> Response {
     if !authed(&a, &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
@@ -365,6 +391,8 @@ pub fn router(agent: Arc<Agent>) -> Router {
         .route("/hook/send_message", post(send_message))
         .route("/hook/start_job", post(start_job))
         .route("/hook/list_jobs", post(list_jobs))
+        .route("/hook/steer_job", post(steer_job))
+        .route("/hook/stop_job", post(stop_job))
         .route("/hook/approval", post(approval))
         .route("/hook/approval-status", post(approval_status))
         .route("/hook/approval-abandon", post(approval_abandon))

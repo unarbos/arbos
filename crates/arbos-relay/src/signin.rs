@@ -563,21 +563,26 @@ pub struct RefreshBody {
 /// How long a just-rotated refresh token still answers with the pair it was rotated into.
 /// Several requests of one app can be refused at the same instant and each try to refresh;
 /// inside this window they all get the one new pair. Outside it a reused token is a replay.
-pub const REFRESH_GRACE_MS: i64 = 30_000;
+/// Long enough that a retry after a planned relay restart plus client backoff still lands inside.
+pub const REFRESH_GRACE_MS: i64 = 120_000;
 
 /// `POST /auth/refresh {"refresh_token"}` → new pair; the old refresh token is dead after
 /// `REFRESH_GRACE_MS`. A token that was rotated longer ago is a replay: the whole device is revoked.
+///
+/// The in-memory grace cache and the database `rotated_at` window are checked under one
+/// `refresh_grace` lock for the whole refresh (lookup → row read → claim → issue → cache insert)
+/// so parallel refreshes of the same token cannot race into `revoke_device_fully`. After a
+/// restart the cache is empty; a token whose `rotated_at` is still inside the window gets a
+/// fresh pair instead of a revoke.
 pub async fn refresh(State(state): State<AppState>, Json(b): Json<RefreshBody>) -> Response {
     let h = hash(b.refresh_token.trim());
-    {
-        let mut grace = state.refresh_grace.lock().await;
-        let now = now_ms();
-        grace.retain(|_, (at, _)| now - *at < REFRESH_GRACE_MS);
-        if let Some((_, pair)) = grace.get(&h) {
-            tracing::debug!("refresh token re-presented within the grace window; same pair");
-            // Cached copy was built from TokenResponseDto (same as issue_tokens).
-            return Json(pair.clone()).into_response();
-        }
+    let mut grace = state.refresh_grace.lock().await;
+    let now = now_ms();
+    grace.retain(|_, (at, _)| now - *at < REFRESH_GRACE_MS);
+    if let Some((_, pair)) = grace.get(&h) {
+        tracing::debug!("refresh token re-presented within the grace window; same pair");
+        // Cached copy was built from TokenResponseDto (same as issue_tokens).
+        return Json(pair.clone()).into_response();
     }
     let row = match state.db.refresh_row(&h) {
         Ok(Some(r)) => r,
@@ -597,16 +602,7 @@ pub async fn refresh(State(state): State<AppState>, Json(b): Json<RefreshBody>) 
             "refresh token revoked",
         );
     }
-    if row.rotated_at.is_some() {
-        tracing::warn!(device = %row.device_id, "refresh token replayed; revoking the device");
-        let _ = state.db.revoke_device_fully(&row.device_id);
-        return api_error(
-            StatusCode::UNAUTHORIZED,
-            "bad_refresh",
-            "refresh token was already used; sign in again",
-        );
-    }
-    if row.expires_at <= now_ms() {
+    if row.expires_at <= now {
         return api_error(
             StatusCode::UNAUTHORIZED,
             "bad_refresh",
@@ -617,13 +613,74 @@ pub async fn refresh(State(state): State<AppState>, Json(b): Json<RefreshBody>) 
         Ok(Some((_, false))) => {}
         _ => return api_error(StatusCode::UNAUTHORIZED, "bad_refresh", "device revoked"),
     }
-    if let Err(e) = state.db.mark_refresh_rotated(&h) {
-        return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+    if let Some(rotated_at) = row.rotated_at {
+        if now - rotated_at < REFRESH_GRACE_MS {
+            // Cache miss after a restart (or the claimer failed before inserting): still grace.
+            tracing::debug!(
+                device = %row.device_id,
+                "refresh token rotated within grace; issuing a fresh pair"
+            );
+            return match issue_tokens(&state, &row.user_id, &row.device_id) {
+                Ok(dto) => {
+                    let pair = token_response_json(&dto);
+                    grace.insert(h, (now, pair));
+                    Json(dto).into_response()
+                }
+                Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+            };
+        }
+        tracing::warn!(device = %row.device_id, "refresh token replayed; revoking the device");
+        let _ = state.db.revoke_device_fully(&row.device_id);
+        return api_error(
+            StatusCode::UNAUTHORIZED,
+            "bad_refresh",
+            "refresh token was already used; sign in again",
+        );
+    }
+    match state.db.mark_refresh_rotated(&h) {
+        Ok(true) => {}
+        Ok(false) => {
+            // Lost the atomic claim. Prefer a cached pair; otherwise re-issue inside the
+            // database grace window, or revoke as a replay.
+            if let Some((_, pair)) = grace.get(&h) {
+                return Json(pair.clone()).into_response();
+            }
+            let row = match state.db.refresh_row(&h) {
+                Ok(Some(r)) => r,
+                Ok(None) => {
+                    return api_error(
+                        StatusCode::UNAUTHORIZED,
+                        "bad_refresh",
+                        "unknown refresh token",
+                    )
+                }
+                Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+            };
+            let now = now_ms();
+            if row.rotated_at.is_some_and(|at| now - at < REFRESH_GRACE_MS) {
+                return match issue_tokens(&state, &row.user_id, &row.device_id) {
+                    Ok(dto) => {
+                        let pair = token_response_json(&dto);
+                        grace.insert(h, (now, pair));
+                        Json(dto).into_response()
+                    }
+                    Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+                };
+            }
+            tracing::warn!(device = %row.device_id, "refresh token replayed; revoking the device");
+            let _ = state.db.revoke_device_fully(&row.device_id);
+            return api_error(
+                StatusCode::UNAUTHORIZED,
+                "bad_refresh",
+                "refresh token was already used; sign in again",
+            );
+        }
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
     }
     match issue_tokens(&state, &row.user_id, &row.device_id) {
         Ok(dto) => {
             let pair = token_response_json(&dto);
-            state.refresh_grace.lock().await.insert(h, (now_ms(), pair));
+            grace.insert(h, (now, pair));
             Json(dto).into_response()
         }
         Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
@@ -1114,6 +1171,172 @@ pub async fn download_mac(State(state): State<AppState>) -> Response {
     };
     *state.download_cache.lock().await = Some((now, url.clone()));
     found(&url)
+}
+
+#[cfg(test)]
+mod refresh_tests {
+    //! Concurrent refreshes and post-restart retries must not revoke a healthy device.
+
+    use axum::extract::State;
+    use axum::http::StatusCode;
+    use axum::Json;
+    use rusqlite::params;
+
+    use arbos_core::auth::hash;
+    use arbos_core::ids::{now_ms, ulid};
+
+    use super::*;
+    use crate::db_accounts::GithubIdentity;
+    use crate::state::test_support::test_state;
+
+    fn sign_up(state: &AppState, github_id: i64) -> (String, String) {
+        let (user, _) = state
+            .db
+            .upsert_github_user(
+                &GithubIdentity {
+                    id: github_id,
+                    login: format!("user{github_id}"),
+                    avatar_url: None,
+                    name: None,
+                },
+                state.cfg.default_daily_cap_usd,
+            )
+            .expect("user");
+        let device_id = ulid();
+        state
+            .db
+            .insert_device(&device_id, "d", &ulid(), &user.id, "github")
+            .expect("device");
+        (user.id, device_id)
+    }
+
+    async fn do_refresh(state: &AppState, refresh_token: &str) -> Response {
+        refresh(
+            State(state.clone()),
+            Json(RefreshBody {
+                refresh_token: refresh_token.to_owned(),
+            }),
+        )
+        .await
+    }
+
+    async fn body_json(r: Response) -> Value {
+        let body = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    fn device_revoked(state: &AppState, device_id: &str) -> bool {
+        matches!(
+            state.db.device_status(device_id).unwrap(),
+            Some((_, true)) | None
+        )
+    }
+
+    #[tokio::test]
+    async fn concurrent_refreshes_share_one_pair_without_revoking() {
+        let state = test_state(AuthMode::Github);
+        let (user, device) = sign_up(&state, 501);
+        let tokens = issue_tokens(&state, &user, &device).expect("tokens");
+        let refresh_token = tokens.refresh_token.clone();
+
+        let (a, b) = tokio::join!(
+            do_refresh(&state, &refresh_token),
+            do_refresh(&state, &refresh_token),
+        );
+        assert_eq!(a.status(), StatusCode::OK);
+        assert_eq!(b.status(), StatusCode::OK);
+        let va = body_json(a).await;
+        let vb = body_json(b).await;
+        assert_eq!(
+            va["refresh_token"], vb["refresh_token"],
+            "both concurrent refreshes get the same rotated pair"
+        );
+        assert_ne!(va["refresh_token"], json!(refresh_token));
+        assert!(
+            !device_revoked(&state, &device),
+            "device must stay signed in after parallel refresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_after_clearing_grace_cache_still_works_inside_window() {
+        let state = test_state(AuthMode::Github);
+        let (user, device) = sign_up(&state, 502);
+        let tokens = issue_tokens(&state, &user, &device).expect("tokens");
+        let refresh_token = tokens.refresh_token.clone();
+
+        let first = do_refresh(&state, &refresh_token).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let first_pair = body_json(first).await;
+
+        // Simulated relay restart: in-memory grace is gone, rotated_at remains in the DB.
+        state.refresh_grace.lock().await.clear();
+
+        let again = do_refresh(&state, &refresh_token).await;
+        assert_eq!(again.status(), StatusCode::OK);
+        let again_pair = body_json(again).await;
+        assert!(again_pair["refresh_token"]
+            .as_str()
+            .unwrap()
+            .starts_with("arf_"));
+        assert_ne!(again_pair["refresh_token"], json!(refresh_token));
+        // A fresh pair is fine after restart; the important part is no revoke.
+        let _ = first_pair;
+        assert!(
+            !device_revoked(&state, &device),
+            "restart retry inside grace must not revoke the device"
+        );
+
+        // The re-issued pair itself must refresh.
+        let follow = do_refresh(
+            &state,
+            again_pair["refresh_token"].as_str().expect("refresh_token"),
+        )
+        .await;
+        assert_eq!(follow.status(), StatusCode::OK);
+        assert!(!device_revoked(&state, &device));
+    }
+
+    #[tokio::test]
+    async fn replay_after_grace_window_revokes_the_device() {
+        let state = test_state(AuthMode::Github);
+        let (user, device) = sign_up(&state, 503);
+        let tokens = issue_tokens(&state, &user, &device).expect("tokens");
+        let refresh_token = tokens.refresh_token.clone();
+        let h = hash(&refresh_token);
+
+        let past = now_ms() - REFRESH_GRACE_MS - 1_000;
+        state
+            .db
+            .with(|c| {
+                c.execute(
+                    "UPDATE refresh_tokens SET rotated_at = ?2 WHERE token_hash = ?1",
+                    params![h, past],
+                )
+            })
+            .expect("age rotated_at");
+        state.refresh_grace.lock().await.clear();
+
+        let r = do_refresh(&state, &refresh_token).await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        assert!(
+            device_revoked(&state, &device),
+            "a token rotated outside the grace window is a replay"
+        );
+    }
+
+    #[test]
+    fn mark_refresh_rotated_claims_a_row_once() {
+        let state = test_state(AuthMode::Github);
+        let (user, device) = sign_up(&state, 504);
+        let tokens = issue_tokens(&state, &user, &device).expect("tokens");
+        let h = hash(&tokens.refresh_token);
+
+        assert!(state.db.mark_refresh_rotated(&h).expect("first claim"));
+        assert!(!state.db.mark_refresh_rotated(&h).expect("second claim"));
+        let row = state.db.refresh_row(&h).unwrap().unwrap();
+        assert!(row.rotated_at.is_some());
+    }
 }
 
 #[cfg(test)]

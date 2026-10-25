@@ -715,13 +715,18 @@ impl Db {
         })
     }
 
-    pub fn mark_refresh_rotated(&self, token_hash: &str) -> Result<()> {
+    /// Atomically claim a refresh-token row for rotation.
+    ///
+    /// Returns `true` when this call set `rotated_at` (the claimer must issue the new pair).
+    /// Returns `false` when the row was already rotated — another refresh claimed it, or this
+    /// token is being re-presented after a restart.
+    pub fn mark_refresh_rotated(&self, token_hash: &str) -> Result<bool> {
         self.with(|c| {
             c.execute(
-                "UPDATE refresh_tokens SET rotated_at = ?2 WHERE token_hash = ?1",
+                "UPDATE refresh_tokens SET rotated_at = ?2 WHERE token_hash = ?1 AND rotated_at IS NULL",
                 params![token_hash, now_ms()],
             )
-            .map(|_| ())
+            .map(|n| n > 0)
         })
     }
 

@@ -169,6 +169,9 @@ struct Shared {
     chats: Mutex<Vec<Chat>>,
     /// Client-minted message ids whose push the relay has not `ACK`ed (S3).
     unacked: Mutex<HashSet<Id>>,
+    /// Rooms whose pushes were refused with `not_available` on the live connection.
+    /// Cleared by the next ACK for that room (not by draining `unacked`, which is global).
+    push_refused: Mutex<HashSet<Id>>,
     events: mpsc::UnboundedSender<SyncEvent>,
     subscriptions: Mutex<Vec<loro::Subscription>>,
     machine: Mutex<Machine>,
@@ -708,6 +711,7 @@ impl SyncSource for RelaySource {
                 projects: Mutex::new(Vec::new()),
                 chats: Mutex::new(Vec::new()),
                 unacked: Mutex::new(HashSet::new()),
+                push_refused: Mutex::new(HashSet::new()),
                 events: events.clone(),
                 subscriptions: Mutex::new(Vec::new()),
                 machine: Mutex::new(Machine::default()),
@@ -3259,6 +3263,30 @@ async fn perform_room_actions(
                     let had: Vec<Id> = shared.unacked.lock().unwrap().drain().collect();
                     if !had.is_empty() && room_chat != PROJECT_DOC_CHAT_ID {
                         emit_snapshot(shared, key);
+                    }
+                    // Per-room refusal flag (not `unacked`: that set is global and any
+                    // room's ACK drains it, so it cannot tell which chat was refused).
+                    if shared.push_refused.lock().unwrap().remove(room_chat) {
+                        let _ = shared.events.send(SyncEvent::PushRefused {
+                            chat_id: room_chat.to_string(),
+                            refused: false,
+                        });
+                    }
+                }
+                RoomAction::PushRefused { batch_id: _ } => {
+                    if room_chat != PROJECT_DOC_CHAT_ID
+                        && shared
+                            .push_refused
+                            .lock()
+                            .unwrap()
+                            .insert(room_chat.to_string())
+                    {
+                        // One notice per refusal stretch; the room link stays live.
+                        shared.notice("Messages in this chat are not being delivered");
+                        let _ = shared.events.send(SyncEvent::PushRefused {
+                            chat_id: room_chat.to_string(),
+                            refused: true,
+                        });
                     }
                 }
                 RoomAction::BoxState {

@@ -3005,6 +3005,11 @@ impl Render for Composer {
                 v.notice_for(active_chat.as_deref()).map(str::to_owned),
             )
         };
+        // Per-room push refusal (`not_available`): keep the link live, show one muted line.
+        let delivery_notice = state
+            .active_chat_id()
+            .filter(|id| state.push_refused.contains(id))
+            .map(|_| "Messages in this chat are not being delivered".to_string());
         let in_livekit = state.my_call.is_some();
         let has_text = !self.input.read(cx).text().trim().is_empty();
 
@@ -3359,10 +3364,13 @@ impl Render for Composer {
         // One muted line about the voice path while it is doing something (or
         // when it had to fall back: no microphone, mock relay). The link has
         // no line here: the header's connection pill is its one place
-        // ([feedback connection-pill]). Overlay just above the field so the
-        // pill does not jump when the note appears (a flow child above or
-        // below would shift the bottom-pinned composer).
-        let note = voice_notice.filter(|_| recording || transcribing || voice_mode);
+        // ([feedback connection-pill]). A push-refusal notice for this chat
+        // can show here too. Overlay just above the field so the pill does
+        // not jump when the note appears (a flow child above or below would
+        // shift the bottom-pinned composer).
+        let note = voice_notice
+            .filter(|_| recording || transcribing || voice_mode)
+            .or(delivery_notice);
         let mut field_wrap = div().relative().w_full();
         if let Some(note) = note {
             field_wrap = field_wrap.child(

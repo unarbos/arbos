@@ -263,6 +263,12 @@ pub enum SyncEvent {
     RelayLink(LinkState),
     /// Short user-facing notice (errors from HTTP calls, etc.).
     Notice(String),
+    /// A room's pushes were refused (`not_available`) or an ACK cleared that refusal.
+    /// `refused: true` → show one notice and keep a per-room flag; `false` → clear both.
+    PushRefused {
+        chat_id: Id,
+        refused: bool,
+    },
     /// Settings → Connectors: catalog + connected accounts (F1).
     Connectors(ConnectorsView),
     /// An OAuth flow started: open this URL in the browser; the relay finishes the callback.
