@@ -191,11 +191,18 @@ paths_of() {
 }
 
 # ci_state <sha> → success | pending | failed | none
+# ci_state answers are final once a run completed (success/failure): cache them on disk so newest_green does
+# not re-ask GitHub for the same 25 commits every minute (2026-10-25 15:1x: the shared PAT was dry and this was
+# the biggest steady consumer on the relay host, up to 25 billed calls per tick while main's recent CI was
+# pending or red). Only `pending`/`none` are re-asked.
+CI_STATE_CACHE="$STATE/ci-state.cache"
 ci_state() {
-  local runs
+  local runs cached state
+  cached="$(grep -m1 "^$1 " "$CI_STATE_CACHE" 2>/dev/null | cut -d' ' -f2)"
+  if [[ "$cached" == "success" || "$cached" == "failed" ]]; then echo "$cached"; return; fi
   runs="$(gh_api "/actions/workflows/ci.yml/runs?head_sha=$1&per_page=5" 2>/dev/null || true)"
   [[ -n "$runs" ]] || { echo none; return; }
-  python3 - "$runs" <<'EOF'
+  state="$(python3 - "$runs" <<'EOF'
 import json, sys
 runs = json.loads(sys.argv[1]).get("workflow_runs", [])
 runs = [r for r in runs if r.get("event") == "push"] or runs
@@ -209,6 +216,11 @@ elif r.get("conclusion") == "success":
 else:
     print("failed")
 EOF
+)"
+  if [[ "$state" == "success" || "$state" == "failed" ]]; then
+    mkdir -p "$STATE"; { grep -v "^$1 " "$CI_STATE_CACHE" 2>/dev/null; echo "$1 $state"; } | tail -n 400 > "$CI_STATE_CACHE.tmp" && mv "$CI_STATE_CACHE.tmp" "$CI_STATE_CACHE"
+  fi
+  echo "$state"
 }
 
 commit_age_s() {

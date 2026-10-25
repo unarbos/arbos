@@ -1340,13 +1340,15 @@ struct GroupProfileView: View {
     }
 
     /// Reuse a usable invite URL, or mint one, then open the system share sheet.
+    /// Pass the link as a `String`, not a `URL`: Telegram's share extension drops a
+    /// bare URL activity item, so the recipient's chat gets an empty message.
     private func shareGroupInvite() {
         guard !sharingInvite else { return }
         sharingInvite = true
         Task {
             if let existing = groupInvites.first(where: { $0.usable }),
-               let url = URL(string: existing.url) {
-                presentShareSheet(items: [url])
+               URL(string: existing.url) != nil {
+                presentShareSheet(items: [existing.url])
                 sharingInvite = false
                 return
             }
@@ -1354,8 +1356,8 @@ struct GroupProfileView: View {
                 chatId, expires: inviteExpires, singleUse: inviteSingleUse
             ) {
                 groupInvites.insert(inv, at: 0)
-                if let url = URL(string: inv.url) {
-                    presentShareSheet(items: [url])
+                if URL(string: inv.url) != nil {
+                    presentShareSheet(items: [inv.url])
                 }
             }
             sharingInvite = false
