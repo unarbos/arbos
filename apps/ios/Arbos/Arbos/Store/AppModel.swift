@@ -3638,6 +3638,40 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// The avatar picker's Generate tab for my own picture: the relay paints one picture into
+    /// my `users:{id}` slot and answers with its key (not yet set).
+    func generateMyAvatar(prompt: String) async throws -> String {
+        if isFixture {
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            return "fixture-gen-\(prompt.lowercased().replacingOccurrences(of: " ", with: "-"))"
+        }
+        return try await api.generateMyAvatar(prompt: prompt)
+    }
+
+    /// The generated preview becomes my picture (`PUT /me/avatar {image_key}`), then the local
+    /// user carries the new URL like after an upload.
+    func setUserAvatarKey(_ key: String) async -> Bool {
+        if isFixture {
+            if var who = user {
+                who.avatarUrl = "fixture://avatar/me-\(key)"
+                user = who
+            }
+            return true
+        }
+        do {
+            let url = try await api.putMeAvatarKey(key)
+            if var who = user {
+                who.avatarUrl = url
+                user = who
+                saveAccountCache()
+            }
+            return true
+        } catch {
+            notice = Notice(text: "Could not update profile picture: \(error.localizedDescription)")
+            return false
+        }
+    }
+
     /// A picture uploaded with `setUserAvatar` (the relay serves it under
     /// `/avatars/`); GitHub pictures come from GitHub's host. Same rule as the Mac.
     var hasCustomAvatar: Bool {

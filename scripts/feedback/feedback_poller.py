@@ -435,6 +435,7 @@ class GitHub:
         self.ledger: dict[str, list[int]] = {}
         self.rate_remaining: int | None = None
         self._feedback_refs: dict[str, str] | None = None
+        self._login: str | None = None
 
     @staticmethod
     def endpoint_shape(url: str) -> str:
@@ -605,6 +606,15 @@ class GitHub:
             if e.status == 404:
                 return None
             raise
+
+    def login(self) -> str:
+        """The account the token posts as (one ETag-cached GET per process); the repo owner if that fails."""
+        if self._login is None:
+            try:
+                self._login = self.api("GET", "/user")["login"]
+            except (HttpError, KeyError, TypeError):
+                self._login = self.repo.split("/")[0]
+        return self._login
 
     def feedback_refs(self) -> dict[str, str]:
         """Every `feedback/*` branch head in one listing (pages of 100), cached for this process (one tick).
@@ -3696,10 +3706,17 @@ class Loop:
                 body = c.get("body") or ""
                 if "scripts/feedback/feedback_poller.py" in body or body.startswith(("Cursor agent started", "Merged to", "Handed off", "Pushed to")):
                     continue
+                # The loop's own comments are never claims: its "comment `take over bc-…` if <owner> should have
+                # it" reply was read back as a take-over one tick later and bounced #1804 (Jacob P0) out of a
+                # green gate at 21:17 Oct 25. Operator notes posted with the same token count as the loop's.
+                if (c.get("user") or {}).get("login", "").lower() == self.gh.login().lower():
+                    continue
                 m = self.CLAIM_RE.search(body)
                 if not m:
                     continue
                 owner = m.group(4)
+                if st.get("handed_off_to", "").startswith(owner) or owner.startswith(st.get("handed_off_to") or "\0"):
+                    continue  # the current owner re-stating ownership changes nothing, mid-gate least of all
                 mid_fix = st.get("status") in ("running", "gating")
                 if mid_fix and not re.search(r"\btak(e|ing) ?over\b", body, re.I):
                     self.gh.comment(st["issue"], f"The loop's own agent is mid-fix on this one ({st.get('agent_url') or 'running'}, state `{st['status']}`); "

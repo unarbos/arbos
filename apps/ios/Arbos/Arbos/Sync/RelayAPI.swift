@@ -953,10 +953,25 @@ final class RelayAPI {
     }
 
     /// `POST /me/avatar/generate {prompt}` (#1789): a picture in my own slot `users:{me}` — the
-    /// own-profile picker's route, and the Create sheets' (the entity does not exist yet; the
-    /// bytes are copied into its slot on Create).
+    /// own-profile picker's route (Jacob, 2026-10-25; "Set avatar" sends the key through
+    /// `putMeAvatarKey`), and the Create sheets' (the entity does not exist yet; the bytes are
+    /// copied into its slot on Create).
     func generateMyAvatar(prompt: String) async throws -> String {
         try await generateAvatar(path: "/me/avatar/generate", prompt: prompt)
+    }
+
+    /// `PUT /me/avatar {image_key}` (JSON): the generated preview becomes my profile picture;
+    /// answers the new `avatar_url`.
+    func putMeAvatarKey(_ key: String) async throws -> String {
+        let v = try await json("PUT", "/me/avatar", body: ["image_key": key])
+        guard JSONSerialization.isValidJSONObject(v),
+              let data = try? JSONSerialization.data(withJSONObject: v),
+              let dto = try? JSONDecoder().decode(MeUserResponseDto.self, from: data) else {
+            throw RelayError(status: 0, message: "The relay returned no avatar URL")
+        }
+        if let url = dto.avatar_url.flatMap({ $0 }), !url.isEmpty { return url }
+        if let url = dto.user.avatar_url.flatMap({ $0 }), !url.isEmpty { return url }
+        throw RelayError(status: 0, message: "The relay returned no avatar URL")
     }
 
     /// The bytes of a blob I may read (a generated preview in my own slot), for copying.

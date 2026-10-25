@@ -18,6 +18,11 @@
 // bodies** through `AvatarSourceBody` and `AvatarSourceState` — `Upload | Generate` only, no
 // Bot tab, no Reset — and generate into my own slot (`POST /me/avatar/generate`) until the
 // entity exists.
+//
+// My own profile picture (Jacob, 2026-10-25) opens this sheet too — `AvatarTarget.me`:
+// Generate | Upload with Reset (people are D79 coloured initials, so no Bot tab); Generate goes
+// through the same `/me/avatar/generate`, Set sends `PUT /me/avatar {image_key}` or the JPEG,
+// Reset is `DELETE /me/avatar`.
 
 import ArbosFFI
 import PhotosUI
@@ -29,6 +34,8 @@ enum AvatarTarget: Equatable {
     case agent(Id)
     case group(String)
     case server(String)
+    /// My own profile picture (`/me/avatar…`; Jacob, 2026-10-25).
+    case me
 }
 
 /// Which body is up.
@@ -253,11 +260,14 @@ struct AvatarPickerSheet: View {
     private let setBg = Color(white: 0xE5 / 255)
     private let title = Color(white: 0xF5 / 255)
 
-    /// The tabs every target gets — agents, groups and servers alike (Jacob, 2026-10-24: the
-    /// group / server picker had lost Generate); Reset sits beside them in the bar.
+    /// The tabs per target: agents, groups and servers get all three (Jacob, 2026-10-24: the
+    /// group / server picker had lost Generate); my own picture has no leaf — people are D79
+    /// coloured initials — so it gets Generate | Upload (Jacob, 2026-10-25). Reset sits beside
+    /// them in the bar for every target.
     static func tabs(for target: AvatarTarget) -> [AvatarPickerTab] {
         switch target {
         case .agent, .group, .server: return [.bot, .generate, .upload]
+        case .me: return [.generate, .upload]
         }
     }
     private var tabs: [AvatarPickerTab] { Self.tabs(for: target) }
@@ -270,6 +280,7 @@ struct AvatarPickerSheet: View {
         case .agent(let id): return id
         case .group(let id): return "\(peopleSlot):\(id)"
         case .server(let id): return "servers:\(id)"
+        case .me: return "users:\(model.user?.id ?? "")"
         }
     }
 
@@ -285,6 +296,9 @@ struct AvatarPickerSheet: View {
         case .server(let id):
             if reset { return LeafArt.pick(seed: id) }
             return server?.leafPick ?? LeafArt.pick(seed: id)
+        case .me:
+            // People have no leaf; the Bot tab never shows for me.
+            return LeafArt.pick(seed: model.user?.id ?? "me")
         }
     }
     private var pick: LeafPick {
@@ -295,6 +309,8 @@ struct AvatarPickerSheet: View {
         case .agent: return project.map { $0.avatarLeaf != nil || $0.avatarLeafColor != nil || $0.imageKey != nil } ?? false
         case .group: return people.map { $0.leafPick != nil || $0.imageKey != nil } ?? false
         case .server: return server.map { $0.leafPick != nil || $0.imageKey != nil } ?? false
+        // Only an Arbos-uploaded picture resets (the GitHub one is already the default).
+        case .me: return model.hasCustomAvatar
         }
     }
     private var dirty: Bool {
@@ -327,7 +343,14 @@ struct AvatarPickerSheet: View {
         .background(sheetBg.ignoresSafeArea())
         .presentationDetents([.height(397 + 44)])
         .presentationDragIndicator(.visible)
-        .onAppear { tab = tabs.contains(initialTab) ? initialTab : .bot }
+        .onAppear {
+            tab = tabs.contains(initialTab) ? initialTab : (tabs.first ?? .bot)
+            // Rig: a prefilled prompt runs Generate at once.
+            if tab == .generate, let text = DebugHooks.avatarPrompt, !text.isEmpty {
+                source.prompt = text
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { generate() }
+            }
+        }
         .onChange(of: source.uploadJpeg) { _, jpeg in
             if jpeg != nil { reset = false }
         }
@@ -438,6 +461,7 @@ struct AvatarPickerSheet: View {
                 case .agent(let id): source.generatedKey = try await model.generateProjectAvatar(projectId: id, prompt: text)
                 case .group(let id): source.generatedKey = try await model.generateGroupAvatar(chatId: id, prompt: text)
                 case .server(let id): source.generatedKey = try await model.generateServerAvatar(id, prompt: text)
+                case .me: source.generatedKey = try await model.generateMyAvatar(prompt: text)
                 }
             } catch {
                 source.errorText = error.localizedDescription
@@ -461,8 +485,8 @@ struct AvatarPickerSheet: View {
                     ZStack {
                         Circle().fill(mutedDisc)
                         if phase.error != nil {
-                            // The fixture's "generated" key has no blob behind it: show the leaf.
-                            LeafAvatar(pick: currentPick, size: 114)
+                            // The fixture's "generated" key has no blob behind it: the picture as it is.
+                            currentPicture
                         } else {
                             ProgressView().tint(placeholder)
                         }
@@ -471,34 +495,49 @@ struct AvatarPickerSheet: View {
             }
             .frame(width: 114, height: 114)
             .clipShape(Circle())
+        } else if reset, case .me = target {
+            // Back to the GitHub picture (unknown here) or the coloured initials.
+            PersonAvatar(url: nil, handle: model.user?.login ?? "?", size: 114,
+                         name: model.user?.name, id: model.user?.id,
+                         colorIndex: model.user?.avatarColorIndexEffective)
         } else if reset {
             LeafAvatar(pick: currentPick, size: 114)
         } else {
-            switch target {
-            case .agent:
-                if let project {
-                    AgentAvatar(project: project, theme: theme, size: 114, still: true)
-                } else {
-                    LeafAvatar(pick: currentPick, size: 114)
-                }
-            case .group(let id):
-                if let key = people?.imageKey, let url = model.blobURL(projectId: "\(peopleSlot):\(id)", key: key) {
-                    AsyncImage(url: url) { phase in
-                        if let image = phase.image { image.resizable().scaledToFill() } else { Circle().fill(mutedDisc) }
-                    }
-                    .frame(width: 114, height: 114).clipShape(Circle())
-                } else if let leaf = people?.leafPick {
-                    LeafAvatar(pick: leaf, size: 114)
-                } else {
-                    LeafAvatar(pick: currentPick, size: 114).opacity(0.55)
-                }
-            case .server:
-                if let server {
-                    ServerAvatar(server: server, size: 114)
-                } else {
-                    LeafAvatar(pick: currentPick, size: 114).opacity(0.55)
-                }
+            currentPicture
+        }
+    }
+
+    /// The entity's picture as it is now (no pending choice).
+    @ViewBuilder
+    private var currentPicture: some View {
+        switch target {
+        case .agent:
+            if let project {
+                AgentAvatar(project: project, theme: theme, size: 114, still: true)
+            } else {
+                LeafAvatar(pick: currentPick, size: 114)
             }
+        case .group(let id):
+            if let key = people?.imageKey, let url = model.blobURL(projectId: "\(peopleSlot):\(id)", key: key) {
+                AsyncImage(url: url) { phase in
+                    if let image = phase.image { image.resizable().scaledToFill() } else { Circle().fill(mutedDisc) }
+                }
+                .frame(width: 114, height: 114).clipShape(Circle())
+            } else if let leaf = people?.leafPick {
+                LeafAvatar(pick: leaf, size: 114)
+            } else {
+                LeafAvatar(pick: currentPick, size: 114).opacity(0.55)
+            }
+        case .server:
+            if let server {
+                ServerAvatar(server: server, size: 114)
+            } else {
+                LeafAvatar(pick: currentPick, size: 114).opacity(0.55)
+            }
+        case .me:
+            PersonAvatar(url: model.user?.avatarUrl, handle: model.user?.login ?? "?", size: 114,
+                         name: model.user?.name, id: model.user?.id,
+                         colorIndex: model.user?.avatarColorIndexEffective)
         }
     }
 
@@ -560,6 +599,18 @@ struct AvatarPickerSheet: View {
                     case .bot: ok = await model.setServerLeaf(id, pick: pick)
                     case .upload: if let uploadJpeg { ok = await model.setServerImage(id, jpeg: uploadJpeg) }
                     case .generate: if let generatedKey { ok = await model.setServerImageKey(id, key: generatedKey) }
+                    }
+                }
+            case .me:
+                // Reset = the GitHub picture again (`DELETE /me/avatar`); a photo goes up as
+                // `PUT /me/avatar`; a generated preview is set by its key.
+                if reset {
+                    ok = await model.removeUserAvatar()
+                } else {
+                    switch tab {
+                    case .bot: break
+                    case .upload: if let uploadJpeg { ok = await model.setUserAvatar(jpeg: uploadJpeg) }
+                    case .generate: if let generatedKey { ok = await model.setUserAvatarKey(generatedKey) }
                     }
                 }
             }
