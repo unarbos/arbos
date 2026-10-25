@@ -1248,6 +1248,11 @@ pub struct TurnState {
     /// The route's `ack` became a bubble (`new` / `wake`). An `act` ack is working-row status
     /// only, so it does not count as words the user read (duplex step 1 fallback rule).
     pub ack_posted: bool,
+    /// A web tool (`web_search` / `web_fetch`) ran in this turn: research, not a quick local act.
+    pub web_tool_used: bool,
+    /// Duplex step 4: this act turn was cut at `act_to_job_after()` and its remainder becomes a
+    /// job after the turn ends (`handle_send`); no fallback bubble, no escalation subagent.
+    pub act_to_job: bool,
 }
 
 /// The direct tool call a turn is inside right now.
@@ -1383,6 +1388,8 @@ impl TurnState {
             unposted_text: String::new(),
             posted_fallback: false,
             ack_posted: false,
+            web_tool_used: false,
+            act_to_job: false,
         }
     }
 }
@@ -3020,6 +3027,13 @@ impl Agent {
         if turn.stopped {
             return result;
         }
+        if turn.act_to_job {
+            if let Some(ValidRoute::Act { plan }) = &turn.route {
+                self.convert_act_turn_to_job(chat_id, host, &user_msg_id, &user_text, plan, &turn)
+                    .await;
+            }
+            return result;
+        }
         let followup = match (&turn.route, turn.escalate) {
             (
                 Some(ValidRoute::New {
@@ -3753,6 +3767,8 @@ impl Agent {
             unposted_text: String::new(),
             posted_fallback: false,
             ack_posted: false,
+            web_tool_used: false,
+            act_to_job: false,
         });
         self.turn_running.store(true, Ordering::SeqCst);
         let keepalive = self.spawn_keepalive();
@@ -4402,6 +4418,19 @@ impl Agent {
                         self.cut_relay_turn_short(host, &pi, reason).await;
                         continue;
                     }
+                    // Duplex step 4: long act work leaves the turn and becomes a job (lock freed).
+                    if !reply_only
+                        && !deadline_announced
+                        && self.maybe_convert_act_to_job(host, elapsed).await
+                    {
+                        deadline_announced = true;
+                        let _ = pi
+                            .call(RpcCommand::Abort {
+                                id: pi.next_id("ab"),
+                            })
+                            .await;
+                        continue;
+                    }
                     // Turn deadline: announce in chat, hand remaining work to a subagent, never silent.
                     if elapsed > deadline && !deadline_announced {
                         deadline_announced = true;
@@ -4633,6 +4662,11 @@ impl Agent {
                 // The ack (when the model wrote one) is settled before the first tool runs; no
                 // synthetic "On it." — the working row's activity label below is the status.
                 self.maybe_split_ack(host, t, true).await;
+                if is_web_tool(tool_name) && !t.web_tool_used {
+                    t.web_tool_used = true;
+                    // Research under way: the ack becomes a bubble at 2 s, not 4 (duplex step 4).
+                    self.spawn_act_ack_promotion_after(t, Duration::from_secs(2));
+                }
                 // A tool with no plain-words label keeps the row's current status (the act ack)
                 // rather than clearing it — clearing left `project.activity` null for a whole
                 // `sleep`-style turn (#1657); with nothing to keep, a generic line.
@@ -4967,12 +5001,19 @@ impl Agent {
         if after.is_zero() {
             return;
         }
+        self.spawn_act_ack_promotion_after(t, after);
+    }
+
+    /// Promote the act ack once the turn has run `after` (measured from the turn's start), if
+    /// it is still the same turn and nothing was posted meanwhile.
+    fn spawn_act_ack_promotion_after(self: &Arc<Self>, t: &TurnState, after: Duration) {
         let me = self.clone();
         let chat = t.chat_id.clone();
         let user_msg = t.user_msg_id.clone();
         let started = t.started;
+        let wait = after.saturating_sub(started.elapsed());
         tokio::spawn(async move {
-            tokio::time::sleep(after).await;
+            tokio::time::sleep(wait).await;
             let Some(host) = me.sync.host(&chat).await else {
                 return;
             };
@@ -4983,45 +5024,170 @@ impl Agent {
             if t.chat_id != chat || t.user_msg_id != user_msg || t.started != started {
                 return;
             }
-            if t.stopped
-                || t.ack_posted
-                || !matches!(t.route, Some(ValidRoute::Act { .. }))
-                || Self::posted_anything(t)
-            {
-                return;
+            if me.promote_act_ack(&host, t).await {
+                tracing::info!(chat_id = %chat, after_ms = after.as_millis() as i64, "act ack promoted to a bubble: the work is taking a while");
             }
-            let ack = t.ack_text.trim().to_owned();
-            if ack.is_empty() {
-                return;
-            }
-            if t.row_closed {
-                me.open_row(&host, t, "ack").await;
-            }
-            {
-                let h = host.lock().await;
-                if t.text_part_dirty {
-                    if let Some(p) = h.doc.add_text_part(&t.assistant_msg_id, "text") {
-                        t.text_part_id = p;
-                    }
-                    t.text_part_dirty = false;
-                }
-                h.doc
-                    .append_text(&t.assistant_msg_id, &t.text_part_id, &ack);
-            }
-            t.ack_posted = true;
-            me.close_row(&host, t, "ack").await;
-            me.open_row(&host, t, "result").await;
-            let _ = me.store.t3_append(
-                &chat,
-                None,
-                Some(&chat),
-                "assistant",
-                Some("assistant"),
-                &ack,
-                Some(&json!({ "ack": true, "promoted_after_ms": after.as_millis() as i64 })),
-            );
-            tracing::info!(chat_id = %chat, after_ms = after.as_millis() as i64, "act ack promoted to a bubble: the work is taking a while");
         });
+    }
+
+    /// The act ack as the first bubble, once: closes it as an `ack` row and opens a fresh result
+    /// row. `false` when there is nothing to promote (no ack, already posted, not an act turn,
+    /// stopped).
+    async fn promote_act_ack(&self, host: &SharedHost, t: &mut TurnState) -> bool {
+        if t.stopped
+            || t.ack_posted
+            || !matches!(t.route, Some(ValidRoute::Act { .. }))
+            || Self::posted_result(t)
+        {
+            return false;
+        }
+        let ack = t.ack_text.trim().to_owned();
+        if ack.is_empty() {
+            return false;
+        }
+        if t.row_closed {
+            self.open_row(host, t, "ack").await;
+        }
+        {
+            let h = host.lock().await;
+            if t.text_part_dirty {
+                if let Some(p) = h.doc.add_text_part(&t.assistant_msg_id, "text") {
+                    t.text_part_id = p;
+                }
+                t.text_part_dirty = false;
+            }
+            h.doc
+                .append_text(&t.assistant_msg_id, &t.text_part_id, &ack);
+        }
+        t.ack_posted = true;
+        self.close_row(host, t, "ack").await;
+        self.open_row(host, t, "result").await;
+        let _ = self.store.t3_append(
+            &t.chat_id,
+            None,
+            Some(&t.chat_id),
+            "assistant",
+            Some("assistant"),
+            &ack,
+            Some(&json!({ "ack": true, "promoted": true })),
+        );
+        true
+    }
+
+    /// Duplex step 4 trigger, checked on the main loop's 1 s tick: an `act` user turn still
+    /// running at `act_to_job_after()` that has used a web tool or more than
+    /// `act_to_job_tool_calls()` tool calls posts its ack now and is marked for conversion; the
+    /// caller aborts the pi turn and `handle_send` starts the job. `false` when nothing applies.
+    pub(crate) async fn maybe_convert_act_to_job(
+        self: &Arc<Self>,
+        host: &SharedHost,
+        elapsed: Duration,
+    ) -> bool {
+        if !self.cfg.act_to_job() || !self.cfg.jobs() || elapsed < crate::config::act_to_job_after()
+        {
+            return false;
+        }
+        let mut tl = self.turn.lock().await;
+        let Some(t) = tl.as_mut() else {
+            return false;
+        };
+        if t.act_to_job
+            || t.stopped
+            || t.escalate
+            || t.reply_only
+            || t.routine_turn
+            || t.from_voice
+            || !matches!(t.route, Some(ValidRoute::Act { .. }))
+        {
+            return false;
+        }
+        let long_work = t.web_tool_used
+            || t.metrics.tool_calls > i64::from(crate::config::act_to_job_tool_calls());
+        if !long_work {
+            return false;
+        }
+        // The job delivers the answer under the ask; whatever the model had staged stays with
+        // the turn as the safety net (#1776: prose must reach the user) — posted only if the
+        // job cannot start.
+        t.act_to_job = true;
+        t.escalate = false;
+        self.promote_act_ack(host, t).await;
+        tracing::info!(
+            chat_id = %t.chat_id,
+            elapsed_ms = elapsed.as_millis() as i64,
+            tool_calls = t.metrics.tool_calls,
+            web = t.web_tool_used,
+            "act turn converted to a job: long work leaves the turn"
+        );
+        true
+    }
+
+    /// After a converted act turn ended: the remainder runs as a job with the user's request,
+    /// the plan and the act transcript so far. Research (web tools, no edits) is `research`;
+    /// anything that touched files or ran commands is `code` (project folder + git lock; asks
+    /// before a restart).
+    pub(crate) async fn convert_act_turn_to_job(
+        self: &Arc<Self>,
+        chat_id: &str,
+        host: &SharedHost,
+        user_msg_id: &str,
+        user_text: &str,
+        plan: &str,
+        turn: &TurnState,
+    ) {
+        let edited = turn.act_transcript.iter().any(|l| {
+            l.starts_with("→ edit")
+                || l.starts_with("→ write")
+                || l.starts_with("→ bash")
+                || l.starts_with("→ codemode")
+        });
+        let kind = if turn.web_tool_used && !edited {
+            "research"
+        } else if edited {
+            "code"
+        } else {
+            "other"
+        };
+        let title = act_job_title(&turn.ack_text, turn.activity.as_deref(), kind);
+        let transcript: String = turn.act_transcript.join("\n").chars().take(2400).collect();
+        let brief = format!(
+            "Continue this task the main agent started and could not finish quickly; the user has already seen a one-line acknowledgement.\n\nUser request: {user_text}\n\nPlan: {plan}\n\nDone so far:\n{transcript}\n\nFinish it and return the answer the user should read. For a comparison or research: each item with its page URL, the compared facts, the sources you used and what could not be checked. Do not repeat the acknowledgement."
+        );
+        match self
+            .start_job(chat_id, host, user_msg_id, &title, &brief, kind, Vec::new())
+            .await
+        {
+            Ok(v) => {
+                tracing::info!(chat_id, job = %v["job_id"], kind, %title, "converted act turn runs on as a job")
+            }
+            Err(e) => {
+                // No job: the user must still get words. The prose the model had written when
+                // the turn was cut is the best answer there is; else one plain line.
+                tracing::warn!(chat_id, error = %e, "act→job conversion could not start the job");
+                let kept = ProseFilter::clean_prose(turn.unposted_text.trim());
+                let line = if kept.trim().is_empty() {
+                    "I couldn't finish that one in the background. Ask me again in a moment."
+                        .to_owned()
+                } else {
+                    kept
+                };
+                let h = host.lock().await;
+                let id = ulid();
+                h.doc
+                    .start_assistant_message(&id, user_msg_id, &self.cfg.device_id);
+                if let Some(attr) = self.people_reply_fields(chat_id) {
+                    h.doc.set_message_fields(&id, &attr.fields);
+                }
+                if self.reply_to_wanted_for(&h.doc, chat_id, user_msg_id) {
+                    h.doc
+                        .set_message_fields(&id, &[("replyTo", json!(user_msg_id))]);
+                }
+                if let Some(p) = h.doc.add_text_part(&id, "text") {
+                    h.doc.append_text(&id, &p, &line);
+                }
+                h.doc.finish_message(&id, MessageStatus::Done);
+            }
+        }
     }
 
     /// Open a fresh streaming assistant row for this turn (after an ack or a progress bubble).
@@ -5142,9 +5308,27 @@ impl Agent {
         let Some(host) = self.sync.host(&chat_id).await else {
             return Err("no room for this chat".into());
         };
+        self.start_job(&chat_id, &host, &user_msg_id, &title, brief, kind, touches)
+            .await
+    }
+
+    /// Start a job for `user_msg_id` in `chat_id` (the `start_job` tool and the step-4 act→job
+    /// conversion share this): caps, the row, the worker task. Returns `{job_id, title, state}`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn start_job(
+        self: &Arc<Self>,
+        chat_id: &str,
+        host: &SharedHost,
+        user_msg_id: &str,
+        title: &str,
+        brief: &str,
+        kind: &str,
+        touches: Vec<String>,
+    ) -> Result<Value, String> {
+        let title = title.to_owned();
         let open_here = self
             .store
-            .jobs_for_chat(&chat_id)
+            .jobs_for_chat(chat_id)
             .unwrap_or_default()
             .into_iter()
             .filter(|j| j.is_open())
@@ -5164,15 +5348,7 @@ impl Agent {
         }
         let job_id = ulid();
         self.store
-            .insert_job(
-                &job_id,
-                &chat_id,
-                &user_msg_id,
-                &title,
-                kind,
-                brief,
-                &touches,
-            )
+            .insert_job(&job_id, chat_id, user_msg_id, &title, kind, brief, &touches)
             .map_err(|e| e.to_string())?;
         let slug: String = title
             .split_whitespace()
@@ -5198,9 +5374,9 @@ impl Agent {
             touches,
         };
         let _ = self.store.t3_append(
-            &chat_id,
+            chat_id,
             None,
-            Some(&chat_id),
+            Some(chat_id),
             "job_start",
             Some("system"),
             &format!("start_job {title}: {brief}"),
@@ -5208,9 +5384,9 @@ impl Agent {
         );
         tracing::info!(chat_id, job = %job_id, %title, kind, open_here, "job started");
         self.spawn_subagent_task(
-            &chat_id,
-            &host,
-            &user_msg_id,
+            chat_id,
+            host,
+            user_msg_id,
             None,
             name,
             title.clone(),
@@ -5385,21 +5561,23 @@ impl Agent {
         tracing::info!(chat_id = %t.chat_id, chars = cleaned.chars().count(), "prose outside send_message kept out of the chat");
     }
 
-    /// Did this turn put any words in front of the user (a bubble, an ack, a progress note)?
-    fn posted_anything(t: &TurnState) -> bool {
-        !t.streamed_text.trim().is_empty()
-            || t.ack_posted
-            || t.progress_texts.iter().any(|p| !p.trim().is_empty())
+    /// Did this turn put an *answer* in front of the user — a `send_message` bubble or a posted
+    /// `route.reply`? The ack is not the answer: on 0.1.131 an act ack promoted to a bubble
+    /// counted as "posted", the fallback stayed quiet, and the user kept only "Reading the
+    /// README … now." (#1776, six eval failures; the same shape as #1355 / #1699).
+    fn posted_result(t: &TurnState) -> bool {
+        !t.streamed_text.trim().is_empty() || t.progress_texts.iter().any(|p| !p.trim().is_empty())
     }
 
     /// Turn end, send tool `On`: a turn that posted nothing, started no background work and
     /// still holds prose posts that prose once, so a model that forgot the tool never leaves
     /// the user with silence. `Strict` never posts it; silence is a valid outcome.
     async fn post_fallback_if_silent(&self, host: &SharedHost, t: &mut TurnState) {
-        if t.send_tool != crate::config::SendTool::On || t.stopped || t.routine_turn {
+        if t.send_tool != crate::config::SendTool::On || t.stopped || t.routine_turn || t.act_to_job
+        {
             return;
         }
-        if Self::posted_anything(t) || t.unposted_text.trim().is_empty() {
+        if Self::posted_result(t) || t.unposted_text.trim().is_empty() {
             return;
         }
         if matches!(
@@ -5513,8 +5691,7 @@ impl Agent {
                 // (#1373: deciding here wrote the reply twice).
                 if let Some(ValidRoute::Reply { reply: Some(text) }) = &t.route {
                     let text = text.trim().to_owned();
-                    let answered =
-                        t.route_correcting && (t.has_prose() || Self::posted_anything(t));
+                    let answered = t.route_correcting && (t.has_prose() || Self::posted_result(t));
                     if !text.is_empty() && !answered {
                         if t.send_tool == crate::config::SendTool::Off {
                             t.route_reply_text = Some(text);
@@ -7584,17 +7761,24 @@ fn lock_conflicts(a: &str, b: &str) -> bool {
     }
 }
 
-/// Restart after a box restart without asking (Jacob, 2026-10-24): work inside the box —
-/// research, edits in the project folder, git on a branch, routines — is reversible and goes
-/// again; a job that uses a secret restarts only when the owner's standing "Always allow"
-/// grant covers it (`vault::enabled_grant_names`); anything that leaves the box as the user
-/// (`external:`, `send`, `pay`, `local:`) waits for a go.
+/// Restart after a box restart without asking (Jacob, 2026-10-24, rule 3): research restarts
+/// itself; a job that edits (kind `code`, or `path:` / `git` touches) or spends asks first unless
+/// a standing grant already allows that action — for a secret, the owner's "Always allow" grant
+/// (`vault::enabled_grant_names`); there is no standing grant for edits yet, so they ask. Anything
+/// that leaves the box as the user (`external:`, `send`, `pay`, `local:`) waits for a go. Routines
+/// are neither an edit nor a spend and restart.
 fn job_restart_allowed(job: &crate::store::JobRow, project_id: &str) -> bool {
+    if job.kind == "code" {
+        return false;
+    }
     let grants = crate::vault::enabled_grant_names(project_id);
     job.touches.iter().all(|t| {
         let k = normalize_lock_key(t);
         if let Some(name) = k.strip_prefix("secret:") {
             return grants.iter().any(|g| g.eq_ignore_ascii_case(name));
+        }
+        if k.starts_with("path:") || k == "git" {
+            return false;
         }
         !(k.starts_with("external")
             || k.starts_with("send")
@@ -7603,9 +7787,48 @@ fn job_restart_allowed(job: &crate::store::JobRow, project_id: &str) -> bool {
     })
 }
 
+/// `web_search` / `web_fetch` (also behind the `mcp__arbos__` prefix): the turn is research.
+fn is_web_tool(tool_name: &str) -> bool {
+    let n = tool_name.strip_prefix("mcp__arbos__").unwrap_or(tool_name);
+    matches!(
+        n,
+        "web_search"
+            | "web_fetch"
+            | "search_web"
+            | "fetch_url"
+            | "browse"
+            | "browser_navigate"
+            | "browser_open"
+    )
+}
+
+/// A job title for a converted act turn: the live activity label when it is a short plain line,
+/// else the first five words of the ack, else a line for the kind.
+fn act_job_title(ack: &str, activity: Option<&str>, kind: &str) -> String {
+    if let Some(a) = activity
+        .map(str::trim)
+        .filter(|a| !a.is_empty() && a.split_whitespace().count() <= 6 && !a.ends_with('.'))
+    {
+        return a.to_owned();
+    }
+    let words: Vec<&str> = ack.split_whitespace().take(5).collect();
+    if !words.is_empty() {
+        return words
+            .join(" ")
+            .trim_end_matches(['.', ',', ':', ';'])
+            .to_owned();
+    }
+    match kind {
+        "research" => "Researching this".to_owned(),
+        "code" => "Working on the code".to_owned(),
+        _ => "Working on it".to_owned(),
+    }
+}
+
 /// How long an `act` turn may run before its ack becomes a bubble (`ARBOS_ACT_ACK_BUBBLE_SECS`,
 /// default 4; `0` keeps the ack on the working row only). Four seconds: a quick act answers inside
-/// it and shows one bubble; longer work shows the ack where Grok Bot shows it.
+/// it and shows one bubble; longer work shows the ack where Grok Bot shows it. Research turns
+/// promote at 2 s once a web tool has run (duplex step 4).
 fn act_ack_bubble_after() -> Duration {
     let secs = std::env::var("ARBOS_ACT_ACK_BUBBLE_SECS")
         .ok()
@@ -7912,10 +8135,13 @@ mod tests {
             restarts: 0,
         };
         assert!(job_restart_allowed(&row("research", &[]), "p"));
-        assert!(job_restart_allowed(
-            &row("code", &["path:/work/p", "git"]),
+        // edits ask first (no standing grant for edits exists yet)
+        assert!(!job_restart_allowed(&row("code", &[]), "p"));
+        assert!(!job_restart_allowed(
+            &row("other", &["path:/work/p/src"]),
             "p"
         ));
+        assert!(!job_restart_allowed(&row("other", &["git"]), "p"));
         assert!(job_restart_allowed(&row("ops", &["routines"]), "p"));
         assert!(
             !job_restart_allowed(&row("other", &["secret:STRIPE_KEY"]), "p"),
@@ -7926,6 +8152,32 @@ mod tests {
             "p"
         ));
         assert!(!job_restart_allowed(&row("ops", &["pay"]), "p"));
+        // the act→job conversion's own kinds
+        assert_eq!(
+            act_job_title(
+                "Looking up the top-rated surf schools around Santa Teresa now.",
+                None,
+                "research"
+            ),
+            "Looking up the top-rated surf"
+        );
+        assert_eq!(
+            act_job_title("", Some("Searching the web"), "research"),
+            "Searching the web"
+        );
+        assert_eq!(
+            act_job_title(
+                "",
+                Some("Looking up the schools and their prices now."),
+                "code"
+            ),
+            "Working on the code"
+        );
+        assert!(
+            is_web_tool("mcp__arbos__web_search")
+                && is_web_tool("web_fetch")
+                && !is_web_tool("bash")
+        );
     }
 
     /// D91: the window size pi would start the next turn from, as pi counts it.
