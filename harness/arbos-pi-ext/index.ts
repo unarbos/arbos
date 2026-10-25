@@ -40,7 +40,7 @@ const CODE_MODE = (process.env.ARBOS_CODE_MODE ?? "off").trim().toLowerCase() ==
 // Default deadline of a `codemode` script when the model sets none (code mode on): the turn deadline.
 const SCRIPT_TIMEOUT_MS = Number(process.env.ARBOS_SCRIPT_TIMEOUT_MS ?? 15 * 60 * 1000);
 // Tools that talk to the user or to agentd's turn state: direct calls only, never from a script.
-const DIRECT_ONLY_TOOLS = new Set(["route", "ask_user", "send_message", "mcp__arbos__ask_user"]);
+const DIRECT_ONLY_TOOLS = new Set(["route", "ask_user", "send_message", "start_job", "list_jobs", "mcp__arbos__ask_user"]);
 // pi's built-in tools inside a `codemode` script: these keep their plain `tools.<name>`.
 const PI_BUILTIN_TOOLS = new Set(["read", "bash", "edit", "write", "grep", "find", "ls", "codemode"]);
 // Stable prefix (D87): with it on, the working set, the per-turn skills and project memory are
@@ -466,6 +466,58 @@ export default function arbosPiExt(pi: ExtensionAPI) {
         return { content: [{ type: "text", text: res.note }], details: undefined };
       }
       return { content: [{ type: "text", text: "Posted. Do not repeat it; anything you write outside send_message is not shown." }], details: undefined };
+    },
+  });
+
+  // ---- 2c. jobs (duplex step 2): start_job returns at once; the result comes back as an [Arbos] job notice
+  if (SESSION_ROLE === "main") pi.registerTool({
+    name: "start_job",
+    label: "Start job",
+    description:
+      "Start a background job for work that takes more than a few seconds (research, a comparison, a build, a long script). Returns at once with a job id; the job's title is the status line the user watches, and its result reaches you later as an `[Arbos] Job … finished` message to deliver with send_message. Post a one-line acknowledgement with send_message first, then call this and end the turn.",
+    promptSnippet: "start_job: run longer work beside the chat; its result arrives later as an [Arbos] job notice",
+    parameters: Type.Object({
+      title: Type.String({ description: "2-5 words, present tense, what the user sees while it runs (\"Searching for surf schools\")" }),
+      brief: Type.String({ description: "The exact instruction for the worker: what to find or build, for whom, the acceptance criterion, what to return (URLs and sources for research)" }),
+      kind: Type.Union([Type.Literal("research"), Type.Literal("code"), Type.Literal("ops"), Type.Literal("other")]),
+      touches: Type.Optional(Type.Union([Type.Array(Type.String()), Type.Null()], { description: "Resources the job changes: paths, 'git', 'routines', 'secret:<name>' (none for research)" })),
+    }),
+    exposure: "model-only",
+    executionMode: "sequential",
+    async execute(_toolCallId, params) {
+      const res = await hook("/hook/start_job", {
+        session_id: sessionId,
+        title: params.title,
+        brief: params.brief,
+        kind: params.kind,
+        touches: params.touches ?? [],
+      });
+      if (res && !res.ok) {
+        return { content: [{ type: "text", text: `Job not started (${res.error ?? "unknown"}). Tell the user in one line what you will do instead.` }], details: undefined };
+      }
+      const job = (res as { job?: { job_id?: string; state?: string } } | undefined)?.job;
+      return {
+        content: [{ type: "text", text: `Job ${job?.job_id ?? "?"} ${job?.state ?? "running"}. End the turn now with nothing more; its result arrives later as an [Arbos] job notice.` }],
+        details: undefined,
+      };
+    },
+  });
+
+  if (SESSION_ROLE === "main") pi.registerTool({
+    name: "list_jobs",
+    label: "List jobs",
+    description: "The jobs of this chat: id, title, state (queued | running | done | failed | cancelled | interrupted), current step and elapsed seconds. Use it to answer \"how is it going?\" and before starting work that may already be running.",
+    promptSnippet: "list_jobs: the jobs of this chat with their live step",
+    parameters: Type.Object({}),
+    exposure: "model-only",
+    executionMode: "sequential",
+    async execute() {
+      const res = await hook("/hook/list_jobs", { session_id: sessionId });
+      if (res && !res.ok) {
+        return { content: [{ type: "text", text: `No job list (${res.error ?? "unknown"}).` }], details: undefined };
+      }
+      const jobs = (res as { jobs?: unknown[] } | undefined)?.jobs ?? [];
+      return { content: [{ type: "text", text: jobs.length ? JSON.stringify(jobs) : "No jobs in this chat." }], details: undefined };
     },
   });
 

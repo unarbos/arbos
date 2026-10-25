@@ -96,9 +96,10 @@ class StreamWatcher(threading.Thread):
             self.lines.append(buf)
 
 
-def send_turn(project, chat_id, prompt, timeout_s, reject_approvals=True, on_rows=None, until_first_reply=False, on_poll=None, skip_secret_cards=False):
+def send_turn(project, chat_id, prompt, timeout_s, reject_approvals=True, on_rows=None, until_first_reply=False, on_poll=None, skip_secret_cards=False, tight_s=2.0):
     """until_first_reply: for background tasks — return once the agent has answered (ack or text)
-    and the ack row has settled, without waiting for the background result."""
+    and the ack row has settled, without waiting for the background result.
+    tight_s: how long `on_poll` is called every 0.5 s before the 3 s cadence (a 5 s deadline needs it)."""
     t0 = time.time()
     proc = rl.ctl_popen("chat", "send", project, chat_id, prompt, "--stream", "--timeout", str(min(timeout_s, 600)))
     watcher = StreamWatcher(proc, t0)
@@ -114,8 +115,8 @@ def send_turn(project, chat_id, prompt, timeout_s, reject_approvals=True, on_row
     over = False
     repaired = False
     if on_poll:
-        # a tight first second for checks with a short deadline (the steer's working-row change)
-        for _ in range(4):
+        # a tight first stretch for checks with a short deadline (the steer's working-row change)
+        for _ in range(max(1, int(tight_s / 0.5))):
             time.sleep(0.5)
             on_poll()
     else:
