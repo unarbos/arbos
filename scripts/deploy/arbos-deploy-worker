@@ -608,6 +608,30 @@ roll_continue() {
   finish_roll "$sha" "$snapshot" || true
 }
 
+seed_check() {
+  # seed_check <sha> <version> <image> — the pi-ext seed inside the image must come from this commit:
+  # images 0.1.121–0.1.123 (2026-10-25) shipped a three-day-old arbos-pi-ext out of the buildx cache next to
+  # a fresh agentd binary, and nothing noticed until a worker read docker history. The image writes
+  # /etc/arbos/pi-seed/extensions/arbos-pi-ext/.source-sha (#1702); a mismatch, or an index.ts without the
+  # current `reply_to` handler, fails the roll before any box moves and holds the lane like a canary failure.
+  local sha="$1" version="$2" image="$3" out seed_sha hits
+  command -v docker >/dev/null 2>&1 || { log "agentd: seed check skipped (no docker on this host)"; return 0; }
+  gh_token | docker login ghcr.io -u x --password-stdin >/dev/null 2>&1 || true
+  if ! docker pull -q "$image" >/dev/null 2>&1; then
+    record_failure agentd "$sha" "seed check: could not pull $image"; return 1
+  fi
+  out="$(docker run --rm --entrypoint sh "$image" -c 'cat /etc/arbos/pi-seed/extensions/arbos-pi-ext/.source-sha 2>/dev/null; echo; grep -c reply_to /etc/arbos/pi-seed/extensions/arbos-pi-ext/index.ts 2>/dev/null' 2>/dev/null || true)"
+  seed_sha="$(echo "$out" | sed -n 1p | tr -d '[:space:]')"
+  hits="$(echo "$out" | sed -n 2p | tr -d '[:space:]')"
+  if [[ "$seed_sha" != "$sha" || "${hits:-0}" -lt 1 ]]; then
+    record_failure agentd "$sha" "seed check: image $version carries pi-ext seed from '${seed_sha:-?}' (want $sha), reply_to hits=${hits:-0}; stale layer — not rolled"
+    hold_agentd "$sha" "$version" "stale arbos-pi-ext seed in the image (seed .source-sha ${seed_sha:-?} != $sha); purge the buildx cache"
+    return 1
+  fi
+  log "agentd: seed check ok — pi-ext seed is from $sha, reply_to present"
+  return 0
+}
+
 roll_image() {
   need_root
   local sha="$1" version tag t0 st waited=0 image snapshot
@@ -639,6 +663,7 @@ roll_image() {
   log "agentd: image $version built and smoke-tested after $(( $(date +%s) - t0 )) s"
   image="ghcr.io/$GH_REPO/arbos-agent:$version"
   snapshot="arbos-agent-$version"
+  seed_check "$sha" "$version" "$image" || exit 1
   prune_snapshots "$version"
   git -C "$REPO" checkout -q --detach "$sha"
   DAYTONA_API_KEY="$(secret_from "$RELAY_ENV" DAYTONA_API_KEY)" \
