@@ -1808,6 +1808,17 @@ pub struct BoxHelloBody {
     pub seed_sha: Option<String>,
 }
 
+/// The box's owner as the agent should know them: login, the profile name (a label) and
+/// `address_name` — the name the user set themselves, the only one agents use to address them.
+fn owner_json(state: &AppState, user_id: &str) -> Value {
+    match state.db.user_address(user_id) {
+        Ok(Some((login, name, address_name))) => {
+            json!({ "id": user_id, "login": login, "name": name, "address_name": address_name })
+        }
+        _ => json!({ "id": user_id }),
+    }
+}
+
 /// One project as the box sees it: settings, chats, and the pushes queued for it.
 fn workspace_json(state: &AppState, p: &Project) -> Result<Value, (StatusCode, String)> {
     let chats = state.db.list_chats(&p.id).map_err(internal)?;
@@ -1874,12 +1885,16 @@ pub async fn box_hello(
         }
     }
     let projects = state.db.projects_of_user(user_id).map_err(internal)?;
+    let owner = owner_json(&state, user_id);
     let mut workspaces = Vec::new();
     for p in &projects {
-        workspaces.push(workspace_json(&state, p)?);
+        let mut w = workspace_json(&state, p)?;
+        w["owner"] = owner.clone();
+        workspaces.push(w);
     }
     Ok(Json(json!({
         "user_id": user_id,
+        "owner": owner,
         "workspaces": workspaces,
         "relay_version": env!("CARGO_PKG_VERSION"),
     }))
@@ -1894,6 +1909,7 @@ pub async fn box_projects(State(state): State<AppState>, principal: Principal) -
     };
     boxes::box_seen_http(&state, user_id).await;
     let projects = state.db.projects_of_user(user_id).map_err(internal)?;
+    let owner = owner_json(&state, user_id);
     let mut out = Vec::new();
     for p in &projects {
         let chats = state.db.list_chats(&p.id).map_err(internal)?;
@@ -1907,9 +1923,9 @@ pub async fn box_projects(State(state): State<AppState>, principal: Principal) -
             project["forked_from"] = json!(src);
         }
         let people_chats = crate::people::people_chats_of_project(&state, &p.id, user_id);
-        out.push(json!({ "project": project, "chats": chats, "people_chats": people_chats }));
+        out.push(json!({ "project": project, "chats": chats, "people_chats": people_chats, "owner": owner }));
     }
-    Ok(Json(json!({ "user_id": user_id, "workspaces": out })).into_response())
+    Ok(Json(json!({ "user_id": user_id, "owner": owner, "workspaces": out })).into_response())
 }
 
 /// `POST /box/keepalive`: box-level keep-alive (any workspace mid-turn keeps the box awake).
