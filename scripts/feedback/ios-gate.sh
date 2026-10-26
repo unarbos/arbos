@@ -214,6 +214,9 @@ trap teardown EXIT
 cd ~/arbos-gate || exit 2
 ROOT=$(pwd)
 git fetch -q origin "+refs/heads/${branch}:refs/remotes/origin/${branch}" || { echo "fetch of ${branch} failed"; exit 2; }
+# The base checks (test-target compile, test baseline) compare against origin/main — fetch it, or the
+# gate tree's stale ref (bc640a45 from 2026-10-25 20:xx on 2026-10-26 06:23) is "main" (#1878).
+git fetch -q origin "+refs/heads/main:refs/remotes/origin/main" || echo "== warning: fetch of main failed; base checks use the tree's last known main"
 git checkout -q --detach "$sha" || { echo "checkout of ${sha} failed"; exit 2; }
 # Arbos depends on the local packages/ArbosFFI product, which links the gitignored
 # ArbosFFIRust.xcframework from scripts/build-xcframework.sh. Build it before xcodebuild.
