@@ -73,6 +73,11 @@ pub enum SyncEvent {
         url: String,
         bytes: Arc<Vec<u8>>,
     },
+    /// The picture at `url` could not be fetched (retries exhausted, or 404): the app forgets
+    /// the request so the next surface that wants it asks again.
+    AvatarMissing {
+        url: String,
+    },
     /// The avatar picker's generated picture is ready to preview (`url` fetches it; `image_key`
     /// is what "Set avatar" sends), or the generation failed (`error`).
     ImageGenerated {

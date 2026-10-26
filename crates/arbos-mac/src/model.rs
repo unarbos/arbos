@@ -984,6 +984,15 @@ struct AgentMemberWire {
     model: Option<String>,
     #[serde(default)]
     owner: Option<Person>,
+    /// The picture and its stamp round-trip through the on-disk store (`Project.agents` is
+    /// persisted as JSON). Until 2026-10-26 this wire struct dropped both, so every roster
+    /// copy came back from a relaunch without its picture; with the stamps equal (agents
+    /// whose avatar predates #1813 carry 0) that lossy copy won the resolver and every
+    /// people-chat surface drew the leaf until the next registry read.
+    #[serde(default)]
+    image_url: Option<String>,
+    #[serde(default)]
+    avatar_version: i64,
 }
 
 impl From<AgentMemberWire> for AgentMember {
@@ -1005,8 +1014,8 @@ impl From<AgentMemberWire> for AgentMember {
             ),
             avatar_leaf: w.avatar_leaf_effective.or(w.avatar_leaf),
             avatar_leaf_color: w.avatar_leaf_color_effective.or(w.avatar_leaf_color),
-            image_url: None,
-            avatar_version: 0,
+            image_url: w.image_url,
+            avatar_version: w.avatar_version,
             description: w.description,
             model: w.model,
             owner: w.owner,
@@ -3584,6 +3593,250 @@ pub fn now_ms() -> u64 {
 
 pub fn new_id() -> Id {
     ulid::Ulid::new().to_string()
+}
+
+/// `ARBOS_TRACE_ROWS=1`: one stderr line per hop of a row's path through this app (socket
+/// frame → doc import → snapshot → app state → transcript), each with a ms timestamp, so a
+/// "the notice came late" report can say which hop waited. Off by default; read once.
+pub fn trace_rows() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("ARBOS_TRACE_ROWS").is_ok_and(|v| v == "1"))
+}
+
+/// A membership notice this device shows before the relay's own row arrives (ARB-393): the
+/// adding Mac writes "<me> added <names>" into its transcript the moment Add is pressed, so the
+/// line never waits on the round trip. The relay stays the author of record — when its system
+/// row with the same words lands, the local copy is dropped; a failed add or a row that never
+/// comes removes it after [`OptimisticNotice::TTL_MS`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OptimisticNotice {
+    /// The local row's id (`local-notice:<ulid>`); never pushed to the relay.
+    pub id: Id,
+    pub text: String,
+    pub created_at: u64,
+}
+
+impl OptimisticNotice {
+    /// Row id prefix: a snapshot never carries these, so they are easy to tell apart.
+    pub const ID_PREFIX: &'static str = "local-notice:";
+    /// How long an unconfirmed local notice may stay on screen.
+    pub const TTL_MS: u64 = 60_000;
+    /// The relay stamps its row with its own clock; a row this much older than the local one
+    /// still counts as the same notice.
+    const SKEW_MS: u64 = 15_000;
+
+    pub fn new(text: String, now: u64) -> Self {
+        Self {
+            id: format!("{}{}", Self::ID_PREFIX, new_id()),
+            text,
+            created_at: now,
+        }
+    }
+
+    /// The transcript row for this notice: a centred system stamp like the relay's.
+    pub fn message(&self, chat_id: &str) -> Message {
+        Message {
+            id: self.id.clone(),
+            chat_id: chat_id.to_owned(),
+            role: Role::System,
+            sender: "system".into(),
+            status: MessageStatus::Done,
+            turn: None,
+            decision: None,
+            subagent_id: None,
+            subagent_name: None,
+            handoff_messages: None,
+            worker: false,
+            job: None,
+            hidden: false,
+            agent_reply_to: None,
+            reactions: Default::default(),
+            in_reply_to: None,
+            routine_name: None,
+            sender_name: None,
+            sender_icon: None,
+            sender_handle: None,
+            sender_avatar: None,
+            sender_avatar_color: None,
+            mentions: Vec::new(),
+            reply_to: None,
+            forwarded_from: None,
+            reply_ref: None,
+            asked_by_handle: None,
+            owner_handle: None,
+            usage: None,
+            return_contract: None,
+            waiting_user: false,
+            waiting_approval: false,
+            model: None,
+            effort: None,
+            created_at: self.created_at,
+            completed_at: None,
+            call_id: None,
+            activity: None,
+            pending: false,
+            parts: vec![Part::Text {
+                id: format!("{}:text", self.id),
+                text: self.text.clone(),
+            }],
+            hidden_parts: Vec::new(),
+            greeting: false,
+        }
+    }
+
+    /// The relay's row for this notice: a system line with the same words, written no earlier
+    /// than the local one (minus clock skew).
+    pub fn confirmed_by(&self, m: &Message) -> bool {
+        m.role == Role::System
+            && !m.id.starts_with(Self::ID_PREFIX)
+            && m.created_at + Self::SKEW_MS >= self.created_at
+            && m.plain_text().trim() == self.text
+    }
+}
+
+/// "A", "A and B", "A, B and C" — the relay's `notices::join_names`, so the local line reads
+/// exactly like the row that replaces it.
+pub fn join_names(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.clone(),
+        [a, b] => format!("{a} and {b}"),
+        [init @ .., last] => format!("{} and {last}", init.join(", ")),
+    }
+}
+
+/// "<who> added <names>"; `None` with nobody to name.
+pub fn added_line(who: &str, names: &[String]) -> Option<String> {
+    (!names.is_empty()).then(|| format!("{who} added {}", join_names(names)))
+}
+
+/// Fold this chat's local notices into a fresh snapshot from the relay: a notice the snapshot
+/// confirms (same words, relay row) or one past its TTL is dropped; the rest are re-inserted in
+/// time order so they survive the list replacement. Returns how many were confirmed.
+pub fn reconcile_optimistic_notices(
+    messages: &mut Vec<Message>,
+    notices: &mut Vec<OptimisticNotice>,
+    now: u64,
+) -> usize {
+    let mut confirmed = 0;
+    notices.retain(|n| {
+        if messages.iter().any(|m| n.confirmed_by(m)) {
+            confirmed += 1;
+            return false;
+        }
+        now.saturating_sub(n.created_at) < OptimisticNotice::TTL_MS
+    });
+    // Snapshots never carry local rows; a stale copy from an earlier merge must not double up.
+    messages.retain(|m| !m.id.starts_with(OptimisticNotice::ID_PREFIX));
+    let chat_id = messages
+        .iter()
+        .find(|m| !m.chat_id.is_empty())
+        .map(|m| m.chat_id.clone())
+        .unwrap_or_default();
+    for n in notices.iter() {
+        let at = messages
+            .iter()
+            .rposition(|m| m.created_at <= n.created_at)
+            .map(|ix| ix + 1)
+            .unwrap_or(0);
+        messages.insert(at, n.message(&chat_id));
+    }
+    confirmed
+}
+
+#[cfg(test)]
+mod optimistic_notice_tests {
+    use super::*;
+
+    fn relay_row(id: &str, text: &str, created_at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "chatId": "c", "role": "system", "sender": "system", "status": "done",
+            "createdAt": created_at, "parts": [{ "kind": "text", "id": "p", "text": text }]
+        }))
+        .unwrap()
+    }
+
+    fn user_row(id: &str, created_at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "chatId": "c", "role": "user", "sender": "user:u_me", "status": "done",
+            "createdAt": created_at, "parts": [{ "kind": "text", "id": "p", "text": "hi" }]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_local_line_reads_like_the_relay_s() {
+        assert_eq!(
+            added_line("Jacob", &["Affine".to_string()]).as_deref(),
+            Some("Jacob added Affine")
+        );
+        assert_eq!(
+            added_line("Jacob", &["Home".into(), "hjkb".into(), "Doug".into()]).as_deref(),
+            Some("Jacob added Home, hjkb and Doug")
+        );
+        assert_eq!(added_line("Jacob", &[]), None);
+        let n = OptimisticNotice::new("Jacob added Affine".into(), 1_000);
+        let m = n.message("c");
+        assert_eq!(m.role, Role::System);
+        assert_eq!(m.plain_text(), "Jacob added Affine");
+        assert!(m.id.starts_with(OptimisticNotice::ID_PREFIX));
+    }
+
+    #[test]
+    fn a_local_notice_survives_snapshots_until_the_relay_row_confirms_it() {
+        let now = 100_000;
+        let mut notices = vec![OptimisticNotice::new("Jacob added Affine".into(), now)];
+        // Snapshot 1: something unrelated arrived; the local line stays, in time order.
+        let mut snap = vec![user_row("m1", now - 5_000), user_row("m2", now + 300)];
+        let confirmed = reconcile_optimistic_notices(&mut snap, &mut notices, now + 400);
+        assert_eq!(confirmed, 0);
+        assert_eq!(
+            snap.iter().map(|m| m.plain_text()).collect::<Vec<_>>(),
+            vec!["hi", "Jacob added Affine", "hi"]
+        );
+        assert_eq!(snap[1].chat_id, "c");
+        assert_eq!(notices.len(), 1);
+        // Snapshot 2: the relay's row (its clock a little behind ours) — the local copy goes,
+        // the relay's stays, nothing doubles up.
+        let mut snap = vec![
+            user_row("m1", now - 5_000),
+            user_row("m2", now + 300),
+            relay_row("r1", "Jacob added Affine", now - 2_000),
+        ];
+        let confirmed = reconcile_optimistic_notices(&mut snap, &mut notices, now + 900);
+        assert_eq!(confirmed, 1);
+        assert!(notices.is_empty());
+        assert_eq!(
+            snap.iter()
+                .filter(|m| m.plain_text() == "Jacob added Affine")
+                .count(),
+            1
+        );
+        assert!(snap
+            .iter()
+            .all(|m| !m.id.starts_with(OptimisticNotice::ID_PREFIX)));
+    }
+
+    #[test]
+    fn other_notices_and_old_rows_do_not_confirm_and_a_stale_notice_expires() {
+        let now = 100_000;
+        let mut notices = vec![OptimisticNotice::new("Jacob added Affine".into(), now)];
+        let mut snap = vec![
+            relay_row("old", "Jacob added Affine", now - 60_000),
+            relay_row("other", "Jacob removed Affine", now + 10),
+        ];
+        assert_eq!(
+            reconcile_optimistic_notices(&mut snap, &mut notices, now + 100),
+            0
+        );
+        assert_eq!(notices.len(), 1);
+        assert_eq!(snap.len(), 3);
+        // Past the TTL with no confirmation: the local line is withdrawn.
+        let mut snap = vec![user_row("m1", now - 5_000)];
+        reconcile_optimistic_notices(&mut snap, &mut notices, now + OptimisticNotice::TTL_MS);
+        assert!(notices.is_empty());
+        assert_eq!(snap.len(), 1);
+    }
 }
 
 #[cfg(test)]
