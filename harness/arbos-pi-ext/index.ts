@@ -40,6 +40,36 @@ const STEER_PREFIX = "[Arbos steer:";
 const RELAY_TURN_MARK = "[Arbos relay turn]";
 
 /**
+ * A shell command that would outlive the turn (nohup / setsid / disown / a trailing `&` / tmux /
+ * screen / systemd-run) in the main agent's own turn. That work is a job: `start_job` runs it on a
+ * worker with status, steer_job and stop_job; a detached script has none of that, and a later
+ * change becomes kill + restart (#1778, b9: `kill …; pkill -f 'sleep 45'` raised a destructive
+ * card). Returns the offending fragment, or null.
+ */
+export function detachedShell(toolName: string, input: Record<string, unknown>): string | null {
+  const text =
+    toolName === "bash" ? String(input?.command ?? "")
+    : toolName === "codemode" ? String(input?.code ?? "")
+    : "";
+  if (!text) return null;
+  const patterns: RegExp[] = [
+    /(^|[;&|(`'"]\s*|\bsudo\s+|\bexec\s+)(nohup|setsid)\b/m,
+    /\bdisown\b/,
+    /\b(tmux\s+new(-session)?|screen\s+-[dD]|systemd-run|start-stop-daemon|at\s+now)\b/,
+    // `cmd &` / `(cmd) &` / `cmd & disown` / `cmd &\n…` — not `&&`, not `2>&1`, not `&>`.
+    /(?<![&<>|\d])&(?![&>])\s*(?:$|[;)\n]|\n|disown\b|\\n)/m,
+  ];
+  for (const re of patterns) {
+    const m = re.exec(text);
+    if (m) return text.slice(Math.max(0, m.index - 40), m.index + m[0].length + 40).replace(/\s+/g, " ").trim();
+  }
+  return null;
+}
+
+const DETACHED_SHELL_HINT =
+  "Detached processes are not started from a turn (nohup, setsid, disown, a trailing `&`, tmux, screen): that work is a job. Call start_job(title, brief, kind) with the whole instruction — every step, the waits, the exact file paths, what to report — and end the turn; the worker runs it with a status line, its result arrives as an [Arbos] job notice, and a later change goes through steer_job(job_id, text) (never kill + restart). Run short foreground commands here only.";
+
+/**
  * A `reply` text that announces more to come ("delivered in parts below", "table follows") is an
  * introduction, not the answer: the turn must go on with send_message. Mirrors
  * `agent::promises_parts` (proof run 1, 2026-10-26 01:0x UTC: the result turn routed `reply`
@@ -241,6 +271,13 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     }
     if (directOnly) {
       return { block: true, reason: `${event.toolName} cannot be called from a script: call it directly, after the script.` };
+    }
+    if (SESSION_ROLE === "main" && parent === null) {
+      const detached = detachedShell(event.toolName, event.input as Record<string, unknown>);
+      if (detached) {
+        audit({ kind: "detached_shell_refused", session: sessionId, tool: event.toolName, fragment: detached.slice(0, 160) });
+        return { block: true, reason: `Refused (\`${detached.slice(0, 80)}\`): ${DETACHED_SHELL_HINT}` };
+      }
     }
     if (beforeRoute && relayTurn && event.toolName === "send_message") {
       // Speaking first in a relay turn is routing `reply`: record it and let the message out.
