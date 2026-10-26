@@ -188,15 +188,20 @@ pub fn resolve<'c>(
     }
 }
 
-/// Of every copy of `hit`'s agent in `cards`, the one with the highest avatar stamp; the
-/// first in the caller's order among equals (so an unstamped world behaves as before).
+/// Of every copy of `hit`'s agent in `cards`, the one with the highest avatar stamp. Among
+/// equal stamps a copy that carries the picture beats one that does not — the two describe
+/// the same state, so the pictureless one is a lossy copy (a roster row restored without
+/// its picture), not a reset: a reset moves the stamp. Otherwise the caller's order holds.
 fn newest_copy<'c>(hit: &'c AgentCard, cards: &[&'c AgentCard]) -> &'c AgentCard {
+    let has_picture = |c: &AgentCard| c.image_key.as_deref().is_some_and(|k| !k.is_empty());
     cards
         .iter()
         .copied()
         .filter(|c| c.id == hit.id)
         .fold(hit, |best, c| {
-            if c.avatar_version > best.avatar_version {
+            if c.avatar_version > best.avatar_version
+                || (c.avatar_version == best.avatar_version && has_picture(c) && !has_picture(best))
+            {
                 c
             } else {
                 best
@@ -475,6 +480,21 @@ mod tests {
         let r = resolve(&bubble, [&stale_roster, &reset]);
         assert_eq!(r.image_key, None);
         assert_eq!(r.avatar_version, 1_700_000_200_000);
+
+        // Equal stamps, one copy without the picture (a roster row restored from disk without
+        // it — Jacob's relaunch, 2026-10-26): the copy with the picture wins in either order.
+        let lossy = card("01TEST", "TestAgent");
+        let whole = AgentCard {
+            image_key: Some("avatar-1.jpg".into()),
+            ..card("01TEST", "TestAgent")
+        };
+        for cards in [
+            [lossy.clone(), whole.clone()],
+            [whole.clone(), lossy.clone()],
+        ] {
+            let r = resolve(&bubble, cards.iter());
+            assert_eq!(r.image_key.as_deref(), Some("avatar-1.jpg"), "{cards:?}");
+        }
 
         // Unstamped copies (an older relay) keep the caller's order: the roster wins.
         let unstamped = [
