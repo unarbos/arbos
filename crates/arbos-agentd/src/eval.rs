@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 
 use crate::config::{DEFAULT_DECISION_SCORER, DEFAULT_DECISION_THRESHOLD};
 use crate::llm::Llm;
+use crate::people::{mention_role, MentionRole};
 use crate::responders::{self, Candidate, ResponderDecision, Room};
 use crate::settings::{DecisionConfig, DecisionProvider};
 
@@ -55,15 +56,22 @@ fn load_cases(path: &Path) -> Result<Vec<Case>> {
         let roster = rosters
             .get(roster_name)
             .ok_or_else(|| anyhow!("case {} names unknown roster {roster_name}", c["id"]))?;
+        let text = c["text"].as_str().unwrap_or("");
         let candidates = roster["agents"]
             .as_array()
             .map(|a| {
                 a.iter()
-                    .map(|x| Candidate {
-                        id: x["id"].as_str().unwrap_or("").to_owned(),
-                        name: x["name"].as_str().unwrap_or("").to_owned(),
-                        role: x["role"].as_str().unwrap_or("").to_owned(),
-                        host: x["host"].as_bool().unwrap_or(false),
+                    .map(|x| {
+                        let name = x["name"].as_str().unwrap_or("").to_owned();
+                        // Same classifier the people gate uses: how `text` @mentions this agent.
+                        let role = mention_role(text, &name);
+                        Candidate {
+                            id: x["id"].as_str().unwrap_or("").to_owned(),
+                            name,
+                            role: x["role"].as_str().unwrap_or("").to_owned(),
+                            host: x["host"].as_bool().unwrap_or(false),
+                            mentioned_as: (role != MentionRole::None).then(|| role.as_str()),
+                        }
                     })
                     .collect()
             })
