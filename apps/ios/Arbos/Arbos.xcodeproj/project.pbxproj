@@ -42,7 +42,9 @@
 		A1BB00000000000000000004 /* BackSwipeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000003 /* BackSwipeTests.swift */; };
 		A1BB00000000000000000006 /* BackSwipeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000005 /* BackSwipeUITests.swift */; };
 		A11B0000000000000000A002 /* LibraryList.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11B0000000000000000A001 /* LibraryList.swift */; };
+		A15EC9000000000000000002 /* AgentPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15EC9000000000000000001 /* AgentPicker.swift */; };
 		A11B0000000000000000A004 /* LibraryListTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11B0000000000000000A003 /* LibraryListTests.swift */; };
+		A15EC9000000000000000004 /* AgentPickerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15EC9000000000000000003 /* AgentPickerTests.swift */; };
 		A1A9D0000000000000000004 /* AgentIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A9D0000000000000000003 /* AgentIdentityTests.swift */; };
 		A1AF11000000000000000002 /* AgentAvatarFlipTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1AF11000000000000000001 /* AgentAvatarFlipTests.swift */; };
 		A10A6AAB1A89692C252B33E4 /* FeedbackSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A19A848187E4B392C3266926 /* FeedbackSheet.swift */; };
@@ -222,7 +224,9 @@
 		A1BB00000000000000000005 /* BackSwipeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackSwipeUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000010 /* ArbosUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ArbosUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A11B0000000000000000A001 /* LibraryList.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryList.swift; sourceTree = "<group>"; };
+		A15EC9000000000000000001 /* AgentPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentPicker.swift; sourceTree = "<group>"; };
 		A11B0000000000000000A003 /* LibraryListTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryListTests.swift; sourceTree = "<group>"; };
+		A15EC9000000000000000003 /* AgentPickerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentPickerTests.swift; sourceTree = "<group>"; };
 		A1A9D0000000000000000003 /* AgentIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentIdentityTests.swift; sourceTree = "<group>"; };
 		A1AF11000000000000000001 /* AgentAvatarFlipTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentAvatarFlipTests.swift; sourceTree = "<group>"; };
 		A19A848187E4B392C3266926 /* FeedbackSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedbackSheet.swift; sourceTree = "<group>"; };
@@ -501,6 +505,7 @@
 				A1F100000000000000000009 /* MathText.swift */,
 				A1DE700000000000000000C1 /* MentionComposer.swift */,
 				A11B0000000000000000A001 /* LibraryList.swift */,
+				A15EC9000000000000000001 /* AgentPicker.swift */,
 				A1B5EA00000000000000A007 /* GlobalSearchView.swift */,
 			);
 			path = UI;
@@ -559,6 +564,7 @@
 				A1F10000000000000000000B /* MathTextTests.swift */,
 				A1A9D0000000000000000003 /* AgentIdentityTests.swift */,
 				A1AF11000000000000000001 /* AgentAvatarFlipTests.swift */,
+				A15EC9000000000000000003 /* AgentPickerTests.swift */,
 				A1C5440000000000000003 /* ShellApprovalCardTests.swift */,
 				A1BB00000000000000000003 /* BackSwipeTests.swift */,
 			);
@@ -760,6 +766,7 @@
 				A1A9E0000000000000000002 /* AgentPane.swift in Sources */,
 				A1BB00000000000000000002 /* BackSwipe.swift in Sources */,
 				A11B0000000000000000A002 /* LibraryList.swift in Sources */,
+				A15EC9000000000000000002 /* AgentPicker.swift in Sources */,
 				A1B5EA00000000000000A008 /* GlobalSearchView.swift in Sources */,
 				A1F3867FABDB2908FFF6F2F0 /* Secrets.swift in Sources */,
 				A1C5440000000000000002 /* ShellGrants.swift in Sources */,
@@ -877,6 +884,7 @@
 				A1F10000000000000000000C /* MathTextTests.swift in Sources */,
 				A1A9D0000000000000000004 /* AgentIdentityTests.swift in Sources */,
 				A1AF11000000000000000002 /* AgentAvatarFlipTests.swift in Sources */,
+				A15EC9000000000000000004 /* AgentPickerTests.swift in Sources */,
 				A1C5440000000000000004 /* ShellApprovalCardTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
