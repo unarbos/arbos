@@ -221,6 +221,23 @@ preference" and was reverted by Jacob ([feedback header-pill-restore-2026-10-24]
 Code: `header::bar_frame` (equal side slots, `justify_center`) and
 `header::metrics`; pinned by `header_tests::the_pill_is_centred_not_parked_at_the_left_edge`.
 
+### Material: frosted glass on both surfaces (Jacob 2026-10-25 + 2026-10-26, [feedback mac-header-glass-2026-10-25], [feedback mac-header-pill-glass-matte-2026-10-26])
+
+The pill and the folded-sidebar disc are **frosted glass whatever the
+surface** — Grok Bot's header pill over its flat black transcript is the
+reference, so Matte (no window vibrancy) is not an excuse for a flat fill.
+#1830 (v0.6.256) frosted them on Glass only; Jacob's Mac is on Matte (the D90
+default) and he saw the solid `bubble_assistant` pill on his AffineTeam group
+(v0.6.268). Recipe (`glass::header_surface` + `glass::header_frost`,
+`Theme::header_glass*`): the list blurred through the control's rounded
+bounds, a see-through fill (dark `#3b3f45` @ 56 %, light white @ 60 % — the
+same on both surfaces; the backdrop blur composites ≈ 20 % darker than its
+source on Metal and wgpu alike, so over flat `#fcfcfc` the light pill lands
+near the `#ededed` of the solid pill it replaces), a 1 pt rim (white 18 % /
+black 10 %), a top highlight (white 30 % / 90 %) and a 1 pt lift. Sizes and
+placements are untouched; the rest of the glass restyle stays paused. Pinned
+by `header::glass_tests` (every kind × surface × appearance).
+
 ## Message timestamps (Jacob 2026-10-24, [feedback timestamps-hover-only-2026-10-24])
 
 **Message timestamps are hover-only, never always-on.** A bubble never carries
@@ -546,6 +563,31 @@ Pinned by `profiles::chrome_tests` (`the_pane_is_the_chats_surface_in_both_appea
 `pane::tests::every_kind_lays_out_hero_then_pill_then_options` and
 `pane::tests::only_the_agent_pane_may_have_a_share_disc`.
 
+### Grouped-card dividers: inset 16 at both ends (Jacob 2026-10-26, [feedback mac-settings-card-dividers-2026-10-26])
+
+**Every divider between two rows of a grouped card stops 16 pt short of the
+card's left edge and 16 pt short of its right edge — the row's own content
+padding — on every Mac grouped list: the agent pane's Settings card, group /
+server / person / channel info, the Settings pages, profile cards, the
+Library list, the New message / New channel sheets.** Jacob's v0.6.268 shot of
+the agent Settings card (Model · Reasoning · Voice): the lines started under
+the labels but ran into the card's right edge, so the card read lopsided.
+Before, the kit hung the line "under the label" (16 past an icon tile → 58,
+past an avatar → 62) and to the right edge, Apple's iOS 6 habit; Grok Bot's
+cards do not do this either.
+
+| Item | Rule | Code |
+|---|---|---|
+| Leading inset | **16** (`kit::DIVIDER_INSET` = `kit::INSET`, the row padding), whatever leads the row — nothing, a tile, an avatar, a thumbnail | `kit::divider_insets()` → `(16, 16)` |
+| Trailing inset | **16**, the same number | `kit::hairline_below` (hung 1 pt under a row, `.relative()` on the row) and `kit::divider` (in flow, for a card that places its own rows) both draw from it |
+| Height / colour | 1 pt, `theme.border`; none above the first row, none under the last (the card's clip swallows the hung one; `section_parts` places `rows − 1` in-flow ones) | unchanged |
+| Who draws it | **only the kit.** `glass::row` (Settings pages) hangs `kit::hairline_below`; the New message / New channel sheets and the Add-members lists use `kit::divider` / `kit::hairline_below` instead of their own 0.5 pt lines and `border_b_1()` rows. A card that needs a line between two custom children calls `kit::divider(theme)` | `kit::tests::no_card_outside_the_kit_draws_its_own_divider` scans `src/ui` for a left-margin-only hairline, a `left(..)/right(0)` one, a 0.5 pt one, or a list row's own bottom border |
+
+Pinned by `kit::tests::the_divider_is_inset_equally_at_both_ends_by_the_row_padding`
+(pure) and `kit::tests::every_shared_divider_stops_at_the_row_padding_on_both_sides`
+(headless render: tile row, avatar row, `glass::row`, `section` — each line's
+left and right gaps to its card measure 16). iPhone unchanged.
+
 ### Agent pane: Details · Library · Computer (Jacob 2026-10-24, [feedback agent-pane-details-tab-2026-10-24])
 
 **The agent pane's tabs are Grok Bot's — Details · Library · Computer — and
@@ -617,7 +659,7 @@ the agent pane (Details · Library · Computer); `profiles/library.rs`.
 | Item | Rule | Where |
 |---|---|---|
 | Grouping | one list, `when` descending, split by local day: **Today · Yesterday · weekday (last 7 days) · "Oct 18"** (the sidebar's words; "Oct 18, 2025" in another year); each day = `kit::section_title` + one `kit::card` | `group_days`, `day_label` |
-| Row | the kit's one-line row: **41** tall, inset 16, 10 right; **32** pt thumbnail (aspect-fill, radius 7) — a play glyph over a video, the extension ("PDF") on a `surface_2` tile for files, the link glyph for links; name 13 pt one line, tail-truncated; time 11.5 pt muted, compact ("now", "42m", "13h", "2d", "3w", "4mo"); hairline hung at 58 | `ROW_H`, `THUMB`, `rel_time` |
+| Row | the kit's one-line row: **41** tall, inset 16, 10 right; **32** pt thumbnail (aspect-fill, radius 7) — a play glyph over a video, the extension ("PDF") on a `surface_2` tile for files, the link glyph for links; name 13 pt one line, tail-truncated; time 11.5 pt muted, compact ("now", "42m", "13h", "2d", "3w", "4mo"); the kit's divider (16 / 16, below) | `ROW_H`, `THUMB`, `rel_time` |
 | Hover | row fill `surface_2`; the time gives way to a **24 pt ⋯ disc** (no layout shift) that opens the row's menu at the click: Open · Forward · Download for attachments, Open link · Copy link for links | `MORE_DISC`, `menu_items` |
 | Show more | after **5** rows a 36 pt "Show more ⌄" row unfolds the rest of that day in place ("Show less ⌃" folds it); per opened pane | `SHOW_MORE_AFTER`, `library_toggle_day` |
 | Preview card | after **300 ms** on a row: **300** wide, left **20** from the pane's edge, **8** above the row (under it when it would reach the window's top 8 pt band); padding 10, radius 12, a step over the card's fill (white in light) with the strong border and shadow; picture **278 × 156** radius 8 aspect-fill (files: the extension at 22 pt on the tile; links: a globe); type line 11.5 muted ("Image" / "Video" / "PDF" / "Link"); the full name 13 semibold on 17, up to 3 lines; the sender's 18 pt picture, name, "· Yesterday 10:06 PM" (`sidebar::stamp_label`) | `HOVER_DELAY_MS`, `CARD_*`, `card_above` |
