@@ -12,6 +12,8 @@ enum DebugHooks {
     static var openServer: String? { value("ARBOS_OPEN_SERVER") }
     /// Home search opened with this query (search-name-matching rig).
     static var search: String? { value("ARBOS_SEARCH").flatMap { $0.isEmpty ? nil : $0 } }
+    /// With `ARBOS_SEARCH`: open the n-th result row (1-based, list order) once the rows are up.
+    static var searchOpen: Int? { value("ARBOS_SEARCH_OPEN").flatMap { Int($0) } }
     /// Home list segment selected at launch: all | agents | people | servers (screenshot rig).
     static var homeFilter: String? { value("ARBOS_HOME_FILTER") }
     /// With `ARBOS_OPEN_SERVER=…:panel`: the server page's tab to land on (Channels | Members | Settings).
@@ -43,14 +45,15 @@ enum DebugHooks {
     /// Tasks-chip rig (duplex §2.4): the first n of three background jobs open in the opened
     /// agent chat — 1 running with a step, 2 running with no step yet, 3 queued behind a lock.
     static var fixtureJobs: Int { min(3, value("ARBOS_FIXTURE_JOBS").flatMap { Int($0) } ?? 0) }
+    /// `ARBOS_FIXTURE_READS=1` ([feedback library-chat-only-ios-2026-10-25]): the opened agent
+    /// chat ends like Bubble's did — a hidden job row that read app.rs and a reply naming ten
+    /// files and a docs page; none of it belongs in the Library.
+    static var fixtureReads: Bool { value("ARBOS_FIXTURE_READS") == "1" }
     /// Job-tab rig: the first seeded job's document is finished (result delivered).
     static var fixtureRolloutDone: Bool { value("ARBOS_FIXTURE_ROLLOUT_DONE") == "1" }
     /// #1592 rig: the fixture group holds someone else's agent ("TestAgent", run by @sami —
     /// in the roster, not in my projects) with one bubble; with `ARBOS_FIXTURE_WORKING` it works.
     static var fixtureForeignAgent: Bool { value("ARBOS_FIXTURE_FOREIGN_AGENT") == "1" }
-    /// `ARBOS_FIXTURE_SEEN=<handle>:<messageId>[,…]`: peers' read watermarks in the fixture DM
-    /// (sent-state-opacity rig: a seen bubble at full opacity next to a sent one).
-    static var fixtureSeen: String? { value("ARBOS_FIXTURE_SEEN").flatMap { $0.isEmpty ? nil : $0 } }
     /// Presence-row rig: `1` (the chat's other person) or comma-separated handles typing.
     static var fixtureTyping: String? { value("ARBOS_FIXTURE_TYPING").flatMap { $0.isEmpty || $0 == "0" ? nil : $0 } }
     /// Join a call seen via presence automatically (two-simulator relay tests).

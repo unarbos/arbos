@@ -489,6 +489,7 @@ mod identity_tests {
             avatar_leaf: Some(5),
             avatar_leaf_color: Some(2),
             image_url: image.map(str::to_owned),
+            avatar_version: 0,
             ..Default::default()
         }
     }

@@ -312,19 +312,144 @@ extension EnvironmentValues {
     }
 }
 
+// MARK: - Chat header glass ([feedback ios-header-glass-2026-10-25], Jacob 2026-10-25)
+
+/// What a chat-header control is made of.
+///
+/// Jacob's reference is Grok Bot's header (back · name pill · ⋯): iOS 26 Liquid
+/// Glass, the transcript visibly blurred through the pills, a light rim. Ours
+/// painted `.ultraThinMaterial` under `field` at 85 % — a near-solid disc on
+/// every chat kind. On Glass the header now takes the real thing; Matte keeps
+/// its solid controls (Matte means no translucency).
+enum HeaderMaterial: Equatable, Hashable {
+    /// iOS 26+: `.glassEffect` — lensing rim, adaptive tint, blur-through.
+    case liquidGlass
+    /// Older iOS: `.ultraThinMaterial`, a light tint and a top-lit hairline rim.
+    case frosted
+    /// Matte: the field colour, as before.
+    case solid
+}
+
+/// The controls every chat header shows, left to right.
+enum HeaderControl: Equatable, CaseIterable {
+    case back, titlePill, search
+}
+
+/// The chat kinds the header serves — one header, one spec, for all of them.
+enum ChatHeaderKind: Equatable, CaseIterable {
+    case agent, dm, group, channel
+}
+
+/// The chat header's structure and material (read by `ChatView` and by
+/// `HeaderGlassStructureTests`): the same three controls and one material for
+/// every kind; the Search-in-chat bar under them wears the same material.
+enum ChatHeaderGlass {
+    static var liquidGlassAvailable: Bool {
+        if #available(iOS 26.0, *) { return true } else { return false }
+    }
+
+    static func material(surface: Surface, liquidGlassAvailable: Bool = liquidGlassAvailable) -> HeaderMaterial {
+        guard surface == .glass else { return .solid }
+        return liquidGlassAvailable ? .liquidGlass : .frosted
+    }
+
+    /// Back, the title pill, search — for an agent, a DM, a group and a channel alike.
+    static func controls(for kind: ChatHeaderKind) -> [HeaderControl] {
+        _ = kind
+        return [.back, .titlePill, .search]
+    }
+
+    /// The material of each control in a kind's header, in order.
+    static func materials(kind: ChatHeaderKind, surface: Surface, liquidGlassAvailable: Bool = liquidGlassAvailable) -> [(HeaderControl, HeaderMaterial)] {
+        let m = material(surface: surface, liquidGlassAvailable: liquidGlassAvailable)
+        return controls(for: kind).map { ($0, m) }
+    }
+
+    /// The Search-in-chat bar (Jacob 22:53): the header's material, not the flat field.
+    static func searchBarMaterial(surface: Surface, liquidGlassAvailable: Bool = liquidGlassAvailable) -> HeaderMaterial {
+        material(surface: surface, liquidGlassAvailable: liquidGlassAvailable)
+    }
+
+    /// Fallback frost (iOS < 26): how much of `field` sits over the material.
+    static let frostedTint: Double = 0.35
+    /// The Search-in-chat bar's Liquid Glass tint: the system blends a tint far
+    /// lighter than a fill, and a whole line of transcript runs under the bar.
+    static let searchBarTint: Double = 0.55
+    /// Tint under the legacy glass controls elsewhere (home header, sheets).
+    static let legacyTint: Double = 0.85
+}
+
+/// The glass behind a header control: one shape, three materials.
+struct HeaderGlassBackground<S: InsettableShape>: View {
+    @Environment(\.theme) private var theme
+    let shape: S
+    let material: HeaderMaterial
+    /// Buttons take the interactive glass (press feedback); the pill and the bar do not.
+    var interactive: Bool = false
+    /// A wide piece (the Search-in-chat bar) shows a whole line of transcript through
+    /// clear glass; a light `field` tint keeps its placeholder readable. Discs and the pill
+    /// stay untinted, as in the reference.
+    var tinted: Bool = false
+
+    var body: some View {
+        switch material {
+        case .liquidGlass:
+            if #available(iOS 26.0, *) {
+                Color.clear.glassEffect(liquid, in: shape)
+            } else {
+                frosted
+            }
+        case .frosted:
+            frosted
+        case .solid:
+            ZStack {
+                shape.fill(theme.field)
+                shape.strokeBorder(theme.fieldBorder, lineWidth: 1)
+            }
+        }
+    }
+
+    @available(iOS 26.0, *)
+    private var liquid: Glass {
+        let glass: Glass = interactive ? .regular.interactive() : .regular
+        return tinted ? glass.tint(theme.field.opacity(ChatHeaderGlass.searchBarTint)) : glass
+    }
+
+    /// `.ultraThinMaterial`, a thin tint so the content stays visible through it, and a
+    /// rim lit from the top (the specular edge of the reference) — see the Mac's
+    /// `Theme::header_glass()` for the same recipe in quads.
+    private var frosted: some View {
+        ZStack {
+            shape.fill(.ultraThinMaterial)
+            shape.fill(theme.field.opacity(ChatHeaderGlass.frostedTint))
+            shape.strokeBorder(
+                LinearGradient(
+                    colors: [Color.white.opacity(theme.isDark ? 0.30 : 0.70), Color.white.opacity(theme.isDark ? 0.08 : 0.25)],
+                    startPoint: .top, endPoint: .bottom),
+                lineWidth: 1)
+        }
+    }
+}
+
 /// Header / composer control circle: frosted material on Glass, solid field on Matte.
+/// `material` (the chat header) picks Liquid Glass / frost / solid explicitly.
 struct GlassCircle<Content: View>: View {
     @Environment(\.theme) private var theme
     var size: CGFloat = Theme.control
+    var material: HeaderMaterial? = nil
     @ViewBuilder var content: () -> Content
 
     var body: some View {
         ZStack {
-            if theme.isGlass {
-                Circle().fill(.ultraThinMaterial)
+            if let material {
+                HeaderGlassBackground(shape: Circle(), material: material, interactive: true)
+            } else {
+                if theme.isGlass {
+                    Circle().fill(.ultraThinMaterial)
+                }
+                Circle().fill(theme.field.opacity(theme.isGlass ? ChatHeaderGlass.legacyTint : 1))
+                Circle().strokeBorder(theme.fieldBorder, lineWidth: 1)
             }
-            Circle().fill(theme.field.opacity(theme.isGlass ? 0.85 : 1))
-            Circle().strokeBorder(theme.fieldBorder, lineWidth: 1)
             content()
         }
         .frame(width: size, height: size)
@@ -334,19 +459,25 @@ struct GlassCircle<Content: View>: View {
 }
 
 /// Header title pill: frosted material on Glass, solid field on Matte.
+/// `material` (the chat header) picks Liquid Glass / frost / solid explicitly.
 struct GlassPill<Content: View>: View {
     @Environment(\.theme) private var theme
+    var material: HeaderMaterial? = nil
     @ViewBuilder var content: () -> Content
 
     var body: some View {
         content()
             .background {
-                ZStack {
-                    if theme.isGlass {
-                        Capsule().fill(.ultraThinMaterial)
+                if let material {
+                    HeaderGlassBackground(shape: Capsule(), material: material)
+                } else {
+                    ZStack {
+                        if theme.isGlass {
+                            Capsule().fill(.ultraThinMaterial)
+                        }
+                        Capsule().fill(theme.field.opacity(theme.isGlass ? ChatHeaderGlass.legacyTint : 1))
+                        Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1)
                     }
-                    Capsule().fill(theme.field.opacity(theme.isGlass ? 0.85 : 1))
-                    Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1)
                 }
             }
     }

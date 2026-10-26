@@ -162,6 +162,30 @@ files or messages — with the ⌘ badges. Rig hooks: `ARBOS_SEARCH=<text>`,
 `ARBOS_PALETTE=1`, `ARBOS_PALETTE_SELECT=<n>`, `ARBOS_PALETTE_OPEN=1` (open
 the highlighted row once the rows are there).
 
+### iPhone: one bottom search bar, nothing else (Jacob 2026-10-25, [feedback iphone-bottom-search-bar-2026-10-25])
+
+The iPhone's bottom tab bar (Contacts · Calls · Chats · Settings, a tester item
+of 2026-10-23) is gone. Home's bottom edge is **one search capsule and no other
+control** — no grid/+ button, no tabs, no Cancel beside it (`HomeChrome.bottom
+== [.searchBar]`, pinned by `BottomSearchBarTests`). It sits in the bottom
+safe-area inset (rides the keyboard, clears the home indicator); the × inside
+the capsule clears and closes, dragging the results drops the keyboard, opening
+a row closes it. The header keeps the account circle (→ Settings sheet) and the
+`+` circle only — the search disc moved to the bar.
+
+Results are the palette's, app-wide (`GlobalSearch` = `palette.rs`, `SearchIndex` =
+`search_index.rs`, lazy against `messagesVersion`): the same five sections in the
+same order with the same headings and the 8-per-section cap, Recent on the empty
+query; a message row opens its chat scrolled to that row (`pendingReveal`), a
+file row opens the Library item in the viewer, a DM-less person starts the DM.
+The home list is no longer narrowed by typed text (as on the Mac).
+
+Where the four tabs' destinations live now: Settings → the account circle;
+Contacts → `+` (New message: people + directory) and the bar's People & agents;
+Calls → a chat's header call buttons (no call-history list existed; the tab was
+empty); the unread count → the app icon badge and each row's dot / count pill;
+new chat → `+`.
+
 ## Chat-list filter (the iPhone home's `PaneTabs`)
 
 Directly under the strip: **All · Agents · People · Servers** — the iPhone
@@ -321,39 +345,38 @@ a_drag_across_bubbles_spans_them_in_transcript_order`,
 drag straight up from one rendered bubble into the one above), and
 `transcript::cross_bubble_copy_tests`.
 
-## Own-bubble delivery (Jacob 2026-10-24, [feedback sent-state-opacity-2026-10-24])
+## Own-bubble delivery (Jacob 2026-10-24 + 2026-10-25, [feedback sent-state-opacity-2026-10-24], [feedback sent-full-when-delivered-2026-10-25])
 
-**No "sent" / "seen" caption on my bubbles — the bubble's opacity is the
-state.** Grok Bot's user bubble carries no delivery label (refs 03/web-01), and
-Jacob asked for "coloring" only: "remove these 'sent' items, just use coloring
-to make it clear, make the bubble less opaque."
+**No "sent" / "seen" caption on my bubbles, and no dimming after delivery.** A
+delivered bubble is the full own-bubble style the moment the relay ACKs it;
+only a pending bubble is dimmed; a failed one is full with a red "! Retry".
+Grok Bot's user bubble carries no delivery label and no delivery dimming beyond
+pending (refs 03 / web-01).
 
 | State | Meaning | Whole-bubble alpha | Extra |
 |---|---|---|---|
 | Pending | not yet ACKed by the relay | **0.50** (`BUBBLE_ALPHA_PENDING`) | — |
-| Failed | the relay refused it | 1.00 | red ⓘ-style `exclamation` glyph (16 pt, `danger`) on the bubble's outer edge, always visible |
-| Sent | ACKed, nobody opened past it yet | **0.72** (`BUBBLE_ALPHA_SENT`) | — |
-| Seen | a peer's read watermark covers it, an agent answered after it, or read receipts are off | 1.00 | — |
+| Failed | the relay refused it | 1.00 | red `exclamation` glyph + "Retry" (`danger`) on the bubble's outer edge, always visible; click re-sends the text |
+| Delivered | ACKed | 1.00 | — |
 
-Why 0.72 and not a lighter fill: whole-bubble alpha dims the text with the fill,
-which is what makes the difference read in dark mode (fill L* 39 → 30, text
-L* 100 → 76). Measured contrast of the composited text on its composited fill:
-dark 4.9 : 1, light 7.7 : 1 (≥ 4.5 AA); pending 3.4 : 1 / 3.6 : 1 (transient).
-The fill alone at 0.72 would move dark only 8 L* and read as "slightly
-different grey". Same values on the iPhone (`Delivery.sentAlpha` /
-`pendingAlpha`); its own bubble colours are the Mac's (`#5C5C5C` / `#111111`,
-white text).
+Why no "sent-but-unseen" state (the 0.72 of v0.6.223–v0.6.226, #1667): read
+receipts cannot be expected — agents never send one, members on older builds
+never send one, a member who has not opened the chat sends none, and the relay
+stores none — so in a group a delivered bubble sat at 0.72 indefinitely and
+Jacob read it as "not sent" (Arbonites, 2026-10-25 22:17: fill measured
+`#484848` = 0.72 × `#5c5c5c`, with an agent reply already under it). A 1:1-only
+variant would still dim forever against a peer on an older build, so the state
+is gone on both platforms. Read receipts are still *sent* (Settings →
+Notifications on the Mac; the iPhone sends `seen` while a people chat is
+focused) but nothing is drawn from them.
 
-The "seen" caption from #1496 went with the "sent" one (same component); full
-opacity carries it. With read receipts **off** every ACKed bubble is full at
-once — there is nothing to wait for, and a transcript that is lighter forever
-would read as broken.
+Pending at 0.5: white text on the composited fill 3.4 : 1 dark / 3.6 : 1 light,
+transient until the ACK. Same values on the iPhone (`Delivery.pendingAlpha`).
 
 Code: `transcript.rs` `Delivery` + `delivery_state()` + `own_bubble()` +
-`failed_glyph()`, pinned by `delivery_tests`; iPhone `Transcript.swift`
-`Delivery` / `ReadReceipts` / `DeliveryFade` + `DeliveryStateTests`. The iPhone
-also sends the `seen` watermark in its presence header now (`SessionRoom
-.newestMessageId`), so a Mac bubble read on a phone goes full.
+`failed_glyph()` / `Transcript::failed_retry` → `AppState::resend_failed`,
+pinned by `delivery_tests`; iPhone `Transcript.swift` `Delivery` (`.user(text:,
+delivery:, quote:)`) + `AppModel.resendFailed`, pinned by `DeliveryStateTests`.
 
 ## iPhone bubble gestures (Jacob 2026-10-24, [feedback iphone-open-scroll-block-2026-10-24] #1645 + #1629)
 
@@ -453,10 +476,12 @@ edits the label in place but the name through an alert.
 | Details, first | "Coding": the project with a 15 pt blue spinner, 41 pt row | **Coding** card — **hidden for now** (see the 2026-10-25 trim below): the agent's workspace — `cards::activity_spinner` (`CODING_SPINNER` 15, `accent`, eight spokes stepping every 100 ms) while a turn runs, the `code` glyph when idle; subtitle "Working · 42 s · 7 tool calls" / "Idle" / "Machine asleep" (`coding_status`); a click opens the Computer tab |
 | Details, second | "Routines": name over schedule, a 32 × 20 switch | **Routines** card (own agents) — **hidden for now**: one `kit::row` per routine, subtitle "trigger · next in …" / "Paused" (`routine_status`), a `glass::switch` that flips `routine_set_enabled`; "No routines yet" when empty. Routines still load when the pane opens (`RoutinesRefresh`) |
 | Details, then | — | **Settings** (Model · Reasoning · Voice, the hoverpick rows; Model alone on someone else's agent). No footnotes. The **Who may message X**, **Permissions** and **Profile** cards that followed it are gone (below) |
+| "Run by …" (someone else's agent) | — | a **link**, not a label (Jacob 2026-10-25, [feedback agent-pane-run-by-link-mac-2026-10-25]): "Run by Sami Kassab" (display name) or "Run by @sami" (`run_by_label`), drawn as a mention-chip pill under the name (`run_by_link`: accent text, accent pill at 14 % rest / 22 % hover / 30 % pressed with `mention::ChipPointer`'s 120 ms ease-out, pointing hand); a click pushes the owner's person page over the agent's (`Shell::push_profile` → `ProfilePage::User`), the top bar's `‹` disc brings the agent back on its tab and scroll. With no label the link is the subtitle; under a label it is the line below. Rig `ARBOS_OPEN_PROFILE=agent:foreign[:owner]` with `ARBOS_FIXTURE_FOREIGN_AGENT=1` |
 | Library | Grok's second tab | the one list by day with the hover card ("Library tab" below) |
 | Computer | Grok's third tab (the bot's computer) | the agent's **box**: **Machine** card — Status (dot + "Awake · 5 h 12 m"), Where it runs, Machine spec, Image, Spend today (`GET /machine`); **Resources** — Disk / Memory "x free of y", Load, Up for; **Running now** — every workspace with a turn running (spinner, name, "42 s · 7 tool calls") or "Nothing running · N workspaces". The last two come from the box's own `/box/state` through **`GET /machine/debug`** (`ClientCommand::MachineDebugRefresh` → `SyncEvent::BoxReport` → `AppState.box_report`), fetched when the pane opens and when the tab is picked; an asleep box says "The machine did not answer · <reason>". Someone else's agent: Status + Machine class from its project |
 | Delete agent | — | not on the pane (see above) |
 
+Owner link pinned by `agent::run_by_tests` (label; headless click pushes the owner's page and `‹` returns).
 Order pinned by `agent::tests` (`details_is_settings_alone_until_the_live_cards_are_switched_back_on`,
 `computer_order_follows_the_report`, `coding_status_…`, `routine_status_…`,
 `box_report_reads_the_relay_and_the_box`) and `pane::tests::kinds_keep_their_own_tab_sets`.

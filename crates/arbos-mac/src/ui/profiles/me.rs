@@ -583,9 +583,8 @@ impl Shell {
                 .child(group)
                 .child(footnote(
                 "A banner with the sender's picture when an agent finishes or a person writes, \
-                     only while you are not looking. Read receipts keep your bubbles lighter \
-                     until the other side has opened them, and tell others when you open \
-                     theirs — turn them off to stop sending and seeing that."
+                     only while you are not looking. Read receipts tell others when you have \
+                     opened their messages — turn them off to stop sending that."
                     .into(),
                 &theme,
             ))
@@ -1046,6 +1045,7 @@ impl Shell {
             subtitle: Some(who.clone().into()),
             subtitle_color: theme.text_muted,
             subtitle_click: None,
+            subtitle_element: None,
             editor,
         };
 

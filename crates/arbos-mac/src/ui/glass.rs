@@ -3,9 +3,9 @@
 //! sheets, menu rows, and the centered sheet scaffold every modal uses.
 
 use gpui::{
-    div, prelude::*, px, Div, ElementId, FontWeight, Global, InteractiveElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, Pixels, Point, SharedString, Stateful, Window,
-    WindowControlArea,
+    div, prelude::*, px, AnyElement, BoxShadow, Div, ElementId, FontWeight, Global,
+    InteractiveElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, SharedString,
+    Stateful, Window, WindowControlArea,
 };
 
 use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
@@ -122,6 +122,85 @@ pub fn control_disc(
         .bg(theme.surface_2)
         .hover(|s| s.bg(Theme::with_alpha(theme.text, 0.14)))
         .child(icon(glyph, glyph_size, theme.text))
+}
+
+/// What a chat-header control is made of ([feedback mac-header-glass-2026-10-25],
+/// Jacob 2026-10-25; the iPhone's `HeaderMaterial`).
+///
+/// Jacob's reference is Grok Bot's header: frosted pills, the transcript
+/// visibly blurred through them, a light rim. Ours filled the pill with
+/// `bubble_assistant` and the disc with `surface_2` — solid on every chat
+/// kind, even with Surface = Glass at Opacity 0 %. On Glass the header is now
+/// frost; Matte keeps its solid controls (Matte means no translucency).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeaderMaterial {
+    /// Glass: white-alpha over a dark underlay, a 1 pt light rim, a top
+    /// highlight, and the list blurred through (`frost::frosted`).
+    Frosted,
+    /// Matte: today's fill.
+    Solid,
+}
+
+impl HeaderMaterial {
+    pub fn for_theme(theme: &Theme) -> Self {
+        if theme.is_frost() {
+            Self::Frosted
+        } else {
+            Self::Solid
+        }
+    }
+}
+
+/// The pure part of a header control's look, for the tests: its fill and
+/// whether the list is blurred under it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HeaderStyle {
+    pub material: HeaderMaterial,
+    pub fill: gpui::Hsla,
+    pub blur: bool,
+}
+
+pub fn header_style(solid: gpui::Hsla, theme: &Theme) -> HeaderStyle {
+    match HeaderMaterial::for_theme(theme) {
+        HeaderMaterial::Frosted => HeaderStyle {
+            material: HeaderMaterial::Frosted,
+            fill: theme.header_glass(),
+            blur: true,
+        },
+        HeaderMaterial::Solid => HeaderStyle {
+            material: HeaderMaterial::Solid,
+            fill: solid,
+            blur: false,
+        },
+    }
+}
+
+/// Fill a header control (the name pill, the header disc) for the theme's
+/// material. `solid` is the Matte fill it had before. On Glass: the glass
+/// fill, an inset 1 pt rim, a 1 pt specular line along the top edge and a
+/// 1 pt lift — the "glass plate" of `docs/glass-surface-directions.md`.
+pub fn header_surface<E: Styled>(el: E, solid: gpui::Hsla, theme: &Theme) -> E {
+    let style = header_style(solid, theme);
+    match style.material {
+        HeaderMaterial::Solid => el.bg(style.fill),
+        HeaderMaterial::Frosted => el.bg(style.fill).shadow(vec![
+            BoxShadow::new(px(0.0), px(0.0), theme.header_glass_rim())
+                .spread_radius(px(1.0))
+                .inset(),
+            BoxShadow::new(px(0.0), px(1.0), theme.header_glass_highlight()).inset(),
+            BoxShadow::new(px(0.0), px(1.0), gpui::hsla(0.0, 0.0, 0.0, 0.18)).blur_radius(px(2.0)),
+        ]),
+    }
+}
+
+/// Blur the list under a header control on Glass (its rounded bounds); the
+/// control itself on Matte.
+pub fn header_frost(radius: f32, theme: &Theme, el: impl IntoElement) -> AnyElement {
+    if header_style(gpui::transparent_black(), theme).blur {
+        frosted(radius, MENU_BLUR, el).into_any_element()
+    } else {
+        el.into_any_element()
+    }
 }
 
 /// A glass circle: field fill at 85 %, hairline rim. Content centred.

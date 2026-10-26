@@ -116,7 +116,7 @@ private struct ChatSessionHost: View {
 /// `@EnvironmentObject`) so only `ChatSessionHost`'s filtered publishes rebuild it.
 /// Composer draft lives in `ComposerDraft` / `ComposerField` — keystrokes do not
 /// re-evaluate this view (arbonites-chat-lag + feedback app-01M5NNJ001NHHYBHXTASM5NXBZ).
-private struct ChatSession: View {
+struct ChatSession: View {
     let model: AppModel
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
@@ -338,6 +338,19 @@ private struct ChatSession: View {
         model.pendingSearchChat = nil
         showSearch = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { searchFocused = true }
+    }
+
+    /// A result from Home's search bar opened this chat at a message: once the rows
+    /// hold it, scroll there and tint it (the quote-tap path, `revealQuoted`). The
+    /// appear settle scrolls to the end first; the jump follows a beat later.
+    private func revealPendingIfNeeded() {
+        guard let reveal = model.pendingReveal, reveal.chatId == chatId,
+              rows.contains(where: { $0.messageId == reveal.messageId && $0.role != .system }) else { return }
+        model.pendingReveal = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            pinnedToBottom = false
+            revealQuoted(reveal.messageId)
+        }
     }
 
     /// Tokenised blob URL for a custom group picture, if the chat has one.
@@ -690,8 +703,13 @@ private struct ChatSession: View {
                         .buttonStyle(.plain)
                     }
                     .padding(.horizontal, 12).frame(height: 38)
-                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
-                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                    // The header's glass, not the flat field (Jacob 2026-10-25 22:53).
+                    .background {
+                        HeaderGlassBackground(
+                            shape: RoundedRectangle(cornerRadius: 12, style: .continuous),
+                            material: ChatHeaderGlass.searchBarMaterial(surface: theme.surface),
+                            tinted: true)
+                    }
                     .padding(.horizontal, 16)
                 }
                 if hasInCallBar, let c = calls.call {
@@ -979,6 +997,9 @@ private struct ChatSession: View {
                 Task { await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId) }
             }
             openPendingSearchIfNeeded()
+            revealPendingIfNeeded()
+            // Rig: `ARBOS_SHOW=chatsearch` raises the Search-in-chat bar (header-glass shots).
+            if DebugHooks.show == "chatsearch" { showSearch = true }
             if let link = DebugHooks.link {
                 model.setRoomLink(chatId, link)
                 if let ms = DebugHooks.linkClearsMs {
@@ -1077,6 +1098,14 @@ private struct ChatSession: View {
                             model.fixtureAppendAssistant(chatId: chatId, text: AppModel.codeReply)
                         }
                         #endif
+                    case "table":
+                        // Rig: Jacob's Lima bookstore turn — a GFM table of linked stores
+                        // between two prose bubbles (fixture only).
+                        #if DEBUG
+                        if model.isFixture {
+                            model.fixtureLimaReply(chatId: chatId)
+                        }
+                        #endif
                     case "agent-message", "agent-message-received":
                         // Rig: agent-to-agent messaging rows (fixture only) — the sender's
                         // hand-off + confirm + relayed reply, or the receiver's labelled row.
@@ -1125,6 +1154,8 @@ private struct ChatSession: View {
         // Profile "search" sets pendingSearchChat while this chat is already on screen
         // (sheet over us), so onAppear alone never sees it — watch the published flag.
         .onChange(of: model.pendingSearchChat) { _, _ in openPendingSearchIfNeeded() }
+        // A bottom-bar search result: the rows may land after appear (room backfill).
+        .onChange(of: rows.count) { _, _ in revealPendingIfNeeded() }
         // The per-chat version, not the array: comparing 1 000+ messages on every
         // body (each keystroke, presence tick, publish) was a measurable share of
         // the Arbonites lag (arbonites-chat-lag, 2026-10-24).
@@ -1216,10 +1247,25 @@ private struct ChatSession: View {
         .allowsHitTesting(false)
     }
 
+    /// Which kind of chat this header fronts — the spec is the same for all four
+    /// ([feedback ios-header-glass-2026-10-25]).
+    private var headerKind: ChatHeaderKind {
+        if channel != nil { return .channel }
+        if let people { return people.isGroup ? .group : .dm }
+        return .agent
+    }
+
+    /// Liquid Glass on Glass (frost under iOS 26), solid on Matte — one material for the
+    /// back disc, the title pill, the search disc and the Search-in-chat bar.
+    private var headerMaterial: HeaderMaterial {
+        ChatHeaderGlass.materials(kind: headerKind, surface: theme.surface).first?.1
+            ?? ChatHeaderGlass.material(surface: theme.surface)
+    }
+
     private var header: some View {
         HStack {
             Button { dismiss() } label: {
-                GlassCircle {
+                GlassCircle(material: headerMaterial) {
                     Image(systemName: "chevron.left")
                         .font(theme.font(17, weight: .semibold))
                         .foregroundStyle(theme.text)
@@ -1227,7 +1273,7 @@ private struct ChatSession: View {
             }
             .buttonStyle(.plain)
             Spacer()
-            GlassPill {
+            GlassPill(material: headerMaterial) {
                 HStack(spacing: 6) {
                     if let channel {
                         // Rule 3: the unified pill — the server's disc, the `#` glyph and the
@@ -1329,7 +1375,7 @@ private struct ChatSession: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { searchFocused = true }
                 }
             } label: {
-                GlassCircle {
+                GlassCircle(material: headerMaterial) {
                     Image(systemName: "magnifyingglass")
                         .font(theme.font(17, weight: .medium))
                         .foregroundStyle(theme.text)

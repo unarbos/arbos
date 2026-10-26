@@ -47,7 +47,7 @@ final class AvatarPickerTabsTests: XCTestCase {
         // The shared resolver ignores the sentinel for the leaf in effect (an older client draws
         // the automatic leaf); `agentProject` reads the neutral pair off the card instead.
         let card = AgentCard(id: "01N", name: "Field notes", handle: "field-notes",
-                             leaf: UInt8(LeafArt.neutral), leafColor: UInt8(LeafArt.neutral), colorIndex: nil, imageKey: nil)
+                             leaf: UInt8(LeafArt.neutral), leafColor: UInt8(LeafArt.neutral), colorIndex: nil, imageKey: nil, avatarVersion: 0)
         let who = resolveAgent(sender: "agent:01N", handle: nil, name: nil, cards: [card])
         XCTAssertTrue(who.known)
         XCTAssertLessThan(who.leaf.leaf, UInt8(LeafArt.count))
