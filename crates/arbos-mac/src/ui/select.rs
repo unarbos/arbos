@@ -830,7 +830,14 @@ fn closest_index(layout: &TextLayout, position: Point<Pixels>) -> usize {
         let height = line.size(line_height).height;
         if position.y <= origin.y + height || i + 1 == count {
             // A local y of exactly `height` would index one wrapped line too far.
-            let y = (position.y - origin.y).clamp(px(0.0), height - px(0.5));
+            // Guard when the line is shorter than 0.5 pt: Ord::clamp panics if
+            // max < min.
+            let y_hi = height - px(0.5);
+            let y = if y_hi <= px(0.0) {
+                px(0.0)
+            } else {
+                (position.y - origin.y).clamp(px(0.0), y_hi)
+            };
             let local = point(position.x - origin.x, y);
             let ix = match line.closest_index_for_position(local, line_height) {
                 Ok(ix) | Err(ix) => ix,

@@ -722,8 +722,29 @@ pub struct Transcript {
 /// Last-frame geometry, by row id, plus the transcript's viewport.
 #[derive(Default)]
 struct Measured {
-    rows: HashMap<String, Bounds<Pixels>>,
+    rows: HashMap<String, RowBounds>,
     viewport: Bounds<Pixels>,
+    /// Bumped at the start of each [`Transcript::render`]. Row bounds carry
+    /// the frame they were painted in; older than the previous frame are
+    /// treated as unknown when placing the rail.
+    frame: u64,
+}
+
+/// A row's window-space bounds, tagged with the paint frame that recorded them.
+#[derive(Clone, Copy)]
+struct RowBounds {
+    bounds: Bounds<Pixels>,
+    frame: u64,
+}
+
+impl Measured {
+    /// Bounds measured in the current or previous frame; `None` when missing
+    /// or too old (same as an unmeasured row for [`rail_centre`]).
+    fn fresh(&self, id: &str) -> Option<Bounds<Pixels>> {
+        let row = self.rows.get(id)?;
+        let min = self.frame.saturating_sub(1);
+        (row.frame >= min).then_some(row.bounds)
+    }
 }
 
 impl Transcript {
@@ -977,9 +998,9 @@ impl Transcript {
             return None;
         }
         let measured = self.measured.borrow();
-        let last = *measured.rows.get(&self.rows[ix].id)?;
+        let last = measured.fresh(&self.rows[ix].id)?;
         let rows: Vec<Option<Bounds<Pixels>>> = (first..ix)
-            .map(|i| measured.rows.get(&self.rows[i].id).copied())
+            .map(|i| measured.fresh(&self.rows[i].id))
             .collect();
         let top_inset = ROW_GAP_HALF
             + if self.is_turn_start(first) {
@@ -1008,7 +1029,8 @@ impl Transcript {
                 let mut m = measured.borrow_mut();
                 match key {
                     Some(id) => {
-                        m.rows.insert(id, bounds);
+                        let frame = m.frame;
+                        m.rows.insert(id, RowBounds { bounds, frame });
                     }
                     None => m.viewport = bounds,
                 }
@@ -2762,6 +2784,10 @@ fn relative_width(fraction: f32) -> gpui::DefiniteLength {
 
 impl Render for Transcript {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        {
+            let mut m = self.measured.borrow_mut();
+            m.frame = m.frame.wrapping_add(1);
+        }
         self.step_spring(window, cx);
         let theme = Theme::of(cx).clone();
         // Grok Mac (ref 58): a 40 pt ↓ circle centred above the composer once
@@ -3015,6 +3041,11 @@ fn rail_centre(
         top = top.min(viewport.top());
     }
     let bottom = last.bottom() - insets.1;
+    // Inverted range (stale earlier rows below the last, or a last block
+    // shorter than the insets): sit on the last row's own centre.
+    if top > bottom {
+        return (last.top() + last.bottom()) / 2.0 - last.top();
+    }
     let centre = (top + bottom) / 2.0;
     let half = px(RAIL_BUTTON / 2.0 + RAIL_EDGE_INSET);
     let low = viewport.top() + px(HEADER_FADE_BAND) + half;
@@ -3025,7 +3056,16 @@ fn rail_centre(
         centre.clamp(low, high)
     };
     // Never outside the bubble itself (a short bubble at the very edge).
-    let centre = centre.clamp(top + px(RAIL_BUTTON / 2.0), bottom - px(RAIL_BUTTON / 2.0));
+    // A bubble shorter than the button cannot keep the whole control inside:
+    // sit on the bubble's midpoint instead of Ord::clamp (which panics when
+    // min > max).
+    let lo = top + px(RAIL_BUTTON / 2.0);
+    let hi = bottom - px(RAIL_BUTTON / 2.0);
+    let centre = if lo > hi {
+        (top + bottom) / 2.0
+    } else {
+        centre.clamp(lo, hi)
+    };
     centre - last.top()
 }
 
@@ -6584,10 +6624,7 @@ mod transcript_smoke_tests {
         // Every block row was measured by the frame.
         let measured: Vec<Option<Bounds<Pixels>>> = transcript.read_with(&*vcx, |t, _| {
             let m = t.measured.borrow();
-            block_rows
-                .iter()
-                .map(|id| m.rows.get(id).copied())
-                .collect()
+            block_rows.iter().map(|id| m.fresh(id)).collect()
         });
         assert!(measured.iter().all(Option::is_some), "{measured:?}");
         let top = measured.iter().flatten().map(|b| b.top()).min().unwrap();
@@ -7283,6 +7320,93 @@ mod rail_tests {
             centre <= 50.0 - RAIL_BUTTON / 2.0 + 0.01,
             "rail {centre} below the bubble's bottom (50)"
         );
+    }
+
+    /// A short last block at the viewport top with an unmeasured earlier row
+    /// must not panic: the rail sits inside the last row (Ord::clamp would
+    /// abort when the button no longer fits between top and bottom).
+    #[test]
+    fn a_short_bubble_at_the_viewport_top_does_not_panic() {
+        let viewport = b(0.0, 600.0);
+        let rows = [None];
+        let last = b(0.0, 30.0);
+        // Turn-start inset: half gap + turn gap above, half gap below.
+        let insets = (px(ROW_GAP_HALF + TURN_GAP_EXTRA), px(ROW_GAP_HALF));
+        let centre = f32::from(rail_centre(&rows, last, viewport, insets));
+        assert!(
+            (0.0..=30.0).contains(&centre),
+            "centre {centre} outside the last row 0..30"
+        );
+    }
+
+    /// A stale earlier row whose window bounds sit below the last row used to
+    /// make the bubble range too short for the button and abort; the rail
+    /// stays inside the last row instead.
+    #[test]
+    fn a_stale_earlier_row_below_the_last_does_not_panic() {
+        let viewport = b(0.0, 600.0);
+        // Stale window-space bounds from an earlier frame (below the last row).
+        let rows = [Some(b(40.0, 30.0))];
+        let last = b(0.0, 30.0);
+        let insets = (px(ROW_GAP_HALF + TURN_GAP_EXTRA), px(ROW_GAP_HALF));
+        let centre = f32::from(rail_centre(&rows, last, viewport, insets));
+        assert!(
+            (0.0..=30.0).contains(&centre),
+            "centre {centre} outside the last row 0..30"
+        );
+    }
+
+    /// Explicit inverted bubble range: top > bottom must not panic.
+    #[test]
+    fn an_inverted_bubble_range_does_not_panic() {
+        let viewport = b(0.0, 600.0);
+        let last = b(100.0, 20.0);
+        // top = 100 + 17 = 117, bottom = 120 - 3 = 117… use a taller inset.
+        let insets = (px(30.0), px(3.0));
+        let centre = f32::from(rail_centre(&[], last, viewport, insets));
+        assert!(
+            (0.0..=20.0).contains(&centre),
+            "centre {centre} outside the last row"
+        );
+        assert!(
+            (centre - 10.0).abs() < 0.01,
+            "last-row centre, got {centre}"
+        );
+    }
+
+    /// Bounds older than the previous paint frame are treated as unknown.
+    #[test]
+    fn stale_row_bounds_are_ignored() {
+        let mut m = Measured {
+            frame: 5,
+            viewport: b(0.0, 600.0),
+            rows: HashMap::new(),
+        };
+        m.rows.insert(
+            "fresh".into(),
+            RowBounds {
+                bounds: b(10.0, 40.0),
+                frame: 5,
+            },
+        );
+        m.rows.insert(
+            "prev".into(),
+            RowBounds {
+                bounds: b(50.0, 40.0),
+                frame: 4,
+            },
+        );
+        m.rows.insert(
+            "stale".into(),
+            RowBounds {
+                bounds: b(90.0, 40.0),
+                frame: 3,
+            },
+        );
+        assert!(m.fresh("fresh").is_some());
+        assert!(m.fresh("prev").is_some());
+        assert!(m.fresh("stale").is_none());
+        assert!(m.fresh("missing").is_none());
     }
 
     struct Stack;
