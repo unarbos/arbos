@@ -117,24 +117,78 @@ struct Theme: Equatable {
     static let small: CGFloat = 15
     static let tiny: CGFloat = 13
     static let control: CGFloat = 42
+    /// Settings / search / secrets text fields (not the chat composer, see `composerHeight`).
     static let fieldHeight: CGFloat = 42
     static let voiceButton: CGFloat = 36
-    static let plusButton: CGFloat = 42
+
+    // MARK: Chat composer — Grok Bot, Jacob's 2026-10-25 target shot
+    // ([feedback iphone-composer-grok-parity-2026-10-25]; iPhone Air 420 pt, 3 px/pt,
+    // keyboard up). Every number below is that shot's pixel count / 3; the structure
+    // tests in `ComposerMetricsTests` pin them. Grok changed its composer between
+    // the 2026-10-15 refs (42 pt, no rim, 36 pt white circle) and this shot.
+
+    /// The `+` disc and the field are the same height: 144 px.
+    static let composerHeight: CGFloat = 48
+    static let plusButton: CGFloat = composerHeight
+    /// `+` glyph: SF `plus`, regular; 54 px arms (22 pt regular draws 53, 22.5 draws 54).
+    static let plusGlyph: CGFloat = 22.5
+    /// `+` disc → field: 30 px.
+    static let plusFieldGap: CGFloat = 10
+    /// The field's text starts 51 px in from its outer edge (the caret's centre).
+    static let composerTextInset: CGFloat = 17
+    /// One 22 pt body line centred in the 48 pt field.
+    static let composerTextPadY: CGFloat = (composerHeight - 22) / 2
+    /// The white action is a 120 × 96 px capsule (was a 36 pt circle), 24 px from the
+    /// field's top and bottom and 26 px from its right edge.
+    static let actionPillWidth: CGFloat = 40
+    static let actionPillHeight: CGFloat = 32
+    static let actionPillTrailing: CGFloat = 26 / 3
+    /// Mic glyph centre → action pill: 72 px (the glyph sits in a 44 pt hit frame, so
+    /// 22 + `micPillGap`).
+    static let micHitWidth: CGFloat = 44
+    static let micPillGap: CGFloat = 2
+    /// Mic glyph box (Grok's filled mic has no base bar; drawn by `MicGlyph`): 36 × 49 px.
+    static let micGlyphWidth: CGFloat = 12
+    static let micGlyphHeight: CGFloat = 49 / 3
+    /// Field bottom → keyboard with the keyboard up: 54 px (was 24).
+    static let composerBottomKeyboard: CGFloat = 18
+    /// Keyboard down: the composer sits 2 pt above the home indicator's safe area.
+    static let composerBottom: CGFloat = 2
+    /// The rim on the `+` disc and the field (dark): brightest at the outer pixel and
+    /// fading in over 1 pt — 58 / 47 / 40 luminance over the #181818 fill, measured on the
+    /// top, bottom, left and right edges alike. Three nested `strokeBorder`s (outer
+    /// 1/3 pt, 2/3 pt, 1 pt) reproduce the three pixels. Light keeps `fieldBorder` at 1 pt.
+    static let composerRimLayers: [(width: CGFloat, alpha: Double)] = [
+        (1, 0.069), (2 / 3, 0.033), (1 / 3, 0.053),
+    ]
+
     static let avatar: CGFloat = 28
     /// The avatar column (Mac `SENDER_DISC = PLUS_BUTTON`, Jacob [feedback
-    /// AAvkkHYz3TOlou0Hu7u71Sc]): every round picture in a people chat — the sender's
-    /// disc beside a bubble, the presence row over the composer — is the composer's `+`
-    /// disc: the same size, centred on it. The `+` moves with the keyboard (31 → 19 pt
+    /// AAvkkHYz3TOlou0Hu7u71Sc]): every round picture beside a people-chat bubble is
+    /// centred on the composer's `+`. The disc stayed 42 pt when the `+` grew to Grok's
+    /// 48 ([feedback iphone-composer-grok-parity-2026-10-25]: the ask covered the composer
+    /// and the status row, not the bubbles). The `+` moves with the keyboard (31 → 18 pt
     /// inset), so the column follows it via `avatarColumnInset(composerInset:)` (keyboard
-    /// up: inset 3 → avatar 19–61, centre 40 = 19 + 42 / 2; down: inset 15 → 31–73,
-    /// centre 52). The bubble body follows after `memberAvatarGap` (up: 74 from the
-    /// pane). Shared with feedback/sender-name-in-bubble-2026-10-23. Agent chats keep
-    /// #1374's no-avatar rule.
-    static let memberAvatar: CGFloat = plusButton
+    /// up: avatar 21–63, centre 42 = 18 + 48 / 2; down: 34–76, centre 55). The bubble
+    /// body follows after `memberAvatarGap`. Shared with
+    /// feedback/sender-name-in-bubble-2026-10-23. Agent chats keep #1374's no-avatar rule.
+    static let memberAvatar: CGFloat = 42
     static let memberAvatarGap: CGFloat = 13
     /// Transcript edge → the avatar's left edge, for the composer's current side inset.
     static func avatarColumnInset(composerInset: CGFloat) -> CGFloat {
         composerInset + plusButton / 2 - memberAvatar / 2 - 16
+    }
+    /// The status row over the composer (Grok's "Adding glass buttons" row, same shot):
+    /// a 76 px picture whose left edge sits 18 px inside the `+` disc's left edge (72 px
+    /// from the screen with the keyboard up), 42 px to the words (17 pt body, muted),
+    /// and 68 px between the picture's bottom and the composer's top.
+    static let presenceAvatar: CGFloat = 76 / 3
+    static let presenceAvatarOffset: CGFloat = 6
+    static let presenceGap: CGFloat = 14
+    static let presenceBottomGap: CGFloat = 68 / 3
+    /// Transcript edge → the status row's picture, for the composer's current side inset.
+    static func presenceInset(composerInset: CGFloat) -> CGFloat {
+        composerInset + presenceAvatarOffset - 16
     }
     /// Transcript edge → bubble body in a people-chat row, for the composer's current side inset.
     static func memberLane(composerInset: CGFloat) -> CGFloat {
@@ -151,9 +205,10 @@ struct Theme: Equatable {
     static let replyPreviewThumb: CGFloat = 20
     /// The quoted line is pre-cut to this many characters; the row's own ellipsis trims it.
     static let replyPreviewChars = 160
-    /// Composer side inset: Grok uses 31 pt with the keyboard down, 19 pt with it up.
+    /// Composer side inset: Grok uses 31 pt with the keyboard down (2026-10-15 refs), 18 pt
+    /// with it up (54 px on both sides in Jacob's 2026-10-25 shot; was read as 19).
     static let composerInset: CGFloat = 31
-    static let composerInsetKeyboard: CGFloat = 19
+    static let composerInsetKeyboard: CGFloat = 18
     /// Home list: 48 pt avatar box, 80 pt row pitch, 10 pt unread dot.
     static let rowAvatar: CGFloat = 48
     static let rowVPad: CGFloat = 16
@@ -455,6 +510,89 @@ struct GlassCircle<Content: View>: View {
         .frame(width: size, height: size)
         // Grok's circles are 42 pt; the touch target stays ≥ 44 without moving layout.
         .contentShape(Circle().inset(by: -max(0, (44 - size) / 2)))
+    }
+}
+
+/// The composer's rim (`Theme.composerRimLayers`) on the `+` disc and the field: in the
+/// dark theme an edge highlight that fades in over 1 pt, in light the theme's 1 pt
+/// `fieldBorder`. `tint` replaces the rim while recording / waiting for an answer.
+struct ComposerRim<S: InsettableShape>: View {
+    @Environment(\.theme) private var theme
+    let shape: S
+    var tint: Color? = nil
+
+    var body: some View {
+        if let tint {
+            shape.strokeBorder(tint, lineWidth: 1)
+        } else if theme.isDark {
+            ZStack {
+                ForEach(Array(Theme.composerRimLayers.enumerated()), id: \.offset) { _, layer in
+                    shape.strokeBorder(Color.white.opacity(layer.alpha), lineWidth: layer.width)
+                }
+            }
+        } else {
+            shape.strokeBorder(theme.fieldBorder, lineWidth: 1)
+        }
+    }
+}
+
+/// Grok's composer mic (dark `#96969C`): a filled capsule head, a U cradle and a short
+/// stem — no base bar, unlike SF `mic.fill`. Drawn in points so the 3x simulator and
+/// Jacob's shot agree pixel for pixel: box 12 × 16⅓ pt (36 × 49 px); head 17 × 31 px at
+/// x 9; cradle 36 px wide, 4.5 px stroke, arms from y 16, centre y 23, outer radius 18;
+/// stem 4.5 px wide from y 41 to 49, round end.
+struct MicGlyph: Shape {
+    static let size = CGSize(width: Theme.micGlyphWidth, height: Theme.micGlyphHeight)
+    static let headWidth: CGFloat = 17 / 3
+    static let headHeight: CGFloat = 31 / 3
+    static let cradleStroke: CGFloat = 1.5
+    static let cradleArmTop: CGFloat = 16 / 3
+    static let cradleCenterY: CGFloat = 23 / 3
+    static let stemBottom: CGFloat = 49 / 3
+
+    func path(in rect: CGRect) -> Path {
+        let s = rect.width / Self.size.width
+        let cx = rect.minX + rect.width / 2
+        var p = Path()
+        // Head.
+        let head = CGRect(x: cx - Self.headWidth * s / 2, y: rect.minY, width: Self.headWidth * s, height: Self.headHeight * s)
+        p.addPath(Capsule().path(in: head))
+        // Cradle: a U drawn as a stroked path.
+        let outerR = Self.size.width * s / 2
+        let stroke = Self.cradleStroke * s
+        var u = Path()
+        u.move(to: CGPoint(x: cx - outerR + stroke / 2, y: rect.minY + Self.cradleArmTop * s))
+        u.addLine(to: CGPoint(x: cx - outerR + stroke / 2, y: rect.minY + Self.cradleCenterY * s))
+        u.addArc(center: CGPoint(x: cx, y: rect.minY + Self.cradleCenterY * s), radius: outerR - stroke / 2,
+                 startAngle: .degrees(180), endAngle: .degrees(0), clockwise: true)
+        u.addLine(to: CGPoint(x: cx + outerR - stroke / 2, y: rect.minY + Self.cradleArmTop * s))
+        p.addPath(u.strokedPath(StrokeStyle(lineWidth: stroke, lineCap: .butt)))
+        // Stem: from the cradle's outer bottom to the box's bottom, round end.
+        let stemTop = rect.minY + (Self.cradleCenterY * s + outerR) - stroke
+        let stem = CGRect(x: cx - stroke / 2, y: stemTop, width: stroke, height: rect.minY + Self.stemBottom * s - stemTop)
+        p.addPath(RoundedRectangle(cornerRadius: stroke / 2, style: .circular).path(in: stem))
+        return p
+    }
+}
+
+/// Grok's voice-mode glyph in the composer's white pill: five round-capped bars, 2 pt
+/// wide, 3.25 pt apart, 6.5 / 14.5 / 8.5 / 14.5 / 6.5 pt tall, centred in the pill.
+/// Arbos keeps its call semantics behind it (a tap starts a voice call).
+struct VoiceWaveGlyph: Shape {
+    static let barWidth: CGFloat = 2
+    static let pitch: CGFloat = 3.25
+    static let heights: [CGFloat] = [6.5, 14.5, 8.5, 14.5, 6.5]
+
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        let cx = rect.midX, cy = rect.midY
+        let n = Self.heights.count
+        for (i, h) in Self.heights.enumerated() {
+            let x = cx + (CGFloat(i) - CGFloat(n - 1) / 2) * Self.pitch
+            let bar = CGRect(x: x - Self.barWidth / 2, y: cy - h / 2, width: Self.barWidth, height: h)
+            p.addPath(Capsule().path(in: bar))
+        }
+        return p
     }
 }
 
