@@ -62,6 +62,20 @@ pub fn default_provider(state: &AppState) -> Provider {
     }
 }
 
+/// Where THIS user's next box goes: the admin override (`users.box_provider`) when set, else
+/// [`default_provider`]. The override exists so a scratch user can get a Daytona box on a host
+/// whose default is gVisor (the carry e2e of ARB-339); it never moves an existing box.
+pub fn provider_for_user(state: &AppState, user_id: &str) -> Provider {
+    state
+        .db
+        .user_provider(user_id)
+        .ok()
+        .flatten()
+        .as_deref()
+        .and_then(Provider::parse)
+        .unwrap_or_else(|| default_provider(state))
+}
+
 /// Environment every box gets. No provider key is in it (D2). Project-level settings (models,
 /// instructions, chats) are not baked in any more: the box learns them from `/box/hello` and the
 /// `/box/projects` poll, one workspace per project.
@@ -455,7 +469,7 @@ pub async fn start_box(state: &AppState, user_id: &str) -> Result<()> {
             // A user with projects but no box yet (pre-D70 data, or a fresh sign-in): create it on
             // first wake. On a full host (D89) the user is waitlisted instead and this is not an
             // error: the admission tick wakes them later.
-            let provider = default_provider(state);
+            let provider = provider_for_user(state, user_id);
             tracing::info!(%user_id, provider = provider.as_str(), "no box for this user yet; creating one");
             match ensure_user_box(state, user_id, provider).await {
                 Ok(_) => {}
