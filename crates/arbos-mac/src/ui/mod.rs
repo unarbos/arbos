@@ -13,6 +13,7 @@ pub mod connectors;
 pub mod create_entity;
 pub mod devices;
 pub mod dropzone;
+pub mod error_note;
 pub mod feedback;
 pub mod frost;
 pub mod glass;
