@@ -2311,13 +2311,18 @@ class Loop:
             bounced = self.release_bounced_pins()
             if bounced:
                 log(f"Gate: pinned item(s) {', '.join(bounced)} are back with their owner; pin released, the pool runs on")
-        if not members:
+        # Pool-first (coordinator 2026-10-26 02:50: no pool batch had completed since 22:49 — pins, aborts, solo
+        # slots and deferred-fairness batches pre-empted it for 4 h): while `pool_first` is set, solo slots and
+        # the deferred-fairness batch do NOT jump the pool; bisect / plan halves still finish first; pins (Jacob
+        # P0 / live regression only) stay ahead. Cleared by itself once a pool batch merges something.
+        pool_first = bool(cur.get("pool_first"))
+        if not members and not pool_first:
             solo = sorted(((f, st) for f, st in ready if st.get("solo_next")), key=lambda fs: fs[1].get("created") or "")
             if solo:
                 fid, st = solo[0]
                 members = {fid: st["branch_head"]}
                 log(f"Gate: solo slot for {fid} (bumped {st.get('sibling_conflicts') or 0}× / {st.get('main_conflicts') or 0} main conflicts; runs alone)")
-        if not members:
+        if not members and not pool_first:
             # Fairness (2026-10-23 22:2x): a branch bumped twice for sibling conflicts gets a batch of the
             # deferred items only, right after the current run — ahead of bisect / plan halves AND the pool
             # (23:10: a leftover bisect half of 15 went first and the 14 deferred items waited another round).
@@ -2334,12 +2339,21 @@ class Loop:
             # Match by item, gate at its CURRENT head: a bisected item whose owner pushed a repair meanwhile keeps
             # its place in the queue instead of dropping to the back.
             members = self.compatible_batch([(f, st) for f, st in ready if f in half])
+        pool_batch = False
         if not members:
             members = self.compatible_batch(list(ready))
+            pool_batch = bool(members)
         cur["rust_gate_plan"] = plan
         self.store.save_cursor(cur)
         if members:
             self.rust_gate_start(members)
+            if pool_batch:
+                cur = self.store.cursor()
+                if cur.get("rust_gate"):
+                    cur["rust_gate"]["pool_batch"] = True
+                    self.store.save_cursor(cur)
+                if pool_first:
+                    log(f"Gate: pool-first — the full pool batch of {len(members)} runs now; solo slots and deferred-fairness wait behind it")
             return
         main_head = self.gh.branch_head("main")
         if main_head and cur.get("rust_gate_warm") != main_head and self.rust_gate_mac("start-batch", f"warm-{main_head[:8]}", main_head, "1") is not None:
@@ -2897,6 +2911,10 @@ class Loop:
                     log(f"[{fid}] merge after the Rust gate failed: {e}")
             cur = self.store.cursor()
             cur["rust_gate_warm"] = active["tree"] if active["mac"] == "ok" else None
+            if active.get("pool_batch") and cur.get("pool_first"):
+                cur.pop("pool_first", None)
+                self.store.event("_loop", "pool_first_cleared", run=active["id"], members=len(order))
+                log(f"Gate: pool-first satisfied by {active['id']} ({len(order)} member(s) green); normal ordering resumes")
             self.store.save_cursor(cur)
             self.note_green_half(active)
             with contextlib.suppress(Exception):
@@ -4355,6 +4373,8 @@ class Loop:
         pool = [fid for fid, _ in ready if fid not in queued]
         if pool:
             print(f"  pool (next batch after the pins, oldest first, {len(pool)}): " + ", ".join(tag(f) for f in pool))
+            if cur.get("pool_first"):
+                print(f"  POOL-FIRST since {cur['pool_first']}: solo slots and deferred-fairness wait behind the pool batch until it merges once")
         with_owner = [fid for fid in self.store.items() if self.store.state(fid).get("status") == "handed_off" and self.store.state(fid).get("branch_head")]
         if with_owner:
             print(f"  with owner (red/conflict; a new commit on the branch re-enters the pool, {len(with_owner)}): " + ", ".join(tag(f) for f in with_owner))
@@ -4988,6 +5008,20 @@ def main(argv: list[str]) -> int:
             fcntl.flock(lock, fcntl.LOCK_EX)
             n = loop.lift_freeze()
         print(f"freeze lifted; {n} item(s) restored to their previous state and order")
+        return 0
+    if cmd == "pool-first":
+        # `pool-first on|off|status`: until the next pool batch merges, solo slots and the deferred-fairness batch
+        # wait behind the pool (bisect halves and pins still go first).
+        store = Store(cfg)
+        with (cfg.state_dir / ".lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            cur = store.cursor()
+            sub = argv[2] if len(argv) > 2 else "status"
+            if sub == "on":
+                cur["pool_first"] = iso(); store.save_cursor(cur); store.event("_loop", "pool_first_on", by="operator")
+            elif sub == "off":
+                cur.pop("pool_first", None); store.save_cursor(cur); store.event("_loop", "pool_first_off", by="operator")
+            print(f"pool-first: {'on since ' + cur['pool_first'] if cur.get('pool_first') else 'off'}")
         return 0
     if cmd == "known-red":
         # `known-red add <test> [note…]` | `known-red remove <test>` | `known-red list`: the operator's list of
