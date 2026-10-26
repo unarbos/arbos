@@ -942,6 +942,11 @@ pub(crate) mod tests {
             .route(
                 "/projects/{id}/activity",
                 axum::routing::post(mock_activity),
+            )
+            // deliver_file's upload (media.rs): the stub accepts any blob.
+            .route(
+                "/blob/{slot}/{key}",
+                axum::routing::put(|| async { axum::http::StatusCode::CREATED }),
             );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
