@@ -805,6 +805,7 @@ final class AppModel: ObservableObject {
         if env["ARBOS_FIXTURE"] == "1" {
             api = RelayAPI(endpoint: RelayEndpoint("http://fixture.invalid")) { "" }
             credentials = DeviceCredentials(relayUrl: "http://fixture.invalid", deviceId: "ios:fixture", deviceToken: "fixture")
+            LinkIcons.shared.fetch = { host in LinkIcons.fixtureIcon(host: host) }
             loadFixture()
             return
         }
@@ -814,6 +815,8 @@ final class AppModel: ObservableObject {
             UserDefaults.standard.set(endpoint.httpUrl, forKey: "relayUrl")
         }
         api = RelayAPI(endpoint: endpoint) { "" }
+        // Site icons for the bubbles' named links come from whichever relay is current.
+        LinkIcons.shared.fetch = { [weak self] host in await self?.api.linkIcon(host: host) }
         if creds == nil, let saved = Keychain.loadAuth(relayUrl: endpoint.httpUrl) {
             tokens = saved
             creds = DeviceCredentials(relayUrl: saved.relayUrl, deviceId: saved.deviceId, deviceToken: saved.accessToken)
