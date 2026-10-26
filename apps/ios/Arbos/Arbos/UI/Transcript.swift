@@ -2178,7 +2178,17 @@ final class AvatarImageCache {
         Task { _ = await load(url) }
     }
 
-    /// Shared download per URL; waiters resume together when the picture lands.
+    /// Waits between attempts. A cold launch asks for pictures before the network is up (a
+    /// phone that just woke, the relay mid-restart); one failed attempt used to leave the leaf
+    /// placeholder on every surface until the view was rebuilt (Jacob, 2026-10-26, Mac and
+    /// iPhone alike).
+    nonisolated static let retrySeconds: [UInt64] = [2, 5, 10, 20, 40]
+
+    /// Shared download per URL; waiters resume together when the picture lands. Picture URLs
+    /// name their version (`…/avatar.jpg?v=<stamp>`, `/avatars/<user>.jpg?v=…`), so the disk
+    /// cache is asked first: a relaunch paints the picture with no network at all, and a
+    /// changed picture is a new URL. Failures retry with backoff before giving up; a 404 ("no
+    /// picture") does not retry.
     func load(_ url: String) async -> UIImage? {
         if let img = images[url] { return img }
         if requested.contains(url) {
@@ -2188,10 +2198,24 @@ final class AvatarImageCache {
         }
         guard url.contains("://"), let u = AvatarImageCache.sizedURL(url, width: AvatarImageCache.maxPixelSize) else { return nil }
         requested.insert(url)
-        let img: UIImage? = await Task.detached(priority: .userInitiated) {
-            guard let (data, _) = try? await URLSession.shared.data(from: u) else { return nil }
-            return AvatarImageCache.decode(data)
-        }.value
+        var img: UIImage?
+        var attempt = 0
+        while true {
+            let (data, status) = await Task.detached(priority: .userInitiated) { () -> (Data?, Int) in
+                var req = URLRequest(url: u)
+                req.cachePolicy = .returnCacheDataElseLoad
+                guard let (data, resp) = try? await URLSession.shared.data(for: req) else { return (nil, 0) }
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? 200
+                return (code / 100 == 2 ? data : nil, code)
+            }.value
+            if let data, let decoded = AvatarImageCache.decode(data) {
+                img = decoded
+                break
+            }
+            if status == 404 || attempt >= AvatarImageCache.retrySeconds.count { break }
+            try? await Task.sleep(nanoseconds: AvatarImageCache.retrySeconds[attempt] * 1_000_000_000)
+            attempt += 1
+        }
         if let img {
             images[url] = img
         } else {
