@@ -639,10 +639,16 @@ impl Theme {
 
     /// The chat header's glass ([feedback mac-header-glass-2026-10-25], Jacob
     /// 2026-10-25; the iPhone's `HeaderGlassBackground`): what the name pill
-    /// and the header disc are filled with on Glass — white at 12 % over a
-    /// 50 % dark underlay (one composited colour: GPUI quads take one fill),
-    /// white at 60 % in light. Over the bright beach backdrop of Jacob's shots
-    /// white text measures 6.6:1 on it (`docs/glass-surface-directions.md`, B).
+    /// and the header disc are filled with — on Glass and on Matte alike
+    /// ([feedback mac-header-pill-glass-matte-2026-10-26]). Dark: white at
+    /// 12 % over a 50 % dark underlay (one composited colour: GPUI quads take
+    /// one fill); over the flat Matte `bg` that reads as a frosted plate two
+    /// steps lighter, like Grok Bot's pill over its black transcript. Light:
+    /// white at 60 % — over the bright beach backdrop of Jacob's shots white
+    /// text measures 6.6:1 on it (`docs/glass-surface-directions.md`, B), and
+    /// over the flat Matte `#fcfcfc` the blurred list under it (the backdrop
+    /// blur composites ≈ 20 % darker than its source, Metal and wgpu alike)
+    /// lands the pill near the `#ededed` of the solid pill it replaces.
     pub fn header_glass(&self) -> Hsla {
         if self.is_light() {
             hex_a(0xffffff, 0.60)

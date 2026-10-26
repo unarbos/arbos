@@ -228,10 +228,11 @@ pub fn render(
 }
 
 /// The pill's frame, the same for every chat kind — agent, DM, group, server
-/// channel: `PILL_HEIGHT` tall, round, the header material for the theme
-/// (`glass::header_surface`: frost on Glass, `bubble_assistant` on Matte), a
-/// 2 pt accent ring while its right pane is open (mockups b, f; parity review
-/// 2026-10-20). `pr` is the right pad (tighter when a "+" follows the name).
+/// channel, job tab: `PILL_HEIGHT` tall, round, frosted glass on Glass and
+/// Matte alike (`glass::header_surface`; [feedback
+/// mac-header-pill-glass-matte-2026-10-26]), a 2 pt accent ring while its
+/// right pane is open (mockups b, f; parity review 2026-10-20). `pr` is the
+/// right pad (tighter when a "+" follows the name).
 pub(crate) fn pill_frame(theme: &Theme, pane_open: bool, pr: f32) -> Stateful<Div> {
     let pill = div()
         .id("header-title")
@@ -248,7 +249,7 @@ pub(crate) fn pill_frame(theme: &Theme, pane_open: bool, pr: f32) -> Stateful<Di
             gpui::transparent_black()
         })
         .min_w_0();
-    glass::header_surface(pill, theme.bubble_assistant, theme)
+    glass::header_surface(pill, theme)
 }
 
 /// The pill plus, hanging under it, the connection pill ([feedback
@@ -261,9 +262,9 @@ pub(crate) fn pill_frame(theme: &Theme, pane_open: bool, pr: f32) -> Stateful<Di
 /// `metrics::PILL_TOP`, the drag catchment and the fade band are unchanged,
 /// and it floats over the list like the bar itself.
 fn with_link_pill(pill: Stateful<Div>, shell: &Shell, cx: &mut Context<Shell>) -> AnyElement {
-    let theme = Theme::of(cx).clone();
-    // On Glass the list blurs through the pill ([feedback mac-header-glass-2026-10-25]).
-    let pill = glass::header_frost(metrics::PILL_HEIGHT / 2.0, &theme, pill);
+    // The list blurs through the pill on both surfaces ([feedback
+    // mac-header-glass-2026-10-25], [feedback mac-header-pill-glass-matte-2026-10-26]).
+    let pill = glass::header_frost(metrics::PILL_HEIGHT / 2.0, pill);
     let Some(status) = link_pill(shell, cx) else {
         return pill;
     };
@@ -344,9 +345,9 @@ fn link_pill(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
 fn sidebar_toggle(shell: &Shell, theme: &Theme, cx: &mut Context<Shell>) -> AnyElement {
     let _ = shell.state.read(cx).sidebar_overlay;
     let disc = glass::control_disc("header-sidebar", "sidebar-left", CONTROL_GLYPH_WIDE, theme);
-    // The header's material ([feedback mac-header-glass-2026-10-25]): frost on
-    // Glass, the strip disc's `surface_2` on Matte.
-    let disc = glass::header_surface(disc, theme.surface_2, theme)
+    // The header's material ([feedback mac-header-glass-2026-10-25]): frosted
+    // glass on both surfaces, like the pill beside it.
+    let disc = glass::header_surface(disc, theme)
         // The bar is a window-drag region; a control is not part of it.
         .on_mouse_down(
             gpui::MouseButton::Left,
@@ -362,7 +363,7 @@ fn sidebar_toggle(shell: &Shell, theme: &Theme, cx: &mut Context<Shell>) -> AnyE
                 s.toggle_rail(narrow, cx)
             });
         }));
-    glass::header_frost(CONTROL / 2.0, theme, disc)
+    glass::header_frost(CONTROL / 2.0, disc)
 }
 
 /// Geometry every chat header shares — one number each, read by the tests.
@@ -1316,46 +1317,62 @@ mod header_tests {
     }
 }
 
-/// [feedback mac-header-glass-2026-10-25]: the header pill and disc wear the
-/// header material — frost on Glass, solid on Matte — for every chat kind,
-/// and the frosted wrap leaves the bar's geometry untouched. The iPhone twin
-/// is `HeaderGlassStructureTests`.
+/// [feedback mac-header-glass-2026-10-25] and [feedback
+/// mac-header-pill-glass-matte-2026-10-26]: the header pill and disc are
+/// frosted glass for every chat kind on BOTH surfaces — #1830 left Matte
+/// solid, and Jacob's Mac is on Matte (his AffineTeam group, v0.6.268) — and
+/// the frosted wrap leaves the bar's geometry untouched. The iPhone twin is
+/// `HeaderGlassStructureTests`.
 #[cfg(test)]
 mod glass_tests {
     use gpui::{div, prelude::*, px, TestAppContext};
 
     use super::{bar_frame, metrics, pill_frame};
-    use crate::ui::glass::{self, HeaderMaterial};
+    use crate::ui::glass;
     use crate::ui::theme::{Appearance, Surface, Theme, CONTROL};
 
-    const KINDS: [&str; 4] = ["agent", "dm", "group", "channel"];
+    /// The chat kinds the header serves, with the pill's right pad for each
+    /// (4 after an agent's "+", 10 otherwise). A job tab is an agent tab:
+    /// the same `render`, the same pill.
+    const KINDS: [(&str, f32); 5] = [
+        ("agent", 4.0),
+        ("job tab", 4.0),
+        ("dm", 10.0),
+        ("group", 10.0),
+        ("channel", 10.0),
+    ];
+    const SURFACES: [Surface; 2] = [Surface::Glass, Surface::Matte];
+    const APPEARANCES: [Appearance; 2] = [Appearance::Dark, Appearance::Light];
 
     #[test]
-    fn glass_gives_every_kind_a_translucent_pill_and_disc_matte_keeps_them_solid() {
-        for appearance in [Appearance::Dark, Appearance::Light] {
-            let glass = Theme::with(appearance, Surface::Glass);
-            let matte = Theme::with(appearance, Surface::Matte);
-            for _kind in KINDS {
-                for solid in [glass.bubble_assistant, glass.surface_2] {
-                    let g = glass::header_style(solid, &glass);
-                    assert_eq!(g.material, HeaderMaterial::Frosted);
-                    assert!(g.blur, "the list blurs through the control on Glass");
+    fn every_kind_gets_a_frosted_pill_and_disc_on_glass_and_on_matte() {
+        for appearance in APPEARANCES {
+            for surface in SURFACES {
+                let theme = Theme::with(appearance, surface);
+                let style = glass::header_style(&theme);
+                for (kind, _) in KINDS {
                     assert!(
-                        g.fill.a < 1.0,
-                        "a see-through fill on Glass ({appearance:?})"
+                        style.is_frosted(),
+                        "{kind} on {appearance:?} {surface:?}: frosted glass, not a flat fill"
                     );
-                    assert_ne!(g.fill, solid, "not the Matte fill");
-                    let m = glass::header_style(solid, &matte);
-                    assert_eq!(m.material, HeaderMaterial::Solid);
-                    assert!(!m.blur);
-                    assert_eq!(m.fill, solid, "Matte keeps today's fill");
+                    assert!(
+                        style.fill.a < 1.0,
+                        "{kind} on {appearance:?} {surface:?}: the list shows through"
+                    );
+                    // Not the solids the pill and the disc were filled with
+                    // before #1830 (Glass) and before this item (Matte).
+                    assert_ne!(style.fill, theme.bubble_assistant, "{kind}: old pill fill");
+                    assert_ne!(style.fill, theme.surface_2, "{kind}: old disc fill");
+                    assert!(style.rim.a > 0.0, "{kind}: a visible rim");
+                    assert!(style.highlight.a > 0.0, "{kind}: a top highlight");
                 }
             }
-            // The pill and the disc share one fill and one rim on Glass.
-            assert_eq!(
-                glass::header_style(glass.bubble_assistant, &glass).fill,
-                glass::header_style(glass.surface_2, &glass).fill
-            );
+            // One material on both surfaces: Grok Bot's pill over its flat
+            // black transcript is the reference, so the Matte header gets the
+            // very fill, rim and highlight the Glass header has.
+            let glass = glass::header_style(&Theme::with(appearance, Surface::Glass));
+            let matte = glass::header_style(&Theme::with(appearance, Surface::Matte));
+            assert_eq!(glass, matte, "{appearance:?}: the same glass on Matte");
         }
     }
 
@@ -1372,14 +1389,13 @@ mod glass_tests {
         ) -> impl IntoElement {
             let theme = Theme::of(cx).clone();
             let pill = pill_frame(&theme, false, self.pr).w(px(140.0));
-            let pill = glass::header_frost(metrics::PILL_HEIGHT / 2.0, &theme, pill);
+            let pill = glass::header_frost(metrics::PILL_HEIGHT / 2.0, pill);
             let left = self.folded.then(|| {
                 let disc = glass::header_surface(
                     div().id("toggle").size(px(CONTROL)).rounded_full(),
-                    theme.surface_2,
                     &theme,
                 );
-                glass::header_frost(CONTROL / 2.0, &theme, disc)
+                glass::header_frost(CONTROL / 2.0, disc)
             });
             div().w(px(884.0)).h(px(400.0)).child(
                 div()
@@ -1389,28 +1405,33 @@ mod glass_tests {
         }
     }
 
-    /// Headless render on Glass: the frosted pill and disc draw, and the bar
-    /// keeps `metrics` for every kind (pads differ per kind: 4 with a "+", 10 without).
+    /// Headless render on Glass and on Matte, dark and light: the frosted
+    /// pill and disc draw for every kind, folded and not, and the bar keeps
+    /// `metrics` (sizes and placements are not this item's to move).
     #[gpui::test]
-    fn frosted_header_renders_and_keeps_the_bar_geometry(cx: &mut TestAppContext) {
-        for appearance in [Appearance::Dark, Appearance::Light] {
-            cx.update(|cx| cx.set_global(Theme::with(appearance, Surface::Glass)));
-            for (kind, pr) in KINDS.iter().zip([4.0, 10.0, 10.0, 10.0]) {
-                for folded in [false, true] {
-                    let (_view, vcx) = cx.add_window_view(|_, _| GlassBar { folded, pr });
-                    vcx.run_until_parked();
-                    let bar = vcx.debug_bounds("chat-header-bar").expect("bar drawn");
-                    let pill = vcx.debug_bounds("chat-header-pill").expect("pill drawn");
-                    let h: f32 = bar.size.height.into();
-                    let top: f32 = (pill.origin.y - bar.origin.y).into();
-                    let ph: f32 = pill.size.height.into();
-                    assert_eq!(h, metrics::HEIGHT, "{kind} bar height, folded={folded}");
-                    assert_eq!(top, metrics::PILL_TOP, "{kind} pill top, folded={folded}");
-                    assert_eq!(
-                        ph,
-                        metrics::PILL_HEIGHT,
-                        "{kind} pill height, folded={folded}"
-                    );
+    fn frosted_header_renders_on_both_surfaces_and_keeps_the_bar_geometry(cx: &mut TestAppContext) {
+        for appearance in APPEARANCES {
+            for surface in SURFACES {
+                cx.update(|cx| cx.set_global(Theme::with(appearance, surface)));
+                for (kind, pr) in KINDS {
+                    for folded in [false, true] {
+                        let (_view, vcx) = cx.add_window_view(|_, _| GlassBar { folded, pr });
+                        vcx.run_until_parked();
+                        let bar = vcx.debug_bounds("chat-header-bar").expect("bar drawn");
+                        let pill = vcx.debug_bounds("chat-header-pill").expect("pill drawn");
+                        let h: f32 = bar.size.height.into();
+                        let top: f32 = (pill.origin.y - bar.origin.y).into();
+                        let ph: f32 = pill.size.height.into();
+                        let pw: f32 = pill.size.width.into();
+                        let at = format!("{kind} on {appearance:?} {surface:?}, folded={folded}");
+                        assert_eq!(h, metrics::HEIGHT, "bar height, {at}");
+                        assert_eq!(top, metrics::PILL_TOP, "pill top, {at}");
+                        assert_eq!(ph, metrics::PILL_HEIGHT, "pill height, {at}");
+                        assert_eq!(pw, 140.0, "pill width, {at}");
+                        let cx_pill: f32 = (pill.origin.x + pill.size.width / 2.0).into();
+                        let cx_bar: f32 = (bar.origin.x + bar.size.width / 2.0).into();
+                        assert!((cx_pill - cx_bar).abs() <= 1.0, "pill centred, {at}");
+                    }
                 }
             }
         }
