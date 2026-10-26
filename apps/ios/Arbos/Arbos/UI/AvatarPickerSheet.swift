@@ -71,8 +71,59 @@ final class AvatarSourceState: ObservableObject {
     @Published var prompt = ""
     @Published var generating = false
     @Published var generatedKey: String?
+    /// The failure as one short sentence (the relay's, or ours for a transport error).
     @Published var errorText: String?
+    /// The raw words behind it — shown only behind the Details disclosure (Jacob, 2026-10-26).
+    @Published var errorDetail: String?
+    @Published var detailsOpen = false
+    /// When the running generation started (the status line counts the seconds).
+    @Published var startedAt: Date?
     @Published var photoItem: PhotosPickerItem?
+
+    /// One generation: progress on, then the key or the (sentence, detail) of the failure.
+    /// Both sheets call this so the wording is the same everywhere.
+    func run(_ work: @escaping () async throws -> String) {
+        guard !generating else { return }
+        generating = true
+        startedAt = Date()
+        errorText = nil
+        errorDetail = nil
+        detailsOpen = false
+        Task { @MainActor in
+            do {
+                generatedKey = try await work()
+            } catch {
+                let (sentence, detail) = Self.failureWords(error)
+                errorText = sentence
+                errorDetail = detail
+            }
+            generating = false
+            startedAt = nil
+        }
+    }
+
+    /// What the sheet says when a generation failed: one short sentence and the raw words for
+    /// Details. A relay answer keeps its own sentence ("Couldn't generate the image. The server
+    /// took too long.", "That prompt was refused — try a different one."); a client-side
+    /// timeout gets the same timeout sentence; anything else "Couldn't reach the server".
+    static func failureWords(_ error: Error) -> (String, String?) {
+        if let relay = error as? RelayError {
+            let sentence = relay.message.isEmpty ? "Couldn't generate the image." : relay.message
+            let code = relay.type.map { "HTTP \(relay.status) \($0)" } ?? "HTTP \(relay.status)"
+            return (sentence, relay.detail.map { "\(code) — \($0)" } ?? code)
+        }
+        let ns = error as NSError
+        if ns.domain == NSURLErrorDomain && ns.code == NSURLErrorTimedOut {
+            return ("Couldn't generate the image. The server took too long.", error.localizedDescription)
+        }
+        return ("Couldn't reach the server. Check your connection and try again.", error.localizedDescription)
+    }
+
+    /// Seconds since Generate was pressed, while it runs.
+    func generatingFor(_ now: Date) -> Int? {
+        guard generating, let startedAt else { return nil }
+        return max(0, Int(now.timeIntervalSince(startedAt)))
+    }
     @Published var uploadPreview: UIImage?
     /// The encoded master of the chosen photo (PNG or JPEG — `PictureMaster.mime` tells which;
     /// the name predates the PNG case).
@@ -147,9 +198,9 @@ struct AvatarSourceBody<Preview: View>: View {
     @FocusState private var promptFocused: Bool
 
     private var canGenerate: Bool { !state.prompt.trimmingCharacters(in: .whitespaces).isEmpty && !state.generating }
-    private var statusLine: String {
+    private func statusLine(_ now: Date) -> String {
         if let errorText = state.errorText { return errorText }
-        if state.generating { return "Painting a picture — a few seconds." }
+        if let s = state.generatingFor(now) { return "Painting a picture — \(s) s" }
         if state.generatedKey != nil { return keepsLine }
         return "A few words about the picture you want."
     }
@@ -177,7 +228,7 @@ struct AvatarSourceBody<Preview: View>: View {
                 .padding(.horizontal, 16.5)
                 .accessibilityIdentifier("avatar-generate-prompt")
             Button(action: go) {
-                Text(state.generating ? "Generating…" : (state.generatedKey == nil ? "Generate" : "Generate again"))
+                Text(pillLabel)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(canGenerate ? AvatarSheetPalette.title : AvatarSheetPalette.disabledText)
                     .padding(.horizontal, 18)
@@ -188,15 +239,60 @@ struct AvatarSourceBody<Preview: View>: View {
             .disabled(!canGenerate)
             .padding(.top, 12)
             .accessibilityIdentifier("avatar-generate-go")
-            preview()
-            Text(statusLine)
-                .font(.system(size: 12))
-                .foregroundStyle(state.errorText == nil ? AvatarSheetPalette.placeholder : theme.danger)
-                .multilineTextAlignment(.center)
+            // The preview slot: the picture (dimmed under a spinner while painting), or — after
+            // a failure with Details open — the raw words, clamped to the slot (Jacob,
+            // 2026-10-26: a raw transport error must never run into the footer).
+            if state.detailsOpen, state.errorText != nil {
+                Text(state.errorDetail ?? "No further detail.")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(AvatarSheetPalette.labelMuted)
+                    .lineLimit(6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10)
+                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(AvatarSheetPalette.pillBg))
+                    .padding(.horizontal, 16.5)
+                    .padding(.top, 16)
+                    .accessibilityIdentifier("avatar-generate-detail")
+            } else {
+                preview()
+                    .opacity(state.generating ? 0.4 : 1)
+                    .overlay {
+                        if state.generating {
+                            ProgressView().controlSize(.large).tint(theme.accent)
+                                .accessibilityIdentifier("avatar-generate-spinner")
+                        }
+                    }
+            }
+            // One line, never more; an error gets a Details toggle beside the sentence.
+            TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                HStack(spacing: 8) {
+                    Text(statusLine(ctx.date))
+                        .font(.system(size: 12))
+                        .foregroundStyle(state.errorText == nil ? AvatarSheetPalette.placeholder : theme.danger)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .accessibilityIdentifier("avatar-generate-status")
+                    if state.errorText != nil {
+                        Button { state.detailsOpen.toggle() } label: {
+                            Text(state.detailsOpen ? "Hide details" : "Details")
+                                .font(.system(size: 12))
+                                .foregroundStyle(AvatarSheetPalette.labelMuted)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("avatar-generate-details")
+                    }
+                }
                 .padding(.horizontal, 16.5)
                 .padding(.top, 12)
+            }
         }
         .frame(maxWidth: .infinity)
+    }
+
+    private var pillLabel: String {
+        if state.generating { return "Generating…" }
+        if state.errorText != nil { return "Try again" }
+        return state.generatedKey == nil ? "Generate" : "Generate again"
     }
 
     private func go() {
@@ -507,24 +603,16 @@ struct AvatarPickerSheet: View {
     private func generate() {
         let text = source.prompt.trimmingCharacters(in: .whitespaces)
         guard !text.isEmpty, !source.generating else { return }
-        source.generating = true
-        source.errorText = nil
         reset = false
-        Task {
-            do {
-                switch target {
-                case .agent(let id): source.generatedKey = try await model.generateProjectAvatar(projectId: id, prompt: text)
-                case .group(let id): source.generatedKey = try await model.generateGroupAvatar(chatId: id, prompt: text)
-                case .server(let id): source.generatedKey = try await model.generateServerAvatar(id, prompt: text)
-                case .me: source.generatedKey = try await model.generateMyAvatar(prompt: text)
-                }
-            } catch {
-                // The relay's own line ("That prompt was refused — try a different one."), not
-                // "HTTP 422: …" (Jacob, 2026-10-25 23:42: a refusal read as a server outage).
-                let relay = error as? RelayError
-                source.errorText = relay.map(\.message).flatMap { $0.isEmpty ? nil : $0 } ?? error.localizedDescription
+        let target = target
+        let model = model
+        source.run {
+            switch target {
+            case .agent(let id): return try await model.generateProjectAvatar(projectId: id, prompt: text)
+            case .group(let id): return try await model.generateGroupAvatar(chatId: id, prompt: text)
+            case .server(let id): return try await model.generateServerAvatar(id, prompt: text)
+            case .me: return try await model.generateMyAvatar(prompt: text)
             }
-            source.generating = false
         }
     }
 
