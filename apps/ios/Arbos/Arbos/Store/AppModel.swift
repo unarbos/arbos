@@ -1559,6 +1559,7 @@ final class AppModel: ObservableObject {
             }
             projects = newProjects.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
             chats = newChats
+            reconcileAgentAvatars()
             reconcileArchivedProjects(newProjects)
             saveRegistryCache()
             setRelayLink(.live)
@@ -2619,6 +2620,7 @@ final class AppModel: ObservableObject {
             let raw = try await api.peopleChatsJSON()
             let list = raw.compactMap(PeopleChat.parse)
             peopleChats = list
+            reconcileAgentAvatars()
             reconcileArchivedPeople(list)
             for c in list where c.unread { peopleUnread.insert(c.id) }
             for c in list where !c.unread && visibleChatId != c.id {
@@ -2907,15 +2909,17 @@ final class AppModel: ObservableObject {
 
     /// D92: the owner's leaf and disc colour picks (nil = automatic). Optimistic, then PATCH.
     func pickAvatarLeaf(_ projectId: Id, leaf: Int?, color: Int?) {
-        if let i = projects.firstIndex(where: { $0.id == projectId }) {
-            projects[i].avatarLeaf = leaf
-            projects[i].avatarLeafColor = color
-            projects[i].imageKey = nil
-        }
+        // Optimistic, into every copy (header, rosters, chips) at once; the relay's stamp
+        // replaces the local one when it answers.
+        let local = (newestAgentAvatar(projectId)?.version ?? 0) + 1
+        applyAgentAvatar(projectId, AgentAvatarFacts(imageKey: nil, avatarLeaf: leaf, avatarLeafColor: color, version: local), force: true)
         guard !isFixture else { return }
         Task {
             do {
-                try await api.setProjectAvatarLeaf(projectId, leaf: leaf, color: color)
+                let stamped = try await api.setProjectAvatarLeaf(projectId, leaf: leaf, color: color)
+                if stamped > 0 {
+                    applyAgentAvatar(projectId, AgentAvatarFacts(imageKey: nil, avatarLeaf: leaf, avatarLeafColor: color, version: stamped), force: true)
+                }
             } catch {
                 notice = Notice(text: "Avatar: \(error.localizedDescription)")
                 await refreshRegistry()
@@ -3536,18 +3540,17 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// D92 amendment: the agent's picture as the avatar loader fetches it.
+    /// D92 amendment: the agent's picture as the avatar loader fetches it (the newest copy's).
     func projectImageURL(_ project: Project) -> URL? {
-        guard let key = project.imageKey, !key.isEmpty else { return nil }
-        return blobURL(projectId: project.id, key: key)
+        let facts = newestAgentAvatar(project.id) ?? AgentAvatarFacts(project)
+        return agentPictureURL(id: project.id, imageKey: facts.imageKey, version: facts.version).flatMap(URL.init(string:))
     }
 
     /// D92 amendment: upload an agent picture into the project's own blob slot and set it.
     func setProjectImage(projectId: Id, jpeg: Data) async -> Bool {
         let key = "avatar-\(Int(Date().timeIntervalSince1970 * 1000)).jpg"
         if isFixture {
-            if let i = projects.firstIndex(where: { $0.id == projectId }) { projects[i].imageKey = key }
-            return true
+            return await setProjectImageKey(projectId: projectId, key: key)
         }
         do {
             _ = try await api.putBlob(projectId: projectId, key: key, mime: "image/jpeg", data: jpeg)
@@ -3560,10 +3563,18 @@ final class AppModel: ObservableObject {
 
     /// D92 amendment: a blob the relay already holds (the Generate tab's answer) becomes the picture.
     func setProjectImageKey(projectId: Id, key: String) async -> Bool {
-        if let i = projects.firstIndex(where: { $0.id == projectId }) { projects[i].imageKey = key }
+        // Optimistic, into every copy at once (the header used to keep its old URL while the
+        // working row already drew the new picture — Jacob, 2026-10-25); the relay's stamp
+        // replaces the local one when it answers.
+        let base = newestAgentAvatar(projectId)
+        let local = (base?.version ?? 0) + 1
+        applyAgentAvatar(projectId, AgentAvatarFacts(imageKey: key, avatarLeaf: base?.avatarLeaf, avatarLeafColor: base?.avatarLeafColor, version: local), force: true)
         guard !isFixture else { return true }
         do {
-            try await api.setProjectImageKey(projectId, key: key)
+            let stamped = try await api.setProjectImageKey(projectId, key: key)
+            if stamped > 0 {
+                applyAgentAvatar(projectId, AgentAvatarFacts(imageKey: key, avatarLeaf: base?.avatarLeaf, avatarLeafColor: base?.avatarLeafColor, version: stamped), force: true)
+            }
             return true
         } catch {
             notice = Notice(text: "Picture not saved: \(error.localizedDescription)")
@@ -4096,9 +4107,10 @@ final class AppModel: ObservableObject {
                 if payload.user_id == user?.id { await refreshAccount() }
                 needChats = true
                 needServers = true
-            case .agentProfileUpdated:
-                // An agent's avatar changed (the agents' `profile_updated`): re-read my
-                // projects and the rosters so every copy carries the new picture and stamp.
+            case .agentProfileUpdated(let payload):
+                // An agent's avatar changed (the agents' `profile_updated`): the new picture and
+                // stamp land in every copy now; the re-reads bring the leaf picks and the rest.
+                applyAgentAvatarPush(projectId: payload.project_id, imageKey: payload.image_key, version: Int(payload.avatar_version))
                 await refreshRegistry()
                 needChats = true
             case .chatArchived(let payload):
@@ -4147,6 +4159,9 @@ final class AppModel: ObservableObject {
     }
 
     // MARK: Lookups
+
+    /// The relay's HTTP origin (`https://relay.arbos.life`), for URLs built outside this file.
+    var relayHttpUrl: String { api.endpoint.httpUrl }
 
     /// Relay blob URL with the device token as a query parameter (the relay
     /// accepts `?token=` on every route), so AVPlayer and Safari can open it.
@@ -5481,7 +5496,7 @@ final class AppModel: ObservableObject {
                 if let picture, let id, let jpeg = await draftJpeg(picture) {
                     let key = "avatar-\(Int(Date().timeIntervalSince1970 * 1000)).jpg"
                     if (try? await api.putBlob(projectId: id, key: key, mime: "image/jpeg", data: jpeg)) != nil {
-                        try? await api.setProjectImageKey(id, key: key)
+                        _ = try? await api.setProjectImageKey(id, key: key)
                     }
                 }
                 await refreshRegistry()
