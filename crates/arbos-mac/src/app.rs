@@ -357,18 +357,27 @@ pub fn forwarded_from_text(by: &str) -> String {
 
 pub const FORWARDED_FROM_PREFIX: &str = "Forwarded from ";
 
-/// The picker's list for what was typed: a case-insensitive match on the
-/// chat's name or subtitle ("@sam", "Group · 4 members", "Agent"), most recent
-/// first; an empty query keeps every chat.
+/// The picker's list for what was typed, through the shared matcher
+/// (`arbos_core::search`): the chat's name, its @handle (a DM's subtitle) or
+/// its kind line ("Group · 4 members", "Agent") — best match first, most
+/// recent inside a tie; an empty query keeps every chat by recency.
 pub fn filter_forward_targets(mut targets: Vec<ForwardTarget>, query: &str) -> Vec<ForwardTarget> {
-    let query = query.trim().to_lowercase();
-    targets.retain(|t| {
-        query.is_empty()
-            || t.name.to_lowercase().contains(&query)
-            || t.subtitle.to_lowercase().contains(&query)
-    });
+    use arbos_core::search::{normalize_query, rank, Fields};
     targets.sort_by_key(|t| std::cmp::Reverse(t.last_activity));
-    targets
+    let q = normalize_query(query);
+    rank(targets, &q, |t| {
+        let fields = Fields::new(t.name.clone(), "");
+        match t.subtitle.strip_prefix('@') {
+            Some(handle) => Fields {
+                handle: handle.to_string(),
+                ..fields
+            },
+            None => fields.with_title(t.subtitle.clone()),
+        }
+    })
+    .into_iter()
+    .map(|(t, _)| t)
+    .collect()
 }
 
 /// What the composer should look like for the active chat (§3.10).
@@ -1496,10 +1505,21 @@ impl AppState {
                     self.people_directory = results.clone();
                 }
                 if query == self.people_query {
-                    if let Some(changed) = directory_update(&self.people_results, results) {
+                    let fresh = people_sheet_results(&self.people_directory, &results, &query);
+                    if let Some(changed) = directory_update(&self.people_results, fresh) {
                         self.people_results = changed;
                     }
                     self.people_busy = false;
+                } else if is_directory_query(&query) && !is_directory_query(&self.people_query) {
+                    // The directory landed after the user started typing: re-match it.
+                    let fresh = people_sheet_results(
+                        &self.people_directory,
+                        &self.people_results,
+                        &self.people_query,
+                    );
+                    if let Some(changed) = directory_update(&self.people_results, fresh) {
+                        self.people_results = changed;
+                    }
                 }
                 cx.notify();
             }
@@ -3338,7 +3358,7 @@ impl AppState {
             }
             for (p, where_) in met {
                 let name = p.display_name();
-                let rank = Rank::best([name.as_str(), p.handle.as_str()], query);
+                let rank = Rank::of_entity(&name, &p.handle, None, query);
                 if rank == Rank::Indirect {
                     continue;
                 }
@@ -3359,7 +3379,7 @@ impl AppState {
         for server in &self.servers {
             let when = self.server_last_activity(server);
             let rank = if query.is_empty() {
-                Rank::Prefix
+                Rank::EVERYTHING
             } else {
                 Rank::of(&server.name, query)
             };
@@ -6936,6 +6956,12 @@ impl AppState {
             .iter()
             .filter_map(|p| {
                 let chat_id = self.primary_chat(&p.id).map(|c| c.id.clone())?;
+                // A DM's relay name is the other side's handle; the row (and the
+                // matcher) want the display name, with the @handle underneath.
+                let name = match p.person() {
+                    Some(person) if p.kind == crate::model::SpaceKind::Dm => person.display_name(),
+                    _ => p.name.clone(),
+                };
                 let subtitle = match p.kind {
                     crate::model::SpaceKind::Dm => p
                         .person()
@@ -6950,7 +6976,7 @@ impl AppState {
                 Some(ForwardTarget {
                     space_id: p.id.clone(),
                     chat_id,
-                    name: p.name.clone(),
+                    name,
                     subtitle,
                     last_activity: self
                         .tabs(&p.id)
@@ -8346,8 +8372,15 @@ impl AppState {
     pub fn search_people(&mut self, query: String, cx: &mut Context<Self>) {
         self.people_query = query.clone();
         self.people_error = None;
+        // The known directory answers at once through the shared matcher
+        // (display name and @handle — the relay's own search is a handle-prefix
+        // lookup, which is why "aff" showed only @aff, [feedback
+        // shared-search-matcher-mac-2026-10-26]); the relay's reply adds the
+        // people the directory page did not carry.
+        let local = people_sheet_results(&self.people_directory, &self.people_results, &query);
         // An empty query lists everyone on Arbos (the sheet's "Arbos users").
-        self.people_busy = true;
+        self.people_busy = local.is_empty();
+        self.people_results = local;
         self.command(ClientCommand::SearchPeople { query });
         cx.notify();
     }
@@ -10502,6 +10535,31 @@ pub(crate) fn directory_update(current: &[Person], fresh: Vec<Person>) -> Option
     (fresh != current).then_some(fresh)
 }
 
+/// What the people sheet (New message, Add members, Give a person access…)
+/// lists for `query`: the known directory plus the relay's answer, one row per
+/// handle, through the shared matcher on display name and @handle — exact >
+/// prefix > word-start, name before handle, directory order inside a tie
+/// ([feedback shared-search-matcher-mac-2026-10-26]: "aff" lists Affine and
+/// AffineTeam next to Andreas F @aff, not @aff alone). An empty query keeps
+/// everyone in directory order.
+pub(crate) fn people_sheet_results(
+    directory: &[Person],
+    relay: &[Person],
+    query: &str,
+) -> Vec<Person> {
+    use arbos_core::search::{filter, normalize_query, Fields};
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut pool: Vec<Person> = Vec::with_capacity(directory.len() + relay.len());
+    for p in directory.iter().chain(relay.iter()) {
+        if seen.insert(p.handle.to_lowercase()) {
+            pool.push(p.clone());
+        }
+    }
+    filter(pool, &normalize_query(query), |p| {
+        Fields::new(p.display_name(), p.handle.clone())
+    })
+}
+
 #[cfg(test)]
 mod unread_arrival_tests {
     use super::{arrival_read, ArrivalRead};
@@ -10651,6 +10709,98 @@ mod new_message_first_paint_tests {
         assert!(is_directory_query("@"));
         assert!(!is_directory_query("al"));
         assert!(!is_directory_query("@al"));
+    }
+}
+
+#[cfg(test)]
+mod people_sheet_matcher_tests {
+    //! Jacob, Mac v0.6.268, 2026-10-26 09:16 CR: "Give a person access" with
+    //! "aff" typed listed only "Andreas F @aff" — the sheet showed the relay's
+    //! handle-prefix search and never looked at display names. Every people
+    //! sheet now lists the directory through the shared matcher.
+    use super::*;
+
+    fn person(handle: &str, name: &str) -> Person {
+        Person {
+            id: format!("gh_{handle}"),
+            handle: handle.into(),
+            name: (!name.is_empty()).then(|| name.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn directory() -> Vec<Person> {
+        vec![
+            person("doug", "Doug"),
+            person("team-affine", "Team Affine"),
+            person("aff", "Andreas F"),
+            person("affine-foundation", "Affine"),
+            person("robertalanm", "Carro"),
+            person("affteam", "AffineTeam"),
+        ]
+    }
+
+    fn handles(v: &[Person]) -> Vec<&str> {
+        v.iter().map(|p| p.handle.as_str()).collect()
+    }
+
+    #[test]
+    fn aff_lists_display_names_and_the_handle_ranked() {
+        let rows = people_sheet_results(&directory(), &[], "aff");
+        assert_eq!(
+            handles(&rows),
+            ["aff", "affine-foundation", "affteam", "team-affine"],
+            "exact @aff, then the names that start with aff (directory order), then the word-start"
+        );
+        // The relay's handle-prefix answer alone is what Jacob saw.
+        let relay_only = vec![person("aff", "Andreas F")];
+        assert_eq!(
+            handles(&people_sheet_results(&[], &relay_only, "aff")),
+            ["aff"]
+        );
+    }
+
+    #[test]
+    fn relay_extras_join_the_directory_once() {
+        let relay = vec![person("aff", "Andreas F"), person("affable", "Affable Bot")];
+        let rows = people_sheet_results(&directory(), &relay, "@Aff");
+        assert_eq!(
+            handles(&rows),
+            [
+                "aff",
+                "affine-foundation",
+                "affteam",
+                "affable",
+                "team-affine"
+            ]
+        );
+        assert_eq!(
+            rows.iter().filter(|p| p.handle == "aff").count(),
+            1,
+            "one row per handle"
+        );
+    }
+
+    #[test]
+    fn empty_query_keeps_the_directory_order_and_diacritics_fold() {
+        assert_eq!(
+            handles(&people_sheet_results(&directory(), &[], "")),
+            handles(&directory())
+        );
+        let dir = vec![person("zoe-m", "Zoë Martín"), person("jose", "José")];
+        assert_eq!(
+            handles(&people_sheet_results(&dir, &[], "martin")),
+            ["zoe-m"]
+        );
+        assert_eq!(handles(&people_sheet_results(&dir, &[], "JOSÉ")), ["jose"]);
+        assert_eq!(
+            handles(&people_sheet_results(&dir, &[], "zoe mar")),
+            ["zoe-m"]
+        );
+        assert!(
+            people_sheet_results(&dir, &[], "oe").is_empty(),
+            "no mid-word substrings"
+        );
     }
 }
 

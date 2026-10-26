@@ -27,6 +27,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::app::{decode_image, AppState, ComposerMode};
 use crate::model::{AttachmentKind, CallKind, Message, Part, Role};
+use crate::search;
 use crate::ui::callview;
 use crate::ui::frost::{frosted, PANEL_BLUR};
 use crate::ui::glass;
@@ -2626,10 +2627,12 @@ impl Composer {
     /// agents of the current space, plus `@here` (everyone in this chat) and
     /// `@agents` (all agents here) for any member of a group or people chat
     /// (Jacob, 2026-10-24); a server channel keeps the owner-only collective
-    /// pings (the client has no member list for a server yet). Case-insensitive prefix on
-    /// the handle or on any word of the display name; handle matches first,
-    /// then name matches, alphabetical by handle; at most six rows. A handle
-    /// an agent and a person both carry (#1538) tags each of those two rows.
+    /// pings (the client has no member list for a server yet). The shared
+    /// matcher on the @handle and the display name (`arbos_core::search`,
+    /// [feedback shared-search-matcher-mac-2026-10-26]): exact > prefix >
+    /// word-start, name before handle, then alphabetical by handle; at most
+    /// six rows. A handle an agent and a person both carry (#1538) tags each
+    /// of those two rows.
     fn mention_candidates(&self, cx: &App) -> Vec<MentionCandidate> {
         let Some(query) = self.mention_query(cx) else {
             return Vec::new();
@@ -2676,9 +2679,9 @@ impl Composer {
             return Vec::new();
         }
         collectives(&mut out);
-        let mut members: Vec<(MentionCandidate, bool)> = Vec::new();
+        let mut members: Vec<(MentionCandidate, search::Match)> = Vec::new();
         for a in &space.agents {
-            let Some(by_handle) = mention_match(&query, &a.handle, &a.name) else {
+            let Some(matched) = mention_match(&query, &a.handle, &a.name) else {
                 continue;
             };
             members.push((
@@ -2691,14 +2694,14 @@ impl Composer {
                     tag: None,
                     description: None,
                 },
-                by_handle,
+                matched,
             ));
         }
         for p in &space.people {
             if p.handle.eq_ignore_ascii_case(&me_handle) {
                 continue;
             }
-            let Some(by_handle) = mention_match(&query, &p.handle, &p.display_name()) else {
+            let Some(matched) = mention_match(&query, &p.handle, &p.display_name()) else {
                 continue;
             };
             members.push((
@@ -2711,12 +2714,14 @@ impl Composer {
                     tag: None,
                     description: None,
                 },
-                by_handle,
+                matched,
             ));
         }
-        members.sort_by(|(a, a_handle), (b, b_handle)| {
-            b_handle
-                .cmp(a_handle)
+        // The shared matcher's order (exact > prefix > word-start, name before
+        // handle), then alphabetical by handle, agents first on a tie.
+        members.sort_by(|(a, a_match), (b, b_match)| {
+            a_match
+                .cmp(b_match)
                 .then_with(|| a.handle.to_lowercase().cmp(&b.handle.to_lowercase()))
                 .then_with(|| b.is_agent.cmp(&a.is_agent))
         });
@@ -2941,17 +2946,12 @@ const MENTION_MENU_FOOTER: f32 = 20.0;
 const MENTION_MENU_GAP: f32 = 8.0;
 const MENTION_ROWS_MAX: usize = 6;
 
-/// Does `query` (lower-case) match this entity? `Some(true)` on the handle,
-/// `Some(false)` on a word of the display name, `None` otherwise. An empty
-/// query matches everyone (by handle).
-fn mention_match(query: &str, handle: &str, name: &str) -> Option<bool> {
-    if query.is_empty() || handle.to_lowercase().starts_with(query) {
-        return Some(true);
-    }
-    let name = name.to_lowercase();
-    name.split(|c: char| !c.is_alphanumeric())
-        .any(|w| !w.is_empty() && w.starts_with(query))
-        .then_some(false)
+/// Does the typed `@query` match this entity? The shared matcher's verdict on
+/// the @handle and the display name (`arbos_core::search`: exact > prefix >
+/// word-start, name before handle, diacritics folded), `None` when neither
+/// matches. An empty query matches everyone.
+fn mention_match(query: &str, handle: &str, name: &str) -> Option<search::Match> {
+    search::match_entity(name, handle, None, &search::normalize_query(query))
 }
 
 /// A picker row's picture as an element: photo, D79 initials, D92 leaf or the neutral disc.
@@ -4713,11 +4713,34 @@ mod mention_token_tests {
 
     #[test]
     fn candidates_match_the_handle_or_a_word_of_the_name() {
-        assert_eq!(mention_match("", "sam", "Sam Rivera"), Some(true));
-        assert_eq!(mention_match("sa", "sam", "Sam Rivera"), Some(true));
-        assert_eq!(mention_match("riv", "sam", "Sam Rivera"), Some(false));
-        assert_eq!(mention_match("k", "mira-k", "Mira Kaplan"), Some(false));
+        use arbos_core::search::{Match, MatchField, MatchKind};
+        let m = |kind, field| Some(Match { kind, field });
+        assert_eq!(
+            mention_match("", "sam", "Sam Rivera"),
+            Some(Match::EVERYTHING)
+        );
+        assert_eq!(
+            mention_match("sa", "sam", "Sam Rivera"),
+            m(MatchKind::Prefix, MatchField::Name)
+        );
+        assert_eq!(
+            mention_match("sam", "sam", "Sam Rivera"),
+            m(MatchKind::Exact, MatchField::Handle)
+        );
+        assert_eq!(
+            mention_match("riv", "sam", "Sam Rivera"),
+            m(MatchKind::WordStart, MatchField::Name)
+        );
+        assert_eq!(
+            mention_match("k", "mira-k", "Mira Kaplan"),
+            m(MatchKind::WordStart, MatchField::Name)
+        );
+        assert_eq!(
+            mention_match("Zoë", "zoe-m", "Zoe Martin"),
+            m(MatchKind::Prefix, MatchField::Name)
+        );
         assert_eq!(mention_match("x", "sam", "Sam Rivera"), None);
+        assert_eq!(mention_match("ivera", "sam", "Sam Rivera"), None);
         assert_eq!(mention_match("am", "sam", "Sam Rivera"), None);
     }
 }
