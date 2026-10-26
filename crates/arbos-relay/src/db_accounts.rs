@@ -70,6 +70,10 @@ pub fn migrate_accounts(c: &Connection) {
         // Earlier display names (JSON array), newest last: the box rewrites memory that named
         // the owner by one of them to "the owner".
         "ALTER TABLE users ADD COLUMN former_names TEXT NOT NULL DEFAULT '[]'",
+        // Per-user box provider (admin, `PUT /admin/users/{id}/box {"provider"}`): where this
+        // user's NEXT box is created when it differs from ARBOS_DEFAULT_PROVIDER — scratch Daytona
+        // boxes for carry tests on a gVisor-default host (ARB-339). NULL = the relay default.
+        "ALTER TABLE users ADD COLUMN box_provider TEXT",
     ] {
         let _ = c.execute(stmt, []);
     }

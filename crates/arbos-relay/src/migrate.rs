@@ -36,7 +36,7 @@ pub async fn migrate_user(
     let legacy = state.db.legacy_sandboxes()?;
     let mut reports = Vec::new();
     // The target box must exist and run before any copy.
-    let provider_default = boxes::default_provider(state);
+    let provider_default = boxes::provider_for_user(state, user_id);
     let target = boxes::ensure_user_box(state, user_id, provider_default).await?;
     let target_provider =
         Provider::parse(&target.provider).ok_or_else(|| anyhow!("bad target provider"))?;
