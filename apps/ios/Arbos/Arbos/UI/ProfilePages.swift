@@ -364,6 +364,8 @@ struct PaneHeader<Avatar: View>: View {
     var subtitleEditor: AnyView? = nil
     /// Drawn under the subtitle (the "Run by …" link under an agent's label).
     var subtitleBelow: AnyView? = nil
+    /// How many lines the subtitle may use (group description under the title).
+    var subtitleLines: Int = 1
     /// The hero's one action pill under the subtitle (a person's Message,
     /// [feedback profile-message-button-ios-2026-10-25]); nil on panes without one.
     var action: AnyView? = nil
@@ -419,7 +421,8 @@ struct PaneHeader<Avatar: View>: View {
         Text(subtitle)
             .font(theme.font(Theme.small))
             .foregroundStyle(subtitleTint ?? theme.muted)
-            .lineLimit(1)
+            .multilineTextAlignment(.center)
+            .lineLimit(subtitleLines)
             .padding(.horizontal, 32)
     }
 }
@@ -1149,6 +1152,43 @@ struct GroupProfileView: View {
         "\(memberCount) member\(memberCount == 1 ? "" : "s")"
     }
 
+    /// Group about text for the hero (trimmed); empty when unset.
+    private var groupDescription: String {
+        (people?.description ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Owners/admins always; any member when the admin-only setting is off.
+    private var canEditDescription: Bool {
+        guard people?.isGroup == true, projectId == nil else { return false }
+        if people?.descriptionAdminsOnly == true { return canManageMembers }
+        return true
+    }
+
+    /// Title, then description (when set), then member count.
+    private var groupHero: PaneHero {
+        let desc = groupDescription
+        if desc.isEmpty {
+            return PaneHero(
+                picture: .image(AnyView(heroPicture)),
+                name: title,
+                subtitle: memberSubtitle
+            )
+        }
+        return PaneHero(
+            picture: .image(AnyView(heroPicture)),
+            name: title,
+            subtitle: desc,
+            subtitleBelow: AnyView(
+                Text(memberSubtitle)
+                    .font(theme.font(Theme.small))
+                    .foregroundStyle(theme.muted)
+                    .lineLimit(1)
+                    .padding(.horizontal, 32)
+            ),
+            subtitleLines: 4
+        )
+    }
+
     @ViewBuilder private var mainStack: some View {
         ZStack(alignment: .top) {
             theme.bg.ignoresSafeArea()
@@ -1156,15 +1196,11 @@ struct GroupProfileView: View {
                 VStack(spacing: 18) {
                     Color.clear.frame(height: 80)
                     // The shared pane (D93): picture (crayon when a people group — it
-                    // opens the edit sheet), name, member count, Members | Library.
-                    // Leave / Delete group chat in the footer (same rule as the chat
-                    // list: members leave, owners delete).
+                    // opens the edit sheet), name, description under the title, then
+                    // member count, Members | Library. Leave / Delete group chat in
+                    // the footer (same rule as the chat list: members leave, owners delete).
                     ProfilePane(
-                        hero: PaneHero(
-                            picture: .image(AnyView(heroPicture)),
-                            name: title,
-                            subtitle: memberSubtitle
-                        ),
+                        hero: groupHero,
                         tabs: PaneKinds.group,
                         selected: $tab,
                         body: paneBodySections,
@@ -1460,18 +1496,41 @@ struct GroupProfileView: View {
             .buttonStyle(.plain)),
         ]
         // People groups: description lives in Edit group (same sheet as name + picture).
+        // Shown under the title in the hero; this row edits it when allowed.
         if projectId == nil, people?.isGroup == true {
             let desc = people?.description ?? ""
-            list.append(AnyView(Button { showEdit = true } label: {
-                PaneRow(
+            if canEditDescription {
+                list.append(AnyView(Button { showEdit = true } label: {
+                    PaneRow(
+                        leading: .glyph("text.alignleft"),
+                        title: "Description",
+                        value: desc.isEmpty ? "Add a description" : desc,
+                        chevron: true
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(desc.isEmpty ? "Add a description" : "Edit description")))
+            } else if !desc.isEmpty {
+                list.append(AnyView(PaneRow(
                     leading: .glyph("text.alignleft"),
                     title: "Description",
-                    value: desc.isEmpty ? "Add a description" : desc,
-                    chevron: true
-                )
+                    value: desc
+                )))
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel(desc.isEmpty ? "Add a description" : "Edit description")))
+            if canManageMembers {
+                list.append(AnyView(PaneRow(
+                    title: "Admins only edit description",
+                    subtitle: "Members can still read it",
+                    trailing: AnyView(
+                        Toggle("", isOn: Binding(
+                            get: { people?.descriptionAdminsOnly ?? false },
+                            set: { on in
+                                Task { _ = await model.patchPeopleChat(chatId, descriptionAdminsOnly: on) }
+                            }
+                        )).labelsHidden().tint(theme.online)
+                    )
+                )))
+            }
         }
         // People groups only (not a shared project): one-tap share of the invite link.
         if project == nil, people?.kind == "group" {
@@ -2515,6 +2574,17 @@ struct GroupEditSheet: View {
 
     private var people: PeopleChat? { model.peopleChat(chatId) }
 
+    /// Owners/admins always; any member when the admin-only setting is off.
+    private var canEditDescription: Bool {
+        guard let people, people.isGroup else { return false }
+        if people.descriptionAdminsOnly {
+            return people.myRole == "owner" || people.myRole == "admin"
+                || people.humans.first(where: { $0.id == model.user?.id })?.role == "owner"
+                || people.humans.first(where: { $0.id == model.user?.id })?.role == "admin"
+        }
+        return true
+    }
+
     private var clusterMembers: [ChatMember] {
         guard let people else { return [] }
         let others = people.humans.filter { $0.id != model.user?.id }
@@ -2561,20 +2631,24 @@ struct GroupEditSheet: View {
                     }
                     .padding(.horizontal, 16)
 
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Description").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
-                        TextField("", text: $descriptionText, prompt: Text("What this group is for").foregroundStyle(theme.placeholder), axis: .vertical)
-                            .font(theme.font(Theme.body))
-                            .foregroundStyle(theme.text)
-                            .lineLimit(3...6)
-                            .padding(.horizontal, 14).padding(.vertical, 12)
-                            .frame(minHeight: Theme.fieldHeight, alignment: .topLeading)
-                            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
-                            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                    if canEditDescription {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Description").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                            TextField("", text: $descriptionText, prompt: Text("What this group is for").foregroundStyle(theme.placeholder), axis: .vertical)
+                                .font(theme.font(Theme.body))
+                                .foregroundStyle(theme.text)
+                                .lineLimit(3...6)
+                                .padding(.horizontal, 14).padding(.vertical, 12)
+                                .frame(minHeight: Theme.fieldHeight, alignment: .topLeading)
+                                .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
+                                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                        }
+                        .padding(.horizontal, 16)
                     }
-                    .padding(.horizontal, 16)
 
-                    Text("A name, description and picture help everyone recognise this chat. Leave the name blank to use member handles.")
+                    Text(canEditDescription
+                         ? "A name, description and picture help everyone recognise this chat. Leave the name blank to use member handles."
+                         : "A name and picture help everyone recognise this chat. Leave the name blank to use member handles. Only admins can edit the description.")
                         .font(theme.font(Theme.tiny))
                         .foregroundStyle(theme.muted)
                         .multilineTextAlignment(.center)
@@ -2620,8 +2694,13 @@ struct GroupEditSheet: View {
     private func save() async {
         saving = true
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let desc = String(descriptionText.trimmingCharacters(in: .whitespacesAndNewlines).prefix(200))
-        let ok = await model.patchPeopleChat(chatId, title: trimmed, description: desc)
+        let ok: Bool
+        if canEditDescription {
+            let desc = String(descriptionText.trimmingCharacters(in: .whitespacesAndNewlines).prefix(200))
+            ok = await model.patchPeopleChat(chatId, title: trimmed, description: desc)
+        } else {
+            ok = await model.patchPeopleChat(chatId, title: trimmed)
+        }
         saving = false
         if ok { dismiss() }
     }
@@ -2654,6 +2733,8 @@ struct PaneHero {
     var subtitleEditor: AnyView? = nil
     /// Drawn under the subtitle (the "Run by …" link under an agent's label).
     var subtitleBelow: AnyView? = nil
+    /// How many lines the subtitle may use (group description under the title).
+    var subtitleLines: Int = 1
     /// The hero's one action pill under the subtitle (a person's Message); nil
     /// on panes with no primary action and on a person you cannot message.
     var action: AnyView? = nil
@@ -2750,7 +2831,8 @@ struct ProfilePane: View {
                 VStack(spacing: 18) {
                     PaneHeader(name: hero.name, subtitle: hero.subtitle, badge: hero.badge, nameAction: hero.nameAction,
                                subtitleTint: hero.subtitleTint, subtitleAction: hero.subtitleAction, subtitleLink: hero.subtitleLink,
-                               subtitleEditor: hero.subtitleEditor, subtitleBelow: hero.subtitleBelow, action: hero.action) {
+                               subtitleEditor: hero.subtitleEditor, subtitleBelow: hero.subtitleBelow,
+                               subtitleLines: hero.subtitleLines, action: hero.action) {
                         switch hero.picture {
                         case .image(let v): v
                         case .glyph(let glyph):

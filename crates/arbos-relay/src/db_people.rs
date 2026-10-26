@@ -16,7 +16,7 @@ pub const PEOPLE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS people_chats (
   id TEXT PRIMARY KEY, kind TEXT NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL,
   deleted_at INTEGER, title TEXT, image_key TEXT, avatar_leaf INTEGER, avatar_leaf_color INTEGER,
-  description TEXT
+  description TEXT, description_admins_only INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS people_members (
   chat_id TEXT NOT NULL, member TEXT NOT NULL, role TEXT NOT NULL, added_by TEXT NOT NULL,
@@ -79,6 +79,10 @@ pub fn migrate_people(c: &Connection) {
         [],
     );
     let _ = c.execute("ALTER TABLE people_chats ADD COLUMN description TEXT", []);
+    let _ = c.execute(
+        "ALTER TABLE people_chats ADD COLUMN description_admins_only INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
     // Group admin mute (can't post) and ban (can't rejoin).
     let _ = c.execute(
         "ALTER TABLE people_members ADD COLUMN silenced INTEGER NOT NULL DEFAULT 0",
@@ -152,6 +156,9 @@ pub struct PeopleChat {
     /// Optional about text for a people group (≤200 chars); `None` or empty = unset.
     #[serde(default)]
     pub description: Option<String>,
+    /// When true, only owners/admins may edit the description. Default false = any member.
+    #[serde(default)]
+    pub description_admins_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -218,8 +225,11 @@ fn people_chat_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PeopleChat> {
         avatar_leaf: r.get(6)?,
         avatar_leaf_color: r.get(7)?,
         description: r.get(8)?,
+        description_admins_only: r.get::<_, i64>(9).unwrap_or(0) != 0,
     })
 }
+
+const PEOPLE_CHAT_COLS: &str = "id, kind, created_by, created_at, title, image_key, avatar_leaf, avatar_leaf_color, description, description_admins_only";
 
 impl Db {
     // ---- chats and members --------------------------------------------------------------------
@@ -237,7 +247,7 @@ impl Db {
     pub fn people_chat(&self, id: &str) -> Result<Option<PeopleChat>> {
         self.with(|c| {
             c.query_row(
-                "SELECT id, kind, created_by, created_at, title, image_key, avatar_leaf, avatar_leaf_color, description FROM people_chats WHERE id = ?1 AND deleted_at IS NULL",
+                &format!("SELECT {PEOPLE_CHAT_COLS} FROM people_chats WHERE id = ?1 AND deleted_at IS NULL"),
                 params![id],
                 people_chat_from_row,
             )
@@ -280,6 +290,17 @@ impl Db {
                 )?;
             }
             Ok(true)
+        })
+    }
+
+    /// Owner/admin setting: only admins may edit the group description when true.
+    pub fn set_description_admins_only(&self, chat_id: &str, value: bool) -> Result<bool> {
+        self.with(|c| {
+            let n = c.execute(
+                "UPDATE people_chats SET description_admins_only = ?2 WHERE id = ?1 AND deleted_at IS NULL",
+                params![chat_id, value as i64],
+            )?;
+            Ok(n > 0)
         })
     }
 
@@ -441,7 +462,7 @@ impl Db {
     pub fn chats_of_member(&self, member: &str) -> Result<Vec<ChatWithMembers>> {
         let chats: Vec<PeopleChat> = self.with(|c| {
             let mut st = c.prepare(
-                "SELECT p.id, p.kind, p.created_by, p.created_at, p.title, p.image_key, p.avatar_leaf, p.avatar_leaf_color, p.description FROM people_chats p
+                "SELECT p.id, p.kind, p.created_by, p.created_at, p.title, p.image_key, p.avatar_leaf, p.avatar_leaf_color, p.description, p.description_admins_only FROM people_chats p
                  JOIN people_members m ON m.chat_id = p.id
                  WHERE m.member = ?1 AND m.left_at IS NULL AND p.deleted_at IS NULL
                  ORDER BY p.created_at DESC",
@@ -462,7 +483,7 @@ impl Db {
     pub fn dm_between(&self, a: &str, b: &str) -> Result<Option<PeopleChat>> {
         self.with(|c| {
             c.query_row(
-                "SELECT p.id, p.kind, p.created_by, p.created_at, p.title, p.image_key, p.avatar_leaf, p.avatar_leaf_color, p.description FROM people_chats p
+                "SELECT p.id, p.kind, p.created_by, p.created_at, p.title, p.image_key, p.avatar_leaf, p.avatar_leaf_color, p.description, p.description_admins_only FROM people_chats p
                  JOIN people_members ma ON ma.chat_id = p.id AND ma.member = ?1 AND ma.left_at IS NULL
                  JOIN people_members mb ON mb.chat_id = p.id AND mb.member = ?2 AND mb.left_at IS NULL
                  WHERE p.kind = 'dm' AND p.deleted_at IS NULL ORDER BY p.created_at LIMIT 1",

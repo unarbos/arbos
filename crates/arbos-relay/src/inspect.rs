@@ -821,6 +821,7 @@ mod tests {
             avatar_leaf: None,
             avatar_leaf_color: None,
             description: None,
+            description_admins_only: false,
         };
         state.db.insert_people_chat(&chat).unwrap();
         state

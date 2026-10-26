@@ -253,6 +253,8 @@ struct PeopleChat: Identifiable, Equatable {
     var isNeutralAvatar: Bool { LeafArt.isNeutral(avatarLeaf) }
     /// Optional about text for a people group (≤200 chars).
     var description: String = ""
+    /// When true, only owners/admins may edit the description. Default false = any member.
+    var descriptionAdminsOnly: Bool = false
     var pending: Bool
     var members: [ChatMember]
     var headSeq: Int64
@@ -310,6 +312,7 @@ extension PeopleChat {
         self.avatarLeaf = dto.avatar_leaf.map(Int.init)
         self.avatarLeafColor = dto.avatar_leaf_color.map(Int.init)
         self.description = dto.description?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.descriptionAdminsOnly = dto.description_admins_only ?? false
         self.pending = dto.pending
         self.members = dto.members.map { ChatMember(dto: $0) }
         self.headSeq = dto.head_seq

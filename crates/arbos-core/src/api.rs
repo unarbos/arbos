@@ -309,6 +309,9 @@ pub struct PeopleChatDto {
     /// Optional about text for a people group (≤200 chars). Absent or empty = none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// When true, only owners and admins may edit the description. Default false = any member.
+    #[serde(default)]
+    pub description_admins_only: bool,
     pub pending: bool,
     pub members: Vec<ChatMemberDto>,
     /// Banned people (owner/admin with mute-ban rights); empty for everyone else.

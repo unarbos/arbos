@@ -1219,12 +1219,13 @@ final class RelayAPI {
         return chat
     }
 
-    /// `PATCH /chats/{id} {title?, image_key?, description?}` — custom group name, picture key, about text.
-    func patchPeopleChat(_ chatId: String, title: String? = nil, imageKey: String? = nil, description: String? = nil) async throws -> PeopleChat {
+    /// `PATCH /chats/{id} {title?, image_key?, description?, description_admins_only?}` — custom group name, picture key, about text, who may edit the description.
+    func patchPeopleChat(_ chatId: String, title: String? = nil, imageKey: String? = nil, description: String? = nil, descriptionAdminsOnly: Bool? = nil) async throws -> PeopleChat {
         var body: [String: Any] = [:]
         if let title { body["title"] = title }
         if let imageKey { body["image_key"] = imageKey }
         if let description { body["description"] = description }
+        if let descriptionAdminsOnly { body["description_admins_only"] = descriptionAdminsOnly }
         let v = try await json("PATCH", "/chats/\(chatId)", body: body)
         guard let chat = PeopleChat.parse(v) else { throw RelayError(status: 0, message: "The relay returned no chat") }
         return chat

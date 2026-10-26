@@ -3505,9 +3505,9 @@ final class AppModel: ObservableObject {
     }
 
     /// Rename a people group and/or set its picture blob key or description (`PATCH /chats/{id}`).
-    func patchPeopleChat(_ chatId: String, title: String? = nil, imageKey: String? = nil, description: String? = nil) async -> Bool {
+    func patchPeopleChat(_ chatId: String, title: String? = nil, imageKey: String? = nil, description: String? = nil, descriptionAdminsOnly: Bool? = nil) async -> Bool {
         do {
-            let chat = try await api.patchPeopleChat(chatId, title: title, imageKey: imageKey, description: description)
+            let chat = try await api.patchPeopleChat(chatId, title: title, imageKey: imageKey, description: description, descriptionAdminsOnly: descriptionAdminsOnly)
             if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
                 peopleChats[i] = chat
             } else {

@@ -567,6 +567,7 @@ pub fn people_chat_dto(
             .map(str::trim)
             .filter(|t| !t.is_empty())
             .map(str::to_owned),
+        description_admins_only: cm.chat.description_admins_only,
         pending,
         members,
         banned,
@@ -923,6 +924,7 @@ pub async fn chats_create_group(
             .map(str::trim)
             .filter(|t| !t.is_empty())
             .map(|t| t.chars().take(200).collect()),
+        description_admins_only: false,
     };
     if let Err(e) = state.db.insert_people_chat(&chat) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
@@ -1048,6 +1050,7 @@ pub async fn dm_create(
         avatar_leaf: None,
         avatar_leaf_color: None,
         description: None,
+        description_admins_only: false,
     };
     if let Err(e) = state.db.insert_people_chat(&chat) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
@@ -1139,6 +1142,9 @@ pub struct PatchChatBody {
     /// Optional about text. Empty string clears it.
     #[serde(default)]
     pub description: Option<String>,
+    /// Owner/admin: when true, only owners/admins may edit the description.
+    #[serde(default)]
+    pub description_admins_only: Option<bool>,
 }
 
 /// `None` = untouched, `Some(None)` = clear, `Some(Some((leaf, colour)))` = set.
@@ -1170,9 +1176,9 @@ fn safe_image_key(k: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == ':')
 }
 
-/// `PATCH /chats/{id} {"title"?, "image_key"?, "description"?}` — any human member can
-/// name the group, set an optional picture (uploaded first via `PUT /blob/people:{id}/…`),
-/// and set an optional description.
+/// `PATCH /chats/{id} {"title"?, "image_key"?, "description"?, "description_admins_only"?}` —
+/// any human member can name the group and set a picture; description edits honour the
+/// admin-only setting; only owners/admins change that setting.
 pub async fn chat_patch(
     State(state): State<AppState>,
     principal: Principal,
@@ -1187,8 +1193,27 @@ pub async fn chat_patch(
         Ok(l) => l,
         Err((st, msg)) => return api_error(st, "bad_leaf", msg),
     };
-    if b.title.is_none() && b.image_key.is_none() && leaf.is_none() && b.description.is_none() {
+    if b.title.is_none()
+        && b.image_key.is_none()
+        && leaf.is_none()
+        && b.description.is_none()
+        && b.description_admins_only.is_none()
+    {
         return Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response();
+    }
+    if b.description_admins_only.is_some() && !can_manage_members(&cm, &me) {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "Only owners and admins can change who edits the description",
+        );
+    }
+    if b.description.is_some() && cm.chat.description_admins_only && !can_manage_members(&cm, &me) {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "Only owners and admins can edit the description",
+        );
     }
     let title = b.title.as_ref().map(|t| {
         let trimmed = t.trim();
@@ -1228,6 +1253,13 @@ pub async fn chat_patch(
             StoredImage::NotAnImage(why) => return not_an_image(&why),
         }
     }
+    let old_description = cm
+        .chat
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_owned);
     let title_ref = title.as_ref().map(|o| o.as_ref().map(|s| s.as_str()));
     let image_ref = image_key.as_ref().map(|o| o.as_ref().map(|s| s.as_str()));
     let description_ref = description.as_ref().map(|o| o.as_ref().map(|s| s.as_str()));
@@ -1237,6 +1269,25 @@ pub async fn chat_patch(
             .update_people_chat_profile(&id, title_ref, image_ref, leaf, description_ref)
     {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+    }
+    if let Some(flag) = b.description_admins_only {
+        if let Err(e) = state.db.set_description_admins_only(&id, flag) {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+        }
+    }
+    // A real description change posts a system line so everyone sees it (same shape as
+    // membership notices).
+    if let Some(new_desc) = &description {
+        let new_s = new_desc.as_deref();
+        if old_description.as_deref() != new_s {
+            let line = format!(
+                "{} changed the description",
+                notices::person_name(&state, &me)
+            );
+            if let Err(e) = notices::post_people_notice(&state, &id, &line).await {
+                tracing::warn!(chat = %id, error = %e, "description notice not written");
+            }
+        }
     }
     // Other members, and this user's other devices (e.g. Mac), refresh the list.
     let event = PushEventDto::PeopleChatUpdated(PeopleChatUpdatedPayloadDto {
@@ -2876,6 +2927,7 @@ pub async fn invite_create(
                     avatar_leaf: None,
                     avatar_leaf_color: None,
                     description: None,
+                    description_admins_only: false,
                 };
                 if let Err(e) = state.db.insert_people_chat(&chat) {
                     return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
@@ -4857,6 +4909,7 @@ pub(crate) mod tests_support {
             avatar_leaf: None,
             avatar_leaf_color: None,
             description: None,
+            description_admins_only: false,
         };
         state.db.insert_people_chat(&chat).expect("chat");
         for u in [a, b] {
@@ -4963,6 +5016,7 @@ mod picture_tests {
                 avatar_leaf: None,
                 avatar_leaf_color: None,
                 description: None,
+                description_admins_only: None,
             }),
         )
         .await

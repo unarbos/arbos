@@ -1603,6 +1603,8 @@ public struct PeopleChatDto: Codable {
 	public let avatar_leaf_color: Int64?
 	/// Optional about text for a people group (≤200 chars). Absent or empty = none.
 	public let description: String?
+	/// When true, only owners and admins may edit the description. Default false = any member.
+	public let description_admins_only: Bool?
 	public let pending: Bool
 	public let members: [ChatMemberDto]
 	/// Banned people (owner/admin with mute-ban rights); empty for everyone else.
@@ -1616,7 +1618,7 @@ public struct PeopleChatDto: Codable {
 	public let lock_state: String
 	public let me: ChatMeDto
 
-	public init(id: String, archived_at: Int64?, kind: String, created_by: String, created_at: Int64, title: String, image_key: String?, avatar_leaf: Int64?, avatar_leaf_color: Int64?, description: String?, pending: Bool, members: [ChatMemberDto], banned: [ChatMemberDto]?, room: String, head_seq: Int64, last_activity_at: Int64, read_seq: Int64, unread: Bool, lock_state: String, me: ChatMeDto) {
+	public init(id: String, archived_at: Int64?, kind: String, created_by: String, created_at: Int64, title: String, image_key: String?, avatar_leaf: Int64?, avatar_leaf_color: Int64?, description: String?, description_admins_only: Bool?, pending: Bool, members: [ChatMemberDto], banned: [ChatMemberDto]?, room: String, head_seq: Int64, last_activity_at: Int64, read_seq: Int64, unread: Bool, lock_state: String, me: ChatMeDto) {
 		self.id = id
 		self.archived_at = archived_at
 		self.kind = kind
@@ -1627,6 +1629,7 @@ public struct PeopleChatDto: Codable {
 		self.avatar_leaf = avatar_leaf
 		self.avatar_leaf_color = avatar_leaf_color
 		self.description = description
+		self.description_admins_only = description_admins_only
 		self.pending = pending
 		self.members = members
 		self.banned = banned
