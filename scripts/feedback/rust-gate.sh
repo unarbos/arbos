@@ -100,13 +100,14 @@ launch() {
 
 case "$cmd" in
   start-batch)
-    launch "$1" "$2" "${3:-1}" "${4:-mac}"
+    # 5th arg `priority` (a batch with a pinned member): the heavy-job cap lets it take the extra slot.
+    launch "$1" "$2" "${3:-1}" "${4:-mac}" "${5:-normal}"
     ;;
   start-ios)
     # The iOS half (ios-gate.sh <branch> <sha>) as a background run like the Mac half, so the poller
     # tick is never blocked on an Xcode build (a 10-member batch held one tick for 13 min, 2026-10-23
     # 17:51-18:04, and every push / merge / launch waited behind it).
-    launch "$1" _ios "$2" "$3"
+    launch "$1" _ios "$2" "$3" "${4:-normal}"
     ;;
   status)
     id=$1; log=$runs/$id.log; rc=$runs/$id.rc
@@ -132,16 +133,29 @@ case "$cmd" in
     echo aborted
     ;;
   _run)
-    id=$1; tree=$2; mac=$3; mode=$4
+    id=$1; tree=$2; mac=$3; mode=$4; priority=${5:-normal}
     rc=$runs/$id.rc
-    finish() { echo "$1" >"$rc"; exit "$1"; }
+    # Heavy-job cap (#1839): at most two of {gate Mac half, gate iOS half, TF archive, Mac release} run at
+    # once on this box; the rest wait in arbos-heavy-slot.sh. A pinned batch has priority (extra slot).
+    slot=none
+    take_slot() {
+      local flag=""; [ "$priority" = "priority" ] && flag=--priority
+      if [ -x /usr/local/bin/arbos-heavy-slot.sh ]; then
+        # Waiting counts against the poller's gate timeouts (IOS_GATE_TIMEOUT_S 2700 / RUST_GATE_TIMEOUT_S
+        # 3600 on the host): a gate half waits at most 15 min for a slot, then runs uncapped.
+        slot=$(ARBOS_HEAVY_WAIT_MAX_S=900 /usr/local/bin/arbos-heavy-slot.sh acquire "$1" --pid $$ $flag 2>>"$runs/$id.log")
+      fi
+    }
+    finish() { /usr/local/bin/arbos-heavy-slot.sh release "$slot" 2>/dev/null; echo "$1" >"$rc"; exit "$1"; }
     if [ "$tree" = "_ios" ]; then
       # start-ios: $mac = branch, $mode = sha. ios-gate.sh exits 0 ok / 1 fail / 2 infrastructure.
+      take_slot "gate-ios-$id"
       echo "== ios-gate $mac $mode"
       bash "$HOME/arbos-gate/ios-gate.sh" "$mac" "$mode"; s=$?
       echo "== done rc=$s"
       finish "$s"
     fi
+    take_slot "gate-mac-$id"
     cd "$repo" || finish 2
     git merge --abort 2>/dev/null
     git checkout -q -f --detach HEAD 2>/dev/null

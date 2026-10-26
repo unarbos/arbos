@@ -345,6 +345,10 @@ final class AppModel: ObservableObject {
     var openServerHookDone = false
     /// Rig: the tab the channel page opens on (`ARBOS_OPEN_SERVER=…:page-settings`).
     var openServerHookTab: String?
+    /// Rig: `ARBOS_SHOW` ran once for this launch. A chat's `onAppear` fires again when a
+    /// screen pushed over it is popped; without this a `jobtab` hook re-pushed the tab the
+    /// moment a back swipe popped it.
+    var showHookDone = false
     /// `machine.always_on` as last reported by `GET /me` (nil = field absent).
     private var meAlwaysOn: Bool?
     /// Navigation: home → chat. Shared so menus anywhere can open a chat.
