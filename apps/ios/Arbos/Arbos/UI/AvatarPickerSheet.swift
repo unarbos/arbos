@@ -6,8 +6,10 @@
 // in its hue (pastel disc, darker leaf); the ten hues in two rows of five. The per-id
 // automatic default stays: Reset goes back to it. Generate: a short prompt → the relay paints one
 // picture (`POST /projects/{id}/avatar/generate`) → previewed here; Set keeps it. Upload: Photos
-// (images only), uploaded as a 512 px JPEG on Set. Groups and servers open the same sheet with
-// the same three tabs (their own `/avatar/generate` route and blob slot).
+// (images only), uploaded as the picture master on Set — `PictureMaster`: a 1024 px square,
+// PNG for a flat mark, JPEG q92 for a photo (Jacob, 2026-10-26: a 4000 px mark came out
+// jagged through the old 512 px JPEG). Groups and servers open the same sheet with the same
+// three tabs (their own `/avatar/generate` route and blob slot).
 //
 // Grok's sizes from the 2x reference (612 × 794 px → 306 × 397 pt), inside the shipped
 // bottom-sheet frame: a 44 pt bar with a hairline, the Create sheet's 33 / 40 / 56 leaf grid,
@@ -72,6 +74,8 @@ final class AvatarSourceState: ObservableObject {
     @Published var errorText: String?
     @Published var photoItem: PhotosPickerItem?
     @Published var uploadPreview: UIImage?
+    /// The encoded master of the chosen photo (PNG or JPEG — `PictureMaster.mime` tells which;
+    /// the name predates the PNG case).
     @Published var uploadJpeg: Data?
 
     /// The entity about to be created gets this (Jacob, 2026-10-25): the chosen JPEG, the
@@ -84,14 +88,18 @@ final class AvatarSourceState: ObservableObject {
         }
     }
 
-    /// A Photos pick landed: square it at 512 px and keep the JPEG for the create / Set.
+    /// A Photos pick landed: square it at the master size and keep the encoded master for the
+    /// create / Set (`PictureMaster`).
     func tookPhoto(_ item: PhotosPickerItem?) async {
         guard let item,
               let data = try? await item.loadTransferable(type: Data.self),
               let img = UIImage(data: data) else { return }
-        let square = AvatarPickerSheet.square(img, side: 512)
-        uploadPreview = square
-        uploadJpeg = square.jpegData(compressionQuality: 0.85)
+        let square = AvatarPickerSheet.square(img, side: PictureMaster.side)
+        let encoded = PictureMaster.encode(square)
+        // The 114 pt preview draws a 384 px ImageIO thumbnail of the master (≈ 1 : 1 at 3 ×), not
+        // the 1024 px square through the layer's linear filter.
+        uploadPreview = encoded.flatMap(AvatarImageCache.decode) ?? square
+        uploadJpeg = encoded
         errorText = nil
     }
 }
@@ -210,7 +218,7 @@ struct AvatarSourceBody<Preview: View>: View {
             }
             .buttonStyle(.plain)
             .accessibilityIdentifier("avatar-upload-choose")
-            Text(state.uploadJpeg == nil ? "A picture from Photos; kept at 512 px." : uploadsLine)
+            Text(state.uploadJpeg == nil ? "A picture from Photos; kept at up to 1024 px." : uploadsLine)
                 .font(.system(size: 12))
                 .foregroundStyle(AvatarSheetPalette.placeholder)
                 .multilineTextAlignment(.center)
@@ -669,18 +677,105 @@ struct AvatarPickerSheet: View {
         }
     }
 
+    /// The centre square of `image`, `side` **pixels** on a side (scale 1 — not the screen's 3 ×,
+    /// which made a "512" picture 1536 px), drawn with high-quality interpolation so a 4000 px
+    /// export shrinks through an area filter, never point-sampled. A smaller picture is not
+    /// enlarged.
     static func square(_ image: UIImage, side: CGFloat) -> UIImage {
         let s = min(image.size.width, image.size.height)
         let rect = CGRect(x: (image.size.width - s) / 2, y: (image.size.height - s) / 2, width: s, height: s)
-        let renderer = UIGraphicsImageRenderer(size: CGSize(width: side, height: side))
-        return renderer.image { _ in
+        let sourcePx = s * image.scale
+        let out = min(side, max(1, sourcePx.rounded(.down)))
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = false
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: out, height: out), format: format)
+        return renderer.image { ctx in
+            ctx.cgContext.interpolationQuality = .high
             if let cg = image.cgImage?.cropping(to: CGRect(x: rect.origin.x * image.scale, y: rect.origin.y * image.scale,
                                                            width: rect.width * image.scale, height: rect.height * image.scale)) {
                 UIImage(cgImage: cg, scale: image.scale, orientation: image.imageOrientation)
-                    .draw(in: CGRect(x: 0, y: 0, width: side, height: side))
+                    .draw(in: CGRect(x: 0, y: 0, width: out, height: out))
             } else {
-                image.draw(in: CGRect(x: 0, y: 0, width: side, height: side))
+                image.draw(in: CGRect(x: 0, y: 0, width: out, height: out))
             }
         }
+    }
+}
+
+/// The picture master every avatar upload sends — the iPhone twin of the relay's
+/// `avatar_image::master` and the Mac's `sync::avatar_master`: ≤ 1024 px, alpha over white,
+/// **PNG** when the picture is a flat graphic (a mark, a logo: a handful of colours cover almost
+/// every pixel, the rest being its anti-aliased edges), **JPEG q92** for a photograph. The relay
+/// checks that the `Content-Type` and the bytes agree, so [`mime`] / [`ext`] read the bytes.
+enum PictureMaster {
+    /// Longest side of the master, in pixels.
+    static let side: CGFloat = 1024
+    /// The relay's cap for `PUT /me/avatar`.
+    static let maxBytes = 3 * 1024 * 1024
+    static let jpegQuality: CGFloat = 0.92
+    static let flatMaxColors = 64
+    static let flatCoverage = 0.90
+
+    /// Encode `image` (already squared / sized by `AvatarPickerSheet.square`).
+    static func encode(_ image: UIImage) -> Data? {
+        let flattened = overWhite(image)
+        if isFlatGraphic(flattened), let png = flattened.pngData(), png.count <= maxBytes {
+            return png
+        }
+        if let jpeg = flattened.jpegData(compressionQuality: jpegQuality), jpeg.count <= maxBytes {
+            return jpeg
+        }
+        return flattened.jpegData(compressionQuality: 0.85)
+    }
+
+    static func isPNG(_ data: Data) -> Bool {
+        data.starts(with: [0x89, 0x50, 0x4E, 0x47])
+    }
+
+    static func mime(_ data: Data) -> String {
+        isPNG(data) ? "image/png" : "image/jpeg"
+    }
+
+    static func ext(_ data: Data) -> String {
+        isPNG(data) ? "png" : "jpg"
+    }
+
+    /// Transparent pixels land on white (the routes serve JPEG too, and every disc draws on its
+    /// own background — one rule keeps the two formats alike).
+    static func overWhite(_ image: UIImage) -> UIImage {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = image.scale
+        format.opaque = true
+        return UIGraphicsImageRenderer(size: image.size, format: format).image { ctx in
+            UIColor.white.setFill()
+            ctx.fill(CGRect(origin: .zero, size: image.size))
+            image.draw(at: .zero)
+        }
+    }
+
+    /// Sampled on a 128 × 128 grid; colours quantised to 5 bits a channel.
+    static func isFlatGraphic(_ image: UIImage) -> Bool {
+        guard let cg = image.cgImage else { return false }
+        let side = 128
+        var pixels = [UInt8](repeating: 0, count: side * side * 4)
+        let info = CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
+        let drawn = pixels.withUnsafeMutableBytes { buf -> Bool in
+            guard let ctx = CGContext(data: buf.baseAddress, width: side, height: side, bitsPerComponent: 8,
+                                      bytesPerRow: side * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: info)
+            else { return false }
+            ctx.interpolationQuality = .high
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: side, height: side))
+            return true
+        }
+        guard drawn else { return false }
+        var counts: [UInt32: Int] = [:]
+        for i in stride(from: 0, to: pixels.count, by: 4) {
+            let key = UInt32(pixels[i] & 0xF8) << 16 | UInt32(pixels[i + 1] & 0xF8) << 8 | UInt32(pixels[i + 2] & 0xF8)
+            counts[key, default: 0] += 1
+        }
+        let total = side * side
+        let covered = counts.values.sorted(by: >).prefix(flatMaxColors).reduce(0, +)
+        return Double(covered) / Double(total) >= flatCoverage
     }
 }
