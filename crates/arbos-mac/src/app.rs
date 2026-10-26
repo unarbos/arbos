@@ -1513,6 +1513,12 @@ impl AppState {
             }
             SyncEvent::PeopleError(err) => {
                 self.people_busy = false;
+                // The New Message sheet shows the error inline; a DM started
+                // from a person's pane (its Message pill) has no sheet, so the
+                // relay's words ("this person is not available") go to a notice.
+                if !self.new_chat_open && self.awaiting_dm.is_some() {
+                    self.push_notice(err.clone());
+                }
                 self.people_error = Some(err);
                 self.awaiting_dm = None;
                 self.awaiting_group = None;
@@ -1954,7 +1960,7 @@ impl AppState {
                             }
                         }
                     }
-                    // Rig: `ARBOS_OPEN_PROFILE=agent[:model|reasoning|voice]|group[:library|:add-members|:member]|user|me`
+                    // Rig: `ARBOS_OPEN_PROFILE=agent[:model|reasoning|voice]|group[:library|:add-members|:member]|user[:block[:unblock]|:message|:view]|me[:view]`
                     // opens the right pane for the restored chat (selecting it
                     // closed whatever the shell opened at launch), and
                     // `ARBOS_OPEN_SETTINGS=…` re-opens my pane on its Settings tab.
@@ -2085,6 +2091,10 @@ impl AppState {
                                 }
                                 if rest == ":block:unblock" {
                                     self.rig_unblock = Some(person.clone());
+                                }
+                                // `user:message`: the hero's Message pill, pressed.
+                                if rest == ":message" {
+                                    self.start_dm(person.handle.clone(), cx);
                                 }
                                 // `user:view` — their picture full-size in the media viewer.
                                 if rest == ":view" {
@@ -8048,6 +8058,12 @@ impl AppState {
         self.awaiting_dm = Some(handle.clone());
         self.command(ClientCommand::StartDm { handle });
         cx.notify();
+    }
+
+    /// The handle `start_dm` is waiting on the relay for (tests).
+    #[cfg(test)]
+    pub(crate) fn awaiting_dm_handle(&self) -> Option<String> {
+        self.awaiting_dm.clone()
     }
 
     /// Composer keystroke in a people chat: at most one presence ping per 3 s.
