@@ -464,7 +464,10 @@ struct AvatarPickerSheet: View {
                 case .me: source.generatedKey = try await model.generateMyAvatar(prompt: text)
                 }
             } catch {
-                source.errorText = error.localizedDescription
+                // The relay's own line ("That prompt was refused — try a different one."), not
+                // "HTTP 422: …" (Jacob, 2026-10-25 23:42: a refusal read as a server outage).
+                let relay = error as? RelayError
+                source.errorText = relay.map(\.message).flatMap { $0.isEmpty ? nil : $0 } ?? error.localizedDescription
             }
             source.generating = false
         }

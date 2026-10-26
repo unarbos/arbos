@@ -1162,7 +1162,16 @@ mod render_tests {
             }))
             .expect("chat");
             s.chats.insert("g1".into(), vec![chat]);
-            let mut today = shared("m1", "Deck, dashboard and the press kit.", now - 3_600_000);
+            // Clock-independent: today's rows sit at `now` itself (a row "an hour
+            // ago" was yesterday for the first hour after midnight and reddened
+            // the gate), yesterday's an hour before today's local midnight.
+            let today_start = Local::now()
+                .date_naive()
+                .and_hms_opt(0, 0, 0)
+                .and_then(|t| t.and_local_timezone(Local).single())
+                .map(|t| t.timestamp_millis() as u64)
+                .unwrap_or(now);
+            let mut today = shared("m1", "Deck, dashboard and the press kit.", now - 2);
             today.parts = vec![
                 attachment("deck-v3-slide-04.png", "image/png", AttachmentKind::Image),
                 attachment("press-kit-v3.pdf", "application/pdf", AttachmentKind::Pdf),
@@ -1171,12 +1180,8 @@ mod render_tests {
                 attachment("signup-funnel.png", "image/png", AttachmentKind::Image),
                 attachment("launch-day-team.jpg", "image/jpeg", AttachmentKind::Image),
             ];
-            let link = shared(
-                "m2",
-                "Landing page: https://arbos.life/launch",
-                now - 60_000,
-            );
-            let mut yesterday = shared("m0", "", now - 30 * 3_600_000);
+            let link = shared("m2", "Landing page: https://arbos.life/launch", now - 1);
+            let mut yesterday = shared("m0", "", today_start.saturating_sub(3_600_000));
             yesterday.parts = vec![attachment(
                 "q3-review.pdf",
                 "application/pdf",

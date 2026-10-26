@@ -722,6 +722,32 @@ class GitHub:
                     return lines
         return lines
 
+    def run_failed_tests(self, run_id: int) -> tuple[set[str], bool]:
+        """(names of the cargo tests that FAILED in the run's failed jobs, whether anything failed to COMPILE).
+        A run whose failures are all on the operator's known-red list and whose compile is clean is not the
+        branch's fault (#1852)."""
+        jobs = self.repo_api("GET", f"/actions/runs/{run_id}/jobs").get("jobs", [])
+        failed: set[str] = set()
+        compile_error = False
+        for job in jobs:
+            if job.get("conclusion") != "failure":
+                continue
+            try:
+                _status, _hdrs, body = http("GET", f"{GITHUB_API}/repos/{self.repo}/actions/jobs/{job['id']}/logs",
+                                            headers=self.h, timeout=120)
+            except HttpError:
+                return set(), True  # unreadable: never wave it through
+            for line in body.decode(errors="replace").splitlines():
+                line = re.sub(r"\x1b\[[0-9;]*m", "", re.sub(r"^\S+\s", "", line))  # timestamp column, ANSI colour
+                m = re.match(r"test (\S+) \.\.\. FAILED", line)
+                if m:
+                    failed.add(m.group(1))
+                elif re.match(r"error(\[E\d+\])?: ", line) and "test failed, to rerun" not in line and "could not compile" not in line:
+                    compile_error = True
+                elif "could not compile" in line:
+                    compile_error = True
+        return failed, compile_error
+
     def pending_run_containing(self, workflow: str, sha: str, since_iso: str) -> dict | None:
         """A queued / in-progress run of `workflow` on main (started after `since_iso`) whose commit contains `sha`:
         the build that will carry the fix is still in GitHub's runner queue, so waiting is right."""
@@ -1401,15 +1427,50 @@ class Loop:
         touched = moved_files & set(st.get("files") or [])
         if touched:
             aw["ready"] = False
-            st.update(status="gating", awaiting=aw)
+            aw["regate_due"] = True
+            st["awaiting"] = aw
             self.store.save_state(fid, st)
-            self.store.event(fid, "awaiting_regate", main=main_head[:8], touched=sorted(touched)[:20])
-            log(f"[{fid}] main moved onto {len(touched)} of its files; re-gating before it is 'ready' again")
+            self.store.event(fid, "awaiting_stale", main=main_head[:8], touched=sorted(touched)[:20])
+            log(f"[{fid}] main moved onto {len(touched)} of its files; marked stale — re-gates when the pool has no Jacob-tier work (≤ 1 per 2 h)")
         else:
             aw["ready"] = True
             aw["ready_head"] = st["branch_head"]
             st["awaiting"] = aw
             self.store.save_state(fid, st)
+        self.regate_awaiting_if_idle(fid, st)
+
+    # Held items only need to be green at approval time (coordinator, 2026-10-25 23:37): re-gating #1654 on every
+    # main move took solo gate slots while 23 Jacob-tier items waited. A stale held item re-gates only when no
+    # Jacob-tier / coordinator item is queued or gating, at most once per AWAITING_REGATE_EVERY_S, and once more
+    # on `approve` (which clears the timer). Hotfix pins are not affected.
+    AWAITING_REGATE_EVERY_S = 2 * 3600
+
+    def jacob_tier_waiting(self) -> int:
+        n = 0
+        for other in self.store.items():
+            o = self.store.state(other)
+            if o.get("status") in ("queued", "gating") and not o.get("awaiting") \
+                    and self.freeze_allows(other, o, {"allow": self.APPROVAL_DEFAULT_ALLOW}):
+                n += 1
+        return n
+
+    def regate_awaiting_if_idle(self, fid: str, st: dict, force: bool = False) -> bool:
+        aw = st.get("awaiting") or {}
+        if st.get("status") != "awaiting_jacob" or not aw.get("regate_due") or aw.get("conflict"):
+            return False
+        last = aw.get("last_regate") or ""
+        if not force:
+            if last and (utcnow() - parse_iso(last)).total_seconds() < self.AWAITING_REGATE_EVERY_S:
+                return False
+            waiting = self.jacob_tier_waiting()
+            if waiting:
+                return False
+        aw.update(regate_due=False, last_regate=iso())
+        st.update(status="gating", awaiting=aw)
+        self.store.save_state(fid, st)
+        self.store.event(fid, "awaiting_regate", main=(aw.get("main_head") or "")[:8], forced=force)
+        log(f"[{fid}] held item re-gating ({'approve' if force else 'pool idle of Jacob-tier work'})")
+        return True
 
     def write_awaiting_doc(self) -> None:
         gate = self.approval_state()
@@ -1425,7 +1486,9 @@ class Loop:
             what = re.sub(r"\s+", " ", (st.get("agent_summary") or info.get("comment") or "")).strip()[:140]
             before = st.get("screenshot_urls") or []
             after = self.image_links(st.get("agent_summary") or "") + self.image_links(st.get("agent_report") or "")
-            state = "conflict — owner merging main" if aw.get("conflict") else ("re-gating after main moved" if st.get("status") == "gating" else "ready: current with main + green")
+            state = ("conflict — owner merging main" if aw.get("conflict") else "re-gating after main moved" if st.get("status") == "gating"
+                     else "stale: main moved onto its files — re-gates when the pool is idle of Jacob-tier work, or on approve" if aw.get("regate_due")
+                     else "ready: current with main + green")
             rows.append((aw.get("ready_since") or aw.get("since") or "", fid, st, what, before, after, state))
         rows.sort()
         lines = ["---", "cursor:", '  subagentId: "bc-7eefe9bf-713a-5b12-b1f3-e23bd1fdfe11"', "---", "",
@@ -2351,6 +2414,46 @@ class Loop:
                            + "\n".join(stray[:60]) + ("\n…" if len(stray) > 60 else ""))
         return stray
 
+    DOCS_DELETION_MAX = 0.30
+
+    def docs_deletion_probe(self, fid: str, head: str) -> list[str]:
+        """A merge that deletes more than DOCS_DELETION_MAX of a docs/*.md file is bounced for review (#1817's
+        merge 93db39b2 took one side of docs/mac-design-rules.md wholesale: 602 → 379 lines, eight sections gone).
+        Counts the branch's deletions against main's line count; a file the branch removes on purpose shows
+        up here too and the owner says so in the follow-up."""
+        st = self.store.state(fid)
+        if st.get("docs_deletion_checked") == head:
+            return []
+        try:
+            cmp = self.gh.compare("main", head)
+        except HttpError:
+            return []
+        hits: list[str] = []
+        for f in cmp.get("files", []):
+            name = f.get("filename", "")
+            if not (name.startswith("docs/") and name.endswith(".md")) or (f.get("deletions") or 0) < 20:
+                continue
+            try:
+                blob = self.gh.repo_api("GET", f"/contents/{urllib.parse.quote(name)}?ref=main")
+                total = base64.b64decode(blob.get("content") or b"").count(b"\n") or 1
+            except (HttpError, KeyError, TypeError, ValueError):
+                continue
+            share = (f.get("deletions") or 0) / total
+            if share > self.DOCS_DELETION_MAX:
+                hits.append(f"{name}: −{f['deletions']} of {total} lines ({share:.0%}), +{f.get('additions') or 0}")
+        st["docs_deletion_checked"] = head
+        self.store.save_state(fid, st)
+        if not hits:
+            return []
+        log(f"[{fid}] docs-deletion probe: {len(hits)} docs file(s) lose > {self.DOCS_DELETION_MAX:.0%} of their lines; not integrated")
+        self.store.event(fid, "docs_deletion", head=head, files=hits)
+        self.gate_followup(fid, st, "rust",
+                           f"Pre-integration probe: this branch deletes more than {self.DOCS_DELETION_MAX:.0%} of a docs file — usually a merge "
+                           "of `origin/main` that took the branch's side wholesale (93db39b2 dropped eight sections of docs/mac-design-rules.md). "
+                           "Restore main's text (`git checkout origin/main -- <file>`, re-apply your edit) and push; if the deletion is intended, "
+                           "say so on the issue and the operator requeues it.\n\n" + "\n".join(hits))
+        return hits
+
     def rust_gate_start(self, members: dict[str, str]) -> None:
         """Build the integration branch gate/<run> on GitHub (main + every member, in order); CI starts on the
         push; the Mac release build starts if the Mac answers (else it is started on a later tick)."""
@@ -2364,6 +2467,9 @@ class Loop:
             stray = self.merge_revert_probe(fid, head)
             if stray:
                 conflicts[fid] = "merge-revert"
+                continue
+            if self.docs_deletion_probe(fid, head):
+                conflicts[fid] = "docs-deletion"
                 continue
             res = self.gh.merge_into(branch, head, f"gate: merge feedback/{fid} [gate {run_id}]")
             if res is None:
@@ -2399,8 +2505,8 @@ class Loop:
                             "ios": "pending" if ios else "skipped", "mac_started": None}
         self.store.save_cursor(cur)
         for fid, kind in conflicts.items():
-            if kind == "merge-revert":
-                continue  # already sent back by merge_revert_probe
+            if kind in ("merge-revert", "docs-deletion"):
+                continue  # already sent back by the probe
             self.rust_gate_conflict(fid, members[fid], kind, run_id)
         if not merged:
             self.gh.delete_branch(branch)
@@ -2442,6 +2548,55 @@ class Loop:
             self.store.save_cursor(cur)
             log(f"Rust gate {active['id']}: Mac release build started for {active['tree'][:8]}")
 
+    # Known-red tests on main (#1852, coordinator 2026-10-26 00:58): a test the operator knows is red on main
+    # (the clock-dependent Library render test, 2026-10-26 00:xx) must not fail every pool batch and bisect
+    # it. The Linux half ignores a red CI run only when EVERY failed test is on the list and nothing failed
+    # to compile. Entries are written by the operator (`arbos-feedback known-red add <test> [note]`), expire
+    # after 24 h, and are dropped when main's own CI is green with them. The list is the operator's, never a
+    # branch owner's.
+    KNOWN_RED_FILE = "ci-known-red.json"
+    KNOWN_RED_TTL_S = 24 * 3600
+
+    def known_red(self) -> dict[str, dict]:
+        p = self.cfg.state_dir / self.KNOWN_RED_FILE
+        try:
+            data = json.loads(p.read_text()) if p.is_file() else {}
+        except (OSError, ValueError):
+            data = {}
+        now = utcnow()
+        live = {t: e for t, e in data.items() if (now - parse_iso(e.get("added") or iso())).total_seconds() < self.KNOWN_RED_TTL_S}
+        if live != data:
+            self.save_known_red(live)
+        return live
+
+    def save_known_red(self, data: dict[str, dict]) -> None:
+        Store._write(self.cfg.state_dir / self.KNOWN_RED_FILE, data)
+
+    def linux_red_is_known(self, run_id: int) -> tuple[bool, set[str]]:
+        """True when the failed CI run has only known-red test failures and no compile error."""
+        known = self.known_red()
+        if not known:
+            return False, set()
+        failed, compile_error = self.gh.run_failed_tests(run_id)
+        if compile_error or not failed:
+            return False, failed
+        return failed <= set(known), failed
+
+    def known_red_main_check(self, cur: dict) -> None:
+        """Drop known-red entries once main's own CI is green on a commit newer than the entry."""
+        known = self.known_red()
+        if not known:
+            return
+        head = self.gh.branch_head("main") or ""
+        if not head or head == cur.get("known_red_checked_head"):
+            return
+        runs = [r for r in self.gh.runs_for_sha(head) if r.get("name") == "CI" and r.get("status") == "completed"]
+        if runs and runs[0].get("conclusion") == "success":
+            self.save_known_red({})
+            self.store.event("_loop", "known_red_cleared", tests=sorted(known), main=head[:8])
+            log(f"known-red list cleared: main {head[:8]} is green ({', '.join(sorted(known))})")
+        cur["known_red_checked_head"] = head
+
     def rust_gate_poll(self, active: dict) -> bool:
         """Advance a running batch. True = still running (nothing more to do this tick)."""
         cur = self.store.cursor()
@@ -2465,7 +2620,15 @@ class Loop:
                 active["linux"] = "ok" if run["conclusion"] == "success" else "fail"
                 active["linux_run"] = run["html_url"]
                 if active["linux"] == "fail":
-                    active["linux_errors"] = self.gh.run_error_lines(run["id"], limit=60)
+                    known, failed = self.linux_red_is_known(run["id"])
+                    if known:
+                        active["linux"] = "ok"
+                        active["linux_known_red"] = sorted(failed)
+                        log(f"Rust gate {active['id']}: Linux half red only on known-red test(s) {', '.join(sorted(failed))}; counted as ok")
+                        for fid in active.get("members") or {}:
+                            self.store.event(fid, "linux_known_red", run=run["html_url"], tests=sorted(failed))
+                    else:
+                        active["linux_errors"] = self.gh.run_error_lines(run["id"], limit=60)
                 self.store.save_cursor(cur)
                 log(f"Rust gate {active['id']}: Linux half {active['linux']} ({run['html_url']})")
             elif not run and minutes_between(active["started"], iso()) > 10:
@@ -3494,6 +3657,12 @@ class Loop:
             self.watch_handoffs()
         except Exception as e:  # noqa: BLE001
             log(f"handoff watch failed: {e}")
+        try:
+            cur = self.store.cursor()
+            self.known_red_main_check(cur)
+            self.store.save_cursor(cur)
+        except Exception as e:  # noqa: BLE001
+            log(f"known-red check failed: {e}")
         try:
             self.watch_late_pushes()
         except Exception as e:  # noqa: BLE001
@@ -4758,7 +4927,11 @@ def main(argv: list[str]) -> int:
             st = loop.store.state(fid)
             st["approved_by_jacob"] = iso()
             if st.get("status") == "awaiting_jacob":
-                st["status"] = "gating"
+                # Approval re-gates once more when main moved onto its files since the last green (gate() below
+                # merges at once when the head still has a fresh verdict); the 2-hour re-gate timer is cleared.
+                aw = st.get("awaiting") or {}
+                aw.update(regate_due=False, last_regate=None)
+                st.update(status="gating", awaiting=aw)
             loop.store.save_state(fid, st)
             loop.store.event(fid, "approved", by="Jacob")
             if st.get("issue"):
@@ -4815,6 +4988,24 @@ def main(argv: list[str]) -> int:
             fcntl.flock(lock, fcntl.LOCK_EX)
             n = loop.lift_freeze()
         print(f"freeze lifted; {n} item(s) restored to their previous state and order")
+        return 0
+    if cmd == "known-red":
+        # `known-red add <test> [note…]` | `known-red remove <test>` | `known-red list`: the operator's list of
+        # tests known red on main; the Linux half ignores a red CI run whose failures are all on it (#1852).
+        loop = Loop(cfg)
+        sub = argv[2] if len(argv) > 2 else "list"
+        data = loop.known_red()
+        if sub == "add" and len(argv) > 3:
+            data[argv[3]] = {"added": iso(), "by": "operator", "note": " ".join(argv[4:])}
+            loop.save_known_red(data)
+            loop.store.event("_loop", "known_red_added", test=argv[3], note=" ".join(argv[4:]))
+            print(f"known-red: {argv[3]} (expires in 24 h or when main is green)")
+            return 0
+        if sub == "remove" and len(argv) > 3:
+            data.pop(argv[3], None); loop.save_known_red(data); print(f"known-red: removed {argv[3]}"); return 0
+        for t, e in sorted(data.items()):
+            print(f"{t}\tadded {e.get('added')}\t{e.get('note') or ''}")
+        print(f"{len(data)} known-red test(s)")
         return 0
     if cmd == "gate-note":
         # `gate-note <text>` / `gate-note --clear`: one operator line shown on top of `status`'s gate queue

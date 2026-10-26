@@ -875,6 +875,7 @@ mod tests {
             connectors_mock: mock,
             channels_mock: true,
             image_mock: false,
+            avatar_retry_backoff_ms: Vec::new(),
             voice_mock: true,
             openai_audio_base: String::new(),
             vault_mock: false,
@@ -941,6 +942,7 @@ mod tests {
             restart: Arc::new(crate::state::RestartSignal::default()),
             voice_dispatched: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             voice_worker: Arc::new(tokio::sync::Mutex::new(None)),
+            image_health: Arc::new(tokio::sync::Mutex::new(None)),
             client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
             matrix: crate::matrix::Matrix::new(crate::matrix::Config::off()),
         }
