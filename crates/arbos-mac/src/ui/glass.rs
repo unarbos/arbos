@@ -8,8 +8,9 @@ use gpui::{
     Stateful, Window, WindowControlArea,
 };
 
-use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
+use crate::ui::frost::{frosted, frosted_always, MENU_BLUR, PANEL_BLUR};
 use crate::ui::icons::icon;
+use crate::ui::profiles::kit;
 use crate::ui::theme::{Theme, CONTROL, PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
 /// Drag this region to move the window.
@@ -125,82 +126,64 @@ pub fn control_disc(
 }
 
 /// What a chat-header control is made of ([feedback mac-header-glass-2026-10-25],
-/// Jacob 2026-10-25; the iPhone's `HeaderMaterial`).
+/// [feedback mac-header-pill-glass-matte-2026-10-26]; the iPhone's
+/// `HeaderGlassBackground`).
 ///
 /// Jacob's reference is Grok Bot's header: frosted pills, the transcript
-/// visibly blurred through them, a light rim. Ours filled the pill with
-/// `bubble_assistant` and the disc with `surface_2` — solid on every chat
-/// kind, even with Surface = Glass at Opacity 0 %. On Glass the header is now
-/// frost; Matte keeps its solid controls (Matte means no translucency).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HeaderMaterial {
-    /// Glass: white-alpha over a dark underlay, a 1 pt light rim, a top
-    /// highlight, and the list blurred through (`frost::frosted`).
-    Frosted,
-    /// Matte: today's fill.
-    Solid,
-}
-
-impl HeaderMaterial {
-    pub fn for_theme(theme: &Theme) -> Self {
-        if theme.is_frost() {
-            Self::Frosted
-        } else {
-            Self::Solid
-        }
-    }
-}
-
-/// The pure part of a header control's look, for the tests: its fill and
-/// whether the list is blurred under it.
+/// visibly blurred through them, a light rim — over a flat dark background.
+/// #1830 gave the header that frost on Glass and left Matte solid; Jacob's
+/// Mac is on Matte, so he still saw a flat `bubble_assistant` pill
+/// (2026-10-26). The header pill and disc are frosted glass on BOTH surfaces
+/// now: Matte means no window vibrancy, not a flat header. Nothing else of
+/// the glass restyle moves with it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HeaderStyle {
-    pub material: HeaderMaterial,
+    /// White-alpha over a dark underlay (dark), a translucent white or grey
+    /// (light): the list shows through.
     pub fill: gpui::Hsla,
-    pub blur: bool,
+    /// The 1 pt light rim.
+    pub rim: gpui::Hsla,
+    /// The specular line along the top edge.
+    pub highlight: gpui::Hsla,
 }
 
-pub fn header_style(solid: gpui::Hsla, theme: &Theme) -> HeaderStyle {
-    match HeaderMaterial::for_theme(theme) {
-        HeaderMaterial::Frosted => HeaderStyle {
-            material: HeaderMaterial::Frosted,
-            fill: theme.header_glass(),
-            blur: true,
-        },
-        HeaderMaterial::Solid => HeaderStyle {
-            material: HeaderMaterial::Solid,
-            fill: solid,
-            blur: false,
-        },
+#[cfg(test)]
+impl HeaderStyle {
+    /// Frosted glass: a see-through fill with a visible rim. Read by the
+    /// tests on every chat kind × surface × appearance.
+    pub fn is_frosted(&self) -> bool {
+        self.fill.a < 1.0 && self.rim.a > 0.0
     }
 }
 
-/// Fill a header control (the name pill, the header disc) for the theme's
-/// material. `solid` is the Matte fill it had before. On Glass: the glass
-/// fill, an inset 1 pt rim, a 1 pt specular line along the top edge and a
-/// 1 pt lift — the "glass plate" of `docs/glass-surface-directions.md`.
-pub fn header_surface<E: Styled>(el: E, solid: gpui::Hsla, theme: &Theme) -> E {
-    let style = header_style(solid, theme);
-    match style.material {
-        HeaderMaterial::Solid => el.bg(style.fill),
-        HeaderMaterial::Frosted => el.bg(style.fill).shadow(vec![
-            BoxShadow::new(px(0.0), px(0.0), theme.header_glass_rim())
-                .spread_radius(px(1.0))
-                .inset(),
-            BoxShadow::new(px(0.0), px(1.0), theme.header_glass_highlight()).inset(),
-            BoxShadow::new(px(0.0), px(1.0), gpui::hsla(0.0, 0.0, 0.0, 0.18)).blur_radius(px(2.0)),
-        ]),
+/// The pure part of a header control's look, for the tests.
+pub fn header_style(theme: &Theme) -> HeaderStyle {
+    HeaderStyle {
+        fill: theme.header_glass(),
+        rim: theme.header_glass_rim(),
+        highlight: theme.header_glass_highlight(),
     }
 }
 
-/// Blur the list under a header control on Glass (its rounded bounds); the
-/// control itself on Matte.
-pub fn header_frost(radius: f32, theme: &Theme, el: impl IntoElement) -> AnyElement {
-    if header_style(gpui::transparent_black(), theme).blur {
-        frosted(radius, MENU_BLUR, el).into_any_element()
-    } else {
-        el.into_any_element()
-    }
+/// Fill a header control (the name pill, the header disc): the glass fill,
+/// an inset 1 pt rim, a 1 pt specular line along the top edge and a 1 pt
+/// lift — the "glass plate" of `docs/glass-surface-directions.md` — on Glass
+/// and on Matte alike.
+pub fn header_surface<E: Styled>(el: E, theme: &Theme) -> E {
+    let style = header_style(theme);
+    el.bg(style.fill).shadow(vec![
+        BoxShadow::new(px(0.0), px(0.0), style.rim)
+            .spread_radius(px(1.0))
+            .inset(),
+        BoxShadow::new(px(0.0), px(1.0), style.highlight).inset(),
+        BoxShadow::new(px(0.0), px(1.0), gpui::hsla(0.0, 0.0, 0.0, 0.18)).blur_radius(px(2.0)),
+    ])
+}
+
+/// Blur the list under a header control (its rounded bounds), whatever the
+/// surface.
+pub fn header_frost(radius: f32, el: impl IntoElement) -> AnyElement {
+    frosted_always(radius, MENU_BLUR, el).into_any_element()
 }
 
 /// A glass circle: field fill at 85 %, hairline rim. Content centred.
@@ -303,30 +286,22 @@ pub fn group(theme: &Theme) -> Div {
 /// One row in a grouped card: label left, value right. Not interactive.
 pub fn row(label: impl Into<SharedString>, theme: &Theme) -> Div {
     // The pane kit's metrics (profiles::kit): 48 pt rows, 16 pt inset. The
-    // hairline hangs 1 pt below the row like `kit::row`'s: between rows it
-    // lands on the next row's first pixel, under the last row the card's clip
-    // swallows it. A bottom border inside the row drew a stray line under a
-    // one-row card (Settings › Notifications, Jacob Oct 21).
+    // hairline is the kit's one divider, hung 1 pt below the row: between
+    // rows it lands on the next row's first pixel, under the last row the
+    // card's clip swallows it. A bottom border inside the row drew a stray
+    // line under a one-row card (Settings › Notifications, Jacob Oct 21).
     div()
         .relative()
         .flex()
         .items_center()
         .gap(px(12.0))
         .min_h(px(48.0))
-        .px(px(16.0))
+        .px(px(kit::INSET))
         .py(px(6.0))
         .text_size(px(TEXT_BODY))
         .text_color(theme.text)
         .child(div().flex_1().min_w_0().child(label.into()))
-        .child(
-            div()
-                .absolute()
-                .left(px(16.0))
-                .right(px(0.0))
-                .bottom(px(-1.0))
-                .h(px(1.0))
-                .bg(theme.border),
-        )
+        .child(kit::hairline_below(theme))
 }
 
 /// Apple-style icon tile for settings rows: 30 px rounded square, muted
