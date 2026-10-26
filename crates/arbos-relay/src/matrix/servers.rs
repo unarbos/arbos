@@ -148,7 +148,8 @@ fn handle_of(state: &AppState, user_id: &str) -> String {
 fn channel_json(ch: &Channel, archived: bool) -> Value {
     json!({
         "id": ch.id, "server_id": ch.server_id, "name": ch.name, "topic": ch.topic,
-        "restricted": ch.restricted, "position": ch.position, "room_id": ch.room_id,
+        "restricted": ch.restricted, "linked_chat_id": ch.linked_chat_id,
+        "position": ch.position, "room_id": ch.room_id,
         "created_at": ch.created_at, "archived": archived,
     })
 }
@@ -380,6 +381,7 @@ pub async fn create(
             name: n.to_owned(),
             topic: String::new(),
             restricted,
+            linked_chat_id: None,
             position: i as i64,
             room_id: None,
             created_at: now,
@@ -628,6 +630,9 @@ pub struct ChannelBody {
     pub topic: Option<String>,
     #[serde(default)]
     pub restricted: Option<bool>,
+    /// People-group chat id to link (announcement discussion). Empty string clears.
+    #[serde(default)]
+    pub linked_chat_id: Option<String>,
 }
 
 /// `POST /servers/{id}/channels {name, topic?, restricted?}` — owner/admins.
@@ -668,6 +673,12 @@ pub async fn channel_create(
             "a channel with that name exists",
         );
     }
+    let linked = b
+        .linked_chat_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
     let ch = Channel {
         id: ulid(),
         server_id: id.clone(),
@@ -680,6 +691,7 @@ pub async fn channel_create(
             .take(200)
             .collect(),
         restricted: b.restricted.unwrap_or(false),
+        linked_chat_id: linked,
         position: state.db.next_channel_position(&id).unwrap_or(0),
         room_id: None,
         created_at: now_ms(),
@@ -703,7 +715,7 @@ pub async fn channel_create(
     (StatusCode::CREATED, Json(channel_json(&ch, false))).into_response()
 }
 
-/// `PATCH /servers/{id}/channels/{cid} {name?, topic?, restricted?}` — owner/admins.
+/// `PATCH /servers/{id}/channels/{cid} {name?, topic?, restricted?, linked_chat_id?}` — owner/admins.
 pub async fn channel_patch(
     State(state): State<AppState>,
     principal: Principal,
@@ -742,10 +754,22 @@ pub async fn channel_patch(
         None => None,
     };
     let topic: Option<String> = b.topic.map(|t| t.trim().chars().take(200).collect());
-    if let Err(e) = state
-        .db
-        .update_channel(&ch.id, name.as_deref(), topic.as_deref(), b.restricted)
-    {
+    // `Some(None)` clears the link; omit the field to leave it alone.
+    let linked: Option<Option<&str>> = b.linked_chat_id.as_ref().map(|s| {
+        let t = s.trim();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t)
+        }
+    });
+    if let Err(e) = state.db.update_channel(
+        &ch.id,
+        name.as_deref(),
+        topic.as_deref(),
+        b.restricted,
+        linked,
+    ) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
     state.matrix.touch_channel(&state, &ch.id);

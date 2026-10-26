@@ -24,8 +24,8 @@ CREATE TABLE IF NOT EXISTS server_members (
 CREATE INDEX IF NOT EXISTS server_members_user ON server_members(user_id);
 CREATE TABLE IF NOT EXISTS channels (
   id TEXT PRIMARY KEY, server_id TEXT NOT NULL, name TEXT NOT NULL, topic TEXT NOT NULL DEFAULT '',
-  restricted INTEGER NOT NULL DEFAULT 0, position INTEGER NOT NULL DEFAULT 0, room_id TEXT,
-  created_at INTEGER NOT NULL, deleted_at INTEGER
+  restricted INTEGER NOT NULL DEFAULT 0, linked_chat_id TEXT, position INTEGER NOT NULL DEFAULT 0,
+  room_id TEXT, created_at INTEGER NOT NULL, deleted_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS channels_server ON channels(server_id, position);
 CREATE TABLE IF NOT EXISTS server_invites (
@@ -43,6 +43,8 @@ pub fn migrate_servers(c: &Connection) {
          SELECT 'legacy-' || id, id, invite_code, owner_user_id, created_at FROM servers WHERE deleted_at IS NULL",
         [],
     );
+    // Announcement channel → people group (likes on, replies off in both).
+    let _ = c.execute("ALTER TABLE channels ADD COLUMN linked_chat_id TEXT", []);
     // A channel's display name never carries '#': the glyph shows it (#1317).
     let _ = c.execute(
         "UPDATE channels SET name = replace(name, '#', '') WHERE name LIKE '%#%'",
@@ -142,6 +144,10 @@ pub struct Channel {
     pub topic: String,
     /// Only owner/admins post (`#announcements`); shown with a lock.
     pub restricted: bool,
+    /// Optional people-group chat id: likes stay on, threaded replies stay off
+    /// (announcement channels and their linked discussion group).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub linked_chat_id: Option<String>,
     pub position: i64,
     pub room_id: Option<String>,
     pub created_at: i64,
@@ -171,13 +177,15 @@ fn channel_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Channel> {
         name: r.get(2)?,
         topic: r.get(3)?,
         restricted: r.get::<_, i64>(4)? != 0,
-        position: r.get(5)?,
-        room_id: r.get(6)?,
-        created_at: r.get(7)?,
+        linked_chat_id: r.get(5)?,
+        position: r.get(6)?,
+        room_id: r.get(7)?,
+        created_at: r.get(8)?,
     })
 }
 
-const CHANNEL_COLS: &str = "id, server_id, name, topic, restricted, position, room_id, created_at";
+const CHANNEL_COLS: &str =
+    "id, server_id, name, topic, restricted, linked_chat_id, position, room_id, created_at";
 
 fn member_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ServerMember> {
     Ok(ServerMember {
@@ -499,9 +507,19 @@ impl Db {
     pub fn insert_channel(&self, ch: &Channel) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO channels(id, server_id, name, topic, restricted, position, room_id, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![ch.id, ch.server_id, ch.name, ch.topic, ch.restricted as i64, ch.position, ch.room_id, ch.created_at],
+                "INSERT INTO channels(id, server_id, name, topic, restricted, linked_chat_id, position, room_id, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    ch.id,
+                    ch.server_id,
+                    ch.name,
+                    ch.topic,
+                    ch.restricted as i64,
+                    ch.linked_chat_id,
+                    ch.position,
+                    ch.room_id,
+                    ch.created_at
+                ],
             )?;
             Ok(())
         })
@@ -536,6 +554,7 @@ impl Db {
         name: Option<&str>,
         topic: Option<&str>,
         restricted: Option<bool>,
+        linked_chat_id: Option<Option<&str>>,
     ) -> Result<bool> {
         self.with(|c| {
             let mut n = 0;
@@ -555,6 +574,12 @@ impl Db {
                 n += c.execute(
                     "UPDATE channels SET restricted = ?2 WHERE id = ?1",
                     params![id, v as i64],
+                )?;
+            }
+            if let Some(v) = linked_chat_id {
+                n += c.execute(
+                    "UPDATE channels SET linked_chat_id = ?2 WHERE id = ?1",
+                    params![id, v],
                 )?;
             }
             Ok(n > 0)
@@ -666,6 +691,7 @@ mod tests {
                 name: (*name).into(),
                 topic: String::new(),
                 restricted: i == 1,
+                linked_chat_id: None,
                 position: d.next_channel_position("S1").unwrap(),
                 room_id: None,
                 created_at: 1,
@@ -675,8 +701,17 @@ mod tests {
         let chans = d.channels_of_server("S1").unwrap();
         assert_eq!(chans.len(), 2);
         assert!(chans[1].restricted);
-        assert!(d.update_channel("C0", Some("lobby"), None, None).unwrap());
+        assert!(d
+            .update_channel("C0", Some("lobby"), None, None, None)
+            .unwrap());
         assert_eq!(d.channel("C0").unwrap().unwrap().name, "lobby");
+        assert!(d
+            .update_channel("C0", None, None, None, Some(Some("chat_group")))
+            .unwrap());
+        assert_eq!(
+            d.channel("C0").unwrap().unwrap().linked_chat_id.as_deref(),
+            Some("chat_group")
+        );
         assert!(d.delete_channel("C1").unwrap());
         assert_eq!(d.channels_of_server("S1").unwrap().len(), 1);
         d.set_server_invite("S1", "xyz").unwrap();

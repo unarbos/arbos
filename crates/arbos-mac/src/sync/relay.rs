@@ -5296,26 +5296,43 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             message_id,
             emoji,
         } => {
-            let me = format!("user:{}", shared.me_id());
-            let docs = shared.docs.lock().unwrap();
-            if let Some(doc) = docs.get(&chat_id) {
-                let already = doc
-                    .index_of(&message_id)
-                    .and_then(|ix| doc.read_message(ix))
-                    .map(|m| {
-                        m.reactions
-                            .get(&emoji)
-                            .and_then(|bucket| bucket.get(&me))
-                            .copied()
-                            .unwrap_or(false)
-                    })
-                    .unwrap_or(false);
-                let on = !already;
-                if let Err(e) = doc
-                    .core
-                    .transact(|d| d.set_reaction(&message_id, &emoji, &me, on))
-                {
-                    eprintln!("relay: reaction: {e:#}");
+            // Server channels key the transcript by Matrix room id (`!…`); likes go
+            // through `m.reaction`. People / agent chats use the CRDT doc.
+            let is_channel_room = chat_id.starts_with('!');
+            if is_channel_room {
+                if let Some(client) = matrix_client(shared) {
+                    let room_id = chat_id.clone();
+                    let emoji = emoji.clone();
+                    let message_id = message_id.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = client.toggle_reaction(&room_id, &message_id, &emoji).await
+                        {
+                            eprintln!("relay: channel reaction: {e}");
+                        }
+                    });
+                }
+            } else {
+                let me = format!("user:{}", shared.me_id());
+                let docs = shared.docs.lock().unwrap();
+                if let Some(doc) = docs.get(&chat_id) {
+                    let already = doc
+                        .index_of(&message_id)
+                        .and_then(|ix| doc.read_message(ix))
+                        .map(|m| {
+                            m.reactions
+                                .get(&emoji)
+                                .and_then(|bucket| bucket.get(&me))
+                                .copied()
+                                .unwrap_or(false)
+                        })
+                        .unwrap_or(false);
+                    let on = !already;
+                    if let Err(e) = doc
+                        .core
+                        .transact(|d| d.set_reaction(&message_id, &emoji, &me, on))
+                    {
+                        eprintln!("relay: reaction: {e:#}");
+                    }
                 }
             }
         }

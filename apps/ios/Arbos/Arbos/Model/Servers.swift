@@ -14,8 +14,10 @@ struct ServerChannel: Identifiable, Equatable {
     var serverId: String
     var name: String
     var topic: String?
-    /// Admins post; members read.
+    /// Admins post; members read (announcement channel). Members can still like posts.
     var restricted: Bool
+    /// People-group chat linked to this announcement channel: likes stay on, replies stay off.
+    var linkedChatId: String?
     var position: Int
     /// nil for a few seconds after creation while the relay makes the room.
     var roomId: String?
@@ -31,6 +33,7 @@ struct ServerChannel: Identifiable, Equatable {
             name: d["name"] as? String ?? "general",
             topic: (d["topic"] as? String).flatMap { $0.isEmpty ? nil : $0 },
             restricted: (d["restricted"] as? NSNumber)?.boolValue ?? false,
+            linkedChatId: (d["linked_chat_id"] as? String).flatMap { $0.isEmpty ? nil : $0 },
             position: (d["position"] as? NSNumber)?.intValue ?? 0,
             roomId: (d["room_id"] as? String).flatMap { $0.isEmpty ? nil : $0 },
             createdAt: (d["created_at"] as? NSNumber)?.int64Value ?? 0,

@@ -2277,7 +2277,7 @@ struct ServerProfileView: View {
             out.append(.title("Archived"))
             out.append(.card(server.archivedChannels.map { c in
                 AnyView(PaneRow(leading: .glyph("archivebox"), title: c.name,
-                                subtitle: model.channelRestricted(c) ? "Admins only post" : nil,
+                                subtitle: model.channelRestricted(c) ? "Announcement" : nil,
                                 trailing: AnyView(
                                     Button("Unarchive") { Task { await model.archiveChannel(c, false) } }
                                         .font(theme.font(Theme.small, weight: .medium))
@@ -2301,7 +2301,8 @@ struct ServerProfileView: View {
                 Button {
                     Task { await model.setChannelRestricted(c, !restricted) }
                 } label: {
-                    Label("Admins only post", systemImage: restricted ? "checkmark" : "lock")
+                    Label(restricted ? "Announcement channel" : "Make announcement channel",
+                          systemImage: restricted ? "checkmark" : "megaphone")
                 }
                 if !isGeneral {
                     Divider()
@@ -2321,7 +2322,7 @@ struct ServerProfileView: View {
             model.open(channel: c)
         } label: {
             PaneRow(leading: .glyph("number"), title: c.name,
-                    subtitle: restricted ? "Admins only post" : "Everyone posts",
+                    subtitle: restricted ? "Announcement · likes, no replies" : "Everyone posts",
                     trailing: menu)
         }
         .buttonStyle(.borderless)
@@ -2913,7 +2914,20 @@ struct ChannelProfileView: View {
     }
 
     private func privacyLabel(_ restricted: Bool) -> String {
-        restricted ? "Everyone reads · admins post" : "Everyone in the server"
+        restricted ? "Everyone reads · admins post · likes allowed" : "Everyone in the server"
+    }
+
+    private func linkedGroupTitle(_ channel: ServerChannel) -> String {
+        guard let id = channel.linkedChatId else { return "None" }
+        guard let g = model.peopleChat(id) else { return "Linked group" }
+        let title = g.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return title.isEmpty ? "Group" : title
+    }
+
+    private var linkableGroups: [PeopleChat] {
+        model.peopleChats.filter(\.isGroup).sorted {
+            $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
+        }
     }
 
     private func serverRow(_ server: Server) -> AnyView {
@@ -2947,7 +2961,11 @@ struct ChannelProfileView: View {
             PaneRow(title: "Members", value: "\(count)", chevron: true)
         }.buttonStyle(.plain)))
         about.append(AnyView(PaneRow(title: "Privacy", value: privacyLabel(restricted))))
-        about.append(AnyView(PaneRow(title: "Posting", value: restricted ? "Admins only" : "Everyone")))
+        about.append(AnyView(PaneRow(title: "Posting",
+                                     value: restricted ? "Announcement · likes, no replies" : "Everyone")))
+        if restricted {
+            about.append(AnyView(PaneRow(title: "Linked group", value: linkedGroupTitle(channel))))
+        }
         return [
             .card(about),
             .card([serverRow(server)], separatorInset: PaneKit.separatorInset(.avatar(AnyView(EmptyView())))),
@@ -2975,14 +2993,40 @@ struct ChannelProfileView: View {
             AnyView(PaneRow(title: "Privacy", value: privacyLabel(restricted))),
         ]
         if isAdmin {
-            behaviour.append(AnyView(PaneRow(title: "Admins only post", subtitle: "Members read", trailing: AnyView(
+            behaviour.append(AnyView(PaneRow(title: "Announcement channel",
+                                             subtitle: "Admins post · members can like, not reply",
+                                             trailing: AnyView(
                 Toggle("", isOn: Binding(
                     get: { restricted },
                     set: { on in Task { await model.setChannelRestricted(channel, on) } }
                 )).labelsHidden().tint(theme.online)
             ))))
+            if restricted {
+                behaviour.append(AnyView(
+                    Menu {
+                        Button("None") {
+                            Task { await model.setChannelLinkedChat(channel, linkedChatId: nil) }
+                        }
+                        ForEach(linkableGroups) { group in
+                            let label = group.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                            Button(label.isEmpty ? "Group" : label) {
+                                Task { await model.setChannelLinkedChat(channel, linkedChatId: group.id) }
+                            }
+                        }
+                    } label: {
+                        PaneRow(title: "Linked group",
+                                subtitle: "Replies stay off in that group too",
+                                value: linkedGroupTitle(channel),
+                                chevron: true)
+                    }
+                ))
+            }
         } else {
-            behaviour.append(AnyView(PaneRow(title: "Posting", value: restricted ? "Admins only" : "Everyone")))
+            behaviour.append(AnyView(PaneRow(title: "Posting",
+                                             value: restricted ? "Announcement · likes, no replies" : "Everyone")))
+            if restricted {
+                behaviour.append(AnyView(PaneRow(title: "Linked group", value: linkedGroupTitle(channel))))
+            }
         }
         var out: [PaneSection] = [
             .card(identity),

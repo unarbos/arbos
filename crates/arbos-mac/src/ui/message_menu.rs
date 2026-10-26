@@ -67,14 +67,18 @@ pub const ITEMS: [MessageMenuItem; 5] = [
     MessageMenuItem::Delete,
 ];
 
-/// The items for one bubble: Copy, Reply and Forward always; Reply in DM only
-/// on another person's message (`can_dm`: a human who is not me — my own rows
-/// and an agent's have no peer to DM); Delete only when the relay would let
-/// this user delete it (`model::may_delete_message`).
-pub fn items_for(can_delete: bool, can_dm: bool) -> Vec<MessageMenuItem> {
+/// The items for one bubble: Copy and Forward always; Reply / Reply in DM when
+/// `can_reply` (off for announcement channels); Reply in DM only on another
+/// person's message (`can_dm`); Delete only when the relay would let this user
+/// delete it (`model::may_delete_message`).
+pub fn items_for(can_delete: bool, can_dm: bool, can_reply: bool) -> Vec<MessageMenuItem> {
     ITEMS
         .into_iter()
-        .filter(|i| (can_delete || !i.danger()) && (can_dm || *i != MessageMenuItem::ReplyInDm))
+        .filter(|i| {
+            (can_delete || !i.danger())
+                && (can_dm || *i != MessageMenuItem::ReplyInDm)
+                && (can_reply || (*i != MessageMenuItem::Reply && *i != MessageMenuItem::ReplyInDm))
+        })
         .collect()
 }
 
@@ -178,9 +182,11 @@ pub fn render(shell: &Shell, window: &Window, cx: &mut Context<Shell>) -> Option
                     && m.sender_handle.as_deref().is_some_and(|h| !h.is_empty())
             })
     };
+    // Server channels (transcript keyed by Matrix room id): likes on, replies off.
+    let can_reply = !chat_id.starts_with('!');
     let (origin, _) = placed_rect(at, window.viewport_size());
     let mut body = div().flex().flex_col().gap(px(MENU_GAP));
-    for item in items_for(can_delete, can_dm) {
+    for item in items_for(can_delete, can_dm, can_reply) {
         if item.danger() {
             body = body.child(glass::menu_divider(&theme));
         }
@@ -280,22 +286,24 @@ mod tests {
     fn delete_and_reply_in_dm_are_offered_only_when_allowed() {
         let labels = |v: Vec<MessageMenuItem>| v.iter().map(|i| i.label()).collect::<Vec<_>>();
         assert_eq!(
-            labels(items_for(true, true)),
+            labels(items_for(true, true, true)),
             ["Copy", "Reply", "Forward", "Reply in DM", "Delete"]
         );
         assert_eq!(
-            labels(items_for(false, true)),
+            labels(items_for(false, true, true)),
             ["Copy", "Reply", "Forward", "Reply in DM"]
         );
         // My own row / an agent's: nobody to DM.
         assert_eq!(
-            labels(items_for(true, false)),
+            labels(items_for(true, false, true)),
             ["Copy", "Reply", "Forward", "Delete"]
         );
         assert_eq!(
-            labels(items_for(false, false)),
+            labels(items_for(false, false, true)),
             ["Copy", "Reply", "Forward"]
         );
+        // Announcement / server channel: likes stay on the rail; Reply stays off.
+        assert_eq!(labels(items_for(false, true, false)), ["Copy", "Forward"]);
     }
 
     #[test]

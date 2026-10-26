@@ -1663,30 +1663,27 @@ impl Transcript {
                 .hover(|s| s.bg(theme.surface_2))
                 .child(icon(glyph, RAIL_GLYPH, color))
         };
-        div()
-            .flex()
-            .items_center()
-            .gap(px(RAIL_GAP))
-            .child(
-                btn(
-                    SharedString::from(format!("{row_id}#react")),
-                    "face-smile",
-                    opacity,
-                    theme.text_muted,
-                )
-                .on_click(cx.listener(
-                    move |_, event: &gpui::ClickEvent, _, cx| {
-                        if let Some(chat_id) = react_chat.clone() {
-                            cx.emit(TranscriptEvent::ReactionCapsule {
-                                chat_id,
-                                message_id: react_msg.clone(),
-                                position: event.position(),
-                            });
-                        }
-                    },
-                )),
+        // Announcement / server channels (`!room`): likes stay, Reply stays off.
+        let allow_reply = chat_id.as_deref().is_some_and(|id| !id.starts_with('!'));
+        let mut rail = div().flex().items_center().gap(px(RAIL_GAP)).child(
+            btn(
+                SharedString::from(format!("{row_id}#react")),
+                "face-smile",
+                opacity,
+                theme.text_muted,
             )
-            .child(
+            .on_click(cx.listener(move |_, event: &gpui::ClickEvent, _, cx| {
+                if let Some(chat_id) = react_chat.clone() {
+                    cx.emit(TranscriptEvent::ReactionCapsule {
+                        chat_id,
+                        message_id: react_msg.clone(),
+                        position: event.position(),
+                    });
+                }
+            })),
+        );
+        if allow_reply {
+            rail = rail.child(
                 btn(
                     SharedString::from(format!("{row_id}#reply")),
                     "reply",
@@ -1701,26 +1698,25 @@ impl Transcript {
                         });
                     }
                 })),
+            );
+        }
+        rail.child(
+            btn(
+                SharedString::from(format!("{row_id}#more")),
+                more_glyph,
+                more_opacity,
+                more_color,
             )
-            .child(
-                btn(
-                    SharedString::from(format!("{row_id}#more")),
-                    more_glyph,
-                    more_opacity,
-                    more_color,
-                )
-                .on_click(cx.listener(
-                    move |_, event: &gpui::ClickEvent, _, cx| {
-                        if let Some(chat_id) = more_chat.clone() {
-                            cx.emit(TranscriptEvent::MessageMenu {
-                                chat_id,
-                                message_id: more_msg.clone(),
-                                position: event.position(),
-                            });
-                        }
-                    },
-                )),
-            )
+            .on_click(cx.listener(move |_, event: &gpui::ClickEvent, _, cx| {
+                if let Some(chat_id) = more_chat.clone() {
+                    cx.emit(TranscriptEvent::MessageMenu {
+                        chat_id,
+                        message_id: more_msg.clone(),
+                        position: event.position(),
+                    });
+                }
+            })),
+        )
     }
 
     /// A sender row's agent, resolved like the chip: a shared agent's reply may

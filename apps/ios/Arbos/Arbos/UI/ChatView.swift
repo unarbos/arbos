@@ -822,7 +822,8 @@ struct ChatSession: View {
                         items: MessageMenu.items(forMessage: true,
                                                 canEdit: canEditMessage(row),
                                                 canDelete: canDelete(row),
-                                                hasReplies: row.replyCount > 0),
+                                                hasReplies: row.replyCount > 0,
+                                                canReply: allowsReplies),
                         onReact: { emoji in
                             closeActions()
                             model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: emoji)
@@ -1651,7 +1652,7 @@ struct ChatSession: View {
                         highlightedMessage: highlightedMessage,
                         rowsCount: rows.count,
                         messagesCount: messages.count,
-                        canReply: { isMessageRow($0) },
+                        canReply: { allowsMessageActions($0) },
                         onQuoteTap: { revealQuoted($0) },
                         onMenu: { runMessageMenu($0, row: $1) },
                         actionsRowId: actionsRow?.id,
@@ -1922,17 +1923,26 @@ struct ChatSession: View {
         }
     }
 
-    /// A real message in the shared chat doc (the full menu: Copy, Reply,
-    /// Forward, Reply in DM, Delete) — not a date / join / system line.
-    /// Channels carry no replies or deletes yet (C1 scope): Copy only.
+    /// A real message bubble (not a date / join / system line). Channels and
+    /// announcement-linked groups open the reaction capsule; Reply stays gated
+    /// by `allowsReplies`.
     private func isMessageRow(_ row: Row) -> Bool {
-        if isChannel { return false }
         switch row.kind {
         case .system, .question, .error, .forwardHint:
             return false
         case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
             return messageById[row.messageId] != nil
         }
+    }
+
+    /// Long-press opens the capsule + menu (channels included so members can like).
+    private func allowsMessageActions(_ row: Row) -> Bool { isMessageRow(row) }
+
+    /// Announcement channels and their linked people groups: likes on, replies off.
+    private var allowsReplies: Bool {
+        if isChannel { return false }
+        if isPeople, model.isAnnouncementLinkedGroup(chatId) { return false }
+        return true
     }
 
     /// Long-press on a bubble: the actions overlay (capsule + menu). The keyboard goes
@@ -2019,9 +2029,9 @@ struct ChatSession: View {
         pendingThread = PendingThread(root: root, replies: replies)
     }
 
-    /// Own user text the long-press menu may offer Edit for.
+    /// Own user text the long-press menu may offer Edit for (people / agent chats only).
     private func canEditMessage(_ row: Row) -> Bool {
-        guard isMessageRow(row), let m = messageById[row.messageId] else { return false }
+        guard !isChannel, isMessageRow(row), let m = messageById[row.messageId] else { return false }
         guard isOwnMessage(m) else { return false }
         return !m.plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -2048,8 +2058,9 @@ struct ChatSession: View {
     }
 
     /// Reply to this row: composer preview + focus (people chats also address the agent).
-    /// Long-press → Reply on the bubble.
+    /// Long-press → Reply on the bubble. No-op in announcement channels / linked groups.
     private func beginReply(to row: Row) {
+        guard allowsReplies else { return }
         guard let m = messageById[row.messageId] else { return }
         editing = nil
         replyTo = m
@@ -2855,7 +2866,9 @@ struct ChatSession: View {
         if isPeople {
             let address = sendAddress(for: text)
             let chips = chipMentions(for: text)
-            model.sendPeople(chatId: chatId, text: text, replyTo: replyTo?.id, address: address,
+            // Linked announcement groups: likes on, threaded replies off.
+            let replyId = allowsReplies ? replyTo?.id : nil
+            model.sendPeople(chatId: chatId, text: text, replyTo: replyId, address: address,
                              chipMentions: chips, attachments: pending,
                              chipTokens: MentionDraft.tokens(composerDraft.mentions), replyRef: replyRef)
             pending.removeAll()

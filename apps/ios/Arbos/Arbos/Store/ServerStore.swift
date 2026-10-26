@@ -468,6 +468,44 @@ extension AppModel {
         await refreshServers()
     }
 
+    /// Link (or clear) a people group on an announcement channel. Replies stay off in both.
+    func setChannelLinkedChat(_ channel: ServerChannel, linkedChatId: String?) async {
+        if let si = servers.firstIndex(where: { $0.id == channel.serverId }),
+           let ci = servers[si].channels.firstIndex(where: { $0.id == channel.id }) {
+            servers[si].channels[ci].linkedChatId = linkedChatId
+        }
+        do {
+            try await relay.patchChannel(serverId: channel.serverId, channelId: channel.id,
+                                         linkedChatId: .some(linkedChatId))
+        } catch {
+            notice = Notice(text: "Could not update the linked group: \(error.localizedDescription)")
+        }
+        await refreshServers()
+    }
+
+    /// Optimistic like + Matrix `m.reaction` (or redact to unlike).
+    func toggleChannelReaction(chatId channelId: Id, messageId: Id, emoji: String) {
+        guard let me = myUserId, let c = channel(channelId),
+              let client = matrixClient, let roomId = channelRoomId(c) else { return }
+        if var list = channelRows[channelId], let i = list.firstIndex(where: { $0.id == messageId }) {
+            list[i].reactions = MessageReaction.toggling(list[i].reactions, emoji: emoji, sender: me)
+            channelRows[channelId] = list
+            Haptics.pick()
+        }
+        Task {
+            do {
+                try await client.toggleReaction(roomId: roomId, messageId: messageId, emoji: emoji)
+            } catch {
+                notice = Notice(text: "Could not update the reaction: \(error.localizedDescription)")
+                // Reload so a failed unlike / like does not leave a stale chip.
+                if caughtUp.contains(channelId) {
+                    caughtUp.remove(channelId)
+                    openChannel(channelId)
+                }
+            }
+        }
+    }
+
     /// Row menu → Archive / Unarchive: hide a channel from my list or bring it back. An archived
     /// channel that is open gives way to the channel list.
     func archiveChannel(_ channel: ServerChannel, _ archived: Bool) async {

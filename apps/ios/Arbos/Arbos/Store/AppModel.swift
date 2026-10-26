@@ -4243,17 +4243,30 @@ final class AppModel: ObservableObject {
 
     /// Add or remove an emoji reaction on a message. Multiple different emojis
     /// can be active on the same message; tapping the same emoji again clears it.
+    /// Server channels send `m.reaction` through the Matrix client (announcement likes).
     func toggleReaction(chatId: Id, messageId: Id, emoji: String) {
         guard let me = myUserId, !emoji.isEmpty else { return }
         #if DEBUG
         if isFixture {
-            guard var list = messages[chatId], let i = list.firstIndex(where: { $0.id == messageId }) else { return }
-            list[i].reactions = MessageReaction.toggling(list[i].reactions, emoji: emoji, sender: me)
-            messages[chatId] = list
-            Haptics.pick()
+            if var list = messages[chatId], let i = list.firstIndex(where: { $0.id == messageId }) {
+                list[i].reactions = MessageReaction.toggling(list[i].reactions, emoji: emoji, sender: me)
+                messages[chatId] = list
+                Haptics.pick()
+                return
+            }
+            if var list = channelRows[chatId], let i = list.firstIndex(where: { $0.id == messageId }) {
+                list[i].reactions = MessageReaction.toggling(list[i].reactions, emoji: emoji, sender: me)
+                channelRows[chatId] = list
+                Haptics.pick()
+                return
+            }
             return
         }
         #endif
+        if channel(chatId) != nil {
+            toggleChannelReaction(chatId: chatId, messageId: messageId, emoji: emoji)
+            return
+        }
         guard let doc = docs[chatId] else { return }
         do {
             try doc.toggleReaction(messageId: messageId, emoji: emoji, sender: me)
@@ -4261,6 +4274,13 @@ final class AppModel: ObservableObject {
             Haptics.pick()
         } catch {
             notice = Notice(text: "Could not update the reaction: \(error.localizedDescription)")
+        }
+    }
+
+    /// True when this people chat is linked from an announcement channel (likes on, replies off).
+    func isAnnouncementLinkedGroup(_ chatId: Id) -> Bool {
+        servers.contains { server in
+            server.channels.contains { $0.linkedChatId == chatId && $0.restricted }
         }
     }
 

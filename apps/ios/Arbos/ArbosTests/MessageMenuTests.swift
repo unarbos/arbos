@@ -51,6 +51,18 @@ final class MessageMenuTests: XCTestCase {
         XCTAssertEqual(MessageMenu.items(forMessage: false, canEdit: true), [.copy])
     }
 
+    /// Announcement channels / linked groups: likes stay on the capsule; Reply stays off.
+    func testAnnouncementMenuOmitsReply() {
+        XCTAssertEqual(
+            MessageMenu.items(forMessage: true, canDelete: false, canReply: false),
+            [.copy, .forward]
+        )
+        XCTAssertEqual(
+            MessageMenu.items(forMessage: true, canEdit: true, canDelete: true, canReply: false),
+            [.copy, .forward, .edit, .delete]
+        )
+    }
+
 
     /// #1389: a long-press on any block of a bubble reaches the one menu, and
     /// its Copy is the whole message — every paragraph, the list, the code

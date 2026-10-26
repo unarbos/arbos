@@ -3397,9 +3397,12 @@ pub struct ServerChannel {
     pub name: String,
     #[serde(default, deserialize_with = "null_to_empty")]
     pub topic: String,
-    /// Admins-only posting.
+    /// Admins-only posting (announcement channel: likes on, replies off).
     #[serde(default)]
     pub restricted: bool,
+    /// People-group chat linked to this announcement channel.
+    #[serde(default)]
+    pub linked_chat_id: Option<String>,
     #[serde(default)]
     pub position: i64,
     /// `None` for a few seconds after creation while the room is being made.

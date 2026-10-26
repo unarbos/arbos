@@ -52,14 +52,81 @@ pub trait Listener: Send + Sync {
     fn on_connection(&self, connected: bool, error: Option<String>);
 }
 
+/// One `m.reaction` we have seen in a room (likes on channel posts).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StoredReaction {
+    /// The reaction event's own id (needed to redact / unlike).
+    event_id: String,
+    /// The message event id the reaction points at.
+    target: String,
+    emoji: String,
+    /// `user:<id>` (same shape as message senders).
+    sender: String,
+}
+
 #[derive(Default)]
 struct Timeline {
     rows: Vec<MessageRow>,
+    /// Reactions keyed by the target message's Matrix event id.
+    reactions: HashMap<String, Vec<StoredReaction>>,
     /// `/messages` token for the next page back; `None` before the first page or at the start.
     prev_batch: Option<String>,
     /// The first page was loaded (so the rows are complete from `prev_batch` to now).
     loaded: bool,
     at_start: bool,
+}
+
+impl Timeline {
+    /// Message rows with each message's reactions folded into its JSON (`reactions` map).
+    fn projected(&self) -> Vec<MessageRow> {
+        self.rows
+            .iter()
+            .map(|row| {
+                let Some(list) = self.reactions.get(&row.event_id) else {
+                    return row.clone();
+                };
+                let Ok(mut v) = serde_json::from_str::<Value>(&row.json) else {
+                    return row.clone();
+                };
+                let mut map = serde_json::Map::new();
+                for r in list {
+                    let bucket = map
+                        .entry(r.emoji.clone())
+                        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+                    if let Some(obj) = bucket.as_object_mut() {
+                        obj.insert(r.sender.clone(), Value::Bool(true));
+                    }
+                }
+                v["reactions"] = Value::Object(map);
+                let mut out = row.clone();
+                out.json = v.to_string();
+                out
+            })
+            .collect()
+    }
+
+    fn upsert_reaction(&mut self, r: StoredReaction) {
+        let list = self.reactions.entry(r.target.clone()).or_default();
+        if list.iter().any(|x| x.event_id == r.event_id) {
+            return;
+        }
+        // One reaction per (sender, emoji) on a target — keep the newest event id.
+        list.retain(|x| !(x.sender == r.sender && x.emoji == r.emoji));
+        list.push(r);
+    }
+
+    fn remove_reaction_event(&mut self, event_id: &str) -> bool {
+        let mut changed = false;
+        self.reactions.retain(|_, list| {
+            let before = list.len();
+            list.retain(|r| r.event_id != event_id);
+            if list.len() != before {
+                changed = true;
+            }
+            !list.is_empty()
+        });
+        changed
+    }
 }
 
 const HISTORY_PAGE: u32 = 50;
@@ -152,6 +219,75 @@ impl MatrixClient {
                     }
                 }
             });
+        // Likes on channel posts (`m.reaction`).
+        let weak_react = Arc::downgrade(self);
+        self.client.add_event_handler(
+            move |ev: Raw<
+                matrix_sdk::ruma::events::OriginalSyncMessageLikeEvent<
+                    matrix_sdk::ruma::events::reaction::ReactionEventContent,
+                >,
+            >,
+                  room: Room| {
+                let weak = weak_react.clone();
+                async move {
+                    let Some(this) = weak.upgrade() else { return };
+                    let Ok(v) = serde_json::from_str::<Value>(ev.json().get()) else {
+                        return;
+                    };
+                    this.ingest_side_event(room.room_id(), &v);
+                }
+            },
+        );
+        // Unlike: redacting a reaction event removes it from the chips.
+        let weak_redact = Arc::downgrade(self);
+        self.client.add_event_handler(
+            move |ev: Raw<
+                matrix_sdk::ruma::events::room::redaction::OriginalSyncRoomRedactionEvent,
+            >,
+                  room: Room| {
+                let weak = weak_redact.clone();
+                async move {
+                    let Some(this) = weak.upgrade() else { return };
+                    let Ok(v) = serde_json::from_str::<Value>(ev.json().get()) else {
+                        return;
+                    };
+                    this.ingest_side_event(room.room_id(), &v);
+                }
+            },
+        );
+    }
+
+    /// Live `m.reaction` / redaction of a reaction — updates the open timeline in place.
+    fn ingest_side_event(&self, room_id: &RoomId, v: &Value) {
+        let ty = v["type"].as_str().unwrap_or_default();
+        let mut tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(t) = tl.get_mut(room_id) else {
+            return;
+        };
+        let changed = match ty {
+            "m.reaction" => {
+                if let Some(r) = parse_reaction(v) {
+                    t.upsert_reaction(r);
+                    true
+                } else {
+                    false
+                }
+            }
+            "m.room.redaction" => {
+                let redacts = v["redacts"]
+                    .as_str()
+                    .or_else(|| v["content"]["redacts"].as_str())
+                    .unwrap_or_default();
+                !redacts.is_empty() && t.remove_reaction_event(redacts)
+            }
+            _ => false,
+        };
+        if !changed || !t.loaded {
+            return;
+        }
+        let out = t.projected();
+        drop(tl);
+        self.listener.on_timeline(room_id.to_string(), out);
     }
 
     async fn sync_loop(self: Arc<Self>, mut stop: watch::Receiver<bool>) {
@@ -396,7 +532,7 @@ impl MatrixClient {
     }
 
     /// Merge rows into a room's timeline (deduplicated by event id, kept in time order) and
-    /// tell the listener when something changed.
+    /// tell the listener when something changed. Returned rows include reaction chips.
     fn push_rows(&self, room_id: &RoomId, rows: Vec<MessageRow>, notify: bool) -> Vec<MessageRow> {
         let mut tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
         let t = tl.entry(room_id.to_owned()).or_default();
@@ -415,7 +551,7 @@ impl MatrixClient {
                     .then(a.event_id.cmp(&b.event_id))
             });
         }
-        let out = t.rows.clone();
+        let out = t.projected();
         let loaded = t.loaded;
         drop(tl);
         if changed && notify && loaded {
@@ -424,11 +560,23 @@ impl MatrixClient {
         out
     }
 
+    /// Store reactions from a `/messages` page (and any redactions ones already gone).
+    fn push_reactions(&self, room_id: &RoomId, reactions: Vec<StoredReaction>) {
+        if reactions.is_empty() {
+            return;
+        }
+        let mut tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
+        let t = tl.entry(room_id.to_owned()).or_default();
+        for r in reactions {
+            t.upsert_reaction(r);
+        }
+    }
+
     async fn page(
         &self,
         room: &Room,
         from: Option<String>,
-    ) -> Result<(Vec<MessageRow>, Option<String>)> {
+    ) -> Result<(Vec<MessageRow>, Option<String>, Vec<StoredReaction>)> {
         let mut opts = MessagesOptions::backward();
         opts.from = from;
         opts.limit = UInt::from(HISTORY_PAGE);
@@ -443,7 +591,8 @@ impl MatrixClient {
             .iter()
             .filter_map(|v| message_row(v, &|m| names.get(m).cloned()))
             .collect();
-        Ok((rows, page.end))
+        let reactions: Vec<StoredReaction> = events.iter().filter_map(parse_reaction).collect();
+        Ok((rows, page.end, reactions))
     }
 
     /// The room's recent history (newest page), chronological. Later rows arrive through the
@@ -457,7 +606,8 @@ impl MatrixClient {
         if loaded {
             return Ok(self.push_rows(room.room_id(), Vec::new(), false));
         }
-        let (rows, end) = self.page(&room, None).await?;
+        let (rows, end, reactions) = self.page(&room, None).await?;
+        self.push_reactions(room.room_id(), reactions);
         {
             let mut tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
             let t = tl.entry(room.room_id().to_owned()).or_default();
@@ -479,7 +629,8 @@ impl MatrixClient {
                 None => None,
             }
         };
-        let (rows, end) = self.page(&room, from).await?;
+        let (rows, end, reactions) = self.page(&room, from).await?;
+        self.push_reactions(room.room_id(), reactions);
         {
             let mut tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
             let t = tl.entry(room.room_id().to_owned()).or_default();
@@ -503,6 +654,83 @@ impl MatrixClient {
         Ok(r.response.event_id.to_string())
     }
 
+    /// Toggle an emoji like on a channel message (`message_id` is `life.arbos.id` or the
+    /// Matrix event id). Members can like even when the channel is announcement-only.
+    pub async fn toggle_reaction(
+        &self,
+        room_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> Result<()> {
+        let emoji = emoji.trim();
+        if emoji.is_empty() || message_id.is_empty() {
+            return Ok(());
+        }
+        let room = self.room(room_id)?;
+        let me = self.me_member();
+        let (target_event_id, existing) = {
+            let tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(t) = tl.get(room.room_id()) else {
+                return Err(Error::NoRoom(room_id.to_owned()));
+            };
+            let target = t
+                .rows
+                .iter()
+                .find(|r| r.id == message_id || r.event_id == message_id)
+                .map(|r| r.event_id.clone())
+                .ok_or_else(|| Error::Homeserver(format!("no message {message_id}")))?;
+            let existing = t
+                .reactions
+                .get(&target)
+                .into_iter()
+                .flatten()
+                .find(|r| r.sender == me && r.emoji == emoji)
+                .map(|r| r.event_id.clone());
+            (target, existing)
+        };
+        if let Some(reaction_id) = existing {
+            let eid = matrix_sdk::ruma::EventId::parse(&reaction_id)
+                .map_err(|e| Error::Homeserver(e.to_string()))?;
+            room.redact(&eid, None, None).await?;
+            let mut tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(t) = tl.get_mut(room.room_id()) {
+                t.remove_reaction_event(&reaction_id);
+                let out = t.projected();
+                let loaded = t.loaded;
+                drop(tl);
+                if loaded {
+                    self.listener.on_timeline(room.room_id().to_string(), out);
+                }
+            }
+            return Ok(());
+        }
+        let content = json!({
+            "m.relates_to": {
+                "rel_type": "m.annotation",
+                "event_id": target_event_id,
+                "key": emoji,
+            }
+        });
+        let r = room.send_raw("m.reaction", content).await?;
+        let reaction_event_id = r.response.event_id.to_string();
+        let mut tl = self.timelines.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(t) = tl.get_mut(room.room_id()) {
+            t.upsert_reaction(StoredReaction {
+                event_id: reaction_event_id,
+                target: target_event_id,
+                emoji: emoji.to_owned(),
+                sender: me,
+            });
+            let out = t.projected();
+            let loaded = t.loaded;
+            drop(tl);
+            if loaded {
+                self.listener.on_timeline(room.room_id().to_string(), out);
+            }
+        }
+        Ok(())
+    }
+
     /// Public read receipt on the newest row the app has.
     pub async fn mark_read(&self, room_id: &str) -> Result<()> {
         let room = self.room(room_id)?;
@@ -519,4 +747,28 @@ impl MatrixClient {
             .await?;
         Ok(())
     }
+}
+
+/// `m.reaction` → a stored like, or `None` when the event is not a usable annotation.
+fn parse_reaction(ev: &Value) -> Option<StoredReaction> {
+    if ev["type"].as_str() != Some("m.reaction") {
+        return None;
+    }
+    let relates = &ev["content"]["m.relates_to"];
+    if relates["rel_type"].as_str() != Some("m.annotation") {
+        return None;
+    }
+    let event_id = ev["event_id"].as_str()?.to_owned();
+    let target = relates["event_id"].as_str()?.to_owned();
+    let emoji = relates["key"].as_str()?.to_owned();
+    if event_id.is_empty() || target.is_empty() || emoji.is_empty() {
+        return None;
+    }
+    let mxid = ev["sender"].as_str().unwrap_or_default();
+    Some(StoredReaction {
+        event_id,
+        target,
+        emoji,
+        sender: member_of_mxid(mxid),
+    })
 }

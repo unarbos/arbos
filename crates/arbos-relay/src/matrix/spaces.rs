@@ -2,7 +2,8 @@
 //! (`m.space` room) whose `m.space.child` events point at its channel rooms; a channel is a
 //! room with `join_rule: restricted` allowing the Space's members, `m.space.parent` back, and
 //! `life.arbos.chat {kind: channel}`. Every server member is joined to every channel; a
-//! restricted channel (`#announcements`) sets `events_default: 50` so only owner/admins post.
+//! restricted channel (`#announcements`) sets `events_default: 50` so only owner/admins post,
+//! while `events["m.reaction"] = 0` so every member can still like a post.
 
 use serde_json::{json, Value};
 
@@ -285,6 +286,9 @@ impl Worker {
             "power_level_content_override": {
                 "users": spec.users_pl, "invite": ADMIN_PL, "state_default": ADMIN_PL,
                 "events_default": events_default,
+                // Announcement channels (`events_default: 50`): members cannot post, but they
+                // can still like (m.reaction). Unrestricted channels keep the same override.
+                "events": { "m.reaction": 0 },
             },
         });
         let room = self.client.create_room(&spec.creator, &body).await?;
@@ -294,7 +298,8 @@ impl Worker {
         Ok(room)
     }
 
-    /// `events_default` follows the channel's posting rule.
+    /// `events_default` follows the channel's posting rule; `m.reaction` stays at 0 so
+    /// members can like announcement posts without being able to reply.
     async fn reconcile_posting(
         &self,
         room: &str,
@@ -306,8 +311,19 @@ impl Worker {
             .state(room, creator, "m.room.power_levels", "")
             .await?
         {
-            if pl["events_default"].as_i64().unwrap_or(0) != events_default {
-                pl["events_default"] = json!(events_default);
+            let reaction_pl = pl["events"]["m.reaction"].as_i64();
+            let need_default = pl["events_default"].as_i64().unwrap_or(0) != events_default;
+            let need_reaction = reaction_pl != Some(0);
+            if need_default || need_reaction {
+                if need_default {
+                    pl["events_default"] = json!(events_default);
+                }
+                if need_reaction {
+                    if !pl["events"].is_object() {
+                        pl["events"] = json!({});
+                    }
+                    pl["events"]["m.reaction"] = json!(0);
+                }
                 self.client
                     .send_state(room, creator, "m.room.power_levels", "", &pl)
                     .await?;

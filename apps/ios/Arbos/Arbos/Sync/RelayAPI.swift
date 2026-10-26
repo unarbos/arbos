@@ -818,21 +818,28 @@ final class RelayAPI {
         _ = try await request("DELETE", "/servers/\(id)")
     }
 
-    /// `POST /servers/{id}/channels {name, topic?, restricted?}` → 201 the channel.
-    func createChannel(serverId: String, name: String, topic: String? = nil, restricted: Bool = false) async throws -> ServerChannel {
+    /// `POST /servers/{id}/channels {name, topic?, restricted?, linked_chat_id?}` → 201 the channel.
+    func createChannel(serverId: String, name: String, topic: String? = nil, restricted: Bool = false,
+                       linkedChatId: String? = nil) async throws -> ServerChannel {
         var body: [String: Any] = ["name": name, "restricted": restricted]
         if let topic, !topic.isEmpty { body["topic"] = topic }
+        if let linkedChatId, !linkedChatId.isEmpty { body["linked_chat_id"] = linkedChatId }
         let v = try await json("POST", "/servers/\(serverId)/channels", body: body)
         guard let c = ServerChannel.parse(v) else { throw RelayError(status: 0, message: "The relay returned no channel") }
         return c
     }
 
-    /// `PATCH /servers/{id}/channels/{cid} {name?, topic?, restricted?}`.
-    func patchChannel(serverId: String, channelId: String, name: String? = nil, topic: String? = nil, restricted: Bool? = nil) async throws {
+    /// `PATCH /servers/{id}/channels/{cid} {name?, topic?, restricted?, linked_chat_id?}`.
+    /// Pass `linkedChatId: .some(nil)` (via empty string) to clear a linked group.
+    func patchChannel(serverId: String, channelId: String, name: String? = nil, topic: String? = nil,
+                      restricted: Bool? = nil, linkedChatId: String?? = nil) async throws {
         var body: [String: Any] = [:]
         if let name { body["name"] = name }
         if let topic { body["topic"] = topic }
         if let restricted { body["restricted"] = restricted }
+        if let linked = linkedChatId {
+            body["linked_chat_id"] = linked ?? ""
+        }
         guard !body.isEmpty else { return }
         _ = try await request("PATCH", "/servers/\(serverId)/channels/\(channelId)", body: body)
     }

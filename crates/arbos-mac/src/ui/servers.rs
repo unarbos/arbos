@@ -93,13 +93,13 @@ pub fn sheet(shell: &Shell, sheet: &ServerSheet, cx: &mut Context<Shell>) -> Div
                                 div()
                                     .text_size(px(TEXT_SMALL + 1.0))
                                     .text_color(theme.text)
-                                    .child("Admins only post"),
+                                    .child("Announcement channel"),
                             )
                             .child(
                                 div()
                                     .text_size(px(TEXT_TINY))
                                     .text_color(theme.text_muted)
-                                    .child("Everyone reads; owners and admins write."),
+                                    .child("Admins post · members can like, not reply"),
                             ),
                     )
                     .child(glass::switch(restricted, &theme))

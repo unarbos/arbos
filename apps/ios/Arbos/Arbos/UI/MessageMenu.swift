@@ -61,12 +61,19 @@ enum MessageMenu {
 
     /// View thread when `hasReplies`; Edit only on the user's own text; Delete only
     /// when the relay would allow it (`MessageDeleteRule.mayDelete`).
+    /// `canReply: false` for announcement channels and their linked groups (likes stay on;
+    /// Reply / View thread / Reply in DM stay off).
     static func items(forMessage: Bool, canEdit: Bool = false, canDelete: Bool = true,
-                      hasReplies: Bool = false) -> [MessageMenuItem] {
+                      hasReplies: Bool = false, canReply: Bool = true) -> [MessageMenuItem] {
         guard forMessage else { return copyOnly }
-        var out: [MessageMenuItem] = [.copy, .reply]
-        if hasReplies { out.append(.viewThread) }
-        out.append(contentsOf: [.forward, .replyInDM])
+        var out: [MessageMenuItem] = [.copy]
+        if canReply {
+            out.append(.reply)
+            if hasReplies { out.append(.viewThread) }
+            out.append(contentsOf: [.forward, .replyInDM])
+        } else {
+            out.append(.forward)
+        }
         if canEdit { out.append(.edit) }
         if canDelete { out.append(.delete) }
         return out
