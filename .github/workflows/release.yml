@@ -360,7 +360,12 @@ jobs:
             echo "::warning title=Not notarized::NOTARY_KEY_P8 / NOTARY_KEY_ID / NOTARY_ISSUER_ID are not all set."
           fi
           export ARBOS_DIST="$GITHUB_WORKSPACE/dist"
-          scripts/bundle-mac.sh
+          # The Mac shares its 8 cores with the gate's halves, the TestFlight archive and the rigs: two
+          # -j8 builds plus a simulator boot took it to load 263 on 2026-10-26 and ssh timed out for every
+          # worker. Half the codegen threads and a mild nice keep the box answering; a solo build is only
+          # slightly longer.
+          export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
+          nice -n 5 scripts/bundle-mac.sh
           source dist/build-info.env
           {
             echo "signing=$ARBOS_SIGNING"
