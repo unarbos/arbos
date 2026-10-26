@@ -65,6 +65,10 @@ pub async fn healthz(State(state): State<AppState>) -> Response {
             "snapshot".into(),
             serde_json::json!(state.default_snapshot()),
         );
+        // The image provider's last probe (`images::probe_provider`): an outage, a revoked key or
+        // a retired model shows here before a person's Generate fails.
+        let images = state.image_health.try_lock().ok().and_then(|g| g.clone());
+        obj.insert("images".into(), serde_json::json!(images));
     }
     Json(v).into_response()
 }
@@ -323,6 +327,7 @@ pub async fn create_project(
         avatar_leaf: b.avatar_leaf,
         avatar_leaf_color: b.avatar_leaf_color,
         image_key: None,
+        avatar_version: 0,
     };
     if state
         .db
@@ -782,11 +787,22 @@ pub async fn patch_project(
             crate::people::notify_agent_renamed(&state, &p.id);
         }
     }
+    let before_avatar = p.avatar_version;
     let p = state
         .db
         .project(&p.id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
+    // The avatar moved (picture, leaf or colour): every device that draws this agent learns
+    // the new stamp now — the agents' `profile_updated` (Jacob, 2026-10-25: the chat flipped
+    // between the old and the new picture until a roster happened to refresh).
+    if p.avatar_version != before_avatar {
+        let device = match &principal {
+            Principal::Device { id, .. } => id.as_str(),
+            Principal::Box { .. } | Principal::Admin => "",
+        };
+        crate::people::notify_agent_avatar_changed(&state, &p, device);
+    }
     let mut body = project_json(&state, &p).await;
     if let Some((wanted, got)) = renamed_for_handle {
         if let Some(o) = body.as_object_mut() {
@@ -1000,6 +1016,7 @@ pub(crate) async fn project_dto(state: &AppState, p: &Project) -> ProjectDto {
         avatar_leaf_effective: Some(i64::from(leaf.leaf)),
         avatar_leaf_color_effective: Some(i64::from(leaf.color)),
         image_key: p.image_key.clone(),
+        avatar_version: Some(p.avatar_version),
         primary_chat_id: primary_chat_id(state, p),
         owner: project_owner_dto(state, &p.user_id),
         model: p
@@ -2390,5 +2407,266 @@ mod primary_chat_tests {
             .unwrap()
             .iter()
             .any(|c| c.kind == "projects"));
+    }
+}
+
+#[cfg(test)]
+mod agent_avatar_version_tests {
+    //! An agent's avatar change stamps `avatar_version`, the roster copy carries the same
+    //! stamp, and every device that draws the agent hears `agent_profile_updated` — the
+    //! agents' `profile_updated` (Jacob, 2026-10-25: the chat flipped between the old and
+    //! the new picture until a roster happened to refresh).
+
+    use axum::extract::{Path, State};
+    use axum::Json;
+
+    use arbos_core::ids::ulid;
+
+    use super::*;
+    use crate::people::tests_support::{person, project_of};
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    fn leaf_patch(leaf: i64) -> PatchProjectBody {
+        PatchProjectBody {
+            name: None,
+            icon: None,
+            color: None,
+            instructions: None,
+            models: None,
+            spend_cap_daily: None,
+            avatar: None,
+            avatar_color: None,
+            description: None,
+            voice: None,
+            vision_enabled: None,
+            avatar_color_index: None,
+            avatar_leaf: Some(Some(leaf)),
+            avatar_leaf_color: Some(Some(2)),
+            image_key: None,
+        }
+    }
+
+    fn device_id(p: &Principal) -> String {
+        match p {
+            Principal::Device { id, .. } => id.clone(),
+            Principal::Box { .. } | Principal::Admin => unreachable!("device principal"),
+        }
+    }
+
+    fn agent_profile_pushes(state: &AppState, dev: &str) -> Vec<Value> {
+        state
+            .db
+            .take_user_pushes(dev)
+            .unwrap()
+            .into_iter()
+            .filter(|(_, kind, _, _)| kind == "agent_profile_updated")
+            .map(|(_, _, payload, _)| payload)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn avatar_change_stamps_version_and_pushes_every_copy_holder() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_phone) = person(&state, 1);
+        let (_, alice_mac) = {
+            // A second device of Alice's.
+            let id = ulid();
+            state
+                .db
+                .insert_device(&id, "mac", &ulid(), &alice, "github")
+                .unwrap();
+            (
+                alice.clone(),
+                Principal::Device {
+                    id,
+                    token: String::new(),
+                    user_id: alice.clone(),
+                },
+            )
+        };
+        let (bob, bob_dev) = person(&state, 2);
+        let (_carol, carol_dev) = person(&state, 3);
+        let project = project_of(&state, &alice, "TestAgent");
+        // Bob shares a group with the agent; Carol shares nothing.
+        let group = crate::people::tests_support::dm(&state, &alice, &bob);
+        state
+            .db
+            .add_member(
+                &group,
+                &format!("agent:{project}"),
+                "member",
+                &alice,
+                &json!({}),
+            )
+            .unwrap();
+        let before = state.db.project(&project).unwrap().unwrap();
+        assert_eq!(before.avatar_version, 0, "fresh project is unstamped");
+
+        // Alice's phone picks a leaf.
+        let r = patch_project(
+            State(state.clone()),
+            alice_phone.clone(),
+            Path(project.clone()),
+            Json(leaf_patch(3)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let after = state.db.project(&project).unwrap().unwrap();
+        assert!(after.avatar_version > 0, "the change is stamped");
+
+        // The project JSON and the roster copy carry the same stamp.
+        let bytes = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["avatar_version"], json!(after.avatar_version));
+        let cm = state
+            .db
+            .chats_of_member(&format!("agent:{project}"))
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let agent_row = cm
+            .members
+            .iter()
+            .find(|m| m.project_id() == Some(project.as_str()))
+            .unwrap();
+        let dto = crate::people::member_dto(&state, agent_row);
+        assert_eq!(
+            dto.project.unwrap().avatar_version,
+            Some(after.avatar_version)
+        );
+
+        // Fan-out: Alice's Mac and Bob hear it; the phone that made the change and Carol do not.
+        let phone = agent_profile_pushes(&state, &device_id(&alice_phone));
+        assert!(phone.is_empty(), "the changing device already knows");
+        let mac = agent_profile_pushes(&state, &device_id(&alice_mac));
+        assert_eq!(mac.len(), 1, "owner's other device");
+        assert_eq!(mac[0]["project_id"], json!(project));
+        assert_eq!(mac[0]["avatar_version"], json!(after.avatar_version));
+        assert_eq!(mac[0]["image_key"], Value::Null);
+        let bobs = agent_profile_pushes(&state, &device_id(&bob_dev));
+        assert_eq!(bobs.len(), 1, "group member");
+        assert!(agent_profile_pushes(&state, &device_id(&carol_dev)).is_empty());
+        let _ = bob;
+
+        // A second change moves the stamp strictly forward, even inside the same millisecond.
+        patch_project(
+            State(state.clone()),
+            alice_phone.clone(),
+            Path(project.clone()),
+            Json(leaf_patch(4)),
+        )
+        .await
+        .unwrap();
+        let again = state.db.project(&project).unwrap().unwrap();
+        assert!(again.avatar_version > after.avatar_version);
+
+        // A patch that leaves the avatar alone neither stamps nor pushes.
+        let mut rename = leaf_patch(0);
+        rename.avatar_leaf = None;
+        rename.avatar_leaf_color = None;
+        rename.description = Some("A test agent".into());
+        patch_project(
+            State(state.clone()),
+            alice_phone,
+            Path(project.clone()),
+            Json(rename),
+        )
+        .await
+        .unwrap();
+        let same = state.db.project(&project).unwrap().unwrap();
+        assert_eq!(same.avatar_version, again.avatar_version);
+        assert!(agent_profile_pushes(&state, &device_id(&alice_mac)).len() == 1);
+    }
+
+    /// The owner-set picture reaches a viewer who only shares a group with the agent (Jacob,
+    /// 2026-10-25: "Hezbola, run by @unarbos" drew the automatic leaf): `/blob/{project}/…`
+    /// stays the owner's, `GET /projects/{id}/avatar.jpg` serves the current picture to anyone,
+    /// 404 while there is none, and the push names the key the viewer should draw.
+    #[tokio::test]
+    async fn foreign_viewer_reads_the_owner_set_picture() {
+        use axum::body::Bytes;
+        use axum::http::{header, HeaderMap, HeaderValue};
+
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (_bob, bob_dev) = person(&state, 2);
+        let project = project_of(&state, &alice, "Hezbola");
+
+        // No picture yet: 404 for everyone.
+        let r = crate::images::project_avatar(State(state.clone()), Path(format!("{project}.jpg")))
+            .await;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
+
+        // Alice uploads a PNG into the agent's slot and makes it the picture.
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
+        let r = crate::blobs::put(
+            State(state.clone()),
+            alice_dev.clone(),
+            Path((project.clone(), "avatar-1.png".to_owned())),
+            headers,
+            Bytes::from_static(crate::image_sniff::samples::PNG),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT);
+        let mut body = leaf_patch(0);
+        body.avatar_leaf = None;
+        body.avatar_leaf_color = None;
+        body.image_key = Some(Some("avatar-1.png".into()));
+        let r = patch_project(
+            State(state.clone()),
+            alice_dev.clone(),
+            Path(project.clone()),
+            Json(body),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+
+        // Bob (a stranger to the project) cannot read the slot — that is the agent's workspace.
+        let r = crate::blobs::get(
+            State(state.clone()),
+            bob_dev.clone(),
+            Path((project.clone(), "avatar-1.png".to_owned())),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+
+        // But the picture route hands him the current picture, typed, cacheable.
+        let r = crate::images::project_avatar(State(state.clone()), Path(format!("{project}.jpg")))
+            .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(
+            r.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("image/png")
+        );
+        assert!(r
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|c| c.contains("max-age")));
+        let bytes = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        assert_eq!(&bytes[..], crate::image_sniff::samples::PNG);
+
+        // Reset to the leaf: the route is 404 again, so a viewer's fetch falls back to the leaf
+        // only when the owner really has none.
+        let mut body = leaf_patch(1);
+        body.image_key = Some(None);
+        patch_project(
+            State(state.clone()),
+            alice_dev,
+            Path(project.clone()),
+            Json(body),
+        )
+        .await
+        .unwrap();
+        let r = crate::images::project_avatar(State(state.clone()), Path(format!("{project}.jpg")))
+            .await;
+        assert_eq!(r.status(), StatusCode::NOT_FOUND);
     }
 }

@@ -6,7 +6,7 @@
 use std::io::Cursor;
 use std::time::Instant;
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -484,6 +484,64 @@ pub fn is_unknown_model_error(status: u16, body: &[u8]) -> bool {
             && (message.contains("does not exist") || message.contains("not found")))
 }
 
+/// Did the provider refuse the *prompt* (its safety / content-policy system)? Jacob's
+/// "Snowwhite and the transformers" (2026-10-25 23:36 UTC) came back from gpt-image-1-mini as
+/// 400 "Your request was rejected by the safety system…" and surfaced as a blanket 502. Another
+/// model will refuse the same words, so this is a clear 422 for the person, not a fall-through.
+pub fn is_prompt_refusal(status: u16, body: &[u8]) -> bool {
+    if !(400..500).contains(&status) {
+        return false;
+    }
+    let v: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let code = v
+        .pointer("/error/code")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let kind = v
+        .pointer("/error/type")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let message = v
+        .pointer("/error/message")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    code.contains("moderation")
+        || code.contains("content_policy")
+        || code.contains("safety")
+        || kind.contains("moderation")
+        || kind.contains("content_policy")
+        || message.contains("safety system")
+        || message.contains("content policy")
+        || message.contains("rejected as a result of")
+        || (message.contains("rejected") && message.contains("safety"))
+}
+
+/// A provider answer worth one more try before giving up on this model: rate limited or a
+/// server-side failure (the request itself was fine).
+pub fn is_transient_upstream(status: u16) -> bool {
+    status == 429 || (500..600).contains(&status)
+}
+
+/// What the person reads when the provider refused their words.
+pub const AVATAR_REFUSED_FRIENDLY: &str = "That prompt was refused — try a different one.";
+
+/// The refusal: a 422 with the clear line, the provider's words under `detail`, one log line.
+fn avatar_refused(project_id: &str, detail: impl Into<String>) -> Response {
+    let detail = detail.into();
+    tracing::info!(project = %project_id, %detail, "avatar prompt refused by the provider");
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(json!({ "error": { "type": "avatar_refused", "message": AVATAR_REFUSED_FRIENDLY, "detail": detail } })),
+    )
+        .into_response()
+}
+
 /// The friendly failure: the user-facing line, the provider's words under `detail`, one log line.
 fn avatar_unavailable(project_id: &str, detail: impl Into<String>) -> Response {
     let detail = detail.into();
@@ -617,6 +675,177 @@ pub async fn server_avatar_generate(
 /// Blob slot prefix for a person's own generated previews: `users:{user_id}`.
 pub const USER_BLOB_PREFIX: &str = "users:";
 
+/// `GET /projects/{id}/avatar.jpg` — the agent's current picture (the blob its `image_key`
+/// names), public like `GET /avatars/{user}.jpg` (the same role as a GitHub CDN avatar URL).
+/// Why not `/blob/{project}/{key}`: that slot is the owner's and the project's guests' (it holds
+/// the agent's working files too), so a viewer who only shares a group with the agent got 403
+/// and drew the automatic leaf instead of the owner's picture (Jacob, 2026-10-25: "Hezbola,
+/// run by @unarbos, purple leaf"). Clients append `?v={avatar_version}`, so a change is a new
+/// URL and the day-long cache never serves the old bytes. 404 while the agent has no picture.
+pub async fn project_avatar(State(state): State<AppState>, Path(file): Path<String>) -> Response {
+    let project_id = file.strip_suffix(".jpg").unwrap_or(file.as_str());
+    let Ok(Some(p)) = state.db.project(project_id) else {
+        return crate::signin::api_error(StatusCode::NOT_FOUND, "not_found", "no such agent");
+    };
+    let Some(key) = p
+        .image_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+    else {
+        return crate::signin::api_error(StatusCode::NOT_FOUND, "not_found", "no picture");
+    };
+    let Some(bytes) = crate::blobs::read(&state, &p.id, key).await else {
+        return crate::signin::api_error(StatusCode::NOT_FOUND, "not_found", "no picture");
+    };
+    let mime = match crate::blobs::stored_image(&state, &p.id, key).await {
+        crate::blobs::StoredImage::Image(kind) => match kind {
+            crate::image_sniff::ImageKind::Png => "image/png",
+            crate::image_sniff::ImageKind::Jpeg => "image/jpeg",
+            crate::image_sniff::ImageKind::Gif => "image/gif",
+            crate::image_sniff::ImageKind::Webp => "image/webp",
+            crate::image_sniff::ImageKind::Heic => "image/heic",
+        },
+        crate::blobs::StoredImage::Missing | crate::blobs::StoredImage::NotAnImage(_) => {
+            return crate::signin::api_error(StatusCode::NOT_FOUND, "not_found", "no picture")
+        }
+    };
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static(mime),
+            ),
+            (
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("public, max-age=86400"),
+            ),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
+/// The image provider's last health probe: `GET {images_base}/models/{first avatar model}` with
+/// the relay's key — no generation, no spend — so an outage, a revoked key or a retired model
+/// shows in `healthz.images` and `GET /admin/images/health` before a person hits it.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ImageHealth {
+    pub ok: bool,
+    pub checked_at: i64,
+    pub model: String,
+    pub status: u16,
+    pub detail: String,
+    pub took_ms: u64,
+}
+
+/// How often the background probe runs.
+const IMAGE_HEALTH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// One probe; stores and returns the record. With `ARBOS_IMAGE_MOCK=1` or no key the answer
+/// says so instead of calling out.
+pub async fn probe_provider(state: &AppState) -> ImageHealth {
+    let model = avatar_gen_models()[0].clone();
+    let t0 = Instant::now();
+    let record = if state.cfg.image_mock {
+        ImageHealth {
+            ok: true,
+            checked_at: arbos_core::ids::now_ms(),
+            model,
+            status: 200,
+            detail: "mock".into(),
+            took_ms: 0,
+        }
+    } else if let Some(key) = state.cfg.openai_key.clone() {
+        let url = format!(
+            "{}/models/{model}",
+            state.cfg.openai_images_base.trim_end_matches('/')
+        );
+        match state
+            .http
+            .get(&url)
+            .bearer_auth(&key)
+            .timeout(std::time::Duration::from_secs(15))
+            .send()
+            .await
+        {
+            Ok(r) => {
+                let status = r.status().as_u16();
+                let body = r.text().await.unwrap_or_default();
+                let detail = if (200..300).contains(&status) {
+                    "ok".to_owned()
+                } else {
+                    serde_json::from_str::<Value>(&body)
+                        .ok()
+                        .and_then(|v| {
+                            v.pointer("/error/message")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned)
+                        })
+                        .unwrap_or_else(|| format!("HTTP {status}"))
+                };
+                ImageHealth {
+                    ok: (200..300).contains(&status),
+                    checked_at: arbos_core::ids::now_ms(),
+                    model,
+                    status,
+                    detail,
+                    took_ms: t0.elapsed().as_millis() as u64,
+                }
+            }
+            Err(e) => ImageHealth {
+                ok: false,
+                checked_at: arbos_core::ids::now_ms(),
+                model,
+                status: 0,
+                detail: e.to_string(),
+                took_ms: t0.elapsed().as_millis() as u64,
+            },
+        }
+    } else {
+        ImageHealth {
+            ok: false,
+            checked_at: arbos_core::ids::now_ms(),
+            model,
+            status: 0,
+            detail: "no OPENAI_API_KEY".into(),
+            took_ms: 0,
+        }
+    };
+    if !record.ok {
+        tracing::warn!(model = %record.model, status = record.status, detail = %record.detail, "image provider probe failed");
+    }
+    *state.image_health.lock().await = Some(record.clone());
+    record
+}
+
+/// Every 5 minutes, from start-up (the first probe runs at once).
+pub fn spawn_health_probe(state: AppState) {
+    tokio::spawn(async move {
+        loop {
+            probe_provider(&state).await;
+            tokio::time::sleep(IMAGE_HEALTH_INTERVAL).await;
+        }
+    });
+}
+
+/// `GET /admin/images/health[?probe=1]` (admin token): the last probe, or a fresh one.
+pub async fn admin_image_health(
+    State(state): State<AppState>,
+    principal: Principal,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if !matches!(principal, Principal::Admin) {
+        return avatar_error(StatusCode::FORBIDDEN, "forbidden", "admin token required");
+    }
+    let record = if q.get("probe").is_some_and(|v| v == "1") {
+        Some(probe_provider(&state).await)
+    } else {
+        state.image_health.lock().await.clone()
+    };
+    Json(json!({ "images": record })).into_response()
+}
+
 /// `POST /me/avatar/generate {prompt}` — the same for the signed-in person's own profile picture
 /// (Jacob, 2026-10-25: the own-profile avatar opens the agents' picker). The picture lands in
 /// `users:{id}`, which only that person reads, and "Set avatar" sends
@@ -707,39 +936,68 @@ async fn generate_into(state: &AppState, target: AvatarTarget, prompt: &str) -> 
         );
         let mut picked: Option<(String, Value)> = None;
         let mut last_detail = String::from("no model answered");
-        for candidate in &models {
-            let upstream = match state
-                .http
-                .post(&url)
-                .bearer_auth(&key)
-                .json(&avatar_request(candidate, &prompt))
-                .send()
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => return avatar_unavailable(&target.slot, format!("{candidate}: {e}")),
-            };
-            let status = upstream.status();
-            let bytes = upstream.bytes().await.unwrap_or_default();
-            if status.is_success() {
-                let parsed: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-                picked = Some((candidate.clone(), parsed));
-                break;
+        let backoff = &state.cfg.avatar_retry_backoff_ms;
+        'models: for candidate in &models {
+            // Transient trouble (timeout, 429, 5xx) gets `backoff.len()` more tries on the same
+            // model, then the next model; a refused prompt or any other 4xx stops here.
+            let mut attempt = 0usize;
+            loop {
+                let sent = state
+                    .http
+                    .post(&url)
+                    .bearer_auth(&key)
+                    .json(&avatar_request(candidate, &prompt))
+                    .send()
+                    .await;
+                let (status, bytes) = match sent {
+                    Ok(r) => {
+                        let status = r.status();
+                        (status, r.bytes().await.unwrap_or_default())
+                    }
+                    Err(e) => {
+                        last_detail = format!("{candidate}: {e}");
+                        if let Some(wait) = backoff.get(attempt) {
+                            tracing::warn!(target = %target.slot, model = %candidate, error = %e, attempt, "avatar provider unreachable; retrying");
+                            tokio::time::sleep(std::time::Duration::from_millis(*wait)).await;
+                            attempt += 1;
+                            continue;
+                        }
+                        continue 'models;
+                    }
+                };
+                if status.is_success() {
+                    let parsed: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+                    picked = Some((candidate.clone(), parsed));
+                    break 'models;
+                }
+                let message = serde_json::from_slice::<Value>(&bytes)
+                    .ok()
+                    .and_then(|v| {
+                        v.pointer("/error/message")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .unwrap_or_else(|| format!("HTTP {status}"));
+                last_detail = format!("{candidate}: {message}");
+                if is_prompt_refusal(status.as_u16(), &bytes) {
+                    return avatar_refused(&target.slot, last_detail);
+                }
+                if is_unknown_model_error(status.as_u16(), &bytes) {
+                    tracing::info!(target = %target.slot, model = %candidate, %message, "avatar model rejected; trying the next");
+                    continue 'models;
+                }
+                if is_transient_upstream(status.as_u16()) {
+                    if let Some(wait) = backoff.get(attempt) {
+                        tracing::warn!(target = %target.slot, model = %candidate, %status, attempt, "avatar provider transient failure; retrying");
+                        tokio::time::sleep(std::time::Duration::from_millis(*wait)).await;
+                        attempt += 1;
+                        continue;
+                    }
+                    tracing::warn!(target = %target.slot, model = %candidate, %status, "avatar provider still failing; trying the next model");
+                    continue 'models;
+                }
+                return avatar_unavailable(&target.slot, last_detail);
             }
-            let message = serde_json::from_slice::<Value>(&bytes)
-                .ok()
-                .and_then(|v| {
-                    v.pointer("/error/message")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                })
-                .unwrap_or_else(|| format!("HTTP {status}"));
-            last_detail = format!("{candidate}: {message}");
-            if is_unknown_model_error(status.as_u16(), &bytes) {
-                tracing::info!(target = %target.slot, model = %candidate, %message, "avatar model rejected; trying the next");
-                continue;
-            }
-            return avatar_unavailable(&target.slot, last_detail);
         }
         let Some((used, parsed)) = picked else {
             return avatar_unavailable(&target.slot, last_detail);
@@ -813,17 +1071,42 @@ mod avatar_generate_tests {
     use crate::state::AuthMode;
 
     /// A stub `/images/generations`: records every request, rejects models in `unknown` the way
-    /// OpenAI does, answers a 1 × 1 PNG for the rest.
+    /// OpenAI does, refuses a prompt containing "forbidden" the way the safety system did on
+    /// 2026-10-25, answers 503 to the first `flaky_503` calls, a 1 × 1 PNG for the rest. Also
+    /// serves `GET /models/{m}` (200, or 404 for `unknown`) for the health probe.
     async fn stub(unknown: &'static [&'static str]) -> (String, Arc<Mutex<Vec<Value>>>) {
+        stub_with(unknown, 0).await
+    }
+
+    async fn stub_with(
+        unknown: &'static [&'static str],
+        flaky_503: usize,
+    ) -> (String, Arc<Mutex<Vec<Value>>>) {
+        use axum::routing::get;
         let seen: Arc<Mutex<Vec<Value>>> = Arc::default();
         let seen_in = seen.clone();
+        let flaky_left = Arc::new(Mutex::new(flaky_503));
         let app = Router::new().route(
+            "/models/{model}",
+            get(move |Path(model): Path<String>| async move {
+                if unknown.contains(&model.as_str()) {
+                    (
+                        StatusCode::NOT_FOUND,
+                        Json(json!({ "error": { "message": format!("The model '{model}' does not exist"), "code": "model_not_found" } })),
+                    )
+                } else {
+                    (StatusCode::OK, Json(json!({ "id": model, "object": "model" })))
+                }
+            }),
+        ).route(
             "/images/generations",
             post(move |Json(body): Json<Value>| {
                 let seen = seen_in.clone();
+                let flaky_left = flaky_left.clone();
                 async move {
                     seen.lock().unwrap().push(body.clone());
                     let model = body["model"].as_str().unwrap_or("");
+                    let prompt = body["prompt"].as_str().unwrap_or("");
                     if unknown.contains(&model) {
                         return (
                             StatusCode::BAD_REQUEST,
@@ -831,6 +1114,24 @@ mod avatar_generate_tests {
                                 "message": format!("The model '{model}' does not exist."),
                                 "type": "image_generation_user_error", "param": "model", "code": "invalid_value" } })),
                         );
+                    }
+                    if prompt.contains("forbidden") {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({ "error": {
+                                "message": "Your request was rejected by the safety system. If you believe this is an error, contact us at help.openai.com and include the request ID req_stub.",
+                                "type": "image_generation_user_error", "param": Value::Null, "code": "moderation_blocked" } })),
+                        );
+                    }
+                    {
+                        let mut left = flaky_left.lock().unwrap();
+                        if *left > 0 {
+                            *left -= 1;
+                            return (
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                Json(json!({ "error": { "message": "The server is overloaded", "type": "server_error", "param": Value::Null, "code": Value::Null } })),
+                            );
+                        }
                     }
                     let png = mock_png("stub", "64x64");
                     (
@@ -1258,6 +1559,132 @@ mod avatar_generate_tests {
             .contains("avatars.githubusercontent.com"));
         assert_eq!(drain(&device_id(&bob_dev)).len(), 1);
         assert!(drain(&device_id(&alice_dev)).is_empty());
+    }
+
+    /// Jacob's 2026-10-25 23:36 UTC failure: the provider's safety system refused "Snowwhite and
+    /// the transformers" and the relay answered a blanket 502. A refusal is now a 422 with a clear
+    /// line, on the agent route and the own-profile route alike; nothing is retried or metered.
+    #[tokio::test]
+    async fn a_refused_prompt_is_a_clear_422_on_every_route() {
+        let (base, seen) = stub(&[]).await;
+        let state = state_against(&base);
+        let (dev, project) = funded_agent(&state, 93);
+        let r = avatar_generate(
+            State(state.clone()),
+            dev.clone(),
+            Path(project.clone()),
+            Json(AvatarGenerateBody {
+                prompt: "a forbidden picture".into(),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let bytes = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["error"]["type"], "avatar_refused");
+        assert_eq!(v["error"]["message"], AVATAR_REFUSED_FRIENDLY);
+        assert!(v["error"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("rejected by the safety system"));
+        assert_eq!(seen.lock().unwrap().len(), 1, "no retry, no next model");
+        assert_eq!(
+            state
+                .db
+                .usage_count_since(&project, "openai-images", "avatar:", 0)
+                .unwrap(),
+            0,
+            "a refusal is not metered"
+        );
+        // The own-profile route: the same answer.
+        let r = me_avatar_generate(
+            State(state.clone()),
+            dev.clone(),
+            Json(AvatarGenerateBody {
+                prompt: "another forbidden one".into(),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        // Jacob's exact provider body is a refusal, not a model rejection.
+        let body = br#"{"error":{"message":"Your request was rejected by the safety system. If you believe this is an error, contact us at help.openai.com and include the request ID req_e26ae2ab492d48b7bafa7e6b19440e8f.","type":"image_generation_user_error","param":null,"code":"moderation_blocked"}}"#;
+        assert!(is_prompt_refusal(400, body));
+        assert!(!is_unknown_model_error(400, body));
+        assert!(!is_prompt_refusal(500, body), "a 5xx is never a refusal");
+    }
+
+    /// A transient provider failure (503 / 429 / a dropped connection) gets the backoff retries
+    /// on the same model before the fall-through; the picture still arrives.
+    #[tokio::test]
+    async fn a_transient_provider_failure_is_retried_then_succeeds() {
+        let (base, seen) = stub_with(&[], 2).await;
+        let mut state = state_against(&base);
+        Arc::get_mut(&mut state.cfg)
+            .unwrap()
+            .avatar_retry_backoff_ms = vec![0, 0];
+        let (dev, project) = funded_agent(&state, 94);
+        let r = avatar_generate(
+            State(state.clone()),
+            dev,
+            Path(project.clone()),
+            Json(AvatarGenerateBody {
+                prompt: "a patient otter".into(),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let calls = seen.lock().unwrap();
+        assert_eq!(calls.len(), 3, "two 503s, then the picture");
+        assert!(
+            calls.iter().all(|c| c["model"] == "gpt-image-1-mini"),
+            "retries stay on the same model"
+        );
+        assert!(
+            is_transient_upstream(503) && is_transient_upstream(429) && !is_transient_upstream(400)
+        );
+    }
+
+    /// The provider probe: `GET /models/{first model}` — ok against a live stub, not ok when the
+    /// model is gone; the record lands in state for `healthz.images` and the admin route.
+    #[tokio::test]
+    async fn the_provider_probe_records_health() {
+        let (base, _) = stub(&[]).await;
+        let state = state_against(&base);
+        let h = probe_provider(&state).await;
+        assert!(h.ok, "{h:?}");
+        assert_eq!(h.model, avatar_gen_models()[0]);
+        assert!(state
+            .image_health
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|r| r.ok));
+        let (base, _) = stub(&["gpt-image-1-mini"]).await;
+        let state = state_against(&base);
+        let h = probe_provider(&state).await;
+        assert!(!h.ok);
+        assert_eq!(h.status, 404);
+        assert!(h.detail.contains("does not exist"));
+        // Admin only.
+        let r = admin_image_health(
+            State(state.clone()),
+            Principal::Box {
+                user_id: "u".into(),
+            },
+            axum::extract::Query(Default::default()),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        let r = admin_image_health(
+            State(state.clone()),
+            Principal::Admin,
+            axum::extract::Query(Default::default()),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["images"]["ok"], false);
     }
 
     /// One REAL generation against api.openai.com with `OPENAI_API_KEY` (≈ $0.005). Off unless

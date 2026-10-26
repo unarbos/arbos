@@ -779,6 +779,8 @@ enum FixtureMedia {
         switch item.kind {
         case .image where item.name.contains("Screenshot"):
             return pagePNG().map { ($0, "image/png") }
+        case .image where item.name.hasPrefix("IMG_"):
+            return phoneShotPNG().map { ($0, "image/png") }
         case .image:
             return png(seed: ref).map { ($0, "image/png") }
         case .file:
@@ -822,6 +824,46 @@ enum FixtureMedia {
             cg.setFillColor(UIColor(red: 26 / 255, green: 115 / 255, blue: 232 / 255, alpha: 1).cgColor)
             cg.fill(CGRect(x: 40, y: 176, width: 140, height: 40))
             cg.setFillColor(UIColor(white: 0.38, alpha: 1).cgColor); cg.fill(CGRect(x: 40, y: 240, width: 150, height: 12))
+        }
+        return img.pngData()
+    }
+
+    /// A 390 × 844 portrait "phone screenshot": dark chat page with a header pill and a
+    /// few bubbles — the tall picture of [feedback image-caption-bubble-ios-2026-10-25],
+    /// whose caption must not wrap at the picture's ~150 pt fitted width.
+    private static func phoneShotPNG() -> Data? {
+        let (w, h) = (390, 844)
+        let img = UIGraphicsImageRenderer(size: CGSize(width: w, height: h), format: {
+            let f = UIGraphicsImageRendererFormat(); f.scale = 1; return f
+        }()).image { ctx in
+            let cg = ctx.cgContext
+            func fillPath(_ path: UIBezierPath) { cg.addPath(path.cgPath); cg.fillPath() }
+            cg.setFillColor(UIColor(white: 0.07, alpha: 1).cgColor); cg.fill(CGRect(x: 0, y: 0, width: w, height: h))
+            // Status bar + header pill.
+            cg.setFillColor(UIColor(white: 0.9, alpha: 1).cgColor)
+            cg.fill(CGRect(x: 32, y: 22, width: 36, height: 12))
+            cg.setFillColor(UIColor(white: 0.16, alpha: 1).cgColor)
+            fillPath(UIBezierPath(roundedRect: CGRect(x: 110, y: 62, width: 170, height: 44), cornerRadius: 22))
+            // Bubbles: three incoming on the left, two outgoing on the right.
+            let rows: [(CGFloat, CGFloat, CGFloat, Bool)] = [(150, 230, 70, false), (236, 180, 48, false), (300, 210, 92, true),
+                                                              (408, 250, 120, false), (544, 160, 48, true), (608, 240, 96, false)]
+            for (y, bw, bh, mine) in rows {
+                let x: CGFloat = mine ? CGFloat(w) - 18 - bw : 18
+                cg.setFillColor((mine ? UIColor(white: 0.32, alpha: 1) : UIColor(white: 0.14, alpha: 1)).cgColor)
+                fillPath(UIBezierPath(roundedRect: CGRect(x: x, y: y, width: bw, height: bh), cornerRadius: 18))
+                cg.setFillColor(UIColor(white: mine ? 0.85 : 0.6, alpha: 1).cgColor)
+                var ly = y + 16
+                while ly + 8 < y + bh - 10 {
+                    cg.fill(CGRect(x: x + 14, y: ly, width: bw - 28 - CGFloat((Int(ly) * 7) % 40), height: 8))
+                    ly += 20
+                }
+            }
+            // Composer.
+            cg.setFillColor(UIColor(white: 0.14, alpha: 1).cgColor)
+            fillPath(UIBezierPath(roundedRect: CGRect(x: 70, y: CGFloat(h) - 86, width: 240, height: 52), cornerRadius: 26))
+            fillPath(UIBezierPath(ovalIn: CGRect(x: 14, y: CGFloat(h) - 86, width: 52, height: 52)))
+            cg.setFillColor(UIColor.white.cgColor)
+            fillPath(UIBezierPath(ovalIn: CGRect(x: CGFloat(w) - 66, y: CGFloat(h) - 86, width: 52, height: 52)))
         }
         return img.pngData()
     }
