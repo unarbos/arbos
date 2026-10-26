@@ -94,6 +94,23 @@ fn record(info: &std::panic::PanicHookInfo<'_>) {
     }
 }
 
+/// True when this entry is from a deliberate unit/smoke-test panic, not a real crash.
+/// Those must not go through the silent-diagnostic path — otherwise running the
+/// transcript smoke test leaves a line in `panic.log` that the next app launch reports
+/// as feedback (app-01M5WZDJQ5D1S90566WD5FMJQ1: Ken's Mac, "test poison event").
+fn is_test_entry(entry: &str) -> bool {
+    // Message line written by AppState::apply_inner's #[cfg(test)] poison assert.
+    if entry.lines().any(|l| l.trim() == "test poison event") {
+        return true;
+    }
+    // Rust test threads are named like `ui::transcript::transcript_smoke_tests::…`.
+    entry.lines().any(|l| {
+        let l = l.trim();
+        l.starts_with("thread ")
+            && (l.contains("_tests::") || l.contains("::tests::") || l.contains("smoke_tests"))
+    })
+}
+
 /// The newest panic entry not yet reported (if any), and mark the log as reported up to its
 /// current length. Called once per launch when the relay session is up; the caller sends it
 /// through the silent-diagnostic feedback path.
@@ -118,6 +135,9 @@ pub fn take_unreported() -> Option<String> {
         .unwrap_or(fresh);
     let last = last.trim();
     if last.is_empty() {
+        return None;
+    }
+    if is_test_entry(last) {
         return None;
     }
     // The feedback note has a size limit; keep the head (message, location, top frames).
@@ -159,6 +179,23 @@ mod tests {
         .unwrap();
         let second = take_unreported().expect("the new entry");
         assert!(second.contains("second") && !second.contains("index out of bounds"));
+        // A smoke-test poison entry is marked reported but never returned — so a cargo test
+        // run cannot open a silent-diagnostic feedback item on the next real launch.
+        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(
+            format!(
+                "{ENTRY_START}2026-10-26T20:11:34Z ====\nversion 0.6.276 · 27.0.1\n\
+                 thread ui::transcript::transcript_smoke_tests::a_panicking_sync_event_is_skipped_not_fatal\n\
+                 at crates/arbos-mac/src/app.rs:1439:13\ntest poison event\n   0: frame\n\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            take_unreported(),
+            None,
+            "test poison must not become a silent diagnostic"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -6743,8 +6743,25 @@ mod transcript_smoke_tests {
     /// launch (a panic on the main thread unwinds into AppKit → `abort()`). A sync event whose
     /// apply panics is skipped with a notice, the state keeps every other row, and the
     /// transcript still renders; the panic hook records the message to `panic.log`.
+    /// The log path is pointed at a temp HOME so this poison never lands in the user's real
+    /// `~/Library/Logs/Arbos/panic.log` (that was auto-reported as feedback
+    /// app-01M5WZDJQ5D1S90566WD5FMJQ1).
     #[gpui::test]
     fn a_panicking_sync_event_is_skipped_not_fatal(cx: &mut TestAppContext) {
+        let dir = std::env::temp_dir().join(format!(
+            "arbos-panic-smoke-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        // panic_log::log_path reads HOME / XDG_STATE_HOME; isolate so the real user log is untouched.
+        let prev_home = std::env::var_os("HOME");
+        let prev_xdg = std::env::var_os("XDG_STATE_HOME");
+        std::env::set_var("HOME", &dir);
+        std::env::set_var("XDG_STATE_HOME", &dir);
         crate::panic_log::install();
         let before = std::fs::read_to_string(crate::panic_log::log_path()).unwrap_or_default();
         let (_rt, state, transcript) = mount(cx);
@@ -6774,6 +6791,15 @@ mod transcript_smoke_tests {
             after.len() > before.len() && after[before.len()..].contains("test poison event"),
             "panic.log holds the message"
         );
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match prev_xdg {
+            Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+            None => std::env::remove_var("XDG_STATE_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The list renders the reply as block rows (no panic, every block drawn),
