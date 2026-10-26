@@ -398,6 +398,43 @@ does not re-create the window of bubbles (#1645; first-scrollable after open
 Code: `MessageActions.swift` `messageRowGestures`, `Transcript.swift` `RowView`,
 `AppModel.swift` `requestSnapshot` / `applySnapshot`.
 
+## iPhone composer and status row = Grok Bot's (Jacob 2026-10-25, [feedback iphone-composer-grok-parity-2026-10-25] #1841)
+
+**One composer and one status row for every chat kind** — agent 1:1, DM, group,
+server channel, job tab — laid out from `Theme`'s composer constants and
+pinned by `ArbosTests/ComposerMetricsTests`. The numbers are Jacob's Grok Bot
+shot of 2026-10-25 (iPhone Air, 420 pt, 3 px/pt, keyboard up), aligned on the
+composer's bottom line and the `+`; every value is a whole pixel at 3x. Grok
+changed its composer between the 2026-10-15 refs and this shot; this shot wins.
+
+| Item | Rule (pt) | Code |
+| --- | --- | --- |
+| `+` disc and field height | **48** (was 42), field edge on a true circle; radius stays 24 as the field grows | `Theme.plusButton`, `Theme.composerHeight` |
+| Rim on the `+` and the field (dark) | edge highlight fading in over 1 pt: 58 / 47 / 40 luminance over `#181818` — three nested inner strokes ⅓, ⅔, 1 pt; light keeps the 1 pt `fieldBorder` | `ComposerRim`, `Theme.composerRimLayers` |
+| `+` glyph | SF `plus` **22.5 pt regular** (54 px arms, 5 px stroke) | `Theme.plusGlyph` |
+| `+` → field | **10** (was 12) | `Theme.plusFieldGap` |
+| Side inset | 31 keyboard down (unchanged), **18 keyboard up** (was 19) | `Theme.composerInset`, `composerInsetKeyboard` |
+| Text start | caret centre **17** from the field's edge; one 22 pt line centred (13 top / bottom) | `Theme.composerTextInset`, `composerTextPadY`, `MentionTextView.insets` |
+| Placeholder / caret | 17 pt regular `#58585B`; 2 × 22 pt accent caret — unchanged (identical in the shot) | — |
+| Mic | **filled mic without a base bar**, 12 × 16⅓, `#96969C`; glyph centre **24 before the pill** (44 pt hit frame + 2) | `MicGlyph`, `Theme.micHitWidth`, `micPillGap` |
+| Right action | white **capsule 40 × 32** (was a 36 circle), 8 from the field's top and bottom, **8⅔ (26 px)** from its right edge | `Theme.actionPillWidth/Height/Trailing` |
+| Right action glyph, idle | Grok's **voice-wave**: five round bars 2 wide, 3.25 apart, 6.5 / 14.5 / 8.5 / 14.5 / 6.5 tall; **a tap still starts the call** (Arbos has calls, Grok has voice mode). With text or a recording: `arrow.up` 16 bold. Channels: the arrow, dimmed until there is text | `VoiceWaveGlyph`, `ComposerField.actionGlyph` |
+| Field → keyboard | **18** with the keyboard up (was 8); 2 above the home indicator otherwise | `Theme.composerBottomKeyboard`, `composerBottom` |
+| Status picture | **25⅓ (76 px)**, left edge **6 inside the `+` disc's left edge** (24 from the screen keyboard up, 37 down) — no longer the bubble's 42 pt disc, no longer centred on the `+` | `Theme.presenceAvatar`, `presenceAvatarOffset`, `presenceInset(composerInset:)` |
+| Status words | **17 pt body**, muted, shimmer unchanged; **14** after the picture (words at 190 px keyboard up) | `PresenceRow.textSize`, `Theme.presenceGap` |
+| Picture bottom → composer top | **22⅔ (68 px)**; the row is the picture tall, ChatView pads below it | `Theme.presenceBottomGap` |
+| Tasks chip (#1696) and job-tab words (#1801) | ride the same row unchanged (20 pt chip inside the 25⅓ row) | `PresenceRow.tasksChip`, `onWords` |
+
+Not moved, on purpose: the people-chat **bubble picture stays 42 pt centred on
+the `+`** (the ask covered the composer and the row, not the bubbles — the `+`
+grew, the disc did not; `Theme.memberAvatar` is no longer `= plusButton`); the
+Settings / search / secrets fields keep `Theme.fieldHeight` 42; the status
+words' colour (both sides shimmer — one still cannot settle it); the light
+theme's rim colour (no Grok light reference for this composer — shots on the
+sheet for Jacob's yes). Measurement record and the before/after sheet:
+project store `docs/grokbot-design-parity.md` § "Composer and status row vs
+Jacob's 2026-10-25 Grok Bot shot" and `media/feedback/iphone-composer-parity/`.
+
 ## Full screen (Jacob 2026-10-24, [feedback fullscreen-traffic-lights-2026-10-24] → [feedback topbar-grok-parity-2026-10-24])
 
 **The traffic lights are macOS's own standard window buttons, always. The

@@ -761,7 +761,7 @@ struct ChatSession: View {
                             .font(theme.font(Theme.small))
                             .foregroundStyle(theme.muted)
                             .frame(maxWidth: .infinity)
-                            .frame(height: Theme.fieldHeight)
+                            .frame(height: Theme.composerHeight)
                             .accessibilityIdentifier("channel-read-only")
                     } else if isPeople, let banner = MuteBanner.text(people: people, pushMutedUntil: model.pushMutedUntil(chatId)) {
                         // Group admin muted me from posting — one quiet line, no composer.
@@ -769,7 +769,7 @@ struct ChatSession: View {
                             .font(theme.font(Theme.small))
                             .foregroundStyle(theme.muted)
                             .frame(maxWidth: .infinity)
-                            .frame(height: Theme.fieldHeight)
+                            .frame(height: Theme.composerHeight)
                             .accessibilityIdentifier("group-silenced")
                     } else {
                         composer
@@ -780,7 +780,8 @@ struct ChatSession: View {
                 .animation(.easeOut(duration: 0.25), value: composerFocused)
             }
             .padding(.top, 8)
-            .padding(.bottom, composerFocused ? 8 : 2)
+            // Grok: 18 pt between the field and the keyboard, 2 pt above the home indicator.
+            .padding(.bottom, composerFocused ? Theme.composerBottomKeyboard : Theme.composerBottom)
             .background(alignment: .top) {
                 LinearGradient(colors: [theme.bg.opacity(0), theme.bg], startPoint: .top, endPoint: .bottom)
                     .frame(height: 24)
@@ -2188,7 +2189,8 @@ struct ChatSession: View {
                             onTasks: openTasks,
                             onWords: openNewest)
                     .padding(.horizontal, 16)
-                    .padding(.bottom, 4)
+                    // Grok: 68 px from the picture's bottom to the composer's top.
+                    .padding(.bottom, Theme.presenceBottomGap)
             }
         }
     }
@@ -2309,11 +2311,11 @@ struct ChatSession: View {
                             .background(Capsule().fill(theme.bubbleAssistant))
                         }
                     }
-                    .padding(.leading, Theme.plusButton + 12)
+                    .padding(.leading, Theme.plusButton + Theme.plusFieldGap)
                 }
             }
             // Bottom-align the "+" with a multi-line field so growth expands upward.
-            HStack(alignment: .bottom, spacing: 12) {
+            HStack(alignment: .bottom, spacing: Theme.plusFieldGap) {
                 if !isChannel {
                     attachButton
                 }
@@ -2327,13 +2329,14 @@ struct ChatSession: View {
         Button { showAttach = true } label: {
             ZStack {
                 Circle().fill(theme.field)
-                Circle().strokeBorder(theme.fieldBorder.opacity(0.6), lineWidth: 1)
+                ComposerRim(shape: Circle())
                 Image(systemName: "plus")
-                    .font(theme.font(21, weight: .regular))
+                    .font(theme.font(Theme.plusGlyph, weight: .regular))
                     .foregroundStyle(theme.text)
             }
             .frame(width: Theme.plusButton, height: Theme.plusButton)
-            .contentShape(Circle().inset(by: -(44 - Theme.plusButton) / 2))
+            .contentShape(Circle())
+            .accessibilityIdentifier("composer-plus")
         }
         .buttonStyle(.plain)
         .sheet(isPresented: $showAttach, onDismiss: demoDismissed) {
@@ -2811,6 +2814,8 @@ struct WorkingStatusText: View {
     @Environment(\.theme) private var theme
     let text: String
     let color: Color
+    /// Point size; the presence row uses Grok's 17 pt body, the transcript's rows 15.
+    var size: CGFloat = Theme.small
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -2847,7 +2852,7 @@ struct WorkingStatusText: View {
 
     private func label<S: ShapeStyle>(_ style: S) -> some View {
         Text(text)
-            .font(theme.font(Theme.small))
+            .font(theme.font(size))
             .foregroundStyle(style)
     }
 }
@@ -3259,9 +3264,35 @@ private struct ComposerField: View {
         !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasPending
     }
 
-    /// Idle round button: phone — starts a voice call (agent or people chat).
-    /// Channels have no calls (C1): the arrow stays, dimmed until there is text.
-    private var idleButtonGlyph: String { isChannel ? "arrow.up" : "phone.fill" }
+    private var fieldShape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: Theme.composerHeight / 2, style: .circular)
+    }
+
+    /// Grok's filled mic (`MicGlyph`); the armed slide-to-cancel shows the bin instead.
+    @ViewBuilder
+    private var micGlyph: some View {
+        if memoCancelArmed {
+            Image(systemName: "trash").font(theme.font(17))
+        } else {
+            MicGlyph().frame(width: Theme.micGlyphWidth, height: Theme.micGlyphHeight)
+        }
+    }
+
+    /// Inside the white pill: the send arrow with text or a recording; idle, Grok's
+    /// voice-wave bars — a tap starts a voice call (agent or people chat). Channels
+    /// have no calls (C1): the arrow stays, dimmed until there is text.
+    @ViewBuilder
+    private var actionGlyph: some View {
+        if canSend || recorder.recording || isChannel {
+            Image(systemName: "arrow.up")
+                .font(theme.font(16, weight: .bold))
+                .foregroundStyle(theme.onPrimary)
+        } else {
+            VoiceWaveGlyph()
+                .fill(theme.onPrimary)
+                .accessibilityHidden(true)
+        }
+    }
 
     /// Max height for the growing composer field.
     ///
@@ -3270,7 +3301,14 @@ private struct ComposerField: View {
     /// eight lines and covering the transcript. Hug content with `fixedSize`,
     /// and still cap at 8 lines (Grok's 22 pt body pitch) for wrap glitches.
     private var composerFieldMaxHeight: CGFloat {
-        Theme.fieldHeight + 7 * 22
+        Theme.composerHeight + 7 * 22
+    }
+
+    /// The field's rim: Grok's edge highlight, or the recording / needs-answer tint.
+    private var rimTint: Color? {
+        if recorder.recording { return theme.danger.opacity(0.5) }
+        if needsAnswer { return theme.warn.opacity(0.7) }
+        return nil
     }
 
     var body: some View {
@@ -3282,7 +3320,7 @@ private struct ComposerField: View {
                     Image(systemName: "xmark")
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(theme.danger)
-                        .frame(width: 44, height: Theme.fieldHeight)
+                        .frame(width: 44, height: Theme.composerHeight)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -3329,56 +3367,52 @@ private struct ComposerField: View {
                                 agentProject: { model.agent(member: $0, chatId: chatId) })
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if draft.text.isEmpty || recorder.recording {
-                // Press/release like Mac: tap toggles recording on; hold ≥0.25s then
-                // release sends. Slide left while holding to discard (WhatsApp-style).
-                // highPriorityGesture so a focused TextField cannot steal the touch.
-                // The mic stays mounted while recording so release can finish without
-                // a second tap.
-                Image(systemName: memoCancelArmed ? "trash" : "mic")
-                    .font(theme.font(17))
-                    .foregroundStyle(recorder.recording ? theme.danger : theme.icon)
-                    .frame(width: 44, height: Theme.fieldHeight)
-                    .contentShape(Rectangle())
-                    .padding(.trailing, 2)
-                    .id("memo-mic")
-                    .highPriorityGesture(
-                        DragGesture(minimumDistance: 0)
-                            .onChanged { onMicDrag($0) }
-                            .onEnded { onMicEnd($0) }
-                    )
+            // Grok's trailing cluster: mic glyph centre 24 pt before the pill, the pill
+            // 8⅔ pt from the field's edge, both centred on the field's bottom line.
+            HStack(spacing: Theme.micPillGap) {
+                if draft.text.isEmpty || recorder.recording {
+                    // Press/release like Mac: tap toggles recording on; hold ≥0.25s then
+                    // release sends. Slide left while holding to discard (WhatsApp-style).
+                    // highPriorityGesture so a focused TextField cannot steal the touch.
+                    // The mic stays mounted while recording so release can finish without
+                    // a second tap.
+                    micGlyph
+                        .foregroundStyle(recorder.recording ? theme.danger : theme.icon)
+                        .frame(width: Theme.micHitWidth, height: Theme.composerHeight)
+                        .contentShape(Rectangle())
+                        .id("memo-mic")
+                        .accessibilityIdentifier("composer-mic")
+                        .highPriorityGesture(
+                            DragGesture(minimumDistance: 0)
+                                .onChanged { onMicDrag($0) }
+                                .onEnded { onMicEnd($0) }
+                        )
+                }
+                // While recording: tap send also finishes (same as release). Otherwise
+                // Grok keeps the composer usable while the bot works: text sends, an
+                // empty field starts a voice call with the agent (Grok's voice-wave pill).
+                Button(action: onPrimary) {
+                    Capsule()
+                        .fill(theme.primary)
+                        .frame(width: Theme.actionPillWidth, height: Theme.actionPillHeight)
+                        .overlay(actionGlyph)
+                        .frame(height: Theme.composerHeight)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .opacity(isChannel && !canSend && !recorder.recording ? 0.45 : 1)
+                .accessibilityLabel((canSend || recorder.recording) ? "Send" : (isChannel ? "Send" : "Call"))
+                .accessibilityIdentifier("composer-action")
             }
-            // While recording: tap send also finishes (same as release). Otherwise
-            // Grok keeps the composer usable while the bot works: text sends, an
-            // empty field starts a voice call with the agent (phone icon next to mic).
-            Button(action: onPrimary) {
-                Circle()
-                    .fill(theme.primary)
-                    .frame(width: Theme.voiceButton, height: Theme.voiceButton)
-                    .overlay(
-                        Image(systemName: (canSend || recorder.recording) ? "arrow.up" : idleButtonGlyph)
-                            .font(theme.font(16, weight: .bold))
-                            .foregroundStyle(theme.onPrimary)
-                    )
-                    .contentShape(Circle().inset(by: -(44 - Theme.voiceButton) / 2))
-            }
-            .buttonStyle(.plain)
-            .opacity(isChannel && !canSend && !recorder.recording ? 0.45 : 1)
-            .accessibilityLabel((canSend || recorder.recording) ? "Send" : (isChannel ? "Send" : "Call"))
-            .padding(.trailing, 3)
+            .padding(.trailing, Theme.actionPillTrailing)
         }
         // Hard max so a TextField layout glitch cannot paint over the transcript.
-        .frame(minHeight: Theme.fieldHeight, maxHeight: composerFieldMaxHeight, alignment: .bottom)
+        .frame(minHeight: Theme.composerHeight, maxHeight: composerFieldMaxHeight, alignment: .bottom)
         .fixedSize(horizontal: false, vertical: true)
-        .background(RoundedRectangle(cornerRadius: Theme.fieldHeight / 2, style: .continuous).fill(theme.field))
-        .overlay(
-            RoundedRectangle(cornerRadius: Theme.fieldHeight / 2, style: .continuous)
-                .strokeBorder(
-                    recorder.recording ? theme.danger.opacity(0.5)
-                        : (needsAnswer ? theme.warn.opacity(0.7) : theme.fieldBorder),
-                    lineWidth: 1
-                )
-        )
+        // A true capsule at one line (Grok's edge follows a circle); the radius stays
+        // 24 pt as the field grows.
+        .background(fieldShape.fill(theme.field))
+        .overlay(ComposerRim(shape: fieldShape, tint: rimTint))
         .alert("Microphone access is off", isPresented: $recorder.permissionDenied) {
             Button("OK", role: .cancel) { }
         } message: {
