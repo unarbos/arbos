@@ -5,6 +5,7 @@
 // keyboard.
 
 import ArbosFFI
+import PencilKit
 import PhotosUI
 import SwiftUI
 import UIKit
@@ -177,8 +178,13 @@ struct ChatSession: View {
     @State private var pending: [AppModel.PendingAttachment] = []
     @State private var photoItem: PhotosPickerItem?
     @State private var showPhotos = false
+    /// Photos pick that opens the markup editor before staging (AttachSheet → Edit image).
+    @State private var editImageItem: PhotosPickerItem?
+    @State private var showEditImagePhotos = false
     @State private var showFiles = false
     @State private var showAttach = false
+    /// Full-screen markup / drawing before a picture is staged or re-staged in the composer.
+    @State private var markupSession: ImageMarkupSession?
     @State private var scroller: ScrollViewProxy?
     /// Scrolled more than ~120 pt above the end: show Grok's round chevron
     /// (or the new-messages pill when rows landed below).
@@ -2359,20 +2365,31 @@ struct ChatSession: View {
                     HStack(spacing: 8) {
                         ForEach(pending) { a in
                             // Images show a real thumbnail (same 28 pt chip as Mac);
-                            // other files keep the SF Symbol + name pill.
+                            // other files keep the SF Symbol + name pill. Tap an image to
+                            // edit or draw on it before send ([feedback app-01M5WCM6…]).
                             let thumb = a.mime.hasPrefix("image/") ? UIImage(data: a.data) : nil
                             HStack(spacing: 6) {
-                                if let thumb {
-                                    Image(uiImage: thumb)
-                                        .resizable()
-                                        .scaledToFill()
-                                        .frame(width: 28, height: 28)
-                                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                                } else {
-                                    Image(systemName: a.mime.hasPrefix("image/") ? "photo" : (a.mime.hasPrefix("audio/") ? "waveform" : "doc"))
-                                        .font(theme.font(12))
+                                Button {
+                                    guard let thumb else { return }
+                                    markupSession = ImageMarkupSession(kind: .edit(thumb), replaceId: a.id)
+                                } label: {
+                                    HStack(spacing: 6) {
+                                        if let thumb {
+                                            Image(uiImage: thumb)
+                                                .resizable()
+                                                .scaledToFill()
+                                                .frame(width: 28, height: 28)
+                                                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                                        } else {
+                                            Image(systemName: a.mime.hasPrefix("image/") ? "photo" : (a.mime.hasPrefix("audio/") ? "waveform" : "doc"))
+                                                .font(theme.font(12))
+                                        }
+                                        Text(a.name).font(theme.font(Theme.tiny)).lineLimit(1)
+                                    }
                                 }
-                                Text(a.name).font(theme.font(Theme.tiny)).lineLimit(1)
+                                .buttonStyle(.plain)
+                                .disabled(thumb == nil)
+                                .accessibilityHint(thumb != nil ? "Edit or draw before sending" : "")
                                 Button { pending.removeAll { $0.id == a.id } } label: {
                                     Image(systemName: "xmark").font(.system(size: 10, weight: .bold))
                                 }
@@ -2398,7 +2415,8 @@ struct ChatSession: View {
         }
     }
 
-    /// The "+" before the field: photos and files. Channels send text only (C1), so none there.
+    /// The "+" before the field: photos, files, edit image, drawing. Channels send text
+    /// only (C1), so none there.
     private var attachButton: some View {
         Button { showAttach = true } label: {
             ZStack {
@@ -2420,10 +2438,19 @@ struct ChatSession: View {
             } onFile: {
                 showAttach = false
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showFiles = true }
+            } onEditImage: {
+                showAttach = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showEditImagePhotos = true }
+            } onDrawing: {
+                showAttach = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    markupSession = ImageMarkupSession(kind: .drawing, replaceId: nil)
+                }
             }
             .environment(\.theme, theme)
         }
         .photosPicker(isPresented: $showPhotos, selection: $photoItem, matching: .any(of: [.images, .videos]))
+        .photosPicker(isPresented: $showEditImagePhotos, selection: $editImageItem, matching: .images)
         .fileImporter(isPresented: $showFiles, allowedContentTypes: [.item], allowsMultipleSelection: false) { result in
             if case .success(let urls) = result, let url = urls.first {
                 let ok = url.startAccessingSecurityScopedResource()
@@ -2450,6 +2477,42 @@ struct ChatSession: View {
                 }
                 photoItem = nil
             }
+        }
+        .onChange(of: editImageItem) { _, item in
+            guard let item else { return }
+            Task {
+                if let data = try? await item.loadTransferable(type: Data.self),
+                   let image = UIImage(data: data) {
+                    markupSession = ImageMarkupSession(kind: .edit(image), replaceId: nil)
+                }
+                editImageItem = nil
+            }
+        }
+        .fullScreenCover(item: $markupSession) { session in
+            ImageMarkupEditor(
+                kind: session.kind,
+                onCancel: { markupSession = nil },
+                onDone: { data, mime, ext in
+                    let stamp = ChatView.photoStamp.string(from: Date())
+                    let name: String = {
+                        switch session.kind {
+                        case .drawing: return "Drawing \(stamp).\(ext)"
+                        case .edit: return "Photo \(stamp).\(ext)"
+                        }
+                    }()
+                    if let replaceId = session.replaceId,
+                       let ix = pending.firstIndex(where: { $0.id == replaceId }) {
+                        pending[ix].name = name
+                        pending[ix].mime = mime
+                        pending[ix].data = data
+                    } else {
+                        pending.append(.init(name: name, mime: mime, data: data))
+                    }
+                    composerFocused = true
+                    markupSession = nil
+                }
+            )
+            .environment(\.theme, theme)
         }
     }
 
@@ -2979,22 +3042,26 @@ private struct ScrollInterruptTap: UIViewRepresentable {
     }
 }
 
-/// "+" sheet: Photo or video, File — Grok's attach options as a short bottom sheet.
+/// "+" sheet: Photo or video, File, Edit image, Drawing — attach options as a short bottom sheet.
 struct AttachSheet: View {
     @Environment(\.theme) private var theme
     let onPhoto: () -> Void
     let onFile: () -> Void
+    let onEditImage: () -> Void
+    let onDrawing: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
             Capsule().fill(theme.muted.opacity(0.4)).frame(width: 36, height: 5).padding(.top, 8).padding(.bottom, 14)
             row(icon: "photo", title: "Photo or video", subtitle: "From your library", action: onPhoto)
             row(icon: "doc", title: "File", subtitle: "From Files or iCloud Drive", action: onFile)
+            row(icon: "slider.horizontal.3", title: "Edit image", subtitle: "Markup a photo, then attach", action: onEditImage)
+            row(icon: "pencil.tip.crop.circle", title: "Drawing", subtitle: "Draw on a blank canvas", action: onDrawing)
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 16)
         .background(theme.bg)
-        .presentationDetents([.height(190)])
+        .presentationDetents([.height(340)])
         .presentationDragIndicator(.hidden)
         .presentationBackground(theme.bg)
     }
@@ -3015,6 +3082,178 @@ struct AttachSheet: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// Full-screen markup session opened from AttachSheet or a pending image chip.
+struct ImageMarkupSession: Identifiable {
+    enum Kind {
+        case drawing
+        case edit(UIImage)
+    }
+
+    let id = UUID()
+    let kind: Kind
+    /// When set, Done replaces this staged attachment instead of appending.
+    let replaceId: UUID?
+}
+
+/// PencilKit editor: draw on a blank canvas, or markup a picked / staged picture, then attach.
+struct ImageMarkupEditor: View {
+    @Environment(\.theme) private var theme
+    let kind: ImageMarkupSession.Kind
+    let onCancel: () -> Void
+    let onDone: (_ data: Data, _ mime: String, _ ext: String) -> Void
+
+    @State private var canvasView = PKCanvasView()
+
+    private var title: String {
+        switch kind {
+        case .drawing: return "Drawing"
+        case .edit: return "Edit image"
+        }
+    }
+
+    private var backgroundImage: UIImage? {
+        switch kind {
+        case .drawing: return nil
+        case .edit(let image): return image
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            ImageMarkupCanvas(canvasView: canvasView, backgroundImage: backgroundImage)
+                .background(theme.bg)
+                .navigationTitle(title)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel", action: onCancel)
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { finish() }
+                            .fontWeight(.semibold)
+                    }
+                }
+                .toolbarBackground(theme.bg, for: .navigationBar)
+                .toolbarBackground(.visible, for: .navigationBar)
+        }
+        .preferredColorScheme(theme.isDark ? .dark : .light)
+    }
+
+    private func finish() {
+        let exported = ImageMarkupCanvas.export(canvas: canvasView, background: backgroundImage)
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        let longest = max(exported.size.width, exported.size.height)
+        let scale = min(1, 2048 / max(longest, 1))
+        let size = CGSize(width: (exported.size.width * scale).rounded(),
+                          height: (exported.size.height * scale).rounded())
+        let drawn = UIGraphicsImageRenderer(size: size, format: format).image { _ in
+            exported.draw(in: CGRect(origin: .zero, size: size))
+        }
+        if let png = drawn.pngData() {
+            onDone(png, "image/png", "png")
+        } else if let jpeg = drawn.jpegData(compressionQuality: 0.85) {
+            onDone(jpeg, "image/jpeg", "jpg")
+        } else {
+            onCancel()
+        }
+    }
+}
+
+/// Hosts a `PKCanvasView` (and optional photo behind it) and the system Pencil tool picker.
+private struct ImageMarkupCanvas: UIViewRepresentable {
+    let canvasView: PKCanvasView
+    let backgroundImage: UIImage?
+
+    func makeUIView(context: Context) -> UIView {
+        let container = UIView()
+        container.backgroundColor = .secondarySystemBackground
+
+        let imageView = UIImageView()
+        imageView.contentMode = .scaleAspectFit
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        imageView.tag = 42
+        container.addSubview(imageView)
+
+        canvasView.translatesAutoresizingMaskIntoConstraints = false
+        canvasView.backgroundColor = .clear
+        canvasView.isOpaque = false
+        canvasView.drawingPolicy = .anyInput
+        canvasView.overrideUserInterfaceStyle = .unspecified
+        container.addSubview(canvasView)
+
+        NSLayoutConstraint.activate([
+            imageView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            imageView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            imageView.topAnchor.constraint(equalTo: container.topAnchor),
+            imageView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            canvasView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            canvasView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            canvasView.topAnchor.constraint(equalTo: container.topAnchor),
+            canvasView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+
+        imageView.image = backgroundImage
+        if backgroundImage == nil {
+            // Blank drawing: white paper so strokes stay visible on light and dark themes.
+            container.backgroundColor = .white
+        }
+        context.coordinator.imageView = imageView
+        return container
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        context.coordinator.imageView?.image = backgroundImage
+        DispatchQueue.main.async {
+            guard let window = uiView.window else { return }
+            let picker = PKToolPicker.shared(for: window)
+            picker?.setVisible(true, forFirstResponder: canvasView)
+            picker?.addObserver(canvasView)
+            canvasView.becomeFirstResponder()
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    final class Coordinator {
+        var imageView: UIImageView?
+    }
+
+    /// Composite the photo (if any) with the ink into one bitmap for upload.
+    static func export(canvas: PKCanvasView, background: UIImage?) -> UIImage {
+        let bounds = canvas.bounds.integral
+        let size = bounds.size.width > 1 && bounds.size.height > 1
+            ? bounds.size
+            : CGSize(width: 1024, height: 1024)
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = UIScreen.main.scale
+        format.opaque = background == nil
+        return UIGraphicsImageRenderer(size: size, format: format).image { ctx in
+            if let background {
+                let rect = aspectFitRect(for: background.size, in: size)
+                UIColor.secondarySystemBackground.setFill()
+                ctx.fill(CGRect(origin: .zero, size: size))
+                background.draw(in: rect)
+            } else {
+                UIColor.white.setFill()
+                ctx.fill(CGRect(origin: .zero, size: size))
+            }
+            let ink = canvas.drawing.image(from: CGRect(origin: .zero, size: size), scale: format.scale)
+            ink.draw(in: CGRect(origin: .zero, size: size))
+        }
+    }
+
+    private static func aspectFitRect(for imageSize: CGSize, in canvas: CGSize) -> CGRect {
+        guard imageSize.width > 0, imageSize.height > 0 else {
+            return CGRect(origin: .zero, size: canvas)
+        }
+        let scale = min(canvas.width / imageSize.width, canvas.height / imageSize.height)
+        let w = imageSize.width * scale
+        let h = imageSize.height * scale
+        return CGRect(x: (canvas.width - w) / 2, y: (canvas.height - h) / 2, width: w, height: h)
     }
 }
 
