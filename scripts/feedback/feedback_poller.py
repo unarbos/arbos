@@ -2415,6 +2415,31 @@ class Loop:
             except HttpError:
                 return []
         stray = sorted(files - own)
+        # A merge commit may legitimately edit a file the branch never touched: main added a struct literal
+        # and the branch added the field, so the merge had to write `reply_ref: None` into voice.rs
+        # (reply-in-dm-context, 04:51 Oct 26 — a false positive, #1882). A REVERT puts main's file back to
+        # the pre-merge content (or deletes main's lines); a resolution only ADDS. Keep a stray file only
+        # when the merge deleted something from main's version or returned the file to the merge base.
+        if stray:
+            per_file = {f["filename"]: f for f in cmp.get("files", [])}
+            base_sha = (cmp.get("merge_base_commit") or {}).get("sha")
+            kept: list[str] = []
+            for name in stray:
+                info = per_file.get(name) or {}
+                if (info.get("deletions") or 0) == 0 and (info.get("additions") or 0) > 0:
+                    log(f"[{fid}] merge-revert probe: {name} only gains lines in the merge (+{info.get('additions')}); a resolution, not a revert")
+                    continue
+                if base_sha:
+                    try:
+                        at_head = self.gh.repo_api("GET", f"/contents/{urllib.parse.quote(name)}?ref={head}").get("sha")
+                        at_base = self.gh.repo_api("GET", f"/contents/{urllib.parse.quote(name)}?ref={base_sha}").get("sha")
+                    except HttpError:
+                        at_head, at_base = None, "?"
+                    if at_head and at_head == at_base:
+                        kept.append(f"{name} (back to the pre-merge content)")
+                        continue
+                kept.append(f"{name} (−{info.get('deletions') or 0} of main's lines)")
+            stray = kept
         st["merge_revert_checked"] = head
         self.store.save_state(fid, st)
         if not stray:
