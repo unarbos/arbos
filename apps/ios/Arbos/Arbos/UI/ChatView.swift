@@ -332,6 +332,44 @@ struct ChatSession: View {
         }
     }
 
+    /// Hardware ⌘F ([feedback iphone-chat-search-cmd-f-2026-10-26]): open the bar, or
+    /// put the cursor back in it when it is already up. Never closes it.
+    private func openSearchFromKeyboard() {
+        let effect = ChatSearchShortcut.apply(open: showSearch)
+        if effect.animate {
+            withAnimation(.easeOut(duration: 0.18)) { showSearch = effect.open }
+        } else {
+            showSearch = effect.open
+        }
+        if effect.focus {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { searchFocused = true }
+        }
+    }
+
+    /// Esc or the ✕: the bar goes, the filter with it.
+    private func closeSearch() {
+        showSearch = false
+        searchText = ""
+        searchFocused = false
+    }
+
+    /// Hardware-keyboard keys for the bar ([feedback iphone-chat-search-cmd-f-2026-10-26]).
+    /// Zero-size buttons carry the shortcuts: the header's disc toggles on tap, but the
+    /// Find key must only ever open or refocus the bar, and Esc closes it like the Mac's.
+    private var searchKeyboardShortcuts: some View {
+        ZStack {
+            Button(action: openSearchFromKeyboard) { EmptyView() }
+                .keyboardShortcut(ChatSearchShortcut.key, modifiers: ChatSearchShortcut.modifiers)
+            if showSearch {
+                Button(action: closeSearch) { EmptyView() }
+                    .keyboardShortcut(.cancelAction)
+            }
+        }
+        .frame(width: 0, height: 0)
+        .opacity(0)
+        .accessibilityHidden(true)
+    }
+
     /// Profile "search" tile: raise the in-chat search bar once for this chat.
     private func openPendingSearchIfNeeded() {
         guard model.pendingSearchChat == chatId else { return }
@@ -712,7 +750,7 @@ struct ChatSession: View {
                             .font(theme.font(Theme.body)).foregroundStyle(theme.text)
                             .focused($searchFocused)
                             .autocorrectionDisabled()
-                        Button { showSearch = false; searchText = "" } label: {
+                        Button { closeSearch() } label: {
                             Image(systemName: "xmark.circle.fill").foregroundStyle(theme.muted)
                         }
                         .buttonStyle(.plain)
@@ -1437,9 +1475,7 @@ struct ChatSession: View {
             // duplicated it in groups (#1625).
             Button {
                 if showSearch {
-                    showSearch = false
-                    searchText = ""
-                    searchFocused = false
+                    closeSearch()
                 } else {
                     withAnimation(.easeOut(duration: 0.18)) { showSearch = true }
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { searchFocused = true }
@@ -1454,6 +1490,7 @@ struct ChatSession: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Search in chat")
             .accessibilityIdentifier("chat-search-button")
+            .background { searchKeyboardShortcuts }
         }
         .controlBar()
     }
