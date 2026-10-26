@@ -1706,13 +1706,22 @@ public struct PeopleMessagePayloadDto: Codable {
 	public let from_handle: String
 	public let seq: Int64
 	public let sender: SenderDto
+	/// The project id for an agent's reply in a project chat; absent (`people`) for DMs and
+	/// people groups. Agents' announcements queue this push since 2026-10-26 (before, only a
+	/// device's own row did, so an agent reply never showed an in-app banner).
+	public let project_id: String?
+	/// The announced message's first line, when the sender announced one (agents do; a
+	/// device's row-level push has none and the banner says "New message").
+	public let text: String?
 
-	public init(chat_id: String, from: String, from_handle: String, seq: Int64, sender: SenderDto) {
+	public init(chat_id: String, from: String, from_handle: String, seq: Int64, sender: SenderDto, project_id: String?, text: String?) {
 		self.chat_id = chat_id
 		self.from = from
 		self.from_handle = from_handle
 		self.seq = seq
 		self.sender = sender
+		self.project_id = project_id
+		self.text = text
 	}
 }
 
