@@ -85,6 +85,48 @@ final class LibraryListTests: XCTestCase {
         XCTAssertEqual(LibraryList.bareURL(URL(string: "https://www.arbos.life/launch/")!), "arbos.life/launch")
     }
 
+    // MARK: - Only what was exchanged in the chat ([feedback library-chat-only-ios-2026-10-25])
+
+    private func row(_ m: [String: Any]) -> Message {
+        DocJSON.message(m, chatId: "c1")!
+    }
+
+    func testBareFileNamesAndUntypedHostsAreNotLinks() {
+        XCTAssertEqual(ChatMedia.links(in: "I looked at app.rs, calls.rs, auth.rs and update.rs.").map(\.absoluteString), [],
+                       "the data detector reads app.rs as a Serbian site; a file name is not a link")
+        XCTAssertEqual(ChatMedia.links(in: "see www.example.com and https://arbos.life/launch.").map(\.absoluteString),
+                       ["https://arbos.life/launch"], "typed http(s) links only")
+    }
+
+    @MainActor
+    func testToolPartsJobRowsAndTheAgentsPagesNeverEnterTheLibraryButChatSentThingsDo() {
+        let model = AppModel()
+        let job = row(["id": "j", "role": "assistant", "sender": "box:1", "status": "streaming", "createdAt": 5,
+                       "hidden": true, "worker": true,
+                       "parts": [["id": "j-t", "kind": "text", "text": "Read https://github.com/unarbos/arbos/blob/main/crates/arbos-mac/src/app.rs"],
+                                 ["id": "j-a", "kind": "attachment", "attachment": ["name": "app.rs", "mime": "text/plain", "ref": "blob-1"]]]])
+        let worker = row(["id": "w", "role": "assistant", "sender": "agent", "status": "done", "createdAt": 4, "worker": true,
+                          "subagentName": "reader", "parts": [["id": "w-t", "kind": "text", "text": "https://docs.rs/gpui"]]])
+        let reply = row(["id": "a", "role": "assistant", "sender": "box:1", "status": "done", "createdAt": 3,
+                         "parts": [["id": "a-c", "kind": "tool", "call": ["id": "c1", "name": "web_fetch"], "outputSummary": "Fetched https://news.ycombinator.com"],
+                                   ["id": "a-t", "kind": "text", "text": "I read calls.rs and auth.rs; source https://github.com/unarbos/arbos. Here is the chart:"],
+                                   ["id": "a-a", "kind": "attachment", "attachment": ["name": "signups.png", "mime": "image/png", "ref": "blob-3", "kind": "image"]]]])
+        let sent = row(["id": "u", "role": "user", "sender": "user:gh_2", "status": "done", "createdAt": 2, "senderHandle": "samir",
+                        "parts": [["id": "u-t", "kind": "text", "text": "Landing page: https://arbos.life/launch — and the deck:"],
+                                  ["id": "u-a", "kind": "attachment", "attachment": ["name": "deck-v3.pdf", "mime": "application/pdf", "ref": "blob-2"]]]])
+        XCTAssertFalse(ChatMedia.sharedInChat(job))
+        XCTAssertFalse(ChatMedia.sharedInChat(worker))
+        XCTAssertTrue(ChatMedia.sharedInChat(reply))
+        XCTAssertEqual(ChatMedia.libraryLinks(reply), [], "the agent's prose link is its research, not a shared link")
+        XCTAssertEqual(ChatMedia.libraryLinks(sent).map(\.absoluteString), ["https://arbos.life/launch"])
+
+        let items = ChatMedia.items(messages: [job, worker, reply, sent], slot: "p1", model: model)
+        XCTAssertEqual(Set(items.map(\.title)), ["signups.png", "arbos.life", "deck-v3.pdf"],
+                       "the agent's shared chart, the person's link and file — nothing the agent read or fetched: \(items.map(\.title))")
+        XCTAssertEqual(items.first?.title, "signups.png", "newest first")
+        XCTAssertEqual(Set(items.map(\.kind)), [.media, .link, .file])
+    }
+
     func testTheMocksNumbers() {
         XCTAssertEqual(LibraryList.thumb, 36)
         XCTAssertEqual(LibraryList.previewWidth, 344)
