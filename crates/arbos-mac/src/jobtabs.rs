@@ -101,6 +101,7 @@ fn base(chat: &str, id: String, role: Role, status: MessageStatus, at: u64) -> M
         mentions: Vec::new(),
         reply_to: None,
         forwarded_from: None,
+        reply_ref: None,
         asked_by_handle: None,
         owner_handle: None,
         usage: None,
