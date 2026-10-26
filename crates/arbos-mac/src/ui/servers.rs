@@ -12,6 +12,7 @@ use gpui::{div, prelude::*, px, Context, Div, Focusable as _};
 
 use crate::app::{AppState, ServerSheet};
 use crate::ui::glass;
+use crate::ui::profiles::kit;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, TEXT_SMALL, TEXT_TINY};
 
@@ -71,45 +72,43 @@ pub fn sheet(shell: &Shell, sheet: &ServerSheet, cx: &mut Context<Shell>) -> Div
         .mx(px(16.0))
         .child(field);
     if is_channel {
-        group = group
-            .child(div().h(px(0.5)).ml(px(14.0)).bg(theme.border))
-            .child(
-                div()
-                    .id("new-channel-restricted")
-                    .flex()
-                    .items_center()
-                    .gap(px(12.0))
-                    .px(px(14.0))
-                    .py(px(10.0))
-                    .cursor_pointer()
-                    .hover(|st| st.bg(theme.surface_2))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .text_size(px(TEXT_SMALL + 1.0))
-                                    .text_color(theme.text)
-                                    .child("Announcement channel"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(TEXT_TINY))
-                                    .text_color(theme.text_muted)
-                                    .child("Members can like posts, not reply."),
-                            ),
-                    )
-                    .child(glass::switch(restricted, &theme))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.new_channel_restricted = !this.new_channel_restricted;
-                        let handle = this.server_input.read(cx).focus_handle(cx);
-                        window.focus(&handle, cx);
-                        cx.notify();
-                    })),
-            );
+        group = group.child(kit::divider(&theme)).child(
+            div()
+                .id("new-channel-restricted")
+                .flex()
+                .items_center()
+                .gap(px(12.0))
+                .px(px(14.0))
+                .py(px(10.0))
+                .cursor_pointer()
+                .hover(|st| st.bg(theme.surface_2))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_size(px(TEXT_SMALL + 1.0))
+                                .text_color(theme.text)
+                                .child("Announcement channel"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(TEXT_TINY))
+                                .text_color(theme.text_muted)
+                                .child("Members can like posts, not reply."),
+                        ),
+                )
+                .child(glass::switch(restricted, &theme))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.new_channel_restricted = !this.new_channel_restricted;
+                    let handle = this.server_input.read(cx).focus_handle(cx);
+                    window.focus(&handle, cx);
+                    cx.notify();
+                })),
+        );
     }
     let mut body = div()
         .flex()

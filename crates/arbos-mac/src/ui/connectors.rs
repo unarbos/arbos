@@ -286,7 +286,7 @@ impl ConnectorsPanel {
             .gap(px(8.0))
             .py(px(9.0))
             .relative()
-            .child(kit::hairline_below(16.0, theme))
+            .child(kit::hairline_below(theme))
             .child(
                 div()
                     .flex()

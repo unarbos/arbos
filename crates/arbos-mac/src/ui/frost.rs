@@ -19,6 +19,10 @@ pub const PANEL_BLUR: f32 = 24.0;
 pub struct Frosted {
     corner_radius: f32,
     blur_radius: f32,
+    /// Blur on Matte too (the chat header's controls, [feedback
+    /// mac-header-pill-glass-matte-2026-10-26]); the rest of the glass restyle
+    /// follows the surface.
+    on_matte: bool,
     child: AnyElement,
 }
 
@@ -28,7 +32,18 @@ pub fn frosted(corner_radius: f32, blur_radius: f32, child: impl IntoElement) ->
     Frosted {
         corner_radius,
         blur_radius,
+        on_matte: false,
         child: child.into_any_element(),
+    }
+}
+
+/// Blur the backdrop under `child` on both surfaces. Matte means no window
+/// vibrancy, not a flat header: the chat header's pill and disc are frosted
+/// glass whatever the surface (Jacob 2026-10-26).
+pub fn frosted_always(corner_radius: f32, blur_radius: f32, child: impl IntoElement) -> Frosted {
+    Frosted {
+        on_matte: true,
+        ..frosted(corner_radius, blur_radius, child)
     }
 }
 
@@ -83,7 +98,7 @@ impl Element for Frosted {
         window: &mut Window,
         cx: &mut App,
     ) {
-        if Theme::of(cx).is_frost() {
+        if self.on_matte || Theme::of(cx).is_frost() {
             let radius = px(self.corner_radius);
             let blur = px(self.blur_radius);
             window.paint_layer(bounds, |window| {
