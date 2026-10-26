@@ -36,6 +36,7 @@ mod groups;
 mod image_sniff;
 mod images;
 mod inspect;
+mod link_icons;
 mod livekit;
 mod local;
 mod matrix;
@@ -796,6 +797,7 @@ async fn main() -> anyhow::Result<()> {
             delete(moderation::delete_message),
         )
         .route("/blob/{project}/{key}", get(blobs::get).put(blobs::put))
+        .route("/link-icon", get(link_icons::get))
         .route("/feedback", post(feedback::submit))
         .route("/feedback/capture/{id}", post(feedback::device_capture))
         .route("/box/feedback/capture", post(feedback::box_capture_request))
