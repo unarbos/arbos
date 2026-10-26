@@ -1395,7 +1395,31 @@ impl AppState {
         rx
     }
 
+    /// One sync event into the state. A panic while applying it (a row shape the code did
+    /// not expect: 2026-10-26, Mac 0.6.268 crashed at every launch restoring the saved
+    /// chats) is caught here, logged by the panic hook (`panic_log`) and the event is skipped
+    /// — the app stays up with that one row missing instead of aborting on the main thread.
     pub(crate) fn apply(&mut self, event: SyncEvent, cx: &mut Context<Self>) {
+        let label = sync_event_label(&event);
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.apply_inner(event, cx)));
+        if result.is_err() {
+            log::error!(target: "arbos_mac::diagnostic", "sync event skipped after a panic: {label}");
+            self.push_notice(
+                "One update could not be shown; it was skipped. The details are in the log."
+                    .to_owned(),
+            );
+            cx.notify();
+        }
+    }
+
+    fn apply_inner(&mut self, event: SyncEvent, cx: &mut Context<Self>) {
+        #[cfg(test)]
+        if let SyncEvent::Notice(text) = &event {
+            // The restore guard's regression test: a notice that reads "panic!" is the
+            // stand-in for a row shape that panics deep inside an apply.
+            assert!(text != "panic!", "test poison event");
+        }
         match event {
             SyncEvent::NeedsPairing { relay_url } => {
                 let mode = self
@@ -10817,5 +10841,30 @@ mod forward_filter_tests {
 impl search_index::SenderName for AppState {
     fn sender_name(&self, _chat_id: &str, message: &Message) -> String {
         self.viewer_sender_name(message)
+    }
+}
+
+/// The event kind for the skip log, without its payload: the Debug output is cut at the
+/// variant name (a snapshot's rows are never formatted).
+fn sync_event_label(event: &SyncEvent) -> String {
+    use std::fmt::Write as _;
+    struct Head(String);
+    impl std::fmt::Write for Head {
+        fn write_str(&mut self, s: &str) -> std::fmt::Result {
+            for c in s.chars() {
+                if matches!(c, ' ' | '(' | '{') || self.0.len() >= 48 {
+                    return Err(std::fmt::Error);
+                }
+                self.0.push(c);
+            }
+            Ok(())
+        }
+    }
+    let mut head = Head(String::new());
+    let _ = write!(head, "{event:?}");
+    if head.0.is_empty() {
+        "event".to_owned()
+    } else {
+        head.0
     }
 }
