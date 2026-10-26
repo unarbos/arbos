@@ -376,6 +376,29 @@ extension AppModel {
                     subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 6 * 60_000, completedAt: nil, pending: false,
                     parts: [.text(id: "d4t", text: "Sure — add it, and send the copy whenever you're ready.")], hiddenCount: 0, senderHandle: "jacob", senderName: "Jacob Steeves"),
         ]
+        // `ARBOS_FIXTURE_REPLY_DM=1` (rig, #1836): rows that answer messages in other chats —
+        // unconst replies here to Mira's Launch week line (a group I am in: linked); I reply
+        // to Sam's; and one from a chat I am not in (quote only, no link).
+        if DebugHooks.fixtureReplyDM {
+            var theirs = Message(id: "d5", chatId: "fx-dm-unconst", role: .user, sender: "user:gh_32490803", status: .done, turn: nil, decision: nil, subagentId: nil,
+                                 subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 5 * 60_000, completedAt: nil, pending: false,
+                                 parts: [.text(id: "d5t", text: "Works")], hiddenCount: 0, senderHandle: "unconst", senderName: "Unconst")
+            theirs.replyRef = ReplyRef(chatId: "fx-group-launch", projectId: "people", messageId: "g1", chatTitle: "Launch week",
+                                       sender: "user:fx-u3", senderName: "Mira Kaplan", senderHandle: "mira-k",
+                                       text: "Launch checklist is here: https://notion.so/arbos/launch-week")
+            var mine = Message(id: "d6", chatId: "fx-dm-unconst", role: .user, sender: "user:fx-me", status: .done, turn: nil, decision: nil, subagentId: nil,
+                               subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 4 * 60_000, completedAt: nil, pending: false,
+                               parts: [.text(id: "d6t", text: "Press kit looks good — ship it.")], hiddenCount: 0, senderHandle: "jacob", senderName: "Jacob Steeves")
+            mine.replyRef = ReplyRef(chatId: "fx-group-launch", projectId: "people", messageId: "g2", chatTitle: "Launch week",
+                                     sender: "user:fx-u4", senderName: "Sam Okafor", senderHandle: "sam", text: "press-kit-v3.pdf")
+            var outside = Message(id: "d7", chatId: "fx-dm-unconst", role: .user, sender: "user:gh_32490803", status: .done, turn: nil, decision: nil, subagentId: nil,
+                                  subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 3 * 60_000, completedAt: nil, pending: false,
+                                  parts: [.text(id: "d7t", text: "Same thing happened in ours.")], hiddenCount: 0, senderHandle: "unconst", senderName: "Unconst")
+            outside.replyRef = ReplyRef(chatId: "fx-not-my-chat", projectId: "people", messageId: "x1", chatTitle: "Design crit",
+                                        sender: "user:gh_900", senderName: "Alex Rivera", senderHandle: "alex-rivera",
+                                        text: "The pricing slide still shows last quarter's tiers.")
+            messages["fx-dm-unconst"]?.append(contentsOf: [theirs, mine, outside])
+        }
         caughtUp.insert("fx-dm-unconst")
         directory = [
             Person(id: "fx-u1", handle: "alex-rivera", avatarUrl: nil, name: "Alex Rivera", status: "member"),
@@ -526,6 +549,28 @@ extension AppModel {
 
     /// Sends in fixture mode append locally so the composer can be exercised,
     /// then a scripted reply lands as complete bubbles (ack → working → result).
+    /// Fixture `openDM`: the existing DM with `handle`, else a new one built from the member
+    /// as the group lists them (Reply in DM rig and tests, #1836). No relay.
+    func fixtureOpenDM(handle: String, navigate: Bool) -> PeopleChat? {
+        let handle = handle.trimmingCharacters(in: CharacterSet(charactersIn: "@ "))
+        if let dm = peopleChats.first(where: { $0.kind == "dm" && $0.humans.contains { $0.handle == handle } }) {
+            if navigate { path = [.chat(chatId: dm.id, projectId: peopleSlot)] }
+            return dm
+        }
+        guard let peer = peopleChats.flatMap(\.members).first(where: { !$0.isAgent && $0.handle == handle }),
+              let me = peopleChats.flatMap(\.members).first(where: { $0.member == myUserId })
+        else { return nil }
+        let id = "fx-dm-\(handle)"
+        let dm = PeopleChat(id: id, kind: "dm", createdBy: me.id, createdAt: nowMs(), title: "@\(handle)", pending: false,
+                            members: [peer, me], headSeq: 0, readSeq: 0, unread: false, lockState: "people_only",
+                            lastActivityAt: nowMs(), myRole: "owner", muted: false, silenced: false)
+        peopleChats.insert(dm, at: 0)
+        messages[id] = []
+        caughtUp.insert(id)
+        if navigate { path = [.chat(chatId: id, projectId: peopleSlot)] }
+        return dm
+    }
+
     func fixtureAppend(chatId: Id, text: String, attachments: [Attachment], replyTo: Id? = nil,
                        forwardedFrom: String? = nil) {
         var list = messages[chatId] ?? []

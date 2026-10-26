@@ -41,12 +41,10 @@ enum ProfileTarget: Identifiable, Equatable, Hashable {
     /// D88 (#1317): a channel's own page — what the `# general` pill opens.
     case channel(channelId: String)
 
-    /// Pages whose member rows push a person over them (back chevron returns
-    /// here). The agent page runs its own NavigationStack, so it stays a root.
-    var pushesPeople: Bool {
-        if case .agent = self { return false }
-        return true
-    }
+    /// Pages whose rows push a person over them (back chevron returns here):
+    /// every kind — the agent page's "Run by …" owner link pushes too
+    /// ([feedback agent-pane-run-by-link-ios-2026-10-25]).
+    var pushesPeople: Bool { true }
 
     var id: String {
         switch self {
@@ -359,8 +357,13 @@ struct PaneHeader<Avatar: View>: View {
     var subtitleTint: Color? = nil
     /// A tap on the subtitle (the agent pane's label: tap to edit it in place).
     var subtitleAction: (() -> Void)? = nil
+    /// The subtitle is a link (the foreign agent's "Run by …"): a mention-chip pill,
+    /// accent text, 14 % accent fill, 30 % while pressed ([feedback agent-pane-run-by-link-ios-2026-10-25]).
+    var subtitleLink = false
     /// Drawn instead of the subtitle while it is being edited.
     var subtitleEditor: AnyView? = nil
+    /// Drawn under the subtitle (the "Run by …" link under an agent's label).
+    var subtitleBelow: AnyView? = nil
     /// The hero's one action pill under the subtitle (a person's Message,
     /// [feedback profile-message-button-ios-2026-10-25]); nil on panes without one.
     var action: AnyView? = nil
@@ -378,12 +381,19 @@ struct PaneHeader<Avatar: View>: View {
             }
             if let subtitleEditor {
                 subtitleEditor
+            } else if let subtitleAction, subtitleLink {
+                Button(action: subtitleAction) { Text(subtitle).lineLimit(1) }
+                    .buttonStyle(ChipLinkStyle())
+                    .accessibilityHint("Opens their profile")
             } else if let subtitleAction {
                 Button(action: subtitleAction) { subtitleText }
                     .buttonStyle(.plain)
                     .accessibilityHint("Edits the label")
             } else {
                 subtitleText
+            }
+            if let subtitleBelow {
+                subtitleBelow
             }
             if let action {
                 action.padding(.top, PaneKit.heroActionGap)
@@ -411,6 +421,26 @@ struct PaneHeader<Avatar: View>: View {
             .foregroundStyle(subtitleTint ?? theme.muted)
             .lineLimit(1)
             .padding(.horizontal, 32)
+    }
+}
+
+/// A link drawn as a mention chip (the Mac's `run_by_link`): accent text on an accent
+/// capsule at 14 %, 30 % while the finger is down, a 120 ms ease-out between them —
+/// the chip pointer rules ([feedback mention-chip-hover-2026-10-24]).
+struct ChipLinkStyle: ButtonStyle {
+    @Environment(\.theme) private var theme
+    static let restAlpha: Double = 0.14
+    static let pressedAlpha: Double = 0.30
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(theme.font(Theme.small))
+            .foregroundStyle(theme.accent)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(theme.accent.opacity(configuration.isPressed ? Self.pressedAlpha : Self.restAlpha)))
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .contentShape(Capsule())
     }
 }
 
@@ -2618,8 +2648,12 @@ struct PaneHero {
     var subtitleTint: Color? = nil
     /// A tap on the subtitle (the agent pane's label: tap to edit it in place).
     var subtitleAction: (() -> Void)? = nil
+    /// The subtitle is a link — the foreign agent's "Run by …" (a chip pill).
+    var subtitleLink = false
     /// Drawn instead of the subtitle while it is being edited.
     var subtitleEditor: AnyView? = nil
+    /// Drawn under the subtitle (the "Run by …" link under an agent's label).
+    var subtitleBelow: AnyView? = nil
     /// The hero's one action pill under the subtitle (a person's Message); nil
     /// on panes with no primary action and on a person you cannot message.
     var action: AnyView? = nil
@@ -2715,8 +2749,8 @@ struct ProfilePane: View {
             } header: {
                 VStack(spacing: 18) {
                     PaneHeader(name: hero.name, subtitle: hero.subtitle, badge: hero.badge, nameAction: hero.nameAction,
-                               subtitleTint: hero.subtitleTint, subtitleAction: hero.subtitleAction, subtitleEditor: hero.subtitleEditor,
-                               action: hero.action) {
+                               subtitleTint: hero.subtitleTint, subtitleAction: hero.subtitleAction, subtitleLink: hero.subtitleLink,
+                               subtitleEditor: hero.subtitleEditor, subtitleBelow: hero.subtitleBelow, action: hero.action) {
                         switch hero.picture {
                         case .image(let v): v
                         case .glyph(let glyph):
