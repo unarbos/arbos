@@ -29,6 +29,7 @@ use crate::app::{decode_image, AppState, ComposerMode};
 use crate::model::{AttachmentKind, CallKind, Message, Part, Role};
 use crate::search;
 use crate::ui::callview;
+use crate::ui::error_note;
 use crate::ui::frost::{frosted, PANEL_BLUR};
 use crate::ui::glass;
 use crate::ui::icons::icon;
@@ -3021,11 +3022,12 @@ impl Render for Composer {
                 v.notice_for(active_chat.as_deref()).map(str::to_owned),
             )
         };
-        // Per-room push refusal (`not_available`): keep the link live, show one muted line.
-        let delivery_notice = state
+        // The composer's note: the last send / attachment / recording failure in this chat
+        // (the shared error element, directly above the field — Jacob 2026-10-26). A push
+        // refusal is chat-level and lives in the slot under the header, not here.
+        let send_error = state
             .active_chat_id()
-            .filter(|id| state.push_refused.contains(id))
-            .map(|_| "Messages in this chat are not being delivered".to_string());
+            .and_then(|id| state.send_error(&id).cloned().map(|slot| (id, slot)));
         let in_livekit = state.my_call.is_some();
         let has_text = !self.input.read(cx).text().trim().is_empty();
         // In a job tab (`jobtabs`) typing steers that job.
@@ -3395,13 +3397,32 @@ impl Render for Composer {
         // One muted line about the voice path while it is doing something (or
         // when it had to fall back: no microphone, mock relay). The link has
         // no line here: the header's connection pill is its one place
-        // ([feedback connection-pill]). A push-refusal notice for this chat
-        // can show here too. Overlay just above the field so the pill does
+        // ([feedback connection-pill]). Overlay just above the field so the pill does
         // not jump when the note appears (a flow child above or below would
         // shift the bottom-pinned composer).
-        let note = voice_notice
-            .filter(|_| recording || transcribing || voice_mode)
-            .or(delivery_notice);
+        let note = voice_notice.filter(|_| recording || transcribing || voice_mode);
+        if let Some((chat, slot)) = send_error {
+            let chat_for_retry = chat.clone();
+            column = column.child(error_note::render(
+                "composer-error",
+                &slot.error,
+                slot.details_open,
+                error_note::Style::Inline,
+                &theme,
+                error_note::Handlers::new()
+                    .try_again(cx.listener(move |this, _, _, cx| {
+                        let chat = chat_for_retry.clone();
+                        this.state.update(cx, |s, cx| s.retry_send_error(chat, cx));
+                    }))
+                    .toggle_details(cx.listener(move |this, _, _, cx| {
+                        let chat = chat.clone();
+                        this.state.update(cx, |s, cx| {
+                            s.toggle_send_error_details(&chat);
+                            cx.notify();
+                        });
+                    })),
+            ));
+        }
         let mut field_wrap = div().relative().w_full();
         if let Some(note) = note {
             field_wrap = field_wrap.child(
