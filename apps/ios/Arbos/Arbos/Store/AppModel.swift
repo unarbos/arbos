@@ -2664,11 +2664,13 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Search handles (prefix) for the new-chat sheet.
+    /// The relay's people search (a handle-prefix lookup) for the new-chat sheet;
+    /// the sheet itself lists the directory through the shared matcher
+    /// (`PeoplePicker.people`) and adds these on top. The fixture answers from
+    /// the directory through the same matcher.
     func searchPeople(_ q: String) async -> [Person] {
         if isFixture {
-            let needle = q.lowercased()
-            return directory.filter { $0.handle.lowercased().contains(needle) || ($0.name ?? "").lowercased().contains(needle) }
+            return PeoplePicker.people(directory: directory, remote: [], me: nil, query: q)
         }
         return (try? await api.searchUsers(q)) ?? []
     }
