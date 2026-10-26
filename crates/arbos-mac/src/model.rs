@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use arbos_core::doc::ReplyRef;
 pub use arbos_core::widget::{ChoiceOption, FieldKind, FormField, QuestionState, Widget};
 
 pub type Id = String;
@@ -1945,6 +1946,11 @@ pub struct Message {
     /// shows "Forwarded from <name>" above the text (`forwardedFrom`).
     #[serde(default)]
     pub forwarded_from: Option<String>,
+    /// Bubble menu → Reply in DM: the quoted message in another chat, with its
+    /// snapshot (`replyRef`); the bubble shows the quote header plus
+    /// "Replying to <who> in <chat>".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_ref: Option<ReplyRef>,
     /// On an agent's reply in a people chat: who asked and whose machine answered.
     #[serde(default)]
     pub asked_by_handle: Option<String>,

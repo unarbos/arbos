@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 
 use crate::auth;
 use crate::calls::{self, CallCmd, CallEvent};
+use crate::model::SpaceKind;
 use crate::model::{
     add_members_plan, call_ended_line, created_group, reachable_line, AccountView, Call, CallEnded,
     CallKind, CallMissed, Person, Reachable, Sender, Voice,
@@ -22,8 +23,8 @@ use crate::model::{
     new_id, now_ms, Attachment, AttachmentKind, BoxReport, BoxState, ChannelSel, ChannelsView,
     Chat, ChatKind, ConnectorsView, DevicesView, Effort, Id, Job, JobRollout, Link, LinkState,
     LocalView, Machine, Message, MessageStatus, NewSecret, Part, Project, ProjectDocView,
-    ProjectSecrets, QuestionState, Role, Routine, RoutineRun, RoutineTrigger, SecretDirector,
-    SecretScope, SecretsView, ServerInfo, Skill, StatusKind,
+    ProjectSecrets, QuestionState, ReplyRef, Role, Routine, RoutineRun, RoutineTrigger,
+    SecretDirector, SecretScope, SecretsView, ServerInfo, Skill, StatusKind,
 };
 use crate::palette;
 use crate::search;
@@ -390,6 +391,9 @@ pub struct ChatUi {
     pub drop_started_at: Option<u64>,
     /// Message the next send replies to (hover reply / people-chat parity).
     pub reply_to: Option<Id>,
+    /// Reply in DM: the message in another chat the next send here answers
+    /// (its address + snapshot, written as `replyRef`). Exclusive with `reply_to`.
+    pub reply_ref: Option<ReplyRef>,
 }
 
 /// Rows per history page the shared Matrix client fetches (`arbos_matrix::client::HISTORY_PAGE`).
@@ -452,6 +456,9 @@ pub struct AppState {
     pub accents: HashMap<String, arbos_core::avatar::Accent>,
     /// A DM just started from the sheet: select it when it arrives.
     awaiting_dm: Option<String>,
+    /// Reply in DM: the cross-chat reply to arm once the DM opens (new DMs
+    /// arrive from the relay a moment after `start_dm`).
+    pending_dm_reply: Option<ReplyRef>,
     /// A people group just created: select it when those handles appear.
     awaiting_group: Option<Vec<String>>,
     /// The sheet invites into this project instead of starting a DM (step 3).
@@ -947,6 +954,7 @@ impl AppState {
             avatars: HashMap::new(),
             accents: HashMap::new(),
             awaiting_dm: None,
+            pending_dm_reply: None,
             awaiting_group: None,
             invite_target: None,
             message_grant_target: None,
@@ -1771,6 +1779,7 @@ impl AppState {
                         let id = space.id.clone();
                         self.projects = projects.clone();
                         self.select_project(id, cx);
+                        self.arm_pending_dm_reply(cx);
                     }
                 }
                 // Members match (older relays / the fixture before it sends
@@ -3702,16 +3711,191 @@ impl AppState {
 
     /// Hover reply: the next send in this chat answers `message_id`.
     pub fn set_reply_to(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
-        self.chat_ui.entry(chat_id).or_default().reply_to = Some(message_id);
+        let ui = self.chat_ui.entry(chat_id).or_default();
+        ui.reply_to = Some(message_id);
+        ui.reply_ref = None;
         cx.notify();
     }
 
-    /// Clear the reply chip above the composer.
+    /// Clear the reply chip above the composer (in-chat or cross-chat).
     pub fn clear_reply_to(&mut self, chat_id: &str, cx: &mut Context<Self>) {
         if let Some(ui) = self.chat_ui.get_mut(chat_id) {
             ui.reply_to = None;
+            ui.reply_ref = None;
         }
         cx.notify();
+    }
+
+    /// The cross-chat reference for `message_id` in `chat_id`: its address plus
+    /// a snapshot of who wrote it and what it said (crdt-sync §6.2 `replyRef`).
+    /// `None` when the row is not loaded.
+    pub fn reply_ref_for(&self, chat_id: &str, message_id: &str) -> Option<ReplyRef> {
+        let m = self
+            .messages_of(chat_id)
+            .iter()
+            .find(|m| m.id == message_id)?;
+        let space_id = self.space_of_chat(chat_id);
+        let space = self.project(&space_id);
+        let project_id = match space {
+            Some(p) if p.is_people() => "people".to_owned(),
+            Some(p) => p.id.clone(),
+            None => space_id.clone(),
+        };
+        let mine = m.sender == "user" || m.sender == format!("user:{}", self.me_id());
+        let (sender_name, sender_handle) = if mine {
+            (self.me_name(), self.me_handle())
+        } else if m.role == Role::User {
+            (
+                m.sender_name.clone().unwrap_or_default(),
+                m.sender_handle.clone().unwrap_or_default(),
+            )
+        } else {
+            // An agent's row: the Project's name, or the handle it signs with.
+            let name = space
+                .filter(|p| !p.is_people())
+                .map(|p| p.name.clone())
+                .or_else(|| m.sender_name.clone())
+                .unwrap_or_default();
+            (name, m.sender_handle.clone().unwrap_or_default())
+        };
+        let text = m.plain_text();
+        let text = if text.trim().is_empty() {
+            m.parts
+                .iter()
+                .find_map(|p| match p {
+                    Part::Attachment { attachment, .. } => Some(attachment.name.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default()
+        } else {
+            text
+        };
+        Some(ReplyRef {
+            chat_id: chat_id.to_owned(),
+            project_id,
+            message_id: message_id.to_owned(),
+            chat_title: self.chat_display_title(chat_id),
+            sender: m.sender.clone(),
+            sender_name,
+            sender_handle,
+            text: ReplyRef::snapshot_text(&text),
+        })
+    }
+
+    /// What a quote header calls `chat_id`: the group / DM / project name, or the
+    /// tab title when the space has several chats.
+    pub fn chat_display_title(&self, chat_id: &str) -> String {
+        let space_id = self.space_of_chat(chat_id);
+        if let Some(space) = self.project(&space_id) {
+            if let Some(person) = space.person().filter(|_| space.kind == SpaceKind::Dm) {
+                return person.display_name();
+            }
+            let chats = self.tabs(&space_id);
+            let plain = chats
+                .iter()
+                .filter(|c| c.kind != ChatKind::Projects)
+                .count();
+            if plain > 1 {
+                if let Some(c) = chats.iter().find(|c| c.id == chat_id) {
+                    if c.is_group() || !c.is_pinned {
+                        return c.title.clone();
+                    }
+                }
+            }
+            return space.name.clone();
+        }
+        self.chats
+            .values()
+            .flat_map(|v| v.iter())
+            .find(|c| c.id == chat_id)
+            .map(|c| c.title.clone())
+            .unwrap_or_default()
+    }
+
+    /// Is `chat_id` one of this user's chats (people chat, own or shared
+    /// project)? Only then can a cross-chat quote open its original.
+    pub fn is_member_of_chat(&self, chat_id: &str) -> bool {
+        self.chats
+            .values()
+            .chain(self.job_tabs.values())
+            .flat_map(|v| v.iter())
+            .any(|c| c.id == chat_id)
+            || self.project(chat_id).is_some_and(|p| p.is_people())
+    }
+
+    /// Bubble menu → Reply in DM: open (or create) the DM with the person who
+    /// wrote `message_id` and arm the composer there with a cross-chat reply
+    /// to it. Nothing happens for my own rows or an agent's (no peer to DM).
+    pub fn reply_in_dm(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
+        let Some(reply_ref) = self.reply_ref_for(&chat_id, &message_id) else {
+            return;
+        };
+        let me = format!("user:{}", self.me_id());
+        if !reply_ref.sender.starts_with("user:")
+            || reply_ref.sender == me
+            || reply_ref.sender_handle.is_empty()
+        {
+            return;
+        }
+        self.pending_dm_reply = Some(reply_ref.clone());
+        self.start_dm(reply_ref.sender_handle, cx);
+        // The DM already exists: `start_dm` selected it synchronously.
+        self.arm_pending_dm_reply(cx);
+    }
+
+    /// Once the DM is the open space, move the pending cross-chat reply onto
+    /// its composer. Called when `start_dm` selects an existing DM at once and
+    /// when a freshly created one arrives from the relay.
+    fn arm_pending_dm_reply(&mut self, cx: &mut Context<Self>) {
+        let Some(r) = self.pending_dm_reply.clone() else {
+            return;
+        };
+        let Some(space) = self
+            .selected_project
+            .as_deref()
+            .and_then(|id| self.project(id))
+        else {
+            return;
+        };
+        let is_dm = space.kind == SpaceKind::Dm
+            && space.person().is_some_and(|p| p.handle == r.sender_handle);
+        if !is_dm {
+            return;
+        }
+        let Some(dm_chat) = self.active_chat_id() else {
+            return;
+        };
+        self.pending_dm_reply = None;
+        let ui = self.chat_ui.entry(dm_chat).or_default();
+        ui.reply_to = None;
+        ui.reply_ref = Some(r);
+        cx.notify();
+    }
+
+    /// Click on a cross-chat quote: open the source chat scrolled to the
+    /// original and highlight it. `false` when the viewer is not in that chat.
+    pub fn reveal_reply_ref(&mut self, r: &ReplyRef, cx: &mut Context<Self>) -> bool {
+        if !self.is_member_of_chat(&r.chat_id) {
+            return false;
+        }
+        let space_id = self.space_of_chat(&r.chat_id);
+        self.close_profile(cx);
+        self.reveal_search_message(space_id, r.chat_id.clone(), r.message_id.clone(), cx);
+        self.highlight_message = Some(r.message_id.clone());
+        let message_id = r.message_id.clone();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(QUOTE_HIGHLIGHT_MS))
+                .await;
+            let _ = this.update(cx, |state, cx| {
+                if state.highlight_message.as_deref() == Some(message_id.as_str()) {
+                    state.highlight_message = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        true
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3744,14 +3928,16 @@ impl AppState {
         let message_id = new_id();
         // Guide never answers a card — it steers the live turn.
         let answer = !steer && self.chat_needs_answer(&chat_id);
-        {
+        let reply_ref = {
             let ui = self.chat_ui.entry(chat_id.clone()).or_default();
             if !ui.composer_dropped {
                 ui.composer_dropped = true;
                 ui.drop_started_at = Some(now_ms());
             }
             ui.reply_to = None;
-        }
+            // A cross-chat reply never carries an in-chat `replyTo` as well.
+            ui.reply_ref.take().filter(|_| reply_to.is_none())
+        };
         // Title from the first message (§3.4); the source also queues a
         // `retitle` command for the box.
         if let Some(chat) = self
@@ -3862,6 +4048,7 @@ impl AppState {
                 mentions: mentions.clone(),
                 reply_to: reply_to.clone(),
                 forwarded_from: None,
+                reply_ref: reply_ref.clone(),
                 asked_by_handle: None,
                 owner_handle: None,
                 usage: None,
@@ -3915,6 +4102,7 @@ impl AppState {
                 text,
                 attachments,
                 reply_to,
+                reply_ref,
                 mentions,
             });
         }
@@ -4596,6 +4784,7 @@ impl AppState {
                 mentions: Vec::new(),
                 reply_to: None,
                 forwarded_from: None,
+                reply_ref: None,
                 asked_by_handle: None,
                 owner_handle: None,
                 usage: None,
@@ -5006,6 +5195,7 @@ impl AppState {
                 mentions: Vec::new(),
                 reply_to: None,
                 forwarded_from: None,
+                reply_ref: None,
                 asked_by_handle: None,
                 owner_handle: None,
                 created_at: now_ms(),
@@ -5385,6 +5575,7 @@ impl AppState {
             text,
             attachments: Vec::new(),
             reply_to: Some(ask),
+            reply_ref: None,
             mentions: Vec::new(),
         });
         cx.emit(AppEvent::TranscriptChanged {
@@ -6744,6 +6935,7 @@ impl AppState {
                 mentions: Vec::new(),
                 reply_to: None,
                 forwarded_from: None,
+                reply_ref: None,
                 asked_by_handle: None,
                 owner_handle: None,
                 usage: None,
@@ -6877,6 +7069,7 @@ impl AppState {
                 mentions: Vec::new(),
                 reply_to: None,
                 forwarded_from: Some(source.by.clone()),
+                reply_ref: None,
                 asked_by_handle: None,
                 owner_handle: None,
                 usage: None,
@@ -7548,6 +7741,15 @@ impl AppState {
                     String::new()
                 }
             })
+    }
+
+    /// The signed-in user's display name, else their handle.
+    pub fn me_name(&self) -> String {
+        self.account
+            .as_ref()
+            .map(|a| a.name.trim().to_owned())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| self.me_handle())
     }
 
     /// Projects of mine (not people chats, not shared with me) — the add-agent picker.
