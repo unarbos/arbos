@@ -237,6 +237,19 @@ impl MatrixClient {
         Ok(self.inner.send_text(&room_id, &text, &local_id).await?)
     }
 
+    /// Add or remove an emoji on a channel message (announcement channels included).
+    pub async fn toggle_reaction(
+        &self,
+        room_id: String,
+        message_id: String,
+        emoji: String,
+    ) -> Result<(), MatrixError> {
+        Ok(self
+            .inner
+            .toggle_reaction(&room_id, &message_id, &emoji)
+            .await?)
+    }
+
     pub async fn mark_read(&self, room_id: String) -> Result<(), MatrixError> {
         Ok(self.inner.mark_read(&room_id).await?)
     }

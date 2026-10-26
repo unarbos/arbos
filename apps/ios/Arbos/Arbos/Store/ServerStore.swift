@@ -731,6 +731,31 @@ extension AppModel {
         }
     }
 
+    /// Like / unlike a channel post (Matrix `m.reaction`). Works for members in
+    /// announcement channels where posting is admins-only.
+    func toggleChannelReaction(channel: ServerChannel, messageId: Id, emoji: String, me: String) {
+        guard let client = matrixClient, let roomId = channelRoomId(channel) else {
+            notice = Notice(text: "Not connected to the server yet.")
+            return
+        }
+        if var list = channelRows[channel.id], let i = list.firstIndex(where: { $0.id == messageId }) {
+            list[i].reactions = MessageReaction.toggling(list[i].reactions, emoji: emoji, sender: me)
+            channelRows[channel.id] = list
+            Haptics.pick()
+        }
+        Task {
+            do {
+                try await client.toggleReaction(roomId: roomId, messageId: messageId, emoji: emoji)
+            } catch {
+                // Pull the authoritative timeline; the optimistic chip may reverse.
+                if let rows = try? await client.openRoom(roomId: roomId) {
+                    setChannelRows(channel.id, rows)
+                }
+                notice = Notice(text: "Could not update the reaction: \(error.localizedDescription)")
+            }
+        }
+    }
+
     /// Send into a channel: the row shows at once with a client ULID as its id; the echo
     /// arrives in the timeline with the same id (`life.arbos.id`).
     func sendChannel(chatId channelId: Id, text: String) {

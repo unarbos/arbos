@@ -146,6 +146,70 @@ pub fn message_row(
     })
 }
 
+/// One `m.reaction` annotation on a message (`event_id` is the reaction event, for redact).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredReaction {
+    pub event_id: String,
+    pub sender: String,
+    pub emoji: String,
+}
+
+/// Parse an `m.reaction` event → `(target message event id, reaction)`.
+pub fn reaction_from_event(ev: &Value) -> Option<(String, StoredReaction)> {
+    if ev["type"].as_str() != Some("m.reaction") {
+        return None;
+    }
+    let event_id = ev["event_id"].as_str()?.to_owned();
+    let relates = &ev["content"]["m.relates_to"];
+    if relates["rel_type"].as_str() != Some("m.annotation") {
+        return None;
+    }
+    let target = relates["event_id"].as_str()?.to_owned();
+    let emoji = relates["key"].as_str()?.to_owned();
+    if target.is_empty() || emoji.is_empty() {
+        return None;
+    }
+    let mxid = ev["sender"].as_str().unwrap_or_default();
+    Some((
+        target,
+        StoredReaction {
+            event_id,
+            sender: member_of_mxid(mxid),
+            emoji,
+        },
+    ))
+}
+
+/// `m.room.redaction` → the redacted event id (often a reaction we stored).
+pub fn redacts_from_event(ev: &Value) -> Option<String> {
+    if ev["type"].as_str() != Some("m.room.redaction") {
+        return None;
+    }
+    ev["redacts"]
+        .as_str()
+        .or_else(|| ev["content"]["redacts"].as_str())
+        .map(str::to_owned)
+        .filter(|s| !s.is_empty())
+}
+
+/// Stamp flat `"emoji|sender" → true` reactions onto a message row (chat-doc shape).
+pub fn row_with_reactions(row: &MessageRow, reactions: &[StoredReaction]) -> MessageRow {
+    let mut out = row.clone();
+    let Ok(mut v) = serde_json::from_str::<Value>(&out.json) else {
+        return out;
+    };
+    let mut map = serde_json::Map::new();
+    for r in reactions {
+        if r.emoji.is_empty() || r.sender.is_empty() {
+            continue;
+        }
+        map.insert(format!("{}|{}", r.emoji, r.sender), json!(true));
+    }
+    v["reactions"] = Value::Object(map);
+    out.json = v.to_string();
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,5 +258,37 @@ mod tests {
         let v: Value = serde_json::from_str(&row.json).unwrap();
         assert_eq!(v["role"], "system");
         assert_eq!(v["senderHandle"], "");
+    }
+
+    #[test]
+    fn reaction_and_redaction_parse() {
+        let (target, r) = reaction_from_event(&json!({
+            "type": "m.reaction", "event_id": "$r1", "sender": "@gh_7:arbos.life",
+            "content": { "m.relates_to": {
+                "rel_type": "m.annotation", "event_id": "$msg", "key": "❤️"
+            }}
+        }))
+        .unwrap();
+        assert_eq!(target, "$msg");
+        assert_eq!(r.event_id, "$r1");
+        assert_eq!(r.sender, "user:gh_7");
+        assert_eq!(r.emoji, "❤️");
+        assert_eq!(
+            redacts_from_event(&json!({
+                "type": "m.room.redaction", "event_id": "$x", "redacts": "$r1"
+            })),
+            Some("$r1".into())
+        );
+        let row = message_row(
+            &json!({
+                "type": "m.room.message", "event_id": "$msg", "sender": "@gh_7:arbos.life",
+                "origin_server_ts": 1, "content": { "msgtype": "m.text", "body": "hi" }
+            }),
+            &|_| None,
+        )
+        .unwrap();
+        let stamped = row_with_reactions(&row, &[r]);
+        let v: Value = serde_json::from_str(&stamped.json).unwrap();
+        assert_eq!(v["reactions"]["❤️|user:gh_7"], true);
     }
 }

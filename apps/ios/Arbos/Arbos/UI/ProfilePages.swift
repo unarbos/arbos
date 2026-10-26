@@ -2277,7 +2277,7 @@ struct ServerProfileView: View {
             out.append(.title("Archived"))
             out.append(.card(server.archivedChannels.map { c in
                 AnyView(PaneRow(leading: .glyph("archivebox"), title: c.name,
-                                subtitle: model.channelRestricted(c) ? "Admins only post" : nil,
+                                subtitle: model.channelRestricted(c) ? "Announcement" : nil,
                                 trailing: AnyView(
                                     Button("Unarchive") { Task { await model.archiveChannel(c, false) } }
                                         .font(theme.font(Theme.small, weight: .medium))
@@ -2301,7 +2301,7 @@ struct ServerProfileView: View {
                 Button {
                     Task { await model.setChannelRestricted(c, !restricted) }
                 } label: {
-                    Label("Admins only post", systemImage: restricted ? "checkmark" : "lock")
+                    Label("Announcement channel", systemImage: restricted ? "checkmark" : "lock")
                 }
                 if !isGeneral {
                     Divider()
@@ -2321,7 +2321,7 @@ struct ServerProfileView: View {
             model.open(channel: c)
         } label: {
             PaneRow(leading: .glyph("number"), title: c.name,
-                    subtitle: restricted ? "Admins only post" : "Everyone posts",
+                    subtitle: restricted ? "Announcement · like only" : "Everyone posts",
                     trailing: menu)
         }
         .buttonStyle(.borderless)
@@ -2913,7 +2913,7 @@ struct ChannelProfileView: View {
     }
 
     private func privacyLabel(_ restricted: Bool) -> String {
-        restricted ? "Everyone reads · admins post" : "Everyone in the server"
+        restricted ? "Announcement · members like, admins post" : "Everyone in the server"
     }
 
     private func serverRow(_ server: Server) -> AnyView {
@@ -2975,14 +2975,19 @@ struct ChannelProfileView: View {
             AnyView(PaneRow(title: "Privacy", value: privacyLabel(restricted))),
         ]
         if isAdmin {
-            behaviour.append(AnyView(PaneRow(title: "Admins only post", subtitle: "Members read", trailing: AnyView(
+            behaviour.append(AnyView(PaneRow(title: "Announcement channel",
+                                             subtitle: restricted
+                                                ? "Members can like posts, not reply"
+                                                : "Everyone can post and reply",
+                                             trailing: AnyView(
                 Toggle("", isOn: Binding(
                     get: { restricted },
                     set: { on in Task { await model.setChannelRestricted(channel, on) } }
                 )).labelsHidden().tint(theme.online)
             ))))
         } else {
-            behaviour.append(AnyView(PaneRow(title: "Posting", value: restricted ? "Admins only" : "Everyone")))
+            behaviour.append(AnyView(PaneRow(title: "Posting",
+                                             value: restricted ? "Announcement · like only" : "Everyone")))
         }
         var out: [PaneSection] = [
             .card(identity),

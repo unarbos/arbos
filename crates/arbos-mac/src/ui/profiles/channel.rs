@@ -200,7 +200,7 @@ fn toggle_row(
 
 fn privacy_label(restricted: bool) -> &'static str {
     if restricted {
-        "Everyone in the server reads · admins post"
+        "Announcement · members like, admins post"
     } else {
         "Everyone in the server"
     }
@@ -415,8 +415,8 @@ fn settings_tab(
         let (sid, cid) = (server.id.clone(), channel.id.clone());
         behaviour.push(toggle_row(
             "channel-set-restricted",
-            "Admins only post",
-            Some("Members read"),
+            "Announcement channel",
+            Some("Members can like posts, not reply"),
             restricted,
             theme,
             move |this, cx| {
@@ -433,7 +433,7 @@ fn settings_tab(
                 "channel-set-posting",
                 "Posting",
                 if restricted {
-                    "Admins only"
+                    "Announcement · like only"
                 } else {
                     "Everyone"
                 },

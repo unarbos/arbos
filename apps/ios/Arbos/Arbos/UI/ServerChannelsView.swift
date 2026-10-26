@@ -245,7 +245,7 @@ struct ServerChannelsView: View {
     }
 }
 
-/// Rule 7: a new channel — a name (letters, digits, dashes) and "Admins only post".
+/// Rule 7: a new channel — a name (letters, digits, dashes) and announcement mode.
 struct NewChannelSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -287,8 +287,10 @@ struct NewChannelSheet: View {
                     .padding(.horizontal, 16)
 
                     ProfileCard {
-                        PaneRow(title: "Admins only post",
-                                subtitle: restricted ? "Members read" : "Everyone posts",
+                        PaneRow(title: "Announcement channel",
+                                subtitle: restricted
+                                    ? "Members can like posts, not reply"
+                                    : "Everyone can post and reply",
                                 trailing: AnyView(Toggle("", isOn: $restricted).labelsHidden().tint(theme.primary)))
                     }
 

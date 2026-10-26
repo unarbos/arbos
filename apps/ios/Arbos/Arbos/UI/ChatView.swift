@@ -819,10 +819,12 @@ struct ChatSession: View {
                         safeTop: max(geo.safeAreaInsets.top, safeArea.top),
                         safeBottom: max(geo.safeAreaInsets.bottom, safeArea.bottom),
                         held: heldReactions(row),
-                        items: MessageMenu.items(forMessage: true,
+                        // Channels (announcement included): reactions in the capsule, Copy only
+                        // in the menu — members like posts but cannot reply (C1 + feedback).
+                        items: MessageMenu.items(forMessage: !isChannel,
                                                 canEdit: canEditMessage(row),
                                                 canDelete: canDelete(row),
-                                                hasReplies: row.replyCount > 0),
+                                                hasReplies: !isChannel && row.replyCount > 0),
                         onReact: { emoji in
                             closeActions()
                             model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: emoji)

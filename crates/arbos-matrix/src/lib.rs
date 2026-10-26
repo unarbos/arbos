@@ -15,7 +15,7 @@ pub mod client;
 pub mod rows;
 
 pub use client::{Listener, MatrixClient, Session, Snapshot};
-pub use rows::{ChannelRow, MessageRow, SpaceRow};
+pub use rows::{ChannelRow, MessageRow, SpaceRow, StoredReaction};
 
 /// Anything that can go wrong talking to the homeserver, flattened for the apps and the FFI.
 #[derive(Debug, Clone, thiserror::Error)]

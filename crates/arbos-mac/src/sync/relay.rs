@@ -5317,7 +5317,29 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 {
                     eprintln!("relay: reaction: {e:#}");
                 }
+                return true;
             }
+            drop(docs);
+            // Server channel: Matrix `m.reaction` (announcement channels included).
+            let Some(client) = matrix_client(shared) else {
+                return true;
+            };
+            let shared = shared.clone();
+            let chat_id = chat_id.clone();
+            let message_id = message_id.clone();
+            let emoji = emoji.clone();
+            tokio::spawn(async move {
+                let snap = client.snapshot().await;
+                let Some(ch) = snap.channels.iter().find(|c| c.channel_id == chat_id) else {
+                    return;
+                };
+                if let Err(err) = client
+                    .toggle_reaction(&ch.room_id, &message_id, &emoji)
+                    .await
+                {
+                    shared.notice(format!("Could not update the reaction: {err}"));
+                }
+            });
         }
         ClientCommand::DeleteMessage {
             chat_id,

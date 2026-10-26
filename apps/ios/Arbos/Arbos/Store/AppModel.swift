@@ -4243,17 +4243,30 @@ final class AppModel: ObservableObject {
 
     /// Add or remove an emoji reaction on a message. Multiple different emojis
     /// can be active on the same message; tapping the same emoji again clears it.
+    /// Server channels use Matrix `m.reaction` (announcement channels included).
     func toggleReaction(chatId: Id, messageId: Id, emoji: String) {
         guard let me = myUserId, !emoji.isEmpty else { return }
         #if DEBUG
         if isFixture {
-            guard var list = messages[chatId], let i = list.firstIndex(where: { $0.id == messageId }) else { return }
-            list[i].reactions = MessageReaction.toggling(list[i].reactions, emoji: emoji, sender: me)
-            messages[chatId] = list
-            Haptics.pick()
+            if var list = messages[chatId], let i = list.firstIndex(where: { $0.id == messageId }) {
+                list[i].reactions = MessageReaction.toggling(list[i].reactions, emoji: emoji, sender: me)
+                messages[chatId] = list
+                Haptics.pick()
+                return
+            }
+            if var list = channelRows[chatId], let i = list.firstIndex(where: { $0.id == messageId }) {
+                list[i].reactions = MessageReaction.toggling(list[i].reactions, emoji: emoji, sender: me)
+                channelRows[chatId] = list
+                Haptics.pick()
+                return
+            }
             return
         }
         #endif
+        if let channel = channel(chatId) {
+            toggleChannelReaction(channel: channel, messageId: messageId, emoji: emoji, me: me)
+            return
+        }
         guard let doc = docs[chatId] else { return }
         do {
             try doc.toggleReaction(messageId: messageId, emoji: emoji, sender: me)
