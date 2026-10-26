@@ -532,14 +532,19 @@ impl Shell {
                 if let Some(pk) = this.pending_picker_mut() {
                     if pk.target == done.target {
                         pk.generating = false;
+                        pk.started_at = None;
                         match (done.image_key, done.url) {
                             (Some(key), Some(url)) => {
                                 pk.generated = Some((key, url));
                                 pk.error = None;
+                                pk.error_detail = None;
                             }
                             _ => {
-                                pk.error =
-                                    done.error.or_else(|| Some("No picture came back".into()))
+                                pk.error = done
+                                    .error
+                                    .or_else(|| Some("Couldn't generate the image.".into()));
+                                pk.error_detail = done.detail;
+                                pk.details_open = false;
                             }
                         }
                     }
@@ -1507,7 +1512,10 @@ impl Shell {
         }
         let target = pk.target.clone();
         pk.generating = true;
+        pk.started_at = Some(std::time::Instant::now());
         pk.error = None;
+        pk.error_detail = None;
+        pk.details_open = false;
         pk.reset = false;
         self.state.update(cx, |s, cx| {
             s.generate_image(target, prompt, cx);
@@ -3147,8 +3155,7 @@ impl Shell {
                 space.name.clone()
             };
             let hint = if is_people {
-                "Say hi. It lands for both of you at once; Add agent brings one of yours in."
-                    .to_string()
+                "Say hi. It lands for both of you at once.".to_string()
             } else {
                 format!("Ask {name} anything. It plans, delegates, or just answers.")
             };
@@ -3167,6 +3174,36 @@ impl Shell {
                 let state = self.state.read(cx);
                 hero = hero.child(crate::ui::groups::picture(&space, state, 88.0, &theme));
             }
+            // Empty people chat: a clear "Add agent" control so bringing your
+            // own agent in is discoverable ([feedback
+            // app-01M5WKBR85JVW1KKJH96FWZVK5]); the right pane has the same
+            // entry for chats that already have messages.
+            let add_agent = is_people.then(|| {
+                div()
+                    .id("empty-add-agent")
+                    .mt(px(4.0))
+                    .px(px(14.0))
+                    .py(px(7.0))
+                    .rounded(px(8.0))
+                    .bg(theme.surface_2)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.bubble_assistant))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(icon("sparkles", 14.0, theme.text_muted))
+                    .child(
+                        div()
+                            .text_size(px(TEXT_SMALL))
+                            .text_color(theme.text)
+                            .child("Add agent"),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.members_open = false;
+                        this.add_agent_open = true;
+                        cx.notify();
+                    }))
+            });
             column = column.child(
                 div()
                     .flex_1()
@@ -3192,6 +3229,7 @@ impl Shell {
                             .max_w(px(460.0))
                             .child(hint),
                     )
+                    .children(add_agent)
                     .child(
                         div()
                             .w(px(COMPOSER_WIDTH))

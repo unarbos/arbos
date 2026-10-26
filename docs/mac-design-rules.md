@@ -440,6 +440,7 @@ changed its composer between the 2026-10-15 refs and this shot; this shot wins.
 | Status picture | **25⅓ (76 px)**, left edge **6 inside the `+` disc's left edge** (24 from the screen keyboard up, 37 down) — no longer the bubble's 42 pt disc, no longer centred on the `+` | `Theme.presenceAvatar`, `presenceAvatarOffset`, `presenceInset(composerInset:)` |
 | Status words | **17 pt body**, muted, shimmer unchanged; **14** after the picture (words at 190 px keyboard up) | `PresenceRow.textSize`, `Theme.presenceGap` |
 | Picture bottom → composer top | **22⅔ (68 px)**; the row is the picture tall, ChatView pads below it | `Theme.presenceBottomGap` |
+| Last bubble → picture top | **14 (42 px)** — the row rises 22 pt into the transcript's 28 pt tail instead of starting under the tail and the bar's 8 pt pad (was 36); bubble → composer with the row = Grok's 62⅓; the bar grows 26 pt (was 48) when the row appears ([feedback status-row-gap-ios-2026-10-26]) | `Theme.presenceTopGap`, `presenceLift`, `transcriptTail`, `chatBarTopPad` |
 | Tasks chip (#1696) and job-tab words (#1801) | ride the same row unchanged (20 pt chip inside the 25⅓ row) | `PresenceRow.tasksChip`, `onWords` |
 
 Not moved, on purpose: the people-chat **bubble picture stays 42 pt centred on
@@ -509,6 +510,33 @@ A new screen declares itself there.
 | `inlineChips` | ≤ 32 pt chips and segments inside cards | not controls of the family |
 | `primaryCTA` | 50 pt filled capsules (Sign in, Pair, Create) | primary buttons, `primary` fill, no rim |
 | `textAreas` | feedback note / description areas, 18 pt corners | free-form, grow |
+
+## Glass surface: readable content, translucent chrome (Jacob 2026-10-26, [feedback mac-glass-contrast-2026-10-26])
+
+Jacob (09:55 CR): "the glass appearance is broken on the mac." Reproduced on
+v0.6.268 over white, black and busy desktops at Opacity 0 / 50 / 100 %: GPUI's
+`Blurred` window is an `NSVisualEffectView` with every tint layer stripped — a
+colourless gaussian of the desktop — so the only tone was the shell wash at
+the slider's value. Dark at 0 % over white: sidebar names white on `#afafaf`
+(1.9:1), previews gone, discs and hairlines flat; light at 0 % over black the
+mirror image. The blur itself survived an appearance switch (System pref
+toggled dark → light → dark, no flat frame); that risk did not reproduce.
+
+Rules (ARB-271, the wider Liquid / frosted / tinted restyle, stays paused —
+this is the correctness of the existing surface):
+
+| Layer | Rule | Code |
+| --- | --- | --- |
+| Window material | A real AppKit semantic material with its tint intact, installed once under GPUI's content view; its `appearance` follows the theme (dark material under a dark theme, whatever macOS is set to), so an appearance switch re-tones it and never drops it. Default `Sidebar` (Finder's). GPUI's own background is `Transparent` on Glass so the two do not stack. | `ui::vibrancy` (`BackdropPlan`, `apply`), `Theme::window_background_for`, `GlassMaterial` (`ARBOS_GLASS_MATERIAL=…` for the rig) |
+| Opacity slider | Still 0 … 100 %, floor **0 %** (#1425). It sets the shell wash only; legibility never depends on it. | `GlassOpacity`, `Theme::shell()` |
+| Chat column | Page-colour wash at **0.85** on both appearances (dark `bg`, light white; light had it since 2026-10-21). Body text ≥ 4.5:1 and muted ≥ 3:1 over white / black / mid grey at every slider value, counting the app's paint alone. | `CHAT_WASH_ALPHA`, `Theme::chat_wash()` / `pane()` |
+| Sidebar | Tint **0.60** both appearances (dark was 0.35): names ≥ 4.5:1 over any desktop by the app's paint alone; previews lean on the material below the default Opacity. | `CHROME_TINT_ALPHA`, `Theme::chrome()` |
+| Floating cards | Menus, sheets, pickers at **0.85** (dark was 0.50, light 0.72) with the header's 1 pt rim and top highlight on Glass. | `FROST_TINT_ALPHA`, `Theme::card()`, `glass::plate` |
+| Untouched | Traffic lights native; sizes and placements; bubbles, discs and hairlines keep their colours (they sit on the washed surfaces above); Matte. | — |
+
+Pinned by `theme::glass_contrast_tests` (the matrix above with a WCAG model of
+the compositing) and `vibrancy::tests` (material on Glass, none on Matte,
+kept across dark → light → dark).
 
 ## Full screen (Jacob 2026-10-24, [feedback fullscreen-traffic-lights-2026-10-24] → [feedback topbar-grok-parity-2026-10-24])
 

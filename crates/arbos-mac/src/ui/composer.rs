@@ -230,11 +230,12 @@ pub struct ComposerInput {
     /// Runs deferred, after this entity's update ends, so the owner may read
     /// and update the input freely.
     pub on_submit: Option<SubmitHandler>,
-    /// Tab / Down while the `@` mention menu is open: move the highlight down.
+    /// Down while the `@` mention menu is open: move the highlight down.
     pub on_mention_next: Option<MentionKeyHandler>,
-    /// Shift+Tab / Up while the `@` mention menu is open: move the highlight up.
+    /// Up / Shift+Tab while the `@` mention menu is open: move the highlight up.
     pub on_mention_prev: Option<MentionKeyHandler>,
-    /// Enter while the `@` mention menu is open: accept the highlighted row.
+    /// Tab or Enter while the `@` mention menu is open: accept the highlighted
+    /// (or hovered) row.
     pub on_mention_accept: Option<MentionKeyHandler>,
     /// Esc while the `@` mention menu is open: close it for this token.
     pub on_mention_escape: Option<MentionKeyHandler>,
@@ -638,7 +639,10 @@ impl ComposerInput {
     }
 
     fn accept_mention(&mut self, _: &AcceptMention, window: &mut Window, cx: &mut Context<Self>) {
-        self.defer_mention_key(self.on_mention_next.clone(), window, cx);
+        // Tab completes the highlighted / hovered row (same as Enter). Arrows
+        // and Shift+Tab still move the highlight ([feedback
+        // app-01M5WKBR85JVW1KKJH96FWZVK5]).
+        self.defer_mention_key(self.on_mention_accept.clone(), window, cx);
     }
 
     fn prev_mention(&mut self, _: &PrevMention, window: &mut Window, cx: &mut Context<Self>) {
@@ -2293,7 +2297,8 @@ pub struct Composer {
     /// S8 shake when the user hits Cmd+W on the pinned tab; also reused for
     /// the empty-send nudge.
     pub nudge_at: Option<u64>,
-    /// Highlighted row in the `@` mention menu (Tab / arrows move it).
+    /// Highlighted row in the `@` mention menu (arrows / hover move it;
+    /// Tab and Enter insert it).
     mention_selected: usize,
     /// Last `@token` query; when it changes, selection resets to the first row.
     mention_query_seen: Option<String>,
@@ -2798,7 +2803,7 @@ impl Composer {
         }
     }
 
-    /// Tab / ↓ or Shift+Tab / ↑ through the `@` list. Returns true when the menu
+    /// ↓ or ↑ / Shift+Tab through the `@` list. Returns true when the menu
     /// was open and handled the key.
     fn mention_move(&mut self, delta: i32, cx: &mut Context<Self>) -> bool {
         let query = self.mention_query(cx);
@@ -2895,6 +2900,14 @@ impl Composer {
                 .cursor_pointer()
                 .when(i == selected, |el| el.bg(theme.surface_2))
                 .hover(|s| s.bg(theme.surface_2))
+                // Hover owns the highlight so Tab / Enter insert that row
+                // ([feedback app-01M5WKBR85JVW1KKJH96FWZVK5]).
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    if *hovered && this.mention_selected != i {
+                        this.mention_selected = i;
+                        cx.notify();
+                    }
+                }))
                 .child(mention_picture(&c.picture, MENTION_ROW_PICTURE, &theme))
                 .child(
                     div()
@@ -4135,6 +4148,22 @@ mod enter_tests {
         assert!(
             text.starts_with("hi @sam"),
             "the mention was completed: {text:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn tab_with_an_open_mention_completes_the_highlighted_row(cx: &mut TestAppContext) {
+        // Tab inserts the highlighted handle ([feedback
+        // app-01M5WKBR85JVW1KKJH96FWZVK5]); it must not only move the highlight.
+        let (input, cx, submitted) = input_with_owner_callbacks(cx);
+        cx.simulate_input("hi @sa");
+        cx.dispatch_action(AcceptMention);
+        cx.run_until_parked();
+        assert_eq!(submitted.get(), 0, "Tab on an open @mention does not send");
+        let text = cx.update(|_, cx| input.read(cx).text().to_string());
+        assert!(
+            text.starts_with("hi @sam"),
+            "Tab completed the highlighted mention: {text:?}"
         );
     }
 

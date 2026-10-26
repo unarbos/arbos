@@ -876,6 +876,8 @@ mod tests {
             channels_mock: true,
             image_mock: false,
             avatar_retry_backoff_ms: Vec::new(),
+            avatar_attempt_timeout: std::time::Duration::from_secs(40),
+            avatar_total_timeout: std::time::Duration::from_secs(75),
             voice_mock: true,
             openai_audio_base: String::new(),
             vault_mock: false,
