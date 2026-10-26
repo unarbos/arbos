@@ -979,7 +979,10 @@ auto_requests() {
     [[ -n "$deployed" ]] || continue
     [[ "$deployed" == "$head" ]] && continue
     git -C "$REPO" cat-file -e "$deployed^{commit}" 2>/dev/null || continue
-    queued="$(sed -n 's/^sha=//p' "$QUEUE/$kind" 2>/dev/null)"
+    # No queue file for this kind (voice, most of the time) → sed exits 2 and, under `set -e`,
+    # ended the whole tick here: no relay/voice/agentd deploy from 04:40 to 07:1x UTC on
+    # 2026-10-26 (every tick "status=2/INVALIDARGUMENT"). An absent file is an empty queue.
+    queued="$(sed -n 's/^sha=//p' "$QUEUE/$kind" 2>/dev/null || true)"
     [[ "$queued" == "$head" ]] && continue
     # A queued request that already contains the newest green is NEWER than it (its CI is still
     # running): leave it — overwriting it with the older green started three images one minute
