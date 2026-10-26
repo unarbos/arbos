@@ -76,7 +76,9 @@ enum DebugHooks {
     /// Fixture machine reports `always_on` (D73 policy screens).
     static var alwaysOn: Bool { value("ARBOS_ALWAYS_ON") == "1" }
     /// keyboard | settings | voice | threads | model | profile | member — opened on the chat screen
-    /// (`member` = the group page with its first other member pushed over it).
+    /// (`member` = the group page with its first other member pushed over it; `actions` = the
+    /// long-press overlay on the newest bubble, `keyboard-actions` = the same with the composer
+    /// keyboard up first).
     /// `onboarding` shows the D82 first-login screen frozen on `ARBOS_ONBOARDING_STAGE` (1|2|3|fail).
     static var show: String? { value("ARBOS_SHOW") }
     /// How long after the chat appears `ARBOS_SHOW` fires (ms, default 600): a loaded rig Mac

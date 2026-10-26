@@ -667,6 +667,15 @@ pub struct NotifyBody {
     /// People chats, box callers: which of the box's agents spoke.
     #[serde(default)]
     pub project_id: Option<String>,
+    /// Box callers (#1832): what kind of bubble this is for a live call in the chat —
+    /// `result` (a turn's answer), `job` (a background job's outcome), `quick` (a status line
+    /// while a turn runs). Devices send none (a person's message).
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Box callers: the whole prose of the turn for the call's context (longer than the push
+    /// body), when it differs from `text`.
+    #[serde(default)]
+    pub voice_text: Option<String>,
 }
 
 /// The sender behind a notify call: a device is its person; a box is one of its owner's agents.
@@ -727,7 +736,11 @@ pub async fn notify_people_chat(
         Err(r) => return *r,
     };
     let chat = ChatRef::people(&id);
-    notify_response(announce(&state, &chat, &sender, &b.message_id, &b.text).await)
+    let out = announce(&state, &chat, &sender, &b.message_id, &b.text).await;
+    if out.is_some() {
+        crate::voice::call_update(&state, &chat, &sender, &b).await;
+    }
+    notify_response(out)
 }
 
 /// `POST /projects/{project_id}/chats/{chat_id}/notify {message_id, text}` — a whole message
@@ -752,7 +765,11 @@ pub async fn notify_project_chat(
         Err(r) => return *r,
     };
     let chat = ChatRef::project(&project.id, &chat_id);
-    notify_response(announce(&state, &chat, &sender, &b.message_id, &b.text).await)
+    let out = announce(&state, &chat, &sender, &b.message_id, &b.text).await;
+    if out.is_some() {
+        crate::voice::call_update(&state, &chat, &sender, &b).await;
+    }
+    notify_response(out)
 }
 
 #[cfg(test)]

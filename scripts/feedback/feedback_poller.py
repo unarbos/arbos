@@ -2555,9 +2555,14 @@ class Loop:
             log(f"ALERT main's iOS unit-test target does not compile at {m.group(1)} (seen by gate {active['id']}); branches are not blamed — "
                 f"route the fix to the test's owner: " + " | ".join(errors[:3]))
 
+    def gate_priority(self, active: dict) -> str:
+        """A batch with a pinned member (hotfix / operator gate-next) tells the Mac's heavy-job cap it has
+        priority: it may take the extra slot instead of queueing behind a pool gate and the TF lane."""
+        return "priority" if any(self.store.state(f).get("gate_pinned") for f in (active.get("members") or {})) else "normal"
+
     def rust_gate_mac_start(self, cur: dict) -> None:
         active = cur["rust_gate"]
-        if self.rust_gate_mac("start-batch", active["id"], active["tree"], "1") is not None:
+        if self.rust_gate_mac("start-batch", active["id"], active["tree"], "1", "mac", self.gate_priority(active)) is not None:
             active["mac_started"] = iso()
             self.store.save_cursor(cur)
             log(f"Rust gate {active['id']}: Mac release build started for {active['tree'][:8]}")
@@ -2685,7 +2690,7 @@ class Loop:
         if active.get("ios", "skipped") == "pending" and active["linux"] != "fail" and active["mac"] != "fail":
             ios_id = f"{active['id']}-ios"
             if not active.get("ios_started"):
-                if self.rust_gate_mac("start-ios", ios_id, active["branch"], active["tree"]) is not None:
+                if self.rust_gate_mac("start-ios", ios_id, active["branch"], active["tree"], self.gate_priority(active)) is not None:
                     active["ios_started"] = iso()
                     self.store.save_cursor(cur)
                     log(f"Gate {active['id']}: iOS half started for {active['tree'][:8]}")

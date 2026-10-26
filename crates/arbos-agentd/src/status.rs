@@ -712,7 +712,7 @@ impl Agent {
                 model_call = used_model,
                 "quick reply written"
             );
-            self.announce_reply(&room, &row_id, &text);
+            self.announce_reply_kind(&room, &row_id, &text, "quick", None);
             let _ = self.store.t3_append(
                 chat_id,
                 None,
