@@ -488,6 +488,46 @@ extension View {
     func paneCrayon(_ on: Bool = true) -> some View { modifier(PaneCrayon(on: on)) }
 }
 
+/// Jacob, 2026-10-25: a tap on a profile picture opens it full-size in the media viewer chat
+/// photos use (tap / swipe-down closes, pinch zooms). With no picture (`url` empty — initials
+/// or a leaf) the content is just drawn: nothing to view. Panes whose picture opens the avatar
+/// picker instead get **View** inside the picker.
+struct ViewablePicture<Content: View>: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    let name: String
+    let url: String?
+    @ViewBuilder let content: () -> Content
+    @State private var viewer: MediaViewerState?
+
+    var body: some View {
+        if let url, !url.isEmpty {
+            Button {
+                viewer = MediaViewerState(items: [MediaAlbum.picture(name: name, url: url)], index: 0)
+            } label: {
+                content().contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("View picture")
+            .accessibilityIdentifier("hero-view-picture")
+            .onAppear {
+                if DebugHooks.viewPicture {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                        viewer = MediaViewerState(items: [MediaAlbum.picture(name: name, url: url)], index: 0)
+                    }
+                }
+            }
+            .fullScreenCover(item: $viewer) { v in
+                MediaViewer(album: v.items, index: v.index, onClose: { viewer = nil })
+                    .environmentObject(model)
+                    .environment(\.theme, theme)
+            }
+        } else {
+            content()
+        }
+    }
+}
+
 // ----- the shared pane kit (PaneKit) and the names the pages use ------------
 
 /// A grouped card of rows (the kit's card; hairlines inset to the label).
@@ -795,7 +835,9 @@ struct UserProfileView: View {
                     // no username field, no Add members.
                     ProfilePane(
                         hero: PaneHero(
-                            picture: .image(AnyView(PersonAvatar(url: person.avatarUrl, handle: person.handle, size: PaneKit.heroAvatar, name: person.name, id: person.id, colorIndex: person.avatarColorIndex))),
+                            picture: .image(AnyView(ViewablePicture(name: person.displayName, url: person.avatarUrl) {
+                                PersonAvatar(url: person.avatarUrl, handle: person.handle, size: PaneKit.heroAvatar, name: person.name, id: person.id, colorIndex: person.avatarColorIndex)
+                            })),
                             name: person.displayName,
                             subtitle: "@\(person.handle)",
                             action: MessageButton.shows(isMe: isMe, blocked: blockedEntry != nil) ? AnyView(messageButton) : nil
@@ -1362,7 +1404,9 @@ struct GroupProfileView: View {
     /// cluster or picked image (tap → the edit sheet) for a people group.
     @ViewBuilder private var heroPicture: some View {
         if let project {
-            AgentAvatar(project: project, theme: theme, size: PaneKit.heroAvatar, idle: true)
+            ViewablePicture(name: project.name, url: project.imageURL) {
+                AgentAvatar(project: project, theme: theme, size: PaneKit.heroAvatar, idle: true)
+            }
         } else {
             Button { showEdit = true } label: {
                 AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL, leaf: people?.leafPick, neutralName: people?.isNeutralAvatar == true ? people?.title : nil)
@@ -1975,7 +2019,9 @@ struct ServerProfileView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Change server picture")
             } else {
-                ServerAvatar(server: server, size: PaneHeader<EmptyView>.avatarSize)
+                ViewablePicture(name: server.name, url: server.imageKey.flatMap { model.blobURL(projectId: "servers:\(server.id)", key: $0)?.absoluteString }) {
+                    ServerAvatar(server: server, size: PaneHeader<EmptyView>.avatarSize)
+                }
             }
         }
     }

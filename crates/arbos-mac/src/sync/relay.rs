@@ -1368,9 +1368,22 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
                 refresh = true;
                 refresh_servers = true;
             }
-            // An agent's avatar changed (the agents' `profile_updated`): the registry re-read
-            // brings the new picture and stamp to my project record and every roster copy.
-            PushEventDto::AgentProfileUpdated(_) => refresh = true,
+            // An agent's avatar changed (the agents' `profile_updated`): the new picture and
+            // stamp land in my record and every roster copy now; the re-read brings the rest.
+            PushEventDto::AgentProfileUpdated(payload) => {
+                let mut projects = shared.projects.lock().unwrap();
+                super::agent_avatar::apply_push(
+                    &mut projects,
+                    &shared.http_url,
+                    &payload.project_id,
+                    payload.image_key.as_deref(),
+                    payload.avatar_version,
+                );
+                let snapshot = projects.clone();
+                drop(projects);
+                let _ = shared.events.send(SyncEvent::Projects(snapshot));
+                refresh = true;
+            }
             PushEventDto::PeopleMessage(_)
             | PushEventDto::PeopleChatDeleted(_)
             | PushEventDto::ProjectMemberRemoved(_)
@@ -2260,12 +2273,12 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
             .find(|x| x.id == id)
             .cloned();
         let mut project = project_from_dto(&detail, members.as_ref());
-        // D92 amendment: the agent's uploaded / generated picture, fetched like a group's.
+        // D92 amendment: the agent's uploaded / generated picture — the public versioned route.
         project.image_url = project_image_url(
             &shared.http_url,
-            &shared.token(),
             &id,
             detail.project.image_key.as_deref(),
+            project.avatar_version,
         );
         // list_projects extras (shared / owner_handle) live on the list row.
         if let Some(shared_flag) = list_shared {
@@ -2407,6 +2420,9 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
         }
         *local = merged;
     }
+    // One copy of each agent's avatar everywhere: the newest stamp wins over any roster copy
+    // that arrived older (Jacob, 2026-10-25).
+    super::agent_avatar::reconcile(&mut projects);
     *shared.projects.lock().unwrap() = projects.clone();
     let _ = shared.events.send(SyncEvent::Projects(projects.clone()));
     log_first_paint("relay", projects.len());
@@ -3680,15 +3696,16 @@ fn with_server_picture(shared: &Shared, mut server: ServerInfo) -> ServerInfo {
     server
 }
 
-/// An agent's picture as the avatar loader fetches it: the blob in the project's own slot.
+/// An agent's picture as the avatar loader fetches it: the relay's public picture route,
+/// stamped with `avatar_version` (`sync::agent_avatar::picture_url`). The blob slot is the
+/// owner's and the guests' only — a viewer who merely shared a group got 403 and the leaf.
 fn project_image_url(
     http_url: &str,
-    token: &str,
     project_id: &str,
     key: Option<&str>,
+    version: i64,
 ) -> Option<String> {
-    let key = key.map(str::trim).filter(|k| !k.is_empty())?;
-    Some(format!("{http_url}/blob/{project_id}/{key}?token={token}"))
+    super::agent_avatar::picture_url(http_url, project_id, key, version)
 }
 
 fn picture_jpeg(path: &Path) -> Result<Vec<u8>> {
@@ -5719,13 +5736,23 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             color,
         } => {
             {
+                // Optimistic, into every copy (sidebar record and each roster) at once; a leaf
+                // pick is "not a photo": the picture goes with it.
                 let mut projects = shared.projects.lock().unwrap();
-                if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
-                    p.avatar_leaf = leaf;
-                    p.avatar_leaf_color = color;
-                    // A leaf pick is "not a photo": the picture goes with it.
-                    p.image_url = None;
-                }
+                let local = super::agent_avatar::newest(&projects, &project_id)
+                    .map(|f| f.version + 1)
+                    .unwrap_or(1);
+                super::agent_avatar::apply(
+                    &mut projects,
+                    &project_id,
+                    &super::agent_avatar::Facts {
+                        image_url: None,
+                        leaf,
+                        leaf_color: color,
+                        version: local,
+                    },
+                    true,
+                );
                 let snapshot = projects.clone();
                 drop(projects);
                 let _ = shared.events.send(SyncEvent::Projects(snapshot));
@@ -5738,7 +5765,26 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .patch_json(&format!("/projects/{project_id}"), body)
                     .await
                 {
-                    Ok(_) => {}
+                    Ok(reply) => {
+                        let stamp = super::agent_avatar::stamp_of(&reply);
+                        if stamp > 0 {
+                            let mut projects = shared.projects.lock().unwrap();
+                            super::agent_avatar::apply(
+                                &mut projects,
+                                &project_id,
+                                &super::agent_avatar::Facts {
+                                    image_url: None,
+                                    leaf,
+                                    leaf_color: color,
+                                    version: stamp,
+                                },
+                                true,
+                            );
+                            let snapshot = projects.clone();
+                            drop(projects);
+                            let _ = shared.events.send(SyncEvent::Projects(snapshot));
+                        }
+                    }
                     Err(err) => {
                         // An older relay (no D92 columns) ignores unknown fields and answers
                         // 200; a 404 means no such project. Anything else is worth a line.
@@ -5794,17 +5840,26 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     )
                     .await
                 {
-                    Ok(_) => {
-                        let url = project_image_url(
-                            &shared.http_url,
-                            &shared.token(),
-                            &project_id,
-                            Some(&key),
-                        );
+                    Ok(reply) => {
+                        // The relay's stamp names the new URL; it lands in my record and in
+                        // every roster copy, so the bubbles and the sidebar agree at once.
                         let mut projects = shared.projects.lock().unwrap();
-                        if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
-                            p.image_url = url;
-                        }
+                        let base =
+                            super::agent_avatar::newest(&projects, &project_id).unwrap_or_default();
+                        let stamp = super::agent_avatar::stamp_of(&reply).max(base.version + 1);
+                        let url =
+                            project_image_url(&shared.http_url, &project_id, Some(&key), stamp);
+                        super::agent_avatar::apply(
+                            &mut projects,
+                            &project_id,
+                            &super::agent_avatar::Facts {
+                                image_url: url,
+                                leaf: base.leaf,
+                                leaf_color: base.leaf_color,
+                                version: stamp,
+                            },
+                            true,
+                        );
                         let snapshot = projects.clone();
                         drop(projects);
                         let _ = shared.events.send(SyncEvent::Projects(snapshot));

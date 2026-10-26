@@ -101,8 +101,95 @@ extension AppModel {
         p.avatarLeafColor = neutral ? LeafArt.neutral : Int(a.leaf.color)
         p.avatarColorIndexEffective = Int(a.colorIndex)
         p.imageKey = a.imageKey
-        p.imageURL = a.imageKey.flatMap { blobURL(projectId: a.id, key: $0)?.absoluteString }
+        p.avatarVersion = Int(a.avatarVersion)
+        p.imageURL = agentPictureURL(id: a.id, imageKey: a.imageKey, version: p.avatarVersion)
         return p
+    }
+
+    // MARK: One copy of the avatar everywhere (Jacob, 2026-10-25)
+
+    /// The agent's picture URL as every surface fetches it (`Project.pictureURL`); nil in the
+    /// fixture, where there is no relay to serve it.
+    func agentPictureURL(id: Id, imageKey: String?, version: Int) -> String? {
+        guard !isFixture else { return nil }
+        return Project.pictureURL(httpUrl: relayHttpUrl, id: id, imageKey: imageKey, version: version)
+    }
+
+    /// What an agent's avatar is made of, with the relay's stamp of its last change.
+    struct AgentAvatarFacts: Equatable {
+        var imageKey: String?
+        var avatarLeaf: Int?
+        var avatarLeafColor: Int?
+        var version: Int
+
+        init(imageKey: String?, avatarLeaf: Int?, avatarLeafColor: Int?, version: Int) {
+            self.imageKey = imageKey.flatMap { $0.isEmpty ? nil : $0 }
+            self.avatarLeaf = avatarLeaf
+            self.avatarLeafColor = avatarLeafColor
+            self.version = version
+        }
+
+        init(_ p: Project) {
+            self.init(imageKey: p.imageKey, avatarLeaf: p.avatarLeaf, avatarLeafColor: p.avatarLeafColor, version: p.avatarVersion)
+        }
+    }
+
+    /// Every copy of an agent the model holds: my project record and the roster card of each
+    /// people chat it sits on. These used to drift apart after a change (only the copy the
+    /// change went through moved), so the header drew one picture and the bubbles another.
+    func agentAvatarCopies(_ projectId: Id) -> [AgentAvatarFacts] {
+        var out: [AgentAvatarFacts] = []
+        if let mine = projects.first(where: { $0.id == projectId }) { out.append(AgentAvatarFacts(mine)) }
+        for chat in peopleChats {
+            for m in chat.agents where m.id == projectId {
+                if let p = m.project { out.append(AgentAvatarFacts(p)) }
+            }
+        }
+        return out
+    }
+
+    /// The newest facts the model knows for an agent (highest stamp; the first copy among equals).
+    func newestAgentAvatar(_ projectId: Id) -> AgentAvatarFacts? {
+        agentAvatarCopies(projectId).max { a, b in a.version < b.version }
+    }
+
+    /// Write `facts` into every copy of the agent — the one apply path. A copy that already
+    /// carries a newer stamp is left alone (a late answer never rolls a picture back); `force`
+    /// is for the optimistic local write before the relay has stamped the change.
+    func applyAgentAvatar(_ projectId: Id, _ facts: AgentAvatarFacts, force: Bool = false) {
+        func write(_ p: inout Project) {
+            guard force || facts.version >= p.avatarVersion else { return }
+            p.imageKey = facts.imageKey
+            p.avatarLeaf = facts.avatarLeaf
+            p.avatarLeafColor = facts.avatarLeafColor
+            p.avatarVersion = facts.version
+            p.imageURL = agentPictureURL(id: projectId, imageKey: facts.imageKey, version: facts.version)
+        }
+        for i in projects.indices where projects[i].id == projectId { write(&projects[i]) }
+        for c in peopleChats.indices {
+            for m in peopleChats[c].members.indices where peopleChats[c].members[m].isAgent && peopleChats[c].members[m].id == projectId {
+                if peopleChats[c].members[m].project != nil { write(&peopleChats[c].members[m].project!) }
+            }
+        }
+    }
+
+    /// After any fetch that replaced a copy (registry, people list): per agent, the newest copy
+    /// wins everywhere, so a roster that arrived with an older picture cannot flip a surface back.
+    func reconcileAgentAvatars() {
+        var ids = Set(projects.map(\.id))
+        for chat in peopleChats { for m in chat.agents { ids.insert(m.id) } }
+        for id in ids {
+            guard let newest = newestAgentAvatar(id) else { continue }
+            applyAgentAvatar(id, newest)
+        }
+    }
+
+    /// The picture only (the push carries no leaf picks): a newer stamp from the relay lands in
+    /// place at once; the leaf picks come with the re-read that follows.
+    func applyAgentAvatarPush(projectId: Id, imageKey: String?, version: Int) {
+        let base = newestAgentAvatar(projectId) ?? AgentAvatarFacts(imageKey: nil, avatarLeaf: nil, avatarLeafColor: nil, version: 0)
+        guard version >= base.version else { return }
+        applyAgentAvatar(projectId, AgentAvatarFacts(imageKey: imageKey, avatarLeaf: base.avatarLeaf, avatarLeafColor: base.avatarLeafColor, version: version))
     }
 
     /// The full record behind an id: mine first, then the roster rows (someone else's agent).

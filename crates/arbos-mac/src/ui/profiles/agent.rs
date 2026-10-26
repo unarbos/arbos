@@ -77,6 +77,10 @@ fn project_from_member(state: &crate::app::AppState, project_id: &str) -> Option
             avatar_color_index: a.avatar_color_index,
             avatar_leaf: a.avatar_leaf,
             avatar_leaf_color: a.avatar_leaf_color,
+            // The owner's picture travels with the roster copy; without it the hero drew the
+            // automatic leaf for every foreign agent (Jacob, 2026-10-25: "Hezbola").
+            image_url: a.image_url.clone(),
+            avatar_version: a.avatar_version,
             description: a.description.clone(),
             owner_person: a.owner.clone(),
             model: a.model.clone().unwrap_or_default(),
@@ -143,11 +147,11 @@ pub(super) fn page(
     let now = now_ms() as i64;
 
     // D92 amendment: the uploaded / generated picture wins over the leaf (read while `state`
-    // is borrowed).
-    let hero_image = project
-        .image_url
-        .as_deref()
-        .and_then(|url| state.avatar(url));
+    // is borrowed) — from the newest copy the store holds, like every other surface.
+    let hero_image = crate::sync::agent_avatar::newest(&state.projects, &project.id)
+        .and_then(|f| f.image_url)
+        .or_else(|| project.image_url.clone())
+        .and_then(|url| state.avatar(&url));
     if avatar_state != AvatarState::Idle || streaming {
         PulseClock::request(cx);
     }
