@@ -1,3 +1,4 @@
+import ArbosFFI
 import XCTest
 @testable import Arbos
 
@@ -9,7 +10,7 @@ import XCTest
 final class BottomSearchBarTests: XCTestCase {
     private func entry(_ kind: GlobalSearch.Kind, _ title: String, when: Int64, indirect: Bool = false,
                        target: GlobalSearch.Target? = nil) -> GlobalSearch.Entry {
-        GlobalSearch.Entry(kind: kind, title: title, subtitle: "", when: when, rank: indirect ? .indirect : .contains,
+        GlobalSearch.Entry(kind: kind, title: title, subtitle: "", when: when, rank: indirect ? .indirect : .direct(kind: .wordStart, field: .name),
                            target: target ?? .project("id-\(title)"))
     }
 
@@ -96,16 +97,24 @@ final class BottomSearchBarTests: XCTestCase {
         XCTAssertEqual(arranged[0].rows[0].title, "p19", "newest first")
     }
 
-    /// Rank per type (Jacob): a name that starts with the query beats one that
-    /// merely contains it, whatever their age; indirect hits last.
-    func testPrefixBeatsContainsBeatsIndirect() {
-        XCTAssertEqual(GlobalSearch.Rank.of("Scout", q: "sc"), .prefix)
-        XCTAssertEqual(GlobalSearch.Rank.of("Affinity Scout", q: "sc"), .contains)
+    /// Rank per type (Jacob): a name that starts with the query beats one where
+    /// only a later word starts with it, whatever their age; indirect hits last.
+    /// Through the shared matcher a handle hit sorts after a name hit of the same
+    /// kind, and a substring inside a word is no hit at all.
+    func testPrefixBeatsWordStartBeatsIndirect() {
+        XCTAssertEqual(GlobalSearch.Rank.of("Scout", q: "sc"), .direct(kind: .prefix, field: .name))
+        XCTAssertEqual(GlobalSearch.Rank.of("Affinity Scout", q: "sc"), .direct(kind: .wordStart, field: .name))
         XCTAssertEqual(GlobalSearch.Rank.of("Doug", q: "sc"), .indirect)
-        XCTAssertEqual(GlobalSearch.Rank.best(["Carro", "robertalanm"], q: "rob"), .prefix)
-        var contains = entry(.agent, "Affinity Scout", when: 99); contains.rank = .contains
-        var prefix = entry(.agent, "Scout", when: 1); prefix.rank = .prefix
-        XCTAssertEqual(GlobalSearch.arrange([contains, prefix], queryIsEmpty: false)[0].rows.map(\.title), ["Scout", "Affinity Scout"])
+        XCTAssertEqual(GlobalSearch.Rank.of("Affinity", q: "ffin"), .indirect)
+        XCTAssertEqual(GlobalSearch.Rank.of(name: "Carro", handle: "robertalanm", q: "rob"), .direct(kind: .prefix, field: .handle))
+        XCTAssertEqual(GlobalSearch.Rank.of(name: "Carro", handle: "robertalanm", q: "carro"), .direct(kind: .exact, field: .name))
+        XCTAssertLessThan(GlobalSearch.Rank.direct(kind: .exact, field: .handle), GlobalSearch.Rank.direct(kind: .prefix, field: .name))
+        XCTAssertLessThan(GlobalSearch.Rank.direct(kind: .prefix, field: .name), GlobalSearch.Rank.direct(kind: .prefix, field: .handle))
+        XCTAssertLessThan(GlobalSearch.Rank.direct(kind: .wordStart, field: .handle), GlobalSearch.Rank.direct(kind: .exact, field: .title))
+        XCTAssertLessThan(GlobalSearch.Rank.direct(kind: .wordStart, field: .title), GlobalSearch.Rank.indirect)
+        var wordStart = entry(.agent, "Affinity Scout", when: 99); wordStart.rank = .of("Affinity Scout", q: "sc")
+        var prefix = entry(.agent, "Scout", when: 1); prefix.rank = .of("Scout", q: "sc")
+        XCTAssertEqual(GlobalSearch.arrange([wordStart, prefix], queryIsEmpty: false)[0].rows.map(\.title), ["Scout", "Affinity Scout"])
     }
 
     func testSubtitlesReadNaturally() {
