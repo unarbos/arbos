@@ -38,6 +38,7 @@ use tokio::time::{interval, sleep, timeout};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
+use super::avatar_master::Master;
 use super::credentials::{self, DeviceCredentials};
 use super::diagnostics;
 use super::doc::ChatDoc;
@@ -2057,6 +2058,27 @@ fn cached_avatar(shared: &Arc<Shared>, url: &str) -> Option<Vec<u8>> {
 }
 
 async fn fetch_avatar(shared: Arc<Shared>, url: String) {
+    // `file://<path>` is a picked file (the avatar picker's Upload preview): read and mastered
+    // here, off the UI thread, so the preview shows exactly what the upload will send — never
+    // the raw 4000 px file through the GPU sampler (Jacob, 2026-10-26).
+    if let Some(path) = url.strip_prefix("file://") {
+        if !shared.avatars_done.lock().unwrap().insert(url.clone()) {
+            return;
+        }
+        let path = PathBuf::from(path);
+        let mastered = tokio::task::spawn_blocking(move || picture_master(&path)).await;
+        match mastered {
+            Ok(Ok(master)) => {
+                let _ = shared.events.send(SyncEvent::Avatar {
+                    url,
+                    bytes: Arc::new(master.bytes),
+                });
+            }
+            Ok(Err(err)) => shared.notice(format!("Picture: {err:#}")),
+            Err(_) => {}
+        }
+        return;
+    }
     // `/avatars/<user>.jpg?v=…` is the relay's own picture store (an Arbos
     // override of the GitHub avatar); everything else is absolute.
     let full = if url.starts_with('/') {
@@ -3653,12 +3675,10 @@ fn send_wake(shared: &Arc<Shared>, project_id: &str, reason: &'static str) {
     });
 }
 
-/// Any picked image → a JPEG the relay accepts (`PUT /me/avatar`, ≤ 2 MB):
-/// scaled to fit 512 × 512, quality 85.
-/// A picked picture file as the 512 px JPEG the relay stores. PNG, JPEG, GIF and WebP decode
-/// here; HEIC (Photos exports, iPhone shots) goes through macOS's own `sips` first, since
-/// the `image` crate has no HEIF decoder. Anything that is not an image is an error with a
-/// plain message.
+/// A picked picture file as the master the relay stores (`sync::avatar_master`: ≤ 1024 px,
+/// Lanczos, PNG for a flat mark, JPEG q92 for a photo). PNG, JPEG, GIF and WebP decode here;
+/// HEIC (Photos exports, iPhone shots) goes through macOS's own `sips` first, since the `image`
+/// crate has no HEIF decoder. Anything that is not an image is an error with a plain message.
 /// The blob slot a picker target's pictures live in; the draft's is my own (`users:{me}`).
 fn picture_slot(shared: &Shared, target: &PictureTarget) -> String {
     match target {
@@ -3714,7 +3734,7 @@ async fn my_avatar_saved(shared: &Arc<Shared>, put: Result<reqwest::Response, re
 }
 
 /// The Create sheet's pending picture, once the entity exists: the file (or the bytes of the
-/// picture generated into my own slot) goes into the new entity's slot as a 512 px JPEG, then
+/// picture generated into my own slot) goes into the new entity's slot as a picture master, then
 /// `PATCH <patch_path> {image_key}`. `prefix` names the key (`avatar-` / `server-`). Errors are
 /// a notice — the entity itself is already created and shows its neutral initial.
 async fn adopt_draft_picture(
@@ -3724,10 +3744,10 @@ async fn adopt_draft_picture(
     prefix: &str,
     picture: DraftPicture,
 ) -> bool {
-    let jpeg = match picture {
+    let master = match picture {
         DraftPicture::File(path) => {
-            match tokio::task::spawn_blocking(move || picture_jpeg(&path)).await {
-                Ok(Ok(j)) => j,
+            match tokio::task::spawn_blocking(move || picture_master(&path)).await {
+                Ok(Ok(m)) => m,
                 Ok(Err(err)) => {
                     shared.notice(format!("Picture not uploaded: {err:#}"));
                     return false;
@@ -3740,7 +3760,11 @@ async fn adopt_draft_picture(
             let Some(from) = from else { return false };
             match shared.http.get(from).send().await {
                 Ok(r) if r.status().is_success() => match r.bytes().await {
-                    Ok(b) => b.to_vec(),
+                    // The relay's copy is already a master; its type travels with the bytes.
+                    Ok(b) => Master {
+                        png: b.starts_with(b"\x89PNG"),
+                        bytes: b.to_vec(),
+                    },
                     Err(err) => {
                         shared.notice(format!("Generated picture not copied: {err}"));
                         return false;
@@ -3757,13 +3781,13 @@ async fn adopt_draft_picture(
             }
         }
     };
-    let key = format!("{prefix}{}.jpg", new_id().to_lowercase());
+    let key = format!("{prefix}{}.{}", new_id().to_lowercase(), master.ext());
     let put = shared
         .http
         .put(format!("{}/blob/{slot}/{key}", shared.http_url))
         .bearer_auth(shared.token())
-        .header("content-type", "image/jpeg")
-        .body(jpeg)
+        .header("content-type", master.mime())
+        .body(master.bytes)
         .send()
         .await;
     match put {
@@ -3811,12 +3835,12 @@ fn project_image_url(
     super::agent_avatar::picture_url(http_url, project_id, key, version)
 }
 
-fn picture_jpeg(path: &Path) -> Result<Vec<u8>> {
+fn picture_master(path: &Path) -> Result<Master> {
     let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
-    match avatar_jpeg(&bytes) {
-        Ok(jpeg) => Ok(jpeg),
+    match super::avatar_master::master(&bytes) {
+        Ok(master) => Ok(master),
         Err(err) => match heic_to_jpeg(path) {
-            Some(Ok(converted)) => avatar_jpeg(&converted),
+            Some(Ok(converted)) => super::avatar_master::master(&converted),
             Some(Err(conv)) => Err(conv),
             None => Err(err),
         },
@@ -3847,19 +3871,6 @@ fn heic_to_jpeg(path: &Path) -> Option<Result<Vec<u8>>> {
     };
     let _ = std::fs::remove_file(&out);
     Some(result)
-}
-
-fn avatar_jpeg(bytes: &[u8]) -> Result<Vec<u8>> {
-    let img = image::load_from_memory(bytes).context("not an image")?;
-    let img = img.resize(512, 512, image::imageops::FilterType::Triangle);
-    let rgb = image::DynamicImage::ImageRgb8(img.to_rgb8());
-    let mut out = Vec::new();
-    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85);
-    enc.encode_image(&rgb).context("encode")?;
-    if out.len() > 2_000_000 {
-        anyhow::bail!("the picture is too large even at 512 px");
-    }
-    Ok(out)
 }
 
 pub(crate) fn mime_for(path: &Path) -> &'static str {
@@ -5555,10 +5566,11 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         ClientCommand::SetGroupImage { chat_id, path } => {
             let shared = shared.clone();
             tokio::spawn(async move {
-                // Same shape as the profile picture: a 512 px JPEG, whatever was picked
+                // Same shape as the profile picture: the picture master, whatever was picked
                 // (HEIC from Photos included), so every client renders it.
-                let jpeg = match tokio::task::spawn_blocking(move || picture_jpeg(&path)).await {
-                    Ok(Ok(j)) => j,
+                let master = match tokio::task::spawn_blocking(move || picture_master(&path)).await
+                {
+                    Ok(Ok(m)) => m,
                     Ok(Err(err)) => {
                         shared.notice(format!("Group picture: {err:#}"));
                         return;
@@ -5568,7 +5580,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         return;
                     }
                 };
-                let key = format!("group-{}.jpg", new_id().to_lowercase());
+                let key = format!("group-{}.{}", new_id().to_lowercase(), master.ext());
                 let put = shared
                     .http
                     .put(format!(
@@ -5576,8 +5588,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         shared.http_url, chat_id, key
                     ))
                     .bearer_auth(shared.token())
-                    .header("content-type", "image/jpeg")
-                    .body(jpeg)
+                    .header("content-type", master.mime())
+                    .body(master.bytes)
                     .send()
                     .await;
                 match put {
@@ -5917,22 +5929,25 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 let key = match source {
                     PictureSource::Key(key) => key,
                     PictureSource::File(path) => {
-                        let jpeg =
-                            match tokio::task::spawn_blocking(move || picture_jpeg(&path)).await {
-                                Ok(Ok(j)) => j,
-                                Ok(Err(err)) => {
-                                    shared.notice(format!("Picture not uploaded: {err:#}"));
-                                    return;
-                                }
-                                Err(_) => return,
-                            };
-                        let key = format!("avatar-{}.jpg", new_id().to_lowercase());
+                        let master = match tokio::task::spawn_blocking(move || {
+                            picture_master(&path)
+                        })
+                        .await
+                        {
+                            Ok(Ok(m)) => m,
+                            Ok(Err(err)) => {
+                                shared.notice(format!("Picture not uploaded: {err:#}"));
+                                return;
+                            }
+                            Err(_) => return,
+                        };
+                        let key = format!("avatar-{}.{}", new_id().to_lowercase(), master.ext());
                         let put = shared
                             .http
                             .put(format!("{}/blob/{}/{}", shared.http_url, project_id, key))
                             .bearer_auth(shared.token())
-                            .header("content-type", "image/jpeg")
-                            .body(jpeg)
+                            .header("content-type", master.mime())
+                            .body(master.bytes)
                             .send()
                             .await;
                         match put {
@@ -6077,16 +6092,19 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 let key = match source {
                     PictureSource::Key(key) => key,
                     PictureSource::File(path) => {
-                        let jpeg =
-                            match tokio::task::spawn_blocking(move || picture_jpeg(&path)).await {
-                                Ok(Ok(j)) => j,
-                                Ok(Err(err)) => {
-                                    shared.notice(format!("Picture not uploaded: {err:#}"));
-                                    return;
-                                }
-                                Err(_) => return,
-                            };
-                        let key = format!("server-{}.jpg", new_id().to_lowercase());
+                        let master = match tokio::task::spawn_blocking(move || {
+                            picture_master(&path)
+                        })
+                        .await
+                        {
+                            Ok(Ok(m)) => m,
+                            Ok(Err(err)) => {
+                                shared.notice(format!("Picture not uploaded: {err:#}"));
+                                return;
+                            }
+                            Err(_) => return,
+                        };
+                        let key = format!("server-{}.{}", new_id().to_lowercase(), master.ext());
                         let put = shared
                             .http
                             .put(format!(
@@ -6094,8 +6112,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                                 shared.http_url, server_id, key
                             ))
                             .bearer_auth(shared.token())
-                            .header("content-type", "image/jpeg")
-                            .body(jpeg)
+                            .header("content-type", master.mime())
+                            .body(master.bytes)
                             .send()
                             .await;
                         match put {
@@ -6148,10 +6166,11 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         ClientCommand::SetMyAvatar { path } => {
             let shared = shared.clone();
             tokio::spawn(async move {
-                // The relay takes a JPEG of at most 2 MB: re-encode whatever
-                // was picked, scaled to 512 pt.
-                let jpeg = match tokio::task::spawn_blocking(move || picture_jpeg(&path)).await {
-                    Ok(Ok(j)) => j,
+                // The relay takes a JPEG or PNG of at most 3 MB: whatever was picked becomes
+                // the ≤ 1024 px master (`sync::avatar_master`).
+                let master = match tokio::task::spawn_blocking(move || picture_master(&path)).await
+                {
+                    Ok(Ok(m)) => m,
                     Ok(Err(err)) => {
                         shared.notice(format!("Picture: {err:#}"));
                         return;
@@ -6161,14 +6180,32 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         return;
                     }
                 };
-                let put = shared
+                let mut put = shared
                     .http
                     .put(format!("{}/me/avatar", shared.http_url))
                     .bearer_auth(shared.token())
-                    .header("content-type", "image/jpeg")
-                    .body(jpeg)
+                    .header("content-type", master.mime())
+                    .body(master.bytes.clone())
                     .send()
                     .await;
+                // A relay from before the PNG master (415 "stored as JPEG"): send the same
+                // picture as JPEG q92 instead of a notice.
+                if master.png
+                    && matches!(&put, Ok(r) if r.status() == reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE)
+                {
+                    if let Ok(Ok(jpeg)) =
+                        tokio::task::spawn_blocking(move || master.to_jpeg()).await
+                    {
+                        put = shared
+                            .http
+                            .put(format!("{}/me/avatar", shared.http_url))
+                            .bearer_auth(shared.token())
+                            .header("content-type", jpeg.mime())
+                            .body(jpeg.bytes)
+                            .send()
+                            .await;
+                    }
+                }
                 my_avatar_saved(&shared, put).await;
             });
         }

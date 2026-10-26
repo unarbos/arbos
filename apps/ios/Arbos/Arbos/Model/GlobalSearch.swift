@@ -8,6 +8,7 @@
 // the matcher for chat rows; this module decides what the rows are, how they
 // group and in what order they come. Sections, copy and caps are the Mac's.
 
+import ArbosFFI
 import Foundation
 
 /// The home screen's bottom chrome: what sits under the list.
@@ -65,27 +66,49 @@ enum GlobalSearch {
     }
 
     /// How well a row's own name matched: decides the order inside a section.
-    enum Rank: Int, Comparable {
-        /// The name (or handle) starts with the query.
-        case prefix
-        /// The name contains the query.
-        case contains
+    /// Mirrors the Mac palette's `Rank` over the shared matcher (`EntitySearch`).
+    enum Rank: Equatable, Comparable {
+        /// The name, @handle or title matched through the shared matcher:
+        /// exact > prefix > word-start, name before handle before title.
+        case direct(kind: SearchMatchKind, field: SearchMatchField)
         /// Something other than the name matched: a member, a chat title, a message.
         case indirect
 
-        static func < (lhs: Rank, rhs: Rank) -> Bool { lhs.rawValue < rhs.rawValue }
+        /// Every row's rank on an empty query (nothing to order by but activity).
+        static let everything = Rank.direct(kind: .prefix, field: .name)
 
-        /// Rank a name against the folded query.
-        static func of(_ name: String, q: String) -> Rank {
-            let folded = HomeSearch.fold(name)
-            if folded.hasPrefix(q) { return .prefix }
-            if folded.contains(q) { return .contains }
-            return .indirect
+        /// The core's `Match::order` (0 best): exact / prefix / word-start on
+        /// name then handle (0–5), then the title hits (6–8); indirect last.
+        var order: Int {
+            switch self {
+            case .direct(let kind, let field):
+                let k: Int
+                switch kind {
+                case .exact: k = 0
+                case .prefix: k = 1
+                case .wordStart: k = 2
+                }
+                switch field {
+                case .name: return k * 2
+                case .handle: return k * 2 + 1
+                case .title: return 6 + k
+                }
+            case .indirect:
+                return 9
+            }
         }
 
-        /// The best of several names (display name and @handle).
-        static func best(_ names: [String], q: String) -> Rank {
-            names.map { of($0, q: q) }.min() ?? .indirect
+        static func < (lhs: Rank, rhs: Rank) -> Bool { lhs.order < rhs.order }
+
+        /// Rank a name (a title, a channel, a file name) against the typed query.
+        static func of(_ name: String, q: String) -> Rank {
+            of(name: name, handle: "", q: q)
+        }
+
+        /// Rank an entity (display name, @handle, title) against the typed query.
+        static func of(name: String, handle: String, title: String? = nil, q: String) -> Rank {
+            guard let m = EntitySearch.match(name: name, handle: handle, title: title, query: q) else { return .indirect }
+            return .direct(kind: m.kind, field: m.field)
         }
     }
 
@@ -118,7 +141,7 @@ enum GlobalSearch {
         var subtitle: String
         /// Newest activity (ms); orders rows inside a section.
         var when: Int64
-        /// Name hit (prefix / contains) or indirect (member, chat title, message).
+        /// Name hit (the shared matcher's verdict) or indirect (member, chat title, message).
         var rank: Rank
         var target: Target
         /// Picture source: a project id, a people chat id, a server id, a person's
