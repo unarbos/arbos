@@ -9,7 +9,12 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 install -m 0755 "$HERE/arbos-deploy-hook" /usr/local/bin/arbos-deploy-hook
 bash -n "$HERE/arbos-deploy-worker"
-bash "$HERE/arbos-deploy-worker" selftest   # a worker that cannot complete a tick is not installed (Oct 23 17:55-18:40)
+# A worker that cannot complete a tick is not installed (Oct 23 17:55-18:40; Oct 26 04:40-07:10, #1879:
+# selftest alone passed while the real tick died on a missing queue file). Three checks: shellcheck,
+# the pure-helper selftest, and a dry tick against a copy of the live state and queue.
+if command -v shellcheck >/dev/null 2>&1; then shellcheck -S warning "$HERE/arbos-deploy-worker"; else echo "warning: shellcheck not installed; skipping" >&2; fi
+bash "$HERE/arbos-deploy-worker" selftest
+bash "$HERE/arbos-deploy-worker" dry-tick
 install -m 0755 "$HERE/arbos-deploy-worker" /usr/local/bin/arbos-deploy-worker
 install -m 0644 "$HERE/arbos-deploy.service" /etc/systemd/system/arbos-deploy.service
 install -m 0644 "$HERE/arbos-deploy.timer" /etc/systemd/system/arbos-deploy.timer
