@@ -1041,6 +1041,9 @@ struct ChatSession: View {
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { model.showProfile(.user(ProfilePerson(other))) }
                         }
                     case "members", "addperson": openHeaderProfile()
+                    // `agentprofile`: the first roster agent's profile hero (a foreign agent's
+                    // picture — the avatar-flip rig).
+                    case "agentprofile": if let a = people?.agents.first { model.showProfile(.agent(projectId: a.id)) }
                     case "feedback": FeedbackCenter.shared.open(screen: "chat", chatId: chatId, projectId: isPeople ? nil : projectId)
                     case "call":
                         #if DEBUG
