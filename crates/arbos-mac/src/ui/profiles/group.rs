@@ -153,6 +153,7 @@ pub(super) fn page(
         subtitle_click: None,
         subtitle_element: None,
         editor: None,
+        action: None,
     };
 
     // No share disc on a group (Jacob 2026-10-25, [feedback

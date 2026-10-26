@@ -579,6 +579,29 @@ layout shift, the card 8 pt over the row after the delay, the menus). Rig:
 `ARBOS_OPEN_PROFILE=group:library` / `agent:library`; `ARBOS_LIBRARY_HOVER=<row>`
 draws that row hovered with its card up.
 
+### Person pane: the Message pill (Jacob 2026-10-25, [feedback profile-message-button-mac-2026-10-25])
+
+**Another person's pane carries one primary action — a Message pill under
+the name and @handle — that opens the 1:1 DM you have or starts one; your
+own pane and a person you blocked show no pill.** Jacob: "Add a message
+button to a user." The iPhone has the same button in the same place
+([feedback profile-message-button-ios-2026-10-25]).
+
+| Item | Rule | Where |
+|---|---|---|
+| Place | centred in the hero, 12 under the "@handle" line (the hero's 6 pt gap + `HERO_ACTION_GAP` 6), before the tab pill | `Hero.action`, `pane.rs` |
+| Shape | one of the Grok button family: `theme::CONTROL` **36** tall, a capsule, side padding 18; `surface_2` fill (the discs'), the `bubble` glyph at 17 and "Message" 13 pt semibold in `text`, 7 apart | `kit::pill_button`, `PILL_*` |
+| Pointer | hover lifts the fill `DISC_HOVER_LIFT` 0.06 in lightness, pressed `DISC_PRESSED_LIFT` 0.12 — the chip rule, as the footer's update disc | `kit::pill_button` |
+| Click | `AppState::start_dm(handle)`: the existing people space with that person is selected; else `POST /chats/dm` (the New Message sheet's path) and the DM is selected when the registry lists it. A relay refusal ("this person is not available" — they blocked you) shows as a notice | `user.rs`, `app.rs` |
+| Hidden | on your own pane; once *you* blocked them (`GET /blocks`); the reverse direction is not in any payload the client reads, so the relay's answer covers it | `user::shows_message` |
+
+Pinned by `profiles::user::tests::the_message_pill_is_for_other_unblocked_people`
+and the headless `profiles::user::render_tests` (under the @handle at 36,
+centred; click opens the DM we have / starts one; none on my own pane or a
+blocked person's, back once unblocked). Rig: `ARBOS_OPEN_PROFILE=user`
+(the DM peer's pane), `user:message` (the pill pressed), `group:member`
+(a member with no DM yet).
+
 ## Pane animations (Jacob 2026-10-24, [feedback right-pane-slide-2026-10-24], [feedback sidebar-slide-2026-10-24])
 
 **The right info pane and the left chat sidebar slide; they never pop.**
