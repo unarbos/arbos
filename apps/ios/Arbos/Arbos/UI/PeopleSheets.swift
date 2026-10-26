@@ -57,23 +57,22 @@ struct NewChatSheet: View {
         query.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "@"))
     }
 
-    /// Own + shared agents (home list order by name). Empty query hides archived;
-    /// a search finds them again, same as the home list.
+    /// Own + shared agents (home list order by name) through the shared matcher
+    /// (name, @slug, description), best first. Empty query hides archived; a
+    /// search finds them again, same as the home list.
     private var agents: [Project] {
-        let q = trimmed.lowercased()
-        let base = model.projects.filter { q.isEmpty ? !model.isArchived($0.id) : true }
-        let filtered = q.isEmpty ? base : base.filter {
-            $0.name.lowercased().contains(q) || mentionSlug($0.name).contains(q)
-        }
-        return filtered.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        let base = model.projects.filter { trimmed.isEmpty ? !model.isArchived($0.id) : true }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        return PeoplePicker.agents(base, query: trimmed)
     }
 
-    /// Servers I am in that match the query, then open servers from search I am not in.
+    /// Servers I am in that match the query (shared matcher, best first), then
+    /// open servers from search I am not in.
     private var servers: [Server] {
-        let q = trimmed.lowercased()
-        guard !q.isEmpty, model.serversAvailable else { return [] }
-        let mine = model.servers.filter { $0.name.lowercased().contains(q) }
-            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        guard !trimmed.isEmpty, model.serversAvailable else { return [] }
+        let mine = PeoplePicker.servers(
+            model.servers.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending },
+            query: trimmed)
         var seen = Set(mine.map(\.id))
         var out = mine
         for s in remoteServers where !seen.contains(s.id) {
@@ -83,19 +82,10 @@ struct NewChatSheet: View {
         return out
     }
 
-    /// Directory hits first (alphabetical), then remote hits not already listed.
+    /// Directory + remote hits through the shared matcher (display name and
+    /// @handle, best first), one row per person, never me.
     private var people: [Person] {
-        let q = trimmed.lowercased()
-        let local = q.isEmpty ? model.directory : model.directory.filter {
-            $0.handle.lowercased().contains(q) || ($0.name ?? "").lowercased().contains(q)
-        }
-        var seen = Set(local.map(\.id))
-        var out = local
-        for p in remote where !seen.contains(p.id) && p.id != model.user?.id {
-            seen.insert(p.id)
-            out.append(p)
-        }
-        return out
+        PeoplePicker.people(directory: model.directory, remote: remote, me: model.user?.id, query: trimmed)
     }
 
     var body: some View {
@@ -689,16 +679,8 @@ struct CreateEntityView: View {
     private func generate() {
         let text = source.prompt.trimmingCharacters(in: .whitespaces)
         guard !text.isEmpty, !source.generating else { return }
-        source.generating = true
-        source.errorText = nil
-        Task {
-            do {
-                source.generatedKey = try await model.generateDraftAvatar(prompt: text)
-            } catch {
-                source.errorText = error.localizedDescription
-            }
-            source.generating = false
-        }
+        let model = model
+        source.run { try await model.generateDraftAvatar(prompt: text) }
     }
 
     private func go() {
@@ -765,19 +747,16 @@ struct NewGroupView: View {
     /// exist and can join groups unless deleted (home archive is hide-only).
     private var agentCandidates: [Project] {
         if addToServer != nil || addToSecret != nil { return [] }
-        let q = trimmed.lowercased()
-        let base = model.projects.filter { !$0.shared && (q.isEmpty ? !model.isArchived($0.id) : true) }
+        let base = model.projects.filter { !$0.shared && (trimmed.isEmpty ? !model.isArchived($0.id) : true) }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-        if q.isEmpty { return base }
-        return base.filter { $0.name.lowercased().contains(q) || mentionSlug($0.name).contains(q) }
+        return PeoplePicker.agents(base, query: trimmed)
     }
 
+    /// Directory + remote hits through the shared matcher (display name and @handle):
+    /// "aff" lists Affine and AffineTeam next to Andreas F @aff, not @aff alone
+    /// ([feedback shared-search-matcher-ios-2026-10-26]).
     private var candidates: [Person] {
-        let q = trimmed.lowercased()
-        var out = q.isEmpty ? model.directory : model.directory.filter { $0.handle.lowercased().contains(q) || ($0.name ?? "").lowercased().contains(q) }
-        var seen = Set(out.map(\.id))
-        for p in remote where !seen.contains(p.id) && p.id != model.user?.id { seen.insert(p.id); out.append(p) }
-        return out
+        PeoplePicker.people(directory: model.directory, remote: remote, me: model.user?.id, query: trimmed)
     }
 
     private var addToChat: PeopleChat? { addTo.flatMap { model.peopleChat($0) } }
@@ -1045,20 +1024,12 @@ struct ProjectMembersSheet: View {
 
     private var memberIds: Set<String> { Set(members.map(\.id)) }
 
-    /// Directory + remote matches for the typed handle (excludes current members).
+    /// Directory + remote matches for what was typed (shared matcher on display
+    /// name and @handle), current members and me left out.
     private var suggestions: [Person] {
-        let q = trimmed.lowercased()
-        guard !q.isEmpty else { return [] }
-        let local = model.directory.filter {
-            $0.handle.lowercased().contains(q) || ($0.name ?? "").lowercased().contains(q)
-        }.filter { !memberIds.contains($0.id) && $0.id != model.user?.id }
-        var seen = Set(local.map(\.id))
-        var out = local
-        for p in remote where !seen.contains(p.id) && !memberIds.contains(p.id) && p.id != model.user?.id {
-            seen.insert(p.id)
-            out.append(p)
-        }
-        return out
+        guard !trimmed.isEmpty else { return [] }
+        return PeoplePicker.people(directory: model.directory, remote: remote, me: model.user?.id, query: trimmed)
+            .filter { !memberIds.contains($0.id) }
     }
 
     var body: some View {

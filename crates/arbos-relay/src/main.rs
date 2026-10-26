@@ -248,6 +248,18 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .map(|v| v.split(',').filter_map(|s| s.trim().parse().ok()).collect())
             .unwrap_or_else(|| vec![2_000, 5_000]),
+        avatar_attempt_timeout: std::time::Duration::from_secs(
+            std::env::var("ARBOS_AVATAR_ATTEMPT_TIMEOUT_S")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(40),
+        ),
+        avatar_total_timeout: std::time::Duration::from_secs(
+            std::env::var("ARBOS_AVATAR_TOTAL_TIMEOUT_S")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(75),
+        ),
         voice_mock: std::env::var("ARBOS_VOICE_MOCK").is_ok_and(|v| v == "1"),
         openai_audio_base: std::env::var("ARBOS_OPENAI_AUDIO_BASE")
             .ok()
