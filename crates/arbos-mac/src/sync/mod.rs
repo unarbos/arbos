@@ -565,6 +565,9 @@ pub enum ClientCommand {
         attachments: Vec<PathBuf>,
         /// People-chat / hover-reply: the message this send answers (`replyTo`).
         reply_to: Option<String>,
+        /// Reply in DM: the message in another chat this send answers, with its
+        /// snapshot (`replyRef`). Exclusive with `reply_to`.
+        reply_ref: Option<crate::model::ReplyRef>,
         /// Member ids of the composer's committed mention chips (#1596); the
         /// source unions them with the `@handle`s the text names.
         mentions: Vec<String>,

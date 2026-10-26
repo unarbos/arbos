@@ -3385,22 +3385,32 @@ impl Render for Composer {
         // bubble menu on a message. Always one fixed-height row, whatever
         // the quoted message's length ([feedback reply-preview-fixed-height]).
         if let Some(chat_id) = self.state.read(cx).active_chat_id() {
-            let reply_id = self
-                .state
-                .read(cx)
-                .chat_ui
-                .get(&chat_id)
-                .and_then(|ui| ui.reply_to.clone());
-            if let Some(reply_id) = reply_id {
-                let preview = {
+            let (reply_id, reply_ref) = {
+                let state = self.state.read(cx);
+                let ui = state.chat_ui.get(&chat_id);
+                (
+                    ui.and_then(|ui| ui.reply_to.clone()),
+                    ui.and_then(|ui| ui.reply_ref.clone()),
+                )
+            };
+            // Reply in DM arms a cross-chat reply: "Replying to Jacob in
+            // Arbonites" + the snapshot the row will carry (#1835).
+            let preview = match (reply_id, reply_ref) {
+                (_, Some(r)) => Some(ReplyPreview::for_reply_ref(&r)),
+                (Some(reply_id), None) => {
                     let state = self.state.read(cx);
-                    state
-                        .messages
-                        .get(&chat_id)
-                        .and_then(|list| list.iter().find(|m| m.id == reply_id))
-                        .map(|m| ReplyPreview::for_message(m, &state.thumbnails))
-                        .unwrap_or_else(ReplyPreview::missing)
-                };
+                    Some(
+                        state
+                            .messages
+                            .get(&chat_id)
+                            .and_then(|list| list.iter().find(|m| m.id == reply_id))
+                            .map(|m| ReplyPreview::for_message(m, &state.thumbnails))
+                            .unwrap_or_else(ReplyPreview::missing),
+                    )
+                }
+                (None, None) => None,
+            };
+            if let Some(preview) = preview {
                 let clear_chat = chat_id.clone();
                 let clear = div()
                     .id("composer-reply-clear")
@@ -3575,6 +3585,21 @@ impl ReplyPreview {
             who,
             line: transcript::message_line(message, REPLY_PREVIEW_CHARS),
             thumb,
+        }
+    }
+
+    /// A cross-chat reply (Reply in DM): "Jacob in Arbonites" + the snapshot.
+    pub fn for_reply_ref(r: &crate::model::ReplyRef) -> Self {
+        let place = r.chat_title.trim();
+        let who = if place.is_empty() {
+            r.who()
+        } else {
+            format!("{} in {place}", r.who())
+        };
+        Self {
+            who,
+            line: transcript::first_words(&transcript::one_line(&r.text), REPLY_PREVIEW_CHARS),
+            thumb: None,
         }
     }
 

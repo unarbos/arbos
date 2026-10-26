@@ -4430,6 +4430,7 @@ mod read_cursor_tests {
                 message_id: ulid(),
                 text: text.into(),
                 project_id: None,
+                reply_ref: None,
                 kind: None,
                 voice_text: None,
             }),

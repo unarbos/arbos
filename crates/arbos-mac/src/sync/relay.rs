@@ -54,8 +54,8 @@ use crate::model::{
     new_id, now_ms, AccountView, Attachment, AttachmentKind, BoxReport, BoxState, Call, CallEnded,
     CallLeft, CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView, Chat,
     Effort, Id, Link, LinkState, Machine, MachineState, Message, Part, Person, Project,
-    ProjectDocView, ProjectSecrets, Reachable, Role, Routine, RoutineRun, Sender, ServerInfo,
-    ThreadInfo,
+    ProjectDocView, ProjectSecrets, Reachable, ReplyRef, Role, Routine, RoutineRun, Sender,
+    ServerInfo, ThreadInfo,
 };
 use crate::update;
 
@@ -154,6 +154,7 @@ struct QueuedSend {
     answer: Option<(String, serde_json::Value)>,
     reply_to: Option<String>,
     forwarded_from: Option<String>,
+    reply_ref: Option<ReplyRef>,
     mentions: Vec<String>,
 }
 
@@ -3955,6 +3956,7 @@ async fn send_message(
     answer: Option<(String, serde_json::Value)>,
     reply_to: Option<String>,
     forwarded_from: Option<String>,
+    reply_ref: Option<ReplyRef>,
     mentions: Vec<String>,
 ) {
     // No room doc yet: queue while NewChat is in flight, otherwise fail visibly.
@@ -3971,6 +3973,7 @@ async fn send_message(
                     answer,
                     reply_to,
                     forwarded_from,
+                    reply_ref,
                     mentions,
                 });
                 return;
@@ -4149,6 +4152,9 @@ async fn send_message(
             let _ = d.append_user_message(&message_id, &text, &device, &opts);
             if let Some(by) = forwarded_from.as_deref() {
                 d.set_message_fields(&message_id, &[("forwardedFrom", json!(by))]);
+            }
+            if let Some(r) = reply_ref.as_ref() {
+                d.set_reply_ref(&message_id, r);
             }
             d.push_command(command, payload, &device);
             if let Some(ref title) = title {
@@ -4398,6 +4404,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 Vec::new(),
                 Some(wav),
                 "send",
+                None,
                 None,
                 None,
                 None,
@@ -5168,6 +5175,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             text,
             attachments,
             reply_to,
+            reply_ref,
             mentions,
         } => {
             tokio::spawn(send_message(
@@ -5181,6 +5189,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 None,
                 reply_to,
                 None,
+                reply_ref,
                 mentions,
             ));
         }
@@ -5205,6 +5214,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 None,
                 None,
                 None,
+                None,
                 Vec::new(),
             ));
         }
@@ -5225,6 +5235,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 None,
                 None,
                 Some(forwarded_from),
+                None,
                 Vec::new(),
             ));
         }
@@ -5244,6 +5255,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 "steer",
                 None,
                 reply_to,
+                None,
                 None,
                 Vec::new(),
             ));
@@ -5265,6 +5277,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 None,
                 "answer",
                 answer,
+                None,
                 None,
                 None,
                 Vec::new(),
@@ -5662,6 +5675,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                                 q.answer,
                                 q.reply_to,
                                 q.forwarded_from,
+                                q.reply_ref,
                                 q.mentions,
                             ));
                         }
