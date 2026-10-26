@@ -58,7 +58,7 @@ struct HomeView: View {
     /// People chat delete confirmation from the home long-press / swipe menu.
     /// "Hidden chats N ›" footer → the list of archived agents and people chats.
     @State private var showHidden = false
-    /// Goals list (long-running objectives) from the home sidebar section.
+    /// Planned tasks list (long-running goals) from the Home section.
     @State private var showGoals = false
     @State private var openGoalId: String?
     /// Home list scope: All mixes agents, people and servers; Agents is your
@@ -262,6 +262,7 @@ struct HomeView: View {
                             .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 8, trailing: 20))
                             .listRowSeparator(.hidden)
                             .listRowBackground(theme.bg)
+                        plannedTasksSection
                         Text(listFilter.emptyCopy)
                             .font(theme.font(Theme.small))
                             .foregroundStyle(theme.muted)
@@ -288,9 +289,8 @@ struct HomeView: View {
                                 .listRowSeparator(.hidden)
                                 .listRowBackground(theme.bg)
                         }
-                        if !plannedTasks.isEmpty {
-                            plannedTasksSection
-                        }
+                        // Always on Home so planned work is easy to find (even when none yet).
+                        plannedTasksSection
                         ForEach(homeRows) { entry in
                             switch entry.row {
                             case .project(let project):
@@ -298,7 +298,9 @@ struct HomeView: View {
                                 // borderless (not .plain): .plain steals the list swipe /
                                 // long-press on recent iOS, so archive and the menu fail.
                                 Button { openSearchHit(project, hit: entry.hit) } label: {
-                                    AgentRow(project: project, preview: entry.hit.reason ?? preview(project),
+                                    AgentRow(project: project,
+                                             subject: entry.hit.reason == nil ? model.chatSubject(of: project.id) : nil,
+                                             preview: entry.hit.reason ?? preview(project),
                                              previewIcon: entry.hit.reason == nil ? previewIcon(project) : nil, time: timeLabel(project),
                                              streaming: model.isStreaming(project: project.id),
                                              unread: model.chats(of: project.id).contains { model.chatHasUnread($0) },
@@ -565,42 +567,53 @@ struct HomeView: View {
     }
 
     /// Planned tasks by agent: agent name, task text — tap opens the goal.
+    /// Always shown on Home so the section is easy to find (empty state when none).
     private var plannedTasksSection: some View {
         Section {
-            ForEach(plannedTasks) { task in
-                Button { openGoalId = task.goalId } label: {
-                    HStack(spacing: 12) {
-                        if let project = model.project(task.projectId) {
-                            AgentAvatar(project: project, theme: theme, size: 28, still: true)
-                        } else {
-                            Image(systemName: "checklist")
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundStyle(theme.accent)
-                                .frame(width: 28, height: 28)
+            if plannedTasks.isEmpty {
+                Text("No planned tasks yet. Ask an agent to make something a goal.")
+                    .font(theme.font(Theme.small))
+                    .foregroundStyle(theme.muted)
+                    .listRowInsets(EdgeInsets(top: 6, leading: 20, bottom: 6, trailing: 22))
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(theme.bg)
+                    .accessibilityLabel("No planned tasks yet")
+            } else {
+                ForEach(plannedTasks) { task in
+                    Button { openGoalId = task.goalId } label: {
+                        HStack(spacing: 12) {
+                            if let project = model.project(task.projectId) {
+                                AgentAvatar(project: project, theme: theme, size: 28, still: true)
+                            } else {
+                                Image(systemName: "checklist")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(theme.accent)
+                                    .frame(width: 28, height: 28)
+                            }
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(task.agentName)
+                                    .font(theme.font(Theme.body, weight: .medium))
+                                    .foregroundStyle(theme.text)
+                                    .lineLimit(1)
+                                Text(task.text)
+                                    .font(theme.font(Theme.tiny))
+                                    .foregroundStyle(theme.muted)
+                                    .lineLimit(1)
+                            }
+                            Spacer(minLength: 0)
                         }
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(task.agentName)
-                                .font(theme.font(Theme.body, weight: .medium))
-                                .foregroundStyle(theme.text)
-                                .lineLimit(1)
-                            Text(task.text)
-                                .font(theme.font(Theme.tiny))
-                                .foregroundStyle(theme.muted)
-                                .lineLimit(1)
-                        }
-                        Spacer(minLength: 0)
+                        .contentShape(Rectangle())
                     }
-                    .contentShape(Rectangle())
+                    .buttonStyle(.borderless)
+                    .listRowInsets(EdgeInsets(top: 6, leading: 20, bottom: 6, trailing: 22))
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(theme.bg)
+                    .accessibilityLabel("\(task.agentName), \(task.text)")
                 }
-                .buttonStyle(.borderless)
-                .listRowInsets(EdgeInsets(top: 6, leading: 20, bottom: 6, trailing: 22))
-                .listRowSeparator(.hidden)
-                .listRowBackground(theme.bg)
-                .accessibilityLabel("\(task.agentName), \(task.text)")
             }
             Button { showGoals = true } label: {
                 HStack(spacing: 8) {
-                    Text("All goals")
+                    Text("All planned tasks")
                         .font(theme.font(Theme.small))
                         .foregroundStyle(theme.muted)
                     Image(systemName: "chevron.right")
@@ -614,7 +627,7 @@ struct HomeView: View {
             .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 10, trailing: 22))
             .listRowSeparator(.hidden)
             .listRowBackground(theme.bg)
-            .accessibilityLabel("All goals")
+            .accessibilityLabel("All planned tasks")
         } header: {
             Text("Planned tasks")
                 .font(theme.font(Theme.tiny, weight: .medium))
@@ -1037,7 +1050,9 @@ struct HiddenChatsView: View {
                     switch row {
                     case .project(let project):
                         Button { model.open(project: project) } label: {
-                            AgentRow(project: project, preview: HiddenChatsView.preview(project, in: model), time: "",
+                            AgentRow(project: project,
+                                     subject: model.chatSubject(of: project.id),
+                                     preview: HiddenChatsView.preview(project, in: model), time: "",
                                      streaming: model.isStreaming(project: project.id), unread: false)
                         }
                         .buttonStyle(.borderless)
@@ -1178,6 +1193,9 @@ struct HiddenChatsView: View {
 struct AgentRow: View {
     @Environment(\.theme) private var theme
     let project: Project
+    /// ChatGPT-style subject for the agent's chat (auto-title). When set, the
+    /// row leads with the subject and keeps the agent name on the preview line.
+    var subject: String? = nil
     let preview: String
     /// SF Symbol drawn before the preview (Grok: checklist / paper plane).
     var previewIcon: String? = nil
@@ -1185,6 +1203,9 @@ struct AgentRow: View {
     let streaming: Bool
     let unread: Bool
     var pinned: Bool = false
+
+    /// Primary line: subject when the chat has one, else the agent name.
+    private var title: String { subject ?? project.name }
 
     var body: some View {
         // Grok home row (measured): 48 pt avatar box, text 15 pt after it, name 17
@@ -1197,7 +1218,7 @@ struct AgentRow: View {
             AgentAvatar(project: project, theme: theme, size: Theme.rowAvatar)
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
-                    Text(project.name)
+                    Text(title)
                         .font(theme.font(Theme.body, weight: .semibold))
                         .foregroundStyle(theme.text)
                         .lineLimit(1)
@@ -1221,6 +1242,17 @@ struct AgentRow: View {
                             .foregroundStyle(theme.muted)
                             .accessibilityHidden(true)
                     }
+                    if subject != nil {
+                        Text(project.name)
+                            .font(theme.font(Theme.small))
+                            .foregroundStyle(theme.muted)
+                            .lineLimit(1)
+                            .layoutPriority(1)
+                        Text("·")
+                            .font(theme.font(Theme.small))
+                            .foregroundStyle(theme.placeholder)
+                            .accessibilityHidden(true)
+                    }
                     Text(preview)
                         .font(theme.font(Theme.small))
                         .foregroundStyle(theme.muted)
@@ -1234,6 +1266,8 @@ struct AgentRow: View {
         }
         .padding(.vertical, Theme.rowVPad)
         .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(subject.map { "\($0), \(project.name)" } ?? project.name)
     }
 }
 

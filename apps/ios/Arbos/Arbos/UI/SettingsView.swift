@@ -1424,9 +1424,9 @@ struct GoalsPage: View {
     private var closed: [GoalItem] { model.goals.filter { !$0.isOpen } }
 
     var body: some View {
-        SettingsPage(title: "Goals") {
+        SettingsPage(title: "Planned tasks") {
             if model.goals.isEmpty {
-                Text("Long-running objectives the agent tracks across days. Say “make this a goal” in a chat, or start one here.")
+                Text("Long-running work agents track across days. Ask an agent to make something a goal, or start one here.")
                     .font(theme.font(Theme.small))
                     .foregroundStyle(theme.muted)
                     .padding(.horizontal, 4)

@@ -50,12 +50,25 @@ extension AppModel {
                                                  chats: chatList.map { HomeSearch.ChatTitle(id: $0.id, title: $0.title) },
                                                  messages: { [] }, q: q) else { continue }
             let when = chatList.map(\.lastMessageAt).max() ?? 0
-            let subtitle = hit.reason ?? (p.description.trimmingCharacters(in: .whitespaces).isEmpty ? "Agent" : p.description)
+            let subject: String? = {
+                if let chatId = hit.chatId,
+                   let chat = chatList.first(where: { $0.id == chatId }) {
+                    return AppModel.chatSubject(chat.title, agentName: p.name)
+                }
+                if q.isEmpty { return chatSubject(of: p.id) }
+                return nil
+            }()
+            // ChatGPT-style: a subject hit leads with the subject; agent name stays the subtitle.
+            let title = subject ?? p.name
+            let subtitle: String = {
+                if subject != nil { return p.name }
+                return hit.reason ?? (p.description.trimmingCharacters(in: .whitespaces).isEmpty ? "Agent" : p.description)
+            }()
             let indirect = hit.kind != .title || hit.reason != nil
             let target: GlobalSearch.Target
             if let chatId = hit.chatId { target = .chat(chatId: chatId, projectId: p.id) } else { target = .project(p.id) }
-            out.append(GlobalSearch.Entry(kind: .agent, title: p.name, subtitle: subtitle, when: when,
-                                          rank: q.isEmpty ? .prefix : (indirect ? .indirect : .of(p.name, q: q)),
+            out.append(GlobalSearch.Entry(kind: .agent, title: title, subtitle: subtitle, when: when,
+                                          rank: q.isEmpty ? .prefix : (indirect ? .indirect : .of(title, q: q)),
                                           target: target, picture: .project(p.id)))
         }
 

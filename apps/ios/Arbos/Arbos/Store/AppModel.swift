@@ -5303,6 +5303,23 @@ final class AppModel: ObservableObject {
         return trimmed
     }
 
+    /// A ChatGPT-style subject for a chat: the auto-title from the first message,
+    /// when it is more than the placeholder or the agent's own name. Nil → the
+    /// row should keep showing the agent name.
+    static func chatSubject(_ title: String, agentName: String) -> String? {
+        let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.isEmpty || t == "New chat" || t == "Main" { return nil }
+        if t.caseInsensitiveCompare(agentName) == .orderedSame { return nil }
+        return t
+    }
+
+    /// Subject of this agent's one chat on this device, when it has one.
+    func chatSubject(of projectId: Id) -> String? {
+        guard let project = project(projectId),
+              let chat = singleChat(of: projectId) else { return nil }
+        return AppModel.chatSubject(chat.title, agentName: project.name)
+    }
+
     func wake(projectId: Id, reason: String) {
         rooms[projectDocKey(projectId)]?.wake(reason: reason)
         setProjectState(projectId, .waking, detail: nil)
