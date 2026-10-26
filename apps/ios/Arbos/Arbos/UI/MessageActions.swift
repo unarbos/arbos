@@ -172,7 +172,10 @@ struct MessageActionsOverlay<Bubble: View>: View {
                     }
                     .foregroundStyle(item.isDestructive ? theme.danger : theme.text)
                     .padding(.horizontal, 16)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .frame(height: 44)
+                    // Plain style only hits drawn pixels unless the whole row is a shape.
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 if i + 1 < items.count, !items[i + 1].isDestructive {
