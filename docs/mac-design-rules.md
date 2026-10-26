@@ -435,6 +435,64 @@ sheet for Jacob's yes). Measurement record and the before/after sheet:
 project store `docs/grokbot-design-parity.md` § "Composer and status row vs
 Jacob's 2026-10-25 Grok Bot shot" and `media/feedback/iphone-composer-parity/`.
 
+## iPhone control family — one size for every round button, pill, field and bar (iPhone only; Jacob 2026-10-26, [feedback iphone-header-composer-sizing-2026-10-26])
+
+**iPhone only.** The Mac keeps its own `CONTROL` family (36 pt discs and pill, 44 pt
+composer) unchanged — Jacob 08:52 CR: no Mac size or placement moves with this rule.
+
+Jacob's 08:49 shot (Bubble agent chat): the glass back / search discs and the name
+pill (#1829) were 42 pt over a 48 pt composer (#1841) — two families on one screen.
+There is now one: `Controls` in `apps/ios/Arbos/Arbos/UI/Theme.swift` is the single
+source; `Theme.control`, `Theme.fieldHeight`, `Theme.composerHeight`, `Theme.plusButton`,
+`plusFieldGap` and `composerTextInset` are aliases of it. The numbers are the composer's
+(Grok Bot's 2026-10-25 shot).
+
+| Token | Value (pt) | Used by |
+| --- | --- | --- |
+| `Controls.diameter` — round icon button | **48** (= composer `+`) | chat header back / search, home account + `+`, hidden-chats back, server back / `+`, call collapse, composer `+` |
+| `Controls.height` — pill, field, bar | **48** (= composer field) | header name pill, Search-in-chat bar, bottom search bar (#1810), settings / profile / secrets / sign-in / join-server fields, sheet search fields, pane Message pill, secrets action buttons |
+| `Controls.radius` | **24** (capsule; a growing field keeps 24, the composer's rule) | every field and pill (was 12 / 14 / 25 rounded rects) |
+| Outline | `ComposerRim` — #1841's thin light rim (⅓ / ⅔ / 1 pt inner strokes, dark); `fieldBorder` 1 pt in light | every member, Glass and Matte; on iOS 26 glass it overlays `glassEffect` |
+| `Controls.glyph` — SF symbol in a disc / bar | **19** (17 × 48 / 42) | chevrons, magnifiers, `+` outside the composer |
+| `Controls.inset` — top bar → screen edge | **16** (home was 20) | home, hidden chats, chat, server headers; the Search-in-chat bar |
+| `Controls.top` — bar → safe-area top | **6** | the same bars (`.controlBar()`) |
+| `Controls.gap` — adjacent controls | **10** (= `+` → field) | composer |
+| `Controls.textInset` — text start in a pill / field | **17** (= composer caret) | `.controlField()`, `.controlPill()`, pill trailing pad |
+| `Controls.avatar` / `avatarInset` — picture in a title pill | **32 / 8** (concentric with the capsule end; was 28 / 10 in 42) | chat and server header pills |
+
+Build with the helpers, never by hand: `GlassCircle` (disc), `GlassPill` (title pill),
+`.controlField()` (one-line field / bar), `.controlFieldGrowing()` (text area that grows
+from one line), `.controlPill()` (text pill button), `ControlSurface` (the fill + rim),
+`.controlBar()` (bar insets). Surfaces: the chat header's discs, pill and Search-in-chat
+bar take the Glass material (#1829); everything else is the `field` fill — both wear
+`ComposerRim`.
+
+**Drift guard.** `ArbosTests/ControlTokenLintTests` (and `apps/ios/scripts/control-size-lint.sh`)
+fails the iOS gate on any line outside `Theme.swift` that writes `GlassCircle(size: <number>)`,
+`.background(Capsule()/Circle()/RoundedRectangle(…).fill(theme.field))` or
+`strokeBorder(theme.fieldBorder` without `// control-size: exception <case>` naming one of
+`Controls.Exception`. `ArbosTests/ControlMetricsTests` pins the token relations and walks
+`Controls.Screen` (home, hidden chats, chat header, Search-in-chat, composer, bottom search,
+server header, settings fields, Message pill, sheet search, sign-in, secrets, call header):
+every disc is `diameter`, every pill / field / bar is `height`, every bar inset is `inset`.
+A new screen declares itself there.
+
+**Exceptions (keep their own size, on purpose):**
+
+| `Controls.Exception` | What | Why |
+| --- | --- | --- |
+| `composerSideInset` | composer side inset 31 keyboard down / 18 up | follows the keyboard; Grok's measurement (#1841), the avatar column hangs off it |
+| `plusGlyph` | composer `+` glyph 22.5 regular | Grok-measured (#1841); the family glyph is 19 |
+| `callControls` | call screen 64 pt action discs, 108 pt avatar disc, 150 pt ring, 44 pt chips | Grok's call UI, a different surface |
+| `inCallStrip` | in-call strip chip and voice button 36 | the strip is 48 tall |
+| `filterChips` | 30 pt All · Agents · People · Servers chips, pane tab pills | Grok's home filter |
+| `rowIconTiles` | 36–44 pt leading tiles in rows and sheets, the hero camera badge, avatar-cluster placeholder | row content, not a floating control |
+| `illustrationDiscs` | 72 / 92 / 112 pt discs (primer, feedback done, join link, hero) | illustration |
+| `transcriptJumpChip` | Grok's 36 pt scroll-to-bottom circle, the "New messages" chip | Grok-measured transcript furniture |
+| `inlineChips` | ≤ 32 pt chips and segments inside cards | not controls of the family |
+| `primaryCTA` | 50 pt filled capsules (Sign in, Pair, Create) | primary buttons, `primary` fill, no rim |
+| `textAreas` | feedback note / description areas, 18 pt corners | free-form, grow |
+
 ## Full screen (Jacob 2026-10-24, [feedback fullscreen-traffic-lights-2026-10-24] → [feedback topbar-grok-parity-2026-10-24])
 
 **The traffic lights are macOS's own standard window buttons, always. The
