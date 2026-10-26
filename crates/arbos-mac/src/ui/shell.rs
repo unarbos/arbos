@@ -252,6 +252,10 @@ pub struct Shell {
     /// `ARBOS_RIG_FORWARD_MESSAGE=1` (screenshot rig): opens the "Forward to"
     /// picker for the newest message of the open chat; cleared once it has.
     rig_forward_message: bool,
+    /// Rig: `ARBOS_PEOPLE_QUERY=<text>` types into the people picker's search
+    /// field once a people sheet is open (the Give-access / Add-members shot
+    /// with a query, [feedback shared-search-matcher-mac-2026-10-26]).
+    rig_people_query: Option<String>,
     /// The reaction capsule over a bubble (`reactions`): (chat, message, the smiley's click).
     pub(crate) reaction_capsule: Option<(
         crate::model::Id,
@@ -533,6 +537,12 @@ impl Shell {
                             }
                         }
                     }
+                }
+            }
+            if state.read(cx).new_chat_open {
+                if let Some(q) = this.rig_people_query.take() {
+                    this.people_input
+                        .update(cx, |input, cx| input.set_text(q, cx));
                 }
             }
             let st = state.read(cx);
@@ -865,12 +875,17 @@ impl Shell {
         .detach();
         let secrets = cx.new(|cx| SecretsPanel::new(state.clone(), cx));
         // Rig: `ARBOS_OPEN_SETTINGS=secrets` (the list), `secrets:<secret env>` (one secret),
+        // `secrets-people:<secret env>` (that secret's "Give a person access" sheet),
         // `secrets-agent:<project id or name>` (an agent's page).
         match open_settings.as_deref() {
             Some("secrets") => secrets.update(cx, |p, cx| p.show(cx)),
             Some(v) if v.starts_with("secrets:") => {
                 let env = v["secrets:".len()..].to_string();
                 secrets.update(cx, |p, cx| p.show_secret_env(env, cx));
+            }
+            Some(v) if v.starts_with("secrets-people:") => {
+                let env = v["secrets-people:".len()..].to_string();
+                secrets.update(cx, |p, cx| p.show_secret_people(env, cx));
             }
             Some(v) if v.starts_with("secrets-agent:") => {
                 let pid = v["secrets-agent:".len()..].to_string();
@@ -973,6 +988,9 @@ impl Shell {
             message_menu: None,
             rig_message_menu: message_menu::rig_anchor(),
             rig_forward_message: std::env::var_os("ARBOS_RIG_FORWARD_MESSAGE").is_some(),
+            rig_people_query: std::env::var("ARBOS_PEOPLE_QUERY")
+                .ok()
+                .filter(|q| !q.trim().is_empty()),
             reaction_capsule: None,
             reaction_pick_open: false,
             reaction_pick,
