@@ -5431,6 +5431,30 @@ impl AppState {
         cx.notify();
     }
 
+    /// Retry on one of my bubbles the relay refused (`MessageStatus::Error`,
+    /// see `MessageSendFailed`): the failed row goes, and its text + reply-to go
+    /// out again as a new message through the normal send path (attachments
+    /// were local files picked at send time and are not re-read).
+    pub fn resend_failed(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
+        let Some(list) = self.messages.get_mut(&chat_id) else {
+            return;
+        };
+        let Some(ix) = list
+            .iter()
+            .position(|m| m.id == message_id && m.status == MessageStatus::Error)
+        else {
+            return;
+        };
+        let failed = list.remove(ix);
+        let text = failed.plain_text();
+        if text.trim().is_empty() {
+            cx.emit(AppEvent::TranscriptChanged { chat_id });
+            cx.notify();
+            return;
+        }
+        self.send(text, Vec::new(), failed.reply_to.clone(), Vec::new(), cx);
+    }
+
     pub fn retry(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
         self.command(ClientCommand::Retry {
             chat_id,

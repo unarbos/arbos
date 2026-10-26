@@ -43,37 +43,32 @@ use serde_json::Value;
 actions!(transcript, [Copy]);
 
 /// Where one of my own bubbles is on its way. No caption says it (Jacob,
-/// 2026-10-24: "remove these 'sent' items, just use coloring"): the bubble's
-/// opacity does — see [`Delivery::opacity`] and docs/mac-design-rules.md.
+/// 2026-10-24: "remove these 'sent' items, just use coloring"), and nothing
+/// after delivery dims it (Jacob, 2026-10-25: delivered bubbles that waited
+/// for a read receipt "show up too dim, I think they have not been sent").
+/// See docs/mac-design-rules.md § Own-bubble delivery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Delivery {
-    /// Not yet acknowledged by the relay.
+    /// Not yet acknowledged by the relay: the only dimmed state.
     Pending,
-    /// The relay refused it; a red glyph marks it beside the bubble.
+    /// The relay refused it: full opacity, red mark + Retry beside the bubble.
     Failed,
-    /// Acknowledged, nobody has opened past it yet.
-    Sent,
-    /// A peer's read watermark covers it, an agent answered after it, or read
-    /// receipts are off (nothing to wait for).
-    Seen,
+    /// Acknowledged by the relay: the full own-bubble style, at once. Read
+    /// receipts never change how my bubble looks (agents send none, members
+    /// on older builds send none, a member who has not opened the chat sends
+    /// none — a bubble waiting for one reads as unsent).
+    Delivered,
 }
 
-/// Whole-bubble opacity of a sent-but-unseen bubble. Measured on both themes
-/// (white text, bubble `#5c5c5c` on `#141414` / `#111111` on `#fcfcfc`): the
-/// composited text keeps a 4.9 : 1 (dark) and 7.7 : 1 (light) contrast on its
-/// fill, while the fill drops to L* 30 from 39 (dark) and to `#535353` from
-/// `#111111` (light) — visibly lighter next to a seen bubble, still readable.
-pub const BUBBLE_ALPHA_SENT: f32 = 0.72;
-/// A pending bubble sits below a sent one (3.4 : 1 / 3.6 : 1 text contrast —
-/// transient, it lasts until the relay's ACK).
+/// Whole-bubble opacity of a pending bubble (white text on `#5c5c5c` /
+/// `#111111`: 3.4 : 1 dark, 3.6 : 1 light — transient, until the relay's ACK).
 pub const BUBBLE_ALPHA_PENDING: f32 = 0.5;
 
 impl Delivery {
     pub fn opacity(self) -> f32 {
         match self {
             Delivery::Pending => BUBBLE_ALPHA_PENDING,
-            Delivery::Sent => BUBBLE_ALPHA_SENT,
-            Delivery::Failed | Delivery::Seen => 1.0,
+            Delivery::Failed | Delivery::Delivered => 1.0,
         }
     }
 }
@@ -1243,11 +1238,6 @@ impl Transcript {
             state.active_chat(),
             state.selected_channel.is_some(),
         );
-        // Per-handle read watermarks for this chat (Settings → Notifications).
-        let receipts = chat_id
-            .as_deref()
-            .and_then(|id| state.message_receipts.get(id));
-        let read_receipts = state.read_receipts;
         self.chat_id = chat_id;
         let new_rows = build_rows(
             &messages,
@@ -1257,8 +1247,6 @@ impl Transcript {
             &thumb_keys,
             &self.mentions,
             multi_party,
-            receipts,
-            read_receipts,
         );
         self.multi_party = multi_party;
         // A sender change opens the turn gap. So does every new assistant /
@@ -1523,6 +1511,29 @@ impl Transcript {
     /// smiley (the reaction capsule) · reply · ⋯ (the message menu: Copy,
     /// Reply, Delete). After a copy from the menu the ⋯ shows a checkmark
     /// for a moment.
+    /// The red "! Retry" beside one of my bubbles the relay refused: a click
+    /// re-sends the text (and reply-to) as a new message and drops the failed row.
+    fn failed_retry(
+        &self,
+        row_id: &str,
+        message_id: &Id,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let state = self.state.clone();
+        let chat_id = self.chat_id.clone();
+        let message_id = message_id.clone();
+        failed_glyph(theme)
+            .id(SharedString::from(format!("{row_id}#retry")))
+            .cursor_pointer()
+            .on_click(cx.listener(move |_, _, _, cx| {
+                let (Some(chat_id), message_id) = (chat_id.clone(), message_id.clone()) else {
+                    return;
+                };
+                state.update(cx, |s, cx| s.resend_failed(chat_id, message_id, cx));
+            }))
+    }
+
     fn hover_rail(
         &self,
         row_id: &str,
@@ -2158,12 +2169,19 @@ impl Transcript {
                                 self.hover_row(&row.id, &row.id, now, window, cx);
                             let actions =
                                 self.hover_rail(&row.id, &row.message_id, reveal, &theme, cx);
-                            let delivery = delivery.unwrap_or(Delivery::Seen);
+                            let delivery = delivery.unwrap_or(Delivery::Delivered);
                             row_el
                                 .justify_end()
                                 .children(hover_time(time, reveal, &theme).map(|t| t.mr(px(8.0))))
                                 .child(actions.mr(px(6.0)))
-                                .children(failed_glyph(delivery, &theme).map(|g| g.mr(px(8.0))))
+                                .children((delivery == Delivery::Failed).then(|| {
+                                    self.failed_retry(&row.id, &row.message_id, &theme, cx)
+                                        .mr(px(8.0))
+                                }))
+                                .children(
+                                    (delivery == Delivery::Pending)
+                                        .then(|| pending_glyph(&theme).mr(px(8.0))),
+                                )
                                 .child(own_bubble(bubble, delivery))
                         })
                         .into_any_element()
@@ -2854,17 +2872,8 @@ fn clock_label(ms: u64) -> Option<String> {
 }
 
 /// Where my own bubble is: pending until the relay ACKs, failed when it
-/// refused, then sent until a peer opened past it (or an agent answered after
-/// it). With read receipts off there is nothing to wait for, so an ACKed
-/// bubble is `Seen` (full opacity) at once. `None` for someone else's bubble.
-pub fn delivery_state(
-    message: &Message,
-    messages: &[Message],
-    mix: usize,
-    is_mine: bool,
-    receipts: Option<&HashMap<String, Id>>,
-    read_receipts: bool,
-) -> Option<Delivery> {
+/// refused, delivered otherwise. `None` for someone else's bubble.
+pub fn delivery_state(message: &Message, is_mine: bool) -> Option<Delivery> {
     if !is_mine {
         return None;
     }
@@ -2874,37 +2883,7 @@ pub fn delivery_state(
     if message.status == MessageStatus::Error {
         return Some(Delivery::Failed);
     }
-    if !read_receipts || message_is_seen(message, messages, mix, receipts) {
-        return Some(Delivery::Seen);
-    }
-    Some(Delivery::Sent)
-}
-
-/// True when a peer's read watermark covers this message, or an agent/project
-/// replied after it (the reply is the "opened" signal in agent chats).
-fn message_is_seen(
-    message: &Message,
-    messages: &[Message],
-    mix: usize,
-    receipts: Option<&HashMap<String, Id>>,
-) -> bool {
-    if let Some(receipts) = receipts {
-        if !receipts.is_empty() {
-            let any = receipts.values().any(|seen_id| {
-                messages
-                    .iter()
-                    .position(|m| &m.id == seen_id)
-                    .is_some_and(|ix| ix >= mix)
-                    || seen_id == &message.id
-            });
-            if any {
-                return true;
-            }
-        }
-    }
-    messages[mix + 1..]
-        .iter()
-        .any(|m| matches!(m.role, Role::Assistant | Role::Project))
+    Some(Delivery::Delivered)
 }
 
 /// Grok keeps the rail inside the chat: a bubble taller than the pane gets
@@ -3001,20 +2980,33 @@ fn own_bubble<E: Styled>(bubble: E, delivery: Delivery) -> E {
     bubble.opacity(delivery.opacity())
 }
 
-/// The red mark beside a bubble the relay refused: always visible, outside
-/// the bubble on its outer edge. (There is no resend yet — the composer keeps
-/// the text, the mark says the row is not on the relay.)
-fn failed_glyph(delivery: Delivery, theme: &Theme) -> Option<Div> {
-    (delivery == Delivery::Failed).then(|| {
-        div()
-            .flex_shrink_0()
-            .size(px(RAIL_GLYPH))
-            .flex()
-            .items_center()
-            .justify_center()
-            .debug_selector(|| "own-bubble-failed-glyph".into())
-            .child(icon("exclamation", RAIL_GLYPH, theme.danger))
-    })
+/// The small clock beside a bubble the relay has not ACKed yet (with the
+/// 0.5 opacity): "on its way", never "not sent".
+fn pending_glyph(theme: &Theme) -> Div {
+    div()
+        .flex_shrink_0()
+        .size(px(RAIL_GLYPH))
+        .flex()
+        .items_center()
+        .justify_center()
+        .debug_selector(|| "own-bubble-pending-glyph".into())
+        .child(icon("hourglass", 12.0, theme.text_muted))
+}
+
+/// The mark beside a bubble the relay refused: red glyph + "Retry", always
+/// visible, outside the bubble on its outer edge. [`Transcript::failed_retry`]
+/// makes it clickable.
+fn failed_glyph(theme: &Theme) -> Div {
+    div()
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .text_size(px(TEXT_TINY))
+        .text_color(theme.danger)
+        .debug_selector(|| "own-bubble-failed-glyph".into())
+        .child(icon("exclamation", RAIL_GLYPH, theme.danger))
+        .child("Retry")
 }
 
 /// A text block that is really machine output (a JSON object/array) is not
@@ -3043,8 +3035,8 @@ fn is_json_block(block: &Block) -> bool {
 ///
 /// `thumb_keys` are blob refs that already have a decoded preview; they are
 /// mixed into row versions so a late thumbnail reloads the picture row.
-/// `names_senders`, `receipts`, and `read_receipts` landed from parallel
-/// feedbacks; keep them as plain args rather than a one-off options struct.
+/// `names_senders` landed from a parallel feedback; keep it a plain arg
+/// rather than a one-off options struct.
 #[allow(clippy::too_many_arguments)]
 pub fn build_rows(
     messages: &[Message],
@@ -3054,8 +3046,6 @@ pub fn build_rows(
     thumb_keys: &HashSet<&str>,
     mentions: &Mentions,
     names_senders: bool,
-    receipts: Option<&HashMap<String, Id>>,
-    read_receipts: bool,
 ) -> Vec<Row> {
     let mine = |m: &Message| {
         m.sender == "user" || m.sender.is_empty() || m.sender == format!("user:{me_id}")
@@ -3179,8 +3169,7 @@ pub fn build_rows(
                         .as_deref()
                         .filter(|id| !id.is_empty())
                         .map(|id| Quote::for_reply(id, messages));
-                    let delivery =
-                        delivery_state(message, messages, mix, is_mine, receipts, read_receipts);
+                    let delivery = delivery_state(message, is_mine);
                     let forwarded_from = message
                         .forwarded_from
                         .as_deref()
@@ -5781,7 +5770,7 @@ mod layout_tests {
                             .child(div().size(px(16.0)).mr(px(6.0)))
                             // Through the real delivery wrapper: a sent bubble must
                             // keep the same cap as a seen one (v0.6.223 regression).
-                            .child(own_bubble(bubble, Delivery::Sent))
+                            .child(own_bubble(bubble, Delivery::Delivered))
                     }
                 }
             };
@@ -6844,8 +6833,6 @@ mod system_line_tests {
             &HashSet::new(),
             &Mentions::empty(),
             false,
-            None,
-            true,
         );
         let handoffs: Vec<&Vec<String>> = rows
             .iter()
@@ -6893,8 +6880,6 @@ mod system_line_tests {
             "gh_me",
             &HashSet::new(),
             &Mentions::empty(),
-            true,
-            None,
             true,
         );
         let kinds: Vec<&RowKind> = rows.iter().map(|r| &r.kind).collect();
@@ -6953,8 +6938,6 @@ mod system_line_tests {
             "gh_jacob",
             &HashSet::new(),
             &Mentions::empty(),
-            true,
-            None,
             true,
         );
         // The name sits inside each reply's first bubble (sender-name-in-bubble-2026-10-23).
@@ -7039,8 +7022,6 @@ mod system_line_tests {
             &HashSet::new(),
             &Mentions::empty(),
             true,
-            None,
-            true,
         );
         assert_eq!(
             names(&rows),
@@ -7072,8 +7053,6 @@ mod system_line_tests {
             &HashSet::new(),
             &Mentions::empty(),
             false,
-            None,
-            true,
         );
         let headers: Vec<(Option<String>, bool)> = rows
             .iter()
@@ -7112,8 +7091,6 @@ mod system_line_tests {
             &HashSet::new(),
             &Mentions::empty(),
             false,
-            None,
-            true,
         );
         assert_eq!(
             names(&rows),
@@ -7145,8 +7122,6 @@ mod system_line_tests {
             &HashSet::new(),
             &Mentions::empty(),
             true,
-            None,
-            true,
         );
         let solo = build_rows(
             &[agent],
@@ -7156,8 +7131,6 @@ mod system_line_tests {
             &HashSet::new(),
             &Mentions::empty(),
             false,
-            None,
-            true,
         );
         let group_lane: Vec<Option<&str>> = group
             .iter()
@@ -7296,8 +7269,6 @@ mod presence_rows_tests {
             &HashSet::new(),
             &Mentions::empty(),
             true,
-            None,
-            true,
         )
     }
 
@@ -7388,10 +7359,11 @@ mod presence_rows_tests {
 
 #[cfg(test)]
 mod delivery_tests {
-    //! Jacob, 2026-10-24 ("remove these 'sent' items, just use coloring, make the
-    //! bubble less opaque"): no caption on my bubbles; a sent-but-unseen bubble is
-    //! lighter, a seen one is full; pending sits lower still and a failed one is
-    //! full with a red mark. Rule: docs/mac-design-rules.md.
+    //! Jacob, 2026-10-24 ("remove these 'sent' items, just use coloring") and
+    //! 2026-10-25 ("my messages show up too dim, I think they have not been
+    //! sent"): no caption on my bubbles; a delivered bubble is the full style
+    //! at once, whatever read receipts say; only pending is dimmed; a failed
+    //! one is full with a red "! Retry". Rule: docs/mac-design-rules.md.
     use std::collections::{HashMap, HashSet};
 
     use gpui::TestAppContext;
@@ -7408,14 +7380,14 @@ mod delivery_tests {
     ) -> Message {
         serde_json::from_value(serde_json::json!({
             "id": id,
-            "chatId": "chat_dm",
+            "chatId": "chat_group",
             "role": role,
             "sender": sender,
             "senderHandle": if sender.starts_with("user:") { "sam" } else { "" },
             "status": status,
             "pending": pending,
             "createdAt": at,
-            "parts": [{ "id": format!("p-{id}"), "kind": "text", "text": "fish?" }],
+            "parts": [{ "id": format!("p-{id}"), "kind": "text", "text": "I did lol" }],
         }))
         .expect("message")
     }
@@ -7425,81 +7397,50 @@ mod delivery_tests {
     }
 
     #[test]
-    fn opacity_is_the_state() {
-        assert_eq!(Delivery::Seen.opacity(), 1.0);
+    fn only_pending_is_dimmed() {
+        assert_eq!(Delivery::Delivered.opacity(), 1.0);
         assert_eq!(Delivery::Failed.opacity(), 1.0);
-        assert_eq!(Delivery::Sent.opacity(), BUBBLE_ALPHA_SENT);
         assert_eq!(Delivery::Pending.opacity(), BUBBLE_ALPHA_PENDING);
-        let order = [Delivery::Pending, Delivery::Sent, Delivery::Seen].map(Delivery::opacity);
-        assert!(
-            order.windows(2).all(|w| w[0] < w[1]),
-            "pending < sent < seen: {order:?}"
-        );
+        assert!(Delivery::Pending.opacity() < Delivery::Delivered.opacity());
     }
 
     #[test]
-    fn unseen_is_sent_and_a_watermark_or_a_reply_makes_it_seen() {
+    fn an_acked_bubble_is_delivered_with_or_without_receipts_or_replies() {
         let t = 1_700_000_000_000u64;
-        let messages = vec![mine("a", t), mine("b", t + 1_000), mine("c", t + 2_000)];
-        let no_receipts: HashMap<String, Id> = HashMap::new();
-        for ix in 0..3 {
-            assert_eq!(
-                delivery_state(&messages[ix], &messages, ix, true, Some(&no_receipts), true),
-                Some(Delivery::Sent),
-                "nobody opened the chat: lighter"
-            );
-        }
-        // Sam's watermark is "b": a and b are seen, c is still only sent.
-        let receipts: HashMap<String, Id> = HashMap::from([("sam".to_owned(), "b".to_owned())]);
-        let got: Vec<_> = (0..3)
-            .map(|ix| delivery_state(&messages[ix], &messages, ix, true, Some(&receipts), true))
-            .collect();
-        assert_eq!(
-            got,
-            vec![
-                Some(Delivery::Seen),
-                Some(Delivery::Seen),
-                Some(Delivery::Sent)
-            ]
-        );
-        // An agent's answer after my message is the "opened" signal in agent chats.
-        let with_reply = vec![
+        // Jacob's Arbonites shape (2026-10-25 22:11–22:17): two of mine, an
+        // agent reply after the second, nobody's read receipt anywhere.
+        let messages = vec![
             mine("a", t),
-            message("r", "assistant", "agent:arbos", "done", false, t + 500),
             mine("b", t + 1_000),
+            message("r", "assistant", "agent:hezbola", "done", false, t + 2_000),
+            mine("c", t + 3_000),
         ];
-        assert_eq!(
-            delivery_state(&with_reply[0], &with_reply, 0, true, None, true),
-            Some(Delivery::Seen)
-        );
-        assert_eq!(
-            delivery_state(&with_reply[2], &with_reply, 2, true, None, true),
-            Some(Delivery::Sent)
-        );
+        for m in &messages {
+            if m.role == Role::User {
+                assert_eq!(
+                    delivery_state(m, true),
+                    Some(Delivery::Delivered),
+                    "{}: delivered is the full style at once",
+                    m.id
+                );
+            }
+        }
     }
 
     #[test]
-    fn pending_failed_and_receipts_off_are_unchanged_states() {
+    fn pending_and_failed_are_the_only_other_states_and_others_have_none() {
         let t = 1_700_000_000_000u64;
         let pending = message("p", "user", "user:gh_me", "queued", true, t);
         let failed = message("f", "user", "user:gh_me", "error", false, t + 1);
         let sent = mine("s", t + 2);
-        let messages = vec![pending.clone(), failed.clone(), sent.clone()];
+        assert_eq!(delivery_state(&pending, true), Some(Delivery::Pending));
+        assert_eq!(delivery_state(&failed, true), Some(Delivery::Failed));
+        assert_eq!(delivery_state(&sent, true), Some(Delivery::Delivered));
         assert_eq!(
-            delivery_state(&pending, &messages, 0, true, None, true),
-            Some(Delivery::Pending)
+            delivery_state(&sent, false),
+            None,
+            "someone else's bubble: no state"
         );
-        assert_eq!(
-            delivery_state(&failed, &messages, 1, true, None, true),
-            Some(Delivery::Failed)
-        );
-        // Read receipts off: nothing to wait for, an ACKed bubble is full at once.
-        assert_eq!(
-            delivery_state(&sent, &messages, 2, true, None, false),
-            Some(Delivery::Seen)
-        );
-        // Someone else's bubble carries no delivery state at all.
-        assert_eq!(delivery_state(&sent, &messages, 2, false, None, true), None);
     }
 
     #[test]
@@ -7508,7 +7449,7 @@ mod delivery_tests {
         let messages = vec![
             mine("a", t),
             message("o", "user", "user:gh_sam", "done", false, t + 1_000),
-            mine("b", t + 2_000),
+            message("p", "user", "user:gh_me", "queued", true, t + 2_000),
         ];
         let spoken = HashSet::new();
         let failed = HashMap::new();
@@ -7518,7 +7459,6 @@ mod delivery_tests {
             failed: &failed,
             voice_mode: false,
         };
-        let receipts: HashMap<String, Id> = HashMap::from([("sam".to_owned(), "a".to_owned())]);
         let rows = build_rows(
             &messages,
             false,
@@ -7527,8 +7467,6 @@ mod delivery_tests {
             &HashSet::new(),
             &Mentions::empty(),
             false,
-            Some(&receipts),
-            true,
         );
         let states: Vec<Option<Delivery>> = rows
             .iter()
@@ -7539,13 +7477,13 @@ mod delivery_tests {
             .collect();
         assert_eq!(
             states,
-            vec![Some(Delivery::Seen), None, Some(Delivery::Sent)],
-            "mine: seen up to Sam's watermark, then sent; Sam's bubble: no state"
+            vec![Some(Delivery::Delivered), None, Some(Delivery::Pending)],
+            "mine: delivered / pending; Sam's bubble: no state"
         );
     }
 
-    /// The four states as the row draws them: one wrapper per own bubble named by
-    /// state, no caption anywhere, and the red mark only beside a failed bubble.
+    /// The three states as the row draws them: one bubble per state, no
+    /// caption anywhere, and the red "! Retry" only beside a failed bubble.
     struct OwnBubbles;
 
     impl gpui::Render for OwnBubbles {
@@ -7561,8 +7499,7 @@ mod delivery_tests {
                         match d {
                             Delivery::Pending => "own-bubble-pending",
                             Delivery::Failed => "own-bubble-failed",
-                            Delivery::Sent => "own-bubble-sent",
-                            Delivery::Seen => "own-bubble-seen",
+                            Delivery::Delivered => "own-bubble-delivered",
                         }
                         .into()
                     })
@@ -7580,34 +7517,35 @@ mod delivery_tests {
                 .flex_col()
                 .gap(px(8.0))
                 .children(
-                    [
-                        Delivery::Pending,
-                        Delivery::Failed,
-                        Delivery::Sent,
-                        Delivery::Seen,
-                    ]
-                    .into_iter()
-                    .map(|d| {
-                        div()
-                            .flex()
-                            .justify_end()
-                            .items_center()
-                            .children(failed_glyph(d, &theme).map(|g| g.mr(px(8.0))))
-                            .child(own_bubble(bubble("fish?", d), d))
-                    }),
+                    [Delivery::Pending, Delivery::Failed, Delivery::Delivered]
+                        .into_iter()
+                        .map(|d| {
+                            div()
+                                .flex()
+                                .justify_end()
+                                .items_center()
+                                .children(
+                                    (d == Delivery::Failed)
+                                        .then(|| failed_glyph(&theme).mr(px(8.0))),
+                                )
+                                .children(
+                                    (d == Delivery::Pending)
+                                        .then(|| pending_glyph(&theme).mr(px(8.0))),
+                                )
+                                .child(own_bubble(bubble("fish?", d), d))
+                        }),
                 )
         }
     }
 
     #[gpui::test]
-    fn every_state_draws_a_bubble_and_only_failed_gets_the_mark(cx: &mut TestAppContext) {
+    fn every_state_draws_a_bubble_and_only_failed_gets_the_retry(cx: &mut TestAppContext) {
         let (_view, vcx) = cx.add_window_view(|_, _| OwnBubbles);
         vcx.run_until_parked();
         for sel in [
             "own-bubble-pending",
             "own-bubble-failed",
-            "own-bubble-sent",
-            "own-bubble-seen",
+            "own-bubble-delivered",
         ] {
             vcx.debug_bounds(sel)
                 .unwrap_or_else(|| panic!("{sel} drawn"));
@@ -7618,13 +7556,23 @@ mod delivery_tests {
         );
         let glyph = vcx
             .debug_bounds("own-bubble-failed-glyph")
-            .expect("red mark beside the failed bubble");
+            .expect("red mark + Retry beside the failed bubble");
         let failed = vcx
             .debug_bounds("own-bubble-failed")
             .expect("failed bubble");
         assert!(
             f32::from(glyph.origin.x + glyph.size.width) <= f32::from(failed.origin.x),
             "the mark sits outside the bubble, on its outer edge"
+        );
+        let clock = vcx
+            .debug_bounds("own-bubble-pending-glyph")
+            .expect("clock beside the pending bubble");
+        let pending = vcx
+            .debug_bounds("own-bubble-pending")
+            .expect("pending bubble");
+        assert!(
+            f32::from(clock.origin.x + clock.size.width) <= f32::from(pending.origin.x),
+            "the clock sits outside the pending bubble"
         );
     }
 }

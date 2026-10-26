@@ -164,7 +164,7 @@ pub fn project_section(
         "You are this user's agent in Arbos.".to_owned()
     } else {
         format!(
-            "You are {name}, this user's agent in Arbos; the user sees you as \"{name}\" and, in shared chats, as @{handle}. \"{name}\" is your own name — not a place, a workspace or a product — so never say \"in {name}\" or \"on {name}\".",
+            "You are {name}, this user's agent in Arbos; the user sees you as \"{name}\" and, in shared chats, as @{handle}. \"{name}\" is your own name — not a place, a workspace or a product — so never say \"in {name}\" or \"on {name}\". When someone asks you to look yourself up (\"search yourself\", \"search them online\" right after you were named, \"what does the web say about you\"), the subject is you, an Arbos agent named {name}: search for \"{name}\" together with \"Arbos agent\" and @{handle}, say what the web has about you or plainly that it has nothing, and treat a name that merely looks or sounds like yours as unrelated — never report it as you.",
             handle = agent_slug(name)
         )
     };
@@ -247,6 +247,11 @@ mod tests {
         assert!(s.contains("You are Doug, this user's agent in Arbos"));
         assert!(s.contains("never say \"in Doug\" or \"on Doug\""));
         assert!(!s.contains("used to be called"));
+        // Hezbola, 2026-10-25: "Search them online" after being named made the agent search the
+        // bare word and report Hezbollah pages as the answer. The agent knows who it is.
+        assert!(s.contains("the subject is you, an Arbos agent named Doug"));
+        assert!(s.contains("search for \"Doug\" together with \"Arbos agent\" and @doug"));
+        assert!(s.contains("never report it as you"));
         // An agent literally called Arbos (or unnamed) gets no self line that contradicts the app.
         let arbos = Identity {
             name: "Arbos".into(),

@@ -162,6 +162,30 @@ files or messages — with the ⌘ badges. Rig hooks: `ARBOS_SEARCH=<text>`,
 `ARBOS_PALETTE=1`, `ARBOS_PALETTE_SELECT=<n>`, `ARBOS_PALETTE_OPEN=1` (open
 the highlighted row once the rows are there).
 
+### iPhone: one bottom search bar, nothing else (Jacob 2026-10-25, [feedback iphone-bottom-search-bar-2026-10-25])
+
+The iPhone's bottom tab bar (Contacts · Calls · Chats · Settings, a tester item
+of 2026-10-23) is gone. Home's bottom edge is **one search capsule and no other
+control** — no grid/+ button, no tabs, no Cancel beside it (`HomeChrome.bottom
+== [.searchBar]`, pinned by `BottomSearchBarTests`). It sits in the bottom
+safe-area inset (rides the keyboard, clears the home indicator); the × inside
+the capsule clears and closes, dragging the results drops the keyboard, opening
+a row closes it. The header keeps the account circle (→ Settings sheet) and the
+`+` circle only — the search disc moved to the bar.
+
+Results are the palette's, app-wide (`GlobalSearch` = `palette.rs`, `SearchIndex` =
+`search_index.rs`, lazy against `messagesVersion`): the same five sections in the
+same order with the same headings and the 8-per-section cap, Recent on the empty
+query; a message row opens its chat scrolled to that row (`pendingReveal`), a
+file row opens the Library item in the viewer, a DM-less person starts the DM.
+The home list is no longer narrowed by typed text (as on the Mac).
+
+Where the four tabs' destinations live now: Settings → the account circle;
+Contacts → `+` (New message: people + directory) and the bar's People & agents;
+Calls → a chat's header call buttons (no call-history list existed; the tab was
+empty); the unread count → the app icon badge and each row's dot / count pill;
+new chat → `+`.
+
 ## Chat-list filter (the iPhone home's `PaneTabs`)
 
 Directly under the strip: **All · Agents · People · Servers** — the iPhone
@@ -321,39 +345,38 @@ a_drag_across_bubbles_spans_them_in_transcript_order`,
 drag straight up from one rendered bubble into the one above), and
 `transcript::cross_bubble_copy_tests`.
 
-## Own-bubble delivery (Jacob 2026-10-24, [feedback sent-state-opacity-2026-10-24])
+## Own-bubble delivery (Jacob 2026-10-24 + 2026-10-25, [feedback sent-state-opacity-2026-10-24], [feedback sent-full-when-delivered-2026-10-25])
 
-**No "sent" / "seen" caption on my bubbles — the bubble's opacity is the
-state.** Grok Bot's user bubble carries no delivery label (refs 03/web-01), and
-Jacob asked for "coloring" only: "remove these 'sent' items, just use coloring
-to make it clear, make the bubble less opaque."
+**No "sent" / "seen" caption on my bubbles, and no dimming after delivery.** A
+delivered bubble is the full own-bubble style the moment the relay ACKs it;
+only a pending bubble is dimmed; a failed one is full with a red "! Retry".
+Grok Bot's user bubble carries no delivery label and no delivery dimming beyond
+pending (refs 03 / web-01).
 
 | State | Meaning | Whole-bubble alpha | Extra |
 |---|---|---|---|
 | Pending | not yet ACKed by the relay | **0.50** (`BUBBLE_ALPHA_PENDING`) | — |
-| Failed | the relay refused it | 1.00 | red ⓘ-style `exclamation` glyph (16 pt, `danger`) on the bubble's outer edge, always visible |
-| Sent | ACKed, nobody opened past it yet | **0.72** (`BUBBLE_ALPHA_SENT`) | — |
-| Seen | a peer's read watermark covers it, an agent answered after it, or read receipts are off | 1.00 | — |
+| Failed | the relay refused it | 1.00 | red `exclamation` glyph + "Retry" (`danger`) on the bubble's outer edge, always visible; click re-sends the text |
+| Delivered | ACKed | 1.00 | — |
 
-Why 0.72 and not a lighter fill: whole-bubble alpha dims the text with the fill,
-which is what makes the difference read in dark mode (fill L* 39 → 30, text
-L* 100 → 76). Measured contrast of the composited text on its composited fill:
-dark 4.9 : 1, light 7.7 : 1 (≥ 4.5 AA); pending 3.4 : 1 / 3.6 : 1 (transient).
-The fill alone at 0.72 would move dark only 8 L* and read as "slightly
-different grey". Same values on the iPhone (`Delivery.sentAlpha` /
-`pendingAlpha`); its own bubble colours are the Mac's (`#5C5C5C` / `#111111`,
-white text).
+Why no "sent-but-unseen" state (the 0.72 of v0.6.223–v0.6.226, #1667): read
+receipts cannot be expected — agents never send one, members on older builds
+never send one, a member who has not opened the chat sends none, and the relay
+stores none — so in a group a delivered bubble sat at 0.72 indefinitely and
+Jacob read it as "not sent" (Arbonites, 2026-10-25 22:17: fill measured
+`#484848` = 0.72 × `#5c5c5c`, with an agent reply already under it). A 1:1-only
+variant would still dim forever against a peer on an older build, so the state
+is gone on both platforms. Read receipts are still *sent* (Settings →
+Notifications on the Mac; the iPhone sends `seen` while a people chat is
+focused) but nothing is drawn from them.
 
-The "seen" caption from #1496 went with the "sent" one (same component); full
-opacity carries it. With read receipts **off** every ACKed bubble is full at
-once — there is nothing to wait for, and a transcript that is lighter forever
-would read as broken.
+Pending at 0.5: white text on the composited fill 3.4 : 1 dark / 3.6 : 1 light,
+transient until the ACK. Same values on the iPhone (`Delivery.pendingAlpha`).
 
 Code: `transcript.rs` `Delivery` + `delivery_state()` + `own_bubble()` +
-`failed_glyph()`, pinned by `delivery_tests`; iPhone `Transcript.swift`
-`Delivery` / `ReadReceipts` / `DeliveryFade` + `DeliveryStateTests`. The iPhone
-also sends the `seen` watermark in its presence header now (`SessionRoom
-.newestMessageId`), so a Mac bubble read on a phone goes full.
+`failed_glyph()` / `Transcript::failed_retry` → `AppState::resend_failed`,
+pinned by `delivery_tests`; iPhone `Transcript.swift` `Delivery` (`.user(text:,
+delivery:, quote:)`) + `AppModel.resendFailed`, pinned by `DeliveryStateTests`.
 
 ## iPhone bubble gestures (Jacob 2026-10-24, [feedback iphone-open-scroll-block-2026-10-24] #1645 + #1629)
 

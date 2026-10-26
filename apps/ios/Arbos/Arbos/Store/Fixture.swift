@@ -208,6 +208,21 @@ extension AppModel {
             Message(id: "g4", chatId: "fx-group-launch", role: .system, sender: "system", status: .done, turn: nil, decision: nil, subagentId: nil,
                     subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 40 * 60_000, completedAt: nil, pending: false,
                     parts: [.text(id: "g4t", text: "Jacob added Comms")], hiddenCount: 0, senderHandle: nil, senderName: nil),
+            // A member's portrait phone screenshot with a long note — the shape of Jacob's
+            // Arbonites report ([feedback image-caption-bubble-ios-2026-10-25]): the caption
+            // must wrap at the bubble's width, not the tall picture's.
+            Message(id: "g6", chatId: "fx-group-launch", role: .user, sender: "user:fx-u3", status: .done, turn: nil, decision: nil, subagentId: nil,
+                    subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 35 * 60_000, completedAt: nil, pending: false,
+                    parts: [.attachment(id: "g6a", attachment: Attachment(name: "IMG_4301.PNG", mime: "image/png", blobRef: "fixture-g6a", kind: "image")),
+                            .text(id: "g6t", text: "It's hard to explain, but I feel like your own sent texts could be improved a little. It now seems like it's still waiting for connection before it gets sent out because it's faded. Should be more colored imho @comms")],
+                    hiddenCount: 0, senderHandle: "mira-k", senderName: "Mira Kaplan"),
+            // A landscape picture with a short note: the picture spans the bubble, the note sits
+            // under it at the picture's width (the flush case, unchanged).
+            Message(id: "g7", chatId: "fx-group-launch", role: .user, sender: "user:fx-u4", status: .done, turn: nil, decision: nil, subagentId: nil,
+                    subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 33 * 60_000, completedAt: nil, pending: false,
+                    parts: [.attachment(id: "g7a", attachment: Attachment(name: "launch-hero.png", mime: "image/png", blobRef: "fixture-g7a", kind: "image")),
+                            .text(id: "g7t", text: "Hero for the landing page, v2.")],
+                    hiddenCount: 0, senderHandle: "sam", senderName: "Sam Okafor"),
         ]
         // Mira's second line replies to her first (quote header on another person's bubble).
         messages["fx-group-launch"]?[2].replyTo = "g1"
@@ -333,22 +348,12 @@ extension AppModel {
                     subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 7 * 60_000, completedAt: nil, pending: false,
                     parts: [.text(id: "d3t", text: "Sending in a sec. Also: can we add your Arbos agent here so it can pull the numbers while we talk?")], hiddenCount: 0,
                     senderHandle: "unconst", senderName: "Unconst"),
-            // A second line of mine after unconst's last one: with `ARBOS_FIXTURE_SEEN=unconst:d2`
-            // (rig, sent-state-opacity-2026-10-24) d2 is seen (full) and this one is still only sent (lighter).
+            // A second line of mine after unconst's last one (rig: two own bubbles in a 1:1 shot).
             Message(id: "d4", chatId: "fx-dm-unconst", role: .user, sender: "user:fx-me", status: .done, turn: nil, decision: nil, subagentId: nil,
                     subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 6 * 60_000, completedAt: nil, pending: false,
                     parts: [.text(id: "d4t", text: "Sure — add it, and send the copy whenever you're ready.")], hiddenCount: 0, senderHandle: "jacob", senderName: "Jacob Steeves"),
         ]
         caughtUp.insert("fx-dm-unconst")
-        // `ARBOS_FIXTURE_SEEN=<handle>:<messageId>[,…]` seeds peers' read watermarks for the DM
-        // (what a presence frame with `seen` would do), so a rig can show seen next to sent.
-        if let seeds = DebugHooks.fixtureSeen {
-            for pair in seeds.split(separator: ",") {
-                let bits = pair.split(separator: ":", maxSplits: 1).map(String.init)
-                guard bits.count == 2 else { continue }
-                ReadReceipts.shared.note(["handle": bits[0], "seen": bits[1]], chatId: "fx-dm-unconst")
-            }
-        }
         directory = [
             Person(id: "fx-u1", handle: "alex-rivera", avatarUrl: nil, name: "Alex Rivera", status: "member"),
             Person(id: "fx-u2", handle: "jen", avatarUrl: nil, name: "Jen Park", status: "member"),
