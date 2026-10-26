@@ -926,6 +926,24 @@ newest_green() {
   NEWEST_GREEN=""
 }
 
+# pending_newer_commit <kind> <sha> → the newest first-parent commit on main above <sha> that touches
+# <kind>'s paths and whose CI is pending (or absent and younger than PENDING_NEWER_WAIT_S); empty when
+# there is none or the newest such commit is older than PENDING_NEWER_WAIT_S (then we stop waiting).
+PENDING_NEWER_WAIT_S="${PENDING_NEWER_WAIT_S:-900}"
+pending_newer_commit() {
+  local kind="$1" base="$2" sha state
+  git -C "$REPO" cat-file -e "$base^{commit}" 2>/dev/null || return 0
+  for sha in $(git -C "$REPO" rev-list --first-parent "$base..origin/main" 2>/dev/null); do
+    # shellcheck disable=SC2046
+    git -C "$REPO" diff --quiet "$base" "$sha" -- $(paths_of "$kind") 2>/dev/null && continue
+    state="$(ci_state "$sha")"
+    case "$state" in
+      success|failed) return 0 ;;
+      *) if (( $(commit_age_s "$sha") < PENDING_NEWER_WAIT_S )); then echo "$sha"; fi; return 0 ;;
+    esac
+  done
+}
+
 roll_unit_running() {
   # `systemctl is-active` says "activating", not "active", for the whole run of a oneshot unit —
   # so every tick during a 15–40 minute roll tried a second systemd-run, which failed with "already
@@ -952,7 +970,7 @@ start_roll_unit() {
 }
 
 auto_requests() {
-  local kind head deployed
+  local kind head deployed queued
   head="$(newest_green)"
   [[ -n "$head" ]] || return 0
   for kind in relay voice agentd; do
@@ -961,7 +979,15 @@ auto_requests() {
     [[ -n "$deployed" ]] || continue
     [[ "$deployed" == "$head" ]] && continue
     git -C "$REPO" cat-file -e "$deployed^{commit}" 2>/dev/null || continue
-    [[ "$(sed -n 's/^sha=//p' "$QUEUE/$kind" 2>/dev/null)" == "$head" ]] && continue
+    queued="$(sed -n 's/^sha=//p' "$QUEUE/$kind" 2>/dev/null)"
+    [[ "$queued" == "$head" ]] && continue
+    # A queued request that already contains the newest green is NEWER than it (its CI is still
+    # running): leave it — overwriting it with the older green started three images one minute
+    # before the merge they were meant to carry (0.1.143 / 0.1.144 / 0.1.147, 2026-10-26, #1866).
+    if [[ -n "$queued" ]] && git -C "$REPO" cat-file -e "$queued^{commit}" 2>/dev/null \
+       && git -C "$REPO" merge-base --is-ancestor "$head" "$queued" 2>/dev/null; then
+      continue
+    fi
     # shellcheck disable=SC2046
     if ! git -C "$REPO" diff --quiet "$deployed" "$head" -- $(paths_of "$kind"); then
       ARBOS_DEPLOY_QUEUE="$QUEUE" "$HOOK" "$kind" "$head" >/dev/null && log "auto: $kind differs from main in its paths; requested $head (newest green)"
@@ -1136,6 +1162,15 @@ handle_request() {
       if [[ "$(sed -n 's/^sha=//p' "$STATE/agentd.rolling" 2>/dev/null)" == "$full" ]]; then
         # Its image is registered and the default; only boxes are still pending (roll_continue).
         rm -f "$file"
+        return 0
+      fi
+      # Never start an image a minute before a merge it can see: a newer first-parent commit on main
+      # that touches agentd paths and whose CI is still pending (younger than PENDING_NEWER_WAIT_S)
+      # makes this tick wait and the next request carry it (#1866).
+      local newer
+      newer="$(pending_newer_commit agentd "$full")"
+      if [[ -n "$newer" ]]; then
+        log "agentd: $newer (newer, touches agentd paths, CI pending) is $(commit_age_s "$newer") s old; waiting for it before building an image"
         return 0
       fi
       start_roll_unit "$full" || return 0
