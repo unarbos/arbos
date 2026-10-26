@@ -2922,7 +2922,7 @@ fn mention_match(query: &str, handle: &str, name: &str) -> Option<search::Match>
 /// A picker row's picture as an element: photo, D79 initials, D92 leaf or the neutral disc.
 fn mention_picture(picture: &mention::Picture, size: f32, theme: &Theme) -> gpui::AnyElement {
     match picture {
-        mention::Picture::Image(image) => img(image.clone())
+        mention::Picture::Image(image) => img(crate::ui::picture_fit::fit(image, size))
             .size(px(size))
             .flex_shrink_0()
             .rounded_full()
