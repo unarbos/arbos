@@ -11,7 +11,7 @@ struct NotificationsPrimerView: View {
         VStack(spacing: 18) {
             Capsule().fill(theme.separator).frame(width: 36, height: 5).padding(.top, 10)
             Spacer(minLength: 8)
-            GlassCircle(size: 72) {
+            GlassCircle(size: 72) { // control-size: exception illustrationDiscs
                 Image(systemName: "bell.badge.fill")
                     .font(theme.font(30, weight: .semibold))
                     .foregroundStyle(theme.text)

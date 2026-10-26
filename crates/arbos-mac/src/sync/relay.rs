@@ -51,9 +51,9 @@ use super::dto::{
 use super::store::{self, Store};
 use super::{ClientCommand, DraftPicture, PictureSource, PictureTarget, SyncEvent, SyncSource};
 use crate::model::{
-    new_id, now_ms, AccountView, Attachment, AttachmentKind, BoxReport, BoxState, Call, CallEnded,
-    CallLeft, CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView, Chat,
-    Effort, Id, Link, LinkState, Machine, MachineState, Message, Part, Person, Project,
+    new_id, now_ms, trace_rows, AccountView, Attachment, AttachmentKind, BoxReport, BoxState, Call,
+    CallEnded, CallLeft, CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView,
+    Chat, Effort, Id, Link, LinkState, Machine, MachineState, Message, Part, Person, Project,
     ProjectDocView, ProjectSecrets, Reachable, ReplyRef, Role, Routine, RoutineRun, Sender,
     ServerInfo, ThreadInfo,
 };
@@ -332,6 +332,15 @@ impl Shared {
         }
         *self.creds.write().unwrap() = Some(creds.clone());
         Ok(creds)
+    }
+
+    /// The newest unreported panic of a previous run (`panic_log`), once, through the
+    /// silent-diagnostic feedback path — so a crash that only left a `.ips` behind on the
+    /// Mac still reaches the relay with its message and backtrace.
+    fn report_last_panic(self: &Arc<Self>) {
+        if let Some(entry) = crate::panic_log::take_unreported() {
+            self.diagnostic_always("panic", entry);
+        }
     }
 
     fn me_user(&self) -> Option<credentials::AccountUser> {
@@ -892,6 +901,7 @@ fn start_token_refresher(shared: &Arc<Shared>) {
 }
 
 fn start_after_pairing(shared: &Arc<Shared>) {
+    shared.report_last_panic();
     start_token_refresher(shared);
     open_store(shared);
     load_store(shared);
@@ -1070,6 +1080,17 @@ fn load_store(shared: &Arc<Shared>) {
     }
     *shared.projects.lock().unwrap() = projects.clone();
     *shared.chats.lock().unwrap() = chats;
+    // Pictures the last run fetched paint with the first content: no leaf placeholder on
+    // every agent while the fetches are out, and nothing to fetch for an unchanged picture.
+    for url in picture_urls(&projects) {
+        if let Some(bytes) = cached_avatar(shared, &url) {
+            shared.avatars_done.lock().unwrap().insert(url.clone());
+            let _ = shared.events.send(SyncEvent::Avatar {
+                url,
+                bytes: Arc::new(bytes),
+            });
+        }
+    }
     let _ = shared.events.send(SyncEvent::Projects(projects.clone()));
     log_first_paint("store", projects.len());
     emit_chats(shared);
@@ -1130,6 +1151,7 @@ fn save_registry(shared: &Arc<Shared>) {
     let projects = shared.projects.lock().unwrap().clone();
     let chats = shared.chats.lock().unwrap().clone();
     let people: Vec<Id> = shared.people.lock().unwrap().iter().cloned().collect();
+    let wanted: HashSet<String> = picture_urls(&projects).into_iter().collect();
     shared.with_store(|s| {
         if projects.is_empty() {
             s.remove(store::KEY_PROJECTS);
@@ -1139,7 +1161,32 @@ fn save_registry(shared: &Arc<Shared>) {
             s.put_json(store::KEY_CHATS, &chats);
         }
         s.put_json(store::KEY_PEOPLE, &people);
+        // A picture no current URL names (a changed avatar's old version, a left group) goes.
+        for key in s.keys_with_prefix(store::KEY_AVATAR_PREFIX) {
+            if !wanted.contains(&key[store::KEY_AVATAR_PREFIX.len()..]) {
+                s.remove(&key);
+            }
+        }
     });
+}
+
+/// Every picture URL the registry draws: agents' pictures (my records and roster copies),
+/// groups' pictures, people's avatars.
+pub(crate) fn picture_urls(projects: &[Project]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for p in projects {
+        out.extend(p.image_url.clone());
+        out.extend(p.agents.iter().filter_map(|a| a.image_url.clone()));
+        out.extend(
+            p.people
+                .iter()
+                .map(|x| x.avatar_url.clone())
+                .filter(|u| !u.is_empty()),
+        );
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 fn emit_store_usage(shared: &Arc<Shared>) {
@@ -1996,6 +2043,19 @@ async fn fetch_server_detail(shared: &Arc<Shared>, server_id: &str) {
     refresh_servers_list(shared).await;
 }
 
+/// Waits between picture fetch attempts. A cold launch fires the first fetch before the
+/// network is up (a Mac that just woke, the relay mid-restart), and until 2026-10-26 one failed
+/// attempt left the URL marked done forever: every surface drew the leaf placeholder for the
+/// rest of the session — Jacob's "old picture after relaunch" (#1813 / #1862 reopen).
+const AVATAR_RETRY_SECS: [u64; 6] = [2, 5, 10, 20, 40, 60];
+
+/// The store-cached bytes for a picture URL, if the last run fetched it.
+fn cached_avatar(shared: &Arc<Shared>, url: &str) -> Option<Vec<u8>> {
+    shared
+        .with_store(|s| s.get(&format!("{}{url}", store::KEY_AVATAR_PREFIX)))
+        .flatten()
+}
+
 async fn fetch_avatar(shared: Arc<Shared>, url: String) {
     // `/avatars/<user>.jpg?v=…` is the relay's own picture store (an Arbos
     // override of the GitHub avatar); everything else is absolute.
@@ -2010,18 +2070,41 @@ async fn fetch_avatar(shared: Arc<Shared>, url: String) {
     if !shared.avatars_done.lock().unwrap().insert(url.clone()) {
         return;
     }
-    let Ok(resp) = shared.http.get(&full).send().await else {
-        return;
-    };
-    if !resp.status().is_success() {
-        return;
-    }
-    if let Ok(bytes) = resp.bytes().await {
+    // The last run's bytes serve (the URL names the picture's version, so a cached copy is
+    // never stale; a changed picture is a new URL and a new fetch).
+    if let Some(bytes) = cached_avatar(&shared, &url) {
         let _ = shared.events.send(SyncEvent::Avatar {
-            url,
-            bytes: Arc::new(bytes.to_vec()),
+            url: url.clone(),
+            bytes: Arc::new(bytes),
         });
+        return;
     }
+    let mut attempt = 0usize;
+    loop {
+        let fetched = match shared.http.get(&full).send().await {
+            Ok(resp) if resp.status().is_success() => resp.bytes().await.ok(),
+            // 404 is "no picture": the leaf is right, nothing to retry.
+            Ok(resp) if resp.status() == reqwest::StatusCode::NOT_FOUND => break,
+            Ok(_) | Err(_) => None,
+        };
+        if let Some(bytes) = fetched {
+            let bytes = bytes.to_vec();
+            shared.with_store(|s| s.put(&format!("{}{url}", store::KEY_AVATAR_PREFIX), &bytes));
+            let _ = shared.events.send(SyncEvent::Avatar {
+                url,
+                bytes: Arc::new(bytes),
+            });
+            return;
+        }
+        let Some(wait) = AVATAR_RETRY_SECS.get(attempt) else {
+            break;
+        };
+        attempt += 1;
+        sleep(Duration::from_secs(*wait)).await;
+    }
+    // Gave up (or no picture): the next `want_avatar` for this URL may ask again.
+    shared.avatars_done.lock().unwrap().remove(&url);
+    let _ = shared.events.send(SyncEvent::AvatarMissing { url });
 }
 
 /// `GET /voices` → `SyncEvent::Voices` (a relay without it just leaves the list empty).
@@ -2567,6 +2650,17 @@ fn emit_snapshot(shared: &Shared, chat_id: &str) {
     let mut messages = doc.read_all();
     for m in &mut messages {
         apply_pending(shared, m);
+    }
+    if trace_rows() {
+        let last = messages
+            .last()
+            .map(|m| format!("{:?}/{}", m.role, m.id))
+            .unwrap_or_default();
+        eprintln!(
+            "rows: snapshot chat={chat_id} n={} last={last} at={}",
+            messages.len(),
+            now_ms()
+        );
     }
     let _ = shared.events.send(SyncEvent::ChatSnapshot {
         chat_id: chat_id.to_string(),
@@ -3273,6 +3367,14 @@ async fn perform_room_actions(
                     }
                 }
                 RoomAction::ApplyBytes(bytes) => {
+                    if trace_rows() {
+                        eprintln!(
+                            "rows: row-apply room={} bytes={} at={}",
+                            session.room(),
+                            bytes.len(),
+                            now_ms()
+                        );
+                    }
                     // (failed, parked): parked = Loro holds the ops until their dependencies
                     // arrive; the session keeps the persisted cursor below that row.
                     let (import_failed, parked) = {

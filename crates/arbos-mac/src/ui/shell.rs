@@ -252,6 +252,10 @@ pub struct Shell {
     /// `ARBOS_RIG_FORWARD_MESSAGE=1` (screenshot rig): opens the "Forward to"
     /// picker for the newest message of the open chat; cleared once it has.
     rig_forward_message: bool,
+    /// Rig: `ARBOS_PEOPLE_QUERY=<text>` types into the people picker's search
+    /// field once a people sheet is open (the Give-access / Add-members shot
+    /// with a query, [feedback shared-search-matcher-mac-2026-10-26]).
+    rig_people_query: Option<String>,
     /// The reaction capsule over a bubble (`reactions`): (chat, message, the smiley's click).
     pub(crate) reaction_capsule: Option<(
         crate::model::Id,
@@ -486,6 +490,35 @@ impl Shell {
                         .update(cx, |input, cx| input.set_text(prompt, cx));
                     this.generate_avatar(cx);
                 }
+                // Rig: `ARBOS_RIG_VIEW=<open ms>[,<close ms>]` presses the picker's View after
+                // `open ms`, then the viewer's × after `close ms` (a shot of each state).
+                if let Ok(spec) = std::env::var("ARBOS_RIG_VIEW") {
+                    let mut parts = spec.split(',').filter_map(|p| p.trim().parse::<u64>().ok());
+                    let open_ms = parts.next().unwrap_or(1500);
+                    let close_ms = parts.next();
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(open_ms))
+                            .await;
+                        let _ = this.update(cx, |this, cx| {
+                            let picture = this.avatar_picker.as_ref().and_then(|pk| {
+                                avatar_picker::viewable_picture(pk, this.state.read(cx))
+                            });
+                            if let Some((name, url)) = picture {
+                                this.view_picture(&name, &url, cx);
+                            }
+                        });
+                        let Some(close_ms) = close_ms else { return };
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(close_ms))
+                            .await;
+                        let _ = this.update(cx, |this, cx| {
+                            this.state.update(cx, |s, cx| s.close_media_viewer(cx));
+                            cx.notify();
+                        });
+                    })
+                    .detach();
+                }
             }
             if let Some(done) = state.update(cx, |s, _| s.avatar_generated.take()) {
                 if let Some(pk) = this.pending_picker_mut() {
@@ -502,6 +535,12 @@ impl Shell {
                             }
                         }
                     }
+                }
+            }
+            if state.read(cx).new_chat_open {
+                if let Some(q) = this.rig_people_query.take() {
+                    this.people_input
+                        .update(cx, |input, cx| input.set_text(q, cx));
                 }
             }
             let st = state.read(cx);
@@ -834,12 +873,17 @@ impl Shell {
         .detach();
         let secrets = cx.new(|cx| SecretsPanel::new(state.clone(), cx));
         // Rig: `ARBOS_OPEN_SETTINGS=secrets` (the list), `secrets:<secret env>` (one secret),
+        // `secrets-people:<secret env>` (that secret's "Give a person access" sheet),
         // `secrets-agent:<project id or name>` (an agent's page).
         match open_settings.as_deref() {
             Some("secrets") => secrets.update(cx, |p, cx| p.show(cx)),
             Some(v) if v.starts_with("secrets:") => {
                 let env = v["secrets:".len()..].to_string();
                 secrets.update(cx, |p, cx| p.show_secret_env(env, cx));
+            }
+            Some(v) if v.starts_with("secrets-people:") => {
+                let env = v["secrets-people:".len()..].to_string();
+                secrets.update(cx, |p, cx| p.show_secret_people(env, cx));
             }
             Some(v) if v.starts_with("secrets-agent:") => {
                 let pid = v["secrets-agent:".len()..].to_string();
@@ -942,6 +986,9 @@ impl Shell {
             message_menu: None,
             rig_message_menu: message_menu::rig_anchor(),
             rig_forward_message: std::env::var_os("ARBOS_RIG_FORWARD_MESSAGE").is_some(),
+            rig_people_query: std::env::var("ARBOS_PEOPLE_QUERY")
+                .ok()
+                .filter(|q| !q.trim().is_empty()),
             reaction_capsule: None,
             reaction_pick_open: false,
             reaction_pick,
@@ -1986,9 +2033,11 @@ impl Shell {
     }
 
     /// A profile picture full-size in the media viewer (Jacob, 2026-10-25): the hero of a pane I
-    /// cannot edit, or the picker's View. Closes the picker when it is up.
+    /// cannot edit, or the picker's View. The picker stays up underneath — the viewer draws over
+    /// it and occludes it — so its × / Esc / backdrop close only the viewer and the picker is
+    /// back as it was (Jacob, 2026-10-26: the first cut dropped the picker here, so the X
+    /// seemed to close both).
     pub(crate) fn view_picture(&mut self, name: &str, url: &str, cx: &mut Context<Self>) {
-        self.avatar_picker = None;
         self.state
             .update(cx, |s, cx| s.open_picture_viewer(name, url, cx));
         cx.notify();
@@ -2314,7 +2363,10 @@ impl Shell {
                 window.focus(&self.viewer_focus, cx);
             } else {
                 self.state.update(cx, |s, cx| s.close_media_viewer(cx));
-                Composer::focus(&self.composer, window, cx);
+                // Back to the avatar picker when the viewer was its View; else the composer.
+                if self.avatar_picker.is_none() {
+                    Composer::focus(&self.composer, window, cx);
+                }
             }
             return;
         }

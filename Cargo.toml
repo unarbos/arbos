@@ -20,7 +20,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.6.269"
+version = "0.6.272"
 edition = "2021"
 license = "UNLICENSED"
 publish = false
@@ -75,7 +75,9 @@ dirs = "6"
 [profile.release]
 lto = "thin"
 codegen-units = 1
-strip = true
+# Symbol names stay (debug info goes): a panic backtrace in panic.log and a crash report's
+# frames then name the function instead of an offset (2026-10-26 Mac launch crashes).
+strip = "debuginfo"
 
 [profile.dev]
 opt-level = 0

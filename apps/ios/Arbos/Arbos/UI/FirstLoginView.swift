@@ -137,8 +137,8 @@ struct FirstLoginView: View {
                         .foregroundStyle(theme.text)
                         .padding(.horizontal, 18)
                         .padding(.vertical, 9)
-                        .background(Capsule().fill(theme.field))
-                        .overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1))
+                        .background(Capsule().fill(theme.field)) // control-size: exception inlineChips
+                        .overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1)) // control-size: exception inlineChips
                 }
                 .buttonStyle(.plain)
                 .padding(.top, 8)

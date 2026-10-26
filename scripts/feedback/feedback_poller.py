@@ -435,6 +435,8 @@ class GitHub:
         self.ledger: dict[str, list[int]] = {}
         self.rate_remaining: int | None = None
         self._feedback_refs: dict[str, str] | None = None
+        self._releases: list[dict] | None = None
+        self._contains: dict[tuple[str, str], bool] = {}
         self._login: str | None = None
 
     @staticmethod
@@ -617,20 +619,15 @@ class GitHub:
         return self._login
 
     def feedback_refs(self) -> dict[str, str]:
-        """Every `feedback/*` branch head in one listing (pages of 100), cached for this process (one tick).
+        """Every `feedback/*` branch head in one listing, cached for this process (one tick).
         The watches used to probe `/branches/feedback/<id>` per item; a deleted branch answers 404, which is
-        billed and never a 304 — ~200 such probes per tick (17:5x Oct 25) were the token's biggest consumer."""
+        billed and never a 304 — ~200 such probes per tick (17:5x Oct 25) were the token's biggest consumer.
+        `matching-refs` is NOT paginated: it returns every match and ignores `page`/`per_page`. The earlier
+        "pages of 100, stop under 100" loop never ended once the 101st feedback/* branch existed (15:53 Oct 26:
+        103 branches, a tick looped on the same 103-row answer at ~1 call/s until killed)."""
         if self._feedback_refs is None:
-            refs: dict[str, str] = {}
-            page = 1
-            while True:
-                batch = self.repo_api("GET", f"/git/matching-refs/heads/feedback/?per_page=100&page={page}") or []
-                for r in batch:
-                    refs[r["ref"].removeprefix("refs/heads/")] = r["object"]["sha"]
-                if len(batch) < 100:
-                    break
-                page += 1
-            self._feedback_refs = refs
+            batch = self.repo_api("GET", "/git/matching-refs/heads/feedback/") or []
+            self._feedback_refs = {r["ref"].removeprefix("refs/heads/"): r["object"]["sha"] for r in batch}
         return self._feedback_refs
 
     def compare(self, base: str, head: str) -> dict:
@@ -672,11 +669,15 @@ class GitHub:
         return stable[0] if stable else None
 
     def contains(self, ref: str, sha: str) -> bool:
-        """True when `ref` (tag/branch/sha) already contains commit `sha`."""
-        try:
-            return self.compare(ref, sha).get("status") in ("identical", "behind")
-        except HttpError:
-            return False
+        """True when `ref` (tag/branch/sha) already contains commit `sha`. Memoised per process (one tick):
+        check_ship and fixed_in ask the same (tag, sha) pairs several times per item."""
+        key = (ref, sha)
+        if key not in self._contains:
+            try:
+                self._contains[key] = self.compare(ref, sha).get("status") in ("identical", "behind")
+            except HttpError:
+                self._contains[key] = False
+        return self._contains[key]
 
     def dispatch_ci(self, branch: str) -> bool:
         """workflow_dispatch ci.yml on `branch`; False when the ref's workflow file has no dispatch trigger (422)."""
@@ -794,7 +795,31 @@ class GitHub:
         return None
 
     def releases(self) -> list[dict]:
-        return self.repo_api("GET", "/releases?per_page=60")
+        """The 60 newest releases, fetched once per process (one tick)."""
+        if self._releases is None:
+            self._releases = self.repo_api("GET", "/releases?per_page=60") or []
+        return self._releases
+
+    def release_carrying(self, sha: str, since: str, kind: str = "stable") -> dict | None:
+        """The newest published release whose tag contains `sha`: `stable` = vX.Y.Z, `edge` = edge-*.
+        Only releases published at or after `since` (the commit's own time) are compared — an older one cannot
+        carry the commit — so a fix that is in no release yet costs a handful of compares, not sixty. 16:28–16:35
+        Oct 26: three freshly merged non-Mac items × ~60 `compare` calls each (two passes) held one tick for
+        7 min while a P0's green gate waited to settle."""
+        stable = re.compile(r"v\d+\.\d+\.\d+")
+        for r in sorted(self.releases(), key=lambda r: r.get("published_at") or "", reverse=True):
+            if r.get("draft"):
+                continue
+            tag = r.get("tag_name") or ""
+            if kind == "stable" and (not stable.fullmatch(tag) or r.get("prerelease")):
+                continue
+            if kind == "edge" and not tag.startswith("edge-"):
+                continue
+            if since and (r.get("published_at") or "") < since:
+                return None
+            if self.contains(tag, sha):
+                return r
+        return None
 
 
 # ---------------------------------------------------------------- Cursor
@@ -3150,6 +3175,9 @@ class Loop:
             with contextlib.suppress(HttpError, KeyError):
                 st["commit_date"] = self.gh.commit(sha)["commit"]["committer"]["date"]
         since = st.get("commit_date") or st["pushed_at"]
+        # Release cut-off: the earlier of the commit's own date and the loop's clock when it saw the push (a
+        # committer clock running ahead must never hide every release from the item).
+        rel_since = min(filter(None, [st.get("commit_date"), st.get("pushed_at")]), default="")
         runs = self.gh.runs_for_sha(sha)
         # The same commit may head other branches too (a worker's `cursor/**` mirror of its feedback branch); only
         # runs on main or the item's own branch say anything about what shipped (06:00 Oct 22: a red ios.yml run
@@ -3288,8 +3316,7 @@ class Loop:
                 # lets main move), so the run's head_sha may not contain the fix although the published tag does
                 # (#1241: merged 01:19, run head 76222502 from 01:13, tag v0.6.103 at 02:29). The release itself is
                 # the evidence: the newest published stable tag that carries the commit.
-                tag_rel = next((r for r in self.gh.releases() if not r.get("draft") and re.fullmatch(r"v\d+\.\d+\.\d+", r.get("tag_name") or "")
-                                and (r.get("published_at") or "") >= since and self.gh.contains(r["tag_name"], sha)), None)
+                tag_rel = self.gh.release_carrying(sha, rel_since, "stable")
                 if tag_rel:
                     later = {"head_sha": tag_rel["tag_name"], "html_url": tag_rel["html_url"], "status": "completed",
                              "conclusion": "success", "updated_at": tag_rel["published_at"]}
@@ -3303,13 +3330,15 @@ class Loop:
                 rels = [r for r in self.gh.releases() if not r.get("draft")]
                 # Auto-stable (D85): one vX.Y.Z per green batch, the bump commit sits on top of main (maybe only under the
                 # tag) — so match by "the release's commit contains the fix", stable first; edge-per-push is the fallback.
-                edge = next((r["tag_name"] for r in rels if re.fullmatch(r"v\d+\.\d+\.\d+", r["tag_name"]) and self.gh.contains(r["tag_name"], sha)), None) \
+                carrying = self.gh.release_carrying(sha, rel_since, "stable")
+                edge = (carrying["tag_name"] if carrying else None) \
                     or next((r["tag_name"] for r in rels if r["tag_name"].startswith("edge-") and r.get("target_commitish", "").startswith(built[:7])), None)
                 if not edge and any(f.startswith(("crates/arbos-mac/", "crates/arbos-update/")) for f in st.get("files") or []):
                     # A green Release run is not a release: with per-fix auto-stable tags the published release
                     # may lag or fail to publish. Find any release (stable or edge, newest first) whose commit
                     # contains the fix; until one exists the item stays `pushed` / fixed-on-main (#1079, 23:07).
-                    edge = next((r["tag_name"] for r in rels if r["tag_name"].startswith("edge-") and self.gh.contains(r["tag_name"], sha)), None)
+                    carrying = self.gh.release_carrying(sha, rel_since, "edge")
+                    edge = carrying["tag_name"] if carrying else None
                     if not edge:
                         if st.get("release_wait_noted") != rel["html_url"]:
                             st["release_wait_noted"] = rel["html_url"]
@@ -3447,11 +3476,8 @@ class Loop:
         if mac_files or (st.get("edge_release") or "").startswith("edge-"):
             tag = None
             if commit:
-                for r in self.gh.releases():
-                    if not r.get("prerelease") and not r.get("draft") and re.fullmatch(r"v\d+\.\d+\.\d+", r.get("tag_name") or "") \
-                            and self.gh.contains(r["tag_name"], commit):
-                        tag = r["tag_name"]  # newest stable release that carries the fix
-                        break
+                carrying = self.gh.release_carrying(commit, min(filter(None, [st.get("commit_date"), st.get("pushed_at")]), default=""), "stable")
+                tag = carrying["tag_name"] if carrying else None  # newest stable release that carries the fix
             edge = st.get("edge_release")
             if tag and edge and edge != tag and edge.startswith("edge-"):
                 parts.append(f"Mac {tag} ({edge})")
