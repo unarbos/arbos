@@ -505,6 +505,9 @@ pub struct UserCardDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[typeshare(serialized_as = "Option<I54>")]
     pub avatar_color_index_effective: Option<i64>,
+    /// Optional short bio (≤160 chars). Absent or empty = none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bio: Option<String>,
 }
 
 /// `user` on `/auth/token`, `/me`, and profile update replies.
@@ -530,6 +533,9 @@ pub struct AccountUserDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[typeshare(serialized_as = "Option<Option<I54>>")]
     pub last_login_at: Option<Option<i64>>,
+    /// Optional short bio (≤160 chars). Absent or empty = none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bio: Option<String>,
 }
 
 /// Credits block on `GET /me`.

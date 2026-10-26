@@ -70,6 +70,8 @@ pub fn migrate_accounts(c: &Connection) {
         // Earlier display names (JSON array), newest last: the box rewrites memory that named
         // the owner by one of them to "the owner".
         "ALTER TABLE users ADD COLUMN former_names TEXT NOT NULL DEFAULT '[]'",
+        // Optional short bio on the public profile (≤160 chars); NULL / empty = unset.
+        "ALTER TABLE users ADD COLUMN bio TEXT",
     ] {
         let _ = c.execute(stmt, []);
     }
@@ -89,6 +91,8 @@ pub struct User {
     pub allow_negative: bool,
     /// Made by `POST /admin/users/test`; no GitHub account behind it; deletable.
     pub test: bool,
+    /// Optional short bio on the public profile (≤160 chars).
+    pub bio: Option<String>,
 }
 
 /// `(login, profile name, address name, former names)` — see `Db::user_address`.
@@ -206,10 +210,11 @@ fn user_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<User> {
         daily_cap_usd: if unlimited != 0 { None } else { Some(cap) },
         allow_negative: r.get::<_, i64>(9)? != 0,
         test: r.get::<_, i64>(10)? != 0,
+        bio: r.get(11)?,
     })
 }
 
-const USER_COLS: &str = "id, github_id, login, avatar_url, name, created_at, last_login_at, spend_cap_usd, cap_unlimited, allow_negative, test";
+const USER_COLS: &str = "id, github_id, login, avatar_url, name, created_at, last_login_at, spend_cap_usd, cap_unlimited, allow_negative, test, bio";
 
 impl Db {
     // ---- users --------------------------------------------------------------------------------
@@ -465,19 +470,21 @@ impl Db {
         })
     }
 
-    /// Display name and/or handle (`PATCH /me`). `login` must already be validated and unique.
-    /// `None` for a field leaves it unchanged; empty `name` stores NULL (clients show `@handle`).
+    /// Display name, handle, and/or bio (`PATCH /me`). `login` must already be validated and unique.
+    /// `None` for a field leaves it unchanged; empty `name` / `bio` stores NULL (clients omit them).
     pub fn set_user_profile(
         &self,
         user_id: &str,
         name: Option<&str>,
         login: Option<&str>,
+        bio: Option<&str>,
     ) -> Result<()> {
-        if name.is_none() && login.is_none() {
+        if name.is_none() && login.is_none() && bio.is_none() {
             return Ok(());
         }
         let name_sql: Option<Option<&str>> =
             name.map(|s| if s.is_empty() { None } else { Some(s) });
+        let bio_sql: Option<Option<&str>> = bio.map(|s| if s.is_empty() { None } else { Some(s) });
         if let Some(new_name) = name_sql {
             // The old name joins `former_names` so boxes can retire it from memory.
             let _ = self.with(|c| {
@@ -507,20 +514,36 @@ impl Db {
                 Ok(())
             });
         }
-        let n = self.with(|c| match (name_sql, login) {
-            (Some(name), Some(login)) => c.execute(
-                "UPDATE users SET name = ?2, login = ?3, name_source = 'user' WHERE id = ?1",
-                params![user_id, name, login],
-            ),
-            (Some(name), None) => c.execute(
-                "UPDATE users SET name = ?2, name_source = 'user' WHERE id = ?1",
-                params![user_id, name],
-            ),
-            (None, Some(login)) => c.execute(
-                "UPDATE users SET login = ?2 WHERE id = ?1",
-                params![user_id, login],
-            ),
-            (None, None) => Ok(0),
+        let n = self.with(|c| {
+            let mut touched = 0usize;
+            match (name_sql, login) {
+                (Some(name), Some(login)) => {
+                    touched += c.execute(
+                        "UPDATE users SET name = ?2, login = ?3, name_source = 'user' WHERE id = ?1",
+                        params![user_id, name, login],
+                    )?;
+                }
+                (Some(name), None) => {
+                    touched += c.execute(
+                        "UPDATE users SET name = ?2, name_source = 'user' WHERE id = ?1",
+                        params![user_id, name],
+                    )?;
+                }
+                (None, Some(login)) => {
+                    touched += c.execute(
+                        "UPDATE users SET login = ?2 WHERE id = ?1",
+                        params![user_id, login],
+                    )?;
+                }
+                (None, None) => {}
+            }
+            if let Some(bio) = bio_sql {
+                touched += c.execute(
+                    "UPDATE users SET bio = ?2 WHERE id = ?1",
+                    params![user_id, bio],
+                )?;
+            }
+            Ok(touched)
         })?;
         if n == 0 {
             return Err(anyhow!("no such user"));
@@ -1247,7 +1270,8 @@ mod address_name_tests {
             "the GitHub name is kept as a label"
         );
         assert_eq!(address, None, "but it is not an address");
-        db.set_user_profile(&u.id, Some("Jacob"), None).unwrap();
+        db.set_user_profile(&u.id, Some("Jacob"), None, None)
+            .unwrap();
         let (_, name, address, former) = db.user_address(&u.id).unwrap().unwrap();
         assert_eq!(name.as_deref(), Some("Jacob"));
         assert_eq!(address.as_deref(), Some("Jacob"));
@@ -1261,11 +1285,20 @@ mod address_name_tests {
         let (_, _, address, _) = db.user_address(&u.id).unwrap().unwrap();
         assert_eq!(address.as_deref(), Some("Jacob"));
         // Clearing the name clears the address too; the source flips back only on a new name.
-        db.set_user_profile(&u.id, Some(""), None).unwrap();
+        db.set_user_profile(&u.id, Some(""), None, None).unwrap();
         let (_, name, _, former) = db.user_address(&u.id).unwrap().unwrap();
         assert_eq!(name, None);
         assert_eq!(former, vec!["Const".to_owned(), "Jacob".to_owned()]);
         assert!(db.user_address("gh_nobody").unwrap().is_none());
+        // Optional short bio: set, read, clear.
+        db.set_user_profile(&u.id, None, None, Some("Builds agents."))
+            .unwrap();
+        assert_eq!(
+            db.user(&u.id).unwrap().unwrap().bio.as_deref(),
+            Some("Builds agents.")
+        );
+        db.set_user_profile(&u.id, None, None, Some("")).unwrap();
+        assert_eq!(db.user(&u.id).unwrap().unwrap().bio, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

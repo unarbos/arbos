@@ -20,14 +20,16 @@ struct ProfilePerson: Identifiable, Equatable, Hashable {
     var lastSeenAt: Int64? = nil
     var online: Bool = false
     var avatarColorIndex: Int? = nil
+    /// Optional short bio; filled from `GET /users/{id}` when opening the pane.
+    var bio: String? = nil
 
     var displayName: String { name?.isEmpty == false ? name! : "@\(handle)" }
 
-    init(id: String, handle: String, name: String?, avatarUrl: String?, lastSeenAt: Int64? = nil, online: Bool = false, avatarColorIndex: Int? = nil) {
-        self.id = id; self.handle = handle; self.name = name; self.avatarUrl = avatarUrl; self.lastSeenAt = lastSeenAt; self.online = online; self.avatarColorIndex = avatarColorIndex
+    init(id: String, handle: String, name: String?, avatarUrl: String?, lastSeenAt: Int64? = nil, online: Bool = false, avatarColorIndex: Int? = nil, bio: String? = nil) {
+        self.id = id; self.handle = handle; self.name = name; self.avatarUrl = avatarUrl; self.lastSeenAt = lastSeenAt; self.online = online; self.avatarColorIndex = avatarColorIndex; self.bio = bio
     }
     init(_ m: ChatMember) { self.init(id: m.id, handle: m.handle, name: m.name, avatarUrl: m.avatarUrl, lastSeenAt: m.lastSeenAt, online: m.online, avatarColorIndex: m.avatarColorIndex) }
-    init(_ p: Person) { self.init(id: p.id, handle: p.handle, name: p.name, avatarUrl: p.avatarUrl, lastSeenAt: p.lastSeenAt, online: p.online, avatarColorIndex: p.avatarColorIndex) }
+    init(_ p: Person) { self.init(id: p.id, handle: p.handle, name: p.name, avatarUrl: p.avatarUrl, lastSeenAt: p.lastSeenAt, online: p.online, avatarColorIndex: p.avatarColorIndex, bio: p.bio) }
     init(_ p: ProjectMember) { self.init(id: p.id, handle: p.handle, name: p.name, avatarUrl: p.avatarUrl, lastSeenAt: p.lastSeenAt, online: p.online, avatarColorIndex: p.avatarColorIndex) }
 }
 
@@ -858,10 +860,10 @@ struct UserProfileView: View {
             ScrollView {
                 VStack(spacing: 18) {
                     Color.clear.frame(height: 80)
-                    // The shared pane (D93): picture, name, @handle, the Message pill
-                    // (Jacob 2026-10-25; not on my own pane, not once I blocked them);
-                    // Links | Groups (the Mac's set); one Block user row. No last-seen,
-                    // no username field, no Add members.
+                    // The shared pane (D93): picture, name, @handle, optional bio,
+                    // the Message pill (Jacob 2026-10-25; not on my own pane, not once
+                    // I blocked them); Links | Groups (the Mac's set); one Block user
+                    // row. No last-seen, no username field, no Add members.
                     ProfilePane(
                         hero: PaneHero(
                             picture: .image(AnyView(ViewablePicture(name: person.displayName, url: person.avatarUrl) {
@@ -869,6 +871,7 @@ struct UserProfileView: View {
                             })),
                             name: person.displayName,
                             subtitle: "@\(person.handle)",
+                            subtitleBelow: profileBioBelow,
                             action: MessageButton.shows(isMe: isMe, blocked: blockedEntry != nil) ? AnyView(messageButton) : nil
                         ),
                         tabs: PaneKinds.person,
@@ -902,10 +905,27 @@ struct UserProfileView: View {
                 avatarUrl: fresh?.avatarUrl ?? person.avatarUrl,
                 lastSeenAt: fresh?.lastSeenAt ?? person.lastSeenAt,
                 online: fresh?.online ?? person.online,
-                avatarColorIndex: fresh?.avatarColorIndex ?? person.avatarColorIndex
+                avatarColorIndex: fresh?.avatarColorIndex ?? person.avatarColorIndex,
+                bio: fresh?.bio ?? person.bio
             )
             sharedProjects = await model.sharedProjects(with: who)
         }
+    }
+
+    /// Short bio under `@handle` when the person set one (`GET /users/{id}`).
+    private var profileBioBelow: AnyView? {
+        let raw = (fresh?.bio ?? person.bio)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !raw.isEmpty else { return nil }
+        return AnyView(
+            Text(raw)
+                .font(theme.font(Theme.small))
+                .foregroundStyle(theme.muted)
+                .multilineTextAlignment(.center)
+                .lineLimit(3)
+                .padding(.horizontal, 32)
+                .accessibilityLabel("Bio")
+        )
     }
 
     /// The one primary action (Jacob 2026-10-25): open the DM we have, or start one

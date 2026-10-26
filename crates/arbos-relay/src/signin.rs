@@ -163,6 +163,7 @@ fn user_dto(state: &AppState, user_id: &str) -> AccountUserDto {
             name: Some(u.name),
             created_at: Some(u.created_at),
             last_login_at: Some(u.last_login_at),
+            bio: u.bio.filter(|s| !s.is_empty()),
         },
         None => AccountUserDto {
             id: user_id.to_owned(),
@@ -172,6 +173,7 @@ fn user_dto(state: &AppState, user_id: &str) -> AccountUserDto {
             name: None,
             created_at: None,
             last_login_at: None,
+            bio: None,
         },
     }
 }
@@ -773,13 +775,16 @@ fn avatar_file(state: &AppState, user_id: &str) -> std::path::PathBuf {
         .join(format!("{user_id}.jpg"))
 }
 
-/// `PATCH /me {name?, login?, group_add?}`: profile and/or privacy. At least one field required.
+/// `PATCH /me {name?, login?, bio?, group_add?}`: profile and/or privacy. At least one field required.
 #[derive(Deserialize)]
 pub struct PatchMeBody {
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
     pub login: Option<String>,
+    /// Optional short bio (≤160 chars); empty clears it.
+    #[serde(default)]
+    pub bio: Option<String>,
     /// Who may add me to groups: `anyone` | `people_i_know` | `nobody`.
     #[serde(default)]
     pub group_add: Option<String>,
@@ -824,11 +829,12 @@ pub async fn patch_me(
             return api_error(StatusCode::FORBIDDEN, "forbidden", "device token required")
         }
     };
-    if body.name.is_none() && body.login.is_none() && body.group_add.is_none() {
+    if body.name.is_none() && body.login.is_none() && body.bio.is_none() && body.group_add.is_none()
+    {
         return api_error(
             StatusCode::BAD_REQUEST,
             "bad_request",
-            "provide name, login, and/or group_add",
+            "provide name, login, bio, and/or group_add",
         );
     }
 
@@ -837,6 +843,16 @@ pub async fn patch_me(
         let t = s.trim();
         if t.len() > 80 {
             t.chars().take(80).collect()
+        } else {
+            t.to_owned()
+        }
+    });
+
+    // Trim and cap the bio; empty clears it.
+    let bio: Option<String> = body.bio.as_ref().map(|s| {
+        let t = s.trim();
+        if t.chars().count() > 160 {
+            t.chars().take(160).collect()
         } else {
             t.to_owned()
         }
@@ -881,10 +897,11 @@ pub async fn patch_me(
         },
     };
 
-    if name.is_some() || login.is_some() {
-        if let Err(e) = state
-            .db
-            .set_user_profile(&user_id, name.as_deref(), login.as_deref())
+    if name.is_some() || login.is_some() || bio.is_some() {
+        if let Err(e) =
+            state
+                .db
+                .set_user_profile(&user_id, name.as_deref(), login.as_deref(), bio.as_deref())
         {
             return if e.to_string() == "no such user" {
                 api_error(StatusCode::NOT_FOUND, "not_found", "no such user")

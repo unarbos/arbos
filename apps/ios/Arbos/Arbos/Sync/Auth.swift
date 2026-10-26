@@ -34,6 +34,8 @@ struct AuthUser: Codable, Equatable {
     var login: String
     var name: String?
     var avatarUrl: String?
+    /// Optional short bio (≤160 chars) shown on the public profile.
+    var bio: String? = nil
     /// D79 `avatar_color_index_effective` (nil → derived from `id`).
     var avatarColorIndexEffective: Int? = nil
 }
@@ -196,11 +198,12 @@ extension RelayAPI {
         return (user, credits, dto.machine, dto.features, dto.privacy)
     }
 
-    /// `PATCH /me {name?, login?, group_add?}` → updated user (display name, handle, and/or privacy).
-    func patchMe(name: String? = nil, login: String? = nil, groupAdd: String? = nil) async throws -> AuthUser {
+    /// `PATCH /me {name?, login?, bio?, group_add?}` → updated user (display name, handle, bio, and/or privacy).
+    func patchMe(name: String? = nil, login: String? = nil, bio: String? = nil, groupAdd: String? = nil) async throws -> AuthUser {
         var body: [String: Any] = [:]
         if let name { body["name"] = name }
         if let login { body["login"] = login }
+        if let bio { body["bio"] = bio }
         if let groupAdd { body["group_add"] = groupAdd }
         let v = try await json("PATCH", AuthEndpoints.me, body: body)
         guard JSONSerialization.isValidJSONObject(v),
@@ -261,11 +264,13 @@ extension RelayAPI {
 
     static func parseUser(_ dto: AccountUserDto) -> AuthUser? {
         guard let login = dto.login.flatMap({ $0 }), !login.isEmpty else { return nil }
+        let bio = dto.bio.flatMap { $0.isEmpty ? nil : $0 }
         return AuthUser(
             id: dto.id,
             login: login,
             name: dto.name.flatMap { $0 },
-            avatarUrl: dto.avatar_url.flatMap { $0 }
+            avatarUrl: dto.avatar_url.flatMap { $0 },
+            bio: bio
         )
     }
 }

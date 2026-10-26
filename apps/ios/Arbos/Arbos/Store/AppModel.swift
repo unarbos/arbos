@@ -1193,15 +1193,17 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Settings / onboarding: save display name and handle via `PATCH /me`.
+    /// Settings / onboarding: save display name, handle, and optional bio via `PATCH /me`.
+    /// Pass `bio` only when editing it (Settings); onboarding leaves it unchanged.
     @discardableResult
-    func updateProfile(name: String, handle: String) async -> String? {
+    func updateProfile(name: String, handle: String, bio: String? = nil) async -> String? {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedHandle = handle.trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "@"))
+        let trimmedBio = bio.map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(160)) }
         guard !trimmedHandle.isEmpty else { return "Choose a handle." }
         do {
-            let who = try await api.patchMe(name: trimmedName, login: trimmedHandle)
+            let who = try await api.patchMe(name: trimmedName, login: trimmedHandle, bio: trimmedBio)
             user = who
             saveAccountCache()
             needsProfileSetup = false

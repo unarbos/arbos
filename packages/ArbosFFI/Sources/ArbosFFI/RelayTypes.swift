@@ -19,8 +19,10 @@ public struct AccountUserDto: Codable {
 	public let name: String??
 	public let created_at: Int64?
 	public let last_login_at: Int64??
+	/// Optional short bio (≤160 chars). Absent or empty = none.
+	public let bio: String?
 
-	public init(id: String, github_id: Int64??, login: String??, avatar_url: String??, name: String??, created_at: Int64?, last_login_at: Int64??) {
+	public init(id: String, github_id: Int64??, login: String??, avatar_url: String??, name: String??, created_at: Int64?, last_login_at: Int64??, bio: String?) {
 		self.id = id
 		self.github_id = github_id
 		self.login = login
@@ -28,6 +30,7 @@ public struct AccountUserDto: Codable {
 		self.name = name
 		self.created_at = created_at
 		self.last_login_at = last_login_at
+		self.bio = bio
 	}
 }
 
@@ -2513,8 +2516,10 @@ public struct UserCardDto: Codable {
 	public let last_seen_at: Int64??
 	public let online: Bool?
 	public let avatar_color_index_effective: Int64?
+	/// Optional short bio (≤160 chars). Absent or empty = none.
+	public let bio: String?
 
-	public init(id: String, handle: String, avatar_url: String?, name: String?, status: String, created_at: Int64?, test: Bool?, last_seen_at: Int64??, online: Bool?, avatar_color_index_effective: Int64?) {
+	public init(id: String, handle: String, avatar_url: String?, name: String?, status: String, created_at: Int64?, test: Bool?, last_seen_at: Int64??, online: Bool?, avatar_color_index_effective: Int64?, bio: String?) {
 		self.id = id
 		self.handle = handle
 		self.avatar_url = avatar_url
@@ -2525,6 +2530,7 @@ public struct UserCardDto: Codable {
 		self.last_seen_at = last_seen_at
 		self.online = online
 		self.avatar_color_index_effective = avatar_color_index_effective
+		self.bio = bio
 	}
 }
 

@@ -16,6 +16,8 @@ struct Person: Identifiable, Equatable, Hashable, Codable {
     var online: Bool = false
     /// D79 `avatar_color_index_effective` from the relay (nil → derived from `id`).
     var avatarColorIndex: Int? = nil
+    /// Optional short bio from the public profile card.
+    var bio: String? = nil
 
     var displayName: String { name?.isEmpty == false ? name! : handle }
 
@@ -28,7 +30,8 @@ struct Person: Identifiable, Equatable, Hashable, Codable {
         status: String = "member",
         lastSeenAt: Int64? = nil,
         online: Bool = false,
-        avatarColorIndex: Int? = nil
+        avatarColorIndex: Int? = nil,
+        bio: String? = nil
     ) {
         self.id = id
         self.handle = handle
@@ -38,6 +41,7 @@ struct Person: Identifiable, Equatable, Hashable, Codable {
         self.lastSeenAt = lastSeenAt
         self.online = online
         self.avatarColorIndex = avatarColorIndex
+        self.bio = bio
     }
 
     init(dto: UserCardDto) {
@@ -49,7 +53,8 @@ struct Person: Identifiable, Equatable, Hashable, Codable {
             status: dto.status.isEmpty ? "member" : dto.status,
             lastSeenAt: dto.last_seen_at.flatMap { $0 },
             online: dto.online ?? false,
-            avatarColorIndex: dto.avatar_color_index_effective.map(Int.init)
+            avatarColorIndex: dto.avatar_color_index_effective.map(Int.init),
+            bio: dto.bio.flatMap { $0.isEmpty ? nil : $0 }
         )
     }
 

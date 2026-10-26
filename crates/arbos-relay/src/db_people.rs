@@ -1113,7 +1113,7 @@ impl Db {
                 |r| r.get(0),
             )?;
             let mut st = c.prepare(
-                "SELECT id, login, avatar_url, name, status, test FROM users
+                "SELECT id, login, avatar_url, name, status, test, bio FROM users
                  WHERE login IS NOT NULL AND status IN ('member', 'invited') AND id != ?1
                  ORDER BY lower(login) LIMIT ?2 OFFSET ?3",
             )?;
@@ -1130,6 +1130,7 @@ impl Db {
                         last_seen_at: None,
                         online: None,
                         avatar_color_index_effective: None,
+                        bio: r.get::<_, Option<String>>(6)?.filter(|s| !s.is_empty()),
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1145,7 +1146,7 @@ impl Db {
         );
         self.with(|c| {
             let mut st = c.prepare(
-                "SELECT id, login, avatar_url, name, status, test FROM users WHERE login IS NOT NULL AND status IN ('member', 'invited') AND lower(login) LIKE ?1 ESCAPE '\\' ORDER BY (status = 'member') DESC, lower(login) LIMIT ?2",
+                "SELECT id, login, avatar_url, name, status, test, bio FROM users WHERE login IS NOT NULL AND status IN ('member', 'invited') AND lower(login) LIKE ?1 ESCAPE '\\' ORDER BY (status = 'member') DESC, lower(login) LIMIT ?2",
             )?;
             let rows = st.query_map(params![like, limit], |r| {
                 Ok(UserCardDto {
@@ -1159,6 +1160,7 @@ impl Db {
                     last_seen_at: None,
                     online: None,
                     avatar_color_index_effective: None,
+                    bio: r.get::<_, Option<String>>(6)?.filter(|s| !s.is_empty()),
                 })
             })?;
             rows.collect()
@@ -1188,11 +1190,11 @@ impl Db {
         Ok(id)
     }
 
-    /// `(id, login, avatar_url, name, status)` for a handle, case-insensitive.
+    /// `(id, login, avatar_url, name, status, bio)` for a handle, case-insensitive.
     pub fn user_by_handle(&self, handle: &str) -> Result<Option<UserCardDto>> {
         self.with(|c| {
             c.query_row(
-                "SELECT id, login, avatar_url, name, status FROM users WHERE lower(login) = lower(?1)",
+                "SELECT id, login, avatar_url, name, status, bio FROM users WHERE lower(login) = lower(?1)",
                 params![handle],
                 |r| {
                     Ok(UserCardDto {
@@ -1206,6 +1208,7 @@ impl Db {
                         last_seen_at: None,
                         online: None,
                         avatar_color_index_effective: None,
+                        bio: r.get::<_, Option<String>>(5)?.filter(|s| !s.is_empty()),
                     })
                 },
             )
@@ -1218,7 +1221,7 @@ impl Db {
         self.with(|c| {
             let card = c
                 .query_row(
-                    "SELECT id, login, avatar_url, name, status, created_at FROM users WHERE id = ?1",
+                    "SELECT id, login, avatar_url, name, status, created_at, bio FROM users WHERE id = ?1",
                     params![user_id],
                     |r| {
                         Ok(UserCardDto {
@@ -1232,6 +1235,7 @@ impl Db {
                             last_seen_at: None,
                             online: None,
                             avatar_color_index_effective: None,
+                            bio: r.get::<_, Option<String>>(6)?.filter(|s| !s.is_empty()),
                         })
                     },
                 )

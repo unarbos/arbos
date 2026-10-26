@@ -248,6 +248,7 @@ struct SettingsView: View {
     /// Remove picture when one was uploaded; the Mac me pane's Profile tab.
     private var profileSections: [PaneSection] {
         let canEdit = model.user != nil && !model.isFixture
+        let bio = model.user?.bio?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let rows: [AnyView] = [
             AnyView(Button { editProfile() } label: {
                 PaneRow(title: "Name", value: model.user?.name ?? model.user?.login ?? "Arbos", valueTint: theme.text)
@@ -259,10 +260,20 @@ struct SettingsView: View {
             }
             .buttonStyle(.plain)
             .disabled(!canEdit)),
+            AnyView(Button { editProfile() } label: {
+                PaneRow(
+                    title: "Bio",
+                    value: bio.isEmpty ? "Add a bio" : bio,
+                    valueTint: bio.isEmpty ? theme.muted : theme.text
+                )
+            }
+            .buttonStyle(.plain)
+            .disabled(!canEdit)
+            .accessibilityLabel(bio.isEmpty ? "Add a bio" : "Edit bio")),
         ]
         return [
             .card(rows),
-            .footnote("Your name, handle and picture are what other people and their agents see, here and on the Mac. Signed in with GitHub."),
+            .footnote("Your name, handle, bio and picture are what other people and their agents see, here and on the Mac. Signed in with GitHub."),
         ]
     }
 
@@ -1181,8 +1192,8 @@ struct AboutPage: View {
 
 // MARK: - Profile name / handle
 
-/// Choose or edit display name and @handle — onboarding after GitHub sign-in,
-/// and Settings by tapping the profile name.
+/// Choose or edit display name, @handle, and optional bio — onboarding after
+/// GitHub sign-in, and Settings by tapping a profile row.
 struct ProfileEditView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -1193,11 +1204,12 @@ struct ProfileEditView: View {
 
     @State private var name: String = ""
     @State private var handle: String = ""
+    @State private var bio: String = ""
     @State private var busy = false
     @State private var error: String?
     @FocusState private var focus: Field?
 
-    private enum Field { case name, handle }
+    private enum Field { case name, handle, bio }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1221,6 +1233,7 @@ struct ProfileEditView: View {
 
                     nameField
                     handleField
+                    if !onboarding { bioField }
 
                     if let error {
                         Text(error)
@@ -1228,7 +1241,9 @@ struct ProfileEditView: View {
                             .foregroundStyle(theme.danger)
                     }
 
-                    Text("Handle: letters, numbers, and hyphens · up to 39 characters.")
+                    Text(onboarding
+                        ? "Handle: letters, numbers, and hyphens · up to 39 characters."
+                        : "Handle: letters, numbers, and hyphens · up to 39 characters. Bio: up to 160 characters.")
                         .font(theme.font(Theme.tiny))
                         .foregroundStyle(theme.muted)
                 }
@@ -1279,6 +1294,7 @@ struct ProfileEditView: View {
         .onAppear {
             name = model.user?.name ?? ""
             handle = model.user?.login ?? ""
+            bio = model.user?.bio ?? ""
             focus = .name
         }
     }
@@ -1314,8 +1330,11 @@ struct ProfileEditView: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .focused($focus, equals: .handle)
-                    .submitLabel(.done)
-                    .onSubmit { Task { await save() } }
+                    .submitLabel(onboarding ? .done : .next)
+                    .onSubmit {
+                        if onboarding { Task { await save() } }
+                        else { focus = .bio }
+                    }
                     .onChange(of: handle) { _, new in
                         let cleaned = Self.sanitizeHandle(new)
                         if cleaned != new { handle = cleaned }
@@ -1325,12 +1344,27 @@ struct ProfileEditView: View {
         }
     }
 
+    private var bioField: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Bio").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+            TextField("", text: $bio, prompt: Text("A short line about you").foregroundStyle(theme.placeholder), axis: .vertical)
+                .font(theme.font(Theme.body))
+                .foregroundStyle(theme.text)
+                .lineLimit(2...4)
+                .focused($focus, equals: .bio)
+                .onChange(of: bio) { _, new in
+                    if new.count > 160 { bio = String(new.prefix(160)) }
+                }
+                .controlFieldGrowing()
+        }
+    }
+
     private func save() async {
         guard canSave, !busy else { return }
         busy = true
         error = nil
         defer { busy = false }
-        if let msg = await model.updateProfile(name: name, handle: handle) {
+        if let msg = await model.updateProfile(name: name, handle: handle, bio: onboarding ? nil : bio) {
             error = msg
             return
         }

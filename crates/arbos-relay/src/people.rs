@@ -230,6 +230,7 @@ pub(crate) fn github_status_card(
         last_seen_at: None,
         online: None,
         avatar_color_index_effective: None,
+        bio: None,
     }
 }
 
