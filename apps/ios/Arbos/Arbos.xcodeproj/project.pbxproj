@@ -76,6 +76,7 @@
 		A1D8800000000000000000C6 /* ServerChannelsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D8800000000000000000C5 /* ServerChannelsView.swift */; };
 		A1DE700000000000000000A2 /* DevicesStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DE700000000000000000A1 /* DevicesStore.swift */; };
 		A1DE700000000000000000B2 /* MentionChips.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DE700000000000000000B1 /* MentionChips.swift */; };
+		A1F100000000000000000006 /* LinkIcons.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F100000000000000000005 /* LinkIcons.swift */; };
 		A1DE700000000000000000C2 /* MentionComposer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DE700000000000000000C1 /* MentionComposer.swift */; };
 		A1DE700000000000000000D2 /* MentionDraftTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DE700000000000000000D1 /* MentionDraftTests.swift */; };
 		A1D8800000000000000000D2 /* LeafAvatar.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D8800000000000000000D1 /* LeafAvatar.swift */; };
@@ -109,6 +110,7 @@
 		A1E100000000000000000042 /* ComposerMetricsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E100000000000000000041 /* ComposerMetricsTests.swift */; };
 		A1F100000000000000000002 /* NoAnswerLineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F100000000000000000001 /* NoAnswerLineTests.swift */; };
 		A1F100000000000000000004 /* MarkdownTableTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F100000000000000000003 /* MarkdownTableTests.swift */; };
+		A1F100000000000000000008 /* LinkIconTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F100000000000000000007 /* LinkIconTests.swift */; };
 		A1C5440000000000000004 /* ShellApprovalCardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C5440000000000000003 /* ShellApprovalCardTests.swift */; };
 		A1BD00000000000000000002 /* NewMessageSheetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BD00000000000000000001 /* NewMessageSheetTests.swift */; };
 		A15A00000000000000000031 /* ProfilePaneStructureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000030 /* ProfilePaneStructureTests.swift */; };
@@ -246,6 +248,7 @@
 		A1D8800000000000000000C5 /* ServerChannelsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerChannelsView.swift; sourceTree = "<group>"; };
 		A1DE700000000000000000A1 /* DevicesStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevicesStore.swift; sourceTree = "<group>"; };
 		A1DE700000000000000000B1 /* MentionChips.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MentionChips.swift; sourceTree = "<group>"; };
+		A1F100000000000000000005 /* LinkIcons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkIcons.swift; sourceTree = "<group>"; };
 		A1DE700000000000000000C1 /* MentionComposer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MentionComposer.swift; sourceTree = "<group>"; };
 		A1DE700000000000000000D1 /* MentionDraftTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MentionDraftTests.swift; sourceTree = "<group>"; };
 		A1D8800000000000000000D1 /* LeafAvatar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LeafAvatar.swift; sourceTree = "<group>"; };
@@ -280,6 +283,7 @@
 		A1E100000000000000000041 /* ComposerMetricsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerMetricsTests.swift; sourceTree = "<group>"; };
 		A1F100000000000000000001 /* NoAnswerLineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoAnswerLineTests.swift; sourceTree = "<group>"; };
 		A1F100000000000000000003 /* MarkdownTableTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownTableTests.swift; sourceTree = "<group>"; };
+		A1F100000000000000000007 /* LinkIconTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkIconTests.swift; sourceTree = "<group>"; };
 		A1C5440000000000000003 /* ShellApprovalCardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellApprovalCardTests.swift; sourceTree = "<group>"; };
 		A1BD00000000000000000001 /* NewMessageSheetTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewMessageSheetTests.swift; sourceTree = "<group>"; };
 		A15A00000000000000000030 /* ProfilePaneStructureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfilePaneStructureTests.swift; sourceTree = "<group>"; };
@@ -481,6 +485,7 @@
 				A1D8800000000000000000A7 /* AvatarPickerSheet.swift */,
 				A1C1E00000000000000000A1 /* PresenceRow.swift */,
 				A1DE700000000000000000B1 /* MentionChips.swift */,
+				A1F100000000000000000005 /* LinkIcons.swift */,
 				A1DE700000000000000000C1 /* MentionComposer.swift */,
 				A11B0000000000000000A001 /* LibraryList.swift */,
 				A1B5EA00000000000000A007 /* GlobalSearchView.swift */,
@@ -533,6 +538,7 @@
 				A1E100000000000000000041 /* ComposerMetricsTests.swift */,
 				A1F100000000000000000001 /* NoAnswerLineTests.swift */,
 				A1F100000000000000000003 /* MarkdownTableTests.swift */,
+				A1F100000000000000000007 /* LinkIconTests.swift */,
 				A1A9D0000000000000000003 /* AgentIdentityTests.swift */,
 				A1AF11000000000000000001 /* AgentAvatarFlipTests.swift */,
 				A1C5440000000000000003 /* ShellApprovalCardTests.swift */,
@@ -746,6 +752,7 @@
 				A1D8800000000000000000C6 /* ServerChannelsView.swift in Sources */,
 				A1DE700000000000000000A2 /* DevicesStore.swift in Sources */,
 				A1DE700000000000000000B2 /* MentionChips.swift in Sources */,
+				A1F100000000000000000006 /* LinkIcons.swift in Sources */,
 				A1DE700000000000000000C2 /* MentionComposer.swift in Sources */,
 				A1D8800000000000000000D2 /* LeafAvatar.swift in Sources */,
 				A1D8800000000000000000A8 /* AvatarPickerSheet.swift in Sources */,
@@ -843,6 +850,7 @@
 				A1BB00000000000000000004 /* BackSwipeTests.swift in Sources */,
 				A1F100000000000000000002 /* NoAnswerLineTests.swift in Sources */,
 				A1F100000000000000000004 /* MarkdownTableTests.swift in Sources */,
+				A1F100000000000000000008 /* LinkIconTests.swift in Sources */,
 				A1A9D0000000000000000004 /* AgentIdentityTests.swift in Sources */,
 				A1AF11000000000000000002 /* AgentAvatarFlipTests.swift in Sources */,
 				A1C5440000000000000004 /* ShellApprovalCardTests.swift in Sources */,
