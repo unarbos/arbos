@@ -2916,6 +2916,9 @@ final class AppModel: ObservableObject {
 
     /// Open (or create) the DM with a handle and navigate to it.
     func openDM(handle: String, navigate: Bool = true) async -> PeopleChat? {
+        #if DEBUG
+        if isFixture { return fixtureOpenDM(handle: handle, navigate: navigate) }
+        #endif
         do {
             let chat = try await api.openDM(handle: handle)
             if !peopleChats.contains(where: { $0.id == chat.id }) { peopleChats.insert(chat, at: 0) }
@@ -2943,7 +2946,8 @@ final class AppModel: ObservableObject {
     /// member id: an `@handle` in the text that has a chip means exactly that member.
     func sendPeople(chatId: String, text: String, replyTo: String?, address: String? = nil,
                     chipMentions: [String] = [], attachments: [PendingAttachment] = [],
-                    forwardedFrom: String? = nil, chipTokens: [String: String] = [:]) {
+                    forwardedFrom: String? = nil, chipTokens: [String: String] = [:],
+                    replyRef: ReplyRef? = nil) {
         guard let doc = docs[chatId], let chat = peopleChat(chatId), let me = user else { return }
         var mentions = AppModel.mentions(in: text, members: chat.members, senderHandle: me.login, chipTokens: chipTokens)
         // Leading bare agent names ("Bob?", "hey Bob …", "Arbos what is your name") count as
@@ -3011,9 +3015,12 @@ final class AppModel: ObservableObject {
         // Text-only: write on this turn (same as project `write`) so the push leaves
         // before we return. Deferring every send into a Task left bubbles faint when
         // the room ACK raced a still-queued commit.
+        // A cross-chat reply never carries an in-chat `replyTo` as well.
+        if replyRef != nil { reply = nil }
         if attachments.isEmpty {
             commitPeople(chatId: chatId, doc: doc, messageId: messageId, text: text, author: author,
-                         mentions: mentions, reply: reply, attachments: [], forwardedFrom: forwardedFrom)
+                         mentions: mentions, reply: reply, attachments: [], forwardedFrom: forwardedFrom,
+                         replyRef: replyRef)
             return
         }
         markUnacked(chatId: chatId, messageId: messageId)
@@ -3029,7 +3036,8 @@ final class AppModel: ObservableObject {
                 }
             }
             commitPeople(chatId: chatId, doc: doc, messageId: messageId, text: text, author: author,
-                         mentions: mentions, reply: reply, attachments: uploaded, alreadyUnacked: true)
+                         mentions: mentions, reply: reply, attachments: uploaded, alreadyUnacked: true,
+                         replyRef: replyRef)
         }
     }
 
@@ -3038,7 +3046,7 @@ final class AppModel: ObservableObject {
     private func commitPeople(chatId: String, doc: CoreChatDoc, messageId: Id, text: String,
                               author: CoreChatDoc.Author, mentions: [String], reply: String?,
                               attachments: [Attachment], alreadyUnacked: Bool = false,
-                              forwardedFrom: String? = nil) {
+                              forwardedFrom: String? = nil, replyRef: ReplyRef? = nil) {
         if !alreadyUnacked { markUnacked(chatId: chatId, messageId: messageId) }
         // Rig (#1596): `ARBOS_TRACE_SENDS=1` prints what the row carries.
         if DebugHooks.traceSends {
@@ -3046,7 +3054,8 @@ final class AppModel: ObservableObject {
         }
         do {
             try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments,
-                                      author: author, mentions: mentions, replyTo: reply, forwardedFrom: forwardedFrom)
+                                      author: author, mentions: mentions, replyTo: reply, forwardedFrom: forwardedFrom,
+                                      replyRef: replyRef)
             try doc.pushCommand("send", payload: ["messageId": messageId], device: deviceId)
         } catch {
             clearUnacked(chatId: chatId, messageId: messageId)
@@ -3060,12 +3069,12 @@ final class AppModel: ObservableObject {
         // reconciles; live coalesce + async full re-reads must not gate the send.
         paintLocalUserMessage(chatId: chatId, messageId: messageId, text: text,
                               attachments: attachments, replyTo: reply, forwardedFrom: forwardedFrom,
-                              author: author, mentions: mentions, doc: doc)
+                              author: author, mentions: mentions, doc: doc, replyRef: replyRef)
         doc.commit()
         #if DEBUG
         if SendTrace.traces(chatId) { SendTrace.mark("commit") }
         #endif
-        announce(chatId: chatId, projectId: nil, messageId: messageId, text: text)
+        announce(chatId: chatId, projectId: nil, messageId: messageId, text: text, replyRef: replyRef)
         if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i].lastActivityAt = nowMs() }
         peopleChats.sort { $0.lastActivityAt > $1.lastActivityAt }
     }
@@ -4798,7 +4807,8 @@ final class AppModel: ObservableObject {
     private func paintLocalUserMessage(
         chatId: Id, messageId: Id, text: String, attachments: [Attachment],
         replyTo: Id? = nil, forwardedFrom: String? = nil,
-        author: CoreChatDoc.Author? = nil, mentions: [String] = [], doc: CoreChatDoc? = nil
+        author: CoreChatDoc.Author? = nil, mentions: [String] = [], doc: CoreChatDoc? = nil,
+        replyRef: ReplyRef? = nil
     ) {
         if messages[chatId]?.contains(where: { $0.id == messageId }) == true { return }
         if let doc, doc.count > 0, var row = doc.readMessage(doc.count - 1), row.id == messageId {
@@ -4828,6 +4838,7 @@ final class AppModel: ObservableObject {
         )
         m.replyTo = replyTo
         m.forwardedFrom = forwardedFrom
+        m.replyRef = replyRef
         m.senderHandle = author?.handle
         m.senderName = author?.name
         m.senderAvatar = author?.avatar
@@ -4907,11 +4918,93 @@ final class AppModel: ObservableObject {
 
     /// §7c: tell the relay about the row we just pushed so other members'
     /// phones get a real preview instead of "New message". Best effort.
-    private func announce(chatId: Id, projectId: Id?, messageId: String, text: String) {
+    private func announce(chatId: Id, projectId: Id?, messageId: String, text: String, replyRef: ReplyRef? = nil) {
         guard !isFixture else { return }
         let api = self.api
-        Task { try? await api.notifyMessage(chatId: chatId, projectId: projectId, messageId: messageId, text: text) }
+        Task { try? await api.notifyMessage(chatId: chatId, projectId: projectId, messageId: messageId, text: text, replyRef: replyRef) }
     }
+
+    // MARK: Reply in DM (#1836)
+
+    /// The cross-chat reply to arm on the DM that `replyInDM` opens next; the ChatView of
+    /// that DM takes it on appear (Mac `pending_dm_reply`).
+    @Published var pendingDMReply: (chatId: Id, ref: ReplyRef)?
+
+    /// The cross-chat reference for `message` in `chatId`: its address plus a snapshot of
+    /// who wrote it and what it said (crdt-sync §6.2 `replyRef`).
+    func replyRef(for message: Message, in chatId: Id, projectId: Id?) -> ReplyRef {
+        let people = projectId == nil || projectId == peopleSlot
+        let mine = message.sender == "user" || message.sender == myUserId
+        let (name, handle): (String, String)
+        if mine, let me = user {
+            (name, handle) = (me.name ?? me.login, me.login)
+        } else if message.role == .user {
+            (name, handle) = (message.senderName ?? "", message.senderHandle ?? "")
+        } else {
+            let agentName = projectId.flatMap { project($0)?.name } ?? message.senderName ?? ""
+            (name, handle) = (agentName, message.senderHandle ?? "")
+        }
+        var text = message.plainText
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            for part in message.parts {
+                if case .attachment(_, let a) = part { text = a.name; break }
+            }
+        }
+        return ReplyRef(chatId: chatId, projectId: people ? "people" : (projectId ?? "people"),
+                        messageId: message.id, chatTitle: chatDisplayTitle(chatId, projectId: projectId),
+                        sender: message.sender, senderName: name, senderHandle: handle,
+                        text: ReplyRef.snapshot(text))
+    }
+
+    /// What a quote header calls `chatId`: the DM peer's name, the group's title, or the
+    /// project (agent) name.
+    func chatDisplayTitle(_ chatId: Id, projectId: Id?) -> String {
+        if let pc = peopleChat(chatId) {
+            if pc.kind == "dm", let peer = pc.humans.first(where: { $0.id != user?.id }) {
+                return peer.name ?? "@\(peer.handle)"
+            }
+            return pc.title
+        }
+        if let projectId, let p = project(projectId) { return p.name }
+        return chat(chatId)?.title ?? ""
+    }
+
+    /// Is `chatId` one of this user's chats (a people chat, or a chat of an own or shared
+    /// project)? Only then can a cross-chat quote open its original.
+    func isMember(ofChat chatId: Id) -> Bool {
+        if peopleChat(chatId) != nil { return true }
+        return chats.values.contains { $0.contains { $0.id == chatId } }
+    }
+
+    /// Bubble menu → Reply in DM: open (or create) the DM with the person who wrote
+    /// `message` and arm its composer with a cross-chat reply to it.
+    func replyInDM(to message: Message, in chatId: Id, projectId: Id?) {
+        guard let handle = message.senderHandle, !handle.isEmpty,
+              message.sender.hasPrefix("user:"), message.sender != myUserId
+        else { return }
+        let ref = replyRef(for: message, in: chatId, projectId: projectId)
+        Task { @MainActor in
+            guard let dm = await openDM(handle: handle) else { return }
+            pendingDMReply = (dm.id, ref)
+        }
+    }
+
+    /// Tap on a cross-chat quote: open the source chat on the original. The ChatView
+    /// scrolls to and tints `pendingReveal` on appear. `false` when not a member.
+    @discardableResult
+    func reveal(_ r: ReplyRef) -> Bool {
+        guard isMember(ofChat: r.chatId) else { return false }
+        pendingReveal = MessageReveal(chatId: r.chatId, messageId: r.messageId)
+        if peopleChat(r.chatId) != nil {
+            path = [.chat(chatId: r.chatId, projectId: peopleSlot)]
+        } else if let pid = chats.first(where: { $0.value.contains { $0.id == r.chatId } })?.key {
+            path = [.chat(chatId: r.chatId, projectId: pid)]
+        } else {
+            return false
+        }
+        return true
+    }
+
 
     func stop(chatId: Id) {
         if let jobId = JobTabs.jobId(chatId) {
