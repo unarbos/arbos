@@ -454,6 +454,11 @@ impl Supervisor {
                 .unwrap_or_default();
             match self.ensure_workspace(project, &chats, &pushes).await {
                 Ok(w) => {
+                    // The owner's profile (address name) rides on every listing: the agent
+                    // addresses the owner from it, live, never from a row's `senderName`.
+                    if let Some(o) = e.get("owner").or_else(|| listing.get("owner")) {
+                        w.agent.people.set_owner_profile(o);
+                    }
                     w.agent.note_people_chats(&people_chats, true).await;
                     seen.push(w.project_id.clone());
                 }
