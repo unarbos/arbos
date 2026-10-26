@@ -3466,6 +3466,11 @@ const LIMA_REPLY: &[&str] = &[
 /// screenshot): seven linked headlines as bullets, then one line of prose.
 const NYPOST_REPLY: &str = "- [Syringe attack: lawyer claims mistaken identity](https://nypost.com/2026/10/25/us-news/syringe-attack-lawyer-claims-mistaken-identity/)\n- [Arrest story: a second Jewish victim minutes earlier](https://nypost.com/2026/10/25/us-news/arrest-story-second-jewish-victim-minutes-earlier/)\n- [Ex-NYPD cop charged in a George Washington Bridge killing, free on $1M bail](https://nypost.com/2026/10/25/us-news/ex-nypd-cop-charged-in-gw-bridge-killing-free-on-1m-bail/)\n- [Thomas Markle home search, child pornography, Philippine official’s comment](https://nypost.com/2026/10/25/world-news/thomas-markle-home-search-philippine-official-comment/)\n- [Musk says SpaceX cut Ukraine’s Starlink access](https://nypost.com/2026/10/25/business/musk-says-spacex-cut-ukraines-starlink-access/)\n- [Giants beat the Texans in overtime in J. J. McCarthy’s first start](https://nypost.com/2026/10/25/sports/giants-beat-texans-in-overtime-mccarthy-first-start/)\n- [McCarthy’s wife after that win](https://nypost.com/2026/10/25/sports/mccarthys-wife-after-that-win/)\n\nNo times or bylines were on the page text I read. Want one of these opened?";
 
+/// The reply to "write bubble sort in python" from Jacob's 2026-10-26 10:50 Mac screenshot,
+/// byte for byte: a Python code card, then prose whose `$O(n^2)$` showed its dollars and
+/// caret verbatim ([feedback math-render-mac-2026-10-26]). `ARBOS_FIXTURE_REPLY=math`.
+pub const BUBBLE_SORT_REPLY: &str = "Here is a standard implementation of bubble sort in Python:\n\n```python\ndef bubble_sort(arr):\n    n = len(arr)\n    for i in range(n):\n        swapped = False\n        for j in range(0, n - i - 1):\n            if arr[j] > arr[j + 1]:\n                arr[j], arr[j + 1] = arr[j + 1], arr[j]\n                swapped = True\n        # If no two elements swapped, list is already sorted\n        if not swapped:\n            break\n    return arr\n\n# Example usage:\nitems = [64, 34, 25, 12, 22, 11, 90]\nprint(bubble_sort(items))  # Output: [11, 12, 22, 25, 34, 64, 90]\n```\n\nIt runs in $O(n^2)$ time in the worst and average cases, and $O(n)$ time when the array is already sorted thanks to the `swapped` flag. Space complexity is $O(1)$.";
+
 const REPLY_CODE: &[&str] = &[
     "The transcript is a bottom-aligned list with one row per markdown block:",
     "```rust\nlet list = ListState::new(0, ListAlignment::Bottom, px(320.0));\nlist(list.clone(), cx.processor(Self::render_row))\n```",
@@ -5419,6 +5424,7 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
         // the last message, for the code card's Copy pill shots.
         // `ARBOS_FIXTURE_REPLY=table`: the `LIMA_REPLY` turn (a linked GFM table
         // between two prose bubbles), for the table renderer's shots.
+        // `ARBOS_FIXTURE_REPLY=math`: the `BUBBLE_SORT_REPLY` turn (code card + inline math).
         match std::env::var("ARBOS_FIXTURE_REPLY").as_deref() {
             Ok("1") => {
                 s.user_replying_to("Which tabs do you mean here?", &last);
@@ -5455,6 +5461,16 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
                     TurnKind::Reply,
                     MessageStatus::Done,
                     vec![text(NYPOST_REPLY)],
+                );
+            }
+            // `ARBOS_FIXTURE_REPLY=math`: Jacob's bubble-sort turn — a Python code card,
+            // then prose with inline `$O(n^2)$` math ([feedback math-render-mac-2026-10-26]).
+            Ok("math") => {
+                s.user("write bubble sort in python");
+                s.assistant(
+                    TurnKind::Reply,
+                    MessageStatus::Done,
+                    vec![text(BUBBLE_SORT_REPLY)],
                 );
             }
             _ => {}
@@ -7411,14 +7427,36 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             };
             let shared = shared.clone();
             let target = target.clone();
+            // Rig (error-state shots): a prompt with "timeout" answers the relay's 504 sentence
+            // after 2 s; one with "slow" paints for 25 s first (the progress state).
+            let lower = prompt.to_lowercase();
+            let fail = lower.contains("timeout");
+            let wait_ms = if lower.contains("slow") {
+                25_000
+            } else if fail {
+                2_000
+            } else {
+                1_400
+            };
             tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(1400)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                if fail {
+                    let _ = shared.events.send(SyncEvent::ImageGenerated {
+                        target,
+                        image_key: None,
+                        url: None,
+                        error: Some("Couldn't generate the image. The server took too long.".into()),
+                        detail: Some("HTTP 504 avatar_timeout — gpt-image-1-mini: operation timed out after 40 s (attempt 2 of 2); relay budget 75 s".into()),
+                    });
+                    return;
+                }
                 emit_avatar(&shared, &url);
                 let _ = shared.events.send(SyncEvent::ImageGenerated {
                     target,
                     image_key: Some(key),
                     url: Some(url),
                     error: None,
+                    detail: None,
                 });
             });
             true
