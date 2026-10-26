@@ -1762,15 +1762,9 @@ struct ChatSession: View {
                 guard pinnedToBottom else { return }
                 withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
             }
-            .onChange(of: composerFocused) { _, focused in
-                guard focused else { return }
-                pinnedToBottom = true
-                awayFromBottom = false
-                newBelowCount = 0
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-                    withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo("bottom", anchor: .bottom) }
-                }
-            }
+            // Composer focus / keyboard must not move the transcript. Stick-to-
+            // bottom stays for new rows and sends; typing alone leaves scroll
+            // where the reader put it (feedback app-01M5WXJBNAPAYSQRQCJE3YET2V).
             .onChange(of: awayFromBottom) { _, away in
                 // Reader scrolled back to the end by hand — clear the pill; when the window
                 // had slid into history, its end is not the tail: jump to the real end.
