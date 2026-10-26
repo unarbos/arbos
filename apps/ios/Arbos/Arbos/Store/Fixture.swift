@@ -208,6 +208,21 @@ extension AppModel {
             Message(id: "g4", chatId: "fx-group-launch", role: .system, sender: "system", status: .done, turn: nil, decision: nil, subagentId: nil,
                     subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 40 * 60_000, completedAt: nil, pending: false,
                     parts: [.text(id: "g4t", text: "Jacob added Comms")], hiddenCount: 0, senderHandle: nil, senderName: nil),
+            // A member's portrait phone screenshot with a long note — the shape of Jacob's
+            // Arbonites report ([feedback image-caption-bubble-ios-2026-10-25]): the caption
+            // must wrap at the bubble's width, not the tall picture's.
+            Message(id: "g6", chatId: "fx-group-launch", role: .user, sender: "user:fx-u3", status: .done, turn: nil, decision: nil, subagentId: nil,
+                    subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 35 * 60_000, completedAt: nil, pending: false,
+                    parts: [.attachment(id: "g6a", attachment: Attachment(name: "IMG_4301.PNG", mime: "image/png", blobRef: "fixture-g6a", kind: "image")),
+                            .text(id: "g6t", text: "It's hard to explain, but I feel like your own sent texts could be improved a little. It now seems like it's still waiting for connection before it gets sent out because it's faded. Should be more colored imho @comms")],
+                    hiddenCount: 0, senderHandle: "mira-k", senderName: "Mira Kaplan"),
+            // A landscape picture with a short note: the picture spans the bubble, the note sits
+            // under it at the picture's width (the flush case, unchanged).
+            Message(id: "g7", chatId: "fx-group-launch", role: .user, sender: "user:fx-u4", status: .done, turn: nil, decision: nil, subagentId: nil,
+                    subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 33 * 60_000, completedAt: nil, pending: false,
+                    parts: [.attachment(id: "g7a", attachment: Attachment(name: "launch-hero.png", mime: "image/png", blobRef: "fixture-g7a", kind: "image")),
+                            .text(id: "g7t", text: "Hero for the landing page, v2.")],
+                    hiddenCount: 0, senderHandle: "sam", senderName: "Sam Okafor"),
         ]
         // Mira's second line replies to her first (quote header on another person's bubble).
         messages["fx-group-launch"]?[2].replyTo = "g1"
