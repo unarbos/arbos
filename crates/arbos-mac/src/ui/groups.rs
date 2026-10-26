@@ -24,7 +24,7 @@ pub fn picture(space: &Project, state: &AppState, size: f32, theme: &Theme) -> D
             .rounded_full()
             .overflow_hidden()
             .child(
-                gpui::img(image)
+                gpui::img(crate::ui::picture_fit::fit(&image, size))
                     .size(px(size))
                     .rounded_full()
                     .object_fit(gpui::ObjectFit::Cover),

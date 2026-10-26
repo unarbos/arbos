@@ -51,7 +51,7 @@ pub fn avatar(image: Option<Arc<RenderImage>>, person: &Person, size: f32, theme
         .justify_center();
     match image {
         Some(image) => base.child(
-            gpui::img(image)
+            gpui::img(crate::ui::picture_fit::fit(&image, size))
                 .size(px(size))
                 .rounded_full()
                 .object_fit(gpui::ObjectFit::Cover),
