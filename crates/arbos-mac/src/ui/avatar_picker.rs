@@ -585,6 +585,7 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
                 avatar_leaf: s.avatar_leaf,
                 avatar_leaf_color: s.avatar_leaf_color,
                 image_url: s.image_url.clone(),
+                avatar_version: 0,
                 ..Project::default()
             },
             None => return div(),
@@ -597,6 +598,7 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
                 id: a.id.clone(),
                 name: a.name.clone(),
                 image_url: (!a.avatar_url.is_empty()).then(|| a.avatar_url.clone()),
+                avatar_version: 0,
                 ..Project::default()
             },
             None => return div(),
@@ -616,10 +618,17 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
                 || project.image_url.is_some()
         }
     };
+    // View (Jacob, 2026-10-25): the picture as it is now, full-size in the media viewer — only
+    // when there is a picture (a leaf / letter avatar has nothing to view).
+    let view_picture: Option<(String, String)> = project
+        .image_url
+        .clone()
+        .filter(|u| !u.is_empty())
+        .map(|url| (project.name.clone(), url));
     // The Generate / Upload preview, built while `state` is borrowed (the bodies need `cx`).
     let tab_preview = preview(picker, &project, state, &theme);
 
-    // ----- bar: Bot | Generate | Upload …… Reset ---------------------------------------------
+    // ----- bar: Bot | Generate | Upload …… View · Reset ------------------------------------
     let tabs = tab_pill(&Tab::for_target(&picker.target), picker.tab, &p, &theme, cx)
         .absolute()
         .left(px(BAR_INSET))
@@ -659,6 +668,25 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
                     cx.notify();
                 }))
         });
+    let view = view_picture.map(|(name, url)| {
+        div()
+            .id("avatar-view")
+            .debug_selector(|| "avatar-view".into())
+            .absolute()
+            .right(px(BAR_INSET + 50.0))
+            .top(px((BAR_H - TAB_H) / 2.0))
+            .h(px(TAB_H))
+            .px(px(6.0))
+            .flex()
+            .items_center()
+            .text_size(px(13.0))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(label_muted)
+            .cursor_pointer()
+            .hover(|s| s.opacity(0.85))
+            .child("View")
+            .on_click(cx.listener(move |this, _, _, cx| this.view_picture(&name, &url, cx)))
+    });
     let bar = div()
         .absolute()
         .left_0()
@@ -668,6 +696,7 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
         .border_b_1()
         .border_color(p.line)
         .child(tabs)
+        .children(view)
         .child(reset);
 
     // ----- body ---------------------------------------------------------------------------------
@@ -1138,5 +1167,110 @@ mod me_picker_tests {
         click(vcx, &shell, "avatar-cancel");
         assert!(shell.read_with(&*vcx, |sh, _| sh.avatar_picker.is_none()));
         assert!(commands.try_recv().is_err(), "Cancel sends nothing");
+    }
+
+    /// Jacob, 2026-10-25: on my own picture the picker keeps its place, and gains **View**
+    /// beside Reset when there is a picture — it opens the same media viewer chat photos use
+    /// (Close only: no Download / Forward for a profile picture). Initials offer no View.
+    #[gpui::test]
+    fn view_in_the_picker_opens_my_picture_in_the_media_viewer(cx: &mut TestAppContext) {
+        let url = "https://relay.test/avatars/gh_1.jpg?v=1";
+        let (_rt, state, shell, vcx) = mount(cx, url);
+        settle(&shell, vcx);
+        click(vcx, &shell, "me-avatar");
+        assert!(
+            vcx.debug_bounds("avatar-view").is_some(),
+            "a picture → View"
+        );
+        click(vcx, &shell, "avatar-view");
+        assert!(
+            shell.read_with(&*vcx, |sh, _| sh.avatar_picker.is_none()),
+            "View closes the picker"
+        );
+        let viewer = state.read_with(&*vcx, |s, _| s.media_viewer.clone());
+        let viewer = viewer.expect("the media viewer is up");
+        assert_eq!(viewer.items.len(), 1);
+        assert_eq!(viewer.items[0].picture_url.as_deref(), Some(url));
+        assert_eq!(viewer.items[0].by, "Arbos");
+        assert!(vcx.debug_bounds("media-viewer-close-pill").is_some());
+        assert!(
+            vcx.debug_bounds("media-viewer-download").is_none()
+                && vcx.debug_bounds("media-viewer-forward").is_none(),
+            "a profile picture has no Download / Forward"
+        );
+        click(vcx, &shell, "media-viewer-close-pill");
+        assert!(state.read_with(&*vcx, |s, _| s.media_viewer.is_none()));
+
+        // Initials only: no View in the bar.
+        state.update(vcx, |s, cx| {
+            s.apply(SyncEvent::Account(Some(account(""))), cx)
+        });
+        settle(&shell, vcx);
+        click(vcx, &shell, "me-avatar");
+        assert!(shell.read_with(&*vcx, |sh, _| sh.avatar_picker.is_some()));
+        assert!(vcx.debug_bounds("avatar-view").is_none(), "nothing to view");
+    }
+
+    /// Jacob, 2026-10-25: on someone else's pane a click on their picture opens it full-size in
+    /// the media viewer; a person with initials only has nothing to open.
+    #[gpui::test]
+    fn another_persons_picture_opens_the_viewer_on_a_click(cx: &mut TestAppContext) {
+        let (_rt, state, shell, vcx) = mount(cx, "");
+        let person = |handle: &str, url: &str| crate::model::Person {
+            id: format!("gh_{handle}"),
+            handle: handle.into(),
+            name: Some("Sam Rivera".into()),
+            avatar_url: url.into(),
+            status: "member".into(),
+            role: String::new(),
+            last_seen_at: None,
+            online: false,
+            avatar_color_index: None,
+        };
+        state.update(vcx, |s, cx| {
+            s.people_results = vec![
+                person("sam", "https://relay.test/avatars/gh_sam.jpg?v=2"),
+                person("kim", ""),
+            ];
+            s.open_profile(
+                ProfilePage::User {
+                    handle: "sam".into(),
+                    space_id: None,
+                },
+                cx,
+            );
+        });
+        settle(&shell, vcx);
+        click(vcx, &shell, "profile-avatar");
+        let viewer = state.read_with(&*vcx, |s, _| s.media_viewer.clone());
+        let viewer = viewer.expect("Sam's picture opens the viewer");
+        assert_eq!(
+            viewer.items[0].picture_url.as_deref(),
+            Some("https://relay.test/avatars/gh_sam.jpg?v=2")
+        );
+        assert_eq!(viewer.items[0].by, "Sam Rivera");
+        assert!(
+            vcx.debug_bounds("media-viewer-close").is_some(),
+            "the × is up"
+        );
+        click(vcx, &shell, "media-viewer-close");
+        assert!(state.read_with(&*vcx, |s, _| s.media_viewer.is_none()));
+
+        // Kim has initials only: the hero is not a button.
+        state.update(vcx, |s, cx| {
+            s.open_profile(
+                ProfilePage::User {
+                    handle: "kim".into(),
+                    space_id: None,
+                },
+                cx,
+            )
+        });
+        settle(&shell, vcx);
+        click(vcx, &shell, "profile-avatar");
+        assert!(
+            state.read_with(&*vcx, |s, _| s.media_viewer.is_none()),
+            "initials open nothing"
+        );
     }
 }

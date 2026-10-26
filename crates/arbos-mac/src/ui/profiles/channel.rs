@@ -75,6 +75,7 @@ pub(super) fn page(
         ),
         subtitle_color: theme.text_muted,
         subtitle_click: None,
+        subtitle_element: None,
         editor: None,
     };
 

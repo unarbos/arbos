@@ -694,6 +694,7 @@ pub(crate) fn project_from_dto(
         avatar_leaf: p.avatar_leaf.and_then(leaf_index),
         avatar_leaf_color: p.avatar_leaf_color.and_then(leaf_index),
         image_url: None,
+        avatar_version: p.avatar_version.unwrap_or(0),
         message_grants: p.message_grants.iter().map(message_grant_from).collect(),
     }
 }
@@ -900,6 +901,7 @@ fn agent_from_member(m: &ChatMemberDto, pid: &str, http_url: &str, token: &str) 
             .and_then(|p| p.image_key.as_deref())
             .and_then(non_empty)
             .map(|k| format!("{http_url}/blob/{pid}/{k}?token={token}")),
+        avatar_version: project.and_then(|p| p.avatar_version).unwrap_or(0),
     }
 }
 
@@ -1011,6 +1013,7 @@ pub(crate) fn people_space_from(
             .as_deref()
             .and_then(non_empty)
             .map(|k| format!("{http_url}/blob/people:{id}/{k}?token={token}")),
+        avatar_version: 0,
         message_grants: Vec::new(),
     };
     let chat = Chat {
