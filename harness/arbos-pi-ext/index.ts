@@ -38,6 +38,18 @@ const STEER_PREFIX = "[Arbos steer:";
 // Mirrors `agent::RELAY_TURN_MARK`: agentd stamps every relay turn (a job's or subagent's
 // result, an approval outcome, an agent's reply) — turns whose only valid route is `reply`.
 const RELAY_TURN_MARK = "[Arbos relay turn]";
+
+/**
+ * A `reply` text that announces more to come ("delivered in parts below", "table follows") is an
+ * introduction, not the answer: the turn must go on with send_message. Mirrors
+ * `agent::promises_parts` (proof run 1, 2026-10-26 01:0x UTC: the result turn routed `reply`
+ * with that sentence, the route tool ended the turn, and no part ever followed).
+ */
+export function promisesMore(text: string): boolean {
+  const t = text.toLowerCase();
+  return /\b(in parts?|parts? (below|follow|to follow|coming)|(details?|table|comparison|list|sources|rest|more)\s+(below|follows?|to follow|coming|next)|below[.:!]?\s*$|coming (up|next|right up)|next message|follows? (shortly|now|below)|here (it|they) (come|are)s?:?\s*$)\b/.test(t)
+    || /\bbelow\b/.test(t) && t.length < 160;
+}
 // Mirrors `arbos_core::approval::SHELL_TOOLS`; the classification itself happens in agentd.
 const SHELL_TOOLS = new Set(["bash", "shell", "run_command", "execute_command"]);
 const APPROVAL_POLL_MS = Number(process.env.ARBOS_APPROVAL_POLL_MS ?? 1500);
@@ -162,7 +174,8 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     // that turn already routed, so the route-first guard does not apply again. Read from the
     // prompt itself: state carried from the `input` hook can miss when the hooks run apart.
     routed = event.messageType === "user" && event.prompt.startsWith(STEER_PREFIX);
-    relayTurn = event.messageType === "user" && event.prompt.startsWith(RELAY_TURN_MARK);
+    // The `input` hook prefixed the prompt (route reminder, turn context): the mark is inside.
+    relayTurn = event.messageType === "user" && event.prompt.includes(RELAY_TURN_MARK);
     routeCorrections = 0;
     correcting = false;
     if (STABLE_PREFIX) return; // D87: the context rides in the user turn (see the `input` hook)
@@ -415,6 +428,13 @@ export default function arbosPiExt(pi: ExtensionAPI) {
       switch (action) {
         case "reply":
           if (args.reply && args.reply.trim()) {
+            if (relayTurn || promisesMore(args.reply)) {
+              // An opening line, not the answer: the turn goes on until the parts are posted.
+              return {
+                content: [{ type: "text", text: "Your first line is in the chat. It is not the answer: now post the rest with send_message — each part its own call (conclusion, linked table, details + sources, one next-step offer) — then end the turn. Words outside send_message are not shown." }],
+                details: { action },
+              };
+            }
             return { content: [{ type: "text", text: "Reply delivered to the user." }], details: { action }, terminate: true };
           }
           return { content: [{ type: "text", text: "Route accepted: reply. Post the answer with send_message (one call for a short answer; parts for a comparison); words outside send_message are not shown." }], details: { action } };
