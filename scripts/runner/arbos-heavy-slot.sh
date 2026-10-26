@@ -18,7 +18,7 @@
 # runner; the directory is world-writable, each slot is a directory made atomically with mkdir).
 set -uo pipefail
 SLOTS_DIR="${ARBOS_HEAVY_SLOTS_DIR:-/Users/Shared/arbos-run/heavy-slots}"
-MAX_SLOTS="${ARBOS_HEAVY_MAX_SLOTS:-2}"
+MAX_SLOTS="${ARBOS_HEAVY_MAX_SLOTS:-1}"
 PRIORITY_EXTRA="${ARBOS_HEAVY_PRIORITY_EXTRA:-1}"
 WAIT_MAX_S="${ARBOS_HEAVY_WAIT_MAX_S:-2700}"
 POLL_S=10
