@@ -7,6 +7,7 @@ mod api_fixture_capture;
 mod apns;
 mod auth;
 mod avatar;
+mod avatar_image;
 mod blobs;
 mod boxes;
 mod browser;
