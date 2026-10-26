@@ -198,7 +198,7 @@ struct ServerChannelsView: View {
             Button { dismiss() } label: {
                 GlassCircle {
                     Image(systemName: "chevron.left")
-                        .font(theme.font(17, weight: .semibold))
+                        .font(theme.font(Controls.glyph, weight: .semibold))
                         .foregroundStyle(theme.text)
                 }
             }
@@ -207,18 +207,18 @@ struct ServerChannelsView: View {
             .accessibilityIdentifier("server-back:\(serverId)")
             Spacer()
             GlassPill {
-                HStack(spacing: 8) {
+                HStack(spacing: Theme.headerPillGap) {
                     if let server {
-                        ServerAvatar(server: server, size: Theme.avatar)
+                        ServerAvatar(server: server, size: Controls.avatar)
                     }
                     Text(server?.name ?? "Server")
                         .font(.system(size: Theme.body, weight: .semibold))
                         .foregroundStyle(theme.text)
                         .lineLimit(1)
                 }
-                .padding(.leading, 10)
-                .padding(.trailing, 16)
-                .frame(height: Theme.control)
+                .padding(.leading, Controls.avatarInset)
+                .padding(.trailing, Controls.textInset)
+                .frame(height: Controls.height)
                 .contentShape(Capsule())
                 .onTapGesture { model.showProfile(.server(serverId: serverId)) }
                 .accessibilityAddTraits(.isButton)
@@ -229,7 +229,7 @@ struct ServerChannelsView: View {
                 Button { showNewChannel = true } label: {
                     GlassCircle {
                         Image(systemName: "plus")
-                            .font(theme.font(19, weight: .regular))
+                            .font(theme.font(Controls.glyph, weight: .regular))
                             .foregroundStyle(theme.text)
                     }
                 }
@@ -240,8 +240,7 @@ struct ServerChannelsView: View {
                 Color.clear.frame(width: Theme.control, height: Theme.control)
             }
         }
-        .padding(.horizontal, 20)
-        .padding(.top, 6)
+        .controlBar()
     }
 }
 
@@ -276,9 +275,7 @@ struct NewChannelSheet: View {
                                 .submitLabel(.done)
                                 .onSubmit { create() }
                         }
-                        .padding(.horizontal, 14).frame(height: Theme.fieldHeight)
-                        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
-                        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                        .controlField()
                         if !name.isEmpty, slug != name {
                             Text(slug.isEmpty ? "Use letters, digits and dashes." : "Will be #\(slug)")
                                 .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
@@ -389,7 +386,7 @@ struct JoinServerView: View {
 
     var body: some View {
         VStack(spacing: 18) {
-            GlassCircle(size: 92) {
+            GlassCircle(size: 92) { // control-size: exception illustrationDiscs
                 Image(systemName: "link").font(.system(size: 34, weight: .medium)).foregroundStyle(theme.text)
             }
             .padding(.top, 28)
@@ -407,9 +404,7 @@ struct JoinServerView: View {
                 .submitLabel(.join)
                 .onSubmit(join)
                 .onChange(of: link) { _, _ in searchOpen() }
-                .padding(.horizontal, 16).frame(height: 50)
-                .background(RoundedRectangle(cornerRadius: 25, style: .continuous).fill(theme.field))
-                .overlay(RoundedRectangle(cornerRadius: 25, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                .controlField()
                 .padding(.horizontal, 24)
             Button(action: join) {
                 Text(joining ? "Joining…" : "Join")
