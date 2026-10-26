@@ -3197,20 +3197,18 @@ fn pending_glyph(theme: &Theme) -> Div {
         .child(icon("hourglass", 12.0, theme.text_muted))
 }
 
-/// The mark beside a bubble the relay refused: red glyph + "Retry", always
-/// visible, outside the bubble on its outer edge. [`Transcript::failed_retry`]
-/// makes it clickable.
+/// The mark beside a bubble the relay refused: the red glyph, always visible, outside the
+/// bubble on its outer edge (Jacob's own-bubble rule). The words and Try again are the
+/// composer's note ([feedback error-messages-mac-2026-10-26]); [`Transcript::failed_retry`]
+/// still makes the mark itself clickable.
 fn failed_glyph(theme: &Theme) -> Div {
     div()
         .flex_shrink_0()
         .flex()
         .items_center()
-        .gap(px(4.0))
-        .text_size(px(TEXT_TINY))
-        .text_color(theme.danger)
         .debug_selector(|| "own-bubble-failed-glyph".into())
+        // error-ui: exception failed-bubble-mark (the glyph is the mark, not a message)
         .child(icon("exclamation", RAIL_GLYPH, theme.danger))
-        .child("Retry")
 }
 
 /// A text block that is really machine output (a JSON object/array) is not
