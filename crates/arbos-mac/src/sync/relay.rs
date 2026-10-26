@@ -5317,12 +5317,12 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 {
                     eprintln!("relay: reaction: {e:#}");
                 }
-                return true;
+                return;
             }
             drop(docs);
             // Server channel: Matrix `m.reaction` (announcement channels included).
             let Some(client) = matrix_client(shared) else {
-                return true;
+                return;
             };
             let shared = shared.clone();
             let chat_id = chat_id.clone();
