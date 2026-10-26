@@ -685,7 +685,7 @@ struct HomeView: View {
             Button { showNewChat = true } label: {
                 GlassCircle {
                     Image(systemName: "plus")
-                        .font(theme.font(19, weight: .regular))
+                        .font(theme.font(Controls.glyph, weight: .regular))
                         .foregroundStyle(theme.text)
                 }
             }
@@ -693,9 +693,9 @@ struct HomeView: View {
             .accessibilityLabel("New message")
             .accessibilityIdentifier("home-new")
         }
-        // Grok home header: 20 pt side margins, 42 pt circles.
-        .padding(.horizontal, 20)
-        .padding(.top, 6)
+        // One top bar for every screen: `Controls.inset` / `Controls.top` (was Grok's 20 here
+        // and 16 in chats; [feedback iphone-header-composer-sizing-2026-10-26]).
+        .controlBar()
         .zIndex(1)
     }
 
@@ -929,7 +929,7 @@ struct UpdateCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
-                GlassCircle(size: 36) {
+                GlassCircle(size: 36) { // control-size: exception rowIconTiles
                     Image(systemName: "arrow.down.circle.fill").font(.system(size: 17)).foregroundStyle(theme.text)
                 }
                 VStack(alignment: .leading, spacing: 2) {
@@ -942,7 +942,7 @@ struct UpdateCard: View {
                 Button { model.dismissUpdate() } label: {
                     Text("Later").font(theme.font(Theme.small, weight: .semibold)).foregroundStyle(theme.text)
                         .frame(maxWidth: .infinity).frame(height: 38)
-                        .background(Capsule().fill(theme.field)).overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1))
+                        .background(Capsule().fill(theme.field)).overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1)) // control-size: exception inlineChips
                 }
                 .buttonStyle(.plain)
                 Button { model.openTestFlight() } label: {
@@ -969,7 +969,7 @@ struct WaitlistCard: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            GlassCircle(size: 36) {
+            GlassCircle(size: 36) { // control-size: exception rowIconTiles
                 Image(systemName: "hourglass").font(.system(size: 16)).foregroundStyle(theme.text)
             }
             VStack(alignment: .leading, spacing: 2) {
@@ -1128,7 +1128,7 @@ struct HiddenChatsView: View {
                 Button { dismiss() } label: {
                     GlassCircle {
                         Image(systemName: "chevron.left")
-                            .font(theme.font(17, weight: .semibold))
+                            .font(theme.font(Controls.glyph, weight: .semibold))
                             .foregroundStyle(theme.text)
                     }
                 }
@@ -1138,14 +1138,13 @@ struct HiddenChatsView: View {
                     Text("Hidden chats")
                         .font(theme.font(Theme.body, weight: .semibold))
                         .foregroundStyle(theme.text)
-                        .padding(.horizontal, 16)
-                        .frame(height: Theme.control)
+                        .padding(.horizontal, Controls.textInset)
+                        .frame(height: Controls.height)
                 }
                 Spacer()
                 Color.clear.frame(width: Theme.control, height: Theme.control)
             }
-            .padding(.horizontal, 20)
-            .padding(.top, 6)
+            .controlBar()
         }
         .toolbar(.hidden, for: .navigationBar)
         .toolbar(.hidden, for: .tabBar)
