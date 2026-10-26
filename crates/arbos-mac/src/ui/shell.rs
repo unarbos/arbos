@@ -3,6 +3,7 @@
 //! and the debug Details drawer. Sheets (Settings, New Message, agent profile)
 //! float centred over everything.
 
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -252,6 +253,10 @@ pub struct Shell {
     /// `ARBOS_RIG_FORWARD_MESSAGE=1` (screenshot rig): opens the "Forward to"
     /// picker for the newest message of the open chat; cleared once it has.
     rig_forward_message: bool,
+    /// Rig: `ARBOS_PEOPLE_QUERY=<text>` types into the people picker's search
+    /// field once a people sheet is open (the Give-access / Add-members shot
+    /// with a query, [feedback shared-search-matcher-mac-2026-10-26]).
+    rig_people_query: Option<String>,
     /// The reaction capsule over a bubble (`reactions`): (chat, message, the smiley's click).
     pub(crate) reaction_capsule: Option<(
         crate::model::Id,
@@ -480,28 +485,75 @@ impl Shell {
                 if let Some(pk) = this.avatar_picker.as_mut() {
                     pk.tab = tab;
                 }
+                // Rig: `…:avatar:upload=<path>` — the panel's pick, made for the shot.
+                if let Some(path) = state.update(cx, |s, _| s.avatar_rig_upload.take()) {
+                    if let Some(pk) = this.avatar_picker.as_mut() {
+                        pk.upload = Some(path);
+                        pk.reset = false;
+                    }
+                }
                 // Rig: type the prompt and press Generate so a shot shows prompt → result.
                 if let Some(prompt) = state.update(cx, |s, _| s.avatar_rig_prompt.take()) {
                     this.avatar_prompt_input
                         .update(cx, |input, cx| input.set_text(prompt, cx));
                     this.generate_avatar(cx);
                 }
+                // Rig: `ARBOS_RIG_VIEW=<open ms>[,<close ms>]` presses the picker's View after
+                // `open ms`, then the viewer's × after `close ms` (a shot of each state).
+                if let Ok(spec) = std::env::var("ARBOS_RIG_VIEW") {
+                    let mut parts = spec.split(',').filter_map(|p| p.trim().parse::<u64>().ok());
+                    let open_ms = parts.next().unwrap_or(1500);
+                    let close_ms = parts.next();
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(open_ms))
+                            .await;
+                        let _ = this.update(cx, |this, cx| {
+                            let picture = this.avatar_picker.as_ref().and_then(|pk| {
+                                avatar_picker::viewable_picture(pk, this.state.read(cx))
+                            });
+                            if let Some((name, url)) = picture {
+                                this.view_picture(&name, &url, cx);
+                            }
+                        });
+                        let Some(close_ms) = close_ms else { return };
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(close_ms))
+                            .await;
+                        let _ = this.update(cx, |this, cx| {
+                            this.state.update(cx, |s, cx| s.close_media_viewer(cx));
+                            cx.notify();
+                        });
+                    })
+                    .detach();
+                }
             }
             if let Some(done) = state.update(cx, |s, _| s.avatar_generated.take()) {
                 if let Some(pk) = this.pending_picker_mut() {
                     if pk.target == done.target {
                         pk.generating = false;
+                        pk.started_at = None;
                         match (done.image_key, done.url) {
                             (Some(key), Some(url)) => {
                                 pk.generated = Some((key, url));
                                 pk.error = None;
+                                pk.error_detail = None;
                             }
                             _ => {
-                                pk.error =
-                                    done.error.or_else(|| Some("No picture came back".into()))
+                                pk.error = done
+                                    .error
+                                    .or_else(|| Some("Couldn't generate the image.".into()));
+                                pk.error_detail = done.detail;
+                                pk.details_open = false;
                             }
                         }
                     }
+                }
+            }
+            if state.read(cx).new_chat_open {
+                if let Some(q) = this.rig_people_query.take() {
+                    this.people_input
+                        .update(cx, |input, cx| input.set_text(q, cx));
                 }
             }
             let st = state.read(cx);
@@ -834,12 +886,17 @@ impl Shell {
         .detach();
         let secrets = cx.new(|cx| SecretsPanel::new(state.clone(), cx));
         // Rig: `ARBOS_OPEN_SETTINGS=secrets` (the list), `secrets:<secret env>` (one secret),
+        // `secrets-people:<secret env>` (that secret's "Give a person access" sheet),
         // `secrets-agent:<project id or name>` (an agent's page).
         match open_settings.as_deref() {
             Some("secrets") => secrets.update(cx, |p, cx| p.show(cx)),
             Some(v) if v.starts_with("secrets:") => {
                 let env = v["secrets:".len()..].to_string();
                 secrets.update(cx, |p, cx| p.show_secret_env(env, cx));
+            }
+            Some(v) if v.starts_with("secrets-people:") => {
+                let env = v["secrets-people:".len()..].to_string();
+                secrets.update(cx, |p, cx| p.show_secret_people(env, cx));
             }
             Some(v) if v.starts_with("secrets-agent:") => {
                 let pid = v["secrets-agent:".len()..].to_string();
@@ -942,6 +999,9 @@ impl Shell {
             message_menu: None,
             rig_message_menu: message_menu::rig_anchor(),
             rig_forward_message: std::env::var_os("ARBOS_RIG_FORWARD_MESSAGE").is_some(),
+            rig_people_query: std::env::var("ARBOS_PEOPLE_QUERY")
+                .ok()
+                .filter(|q| !q.trim().is_empty()),
             reaction_capsule: None,
             reaction_pick_open: false,
             reaction_pick,
@@ -1452,7 +1512,10 @@ impl Shell {
         }
         let target = pk.target.clone();
         pk.generating = true;
+        pk.started_at = Some(std::time::Instant::now());
         pk.error = None;
+        pk.error_detail = None;
+        pk.details_open = false;
         pk.reset = false;
         self.state.update(cx, |s, cx| {
             s.generate_image(target, prompt, cx);
@@ -1467,16 +1530,24 @@ impl Shell {
             let Ok(Some(path)) = rx.await else {
                 return;
             };
-            let _ = this.update(cx, |this, cx| {
-                if let Some(pk) = this.pending_picker_mut() {
-                    pk.upload = Some(path);
-                    pk.reset = false;
-                    pk.error = None;
-                }
-                cx.notify();
-            });
+            let _ = this.update(cx, |this, cx| this.avatar_file_chosen(path, cx));
         })
         .detach();
+    }
+
+    /// The panel's pick lands in the open picker (the sheet's or a Create sheet's). The preview
+    /// draws the mastered copy from the avatar cache (`file://` through the sync client), never
+    /// the raw file through the GPU sampler.
+    pub(crate) fn avatar_file_chosen(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, _| {
+            s.want_avatar(avatar_picker::file_url(&path));
+        });
+        if let Some(pk) = self.pending_picker_mut() {
+            pk.upload = Some(path);
+            pk.reset = false;
+            pk.error = None;
+        }
+        cx.notify();
     }
 
     /// "Set avatar": apply the sheet's pending choice and close it.
@@ -1986,9 +2057,11 @@ impl Shell {
     }
 
     /// A profile picture full-size in the media viewer (Jacob, 2026-10-25): the hero of a pane I
-    /// cannot edit, or the picker's View. Closes the picker when it is up.
+    /// cannot edit, or the picker's View. The picker stays up underneath — the viewer draws over
+    /// it and occludes it — so its × / Esc / backdrop close only the viewer and the picker is
+    /// back as it was (Jacob, 2026-10-26: the first cut dropped the picker here, so the X
+    /// seemed to close both).
     pub(crate) fn view_picture(&mut self, name: &str, url: &str, cx: &mut Context<Self>) {
-        self.avatar_picker = None;
         self.state
             .update(cx, |s, cx| s.open_picture_viewer(name, url, cx));
         cx.notify();
@@ -2314,7 +2387,10 @@ impl Shell {
                 window.focus(&self.viewer_focus, cx);
             } else {
                 self.state.update(cx, |s, cx| s.close_media_viewer(cx));
-                Composer::focus(&self.composer, window, cx);
+                // Back to the avatar picker when the viewer was its View; else the composer.
+                if self.avatar_picker.is_none() {
+                    Composer::focus(&self.composer, window, cx);
+                }
             }
             return;
         }
@@ -3076,8 +3152,7 @@ impl Shell {
                 space.name.clone()
             };
             let hint = if is_people {
-                "Say hi. It lands for both of you at once; Add agent brings one of yours in."
-                    .to_string()
+                "Say hi. It lands for both of you at once.".to_string()
             } else {
                 format!("Ask {name} anything. It plans, delegates, or just answers.")
             };
@@ -3096,6 +3171,36 @@ impl Shell {
                 let state = self.state.read(cx);
                 hero = hero.child(crate::ui::groups::picture(&space, state, 88.0, &theme));
             }
+            // Empty people chat: a clear "Add agent" control so bringing your
+            // own agent in is discoverable ([feedback
+            // app-01M5WKBR85JVW1KKJH96FWZVK5]); the right pane has the same
+            // entry for chats that already have messages.
+            let add_agent = is_people.then(|| {
+                div()
+                    .id("empty-add-agent")
+                    .mt(px(4.0))
+                    .px(px(14.0))
+                    .py(px(7.0))
+                    .rounded(px(8.0))
+                    .bg(theme.surface_2)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.bubble_assistant))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(icon("sparkles", 14.0, theme.text_muted))
+                    .child(
+                        div()
+                            .text_size(px(TEXT_SMALL))
+                            .text_color(theme.text)
+                            .child("Add agent"),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.members_open = false;
+                        this.add_agent_open = true;
+                        cx.notify();
+                    }))
+            });
             column = column.child(
                 div()
                     .flex_1()
@@ -3121,6 +3226,7 @@ impl Shell {
                             .max_w(px(460.0))
                             .child(hint),
                     )
+                    .children(add_agent)
                     .child(
                         div()
                             .w(px(COMPOSER_WIDTH))
@@ -3985,6 +4091,7 @@ impl Render for Shell {
         let theme = Theme::of(cx).clone();
         let width: f32 = window.viewport_size().width.into();
         self.fullscreen = window.is_fullscreen();
+        crate::ui::picture_fit::note_scale_factor(window.scale_factor());
         let state = self.state.read(cx);
         let narrow = state.window_is_narrow(width);
         let sidebar_hidden = state.rail_collapsed || narrow;

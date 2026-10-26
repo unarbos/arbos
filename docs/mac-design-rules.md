@@ -221,6 +221,23 @@ preference" and was reverted by Jacob ([feedback header-pill-restore-2026-10-24]
 Code: `header::bar_frame` (equal side slots, `justify_center`) and
 `header::metrics`; pinned by `header_tests::the_pill_is_centred_not_parked_at_the_left_edge`.
 
+### Material: frosted glass on both surfaces (Jacob 2026-10-25 + 2026-10-26, [feedback mac-header-glass-2026-10-25], [feedback mac-header-pill-glass-matte-2026-10-26])
+
+The pill and the folded-sidebar disc are **frosted glass whatever the
+surface** — Grok Bot's header pill over its flat black transcript is the
+reference, so Matte (no window vibrancy) is not an excuse for a flat fill.
+#1830 (v0.6.256) frosted them on Glass only; Jacob's Mac is on Matte (the D90
+default) and he saw the solid `bubble_assistant` pill on his AffineTeam group
+(v0.6.268). Recipe (`glass::header_surface` + `glass::header_frost`,
+`Theme::header_glass*`): the list blurred through the control's rounded
+bounds, a see-through fill (dark `#3b3f45` @ 56 %, light white @ 60 % — the
+same on both surfaces; the backdrop blur composites ≈ 20 % darker than its
+source on Metal and wgpu alike, so over flat `#fcfcfc` the light pill lands
+near the `#ededed` of the solid pill it replaces), a 1 pt rim (white 18 % /
+black 10 %), a top highlight (white 30 % / 90 %) and a 1 pt lift. Sizes and
+placements are untouched; the rest of the glass restyle stays paused. Pinned
+by `header::glass_tests` (every kind × surface × appearance).
+
 ## Message timestamps (Jacob 2026-10-24, [feedback timestamps-hover-only-2026-10-24])
 
 **Message timestamps are hover-only, never always-on.** A bubble never carries
@@ -423,6 +440,7 @@ changed its composer between the 2026-10-15 refs and this shot; this shot wins.
 | Status picture | **25⅓ (76 px)**, left edge **6 inside the `+` disc's left edge** (24 from the screen keyboard up, 37 down) — no longer the bubble's 42 pt disc, no longer centred on the `+` | `Theme.presenceAvatar`, `presenceAvatarOffset`, `presenceInset(composerInset:)` |
 | Status words | **17 pt body**, muted, shimmer unchanged; **14** after the picture (words at 190 px keyboard up) | `PresenceRow.textSize`, `Theme.presenceGap` |
 | Picture bottom → composer top | **22⅔ (68 px)**; the row is the picture tall, ChatView pads below it | `Theme.presenceBottomGap` |
+| Last bubble → picture top | **14 (42 px)** — the row rises 22 pt into the transcript's 28 pt tail instead of starting under the tail and the bar's 8 pt pad (was 36); bubble → composer with the row = Grok's 62⅓; the bar grows 26 pt (was 48) when the row appears ([feedback status-row-gap-ios-2026-10-26]) | `Theme.presenceTopGap`, `presenceLift`, `transcriptTail`, `chatBarTopPad` |
 | Tasks chip (#1696) and job-tab words (#1801) | ride the same row unchanged (20 pt chip inside the 25⅓ row) | `PresenceRow.tasksChip`, `onWords` |
 
 Not moved, on purpose: the people-chat **bubble picture stays 42 pt centred on
@@ -493,6 +511,33 @@ A new screen declares itself there.
 | `primaryCTA` | 50 pt filled capsules (Sign in, Pair, Create) | primary buttons, `primary` fill, no rim |
 | `textAreas` | feedback note / description areas, 18 pt corners | free-form, grow |
 
+## Glass surface: readable content, translucent chrome (Jacob 2026-10-26, [feedback mac-glass-contrast-2026-10-26])
+
+Jacob (09:55 CR): "the glass appearance is broken on the mac." Reproduced on
+v0.6.268 over white, black and busy desktops at Opacity 0 / 50 / 100 %: GPUI's
+`Blurred` window is an `NSVisualEffectView` with every tint layer stripped — a
+colourless gaussian of the desktop — so the only tone was the shell wash at
+the slider's value. Dark at 0 % over white: sidebar names white on `#afafaf`
+(1.9:1), previews gone, discs and hairlines flat; light at 0 % over black the
+mirror image. The blur itself survived an appearance switch (System pref
+toggled dark → light → dark, no flat frame); that risk did not reproduce.
+
+Rules (ARB-271, the wider Liquid / frosted / tinted restyle, stays paused —
+this is the correctness of the existing surface):
+
+| Layer | Rule | Code |
+| --- | --- | --- |
+| Window material | A real AppKit semantic material with its tint intact, installed once under GPUI's content view; its `appearance` follows the theme (dark material under a dark theme, whatever macOS is set to), so an appearance switch re-tones it and never drops it. Default `Sidebar` (Finder's). GPUI's own background is `Transparent` on Glass so the two do not stack. | `ui::vibrancy` (`BackdropPlan`, `apply`), `Theme::window_background_for`, `GlassMaterial` (`ARBOS_GLASS_MATERIAL=…` for the rig) |
+| Opacity slider | Still 0 … 100 %, floor **0 %** (#1425). It sets the shell wash only; legibility never depends on it. | `GlassOpacity`, `Theme::shell()` |
+| Chat column | Page-colour wash at **0.85** on both appearances (dark `bg`, light white; light had it since 2026-10-21). Body text ≥ 4.5:1 and muted ≥ 3:1 over white / black / mid grey at every slider value, counting the app's paint alone. | `CHAT_WASH_ALPHA`, `Theme::chat_wash()` / `pane()` |
+| Sidebar | Tint **0.60** both appearances (dark was 0.35): names ≥ 4.5:1 over any desktop by the app's paint alone; previews lean on the material below the default Opacity. | `CHROME_TINT_ALPHA`, `Theme::chrome()` |
+| Floating cards | Menus, sheets, pickers at **0.85** (dark was 0.50, light 0.72) with the header's 1 pt rim and top highlight on Glass. | `FROST_TINT_ALPHA`, `Theme::card()`, `glass::plate` |
+| Untouched | Traffic lights native; sizes and placements; bubbles, discs and hairlines keep their colours (they sit on the washed surfaces above); Matte. | — |
+
+Pinned by `theme::glass_contrast_tests` (the matrix above with a WCAG model of
+the compositing) and `vibrancy::tests` (material on Glass, none on Matte,
+kept across dark → light → dark).
+
 ## Full screen (Jacob 2026-10-24, [feedback fullscreen-traffic-lights-2026-10-24] → [feedback topbar-grok-parity-2026-10-24])
 
 **The traffic lights are macOS's own standard window buttons, always. The
@@ -545,6 +590,31 @@ Pinned by `profiles::chrome_tests` (`the_pane_is_the_chats_surface_in_both_appea
 `cards_are_inset_and_labelled_at_groks_margins`, `the_pane_edge_is_groks_hairline`),
 `pane::tests::every_kind_lays_out_hero_then_pill_then_options` and
 `pane::tests::only_the_agent_pane_may_have_a_share_disc`.
+
+### Grouped-card dividers: inset 16 at both ends (Jacob 2026-10-26, [feedback mac-settings-card-dividers-2026-10-26])
+
+**Every divider between two rows of a grouped card stops 16 pt short of the
+card's left edge and 16 pt short of its right edge — the row's own content
+padding — on every Mac grouped list: the agent pane's Settings card, group /
+server / person / channel info, the Settings pages, profile cards, the
+Library list, the New message / New channel sheets.** Jacob's v0.6.268 shot of
+the agent Settings card (Model · Reasoning · Voice): the lines started under
+the labels but ran into the card's right edge, so the card read lopsided.
+Before, the kit hung the line "under the label" (16 past an icon tile → 58,
+past an avatar → 62) and to the right edge, Apple's iOS 6 habit; Grok Bot's
+cards do not do this either.
+
+| Item | Rule | Code |
+|---|---|---|
+| Leading inset | **16** (`kit::DIVIDER_INSET` = `kit::INSET`, the row padding), whatever leads the row — nothing, a tile, an avatar, a thumbnail | `kit::divider_insets()` → `(16, 16)` |
+| Trailing inset | **16**, the same number | `kit::hairline_below` (hung 1 pt under a row, `.relative()` on the row) and `kit::divider` (in flow, for a card that places its own rows) both draw from it |
+| Height / colour | 1 pt, `theme.border`; none above the first row, none under the last (the card's clip swallows the hung one; `section_parts` places `rows − 1` in-flow ones) | unchanged |
+| Who draws it | **only the kit.** `glass::row` (Settings pages) hangs `kit::hairline_below`; the New message / New channel sheets and the Add-members lists use `kit::divider` / `kit::hairline_below` instead of their own 0.5 pt lines and `border_b_1()` rows. A card that needs a line between two custom children calls `kit::divider(theme)` | `kit::tests::no_card_outside_the_kit_draws_its_own_divider` scans `src/ui` for a left-margin-only hairline, a `left(..)/right(0)` one, a 0.5 pt one, or a list row's own bottom border |
+
+Pinned by `kit::tests::the_divider_is_inset_equally_at_both_ends_by_the_row_padding`
+(pure) and `kit::tests::every_shared_divider_stops_at_the_row_padding_on_both_sides`
+(headless render: tile row, avatar row, `glass::row`, `section` — each line's
+left and right gaps to its card measure 16). iPhone unchanged.
 
 ### Agent pane: Details · Library · Computer (Jacob 2026-10-24, [feedback agent-pane-details-tab-2026-10-24])
 
@@ -617,7 +687,7 @@ the agent pane (Details · Library · Computer); `profiles/library.rs`.
 | Item | Rule | Where |
 |---|---|---|
 | Grouping | one list, `when` descending, split by local day: **Today · Yesterday · weekday (last 7 days) · "Oct 18"** (the sidebar's words; "Oct 18, 2025" in another year); each day = `kit::section_title` + one `kit::card` | `group_days`, `day_label` |
-| Row | the kit's one-line row: **41** tall, inset 16, 10 right; **32** pt thumbnail (aspect-fill, radius 7) — a play glyph over a video, the extension ("PDF") on a `surface_2` tile for files, the link glyph for links; name 13 pt one line, tail-truncated; time 11.5 pt muted, compact ("now", "42m", "13h", "2d", "3w", "4mo"); hairline hung at 58 | `ROW_H`, `THUMB`, `rel_time` |
+| Row | the kit's one-line row: **41** tall, inset 16, 10 right; **32** pt thumbnail (aspect-fill, radius 7) — a play glyph over a video, the extension ("PDF") on a `surface_2` tile for files, the link glyph for links; name 13 pt one line, tail-truncated; time 11.5 pt muted, compact ("now", "42m", "13h", "2d", "3w", "4mo"); the kit's divider (16 / 16, below) | `ROW_H`, `THUMB`, `rel_time` |
 | Hover | row fill `surface_2`; the time gives way to a **24 pt ⋯ disc** (no layout shift) that opens the row's menu at the click: Open · Forward · Download for attachments, Open link · Copy link for links | `MORE_DISC`, `menu_items` |
 | Show more | after **5** rows a 36 pt "Show more ⌄" row unfolds the rest of that day in place ("Show less ⌃" folds it); per opened pane | `SHOW_MORE_AFTER`, `library_toggle_day` |
 | Preview card | after **300 ms** on a row: **300** wide, left **20** from the pane's edge, **8** above the row (under it when it would reach the window's top 8 pt band); padding 10, radius 12, a step over the card's fill (white in light) with the strong border and shadow; picture **278 × 156** radius 8 aspect-fill (files: the extension at 22 pt on the tile; links: a globe); type line 11.5 muted ("Image" / "Video" / "PDF" / "Link"); the full name 13 semibold on 17, up to 3 lines; the sender's 18 pt picture, name, "· Yesterday 10:06 PM" (`sidebar::stamp_label`) | `HOVER_DELAY_MS`, `CARD_*`, `card_above` |

@@ -46,7 +46,7 @@ extension AppModel {
             if p.shared, let owner = p.ownerHandle, owner != user?.login {
                 members.append(HomeSearch.Member(handle: owner, name: p.ownerName))
             }
-            guard let hit = HomeSearch.titledHit(title: p.name, members: members,
+            guard let hit = HomeSearch.titledHit(title: p.name, description: p.description, members: members,
                                                  chats: chatList.map { HomeSearch.ChatTitle(id: $0.id, title: $0.title) },
                                                  messages: { [] }, q: q) else { continue }
             let when = chatList.map(\.lastMessageAt).max() ?? 0
@@ -55,7 +55,7 @@ extension AppModel {
             let target: GlobalSearch.Target
             if let chatId = hit.chatId { target = .chat(chatId: chatId, projectId: p.id) } else { target = .project(p.id) }
             out.append(GlobalSearch.Entry(kind: .agent, title: p.name, subtitle: subtitle, when: when,
-                                          rank: q.isEmpty ? .prefix : (indirect ? .indirect : .of(p.name, q: q)),
+                                          rank: q.isEmpty ? .everything : (indirect ? .indirect : .of(name: p.name, handle: "", title: p.description, q: q)),
                                           target: target, picture: .project(p.id)))
         }
 
@@ -66,7 +66,7 @@ extension AppModel {
                 seenHandles.insert(other.handle.lowercased())
                 guard let hit = HomeSearch.dmHit(name: other.displayName, handle: other.handle, messages: { [] }, q: q) else { continue }
                 out.append(GlobalSearch.Entry(kind: .person, title: other.displayName, subtitle: hit.reason ?? "@\(other.handle)", when: when,
-                                              rank: q.isEmpty ? .prefix : .best([other.displayName, other.handle], q: q),
+                                              rank: q.isEmpty ? .everything : .of(name: other.displayName, handle: other.handle, q: q),
                                               target: .people(c.id), picture: .peopleChat(c.id)))
                 continue
             }
@@ -77,7 +77,7 @@ extension AppModel {
             let title = c.title.isEmpty ? "Group" : c.title
             out.append(GlobalSearch.Entry(kind: .group, title: title,
                                           subtitle: hit.reason ?? GlobalSearch.groupSubtitle(members: c.humans.count), when: when,
-                                          rank: q.isEmpty ? .prefix : (hit.kind == .title && hit.reason == nil ? .of(title, q: q) : .indirect),
+                                          rank: q.isEmpty ? .everything : (hit.kind == .title && hit.reason == nil ? .of(title, q: q) : .indirect),
                                           target: .people(c.id), picture: .peopleChat(c.id)))
         }
 
@@ -99,7 +99,7 @@ extension AppModel {
                 let key = cand.handle.lowercased()
                 guard !key.isEmpty, !seenHandles.contains(key) else { continue }
                 let display = cand.name?.isEmpty == false ? cand.name! : cand.handle
-                let rank = GlobalSearch.Rank.best([display, cand.handle], q: q)
+                let rank = GlobalSearch.Rank.of(name: display, handle: cand.handle, q: q)
                 guard rank != .indirect else { continue }
                 seenHandles.insert(key)
                 out.append(GlobalSearch.Entry(kind: .person, title: display, subtitle: "@\(cand.handle)", when: 0, rank: rank,
@@ -111,13 +111,13 @@ extension AppModel {
         // Servers, and each matching channel as its own row.
         for s in servers {
             let when = serverActivity(s)
-            if q.isEmpty || HomeSearch.fold(s.name).contains(q) {
+            if q.isEmpty || EntitySearch.matchText(s.name, query: q) != nil {
                 out.append(GlobalSearch.Entry(kind: .server, title: s.name,
                                               subtitle: GlobalSearch.serverSubtitle(channels: s.liveChannels.count, members: s.memberCount),
-                                              when: when, rank: q.isEmpty ? .prefix : .of(s.name, q: q), target: .server(s.id), picture: .server(s.id)))
+                                              when: when, rank: q.isEmpty ? .everything : .of(s.name, q: q), target: .server(s.id), picture: .server(s.id)))
             }
             guard !q.isEmpty else { continue }
-            for ch in s.liveChannels where HomeSearch.fold(ch.name).contains(q) {
+            for ch in s.liveChannels where EntitySearch.matchText(ch.name, query: q) != nil {
                 out.append(GlobalSearch.Entry(kind: .channel, title: "#\(ch.name)", subtitle: s.name, when: when,
                                               rank: .of(ch.name, q: q), target: .channel(serverId: s.id, channelId: ch.id), picture: .server(s.id)))
             }

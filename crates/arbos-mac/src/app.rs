@@ -16,8 +16,9 @@ use crate::auth;
 use crate::calls::{self, CallCmd, CallEvent};
 use crate::model::SpaceKind;
 use crate::model::{
-    add_members_plan, call_ended_line, created_group, reachable_line, AccountView, Call, CallEnded,
-    CallKind, CallMissed, Person, Reachable, Sender, Voice,
+    add_members_plan, added_line, call_ended_line, created_group, reachable_line,
+    reconcile_optimistic_notices, trace_rows, AccountView, Call, CallEnded, CallKind, CallMissed,
+    OptimisticNotice, Person, Reachable, Sender, Voice,
 };
 use crate::model::{
     new_id, now_ms, Attachment, AttachmentKind, BoxReport, BoxState, ChannelSel, ChannelsView,
@@ -356,18 +357,27 @@ pub fn forwarded_from_text(by: &str) -> String {
 
 pub const FORWARDED_FROM_PREFIX: &str = "Forwarded from ";
 
-/// The picker's list for what was typed: a case-insensitive match on the
-/// chat's name or subtitle ("@sam", "Group · 4 members", "Agent"), most recent
-/// first; an empty query keeps every chat.
+/// The picker's list for what was typed, through the shared matcher
+/// (`arbos_core::search`): the chat's name, its @handle (a DM's subtitle) or
+/// its kind line ("Group · 4 members", "Agent") — best match first, most
+/// recent inside a tie; an empty query keeps every chat by recency.
 pub fn filter_forward_targets(mut targets: Vec<ForwardTarget>, query: &str) -> Vec<ForwardTarget> {
-    let query = query.trim().to_lowercase();
-    targets.retain(|t| {
-        query.is_empty()
-            || t.name.to_lowercase().contains(&query)
-            || t.subtitle.to_lowercase().contains(&query)
-    });
+    use arbos_core::search::{normalize_query, rank, Fields};
     targets.sort_by_key(|t| std::cmp::Reverse(t.last_activity));
-    targets
+    let q = normalize_query(query);
+    rank(targets, &q, |t| {
+        let fields = Fields::new(t.name.clone(), "");
+        match t.subtitle.strip_prefix('@') {
+            Some(handle) => Fields {
+                handle: handle.to_string(),
+                ..fields
+            },
+            None => fields.with_title(t.subtitle.clone()),
+        }
+    })
+    .into_iter()
+    .map(|(t, _)| t)
+    .collect()
 }
 
 /// What the composer should look like for the active chat (§3.10).
@@ -416,6 +426,7 @@ pub struct AvatarGenerated {
     pub image_key: Option<String>,
     pub url: Option<String>,
     pub error: Option<String>,
+    pub detail: Option<String>,
 }
 
 pub struct AppState {
@@ -498,6 +509,8 @@ pub struct AppState {
     pub skills: Vec<Skill>,
     pub chats: HashMap<Id, Vec<Chat>>,
     pub messages: HashMap<Id, Vec<Message>>,
+    /// Membership notices this device shows ahead of the relay's row (ARB-393), per chat.
+    pub optimistic_notices: HashMap<Id, Vec<OptimisticNotice>>,
     pub chat_ui: HashMap<Id, ChatUi>,
     pub blobs: HashMap<String, BlobView>,
     /// Decoded inline thumbnails of image attachments, by blob key (F10).
@@ -632,6 +645,9 @@ pub struct AppState {
     /// Rig: a prompt the shell types into the opened picker's Generate field and runs at once
     /// (`ARBOS_OPEN_PROFILE=me:avatar:generate=<prompt>`), so a shot can show prompt → result.
     pub avatar_rig_prompt: Option<String>,
+    /// Rig: a file for the picker's Upload tab (`ARBOS_OPEN_PROFILE=me:avatar:upload=<path>`,
+    /// also `agent:…`), applied as the file panel's pick so a shot shows the upload preview.
+    pub avatar_rig_upload: Option<std::path::PathBuf>,
     /// The Generate tab's answer, for the shell's open picker.
     pub avatar_generated: Option<AvatarGenerated>,
     /// Agent page: which settings row (model / reasoning / voice) is dropped down.
@@ -978,6 +994,7 @@ impl AppState {
             skills: Vec::new(),
             chats: HashMap::new(),
             messages: HashMap::new(),
+            optimistic_notices: HashMap::new(),
             chat_ui: HashMap::new(),
             blobs: HashMap::new(),
             thumbnails: HashMap::new(),
@@ -1035,6 +1052,7 @@ impl AppState {
             profile_opened: 0,
             avatar_picker_request: None,
             avatar_rig_prompt: None,
+            avatar_rig_upload: None,
             avatar_generated: None,
             agent_pick: None,
             profile_editing_description: false,
@@ -1487,10 +1505,21 @@ impl AppState {
                     self.people_directory = results.clone();
                 }
                 if query == self.people_query {
-                    if let Some(changed) = directory_update(&self.people_results, results) {
+                    let fresh = people_sheet_results(&self.people_directory, &results, &query);
+                    if let Some(changed) = directory_update(&self.people_results, fresh) {
                         self.people_results = changed;
                     }
                     self.people_busy = false;
+                } else if is_directory_query(&query) && !is_directory_query(&self.people_query) {
+                    // The directory landed after the user started typing: re-match it.
+                    let fresh = people_sheet_results(
+                        &self.people_directory,
+                        &self.people_results,
+                        &self.people_query,
+                    );
+                    if let Some(changed) = directory_update(&self.people_results, fresh) {
+                        self.people_results = changed;
+                    }
                 }
                 cx.notify();
             }
@@ -1552,6 +1581,7 @@ impl AppState {
             }
             SyncEvent::PeopleError(err) => {
                 self.people_busy = false;
+                self.withdraw_optimistic_notices(cx);
                 // The New Message sheet shows the error inline; a DM started
                 // from a person's pane (its Message pill) has no sheet, so the
                 // relay's words ("this person is not available") go to a notice.
@@ -1604,6 +1634,7 @@ impl AppState {
                 image_key,
                 url,
                 error,
+                detail,
             } => {
                 if let Some(u) = url.clone() {
                     self.want_avatar(u);
@@ -1613,6 +1644,7 @@ impl AppState {
                     image_key,
                     url,
                     error,
+                    detail,
                 });
                 cx.notify();
             }
@@ -1627,6 +1659,12 @@ impl AppState {
                 }
                 let image = rgba.and_then(bgra_frame).map(Arc::new);
                 self.avatars.insert(url, image);
+                cx.notify();
+            }
+            SyncEvent::AvatarMissing { url } => {
+                // Not "no picture" for good: a later `want_avatar` (the next registry event,
+                // a reconnect) requests it again instead of drawing the placeholder forever.
+                self.avatars.remove(&url);
                 cx.notify();
             }
             SyncEvent::PairingFailed(err) => {
@@ -1961,6 +1999,25 @@ impl AppState {
                             self.toggle_group_person(person, cx);
                         }
                     }
+                    // Rig: `ARBOS_RIG_ADD_AGENT=<project id>[:<delay ms>]` adds that agent to
+                    // the restored people chat the way the picker does — optimistic notice,
+                    // relay call, reconciliation — after the delay (default 8 s, so a frame
+                    // grabber is running), for the agent-added-notice recordings.
+                    if let Ok(spec) = std::env::var("ARBOS_RIG_ADD_AGENT") {
+                        if let Some(chat) = self.active_chat_id() {
+                            let (pid, delay_ms) = match spec.split_once(':') {
+                                Some((p, d)) => (p.to_owned(), d.parse().unwrap_or(8_000)),
+                                None => (spec.clone(), 8_000u64),
+                            };
+                            cx.spawn(async move |this, cx| {
+                                cx.background_executor()
+                                    .timer(std::time::Duration::from_millis(delay_ms))
+                                    .await;
+                                let _ = this.update(cx, |s, cx| s.add_agent(chat, pid, cx));
+                            })
+                            .detach();
+                        }
+                    }
                     // Rig: `ARBOS_REPLY_TO=1` arms a reply to the restored chat's
                     // last message (the composer's reply preview bar).
                     if std::env::var("ARBOS_REPLY_TO").is_ok_and(|v| v == "1") {
@@ -2059,13 +2116,17 @@ impl AppState {
                                     .set_profile_tab(crate::ui::profiles::agent::TAB_COMPUTER, cx),
                                 _ => {}
                             }
-                            // `agent:avatar[:generate|:upload]` opens the avatar picker sheet
-                            // (D92 amendment) on that tab.
+                            // `agent:avatar[:generate|:upload[=<path>]]` opens the avatar picker
+                            // sheet (D92 amendment) on that tab.
                             if let Some(tab) = rest.strip_prefix(":avatar") {
                                 use crate::ui::avatar_picker::{Tab, Target};
                                 let tab = match tab {
                                     ":generate" => Tab::Generate,
                                     ":upload" => Tab::Upload,
+                                    t if t.starts_with(":upload=") => {
+                                        self.rig_upload(&t[":upload=".len()..]);
+                                        Tab::Upload
+                                    }
                                     _ => Tab::Bot,
                                 };
                                 self.open_avatar_picker(Target::Agent(project_id), tab, cx);
@@ -2155,13 +2216,18 @@ impl AppState {
                                     self.open_picture_viewer(&a.name, &a.avatar_url, cx);
                                 }
                             }
-                            // `me:avatar[:generate[=<prompt>]|:upload]` — the avatar picker for
-                            // my own picture (Generate | Upload, Reset); with `=<prompt>` the
-                            // shell types the prompt and presses Generate.
+                            // `me:avatar[:generate[=<prompt>]|:upload[=<path>]]` — the avatar
+                            // picker for my own picture (Generate | Upload, Reset); with
+                            // `=<prompt>` the shell types the prompt and presses Generate; with
+                            // `=<path>` the Upload tab previews that file.
                             if let Some(tab) = rest.strip_prefix(":avatar") {
                                 use crate::ui::avatar_picker::{Tab, Target};
                                 let tab = match tab {
                                     ":upload" => Tab::Upload,
+                                    t if t.starts_with(":upload=") => {
+                                        self.rig_upload(&t[":upload=".len()..]);
+                                        Tab::Upload
+                                    }
                                     t => {
                                         if let Some(prompt) = t.strip_prefix(":generate=") {
                                             if !prompt.trim().is_empty() {
@@ -2335,7 +2401,18 @@ impl AppState {
                 }
                 cx.notify();
             }
-            SyncEvent::ChatSnapshot { chat_id, messages } => {
+            SyncEvent::ChatSnapshot {
+                chat_id,
+                mut messages,
+            } => {
+                if trace_rows() {
+                    eprintln!(
+                        "rows: app-snapshot chat={chat_id} n={} at={}",
+                        messages.len(),
+                        now_ms()
+                    );
+                }
+                self.fold_optimistic_notices(&chat_id, &mut messages);
                 let dropped = !messages.is_empty();
                 let ui = self.chat_ui.entry(chat_id.clone()).or_default();
                 if dropped {
@@ -3273,7 +3350,7 @@ impl AppState {
             }
             for (p, where_) in met {
                 let name = p.display_name();
-                let rank = Rank::best([name.as_str(), p.handle.as_str()], query);
+                let rank = Rank::of_entity(&name, &p.handle, None, query);
                 if rank == Rank::Indirect {
                     continue;
                 }
@@ -3294,7 +3371,7 @@ impl AppState {
         for server in &self.servers {
             let when = self.server_last_activity(server);
             let rank = if query.is_empty() {
-                Rank::Prefix
+                Rank::EVERYTHING
             } else {
                 Rank::of(&server.name, query)
             };
@@ -6132,6 +6209,17 @@ impl AppState {
         cx.notify();
     }
 
+    /// Rig: the Upload tab's pick, exactly as the file panel would hand it over (the preview is
+    /// fetched through the avatar cache as `file://…`).
+    fn rig_upload(&mut self, path: &str) {
+        let path = std::path::PathBuf::from(path.trim());
+        if path.as_os_str().is_empty() {
+            return;
+        }
+        self.want_avatar(crate::ui::avatar_picker::file_url(&path));
+        self.avatar_rig_upload = Some(path);
+    }
+
     /// The agent's profile page (which holds the tree + colour picker).
     /// A second click on the same agent folds the pane away.
     pub fn toggle_avatar_picker(&mut self, project_id: Id, cx: &mut Context<Self>) {
@@ -6871,6 +6959,12 @@ impl AppState {
             .iter()
             .filter_map(|p| {
                 let chat_id = self.primary_chat(&p.id).map(|c| c.id.clone())?;
+                // A DM's relay name is the other side's handle; the row (and the
+                // matcher) want the display name, with the @handle underneath.
+                let name = match p.person() {
+                    Some(person) if p.kind == crate::model::SpaceKind::Dm => person.display_name(),
+                    _ => p.name.clone(),
+                };
                 let subtitle = match p.kind {
                     crate::model::SpaceKind::Dm => p
                         .person()
@@ -6885,7 +6979,7 @@ impl AppState {
                 Some(ForwardTarget {
                     space_id: p.id.clone(),
                     chat_id,
-                    name: p.name.clone(),
+                    name,
                     subtitle,
                     last_activity: self
                         .tabs(&p.id)
@@ -8022,9 +8116,25 @@ impl AppState {
             .filter(|p| plan.handles.contains(&p.handle))
             .cloned()
             .collect();
+        // Named the way the relay names them: a person by name, else @handle; an agent by
+        // its project name.
+        let mut names: Vec<String> = picked
+            .iter()
+            .map(|p| match p.name.as_deref().map(str::trim) {
+                Some(name) if !name.is_empty() => name.to_owned(),
+                _ => format!("@{}", p.handle),
+            })
+            .collect();
+        names.extend(plan.agent_ids.iter().filter_map(|id| {
+            self.projects
+                .iter()
+                .find(|p| &p.id == id)
+                .map(|p| p.name.clone())
+        }));
         if let Some(p) = self.projects.iter_mut().find(|p| p.id == plan.chat_id) {
             p.people.extend(picked);
         }
+        self.show_membership_notice(&plan.chat_id, &names, cx);
         self.command(ClientCommand::AddMembers {
             chat_id: plan.chat_id,
             handles: plan.handles,
@@ -8265,8 +8375,15 @@ impl AppState {
     pub fn search_people(&mut self, query: String, cx: &mut Context<Self>) {
         self.people_query = query.clone();
         self.people_error = None;
+        // The known directory answers at once through the shared matcher
+        // (display name and @handle — the relay's own search is a handle-prefix
+        // lookup, which is why "aff" showed only @aff, [feedback
+        // shared-search-matcher-mac-2026-10-26]); the relay's reply adds the
+        // people the directory page did not carry.
+        let local = people_sheet_results(&self.people_directory, &self.people_results, &query);
         // An empty query lists everyone on Arbos (the sheet's "Arbos users").
-        self.people_busy = true;
+        self.people_busy = local.is_empty();
+        self.people_results = local;
         self.command(ClientCommand::SearchPeople { query });
         cx.notify();
     }
@@ -8341,11 +8458,75 @@ impl AppState {
     }
 
     pub fn add_agent(&mut self, chat_id: Id, project_id: Id, cx: &mut Context<Self>) {
+        let names: Vec<String> = self
+            .projects
+            .iter()
+            .find(|p| p.id == project_id)
+            .map(|p| vec![p.name.clone()])
+            .unwrap_or_default();
+        self.show_membership_notice(&chat_id, &names, cx);
         self.command(ClientCommand::AddAgent {
             chat_id,
             project_id,
         });
         cx.notify();
+    }
+
+    /// The adding device's own "<me> added <names>" line, on screen the moment Add is pressed
+    /// (ARB-393). The relay writes the row of record; [`Self::fold_optimistic_notices`] swaps
+    /// this copy out when that row lands.
+    fn show_membership_notice(&mut self, chat_id: &str, names: &[String], cx: &mut Context<Self>) {
+        let Some(text) = added_line(&self.me_name(), names) else {
+            return;
+        };
+        let now = now_ms();
+        let notice = OptimisticNotice::new(text, now);
+        if trace_rows() {
+            eprintln!(
+                "rows: optimistic-notice chat={chat_id} id={} text={:?} at={now}",
+                notice.id, notice.text
+            );
+        }
+        let list = self.messages.entry(chat_id.to_owned()).or_default();
+        list.push(notice.message(chat_id));
+        self.optimistic_notices
+            .entry(chat_id.to_owned())
+            .or_default()
+            .push(notice);
+        cx.emit(AppEvent::TranscriptChanged {
+            chat_id: chat_id.to_owned(),
+        });
+    }
+
+    /// A fresh relay snapshot replaces the chat's list: keep the local notices it has not
+    /// confirmed yet, drop the ones it has (or that are past their TTL).
+    fn fold_optimistic_notices(&mut self, chat_id: &str, messages: &mut Vec<Message>) {
+        let Some(notices) = self.optimistic_notices.get_mut(chat_id) else {
+            return;
+        };
+        let before = notices.len();
+        let confirmed = reconcile_optimistic_notices(messages, notices, now_ms());
+        if trace_rows() && (confirmed > 0 || notices.len() != before) {
+            eprintln!(
+                "rows: notice-reconciled chat={chat_id} confirmed={confirmed} left={} at={}",
+                notices.len(),
+                now_ms()
+            );
+        }
+        if notices.is_empty() {
+            self.optimistic_notices.remove(chat_id);
+        }
+    }
+
+    /// A people-chat action failed: nothing was added, so no local notice may claim it was.
+    fn withdraw_optimistic_notices(&mut self, cx: &mut Context<Self>) {
+        let chats: Vec<Id> = self.optimistic_notices.drain().map(|(id, _)| id).collect();
+        for chat_id in chats {
+            if let Some(list) = self.messages.get_mut(&chat_id) {
+                list.retain(|m| !m.id.starts_with(OptimisticNotice::ID_PREFIX));
+            }
+            cx.emit(AppEvent::TranscriptChanged { chat_id });
+        }
     }
 
     pub fn remove_agent(&mut self, chat_id: Id, project_id: Id, cx: &mut Context<Self>) {
@@ -10357,6 +10538,31 @@ pub(crate) fn directory_update(current: &[Person], fresh: Vec<Person>) -> Option
     (fresh != current).then_some(fresh)
 }
 
+/// What the people sheet (New message, Add members, Give a person access…)
+/// lists for `query`: the known directory plus the relay's answer, one row per
+/// handle, through the shared matcher on display name and @handle — exact >
+/// prefix > word-start, name before handle, directory order inside a tie
+/// ([feedback shared-search-matcher-mac-2026-10-26]: "aff" lists Affine and
+/// AffineTeam next to Andreas F @aff, not @aff alone). An empty query keeps
+/// everyone in directory order.
+pub(crate) fn people_sheet_results(
+    directory: &[Person],
+    relay: &[Person],
+    query: &str,
+) -> Vec<Person> {
+    use arbos_core::search::{filter, normalize_query, Fields};
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut pool: Vec<Person> = Vec::with_capacity(directory.len() + relay.len());
+    for p in directory.iter().chain(relay.iter()) {
+        if seen.insert(p.handle.to_lowercase()) {
+            pool.push(p.clone());
+        }
+    }
+    filter(pool, &normalize_query(query), |p| {
+        Fields::new(p.display_name(), p.handle.clone())
+    })
+}
+
 #[cfg(test)]
 mod unread_arrival_tests {
     use super::{arrival_read, ArrivalRead};
@@ -10506,6 +10712,98 @@ mod new_message_first_paint_tests {
         assert!(is_directory_query("@"));
         assert!(!is_directory_query("al"));
         assert!(!is_directory_query("@al"));
+    }
+}
+
+#[cfg(test)]
+mod people_sheet_matcher_tests {
+    //! Jacob, Mac v0.6.268, 2026-10-26 09:16 CR: "Give a person access" with
+    //! "aff" typed listed only "Andreas F @aff" — the sheet showed the relay's
+    //! handle-prefix search and never looked at display names. Every people
+    //! sheet now lists the directory through the shared matcher.
+    use super::*;
+
+    fn person(handle: &str, name: &str) -> Person {
+        Person {
+            id: format!("gh_{handle}"),
+            handle: handle.into(),
+            name: (!name.is_empty()).then(|| name.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn directory() -> Vec<Person> {
+        vec![
+            person("doug", "Doug"),
+            person("team-affine", "Team Affine"),
+            person("aff", "Andreas F"),
+            person("affine-foundation", "Affine"),
+            person("robertalanm", "Carro"),
+            person("affteam", "AffineTeam"),
+        ]
+    }
+
+    fn handles(v: &[Person]) -> Vec<&str> {
+        v.iter().map(|p| p.handle.as_str()).collect()
+    }
+
+    #[test]
+    fn aff_lists_display_names_and_the_handle_ranked() {
+        let rows = people_sheet_results(&directory(), &[], "aff");
+        assert_eq!(
+            handles(&rows),
+            ["aff", "affine-foundation", "affteam", "team-affine"],
+            "exact @aff, then the names that start with aff (directory order), then the word-start"
+        );
+        // The relay's handle-prefix answer alone is what Jacob saw.
+        let relay_only = vec![person("aff", "Andreas F")];
+        assert_eq!(
+            handles(&people_sheet_results(&[], &relay_only, "aff")),
+            ["aff"]
+        );
+    }
+
+    #[test]
+    fn relay_extras_join_the_directory_once() {
+        let relay = vec![person("aff", "Andreas F"), person("affable", "Affable Bot")];
+        let rows = people_sheet_results(&directory(), &relay, "@Aff");
+        assert_eq!(
+            handles(&rows),
+            [
+                "aff",
+                "affine-foundation",
+                "affteam",
+                "affable",
+                "team-affine"
+            ]
+        );
+        assert_eq!(
+            rows.iter().filter(|p| p.handle == "aff").count(),
+            1,
+            "one row per handle"
+        );
+    }
+
+    #[test]
+    fn empty_query_keeps_the_directory_order_and_diacritics_fold() {
+        assert_eq!(
+            handles(&people_sheet_results(&directory(), &[], "")),
+            handles(&directory())
+        );
+        let dir = vec![person("zoe-m", "Zoë Martín"), person("jose", "José")];
+        assert_eq!(
+            handles(&people_sheet_results(&dir, &[], "martin")),
+            ["zoe-m"]
+        );
+        assert_eq!(handles(&people_sheet_results(&dir, &[], "JOSÉ")), ["jose"]);
+        assert_eq!(
+            handles(&people_sheet_results(&dir, &[], "zoe mar")),
+            ["zoe-m"]
+        );
+        assert!(
+            people_sheet_results(&dir, &[], "oe").is_empty(),
+            "no mid-word substrings"
+        );
     }
 }
 

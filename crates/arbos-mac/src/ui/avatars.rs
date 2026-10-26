@@ -17,6 +17,7 @@ use gpui::{
     AnimationExt, AnyElement, Div, ElementId, FontWeight, Hsla, SharedString, Svg, Transformation,
 };
 
+use crate::app::AppState;
 use crate::model::{AgentMember, Person, Project, Sender};
 use crate::ui::theme::{Appearance, Theme};
 
@@ -576,6 +577,58 @@ pub fn element(seed: &str, name: &str, index: Option<u8>, size: f32, theme: &The
         .child(text)
 }
 
+/// A project's picture as every surface should draw it: the uploaded / generated picture of
+/// the newest copy the store holds (`sync::agent_avatar::newest`, decoded in `state.avatars`),
+/// else `project()` (the leaf / initials). The Secrets agent picker, member chips and the
+/// subagent glyph drew `project()` alone and showed the leaf next to a header that had the
+/// picture (Jacob, 2026-10-26, Mac v0.6.268).
+pub fn project_in(state: &AppState, p: &Project, size: f32, theme: &Theme) -> Div {
+    project_with(project_image(state, p), p, size, theme)
+}
+
+/// The decoded picture a project draws (the newest copy's URL through the avatar cache).
+pub fn project_image(state: &AppState, p: &Project) -> Option<std::sync::Arc<gpui::RenderImage>> {
+    crate::sync::agent_avatar::newest(&state.projects, &p.id)
+        .and_then(|f| f.image_url)
+        .or_else(|| p.image_url.clone())
+        .and_then(|u| state.avatar(&u))
+}
+
+/// `project_image` for every project at once — for builders that hold `cx` mutably while
+/// they loop (listeners) and cannot keep the state borrowed.
+pub fn project_images(
+    state: &AppState,
+) -> std::collections::HashMap<String, std::sync::Arc<gpui::RenderImage>> {
+    state
+        .projects
+        .iter()
+        .filter_map(|p| project_image(state, p).map(|i| (p.id.clone(), i)))
+        .collect()
+}
+
+/// `project()` with the picture when the caller has it.
+pub fn project_with(
+    image: Option<std::sync::Arc<gpui::RenderImage>>,
+    p: &Project,
+    size: f32,
+    theme: &Theme,
+) -> Div {
+    if let Some(image) = image {
+        return div()
+            .size(px(size))
+            .flex_shrink_0()
+            .rounded_full()
+            .overflow_hidden()
+            .child(
+                gpui::img(image)
+                    .size(px(size))
+                    .rounded_full()
+                    .object_fit(gpui::ObjectFit::Cover),
+            );
+    }
+    project(p, size, theme)
+}
+
 /// An agent (project): its id seeds the leaf and colour, the owner's picks override.
 /// A people space (DM / group) rides the same `Project` type: a group shows the
 /// leaf picked on its Create screen (D92 amendment) and otherwise, like a DM,
@@ -681,14 +734,41 @@ pub fn agent_identity(
     handle: Option<&str>,
     name: Option<&str>,
 ) -> AgentIdentity {
-    arbos_core::avatar::identity::resolve(
+    let cards = agent_cards(chat, projects);
+    let resolved = arbos_core::avatar::identity::resolve(
         &AgentQuery {
             sender,
             handle,
             name,
         },
-        &agent_cards(chat, projects),
-    )
+        &cards,
+    );
+    if resolved.known {
+        return resolved;
+    }
+    // A live row the box has not attributed yet (`sender: "agent"`, no handle, no name —
+    // the box's people-chat info was not loaded when the turn started, e.g. right after an
+    // image roll) in a people chat with one agent: it is that agent. Jacob, 2026-10-26: Doug
+    // agent's "Reading 500" row drew a leaf seeded by the word "agent" while his finished
+    // bubbles (attributed) had the photo. With several agents on the roster nothing is safe
+    // to assume, and the seeded leaf stays until the attribution lands.
+    let bare = arbos_core::avatar::identity::sender_id(sender).is_empty()
+        || sender == "agent"
+        || sender == "assistant";
+    if bare && handle.map(str::trim).unwrap_or("").is_empty() {
+        if let Some(chat) = chat.filter(|c| c.is_people() && c.agents.len() == 1) {
+            let only = &chat.agents[0];
+            return arbos_core::avatar::identity::resolve(
+                &AgentQuery {
+                    sender: &only.project_id,
+                    handle: Some(&only.handle),
+                    name: Some(&only.name),
+                },
+                &cards,
+            );
+        }
+    }
+    resolved
 }
 
 /// The identity of a roster member, drawn from the same rule (so its picture is the
@@ -722,7 +802,7 @@ pub fn agent_picture(
             .rounded_full()
             .overflow_hidden()
             .child(
-                gpui::img(image)
+                gpui::img(crate::ui::picture_fit::fit(&image, size))
                     .size(px(size))
                     .rounded_full()
                     .object_fit(gpui::ObjectFit::Cover),
