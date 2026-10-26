@@ -1,6 +1,6 @@
 //! The project MCP server (design §6.7): Streamable-HTTP JSON-RPC on loopback.
-//! Tools: history_search, history_read, read_thread, memory_search, memory_read,
-//! peek, sub_llm, remember, recall, projects_list, ask_user,
+//! Tools: history_search, history_read, read_thread, chat_messages, chat_read, chat_search,
+//! memory_search, memory_read, peek, sub_llm, remember, recall, projects_list, ask_user,
 //! spawn_subagent, wake_subagent, connectors_list, connector_call, local_devices,
 //! local_run, local_read, local_list, deliver_file, generate_image, send_message, vault_list,
 //! vault_request, egress, browser_fill, routines_list, routines_create, routines_update,
@@ -86,6 +86,7 @@ fn tools() -> Value {
         a.extend(crate::web::tool_specs());
         a.extend(crate::feedback::tool_specs());
         a.extend(crate::disk::tool_specs());
+        a.extend(crate::chat_tools::tool_specs());
     }
     list
 }
@@ -810,6 +811,9 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
         }
         "goals_list" | "goals_create" | "goals_update" | "goals_log" | "goals_delete" => {
             crate::goals::call_tool(a, name, args, &chat_for_scratch).await
+        }
+        "chat_read" | "chat_search" => {
+            crate::chat_tools::call_tool(a, name, args, &chat_for_scratch).await
         }
         _ => err_result(format!("unknown tool {name}")),
     }

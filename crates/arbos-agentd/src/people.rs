@@ -2046,6 +2046,8 @@ impl Agent {
             prelude.push_str(&crate::truncate::window_note(chat_id));
             prelude.push('\n');
         }
+        prelude.push_str(crate::chat_tools::shared_chat_tools_note());
+        prelude.push('\n');
         prelude.push('\n');
         Some(prelude)
     }

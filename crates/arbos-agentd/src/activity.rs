@@ -83,7 +83,7 @@ pub fn label(tool_name: &str, args: &Value) -> Option<String> {
             Some(q) => query_label("Searching", q),
             None => "Searching the web".into(),
         }),
-        "context_search" | "history_search" | "memory_search" => {
+        "context_search" | "history_search" | "memory_search" | "chat_read" | "chat_search" => {
             Some("Looking back through the chat".into())
         }
         "secrets_list" | "secrets_request" | "vault_list" | "vault_request" | "egress"
