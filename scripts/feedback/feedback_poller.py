@@ -2388,6 +2388,46 @@ class Loop:
                            + "\n".join(stray[:60]) + ("\n…" if len(stray) > 60 else ""))
         return stray
 
+    DOCS_DELETION_MAX = 0.30
+
+    def docs_deletion_probe(self, fid: str, head: str) -> list[str]:
+        """A merge that deletes more than DOCS_DELETION_MAX of a docs/*.md file is bounced for review (#1817's
+        merge 93db39b2 took one side of docs/mac-design-rules.md wholesale: 602 → 379 lines, eight sections gone).
+        Counts the branch's deletions against main's line count; a file the branch removes on purpose shows
+        up here too and the owner says so in the follow-up."""
+        st = self.store.state(fid)
+        if st.get("docs_deletion_checked") == head:
+            return []
+        try:
+            cmp = self.gh.compare("main", head)
+        except HttpError:
+            return []
+        hits: list[str] = []
+        for f in cmp.get("files", []):
+            name = f.get("filename", "")
+            if not (name.startswith("docs/") and name.endswith(".md")) or (f.get("deletions") or 0) < 20:
+                continue
+            try:
+                blob = self.gh.repo_api("GET", f"/contents/{urllib.parse.quote(name)}?ref=main")
+                total = base64.b64decode(blob.get("content") or b"").count(b"\n") or 1
+            except (HttpError, KeyError, TypeError, ValueError):
+                continue
+            share = (f.get("deletions") or 0) / total
+            if share > self.DOCS_DELETION_MAX:
+                hits.append(f"{name}: −{f['deletions']} of {total} lines ({share:.0%}), +{f.get('additions') or 0}")
+        st["docs_deletion_checked"] = head
+        self.store.save_state(fid, st)
+        if not hits:
+            return []
+        log(f"[{fid}] docs-deletion probe: {len(hits)} docs file(s) lose > {self.DOCS_DELETION_MAX:.0%} of their lines; not integrated")
+        self.store.event(fid, "docs_deletion", head=head, files=hits)
+        self.gate_followup(fid, st, "rust",
+                           f"Pre-integration probe: this branch deletes more than {self.DOCS_DELETION_MAX:.0%} of a docs file — usually a merge "
+                           "of `origin/main` that took the branch's side wholesale (93db39b2 dropped eight sections of docs/mac-design-rules.md). "
+                           "Restore main's text (`git checkout origin/main -- <file>`, re-apply your edit) and push; if the deletion is intended, "
+                           "say so on the issue and the operator requeues it.\n\n" + "\n".join(hits))
+        return hits
+
     def rust_gate_start(self, members: dict[str, str]) -> None:
         """Build the integration branch gate/<run> on GitHub (main + every member, in order); CI starts on the
         push; the Mac release build starts if the Mac answers (else it is started on a later tick)."""
@@ -2401,6 +2441,9 @@ class Loop:
             stray = self.merge_revert_probe(fid, head)
             if stray:
                 conflicts[fid] = "merge-revert"
+                continue
+            if self.docs_deletion_probe(fid, head):
+                conflicts[fid] = "docs-deletion"
                 continue
             res = self.gh.merge_into(branch, head, f"gate: merge feedback/{fid} [gate {run_id}]")
             if res is None:
@@ -2436,8 +2479,8 @@ class Loop:
                             "ios": "pending" if ios else "skipped", "mac_started": None}
         self.store.save_cursor(cur)
         for fid, kind in conflicts.items():
-            if kind == "merge-revert":
-                continue  # already sent back by merge_revert_probe
+            if kind in ("merge-revert", "docs-deletion"):
+                continue  # already sent back by the probe
             self.rust_gate_conflict(fid, members[fid], kind, run_id)
         if not merged:
             self.gh.delete_branch(branch)
