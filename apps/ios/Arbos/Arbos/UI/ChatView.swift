@@ -215,6 +215,9 @@ struct ChatSession: View {
     @State private var showProfile = false
     @State private var showSearch = false
     @State private var searchText = ""
+    /// Index into `searchMatches` for the up/down controls; −1 = none yet
+    /// ([feedback app-01M5W4AVG30C4S2TPJ7T30CVJR]).
+    @State private var searchMatchIndex = -1
     /// Group chats: pick members to call, or call everyone.
     @State private var showGroupCallPicker = false
     @FocusState private var searchFocused: Bool
@@ -235,6 +238,16 @@ struct ChatSession: View {
         guard showSearch, !q.isEmpty else { return rows }
         return rows.filter { m_text($0).localizedCaseInsensitiveContains(q) }
     }
+
+    /// Matching rows for the Search-in-chat up/down buttons (oldest first).
+    /// Same filter as `visibleRows` while a query is active.
+    private var searchMatches: [Row] {
+        let q = searchText.trimmingCharacters(in: .whitespaces)
+        guard showSearch, !q.isEmpty else { return [] }
+        return visibleRows
+    }
+
+    private var canStepSearchMatch: Bool { !searchMatches.isEmpty }
 
     static func shownStamp(_ rowsVersion: Int, _ windowCount: Int, _ windowSkipEnd: Int, _ query: String, _ searching: Bool) -> Int {
         var h = Hasher()
@@ -338,6 +351,41 @@ struct ChatSession: View {
         model.pendingSearchChat = nil
         showSearch = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { searchFocused = true }
+    }
+
+    /// Dismiss the Search-in-chat bar and clear the match cursor.
+    private func closeSearch() {
+        showSearch = false
+        searchText = ""
+        searchMatchIndex = -1
+        searchFocused = false
+    }
+
+    /// Up (`delta` −1) / down (`delta` +1): jump to the previous or next row that
+    /// contains the search keyword, wrapping at the ends. The first press lands on
+    /// the newest (up) or oldest (down) match (`searchMatchIndex` starts at −1).
+    private func stepSearchMatch(by delta: Int) {
+        let matches = searchMatches
+        guard !matches.isEmpty else { return }
+        let next: Int
+        if searchMatchIndex < 0 || searchMatchIndex >= matches.count {
+            next = delta < 0 ? matches.count - 1 : 0
+        } else {
+            next = (searchMatchIndex + delta + matches.count) % matches.count
+        }
+        searchMatchIndex = next
+        pinnedToBottom = false
+        Haptics.pick()
+        revealQuoted(matches[next].messageId)
+    }
+
+    /// Reset the match cursor when the query changes (next up/down picks fresh).
+    private func syncSearchMatchIndex() {
+        searchMatchIndex = -1
+        if highlightedMessage != nil,
+           !searchMatches.contains(where: { $0.messageId == highlightedMessage }) {
+            highlightedMessage = nil
+        }
     }
 
     /// Reply in DM landed here: arm the composer with the cross-chat reply (#1836).
@@ -712,7 +760,26 @@ struct ChatSession: View {
                             .font(theme.font(Theme.body)).foregroundStyle(theme.text)
                             .focused($searchFocused)
                             .autocorrectionDisabled()
-                        Button { showSearch = false; searchText = "" } label: {
+                        // Up/down: step between the same keyword's matches ([feedback app-01M5W4AVG30C4S2TPJ7T30CVJR]).
+                        Button { stepSearchMatch(by: -1) } label: {
+                            Image(systemName: "chevron.up")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(canStepSearchMatch ? theme.text : theme.muted)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!canStepSearchMatch)
+                        .accessibilityLabel("Previous match")
+                        .accessibilityIdentifier("chat-search-prev")
+                        Button { stepSearchMatch(by: 1) } label: {
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(canStepSearchMatch ? theme.text : theme.muted)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!canStepSearchMatch)
+                        .accessibilityLabel("Next match")
+                        .accessibilityIdentifier("chat-search-next")
+                        Button { closeSearch() } label: {
                             Image(systemName: "xmark.circle.fill").foregroundStyle(theme.muted)
                         }
                         .buttonStyle(.plain)
@@ -1212,6 +1279,7 @@ struct ChatSession: View {
         // A bottom-bar search result or a quote tap: the rows may land after appear (room backfill).
         .onChange(of: model.pendingReveal) { _, _ in revealPendingIfNeeded() }
         .onChange(of: rows.count) { _, _ in revealPendingIfNeeded() }
+        .onChange(of: searchText) { _, _ in syncSearchMatchIndex() }
         // The per-chat version, not the array: comparing 1 000+ messages on every
         // body (each keystroke, presence tick, publish) was a measurable share of
         // the Arbonites lag (arbonites-chat-lag, 2026-10-24).
@@ -1426,9 +1494,7 @@ struct ChatSession: View {
             // duplicated it in groups (#1625).
             Button {
                 if showSearch {
-                    showSearch = false
-                    searchText = ""
-                    searchFocused = false
+                    closeSearch()
                 } else {
                     withAnimation(.easeOut(duration: 0.18)) { showSearch = true }
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { searchFocused = true }
