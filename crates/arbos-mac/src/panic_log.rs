@@ -1,0 +1,164 @@
+//! What a crash leaves behind. A Rust panic on the main thread unwinds into AppKit and ends
+//! as `abort()` — the macOS crash report then shows `SIGABRT` with stripped frames and no
+//! panic message (Jacob's 0.6.268 reports of 2026-10-26, incidents 080D4A8B… and A9065D42…:
+//! two headers, nothing to go on). The hook installed by [`install`] writes the panic message,
+//! its source location and a captured backtrace to `~/Library/Logs/Arbos/panic.log` before the
+//! abort, and the next launch reports the newest entry once through the silent-diagnostic
+//! feedback path ([`take_unreported`]), so the relay has the trace even when nobody finds the
+//! `.ips`. Best effort everywhere: nothing here may panic or block.
+
+use std::fs;
+use std::io::Write;
+use std::path::PathBuf;
+use std::sync::OnceLock;
+
+/// `~/Library/Logs/Arbos/panic.log` (macOS), `$XDG_STATE_HOME/arbos/panic.log` elsewhere.
+pub fn log_path() -> PathBuf {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    if cfg!(target_os = "macos") {
+        home.join("Library/Logs/Arbos/panic.log")
+    } else {
+        std::env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".local/state"))
+            .join("arbos/panic.log")
+    }
+}
+
+/// Marker next to the log: the byte length of `panic.log` the last report covered.
+fn reported_marker() -> PathBuf {
+    log_path().with_extension("reported")
+}
+
+const ENTRY_START: &str = "==== panic ";
+/// At most this much of the log is kept (the newest entries); old crashes roll off.
+const MAX_LOG_BYTES: u64 = 512 * 1024;
+
+/// Install the hook. Called first thing in `main`, before any thread or window exists. The
+/// previous hook (Rust's default: message + backtrace on stderr) still runs after ours.
+pub fn install() {
+    static ONCE: OnceLock<()> = OnceLock::new();
+    ONCE.get_or_init(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            record(info);
+            previous(info);
+        }));
+    });
+}
+
+/// One entry: header line, version and OS, the panic message, the backtrace, a blank line.
+fn record(info: &std::panic::PanicHookInfo<'_>) {
+    let message = info
+        .payload()
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_owned())
+        .or_else(|| info.payload().downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "<non-string panic payload>".to_owned());
+    let location = info
+        .location()
+        .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+        .unwrap_or_else(|| "<unknown location>".to_owned());
+    let thread = std::thread::current();
+    let backtrace = std::backtrace::Backtrace::force_capture();
+    let entry = format!(
+        "{ENTRY_START}{} ====\nversion {} · {}\nthread {}\nat {location}\n{message}\n{backtrace}\n\n",
+        chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
+        crate::update::current_version(),
+        crate::update::os_version(),
+        thread.name().unwrap_or("<unnamed>"),
+    );
+    log::error!(target: "arbos_mac::panic", "{location}: {message}");
+    let path = log_path();
+    if let Some(dir) = path.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    if let Ok(len) = fs::metadata(&path).map(|m| m.len()) {
+        if len > MAX_LOG_BYTES {
+            // Keep the newest half: drop whole entries from the front.
+            if let Ok(old) = fs::read_to_string(&path) {
+                let keep_from = old.len().saturating_sub((MAX_LOG_BYTES / 2) as usize);
+                let cut = old[keep_from..]
+                    .find(ENTRY_START)
+                    .map(|i| keep_from + i)
+                    .unwrap_or(keep_from);
+                let _ = fs::write(&path, &old[cut..]);
+                let _ = fs::remove_file(reported_marker());
+            }
+        }
+    }
+    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = f.write_all(entry.as_bytes());
+    }
+}
+
+/// The newest panic entry not yet reported (if any), and mark the log as reported up to its
+/// current length. Called once per launch when the relay session is up; the caller sends it
+/// through the silent-diagnostic feedback path.
+pub fn take_unreported() -> Option<String> {
+    let path = log_path();
+    let text = fs::read_to_string(&path).ok()?;
+    if text.trim().is_empty() {
+        return None;
+    }
+    let reported_to: usize = fs::read_to_string(reported_marker())
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0);
+    let _ = fs::write(reported_marker(), text.len().to_string());
+    if reported_to >= text.len() {
+        return None;
+    }
+    let fresh = text.get(reported_to.min(text.len())..).unwrap_or("");
+    let last = fresh
+        .rfind(ENTRY_START)
+        .map(|i| &fresh[i..])
+        .unwrap_or(fresh);
+    let last = last.trim();
+    if last.is_empty() {
+        return None;
+    }
+    // The feedback note has a size limit; keep the head (message, location, top frames).
+    Some(last.chars().take(6_000).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_entry_is_reported_once_and_the_next_one_again() {
+        let dir = std::env::temp_dir().join(format!("arbos-panic-log-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // Point HOME/XDG at the temp dir for this test (the path helpers read the env).
+        std::env::set_var("XDG_STATE_HOME", &dir);
+        std::env::set_var("HOME", &dir);
+        let path = log_path();
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(reported_marker());
+        assert_eq!(take_unreported(), None, "no log, nothing to report");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            format!("{ENTRY_START}2026-10-26T15:00:00Z ====\nversion 0.6.268\nat a.rs:1:1\nindex out of bounds\n   0: frame\n\n"),
+        )
+        .unwrap();
+        let first = take_unreported().expect("the entry");
+        assert!(first.contains("index out of bounds") && first.contains("a.rs:1:1"));
+        assert_eq!(take_unreported(), None, "reported once");
+        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(
+            format!(
+                "{ENTRY_START}2026-10-26T16:00:00Z ====\nversion 0.6.269\nat b.rs:2:2\nsecond\n\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let second = take_unreported().expect("the new entry");
+        assert!(second.contains("second") && !second.contains("index out of bounds"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
