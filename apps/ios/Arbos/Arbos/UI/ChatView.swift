@@ -1130,12 +1130,21 @@ struct ChatSession: View {
                             model.fixtureAppendAssistant(chatId: chatId, text: AppModel.codeReply)
                         }
                         #endif
-                    case "table":
+                    case "table", "table-top":
                         // Rig: Jacob's Lima bookstore turn — a GFM table of linked stores
-                        // between two prose bubbles (fixture only).
+                        // between two prose bubbles; `table-top` stops after the table so a
+                        // phone-height shot shows it (fixture only).
                         #if DEBUG
                         if model.isFixture {
-                            model.fixtureLimaReply(chatId: chatId)
+                            model.fixtureLimaReply(chatId: chatId, bubbles: show == "table-top" ? 2 : 3)
+                        }
+                        #endif
+                    case "links":
+                        // Rig: Jacob's New York Post turn — seven linked headlines as
+                        // bullets, each with its site icon (fixture only).
+                        #if DEBUG
+                        if model.isFixture {
+                            model.fixtureNYPostReply(chatId: chatId)
                         }
                         #endif
                     case "agent-message", "agent-message-received":

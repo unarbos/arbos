@@ -143,6 +143,14 @@ final class RelayAPI {
         return (data, http)
     }
 
+    /// `GET /link-icon?domain=` — the site's 64×64 PNG for the bubbles' named links, `nil` when the
+    /// site has none (204) or the call failed (nobody asked; the bubble keeps its placeholder).
+    func linkIcon(host: String) async -> Data? {
+        guard let q = host.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return nil }
+        guard let (data, http) = try? await request("GET", "/link-icon?domain=\(q)") else { return nil }
+        return http.statusCode == 200 && !data.isEmpty ? data : nil
+    }
+
     func json(_ method: String, _ path: String, body: Any? = nil, auth: Bool = true) async throws -> Any {
         let (data, _) = try await request(method, path, body: body, auth: auth)
         if data.isEmpty { return NSNull() }
