@@ -1,3 +1,4 @@
+import ArbosFFI
 import AVKit
 import Photos
 import QuickLook
@@ -927,10 +928,10 @@ struct ShareFile: Identifiable, Equatable {
 
 extension AppModel {
     /// The chats the Forward sheet offers: every DM, group and agent that is
-    /// not archived, most recent first, filtered by `query`. Channels are left
-    /// out — they carry no attachments yet (Matrix `m.text`).
+    /// not archived, through the shared matcher on title, @handle and kind line
+    /// (`EntitySearch`), best match first and most recent inside a tie.
+    /// Channels are left out — they carry no attachments yet (Matrix `m.text`).
     func forwardTargets(matching query: String) -> [ForwardTarget] {
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         var out: [ForwardTarget] = []
         for c in peopleChats where !isArchived(peopleChatId: c.id) {
             let title: String
@@ -952,10 +953,13 @@ extension AppModel {
             let at = chats(of: p.id).map(\.lastMessageAt).max() ?? 0
             out.append(ForwardTarget(id: "p:\(p.id)", kind: .agent(p), title: p.name, subtitle: "Agent", activity: at))
         }
-        if !q.isEmpty {
-            out = out.filter { $0.title.lowercased().contains(q) || $0.subtitle.lowercased().contains(q) }
+        out.sort { $0.activity > $1.activity }
+        return EntitySearch.filter(out, query: query) { t in
+            if t.subtitle.hasPrefix("@") {
+                return SearchCandidate(name: t.title, handle: String(t.subtitle.dropFirst()), title: nil)
+            }
+            return SearchCandidate(name: t.title, handle: "", title: t.subtitle)
         }
-        return out.sorted { $0.activity > $1.activity }
     }
 
     /// Forward a viewer item: fetch its bytes, then send them to `target` as a
