@@ -1,3 +1,4 @@
+pub mod agent_picker;
 pub mod approve;
 pub mod attachments;
 pub mod avatar_picker;
@@ -37,6 +38,7 @@ pub mod people;
 pub mod picture_fit;
 pub mod presence;
 pub mod profiles;
+pub mod rail;
 pub mod reactions;
 pub mod routines;
 pub mod secrets;
