@@ -617,20 +617,15 @@ class GitHub:
         return self._login
 
     def feedback_refs(self) -> dict[str, str]:
-        """Every `feedback/*` branch head in one listing (pages of 100), cached for this process (one tick).
+        """Every `feedback/*` branch head in one listing, cached for this process (one tick).
         The watches used to probe `/branches/feedback/<id>` per item; a deleted branch answers 404, which is
-        billed and never a 304 — ~200 such probes per tick (17:5x Oct 25) were the token's biggest consumer."""
+        billed and never a 304 — ~200 such probes per tick (17:5x Oct 25) were the token's biggest consumer.
+        `matching-refs` is NOT paginated: it returns every match and ignores `page`/`per_page`. The earlier
+        "pages of 100, stop under 100" loop never ended once the 101st feedback/* branch existed (15:53 Oct 26:
+        103 branches, a tick looped on the same 103-row answer at ~1 call/s until killed)."""
         if self._feedback_refs is None:
-            refs: dict[str, str] = {}
-            page = 1
-            while True:
-                batch = self.repo_api("GET", f"/git/matching-refs/heads/feedback/?per_page=100&page={page}") or []
-                for r in batch:
-                    refs[r["ref"].removeprefix("refs/heads/")] = r["object"]["sha"]
-                if len(batch) < 100:
-                    break
-                page += 1
-            self._feedback_refs = refs
+            batch = self.repo_api("GET", "/git/matching-refs/heads/feedback/") or []
+            self._feedback_refs = {r["ref"].removeprefix("refs/heads/"): r["object"]["sha"] for r in batch}
         return self._feedback_refs
 
     def compare(self, base: str, head: str) -> dict:
