@@ -1,17 +1,20 @@
 import SwiftUI
 
 /// The message bubble's menu under the reaction capsule (`MessageActions.swift`):
-/// **Copy, Reply, View thread, Forward, Reply in DM, Edit (own messages), Delete**
-/// (#1370 + #1472; View thread when the message has replies); reactions live in
-/// the capsule, never here (Jacob, 2026-10-23). Forward opens the same chat
-/// picker the media viewer uses; Reply in DM opens a private chat with the human
-/// who wrote the message. Non-message rows get `copyOnly` as a plain `.contextMenu`.
+/// **Copy, Reply, View thread, Forward, Reply in DM, Select, Edit (own messages), Delete**
+/// (#1370 + #1472; View thread when the message has replies; Select enters multi-select
+/// so other bubbles become tappable for copy / forward — feedback
+/// app-01M5X5Z19KJ67SYA29ZXAK30RH); reactions live in the capsule, never here
+/// (Jacob, 2026-10-23). Forward opens the same chat picker the media viewer uses;
+/// Reply in DM opens a private chat with the human who wrote the message.
+/// Non-message rows get `copyOnly` as a plain `.contextMenu`.
 enum MessageMenuItem: CaseIterable, Equatable {
     case copy
     case reply
     case viewThread
     case forward
     case replyInDM
+    case select
     case edit
     case delete
 
@@ -22,6 +25,7 @@ enum MessageMenuItem: CaseIterable, Equatable {
         case .viewThread: return "View thread"
         case .forward: return "Forward"
         case .replyInDM: return "Reply in DM"
+        case .select: return "Select"
         case .edit: return "Edit"
         case .delete: return "Delete"
         }
@@ -34,6 +38,7 @@ enum MessageMenuItem: CaseIterable, Equatable {
         case .viewThread: return "bubble.left.and.bubble.right"
         case .forward: return "arrowshape.turn.up.right"
         case .replyInDM: return "bubble.left"
+        case .select: return "checkmark.circle"
         case .edit: return "pencil"
         case .delete: return "trash"
         }
@@ -45,11 +50,11 @@ enum MessageMenuItem: CaseIterable, Equatable {
 enum MessageMenu {
     /// The items, in order, for every real message bubble (Edit / Delete / View
     /// thread are gated per row via `items(forMessage:canEdit:canDelete:hasReplies:)`).
-    static let items: [MessageMenuItem] = [.copy, .reply, .forward, .replyInDM, .delete]
+    static let items: [MessageMenuItem] = [.copy, .reply, .forward, .replyInDM, .select, .delete]
 
     /// Same as `items`, plus View thread after Reply when the message has replies
     /// (no Edit — that still comes from `canEdit` on the row).
-    static let itemsWithThread: [MessageMenuItem] = [.copy, .reply, .viewThread, .forward, .replyInDM, .delete]
+    static let itemsWithThread: [MessageMenuItem] = [.copy, .reply, .viewThread, .forward, .replyInDM, .select, .delete]
 
     /// Rows that are not a message in a shared doc (channels, date / system
     /// lines) can only be copied.
@@ -66,7 +71,7 @@ enum MessageMenu {
         guard forMessage else { return copyOnly }
         var out: [MessageMenuItem] = [.copy, .reply]
         if hasReplies { out.append(.viewThread) }
-        out.append(contentsOf: [.forward, .replyInDM])
+        out.append(contentsOf: [.forward, .replyInDM, .select])
         if canEdit { out.append(.edit) }
         if canDelete { out.append(.delete) }
         return out

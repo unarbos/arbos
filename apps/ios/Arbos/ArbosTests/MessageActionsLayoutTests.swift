@@ -177,7 +177,7 @@ final class MessageActionsKeyboardTests: XCTestCase {
     }
 
     func testActionsThatOpenAnotherSurfaceLeaveTheKeyboardDown() {
-        for item in [MessageMenuItem.forward, .viewThread, .replyInDM] {
+        for item in [MessageMenuItem.forward, .viewThread, .replyInDM, .select] {
             XCTAssertFalse(MessageActionsKeyboard.restoresFocus(wasFocused: true, after: item), "\(item)")
         }
     }

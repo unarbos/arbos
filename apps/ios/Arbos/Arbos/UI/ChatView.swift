@@ -225,6 +225,8 @@ struct ChatSession: View {
     @State private var timeRevealLocked = false
     /// Long-press → Forward: the text to send and who wrote it (Forward sheet).
     @State private var pendingForward: PendingForward?
+    /// Multi-select: message ids chosen after long-press → Select (nil = off).
+    @State private var selectedMessageIds: Set<Id>? = nil
     /// The tasks sheet (duplex §2.4): open while the user looks at the agent's jobs.
     @State private var showTasks = false
     @State private var pendingThread: PendingThread?
@@ -769,7 +771,10 @@ struct ChatSession: View {
                     .environment(\.composerInset, composerSideInset)
                     .animation(.easeOut(duration: 0.25), value: composerFocused)
                 Group {
-                    if isChannel, !model.channelCanPost(chatId) {
+                    if selectedMessageIds != nil {
+                        // Multi-select bar (long-press → Select): Copy / Forward the chosen messages.
+                        messageSelectBar
+                    } else if isChannel, !model.channelCanPost(chatId) {
                         // Rule 9: a restricted channel I cannot post in — one quiet line, no composer.
                         Text("Only admins post here")
                             .font(theme.font(Theme.small))
@@ -1674,7 +1679,9 @@ struct ChatSession: View {
                         onQuoteTap: { revealQuoted($0) },
                         onMenu: { runMessageMenu($0, row: $1) },
                         actionsRowId: actionsRow?.id,
-                        onLongPress: { row in openActions(row) }
+                        onLongPress: { row in openActions(row) },
+                        selectedMessageIds: selectedMessageIds,
+                        onToggleSelect: { row in toggleMessageSelect(row) }
                     )
                     .equatable()
                     // Who is working is the presence row over the composer
@@ -2004,7 +2011,8 @@ struct ChatSession: View {
     /// The long-press menu's actions (`MessageMenu`): Copy the text, Reply
     /// (in a people chat the agent that wrote it becomes the recipient),
     /// View thread (when the message has replies), Forward to another chat,
-    /// Reply in DM (open a private chat with the human who wrote it), Edit
+    /// Reply in DM (open a private chat with the human who wrote it), Select
+    /// (multi-select so other bubbles are tappable for copy / forward), Edit
     /// (own text), Delete for everyone.
     private func runMessageMenu(_ item: MessageMenuItem, row: Row) {
         switch item {
@@ -2022,6 +2030,8 @@ struct ChatSession: View {
             // this chat. Agents and your own messages have no peer to DM.
             guard let m = messageById[row.messageId] else { return }
             model.replyInDM(to: m, in: chatId, projectId: isPeople ? nil : projectId)
+        case .select:
+            beginMessageSelect(row)
         case .edit:
             beginEdit(row)
         case .delete:
@@ -2029,6 +2039,109 @@ struct ChatSession: View {
             // no "Delete message?" step); the menu only offers Delete where `canDelete` holds.
             model.deleteMessage(chatId: chatId, messageId: row.messageId, projectId: isPeople ? nil : projectId)
         }
+    }
+
+    /// Long-press → Select: enter multi-select with this message chosen; other
+    /// message bubbles become tappable to add or remove.
+    private func beginMessageSelect(_ row: Row) {
+        guard isMessageRow(row) else { return }
+        composerFocused = false
+        selectedMessageIds = [row.messageId]
+        Haptics.pick()
+    }
+
+    private func endMessageSelect() {
+        selectedMessageIds = nil
+    }
+
+    private func toggleMessageSelect(_ row: Row) {
+        guard isMessageRow(row), var set = selectedMessageIds else { return }
+        if set.contains(row.messageId) {
+            set.remove(row.messageId)
+        } else {
+            set.insert(row.messageId)
+        }
+        selectedMessageIds = set
+        Haptics.pick()
+    }
+
+    /// Selected messages in transcript order (one entry per message id).
+    private var selectedMessagesOrdered: [Message] {
+        guard let selected = selectedMessageIds, !selected.isEmpty else { return [] }
+        var seen = Set<Id>()
+        var out: [Message] = []
+        for row in rows where selected.contains(row.messageId) && seen.insert(row.messageId).inserted {
+            if let m = messageById[row.messageId] { out.append(m) }
+        }
+        return out
+    }
+
+    private func copySelectedMessages() {
+        let texts = selectedMessagesOrdered
+            .map { $0.plainText.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !texts.isEmpty else { return }
+        UIPasteboard.general.string = texts.joined(separator: "\n\n")
+        endMessageSelect()
+    }
+
+    private func forwardSelectedMessages() {
+        let chosen = selectedMessagesOrdered
+        let texts = chosen
+            .map { $0.plainText.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !texts.isEmpty, let first = chosen.first else { return }
+        let from: String
+        if chosen.count == 1 {
+            from = first.role == .user && first.senderName == nil && (first.sender == "user" || first.sender == model.myUserId)
+                ? (model.user.map { me in me.name.flatMap { $0.isEmpty ? nil : $0 } ?? me.login } ?? "You")
+                : MediaAlbum.senderName(first) { model.project($0)?.name }
+        } else {
+            from = "Several"
+        }
+        pendingForward = PendingForward(text: texts.joined(separator: "\n\n"), from: from)
+        endMessageSelect()
+    }
+
+    /// Bottom bar while multi-select is on: Cancel, count, Copy, Forward.
+    @ViewBuilder
+    private var messageSelectBar: some View {
+        let count = selectedMessageIds?.count ?? 0
+        let hasText = !selectedMessagesOrdered
+            .map { $0.plainText.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .isEmpty
+        HStack(spacing: 12) {
+            Button("Cancel") { endMessageSelect() }
+                .font(theme.font(Theme.body))
+                .foregroundStyle(theme.accent)
+                .buttonStyle(.plain)
+            Spacer(minLength: 0)
+            Text(count == 1 ? "1 Selected" : "\(count) Selected")
+                .font(theme.font(Theme.small, weight: .medium))
+                .foregroundStyle(theme.muted)
+            Spacer(minLength: 0)
+            Button { copySelectedMessages() } label: {
+                Image(systemName: "doc.on.doc")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(hasText ? theme.text : theme.muted)
+                    .frame(width: 36, height: 36)
+            }
+            .buttonStyle(.plain)
+            .disabled(!hasText)
+            .accessibilityLabel("Copy")
+            Button { forwardSelectedMessages() } label: {
+                Image(systemName: "arrowshape.turn.up.right")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(hasText ? theme.text : theme.muted)
+                    .frame(width: 36, height: 36)
+            }
+            .buttonStyle(.plain)
+            .disabled(!hasText)
+            .accessibilityLabel("Forward")
+        }
+        .frame(height: Theme.composerHeight)
+        .accessibilityIdentifier("message-select-bar")
     }
 
     /// Long-press → View thread: open the held message and every reply in its chain.
@@ -3160,6 +3273,9 @@ private struct TranscriptRows: View, Equatable {
     /// The bubble whose long-press actions are open (it alone reports its frame).
     let actionsRowId: String?
     let onLongPress: (Row) -> Void
+    /// Multi-select (long-press → Select): chosen message ids, or `nil` when off.
+    let selectedMessageIds: Set<Id>?
+    let onToggleSelect: (Row) -> Void
 
     static func == (lhs: TranscriptRows, rhs: TranscriptRows) -> Bool {
         let same = lhs.shownStamp == rhs.shownStamp
@@ -3171,6 +3287,7 @@ private struct TranscriptRows: View, Equatable {
             && lhs.timeReveal == rhs.timeReveal
             && lhs.highlightedMessage == rhs.highlightedMessage
             && lhs.mentions.stamp == rhs.mentions.stamp
+            && lhs.selectedMessageIds == rhs.selectedMessageIds
         #if DEBUG
         PerfCounters.bump(same ? "rowsEqTrue" : "rowsEqFalse")
         if !same {
@@ -3188,36 +3305,70 @@ private struct TranscriptRows: View, Equatable {
         // Rows keyed by id, never by position: a grow step prepends older rows and
         // must not touch the ones already laid out (arbonites-chat-lag).
         let firstId = shown.first?.id
+        let selecting = selectedMessageIds != nil
         ForEach(shown) { row in
             let reply = canReply(row)
-            RowView(model: model, theme: theme, composerInset: composerInset, row: row, chatId: chatId, width: width, timeReveal: timeReveal,
-                    onQuoteTap: onQuoteTap,
-                    highlighted: highlightedMessage == row.messageId,
-                    mentions: mentions)
-                .equatable()
-                .padding(.top, row.id == firstId ? 0 : row.gapBefore)
-                .id(row.id)
-                .onAppear {
+            let selected = selectedMessageIds?.contains(row.messageId) == true
+            // Checkmark column (22 + 10 gap) while multi-select is on — shrink the bubble
+            // so the row still fits the transcript width.
+            let markPad: CGFloat = (selecting && reply) ? 32 : 0
+            HStack(alignment: .center, spacing: 10) {
+                if selecting, reply {
+                    Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 22, weight: .regular))
+                        .foregroundStyle(selected ? theme.accent : theme.muted)
+                        .accessibilityHidden(true)
+                }
+                RowView(model: model, theme: theme, composerInset: composerInset, row: row, chatId: chatId, width: width - markPad, timeReveal: timeReveal,
+                        onQuoteTap: onQuoteTap,
+                        highlighted: highlightedMessage == row.messageId,
+                        mentions: mentions)
+                    .equatable()
+                    .opacity(selecting && reply && !selected ? 0.72 : 1)
+            }
+            .padding(.top, row.id == firstId ? 0 : row.gapBefore)
+            .id(row.id)
+            .onAppear {
+                #if DEBUG
+                if SendTrace.traces(chatId) {
+                    SendTrace.markIfPresent("row-in-tree", ids: [row.messageId], detail: "row=\(row.id)")
+                }
+                #endif
+                // Once per open — not on every row (group chats fire this dozens of times).
+                if row.id == firstId {
+                    LaunchClock.mark("chat-first-row", detail: "shown=\(shown.count) rows=\(rowsCount) messages=\(messagesCount)")
                     #if DEBUG
-                    if SendTrace.traces(chatId) {
-                        SendTrace.markIfPresent("row-in-tree", ids: [row.messageId], detail: "row=\(row.id)")
-                    }
+                    PerfLog.shared.armScrollable()
                     #endif
-                    // Once per open — not on every row (group chats fire this dozens of times).
-                    if row.id == firstId {
-                        LaunchClock.mark("chat-first-row", detail: "shown=\(shown.count) rows=\(rowsCount) messages=\(messagesCount)")
-                        #if DEBUG
-                        PerfLog.shared.armScrollable()
-                        #endif
-                    }
                 }
-                // A message bubble: long-press → the reaction capsule + menu overlay
-                // (`MessageActionsOverlay`). Other rows keep the plain Copy menu.
-                .anchorPreference(key: RowFrameKey.self, value: .bounds) { anchor in
-                    actionsRowId == row.id ? [row.id: anchor] : [:]
-                }
-                .messageRowGestures(isMessage: reply, onLongPress: { onLongPress(row) },
-                                    onCopyMenu: { onMenu($0, row) })
+            }
+            // A message bubble: long-press → the reaction capsule + menu overlay
+            // (`MessageActionsOverlay`). Other rows keep the plain Copy menu.
+            // While multi-select is on, taps toggle membership instead.
+            .anchorPreference(key: RowFrameKey.self, value: .bounds) { anchor in
+                actionsRowId == row.id ? [row.id: anchor] : [:]
+            }
+            .contentShape(Rectangle())
+            .modifier(MessageSelectTap(enabled: selecting && reply, action: { onToggleSelect(row) }))
+            .messageRowGestures(isMessage: reply && !selecting, onLongPress: { onLongPress(row) },
+                                onCopyMenu: { onMenu($0, row) })
+            .accessibilityAddTraits(selecting && reply && selected ? [.isSelected] : [])
+            .accessibilityHint(selecting && reply ? (selected ? "Selected. Double tap to remove" : "Double tap to select") : "")
+        }
+    }
+}
+
+/// Tap on a bubble while multi-select is on — simultaneous so the transcript
+/// ScrollView still pans vertically.
+private struct MessageSelectTap: ViewModifier {
+    let enabled: Bool
+    let action: () -> Void
+
+    func body(content: Content) -> some View {
+        if enabled {
+            content.simultaneousGesture(TapGesture().onEnded { _ in action() })
+        } else {
+            content
         }
     }
 }

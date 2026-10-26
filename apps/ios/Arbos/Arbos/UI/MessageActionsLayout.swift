@@ -118,8 +118,9 @@ enum MessageActionsKeyboard {
         case .reply, .edit:
             // These focus the composer themselves (reply preview / editing bar).
             return true
-        case .forward, .viewThread, .replyInDM:
-            // A sheet or another chat takes the screen; a keyboard under it would fight it.
+        case .forward, .viewThread, .replyInDM, .select:
+            // A sheet, another chat, or multi-select replaces the composer; a
+            // keyboard under it would fight it.
             return false
         }
     }
