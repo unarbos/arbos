@@ -215,6 +215,8 @@ struct ChatSession: View {
     @State private var showProfile = false
     @State private var showSearch = false
     @State private var searchText = ""
+    /// Which matching message the up/down chevrons are on (0…matchCount-1, oldest first).
+    @State private var searchMatchIndex = 0
     /// Group chats: pick members to call, or call everyone.
     @State private var showGroupCallPicker = false
     @FocusState private var searchFocused: Bool
@@ -234,6 +236,20 @@ struct ChatSession: View {
         let q = searchText.trimmingCharacters(in: .whitespaces)
         guard showSearch, !q.isEmpty else { return rows }
         return rows.filter { m_text($0).localizedCaseInsensitiveContains(q) }
+    }
+
+    /// Unique messages that contain the current search keyword (oldest → newest).
+    /// One entry per message so up/down steps between keyword hits, not row fragments.
+    private var searchMatchRows: [Row] {
+        let q = searchText.trimmingCharacters(in: .whitespaces)
+        guard showSearch, !q.isEmpty else { return [] }
+        var seen = Set<Id>()
+        var out: [Row] = []
+        for row in rows where m_text(row).localizedCaseInsensitiveContains(q) {
+            guard seen.insert(row.messageId).inserted else { continue }
+            out.append(row)
+        }
+        return out
     }
 
     static func shownStamp(_ rowsVersion: Int, _ windowCount: Int, _ windowSkipEnd: Int, _ query: String, _ searching: Bool) -> Int {
@@ -712,7 +728,28 @@ struct ChatSession: View {
                             .font(theme.font(Theme.body)).foregroundStyle(theme.text)
                             .focused($searchFocused)
                             .autocorrectionDisabled()
-                        Button { showSearch = false; searchText = "" } label: {
+                            .onChange(of: searchText) { _, _ in resetSearchMatchIndex() }
+                        // Step through each message that holds the keyword (Safari find-style).
+                        let canStep = !searchMatchRows.isEmpty
+                        Button { stepSearchMatch(-1) } label: {
+                            Image(systemName: "chevron.up")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(canStep ? theme.text : theme.muted)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!canStep)
+                        .accessibilityLabel("Previous match")
+                        .accessibilityIdentifier("chat-search-prev")
+                        Button { stepSearchMatch(1) } label: {
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(canStep ? theme.text : theme.muted)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!canStep)
+                        .accessibilityLabel("Next match")
+                        .accessibilityIdentifier("chat-search-next")
+                        Button { closeChatSearch() } label: {
                             Image(systemName: "xmark.circle.fill").foregroundStyle(theme.muted)
                         }
                         .buttonStyle(.plain)
@@ -1426,9 +1463,7 @@ struct ChatSession: View {
             // duplicated it in groups (#1625).
             Button {
                 if showSearch {
-                    showSearch = false
-                    searchText = ""
-                    searchFocused = false
+                    closeChatSearch()
                 } else {
                     withAnimation(.easeOut(duration: 0.18)) { showSearch = true }
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { searchFocused = true }
@@ -1909,6 +1944,46 @@ struct ChatSession: View {
         guard let target = rows.first(where: { $0.messageId == messageId && $0.role != .system }) else { return }
         if includeInWindow(messageId: messageId) {
             // The original was outside the window: let the grown VStack lay out first.
+            DispatchQueue.main.async {
+                withAnimation(.easeInOut(duration: 0.35)) { scroller?.scrollTo(target.id, anchor: .center) }
+            }
+        } else {
+            withAnimation(.easeInOut(duration: 0.35)) { scroller?.scrollTo(target.id, anchor: .center) }
+        }
+        highlightedMessage = messageId
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(1600))
+            if highlightedMessage == messageId { highlightedMessage = nil }
+        }
+    }
+
+    /// Dismiss the in-chat search bar and clear its keyword / match cursor.
+    private func closeChatSearch() {
+        showSearch = false
+        searchText = ""
+        searchMatchIndex = 0
+        searchFocused = false
+    }
+
+    /// Keep the match cursor on the newest hit when the keyword changes.
+    private func resetSearchMatchIndex() {
+        let n = searchMatchRows.count
+        searchMatchIndex = n == 0 ? 0 : n - 1
+    }
+
+    /// `delta` −1 = older (up), +1 = newer (down); wraps at both ends.
+    private func stepSearchMatch(_ delta: Int) {
+        let matches = searchMatchRows
+        guard !matches.isEmpty else { return }
+        let next = (searchMatchIndex + delta + matches.count) % matches.count
+        searchMatchIndex = next
+        revealSearchMatch(matches[next])
+    }
+
+    /// Scroll to a search hit and tint it briefly (same flash as a quote tap).
+    private func revealSearchMatch(_ target: Row) {
+        let messageId = target.messageId
+        if includeInWindow(messageId: messageId) {
             DispatchQueue.main.async {
                 withAnimation(.easeInOut(duration: 0.35)) { scroller?.scrollTo(target.id, anchor: .center) }
             }
