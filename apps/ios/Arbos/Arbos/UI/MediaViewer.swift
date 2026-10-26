@@ -188,6 +188,11 @@ struct MediaViewer: View {
         .onAppear {
             if openForward { showForward = true }
             if openDownload { Task { await download() } }
+            #if DEBUG
+            if let ms = DebugHooks.viewerCloseMs {
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(ms)) { close() }
+            }
+            #endif
         }
         .sheet(isPresented: $showForward) {
             if let item {
