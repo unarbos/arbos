@@ -189,6 +189,18 @@ struct Theme: Equatable {
     static let presenceAvatarOffset: CGFloat = 6
     static let presenceGap: CGFloat = 14
     static let presenceBottomGap: CGFloat = 68 / 3
+    /// The transcript's tail: the clear space under the last row, before the chat bar's
+    /// own top padding, so the last bubble never sits under the bar's fade.
+    static let transcriptTail: CGFloat = 28
+    /// The chat bar's padding over its first view (the status row or the composer).
+    static let chatBarTopPad: CGFloat = 8
+    /// Last bubble → the status picture's top: 42 px in the same Grok shot ([feedback
+    /// status-row-gap-ios-2026-10-26]). The row used to start under the tail and the
+    /// bar's pad (36 pt); it now rises `presenceLift` into the tail, so the bubble →
+    /// composer distance with the row showing is Grok's 62⅓ (14 + 25⅓ + 22⅔) and the
+    /// bar grows by 26 pt instead of 48 when the row appears.
+    static let presenceTopGap: CGFloat = 42 / 3
+    static var presenceLift: CGFloat { transcriptTail + chatBarTopPad - presenceTopGap }
     /// Transcript edge → the status row's picture, for the composer's current side inset.
     static func presenceInset(composerInset: CGFloat) -> CGFloat {
         composerInset + presenceAvatarOffset - 16
