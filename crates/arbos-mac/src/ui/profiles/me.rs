@@ -1045,6 +1045,7 @@ impl Shell {
             subtitle: Some(who.clone().into()),
             subtitle_color: theme.text_muted,
             subtitle_click: None,
+            subtitle_element: None,
             editor,
         };
 

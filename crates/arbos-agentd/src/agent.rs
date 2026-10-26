@@ -1313,6 +1313,8 @@ pub struct TurnState {
     /// In-turn retries after a transient model failure (`MODEL_CALL_RETRIES`); the second one
     /// runs on the fallback talking model.
     pub model_retries: u8,
+    /// The one continuation after an opening line that promised parts already ran.
+    pub parts_continuation: bool,
     /// The row the ack bubble went out on, when the turn posted one: a failure after the retries
     /// is written there as one message, never as a second bubble under it.
     pub ack_row_id: Option<String>,
@@ -1486,6 +1488,7 @@ impl TurnState {
             act_to_job: false,
             job_fallback: false,
             model_retries: 0,
+            parts_continuation: false,
             ack_row_id: None,
         }
     }
@@ -4014,6 +4017,7 @@ impl Agent {
             act_to_job: false,
             job_fallback: matches!(kind, TurnKind::JobFallback { .. }),
             model_retries: 0,
+            parts_continuation: false,
             ack_row_id: None,
         });
         self.turn_running.store(true, Ordering::SeqCst);
@@ -4099,6 +4103,24 @@ impl Agent {
         }
         if fallback_model_on {
             self.switch_talking_model(false).await;
+        }
+        // The turn's only words announce parts that never came ("delivered in parts below"): the
+        // model took the route's `reply` text for the answer and stopped. One continuation asks
+        // for the parts (proof run 1, 2026-10-26; the extension no longer ends such a turn, this
+        // is the net under it).
+        if result.is_ok() {
+            if let Some(opening) = self.unkept_parts_promise().await {
+                tracing::warn!(chat_id, opening = %opening, "turn promised parts and posted none; continuing once");
+                let prompt = format!(
+                    "{RELAY_TURN_MARK}\n[Arbos] Your message \"{opening}\" is in the chat, but the parts it announces were never posted. Post them now with send_message — each part its own call (conclusion, linked table, details + sources, one next-step offer) — then end the turn. Do not repeat the opening line."
+                );
+                if let Some(t) = self.turn.lock().await.as_mut() {
+                    t.route = None;
+                    t.route_attempts = 0;
+                    t.parts_continuation = true;
+                }
+                result = self.run_main_turn(chat_id, host, &prompt).await;
+            }
         }
         // An empty turn is usually the model window, not the question: a provider refusal on a
         // bloated session (Lium, 2026-10-21: six turns, 208–242k tokens, zero output) or a settle
@@ -4396,7 +4418,16 @@ impl Agent {
             turn.ack_text.as_str()
         };
         if matches!(final_status, MessageStatus::Done) && !announce.trim().is_empty() {
-            self.announce_reply(&room_name, &assistant_msg_id, announce);
+            // A live call gets the turn's whole prose (progress bubbles + the result), not
+            // only the push body: the answer to a spoken ask is often a progress bubble.
+            let voice_text = voice_prose_of(&turn.progress_texts, &turn.streamed_text);
+            self.announce_reply_kind(
+                &room_name,
+                &assistant_msg_id,
+                announce,
+                "result",
+                Some(&voice_text),
+            );
             if self.people.is_people_chat(chat_id) {
                 self.dispatch_agent_mentions(
                     chat_id,
@@ -4774,7 +4805,18 @@ impl Agent {
     /// Tell the relay a whole reply landed, so people who are not looking get a notification
     /// (`POST /chats/{id}/notify` for a people chat, `POST /projects/{p}/chats/{c}/notify`
     /// otherwise). Fire-and-forget: the message is in the doc either way.
-    pub fn announce_reply(self: &Arc<Self>, room: &str, message_id: &str, text: &str) {
+    /// Tell the relay a bubble landed (push notifications, Matrix, and — for a live call in the
+    /// chat, #1860 — the call's voice session): `kind` = `result` | `job` | `quick`,
+    /// `voice_text` = the whole prose of the turn when the push body (`text`) is only its
+    /// last part.
+    pub fn announce_reply_kind(
+        self: &Arc<Self>,
+        room: &str,
+        message_id: &str,
+        text: &str,
+        kind: &str,
+        voice_text: Option<&str>,
+    ) {
         let Some((project, chat_id)) = room.split_once('/') else {
             return;
         };
@@ -4790,6 +4832,8 @@ impl Agent {
             "message_id": message_id,
             "text": text.chars().take(600).collect::<String>(),
             "project_id": self.cfg.project_id,
+            "kind": kind,
+            "voice_text": voice_text.map(|t| t.chars().take(2000).collect::<String>()),
         });
         let me = self.clone();
         tokio::spawn(async move {
@@ -5586,8 +5630,7 @@ impl Agent {
         host: &SharedHost,
         elapsed: Duration,
     ) -> bool {
-        if !self.cfg.act_to_job() || !self.cfg.jobs() || elapsed < crate::config::act_to_job_after()
-        {
+        if !self.cfg.act_to_job() || !self.cfg.jobs() || elapsed < self.cfg.act_to_job_after() {
             return false;
         }
         let mut tl = self.turn.lock().await;
@@ -6390,6 +6433,33 @@ impl Agent {
         t.model_error = Some(m);
     }
 
+    /// The opening line of a turn that promised parts and posted nothing after it: the route's
+    /// `reply` text (or the one streamed/posted sentence) matches `promises_parts`, no later
+    /// bubble exists, and no continuation ran yet.
+    async fn unkept_parts_promise(&self) -> Option<String> {
+        let tl = self.turn.lock().await;
+        let t = tl.as_ref()?;
+        if t.stopped || t.parts_continuation || t.act_to_job {
+            return None;
+        }
+        let posted: Vec<&str> = t
+            .progress_texts
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once(t.streamed_text.as_str()))
+            .chain(t.route_reply_text.as_deref())
+            .filter(|s| !s.trim().is_empty())
+            .collect();
+        let [only] = posted.as_slice() else {
+            return None;
+        };
+        if promises_parts(only) {
+            Some(only.trim().chars().take(160).collect())
+        } else {
+            None
+        }
+    }
+
     /// A model failure worth an in-turn retry: not a refusal, a budget or hard limit, a full
     /// disk or an abort of ours; the user has read no answer yet (an ack bubble is fine); and the
     /// retry budget is not spent. Returns the attempt index and the error.
@@ -7018,6 +7088,16 @@ impl Agent {
             })
             .unwrap_or(Harness::Prime);
         let (_, subagent_model) = self.live_models().await;
+        // Cost knob 1 (Jacob 2026-10-26): research jobs run on the research worker model (Haiku
+        // 5.5 by default); code and every other kind keep the subagent model.
+        let subagent_model = match &job {
+            Some(j) => crate::config::worker_model_for(
+                &j.kind,
+                self.cfg.research_worker_model().as_deref(),
+                &subagent_model,
+            ),
+            None => subagent_model,
+        };
         let (subagent_id, harness, is_new) = match existing {
             Some(id) => {
                 let row = match self.store.subagent(&id)? {
@@ -7921,7 +8001,7 @@ impl Agent {
             h.doc.finish_message(&row_id, MessageStatus::Done);
             h.room.clone()
         };
-        self.announce_reply(&room, &row_id, &text);
+        self.announce_reply_kind(&room, &row_id, &text, "job", Some(&text));
         let _ = self.store.t3_append(
             chat_id,
             None,
@@ -8297,6 +8377,21 @@ pub(crate) fn moment_note(now: chrono::DateTime<chrono::Utc>, tz: Option<&str>) 
     format!("[Now: {utc}.{local} \"Right now\" and \"tonight\" mean this moment; mention a clock change or a deadline inside the next day when it changes the answer.]\n\n")
 }
 
+/// The prose a turn posted, in order, for a live call's context (#1832): every progress bubble
+/// and the final streamed text, blank ones skipped, each once.
+pub(crate) fn voice_prose_of(progress_texts: &[String], streamed_text: &str) -> String {
+    let mut out: Vec<&str> = progress_texts
+        .iter()
+        .map(|t| t.trim())
+        .filter(|t| !t.is_empty())
+        .collect();
+    let last = streamed_text.trim();
+    if !last.is_empty() && out.last() != Some(&last) {
+        out.push(last);
+    }
+    out.join("\n\n")
+}
+
 fn message_from_voice(m: &arbos_core::doc::MessageView) -> bool {
     m.rest.get("voice").and_then(Value::as_bool) == Some(true)
         || m.rest.get("source").and_then(Value::as_str) == Some("voice")
@@ -8651,6 +8746,44 @@ pub(crate) fn model_retry_prompt(prompt_text: &str, ack: Option<&str>) -> String
     }
 }
 
+/// A short message that announces more to come ("delivered in parts below", "the table
+/// follows") is an opening line, not an answer. Mirrors `promisesMore` in arbos-pi-ext.
+pub(crate) fn promises_parts(text: &str) -> bool {
+    let t = text.trim().to_ascii_lowercase();
+    if t.chars().count() > 400 {
+        return false;
+    }
+    let cues = [
+        "in parts",
+        "in part below",
+        "parts below",
+        "part below",
+        "parts follow",
+        "parts to follow",
+        "parts coming",
+        "below.",
+        "below:",
+        "below!",
+        "follows.",
+        "follows:",
+        "to follow.",
+        "coming up",
+        "coming next",
+        "coming right up",
+        "next message",
+        "here it comes",
+        "here they come",
+    ];
+    if cues
+        .iter()
+        .any(|c| t.ends_with(c) || t.contains(&format!("{c} ")))
+    {
+        return true;
+    }
+    let end = t.trim_end_matches(['.', ':', '!', ' ']);
+    end.ends_with("below") || end.ends_with("follows") || end.ends_with("in parts")
+}
+
 /// pi's wording for a request agentd cancelled (`AbortController` / MCP cancel), never a
 /// provider failure.
 pub(crate) fn is_abort_text(detail: &str) -> bool {
@@ -8960,6 +9093,27 @@ mod tests {
         let r = ModelError::from_message(&refused).unwrap();
         assert!(r.refusal);
         assert!(r.chat_line_after_ack("Jacob").contains("declined"));
+    }
+
+    /// Proof run 1 (2026-10-26 01:0x UTC): "Here are seven well-rated San Jose restaurants,
+    /// delivered in parts below." was the whole delivery. Such a line is a promise, not an answer.
+    #[test]
+    fn an_opening_line_that_promises_parts_is_not_an_answer() {
+        assert!(promises_parts(
+            "Here are seven well-rated San Jose restaurants, delivered in parts below."
+        ));
+        assert!(promises_parts(
+            "Seven places made the cut; the table follows."
+        ));
+        assert!(promises_parts("Details and sources below:"));
+        assert!(promises_parts("Here are the three schools, in parts."));
+        assert!(!promises_parts("London is 7 hours ahead of you right now."));
+        assert!(!promises_parts("42."));
+        assert!(!promises_parts(
+            "The place below the hotel is good and open till ten; no booking needed."
+        ));
+        let long = "x ".repeat(300) + "below.";
+        assert!(!promises_parts(&long));
     }
 
     /// The retry budget and its prompts: two in-turn retries (2 s, then 5 s on the fallback

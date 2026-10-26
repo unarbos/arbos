@@ -432,6 +432,7 @@ fn testagent_member() -> AgentMember {
         avatar_leaf: Some(3),
         avatar_leaf_color: Some(7),
         image_url: None,
+        avatar_version: 0,
         description: None,
         model: None,
         owner: None,
@@ -1757,6 +1758,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 avatar_leaf: leaf.map(|l| l.leaf),
                 avatar_leaf_color: leaf.map(|l| l.color),
                 image_url: image_url.clone(),
+                avatar_version: 0,
                 message_grants: Vec::new(),
                 members_see_reads: true,
             });
@@ -3428,6 +3430,15 @@ const REPLY_SIMPLE: &[&str] = &[
     "Nothing else at rest. Details open only when you ask for them.",
 ];
 
+/// The reply to "Find me a book store in lima" (agent Bubble, 2026-10-25 21:31 UTC), one
+/// string per bubble, byte for byte: conclusion, GFM table of linked stores, details
+/// ([feedback markdown-tables-mac-2026-10-25]; the iPhone fixture's `limaReply`).
+const LIMA_REPLY: &[&str] = &[
+    "Go to Librería El Virrey in Miraflores. Their site lists Sunday hours as 11am–7pm, so it should still be open this afternoon.",
+    "| Store | Area | Sunday | What they sell |\n| --- | --- | --- | --- |\n| [Librería El Virrey](https://www.elvirrey.com/) | Miraflores, Calle Bolognesi 510 | 11am–7pm | Spanish literature, essays, history, art; some English at a higher price |\n| [Communitas](https://www.communitas.pe/) | San Isidro, Av. 2 de Mayo 1690 | 10:30am–7:30pm | Humanities, literature, law, history, science, in Spanish |\n| [Vallejo Librería Café](https://www.tangol.com/blog/en/the-3-best-bookstores-in-lima/n-15210) | San Isidro, Av. Camino Real 1119 | not listed | Books plus coffee or tea |\n| [Assouline Lima](https://www.assouline.com/pages/store/lima) | Miraflores, street not listed | not listed | Luxury and design books |",
+    "El Virrey’s phone is (511) 713 0505. Their own page says the shop dates to late 1973; a travel write-up said 1972. Communitas is the other store with Sunday hours on its site, but it is in San Isidro, not Miraflores, and the page does not clearly say it is a walk-in shop, so check before you go. Vallejo is a bookstore-café; I only have a travel blog for it, and hours were not listed. Assouline is a luxury boutique, not a general bookstore. La Casa de Kanu in Barranco was called a favorite on an expat guide, but I have no street address or hours.\n\nHours were not checked on a second source, and I did not confirm anyone is open right now. No used-book shop and no central Lima store made this list with an address I could verify.\n\nWant me to check whether El Virrey is open right now, or look for an English-language shop?",
+];
+
 const REPLY_CODE: &[&str] = &[
     "The transcript is a bottom-aligned list with one row per markdown block:",
     "```rust\nlet list = ListState::new(0, ListAlignment::Bottom, px(320.0));\nlist(list.clone(), cx.processor(Self::render_row))\n```",
@@ -4713,6 +4724,7 @@ fn seed_projects() -> Vec<Project> {
             avatar_leaf: None,
             avatar_leaf_color: None,
             image_url: None,
+            avatar_version: 0,
             message_grants: Vec::new(),
             members_see_reads: true,
         },
@@ -4749,6 +4761,7 @@ fn seed_projects() -> Vec<Project> {
             avatar_leaf: None,
             avatar_leaf_color: None,
             image_url: None,
+            avatar_version: 0,
             message_grants: Vec::new(),
             members_see_reads: true,
         },
@@ -4785,6 +4798,7 @@ fn seed_projects() -> Vec<Project> {
             avatar_leaf: None,
             avatar_leaf_color: None,
             image_url: None,
+            avatar_version: 0,
             message_grants: Vec::new(),
             members_see_reads: true,
         },
@@ -5366,6 +5380,8 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
         // message, so `ARBOS_REPLY_TO=1` arms the composer's reply preview on it.
         // `ARBOS_FIXTURE_REPLY=code`: the `REPLY_CODE` reply (a ```rust card) as
         // the last message, for the code card's Copy pill shots.
+        // `ARBOS_FIXTURE_REPLY=table`: the `LIMA_REPLY` turn (a linked GFM table
+        // between two prose bubbles), for the table renderer's shots.
         match std::env::var("ARBOS_FIXTURE_REPLY").as_deref() {
             Ok("1") => {
                 s.user_replying_to("Which tabs do you mean here?", &last);
@@ -5385,6 +5401,14 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
                     MessageStatus::Done,
                     vec![text(&REPLY_CODE.join("\n\n"))],
                 );
+            }
+            // `ARBOS_FIXTURE_REPLY=table`: Jacob's Lima bookstore turn — the ask, then
+            // the three bubbles agentd posted (conclusion, linked GFM table, details).
+            Ok("table") => {
+                s.user("Find me a book store in lima");
+                for bubble in LIMA_REPLY {
+                    s.assistant(TurnKind::Reply, MessageStatus::Done, vec![text(bubble)]);
+                }
             }
             _ => {}
         }
@@ -5921,6 +5945,7 @@ fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
         avatar_leaf: None,
         avatar_leaf_color: None,
         image_url: None,
+        avatar_version: 0,
         message_grants: Vec::new(),
         members_see_reads: true,
     }
@@ -5948,6 +5973,7 @@ fn launch_week() -> Project {
         avatar_leaf: None,
         avatar_leaf_color: None,
         image_url: None,
+        avatar_version: 0,
         description: None,
         model: None,
         owner: None,
@@ -5975,6 +6001,7 @@ fn launch_week() -> Project {
             avatar_leaf: Some(leaf),
             avatar_leaf_color: Some(color),
             image_url: None,
+            avatar_version: 0,
             description: None,
             model: None,
             owner: None,
@@ -6028,6 +6055,7 @@ fn seed_people_projects() -> Vec<Project> {
             avatar_leaf: None,
             avatar_leaf_color: None,
             image_url: None,
+            avatar_version: 0,
             message_grants: Vec::new(),
             members_see_reads: true,
         },
@@ -6784,6 +6812,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                                 avatar_leaf: p.avatar_leaf,
                                 avatar_leaf_color: p.avatar_leaf_color,
                                 image_url: None,
+                                avatar_version: 0,
                                 description: None,
                                 model: None,
                                 owner: None,
@@ -6883,6 +6912,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                         avatar_leaf: p.avatar_leaf,
                         avatar_leaf_color: p.avatar_leaf_color,
                         image_url: None,
+                        avatar_version: 0,
                         description: None,
                         model: None,
                         owner: None,
@@ -6955,6 +6985,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                             avatar_leaf: p.avatar_leaf,
                             avatar_leaf_color: p.avatar_leaf_color,
                             image_url: None,
+                            avatar_version: 0,
                             description: None,
                             model: None,
                             owner: None,
@@ -7153,6 +7184,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                                 avatar_leaf: p.avatar_leaf,
                                 avatar_leaf_color: p.avatar_leaf_color,
                                 image_url: None,
+                                avatar_version: 0,
                                 description: None,
                                 model: None,
                                 owner: None,

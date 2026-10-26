@@ -16,7 +16,8 @@ use crate::ui::theme::Theme;
 
 use super::pane::{self, Hero, Picture, ProfilePane, Section};
 use super::{
-    chats_of, collect, editable_name, editable_picture, kit, link_list, list_row, HERO_AVATAR,
+    chats_of, collect, editable_name, hero_picture, kit, link_list, list_row, HeroClick,
+    HERO_AVATAR,
 };
 
 pub(super) const TABS: [&str; 2] = ["Links", "Groups"];
@@ -92,7 +93,15 @@ pub(super) fn page(
 
     // ----- hero: picture and name read-only, @handle as the subtitle --------------
     let picture = people::avatar(image, &person, HERO_AVATAR, &theme).into_any_element();
-    let avatar = editable_picture("profile-avatar", picture, None).into_any_element();
+    // A picture opens full-size in the media viewer; initials open nothing.
+    let view_click = (!person.avatar_url.is_empty()).then(|| {
+        let (name, url) = (person.display_name(), person.avatar_url.clone());
+        let f = cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+            this.view_picture(&name, &url, cx);
+        });
+        Box::new(f) as HeroClick
+    });
+    let avatar = hero_picture("profile-avatar", picture, None, view_click).into_any_element();
     let name = editable_name(
         "profile-name",
         &person.display_name(),
@@ -109,6 +118,7 @@ pub(super) fn page(
         subtitle: Some(format!("@{}", person.handle).into()),
         subtitle_color: theme.text_muted,
         subtitle_click: None,
+        subtitle_element: None,
         editor: None,
     };
 
