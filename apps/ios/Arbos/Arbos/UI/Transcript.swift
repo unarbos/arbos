@@ -164,6 +164,9 @@ struct Row: Identifiable, Equatable {
     var reactions: [MessageReaction] = []
     /// How many messages reply to this one via `replyTo` (long-press Reply); shown top-right when > 0.
     var replyCount: Int = 0
+    /// Someone else replied to me or @mentioned me — the bubble uses a distinct tint
+    /// ([feedback app-01M5WCGPB2CKF850WB7DMAD094], Telegram-style highlight).
+    var addressesMe: Bool = false
     /// The message's `createdAt` (ms), so the swipe-revealed time needs no lookup.
     var createdAt: Int64 = 0
     /// Space above this row (8 pt within a run, 24 pt at a sender / turn change,
@@ -470,6 +473,17 @@ enum Transcript {
                }) {
                 chunk[ix].replyCount = count
             }
+            // Replies to me / @mentions of me: tint every prose/media bubble of the message.
+            if Self.addressesMe(message, me: me, byId: byId) {
+                for i in chunk.indices {
+                    switch chunk[i].kind {
+                    case .other, .member, .assistant, .image, .file, .voiceMemo:
+                        chunk[i].addressesMe = true
+                    default:
+                        break
+                    }
+                }
+            }
             // Date separators when the gap is over an hour (Grok: "Today 8:00 AM").
             if dateBreak {
                 rows.append(Row(id: "\(message.id)#date", messageId: message.id, role: .system,
@@ -507,6 +521,23 @@ enum Transcript {
     static func replyParentId(of message: Message) -> Id? {
         if let p = message.replyTo, !p.isEmpty { return p }
         return nil
+    }
+
+    /// True when someone else replied to one of my messages or @mentioned me.
+    /// Own bubbles and plain 1:1 agent answers (`inReplyTo` only) stay unhighlighted.
+    static func addressesMe(_ message: Message, me: String?, byId: [Id: Message]) -> Bool {
+        guard let me, !me.isEmpty else { return false }
+        if message.sender == me || message.sender == "user" { return false }
+        if message.mentions.contains(me) { return true }
+        if let parentId = message.replyTo, !parentId.isEmpty,
+           let parent = byId[parentId],
+           parent.sender == me || parent.sender == "user" {
+            return true
+        }
+        if let ref = message.replyRef, ref.sender == me || ref.sender == "user" {
+            return true
+        }
+        return false
     }
 
     /// How many messages point at each parent via `replyTo`.
@@ -1174,7 +1205,7 @@ struct RowView: View, Equatable {
                 }
                 .padding(.horizontal, Theme.bubbleHPad)
                 .padding(.vertical, Theme.bubbleVPad)
-                .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
+                .background(incomingBubbleFill)
                 .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: false) }
                 .modifier(LiveSenderBar(url: avatar, seed: model.personId(handle: handle) ?? handle))
                 .frame(maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset), alignment: .leading)
@@ -1237,7 +1268,7 @@ struct RowView: View, Equatable {
                 }
                 .padding(.horizontal, Theme.bubbleHPad)
                 .padding(.vertical, Theme.bubbleVPad)
-                .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
+                .background(incomingBubbleFill)
                 .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: false) }
                 .background {
                     // D82: while the first-login terminal morphs into this bubble it
@@ -1459,15 +1490,34 @@ struct RowView: View, Equatable {
             content
                 .padding(.horizontal, Theme.bubbleHPad)
                 .padding(.vertical, Theme.bubbleVPad)
-                .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
+                .background(incomingBubbleFill)
                 .senderBar(LeafArt.accent(agent, dark: theme.isDark))
         } else {
             content
                 .padding(.horizontal, Theme.bubbleHPad)
                 .padding(.vertical, Theme.bubbleVPad)
-                .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
+                .background(incomingBubbleFill)
                 .modifier(LiveSenderBar(url: nil, seed: agent.id, override: agent.effectiveAvatarColorIndex))
         }
+    }
+
+    /// Incoming bubble fill: a soft green wash + outline when the message replies to
+    /// me or @mentions me (Telegram-style; theme `online` green).
+    private var incomingBubbleFill: some View {
+        RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous)
+            .fill(theme.bubbleAssistant)
+            .overlay {
+                if row.addressesMe {
+                    RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous)
+                        .fill(theme.online.opacity(theme.isDark ? 0.16 : 0.12))
+                }
+            }
+            .overlay {
+                if row.addressesMe {
+                    RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous)
+                        .strokeBorder(theme.online.opacity(theme.isDark ? 0.55 : 0.45), lineWidth: 1.5)
+                }
+            }
     }
 
     /// Grok Bot's quote header at the top of a reply bubble: speech-bubble glyph, then the
@@ -1495,6 +1545,8 @@ struct RowView: View, Equatable {
         // Reply in DM (#1836): the quote names its chat; it is a link only when the viewer
         // can open that chat (a member), else just the words.
         let linkable = quote.source.map { model.isMember(ofChat: $0.chatId) } ?? true
+        // Directed-at-me: Telegram's green reply accent on the quote strip.
+        let quoteColor = row.addressesMe ? theme.online : color.opacity(0.72)
         return Button {
             guard linkable else { return }
             onQuoteTap?(quote)
@@ -1516,7 +1568,16 @@ struct RowView: View, Equatable {
                         .truncationMode(.tail)
                 }
             }
-            .foregroundStyle(color.opacity(0.72))
+            .padding(.leading, row.addressesMe ? 10 : 0)
+            .overlay(alignment: .leading) {
+                if row.addressesMe {
+                    Capsule()
+                        .fill(theme.online)
+                        .frame(width: 2)
+                        .accessibilityHidden(true)
+                }
+            }
+            .foregroundStyle(quoteColor)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
