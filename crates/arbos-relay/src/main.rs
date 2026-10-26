@@ -413,6 +413,7 @@ async fn main() -> anyhow::Result<()> {
             put(signin::put_avatar).delete(signin::delete_avatar),
         )
         .route("/avatars/{file}", get(signin::get_avatar))
+        .route("/projects/{file}/avatar.jpg", get(images::project_avatar))
         .route("/me/pushes", get(people::me_pushes))
         .route("/me/unread", get(notify::me_unread))
         .route("/chats/{id}/calls", post(calls::start_people_call))

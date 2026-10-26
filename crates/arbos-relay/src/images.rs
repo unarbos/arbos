@@ -6,7 +6,7 @@
 use std::io::Cursor;
 use std::time::Instant;
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -674,6 +674,57 @@ pub async fn server_avatar_generate(
 
 /// Blob slot prefix for a person's own generated previews: `users:{user_id}`.
 pub const USER_BLOB_PREFIX: &str = "users:";
+
+/// `GET /projects/{id}/avatar.jpg` — the agent's current picture (the blob its `image_key`
+/// names), public like `GET /avatars/{user}.jpg` (the same role as a GitHub CDN avatar URL).
+/// Why not `/blob/{project}/{key}`: that slot is the owner's and the project's guests' (it holds
+/// the agent's working files too), so a viewer who only shares a group with the agent got 403
+/// and drew the automatic leaf instead of the owner's picture (Jacob, 2026-10-25: "Hezbola,
+/// run by @unarbos, purple leaf"). Clients append `?v={avatar_version}`, so a change is a new
+/// URL and the day-long cache never serves the old bytes. 404 while the agent has no picture.
+pub async fn project_avatar(State(state): State<AppState>, Path(file): Path<String>) -> Response {
+    let project_id = file.strip_suffix(".jpg").unwrap_or(file.as_str());
+    let Ok(Some(p)) = state.db.project(project_id) else {
+        return crate::signin::api_error(StatusCode::NOT_FOUND, "not_found", "no such agent");
+    };
+    let Some(key) = p
+        .image_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+    else {
+        return crate::signin::api_error(StatusCode::NOT_FOUND, "not_found", "no picture");
+    };
+    let Some(bytes) = crate::blobs::read(&state, &p.id, key).await else {
+        return crate::signin::api_error(StatusCode::NOT_FOUND, "not_found", "no picture");
+    };
+    let mime = match crate::blobs::stored_image(&state, &p.id, key).await {
+        crate::blobs::StoredImage::Image(kind) => match kind {
+            crate::image_sniff::ImageKind::Png => "image/png",
+            crate::image_sniff::ImageKind::Jpeg => "image/jpeg",
+            crate::image_sniff::ImageKind::Gif => "image/gif",
+            crate::image_sniff::ImageKind::Webp => "image/webp",
+            crate::image_sniff::ImageKind::Heic => "image/heic",
+        },
+        crate::blobs::StoredImage::Missing | crate::blobs::StoredImage::NotAnImage(_) => {
+            return crate::signin::api_error(StatusCode::NOT_FOUND, "not_found", "no picture")
+        }
+    };
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static(mime),
+            ),
+            (
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("public, max-age=86400"),
+            ),
+        ],
+        bytes,
+    )
+        .into_response()
+}
 
 /// The image provider's last health probe: `GET {images_base}/models/{first avatar model}` with
 /// the relay's key — no generation, no spend — so an outage, a revoked key or a retired model

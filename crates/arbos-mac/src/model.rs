@@ -114,6 +114,11 @@ pub struct Project {
     /// the avatar loader can fetch; `None` = the initials disc.
     #[serde(default)]
     pub image_url: Option<String>,
+    /// The relay's stamp (ms) of the agent's last avatar change (`ProjectDto.avatar_version`);
+    /// `0` when unknown. Among the copies of one agent (this record, every roster) the highest
+    /// stamp is drawn, so a change never flips back (Jacob, 2026-10-25).
+    #[serde(default)]
+    pub avatar_version: i64,
     /// "Who may message X" (agent-to-agent messaging): other owners' people / agents the
     /// owner allowed to message this agent. Empty unless I own it.
     #[serde(default)]
@@ -939,6 +944,10 @@ pub struct AgentMember {
     /// fetches; wins over the leaf.
     #[serde(default)]
     pub image_url: Option<String>,
+    /// The relay's stamp of the agent's last avatar change (same value as the owner's
+    /// `Project.avatar_version`); `0` when the roster copy has none.
+    #[serde(default)]
+    pub avatar_version: i64,
     /// API §9: the agent's description and talking model.
     #[serde(default)]
     pub description: Option<String>,
@@ -1011,6 +1020,7 @@ impl From<AgentMemberWire> for AgentMember {
             avatar_leaf: w.avatar_leaf_effective.or(w.avatar_leaf),
             avatar_leaf_color: w.avatar_leaf_color_effective.or(w.avatar_leaf_color),
             image_url: None,
+            avatar_version: 0,
             description: w.description,
             model: w.model,
             owner: w.owner,

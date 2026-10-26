@@ -320,6 +320,9 @@ pub struct Shell {
     )>,
     /// The channel menu's Delete was clicked once: it shows "Delete #name?" with Cancel / Delete.
     pub(crate) channel_delete_armed: bool,
+    /// The pointer over the agent pane's "Run by …" owner link (the mention
+    /// chip's hover / pressed fade, [feedback agent-pane-run-by-link-mac-2026-10-25]).
+    pub(crate) run_by_chip: crate::ui::mention::ChipPointer<()>,
     /// Group pane › Members: the row whose ✕ was clicked (`user:<id>` or
     /// `agent:<project>`); it shows "Remove … ?" with Cancel / Remove.
     pub(crate) member_remove_armed: Option<String>,
@@ -931,6 +934,7 @@ impl Shell {
             row_menu: None,
             channel_menu: None,
             channel_delete_armed: false,
+            run_by_chip: Default::default(),
             member_remove_armed: None,
             device_revoke_armed: None,
             member_menu: None,
@@ -1981,6 +1985,15 @@ impl Shell {
         });
         let handle = self.agent_name_input.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    /// A profile picture full-size in the media viewer (Jacob, 2026-10-25): the hero of a pane I
+    /// cannot edit, or the picker's View. Closes the picker when it is up.
+    pub(crate) fn view_picture(&mut self, name: &str, url: &str, cx: &mut Context<Self>) {
+        self.avatar_picker = None;
+        self.state
+            .update(cx, |s, cx| s.open_picture_viewer(name, url, cx));
         cx.notify();
     }
 
