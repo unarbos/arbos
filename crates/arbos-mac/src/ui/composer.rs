@@ -20,8 +20,8 @@ use gpui::{
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
     FontWeight, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PaintQuad, Pixels, Point,
-    Render, RenderImage, SharedString, Style, TextAlign, TextRun, UTF16Selection, UnderlineStyle,
-    Window, WrappedLine,
+    Render, RenderImage, ScrollWheelEvent, SharedString, Style, TextAlign, TextRun, UTF16Selection,
+    UnderlineStyle, Window, WrappedLine,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -218,6 +218,10 @@ pub struct ComposerInput {
     chip_cursor: CursorStyle,
     /// Vertical scroll inside the box once it reaches `MAX_LINES`.
     scroll_y: f32,
+    /// Caret offset we last scrolled into view. Wheel scroll leaves this
+    /// alone so the user can read earlier lines without the caret yanking
+    /// the viewport back; the next caret move follows again.
+    last_followed_caret: Option<usize>,
     /// Prior text states for ⌘Z (paste, word-delete, typing, cut).
     undo_stack: Vec<EditSnapshot>,
     /// States undone by ⌘Z, waiting for ⌘⇧Z.
@@ -277,6 +281,7 @@ impl ComposerInput {
             #[cfg(test)]
             chip_cursor: CursorStyle::Arrow,
             scroll_y: 0.0,
+            last_followed_caret: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             on_submit: None,
@@ -516,6 +521,7 @@ impl ComposerInput {
         self.selection_reversed = false;
         self.marked_range = None;
         self.scroll_y = 0.0;
+        self.last_followed_caret = None;
         self.undo_stack.clear();
         self.redo_stack.clear();
         cx.notify();
@@ -552,6 +558,7 @@ impl ComposerInput {
         self.selection_reversed = false;
         self.marked_range = None;
         self.scroll_y = 0.0;
+        self.last_followed_caret = None;
         self.undo_stack.clear();
         self.redo_stack.clear();
         cx.notify();
@@ -1030,6 +1037,45 @@ impl ComposerInput {
         }
     }
 
+    /// Wheel / trackpad over a tall field: scroll the text. When the field is
+    /// not overflowing (or the gesture is already at the edge), leave the
+    /// event alone so the chat column can still scroll the transcript
+    /// ([feedback app-01M5PDB3QYAPBPA4FJXZE1FFD0]).
+    fn on_scroll_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(layout) = self.layout.as_ref() else {
+            return;
+        };
+        let lh = px(INPUT_LINE_HEIGHT);
+        let total_h: f32 = layout
+            .lines
+            .iter()
+            .map(|(_, line)| f32::from(line.size(lh).height))
+            .sum();
+        let visible_h = f32::from(layout.bounds.size.height);
+        let max_scroll = (total_h - visible_h).max(0.0);
+        if max_scroll <= 0.0 {
+            return;
+        }
+        let dy = f32::from(event.delta.pixel_delta(lh).y);
+        if dy == 0.0 {
+            return;
+        }
+        // Positive delta = scroll up (toward earlier lines), same as the
+        // transcript wheel handler: lower scroll_y to reveal content above.
+        let next = (self.scroll_y - dy).clamp(0.0, max_scroll);
+        if (next - self.scroll_y).abs() < f32::EPSILON {
+            return;
+        }
+        self.scroll_y = next;
+        cx.stop_propagation();
+        cx.notify();
+    }
+
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
         cx.notify()
@@ -1050,9 +1096,19 @@ impl ComposerInput {
         let Some(layout) = self.layout.as_ref() else {
             return 0;
         };
+        // Paint shifts lines by -scroll_y; hit-test against that same origin
+        // so a click on the visible top line lands on the scrolled content,
+        // not on line 0 of the buffer.
+        let origin = Bounds::new(
+            point(
+                layout.bounds.left(),
+                layout.bounds.top() - px(self.scroll_y),
+            ),
+            layout.bounds.size,
+        );
         let ix = index_for_position(
             &layout.lines,
-            layout.bounds,
+            origin,
             position,
             self.content.len(),
             self.text_center,
@@ -1489,6 +1545,7 @@ impl EntityInputHandler for ComposerInput {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
+        // index_for_mouse_position already accounts for scroll_y.
         let ix = self.index_for_mouse_position(point);
         Some(self.offset_to_utf16(ix))
     }
@@ -1677,13 +1734,16 @@ impl Element for InputElement {
         }
 
         // Keep the caret inside the visible box once the text is taller than
-        // MAX_LINES; everything below is painted shifted by -scroll_y.
+        // MAX_LINES — but only when the caret moved. A wheel scroll must be
+        // able to leave the caret off-screen so the user can read and click
+        // earlier lines ([feedback app-01M5WFMSH4MHQC89649SHW7CSH]).
         let total_h: f32 = lines
             .iter()
             .map(|(_, l)| f32::from(l.size(lh).height))
             .sum();
         let visible_h = f32::from(bounds.size.height);
         let mut scroll_y = input.scroll_y;
+        let follow_caret = input.last_followed_caret != Some(cursor);
         let cursor_pos = if content.is_empty() {
             let ox = lines
                 .first()
@@ -1699,12 +1759,14 @@ impl Element for InputElement {
         } else {
             position_for_index(&lines, cursor, bounds.size.width, text_center)
         };
-        if let Some(p) = cursor_pos {
-            let cy = f32::from(p.y);
-            if cy < scroll_y {
-                scroll_y = cy;
-            } else if cy + f32::from(lh) > scroll_y + visible_h {
-                scroll_y = cy + f32::from(lh) - visible_h;
+        if follow_caret {
+            if let Some(p) = cursor_pos {
+                let cy = f32::from(p.y);
+                if cy < scroll_y {
+                    scroll_y = cy;
+                } else if cy + f32::from(lh) > scroll_y + visible_h {
+                    scroll_y = cy + f32::from(lh) - visible_h;
+                }
             }
         }
         scroll_y = scroll_y.clamp(0.0, (total_h - visible_h).max(0.0));
@@ -1930,6 +1992,9 @@ impl Element for InputElement {
                 chips: chip_rects,
             });
             input.scroll_y = scroll_y;
+            // Remember the caret we just (or previously) kept in view so a
+            // later wheel scroll is not undone on the next frame.
+            input.last_followed_caret = Some(input.cursor_offset());
         });
         // First layout after a width change, a big insert, or a programmatic
         // `set_text`: re-layout once more with the measured height. A notify is
@@ -2159,6 +2224,7 @@ impl Render for ComposerInput {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .line_height(px(INPUT_LINE_HEIGHT))
             .text_size(px(self.font_size))
             .child(InputElement { input: cx.entity() })
