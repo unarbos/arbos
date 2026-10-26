@@ -252,7 +252,7 @@ final class SessionRoomTests: XCTestCase {
         var unavailableCalls = 0
         var pushRefusedCalls = 0
         room.onUnavailable = { unavailableCalls += 1 }
-        room.onPushRefused = { pushRefusedCalls += 1 }
+        room.onPushRefused = { _, _ in pushRefusedCalls += 1 }
         room.start()
         try await waitUntil { sockets.sockets.count == 1 }
         let sock = try XCTUnwrap(sockets.current)

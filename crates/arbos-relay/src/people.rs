@@ -3334,11 +3334,17 @@ fn group_invite_page_with_head(head: &str, body: &str) -> Response {
 // ---- room hooks ---------------------------------------------------------------------------------
 
 /// Why a row push into a people room was refused (sent back as an `error` frame).
+#[derive(Debug)]
 pub enum PushRefused {
     /// Over the message rate limit. `retry_s` is seconds until the oldest counted event leaves
     /// the 60 s window (carried as `retryS` on the error frame).
     RateLimited {
         retry_s: i64,
+    },
+    /// Admin muted this member from posting. `until_ms` is when the mute ends (epoch ms);
+    /// `None` = until unmuted (carried as `untilMs` on the error frame when set).
+    Muted {
+        until_ms: Option<i64>,
     },
     NotAvailable,
 }
@@ -3347,6 +3353,7 @@ impl PushRefused {
     pub fn code(&self) -> &'static str {
         match self {
             PushRefused::RateLimited { .. } => "rate_limited",
+            PushRefused::Muted { .. } => "muted",
             PushRefused::NotAvailable => "not_available",
         }
     }
@@ -3354,6 +3361,7 @@ impl PushRefused {
     pub fn message(&self) -> &'static str {
         match self {
             PushRefused::RateLimited { .. } => "slow down",
+            PushRefused::Muted { .. } => "you are muted in this chat",
             PushRefused::NotAvailable => "this chat is not available",
         }
     }
@@ -3361,7 +3369,14 @@ impl PushRefused {
     pub fn retry_s(&self) -> Option<i64> {
         match self {
             PushRefused::RateLimited { retry_s } => Some(*retry_s),
-            PushRefused::NotAvailable => None,
+            PushRefused::Muted { .. } | PushRefused::NotAvailable => None,
+        }
+    }
+
+    pub fn until_ms(&self) -> Option<i64> {
+        match self {
+            PushRefused::Muted { until_ms } => *until_ms,
+            PushRefused::RateLimited { .. } | PushRefused::NotAvailable => None,
         }
     }
 }
@@ -3385,12 +3400,14 @@ pub fn on_room_push(
         return Err(PushRefused::NotAvailable);
     }
     // Admin mute from posting: silenced members cannot send into the room.
-    if cm
+    if let Some(m) = cm
         .members
         .iter()
-        .any(|m| m.user_id() == Some(user_id.as_str()) && membership_is_silenced(m))
+        .find(|m| m.user_id() == Some(user_id.as_str()) && membership_is_silenced(m))
     {
-        return Err(PushRefused::NotAvailable);
+        return Err(PushRefused::Muted {
+            until_ms: m.silenced_until,
+        });
     }
     let limit = if young_account(state, user_id) {
         MSGS_PER_MIN / 2
@@ -4011,14 +4028,45 @@ mod agent_tests {
             .unwrap()
             .unwrap();
         assert!(m.silenced);
+        let muted = on_room_push(&state, &bob_dev, &chat).unwrap_err();
         assert!(
-            on_room_push(&state, &bob_dev, &chat).is_err(),
-            "a muted member cannot post"
+            matches!(muted, PushRefused::Muted { until_ms: None }),
+            "a muted member gets muted, not not_available: {muted:?}"
         );
+        assert_eq!(muted.code(), "muted");
+        assert_eq!(muted.until_ms(), None);
         assert!(
             on_room_push(&state, &alice_dev, &chat).is_ok(),
             "owner still posts"
         );
+        // Unknown chat still refuses as not_available (not muted).
+        let missing = on_room_push(&state, &bob_dev, "chat_missing").unwrap_err();
+        assert!(matches!(missing, PushRefused::NotAvailable));
+        assert_eq!(missing.code(), "not_available");
+
+        // Timed mute carries untilMs.
+        let until = now_ms() + 3_600_000;
+        let r = member_patch(
+            State(state.clone()),
+            alice_dev.clone(),
+            Path((chat.clone(), bob.clone())),
+            Json(MemberPatchBody {
+                silenced: Some(true),
+                silenced_until: Some(until),
+                role: None,
+                can_mute_ban: None,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let timed = on_room_push(&state, &bob_dev, &chat).unwrap_err();
+        assert!(matches!(
+            timed,
+            PushRefused::Muted {
+                until_ms: Some(u)
+            } if u == until
+        ));
+        assert_eq!(timed.until_ms(), Some(until));
 
         // Ban Bob — removed and cannot rejoin.
         let mut ban_q = std::collections::HashMap::new();

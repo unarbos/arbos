@@ -485,6 +485,9 @@ pub struct AppState {
     /// Rooms whose pushes were refused (`not_available`); the chat view can show a notice.
     /// Cleared when that room's next ACK arrives.
     pub push_refused: HashSet<Id>,
+    /// Rooms refused with `muted`: chat id → mute end (epoch ms), or `None` until unmuted.
+    /// Cleared on ACK; the composer also hides the banner when a timed mute ends.
+    pub push_muted: HashMap<Id, Option<i64>>,
     pub selected_project: Option<Id>,
     /// Bytes and chats kept on this Mac by the on-device store (Settings → About).
     pub store_usage: (i64, i64),
@@ -949,6 +952,7 @@ impl AppState {
             thumbnails_failed: HashSet::new(),
             notices: Vec::new(),
             push_refused: HashSet::new(),
+            push_muted: HashMap::new(),
             selected_project: None,
             store_usage: (0, 0),
             active_tab: HashMap::new(),
@@ -1373,6 +1377,7 @@ impl AppState {
                 self.device_id = None;
                 self.room_links.clear();
                 self.push_refused.clear();
+                self.push_muted.clear();
                 self.relay_link = (LinkState::Live, 0);
                 self.people_directory.clear();
                 cx.notify();
@@ -1677,15 +1682,34 @@ impl AppState {
                 self.push_notice(text);
                 cx.notify();
             }
-            SyncEvent::PushRefused { chat_id, refused } => {
+            SyncEvent::PushRefused {
+                chat_id,
+                refused,
+                code,
+                until_ms,
+            } => {
                 const DELIVERY: &str = "Messages in this chat are not being delivered";
                 if refused {
-                    self.push_refused.insert(chat_id);
-                    // Notice is also emitted from the room host; keep the flag here
-                    // so the chat view can show it until the room's next ACK.
+                    if code == "muted" {
+                        self.push_muted.insert(chat_id.clone(), until_ms);
+                        // Mirror onto the people space so the banner shows from roster data too.
+                        if let Some(p) = self.projects.iter_mut().find(|p| p.id == chat_id) {
+                            p.silenced = true;
+                            p.silenced_until = until_ms;
+                        }
+                    } else {
+                        self.push_refused.insert(chat_id);
+                        // Notice is also emitted from the room host; keep the flag here
+                        // so the chat view can show it until the room's next ACK.
+                    }
                 } else {
                     self.push_refused.remove(&chat_id);
+                    self.push_muted.remove(&chat_id);
                     self.notices.retain(|n| n.text != DELIVERY);
+                    if let Some(p) = self.projects.iter_mut().find(|p| p.id == chat_id) {
+                        p.silenced = false;
+                        p.silenced_until = None;
+                    }
                 }
                 cx.notify();
             }

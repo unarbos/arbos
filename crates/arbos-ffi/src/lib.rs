@@ -99,9 +99,12 @@ pub enum RoomAction {
         code: String,
         message: String,
     },
-    /// A `not_available` push refusal on this connection (`batchId` from the error).
+    /// A push refusal on this connection (`not_available` or `muted`; `batchId` from the error).
+    /// `until_ms` is set on timed `muted` refusals (epoch ms).
     PushRefused {
         batch_id: Option<String>,
+        code: String,
+        until_ms: Option<i64>,
     },
     Presence {
         device: Option<String>,
@@ -157,7 +160,15 @@ impl From<ClientAction> for RoomAction {
                 after_ms: after.as_millis() as u64,
             },
             ClientAction::SessionError { code, message } => Self::SessionError { code, message },
-            ClientAction::PushRefused { batch_id } => Self::PushRefused { batch_id },
+            ClientAction::PushRefused {
+                batch_id,
+                code,
+                until_ms,
+            } => Self::PushRefused {
+                batch_id,
+                code,
+                until_ms,
+            },
             ClientAction::Presence {
                 device,
                 handle,

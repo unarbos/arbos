@@ -45,8 +45,9 @@ final class SessionRoom {
     var onPresence: (([String: Any]) -> Void)?
     /// Relay rejected this room (HTTP 403/404); caller should refresh membership.
     var onUnavailable: (() -> Void)?
-    /// A push was refused with `not_available` on this connection; stay connected.
-    var onPushRefused: (() -> Void)?
+    /// A push was refused (`not_available` or `muted`) on this connection; stay connected.
+    /// `untilMs` is set on timed `muted` refusals (epoch ms).
+    var onPushRefused: ((_ code: String, _ untilMs: Int64?) -> Void)?
     var presenceUser: () -> (id: String, handle: String)? = { nil }
     /// Read receipt (Mac `presence_header` `seen`): the newest message id of this people chat,
     /// sent while it is focused so peers can lift their own bubbles to full opacity.
@@ -424,15 +425,16 @@ final class SessionRoom {
             // The relay restarts in a few seconds (#1340): the pill says so; the clean close that follows redials.
             if code == "restart_soon" { onLinkState?(.restartSoon); return }
             // Push refused for this connection — stay connected; `pushRefused` carries the notice.
-            if code == "not_available" {
-                lastError = "\(roomChat): not_available"
+            if code == "not_available" || code == "muted" {
+                lastError = "\(roomChat): \(code)"
                 NSLog("relay room \(roomChat): error \(code): \(message)")
                 return
             }
             NSLog("relay room \(roomChat): error \(code): \(message)")
-        case .pushRefused(_):
-            lastError = "\(roomChat): not_available"
-            onPushRefused?()
+        case .pushRefused(let batchId, let code, let untilMs):
+            _ = batchId
+            lastError = "\(roomChat): \(code)"
+            onPushRefused?(code, untilMs)
         case .presence(_, _, let typing, _, let mine, let headerJson):
             guard !mine else { return }
             if let data = headerJson.data(using: .utf8),

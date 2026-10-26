@@ -756,9 +756,9 @@ struct ChatSession: View {
                             .frame(maxWidth: .infinity)
                             .frame(height: Theme.fieldHeight)
                             .accessibilityIdentifier("channel-read-only")
-                    } else if isPeople, people?.isSilencedNow == true {
+                    } else if isPeople, let banner = MuteBanner.text(people: people, pushMutedUntil: model.pushMutedUntil(chatId)) {
                         // Group admin muted me from posting — one quiet line, no composer.
-                        Text("You've been muted in this group")
+                        Text(banner)
                             .font(theme.font(Theme.small))
                             .foregroundStyle(theme.muted)
                             .frame(maxWidth: .infinity)

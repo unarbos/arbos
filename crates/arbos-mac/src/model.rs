@@ -82,6 +82,12 @@ pub struct Project {
     /// People chats: my `me.muted` on the relay (synced across devices).
     #[serde(default)]
     pub muted: bool,
+    /// People chats: an admin muted me from posting (not notification mute).
+    #[serde(default)]
+    pub silenced: bool,
+    /// When my admin mute ends (epoch ms). `None` while muted = until unmuted.
+    #[serde(default)]
+    pub silenced_until: Option<i64>,
     /// Sidebar archive (2026-10-23): hidden from the list for me, on every
     /// device (the relay's per-user flag); the agent keeps running.
     #[serde(default)]
@@ -195,6 +201,14 @@ impl Project {
 
     pub fn is_people(&self) -> bool {
         matches!(self.kind, SpaceKind::Dm | SpaceKind::Group)
+    }
+
+    /// True while an admin mute still blocks posting (honours timed `silenced_until`).
+    pub fn is_silenced_now(&self) -> bool {
+        if !self.silenced {
+            return false;
+        }
+        !matches!(self.silenced_until, Some(until) if until <= now_ms() as i64)
     }
 
     /// A people group chat (several humans, no project).

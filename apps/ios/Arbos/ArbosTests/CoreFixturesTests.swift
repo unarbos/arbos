@@ -819,6 +819,30 @@ final class CoreFixturesTests: XCTestCase {
         XCTAssertNil(merged.chats["gone"])
     }
 
+    func testMuteBannerTextWithAndWithoutEndTime() throws {
+        XCTAssertEqual(MuteBanner.text(untilMs: nil), "You're muted in this chat")
+        let until = Int64(1_900_000_000_000) // fixed epoch ms with a wall-clock time
+        let timed = MuteBanner.text(untilMs: until)
+        XCTAssertTrue(timed.hasPrefix("You're muted in this chat until "), timed)
+        XCTAssertNotEqual(timed, "You're muted in this chat")
+
+        var chat = try XCTUnwrap(PeopleChat.parse(try apiFixtureJSON("people_chat_json_with_me.json")))
+        chat.silenced = true
+        chat.silencedUntil = nil
+        XCTAssertEqual(
+            MuteBanner.text(people: chat, pushMutedUntil: nil),
+            "You're muted in this chat"
+        )
+        chat.silencedUntil = until
+        let fromRoster = try XCTUnwrap(MuteBanner.text(people: chat, pushMutedUntil: nil))
+        XCTAssertTrue(fromRoster.hasPrefix("You're muted in this chat until "), fromRoster)
+        // Push refusal wins over roster when present.
+        XCTAssertEqual(
+            MuteBanner.text(people: chat, pushMutedUntil: Optional.some(nil)),
+            "You're muted in this chat"
+        )
+    }
+
     private static func fixtureProject(id: String, name: String) -> Project {
         Project(
             id: id,

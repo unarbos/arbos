@@ -263,11 +263,15 @@ pub enum SyncEvent {
     RelayLink(LinkState),
     /// Short user-facing notice (errors from HTTP calls, etc.).
     Notice(String),
-    /// A room's pushes were refused (`not_available`) or an ACK cleared that refusal.
-    /// `refused: true` → show one notice and keep a per-room flag; `false` → clear both.
+    /// A room's pushes were refused (`not_available` / `muted`) or an ACK cleared that refusal.
+    /// `refused: true` → show a per-room notice; `false` → clear it.
+    /// `code` is `"muted"` / `"not_available"` while refused; empty when cleared.
+    /// `until_ms` is set on timed `muted` refusals (epoch ms).
     PushRefused {
         chat_id: Id,
         refused: bool,
+        code: String,
+        until_ms: Option<i64>,
     },
     /// Settings → Connectors: catalog + connected accounts (F1).
     Connectors(ConnectorsView),

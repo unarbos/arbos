@@ -40,6 +40,41 @@ use crate::ui::theme::{
 use crate::ui::transcript;
 use crate::ui::voice::{render_recording_row, Voice, VoiceEvent};
 
+/// One-line composer banner while an admin mute blocks posting.
+/// `until_ms` is epoch ms when the mute ends; `None` = until unmuted.
+pub fn mute_banner_text(until_ms: Option<i64>) -> String {
+    match until_ms.and_then(mute_until_clock) {
+        Some(when) => format!("You're muted in this chat until {when}"),
+        None => "You're muted in this chat".to_string(),
+    }
+}
+
+fn mute_until_clock(ms: i64) -> Option<String> {
+    use chrono::{Local, TimeZone};
+    if ms <= 0 {
+        return None;
+    }
+    Local
+        .timestamp_millis_opt(ms)
+        .single()
+        .map(|t| t.format("%-I:%M %p").to_string())
+}
+
+/// Active mute end time for this chat: push refusal first, else roster `silenced_until`.
+fn active_mute_until(state: &AppState, chat_id: &str) -> Option<Option<i64>> {
+    if let Some(until) = state.push_muted.get(chat_id) {
+        if until.is_some_and(|u| u <= crate::model::now_ms() as i64) {
+            return None;
+        }
+        return Some(*until);
+    }
+    let space = state.project(chat_id)?;
+    if !space.is_silenced_now() {
+        return None;
+    }
+    Some(space.silenced_until)
+}
+
 actions!(
     composer,
     [
@@ -2971,6 +3006,22 @@ impl Render for Composer {
         }
         let mode = self.mode(cx);
         let state = self.state.read(cx);
+        // Admin mute: replace the composer with one quiet line (roster or push refusal).
+        if let Some(chat_id) = state.active_chat_id() {
+            if let Some(until) = active_mute_until(state, &chat_id) {
+                let banner = mute_banner_text(until);
+                return div()
+                    .id("composer-muted")
+                    .w_full()
+                    .h(px(COMPOSER_HEIGHT))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(TEXT_SMALL))
+                    .text_color(theme.text_muted)
+                    .child(banner);
+            }
+        }
         let space = state.selected().cloned();
         let voice_mode = state.voice_mode;
         let running = state
@@ -3009,9 +3060,10 @@ impl Render for Composer {
             )
         };
         // Per-room push refusal (`not_available`): keep the link live, show one muted line.
+        // Muted refusals use the banner above, not this delivery notice.
         let delivery_notice = state
             .active_chat_id()
-            .filter(|id| state.push_refused.contains(id))
+            .filter(|id| state.push_refused.contains(id) && !state.push_muted.contains_key(id))
             .map(|_| "Messages in this chat are not being delivered".to_string());
         let in_livekit = state.my_call.is_some();
         let has_text = !self.input.read(cx).text().trim().is_empty();
@@ -3784,6 +3836,30 @@ mod tests {
             id: gpui::hash(&bytes),
             bytes,
         }
+    }
+
+    #[test]
+    fn mute_banner_without_end_time() {
+        assert_eq!(mute_banner_text(None), "You're muted in this chat");
+    }
+
+    #[test]
+    fn mute_banner_with_end_time() {
+        use chrono::{Local, TimeZone};
+        let until = Local
+            .with_ymd_and_hms(2030, 6, 15, 15, 0, 0)
+            .single()
+            .expect("local")
+            .timestamp_millis();
+        let text = mute_banner_text(Some(until));
+        assert!(
+            text.starts_with("You're muted in this chat until "),
+            "{text}"
+        );
+        assert!(
+            text.contains("3:00 PM") || text.contains("15:00"),
+            "expected a 3:00 PM-style clock in {text}"
+        );
     }
 
     #[test]

@@ -686,6 +686,8 @@ pub(crate) fn project_from_dto(
         owner_person: Some(Person::from(&p.owner)),
         machine_info: Some(machine_from_dto(&p.machine)),
         muted: false,
+        silenced: false,
+        silenced_until: None,
         primary_chat: p.primary_chat_id.as_deref().and_then(non_empty),
         voice: p.voice.as_deref().and_then(non_empty),
         vision_enabled: p.vision_enabled,
@@ -997,6 +999,13 @@ pub(crate) fn people_space_from(
         owner_person: None,
         machine_info: None,
         muted: dto.me.muted.unwrap_or(false),
+        silenced: dto.me.silenced.unwrap_or(false),
+        silenced_until: dto
+            .me
+            .silenced
+            .unwrap_or(false)
+            .then_some(dto.me.silenced_until)
+            .flatten(),
         archived_at: None,
         primary_chat: None,
         voice: None,

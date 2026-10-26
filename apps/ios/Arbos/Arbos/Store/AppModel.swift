@@ -706,6 +706,8 @@ final class AppModel: ObservableObject {
     /// Rooms whose pushes were refused with `not_available` on the live connection.
     /// Cleared by that room's next ACK (not by another room's ACK).
     private var pushRefused: Set<Id> = []
+    /// Rooms refused with `muted`: chat id → mute end (epoch ms), or nil until unmuted.
+    private var pushMuted: [Id: Int64?] = []
     /// Rooms with a full re-read scheduled by `requestSnapshot` (one per coalesce window).
     private var snapshotPending: Set<Id> = []
     /// When each room's transcript was last re-read from its doc (`Date` seconds).
@@ -2003,10 +2005,14 @@ final class AppModel: ObservableObject {
             // Project-doc writes are not user bubbles; clearing a global set here
             // used to leave people-chat messages stuck at pending opacity.
             guard let self, !isProjectDoc else { return }
-            if self.pushRefused.remove(key) != nil {
-                if self.notice?.text == "Messages in this chat are not being delivered" {
-                    self.notice = nil
-                }
+            let clearedRefused = self.pushRefused.remove(key) != nil
+            let clearedMuted = self.pushMuted.removeValue(forKey: key) != nil
+            if clearedRefused, self.notice?.text == "Messages in this chat are not being delivered" {
+                self.notice = nil
+            }
+            if clearedMuted, let i = self.peopleChats.firstIndex(where: { $0.id == key }) {
+                self.peopleChats[i].silenced = false
+                self.peopleChats[i].silencedUntil = nil
             }
             guard self.unacked[key] != nil else { return }
             self.unacked[key] = nil
@@ -2026,9 +2032,15 @@ final class AppModel: ObservableObject {
         room.onUnavailable = { [weak self] in
             Task { @MainActor in self?.handleRoomUnavailable(key: key) }
         }
-        room.onPushRefused = { [weak self] in
+        room.onPushRefused = { [weak self] code, untilMs in
             guard let self, !isProjectDoc else { return }
-            if self.pushRefused.insert(key).inserted {
+            if code == "muted" {
+                self.pushMuted[key] = untilMs
+                if let i = self.peopleChats.firstIndex(where: { $0.id == key }) {
+                    self.peopleChats[i].silenced = true
+                    self.peopleChats[i].silencedUntil = untilMs
+                }
+            } else if self.pushRefused.insert(key).inserted {
                 self.notice = Notice(text: "Messages in this chat are not being delivered")
             }
         }
@@ -2086,6 +2098,7 @@ final class AppModel: ObservableObject {
         roomLinkSince[key] = nil
         unacked[key] = nil
         pushRefused.remove(key)
+        pushMuted.removeValue(forKey: key)
         roomCreatedAt[key] = nil
         roomRestoredCursors[key] = nil
         roomUnavailableFailures[key] = nil
@@ -2574,6 +2587,12 @@ final class AppModel: ObservableObject {
     var myUserId: String? { user.map { "user:\($0.id)" } }
 
     func peopleChat(_ id: String) -> PeopleChat? { peopleChats.first { $0.id == id } }
+
+    /// Live `muted` push refusal for this chat, if any (`Optional.some(nil)` = until unmuted).
+    func pushMutedUntil(_ chatId: String) -> Int64?? {
+        guard let wrapped = pushMuted[chatId] else { return nil }
+        return Optional.some(wrapped)
+    }
 
     func isPeopleChat(_ id: String) -> Bool { peopleChat(id) != nil }
 

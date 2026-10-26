@@ -110,6 +110,35 @@ struct ChatMember: Identifiable, Equatable {
     }
 }
 
+/// Composer banner while an admin mute blocks posting.
+enum MuteBanner {
+    /// One-line copy: "You're muted in this chat" plus "until 3:00 PM" when timed.
+    static func text(untilMs: Int64?) -> String {
+        guard let untilMs, untilMs > 0 else {
+            return "You're muted in this chat"
+        }
+        let date = Date(timeIntervalSince1970: TimeInterval(untilMs) / 1000)
+        let f = DateFormatter()
+        f.dateStyle = .none
+        f.timeStyle = .short
+        return "You're muted in this chat until \(f.string(from: date))"
+    }
+
+    /// Banner when the roster or a live push refusal says I am muted; `nil` when I can post.
+    static func text(people: PeopleChat?, pushMutedUntil: Int64??) -> String? {
+        if let wrapped = pushMutedUntil {
+            let now = Int64(Date().timeIntervalSince1970 * 1000)
+            if wrapped.map({ $0 > now }) != Some(false) {
+                // Indefinite (`nil`) or still in the future.
+                return text(untilMs: wrapped)
+            }
+            // Timed push mute ended — fall through to roster.
+        }
+        guard let people, people.isSilencedNow else { return nil }
+        return text(untilMs: people.silencedUntil)
+    }
+}
+
 /// How long an admin mute lasts when silencing a group member from posting.
 enum MemberMuteDuration: CaseIterable, Identifiable {
     case oneHour

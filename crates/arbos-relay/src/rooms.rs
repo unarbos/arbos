@@ -217,7 +217,8 @@ fn error_frame(code: &str, message: &str) -> Message {
     )
 }
 
-/// People-push refusal: always carries `batchId`; `rate_limited` also carries `retryS`.
+/// People-push refusal: always carries `batchId`; `rate_limited` also carries `retryS`;
+/// `muted` carries `untilMs` when the mute has an end time.
 fn push_refused_frame(refused: &people::PushRefused, batch_id: &str) -> Message {
     let mut header = json!({
         "code": refused.code(),
@@ -226,6 +227,9 @@ fn push_refused_frame(refused: &people::PushRefused, batch_id: &str) -> Message 
     });
     if let Some(retry_s) = refused.retry_s() {
         header["retryS"] = json!(retry_s);
+    }
+    if let Some(until_ms) = refused.until_ms() {
+        header["untilMs"] = json!(until_ms);
     }
     frame(FrameType::Error, header, Bytes::new())
 }
