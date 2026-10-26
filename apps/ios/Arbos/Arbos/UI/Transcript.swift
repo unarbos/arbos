@@ -1240,7 +1240,8 @@ struct RowView: View, Equatable {
         case .image(let item, let fromUser, let caption):
             HStack {
                 if fromUser { Spacer(minLength: 0) }
-                ImageBubble(item: item, chatId: chatId, fromUser: fromUser, maxWidth: maxBubble, caption: caption)
+                ImageBubble(item: item, chatId: chatId, fromUser: fromUser, maxWidth: maxBubble, caption: caption,
+                            mentions: mentions)
                     .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: fromUser) }
                 if !fromUser { Spacer(minLength: 0) }
             }
@@ -1999,8 +2000,14 @@ struct AvatarCluster: View {
 /// picture is its own bubble — uniform margins trimmed, aspect-fit at the
 /// bubble radius, no frame and no footer (Download / Forward live in the viewer
 /// it opens). Loaded with the device bearer (same as voice memos).
-/// When the send carried a description, a caption bar sits under the picture
-/// in the same bubble so the note is not a second message.
+/// When the send carried a description, the caption sits under the picture in
+/// the same rounded bubble so the note is not a second message — and that bubble
+/// is a normal text bubble in width: the caption wraps at the bubble cap
+/// (`maxWidth`), never at the picture's own width, which for a portrait
+/// screenshot is a ~150 pt sliver ([feedback image-caption-bubble-ios-2026-10-25]).
+/// A picture narrower than its bubble (portrait + long caption) sits centred at
+/// the top with a small inset and its own radius; one that spans the bubble is
+/// flush, exactly as a picture-only bubble.
 struct ImageBubble: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -2009,6 +2016,7 @@ struct ImageBubble: View {
     let fromUser: Bool
     let maxWidth: CGFloat
     var caption: String? = nil
+    var mentions: MentionTable? = nil
 
     @State private var image: UIImage?
     @State private var failed = false
@@ -2018,10 +2026,18 @@ struct ImageBubble: View {
     static let maxHeight: CGFloat = 320
     static let minWidth: CGFloat = 120
     static let placeholder = CGSize(width: 240, height: 160)
+    /// A picture narrower than its bubble: this far from the top (and centred), with
+    /// `pictureRadius` corners, so it reads as a photo inside the bubble, not a sliver
+    /// glued to one edge.
+    static let pictureInset: CGFloat = 8
+    static let pictureRadius: CGFloat = Theme.bubbleRadius - pictureInset
 
     private var bubbleWidth: CGFloat { min(280, maxWidth) }
     private var fill: Color { fromUser ? theme.bubbleUser : theme.bubbleAssistant }
-    private var captionText: String? {
+    private var captionText: String? { Self.captionText(caption) }
+
+    /// The caption as shown: trimmed, nil when blank.
+    static func captionText(_ caption: String?) -> String? {
         guard let caption else { return nil }
         let t = caption.trimmingCharacters(in: .whitespacesAndNewlines)
         return t.isEmpty ? nil : t
@@ -2044,44 +2060,66 @@ struct ImageBubble: View {
     }
 
     var body: some View {
-        Button { viewer = MediaOpen.state(for: item, chatId: chatId, model: model) } label: {
-            VStack(alignment: .leading, spacing: 0) {
-                ZStack {
-                    fill
-                    if let image {
-                        Image(uiImage: image)
-                            .resizable()
-                            .scaledToFit()
-                    } else if failed || item.blobRef == nil {
-                        Image(systemName: "photo")
-                            .font(theme.font(28))
-                            .foregroundStyle(fromUser ? theme.userText.opacity(0.7) : theme.muted)
-                    } else {
-                        ProgressView().tint(fromUser ? theme.userText.opacity(0.7) : theme.muted)
-                    }
-                }
-                .frame(width: size.width, height: size.height)
-                if let captionText {
-                    Text(captionText)
-                        .font(theme.font(Theme.body))
-                        .foregroundStyle(fromUser ? theme.userText : theme.text)
-                        .multilineTextAlignment(.leading)
-                        .padding(.horizontal, Theme.bubbleHPad)
-                        .padding(.vertical, Theme.bubbleVPad)
-                        .frame(width: size.width, alignment: .leading)
-                        .background(fill)
-                }
+        PhotoBubbleLayout(maxWidth: maxWidth, pictureInset: Self.pictureInset) {
+            Button { viewer = MediaOpen.state(for: item, chatId: chatId, model: model) } label: {
+                pictureTile
             }
-            .clipShape(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous))
+            .buttonStyle(.plain)
+            .accessibilityLabel(captionText == nil ? "Image, tap to view" : "Image with description, tap to view")
+            if let captionText {
+                // The same text as a text bubble: body size, body line spacing, links
+                // and mention chips (Jacob: "normal font size").
+                Markdown.inlineText(captionText, color: fromUser ? theme.userText : theme.text, link: theme.accent,
+                                    codeChip: fromUser ? theme.userCodeChip : theme.codeChip, mentions: mentions)
+                    .font(theme.font(Theme.body))
+                    .lineSpacing(Theme.bodyLineSpacing)
+                    .tint(theme.accent)
+                    .multilineTextAlignment(.leading)
+                    .padding(.horizontal, Theme.bubbleHPad)
+                    .padding(.vertical, Theme.bubbleVPad)
+                    .accessibilityIdentifier("photo-caption")
+            }
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(captionText == nil ? "Image, tap to view" : "Image with description, tap to view")
+        .background(fill)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous))
+        .accessibilityIdentifier("photo-bubble")
         .task(id: item.blobRef) { await load() }
         .fullScreenCover(item: $viewer) { v in
             MediaViewer(album: v.items, index: v.index, onClose: { viewer = nil })
                 .environmentObject(model)
                 .environment(\.theme, theme)
         }
+    }
+
+    /// The picture at its fitted size. The layout hands this tile the bubble's width:
+    /// when that is the picture's own width the picture is flush (a picture-only
+    /// bubble, or a caption no wider than the picture); when the bubble is wider the
+    /// picture sits centred, `pictureInset` down, with `pictureRadius` corners.
+    private var pictureTile: some View {
+        let picture = size
+        return GeometryReader { g in
+            let flush = PhotoBubbleLayout.pictureIsFlush(picture: picture, bubbleWidth: g.size.width)
+            ZStack {
+                if let image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                } else if failed || item.blobRef == nil {
+                    Image(systemName: "photo")
+                        .font(theme.font(28))
+                        .foregroundStyle(fromUser ? theme.userText.opacity(0.7) : theme.muted)
+                } else {
+                    ProgressView().tint(fromUser ? theme.userText.opacity(0.7) : theme.muted)
+                }
+            }
+            .frame(width: picture.width, height: picture.height)
+            .clipShape(RoundedRectangle(cornerRadius: flush ? 0 : Self.pictureRadius, style: .continuous))
+            .frame(width: g.size.width, height: g.size.height, alignment: flush ? .top : .bottom)
+        }
+        // Unproposed (the layout measuring) → the picture's size; placed → the tile the
+        // layout hands it.
+        .frame(minWidth: picture.width, idealWidth: picture.width, maxWidth: .infinity,
+               minHeight: picture.height, idealHeight: picture.height, maxHeight: .infinity)
     }
 
     private func load() async {
@@ -2091,6 +2129,81 @@ struct ImageBubble: View {
         } else {
             failed = true
         }
+    }
+}
+
+/// The photo bubble's geometry: the picture tile on top, the caption under it, the
+/// bubble as wide as the wider of the two — the caption measured at the bubble cap
+/// (`maxWidth`, a text bubble's width), never at the picture's width.
+/// `geometry(picture:caption:maxWidth:)` is the pure arithmetic the layout and the
+/// tests share ([feedback image-caption-bubble-ios-2026-10-25]).
+struct PhotoBubbleLayout: Layout {
+    let maxWidth: CGFloat
+    let pictureInset: CGFloat
+
+    struct Geometry: Equatable {
+        /// The bubble's size; the caption is placed at `captionTop`, full bubble width.
+        var size: CGSize
+        /// The picture tile's height: the picture plus its top inset when it floats.
+        var tileHeight: CGFloat
+        var captionTop: CGFloat { tileHeight }
+        /// Whether the picture spans the bubble (flush, no inset, square against the caption).
+        var pictureFlush: Bool
+    }
+
+    /// `picture` is the fitted picture; `caption` its wrapped size at `cap` (padding
+    /// included) or nil for a picture-only bubble; `cap` is what the row offers, at
+    /// most the bubble cap.
+    static func geometry(picture: CGSize, caption: CGSize?, cap: CGFloat, pictureInset: CGFloat) -> Geometry {
+        let width: CGFloat
+        if let caption {
+            width = min(cap, max(picture.width, caption.width))
+        } else {
+            width = min(cap, picture.width)
+        }
+        let flush = pictureIsFlush(picture: picture, bubbleWidth: width)
+        let tile = picture.height + (flush ? 0 : pictureInset)
+        return Geometry(size: CGSize(width: width, height: tile + (caption?.height ?? 0)),
+                        tileHeight: tile, pictureFlush: flush)
+    }
+
+    /// Flush when the bubble is no wider than the picture (half a point of slack for
+    /// rounding); a wider bubble floats the picture.
+    static func pictureIsFlush(picture: CGSize, bubbleWidth: CGFloat) -> Bool {
+        bubbleWidth <= picture.width + 0.5
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        measure(proposal: proposal, subviews: subviews).size
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let g = measure(proposal: proposal, subviews: subviews)
+        guard let picture = subviews.first else { return }
+        picture.place(at: bounds.origin, anchor: .topLeading,
+                      proposal: ProposedViewSize(width: g.size.width, height: g.tileHeight))
+        if subviews.count > 1 {
+            subviews[1].place(at: CGPoint(x: bounds.minX, y: bounds.minY + g.captionTop), anchor: .topLeading,
+                              proposal: ProposedViewSize(width: g.size.width, height: nil))
+        }
+    }
+
+    private func measure(proposal: ProposedViewSize, subviews: Subviews) -> Geometry {
+        let cap = min(maxWidth, proposal.width ?? maxWidth)
+        guard let pictureView = subviews.first else {
+            return Geometry(size: .zero, tileHeight: 0, pictureFlush: true)
+        }
+        let picture = pictureView.sizeThatFits(.unspecified)
+        guard subviews.count > 1 else {
+            return Self.geometry(picture: picture, caption: nil, cap: cap, pictureInset: pictureInset)
+        }
+        // Wrap the caption at the cap to learn the bubble's width, then once more at that
+        // width so the height matches what is placed.
+        let wide = subviews[1].sizeThatFits(ProposedViewSize(width: cap, height: nil))
+        let width = min(cap, max(picture.width, wide.width))
+        let caption = subviews[1].sizeThatFits(ProposedViewSize(width: width, height: nil))
+        return Self.geometry(picture: picture, caption: CGSize(width: min(width, caption.width), height: caption.height),
+                             cap: cap, pictureInset: pictureInset)
     }
 }
 
