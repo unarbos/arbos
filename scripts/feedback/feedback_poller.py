@@ -722,6 +722,32 @@ class GitHub:
                     return lines
         return lines
 
+    def run_failed_tests(self, run_id: int) -> tuple[set[str], bool]:
+        """(names of the cargo tests that FAILED in the run's failed jobs, whether anything failed to COMPILE).
+        A run whose failures are all on the operator's known-red list and whose compile is clean is not the
+        branch's fault (#1852)."""
+        jobs = self.repo_api("GET", f"/actions/runs/{run_id}/jobs").get("jobs", [])
+        failed: set[str] = set()
+        compile_error = False
+        for job in jobs:
+            if job.get("conclusion") != "failure":
+                continue
+            try:
+                _status, _hdrs, body = http("GET", f"{GITHUB_API}/repos/{self.repo}/actions/jobs/{job['id']}/logs",
+                                            headers=self.h, timeout=120)
+            except HttpError:
+                return set(), True  # unreadable: never wave it through
+            for line in body.decode(errors="replace").splitlines():
+                line = re.sub(r"\x1b\[[0-9;]*m", "", re.sub(r"^\S+\s", "", line))  # timestamp column, ANSI colour
+                m = re.match(r"test (\S+) \.\.\. FAILED", line)
+                if m:
+                    failed.add(m.group(1))
+                elif re.match(r"error(\[E\d+\])?: ", line) and "test failed, to rerun" not in line and "could not compile" not in line:
+                    compile_error = True
+                elif "could not compile" in line:
+                    compile_error = True
+        return failed, compile_error
+
     def pending_run_containing(self, workflow: str, sha: str, since_iso: str) -> dict | None:
         """A queued / in-progress run of `workflow` on main (started after `since_iso`) whose commit contains `sha`:
         the build that will carry the fix is still in GitHub's runner queue, so waiting is right."""
@@ -2522,6 +2548,55 @@ class Loop:
             self.store.save_cursor(cur)
             log(f"Rust gate {active['id']}: Mac release build started for {active['tree'][:8]}")
 
+    # Known-red tests on main (#1852, coordinator 2026-10-26 00:58): a test the operator knows is red on main
+    # (the clock-dependent Library render test, 2026-10-26 00:xx) must not fail every pool batch and bisect
+    # it. The Linux half ignores a red CI run only when EVERY failed test is on the list and nothing failed
+    # to compile. Entries are written by the operator (`arbos-feedback known-red add <test> [note]`), expire
+    # after 24 h, and are dropped when main's own CI is green with them. The list is the operator's, never a
+    # branch owner's.
+    KNOWN_RED_FILE = "ci-known-red.json"
+    KNOWN_RED_TTL_S = 24 * 3600
+
+    def known_red(self) -> dict[str, dict]:
+        p = self.cfg.state_dir / self.KNOWN_RED_FILE
+        try:
+            data = json.loads(p.read_text()) if p.is_file() else {}
+        except (OSError, ValueError):
+            data = {}
+        now = utcnow()
+        live = {t: e for t, e in data.items() if (now - parse_iso(e.get("added") or iso())).total_seconds() < self.KNOWN_RED_TTL_S}
+        if live != data:
+            self.save_known_red(live)
+        return live
+
+    def save_known_red(self, data: dict[str, dict]) -> None:
+        Store._write(self.cfg.state_dir / self.KNOWN_RED_FILE, data)
+
+    def linux_red_is_known(self, run_id: int) -> tuple[bool, set[str]]:
+        """True when the failed CI run has only known-red test failures and no compile error."""
+        known = self.known_red()
+        if not known:
+            return False, set()
+        failed, compile_error = self.gh.run_failed_tests(run_id)
+        if compile_error or not failed:
+            return False, failed
+        return failed <= set(known), failed
+
+    def known_red_main_check(self, cur: dict) -> None:
+        """Drop known-red entries once main's own CI is green on a commit newer than the entry."""
+        known = self.known_red()
+        if not known:
+            return
+        head = self.gh.branch_head("main") or ""
+        if not head or head == cur.get("known_red_checked_head"):
+            return
+        runs = [r for r in self.gh.runs_for_sha(head) if r.get("name") == "CI" and r.get("status") == "completed"]
+        if runs and runs[0].get("conclusion") == "success":
+            self.save_known_red({})
+            self.store.event("_loop", "known_red_cleared", tests=sorted(known), main=head[:8])
+            log(f"known-red list cleared: main {head[:8]} is green ({', '.join(sorted(known))})")
+        cur["known_red_checked_head"] = head
+
     def rust_gate_poll(self, active: dict) -> bool:
         """Advance a running batch. True = still running (nothing more to do this tick)."""
         cur = self.store.cursor()
@@ -2545,7 +2620,15 @@ class Loop:
                 active["linux"] = "ok" if run["conclusion"] == "success" else "fail"
                 active["linux_run"] = run["html_url"]
                 if active["linux"] == "fail":
-                    active["linux_errors"] = self.gh.run_error_lines(run["id"], limit=60)
+                    known, failed = self.linux_red_is_known(run["id"])
+                    if known:
+                        active["linux"] = "ok"
+                        active["linux_known_red"] = sorted(failed)
+                        log(f"Rust gate {active['id']}: Linux half red only on known-red test(s) {', '.join(sorted(failed))}; counted as ok")
+                        for fid in active.get("members") or {}:
+                            self.store.event(fid, "linux_known_red", run=run["html_url"], tests=sorted(failed))
+                    else:
+                        active["linux_errors"] = self.gh.run_error_lines(run["id"], limit=60)
                 self.store.save_cursor(cur)
                 log(f"Rust gate {active['id']}: Linux half {active['linux']} ({run['html_url']})")
             elif not run and minutes_between(active["started"], iso()) > 10:
@@ -3574,6 +3657,12 @@ class Loop:
             self.watch_handoffs()
         except Exception as e:  # noqa: BLE001
             log(f"handoff watch failed: {e}")
+        try:
+            cur = self.store.cursor()
+            self.known_red_main_check(cur)
+            self.store.save_cursor(cur)
+        except Exception as e:  # noqa: BLE001
+            log(f"known-red check failed: {e}")
         try:
             self.watch_late_pushes()
         except Exception as e:  # noqa: BLE001
@@ -4899,6 +4988,24 @@ def main(argv: list[str]) -> int:
             fcntl.flock(lock, fcntl.LOCK_EX)
             n = loop.lift_freeze()
         print(f"freeze lifted; {n} item(s) restored to their previous state and order")
+        return 0
+    if cmd == "known-red":
+        # `known-red add <test> [note…]` | `known-red remove <test>` | `known-red list`: the operator's list of
+        # tests known red on main; the Linux half ignores a red CI run whose failures are all on it (#1852).
+        loop = Loop(cfg)
+        sub = argv[2] if len(argv) > 2 else "list"
+        data = loop.known_red()
+        if sub == "add" and len(argv) > 3:
+            data[argv[3]] = {"added": iso(), "by": "operator", "note": " ".join(argv[4:])}
+            loop.save_known_red(data)
+            loop.store.event("_loop", "known_red_added", test=argv[3], note=" ".join(argv[4:]))
+            print(f"known-red: {argv[3]} (expires in 24 h or when main is green)")
+            return 0
+        if sub == "remove" and len(argv) > 3:
+            data.pop(argv[3], None); loop.save_known_red(data); print(f"known-red: removed {argv[3]}"); return 0
+        for t, e in sorted(data.items()):
+            print(f"{t}\tadded {e.get('added')}\t{e.get('note') or ''}")
+        print(f"{len(data)} known-red test(s)")
         return 0
     if cmd == "gate-note":
         # `gate-note <text>` / `gate-note --clear`: one operator line shown on top of `status`'s gate queue
