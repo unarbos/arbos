@@ -4184,6 +4184,11 @@ final class AppModel: ObservableObject {
                 if payload.user_id == user?.id { await refreshAccount() }
                 needChats = true
                 needServers = true
+            case .agentProfileUpdated:
+                // An agent's avatar changed (the agents' `profile_updated`): re-read my
+                // projects and the rosters so every copy carries the new picture and stamp.
+                await refreshRegistry()
+                needChats = true
             case .chatArchived(let payload):
                 // Another device of mine archived / unarchived a people chat.
                 if peopleChat(payload.chat_id) != nil {

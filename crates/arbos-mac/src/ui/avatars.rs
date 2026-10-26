@@ -637,6 +637,7 @@ fn member_card(a: &AgentMember) -> AgentCard {
         leaf_color: a.avatar_leaf_color,
         color_index: a.avatar_color_index,
         image_key: a.image_url.clone(),
+        avatar_version: a.avatar_version,
     }
 }
 
@@ -649,6 +650,7 @@ fn project_card(p: &Project) -> AgentCard {
         leaf_color: p.avatar_leaf_color,
         color_index: p.avatar_color_index,
         image_key: p.image_url.clone(),
+        avatar_version: p.avatar_version,
     }
 }
 
@@ -885,6 +887,7 @@ mod tests {
             leaf_color: Some(leaf::NEUTRAL),
             color_index: None,
             image_key: None,
+            avatar_version: 0,
         };
         let who = arbos_core::avatar::identity::resolve(
             &AgentQuery {

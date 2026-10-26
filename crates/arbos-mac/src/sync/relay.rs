@@ -1368,6 +1368,9 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
                 refresh = true;
                 refresh_servers = true;
             }
+            // An agent's avatar changed (the agents' `profile_updated`): the registry re-read
+            // brings the new picture and stamp to my project record and every roster copy.
+            PushEventDto::AgentProfileUpdated(_) => refresh = true,
             PushEventDto::PeopleMessage(_)
             | PushEventDto::PeopleChatDeleted(_)
             | PushEventDto::ProjectMemberRemoved(_)

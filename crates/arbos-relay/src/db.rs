@@ -233,6 +233,10 @@ pub struct Project {
     /// over the leaf. `None` = the leaf.
     #[serde(default)]
     pub image_key: Option<String>,
+    /// Stamp (ms) of the last avatar change (picture, leaf, colour); `0` = never changed.
+    /// Clients order their copies of the agent by it (`avatar::identity`).
+    #[serde(default)]
+    pub avatar_version: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -525,6 +529,10 @@ impl Db {
             [],
         );
         let _ = c.execute("ALTER TABLE projects ADD COLUMN image_key TEXT", []);
+        let _ = c.execute(
+            "ALTER TABLE projects ADD COLUMN avatar_version INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
         // One box per user: devices and projects belong to a user; legacy sandboxes record where
         // their /work went.
         let _ = c.execute(
@@ -734,12 +742,13 @@ impl Db {
                    avatar_color_index INTEGER,
                    avatar_leaf INTEGER,
                    avatar_leaf_color INTEGER,
-                   image_key TEXT
+                   image_key TEXT,
+                   avatar_version INTEGER NOT NULL DEFAULT 0
                  );
                  INSERT INTO projects_new(id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily,
-                                          project_token_hash, color, user_id, workspace_state, avatar, deleted_at, avatar_color, description, primary_chat_id, avatar_color_index, avatar_leaf, avatar_leaf_color, image_key)
+                                          project_token_hash, color, user_id, workspace_state, avatar, deleted_at, avatar_color, description, primary_chat_id, avatar_color_index, avatar_leaf, avatar_leaf_color, image_key, avatar_version)
                    SELECT id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily,
-                          project_token_hash, color, user_id, workspace_state, avatar, deleted_at, avatar_color, description, primary_chat_id, avatar_color_index, avatar_leaf, avatar_leaf_color, image_key FROM projects;
+                          project_token_hash, color, user_id, workspace_state, avatar, deleted_at, avatar_color, description, primary_chat_id, avatar_color_index, avatar_leaf, avatar_leaf_color, image_key, avatar_version FROM projects;
                  DROP TABLE projects;
                  ALTER TABLE projects_new RENAME TO projects;
                  COMMIT;",
@@ -874,11 +883,12 @@ impl Db {
             avatar_leaf: r.get(17)?,
             avatar_leaf_color: r.get(18)?,
             image_key: r.get(19)?,
+            avatar_version: r.get::<_, Option<i64>>(20)?.unwrap_or(0),
         })
     }
 
     const PROJECT_COLS: &'static str =
-        "id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state, avatar, avatar_color, description, primary_chat_id, avatar_color_index, avatar_leaf, avatar_leaf_color, image_key";
+        "id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state, avatar, avatar_color, description, primary_chat_id, avatar_color_index, avatar_leaf, avatar_leaf_color, image_key, avatar_version";
 
     /// By id, else by name. Names are unique per user only, so a name lookup prefers the id
     /// match and otherwise returns the most recently active project with that name; callers that
@@ -1052,6 +1062,14 @@ impl Db {
                     params![id, color],
                 )?;
             }
+            let avatar_touched = avatar.is_some()
+                || avatar_color.is_some()
+                || avatar_color_index.is_some()
+                || avatar_leaf.is_some()
+                || avatar_leaf_color.is_some();
+            if avatar_touched {
+                Self::stamp_avatar_version(c, id)?;
+            }
             Ok(())
         })
     }
@@ -1063,8 +1081,19 @@ impl Db {
                 "UPDATE projects SET image_key = ?2 WHERE id = ?1",
                 params![id, key],
             )?;
+            Self::stamp_avatar_version(c, id)?;
             Ok(())
         })
+    }
+
+    /// Every avatar write moves `avatar_version` forward: the clock, or one past the current
+    /// stamp when two writes land inside the same millisecond, so copies always order.
+    fn stamp_avatar_version(c: &Connection, id: &str) -> rusqlite::Result<()> {
+        c.execute(
+            "UPDATE projects SET avatar_version = MAX(?2, avatar_version + 1) WHERE id = ?1",
+            params![id, now_ms()],
+        )?;
+        Ok(())
     }
 
     pub fn set_primary_chat(&self, project_id: &str, chat_id: Option<&str>) -> Result<()> {
@@ -3404,7 +3433,7 @@ mod vault_scope_tests {
                    spend_cap_daily REAL NOT NULL DEFAULT 25.0, project_token_hash TEXT, color TEXT NOT NULL DEFAULT '#8b7cf6',
                    workspace_state TEXT NOT NULL DEFAULT 'stopped', avatar TEXT, deleted_at INTEGER, avatar_color TEXT,
                    description TEXT NOT NULL DEFAULT '', primary_chat_id TEXT, avatar_color_index INTEGER,
-                   avatar_leaf INTEGER, avatar_leaf_color INTEGER, image_key TEXT);
+                   avatar_leaf INTEGER, avatar_leaf_color INTEGER, image_key TEXT, avatar_version INTEGER NOT NULL DEFAULT 0);
                  CREATE UNIQUE INDEX projects_user_name ON projects(user_id, name);
                  INSERT INTO projects(id, name, user_id) VALUES ('p_bob', 'Research', 'bob');
                  CREATE TABLE vault_items (
@@ -3470,6 +3499,7 @@ mod avatar_migration_tests {
             avatar_leaf: None,
             avatar_leaf_color: None,
             image_key: None,
+            avatar_version: 0,
         }
     }
 
