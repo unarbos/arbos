@@ -4,6 +4,7 @@
   "avatar_leaf_color": null,
   "created_at": 1700000000000,
   "created_by": "gh_101",
+  "description_admins_only": false,
   "head_seq": 0,
   "id": "people_dm",
   "image_key": null,
