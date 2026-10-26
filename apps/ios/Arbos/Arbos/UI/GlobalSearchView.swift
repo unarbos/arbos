@@ -21,7 +21,7 @@ struct HomeSearchBar: View {
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
-                .font(theme.font(17, weight: .medium))
+                .font(theme.font(Controls.glyph, weight: .medium))
                 .foregroundStyle(theme.icon)
             TextField("", text: $query, prompt: Text(HomeChrome.searchPlaceholder).foregroundStyle(theme.placeholder))
                 .font(theme.font(Theme.body))
@@ -42,11 +42,8 @@ struct HomeSearchBar: View {
                 .transition(.opacity)
             }
         }
-        .padding(.horizontal, 14)
-        .frame(height: Theme.control)
-        .background(Capsule().fill(theme.field))
-        .overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1))
-        .contentShape(Capsule())
+        // The family's field (#1810 bar = the composer's field: 48, capsule, text at 17, rim).
+        .controlField()
         .onTapGesture { focused.wrappedValue = true }
         .accessibilityIdentifier("home-bottom-search")
     }
