@@ -16,7 +16,9 @@ enum Block: Equatable, Hashable {
     case bullets([String])
     case numbered([String])
     case code(lang: String, code: String)
-    case table([String])
+    /// GitHub-style pipe table: header cells, then body rows (each padded or cut to the
+    /// header's width by the renderer).
+    case table(header: [String], rows: [[String]])
 }
 
 /// Grok Bot's quote header inside a reply bubble: speech-bubble glyph, then the replied-to
@@ -67,7 +69,7 @@ struct Quote: Equatable, Hashable {
             case .paragraph(let t), .heading(_, let t): pieces = [t]
             case .bullets(let items), .numbered(let items): pieces = items
             case .code(_, let code): pieces = [code]
-            case .table(let rows): pieces = rows.map { $0.replacingOccurrences(of: "|", with: " ") }
+            case .table(let header, let rows): pieces = header + rows.flatMap { $0 }
             }
             for piece in pieces {
                 let plain = (try? AttributedString(markdown: piece, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
@@ -794,7 +796,7 @@ enum Markdown {
             if !paragraph.isEmpty { out.append(.paragraph(paragraph.joined(separator: " "))); paragraph = [] }
             if !bullets.isEmpty { out.append(.bullets(bullets)); bullets = [] }
             if !numbered.isEmpty { out.append(.numbered(numbered)); numbered = [] }
-            if !table.isEmpty { out.append(.table(table)); table = [] }
+            if !table.isEmpty { out.append(tableBlock(table)); table = [] }
         }
 
         for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
@@ -833,11 +835,9 @@ enum Markdown {
                 numbered.append(trimmed[trimmed.index(dot, offsetBy: 2)...].trimmingCharacters(in: .whitespaces))
                 continue
             }
-            if trimmed.hasPrefix("|") {
+            if isTableRow(trimmed) {
                 if !paragraph.isEmpty || !bullets.isEmpty || !numbered.isEmpty { flush() }
-                if !trimmed.replacingOccurrences(of: "|", with: "").replacingOccurrences(of: "-", with: "").replacingOccurrences(of: ":", with: "").trimmingCharacters(in: .whitespaces).isEmpty {
-                    table.append(trimmed)
-                }
+                table.append(trimmed)
                 continue
             }
             if !bullets.isEmpty || !numbered.isEmpty || !table.isEmpty { flush() }
@@ -846,6 +846,40 @@ enum Markdown {
         if let c = code { out.append(.code(lang: lang, code: c.joined(separator: "\n"))) }
         flush()
         return out
+    }
+
+    /// `| a | b |`: starts and ends with a pipe.
+    static func isTableRow(_ line: String) -> Bool {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        return t.count > 2 && t.hasPrefix("|") && t.hasSuffix("|")
+    }
+
+    /// `| --- | :-: |`: the row under the header that makes pipe rows a GFM table.
+    static func isTableSeparator(_ line: String) -> Bool {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        return isTableRow(t) && t.contains("-") && t.allSatisfy { "|-: ".contains($0) }
+    }
+
+    /// The cells of one pipe row, outer pipes dropped, each trimmed.
+    static func splitTableRow(_ line: String) -> [String] {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        let inner = t.dropFirst().dropLast()
+        return inner.split(separator: "|", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+
+    /// A run of pipe rows: a table when the second row is the separator (Mac
+    /// `markdown.rs` parity); otherwise — no separator row, so not a GFM table — one
+    /// monospace block that keeps its columns and scrolls sideways rather than prose
+    /// with raw pipes. A single pipe row is prose.
+    static func tableBlock(_ lines: [String]) -> Block {
+        if lines.count >= 2, isTableSeparator(lines[1]) {
+            return .table(header: splitTableRow(lines[0]), rows: lines.dropFirst(2).map(splitTableRow))
+        }
+        if lines.count == 1 {
+            return .paragraph(lines[0])
+        }
+        return .code(lang: "", code: lines.joined(separator: "\n"))
     }
 
     /// A block that is really machine output (a JSON object/array) is not prose.
@@ -859,6 +893,12 @@ enum Markdown {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard t.hasPrefix("{") || t.hasPrefix("["), let data = t.data(using: .utf8) else { return false }
         return (try? JSONSerialization.jsonObject(with: data)) != nil
+    }
+
+    /// The text inline markdown renders to, markers removed (`[Name](url)` → `Name`).
+    static func plain(_ text: String) -> String {
+        (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+            .map { String($0.characters) } ?? text
     }
 
     /// Inline markdown with Mac-parity link paint and Grok-style code chips:
@@ -1555,20 +1595,88 @@ struct BlockView: View {
                     }
                 }
             }
-        case .table(let lines):
-            ScrollView(.horizontal, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(Array(lines.enumerated()), id: \.offset) { i, line in
-                        Text(line.split(separator: "|").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.joined(separator: "    "))
-                            .font(theme.font(14, weight: i == 0 ? .semibold : .regular, design: .monospaced))
-                            .foregroundStyle(theme.text)
-                    }
-                }
-                .padding(10)
-            }
-            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.bg.opacity(0.6)))
+        case .table(let header, let rows):
+            TableBlock(header: header, rows: rows, mentions: mentions)
         case .code(let lang, let code):
             CodeCard(lang: lang, code: code)
+        }
+    }
+}
+
+/// A GFM table as a real table (the Mac's `render_block` table): a header row on
+/// the code wash, body rows with hairlines between them, one column per header
+/// cell with the same width in every row, each cell inline markdown — so a
+/// `[Name](url)` is a tappable link, never raw markup ([feedback
+/// markdown-tables-ios-2026-10-25]: Jacob's Lima bookstore table came out as a
+/// monospace block of `[…](https://…)` cut off at the bubble's edge). Wider
+/// than the bubble, the table keeps its columns and scrolls sideways.
+struct TableBlock: View {
+    @Environment(\.theme) private var theme
+    let header: [String]
+    let rows: [[String]]
+    let mentions: MentionTable
+
+    /// The narrowest a column is laid out at, in points.
+    static let columnMin: CGFloat = 72
+    /// The widest a column is laid out at before its cells wrap.
+    static let columnMax: CGFloat = 220
+    /// Average glyph advance of the 14 pt cell text, used to size columns before layout.
+    static let glyphAdvance: CGFloat = 7.4
+
+    /// One width per column, from the longest rendered cell (markup removed) in that
+    /// column, clamped to `columnMin…columnMax`; every row uses the same widths, so the
+    /// columns line up, and their sum is what the frame scrolls when the bubble is narrower.
+    static func columnWidths(header: [String], rows: [[String]]) -> [CGFloat] {
+        let cols = max(header.count, 1)
+        return (0..<cols).map { ci in
+            let longest = ([header] + rows)
+                .compactMap { ci < $0.count ? $0[ci] : nil }
+                .map { Markdown.plain($0).count }
+                .max() ?? 0
+            return min(max(CGFloat(longest) * glyphAdvance + 20, columnMin), columnMax)
+        }
+    }
+
+    /// `row` padded with empty cells or cut to the header's width.
+    static func fitted(_ row: [String], to cols: Int) -> [String] {
+        Array((row + Array(repeating: "", count: max(0, cols - row.count))).prefix(cols))
+    }
+
+    var body: some View {
+        let cols = max(header.count, 1)
+        let widths = Self.columnWidths(header: header, rows: rows)
+        ScrollView(.horizontal, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 0) {
+                tableRow(Self.fitted(header, to: cols), widths: widths, head: true)
+                    .background(theme.codeChip)
+                ForEach(Array(rows.enumerated()), id: \.offset) { ri, row in
+                    tableRow(Self.fitted(row, to: cols), widths: widths, head: false)
+                        .background(ri % 2 == 1 ? theme.codeChip.opacity(0.4) : .clear)
+                        .overlay(alignment: .top) { Rectangle().fill(theme.separator).frame(height: 0.5) }
+                }
+            }
+            .accessibilityIdentifier("table")
+        }
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.bg.opacity(0.6)))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(theme.separator, lineWidth: 0.5))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func tableRow(_ cells: [String], widths: [CGFloat], head: Bool) -> some View {
+        HStack(alignment: .top, spacing: 0) {
+            ForEach(Array(cells.enumerated()), id: \.offset) { ci, cell in
+                Markdown.inlineText(cell, color: head ? theme.text : theme.muted, link: theme.accent, codeChip: theme.codeChip, mentions: mentions)
+                    .font(theme.font(14, weight: head ? .semibold : .regular))
+                    .tint(theme.accent)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(width: widths[ci], alignment: .topLeading)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .overlay(alignment: .leading) {
+                        if ci > 0 { Rectangle().fill(theme.separator).frame(width: 0.5) }
+                    }
+            }
         }
     }
 }

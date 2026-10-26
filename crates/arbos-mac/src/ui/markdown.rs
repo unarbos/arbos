@@ -86,6 +86,27 @@ pub fn split_blocks(source: &str) -> Vec<Block> {
                     blocks.push(Block::Table { header, rows });
                     continue;
                 }
+                // Pipe rows with no separator row are not a GFM table. Rather
+                // than paint them as prose with raw `|`, they degrade to one
+                // monospace block that keeps its columns and scrolls sideways.
+                if is_table_row(next.trim_end()) {
+                    flush(&mut paragraph, &mut blocks);
+                    let mut code = trimmed.trim().to_string();
+                    while let Some(row) = lines.peek() {
+                        let row = row.trim_end();
+                        if !is_table_row(row) {
+                            break;
+                        }
+                        code.push('\n');
+                        code.push_str(row.trim());
+                        lines.next();
+                    }
+                    blocks.push(Block::Code {
+                        lang: String::new(),
+                        code,
+                    });
+                    continue;
+                }
             }
         }
         if let Some(item) = bullet_item(trimmed) {
