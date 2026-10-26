@@ -429,19 +429,37 @@ pub fn menu_divider(theme: &Theme) -> Div {
         .bg(theme.border)
 }
 
+/// A floating surface's glass plate on Glass ([feedback
+/// mac-glass-contrast-2026-10-26]): the card tint plus the header's 1 pt rim
+/// and top highlight, over the lift shadow it already had. On Matte the
+/// card keeps its solid fill and plain border.
+pub fn plate<E: Styled>(el: E, theme: &Theme) -> E {
+    let el = el
+        .bg(theme.card())
+        .border_1()
+        .border_color(theme.border_strong);
+    if !theme.is_frost() {
+        return el.shadow_lg();
+    }
+    el.shadow(vec![
+        BoxShadow::new(px(0.0), px(0.0), theme.plate_rim())
+            .spread_radius(px(1.0))
+            .inset(),
+        BoxShadow::new(px(0.0), px(1.0), theme.plate_highlight()).inset(),
+        BoxShadow::new(px(0.0), px(8.0), gpui::hsla(0.0, 0.0, 0.0, 0.28)).blur_radius(px(24.0)),
+    ])
+}
+
 /// A dropdown card under a header control: frosted, rounded, shadowed.
 pub fn menu_card(width: f32, theme: &Theme) -> Div {
-    div()
+    let card = div()
         .w(px(width))
         .flex()
         .flex_col()
         .gap(px(MENU_GAP))
         .p(px(MENU_CARD_PADDING))
-        .rounded(px(PANEL_RADIUS))
-        .bg(theme.card())
-        .border_1()
-        .border_color(theme.border_strong)
-        .shadow_lg()
+        .rounded(px(PANEL_RADIUS));
+    plate(card, theme)
 }
 
 /// Frosted dropdown used by the tab "+" menu and sidebar row menus. Occludes
@@ -472,11 +490,8 @@ pub fn sheet(width: f32, theme: &Theme, header: Div, body: impl IntoElement) -> 
         .max_h_full()
         .flex()
         .flex_col()
-        .rounded(px(PANEL_RADIUS + 6.0))
-        .bg(theme.card())
-        .border_1()
-        .border_color(theme.border_strong)
-        .shadow_lg()
+        .rounded(px(PANEL_RADIUS + 6.0));
+    let card = plate(card, theme)
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(header)
         .child(body);
