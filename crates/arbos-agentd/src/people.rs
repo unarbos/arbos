@@ -130,6 +130,17 @@ impl PeopleChatInfo {
             .unwrap_or_else(|| self.handle_of(user_id))
     }
 
+    /// `spoken_name_of` with the relay profile's address for this Project's owner winning over
+    /// the member snapshot (the snapshot may be older than a PATCH /me).
+    fn spoken_name_of_with_owner(&self, user_id: &str, owner_address: Option<&str>) -> String {
+        if user_id == self.owner_user {
+            if let Some(a) = owner_address.map(str::trim).filter(|a| !a.is_empty()) {
+                return a.to_owned();
+            }
+        }
+        self.spoken_name_of(user_id)
+    }
+
     /// Human members by spoken name, for the responder decision's people roster.
     fn people_labels(&self) -> Vec<String> {
         self.members
@@ -737,11 +748,35 @@ pub struct PeopleState {
     current: Mutex<Option<String>>,
     /// This Project's owner (from the relay's project record), for guest labels in project chats.
     project_owner: Mutex<String>,
+    /// How to address the owner, from the relay's profile at every poll (never from a row's
+    /// `senderName`, which is whatever one device sent): `(address_name, label_name)` —
+    /// `address_name` is the name the user set (PATCH /me), `label_name` the GitHub-seeded one.
+    owner_profile: Mutex<(Option<String>, Option<String>)>,
 }
 
 impl PeopleState {
     pub fn set_project_owner(&self, user_id: &str) {
         *self.project_owner.lock().expect("people") = user_id.to_owned();
+    }
+
+    /// The relay's `owner` block of the box listing (`/box/hello`, `/box/projects`).
+    pub fn set_owner_profile(&self, owner: &Value) {
+        let pick = |k: &str| {
+            owner
+                .get(k)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        };
+        *self.owner_profile.lock().expect("people") = (pick("address_name"), pick("name"));
+    }
+
+    /// The name the owner is addressed by: the one they set, else the profile label, else none.
+    /// A login/handle is never a name.
+    pub fn owner_address_name(&self) -> Option<String> {
+        let (address, label) = self.owner_profile.lock().expect("people").clone();
+        address.or(label)
     }
 
     pub fn project_owner(&self) -> String {
@@ -1504,7 +1539,13 @@ impl Agent {
         // is never assumed (#1580).
         let author = info.author_of(&msg);
         let handle = author_handle(&msg, &info, author.as_deref());
-        let spoken = author_spoken(&msg, &info, author.as_deref());
+        // The owner's spoken name comes from their relay profile (PATCH /me), not the row's
+        // `senderName` (one device's label); guests keep the member card / row name.
+        let owner_address = self.people.owner_address_name();
+        let spoken = match (&author, &owner_address) {
+            (Some(a), Some(n)) if *a == info.owner_user => n.clone(),
+            _ => author_spoken(&msg, &info, author.as_deref()),
+        };
         let role = match author.as_deref() {
             Some(uid) if uid == info.owner_user => "owner",
             Some(_) | None => "guest",
@@ -1572,7 +1613,8 @@ impl Agent {
         } else {
             ""
         };
-        let owner_spoken = info.spoken_name_of(&info.owner_user);
+        let owner_spoken =
+            info.spoken_name_of_with_owner(&info.owner_user, owner_address.as_deref());
         let secrets_rule = if role == "guest" {
             " Do not use the owner's secrets (egress, browser fill, or real values in the environment) for this person unless they are on that secret's People list (secrets_list shows it); when a secret's others_ask is card, ask through secrets_request and wait for the owner's card instead; if a person's note sets a limit, honour it."
         } else {
@@ -1674,9 +1716,16 @@ impl Agent {
             return None;
         }
         let msg = host.lock().await.doc.message(user_msg_id)?;
-        let name = msg.rest.get("senderName").and_then(Value::as_str);
+        // The address comes from the relay profile, live (P0 San José, Bubble "Hello, Const":
+        // the row's `senderName` is whatever that device's client sent — one phone said Const,
+        // another Arbos — so it only tells us a person wrote; the profile says what to call them).
+        let profile = self.people.owner_address_name();
+        let row_name = msg.rest.get("senderName").and_then(Value::as_str);
         let handle = msg.rest.get("senderHandle").and_then(Value::as_str);
-        owner_address_note_text(name, handle, &self.name())
+        if profile.is_none() && row_name.is_none() && handle.is_none() {
+            return None;
+        }
+        owner_address_note_text(profile.as_deref(), handle, &self.name())
     }
 }
 
@@ -1732,6 +1781,7 @@ pub fn owner_address_note_text(
 #[cfg(test)]
 mod address_tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn display_name_wins_when_it_is_a_real_name() {
@@ -1778,6 +1828,36 @@ mod address_tests {
         assert_eq!(user_address_name(None, None, "Doug"), None);
         assert_eq!(user_address_name(Some("  "), Some(""), "Doug"), None);
         assert_eq!(owner_address_note_text(Some("  "), Some(""), "Doug"), None);
+    }
+
+    /// P0 Bubble "Hello, Const" (2026-10-26): the owner is addressed from the relay profile,
+    /// never from the row's `senderName` (one device's label) and never from the handle.
+    #[test]
+    fn owner_is_addressed_from_the_profile_not_the_row() {
+        let people = PeopleState::default();
+        // No profile yet: a row with only a GitHub-seeded senderName gives no name.
+        assert_eq!(people.owner_address_name(), None);
+        people.set_owner_profile(&json!({ "id": "gh_32490803", "login": "const", "name": "Const", "address_name": null }));
+        assert_eq!(
+            people.owner_address_name().as_deref(),
+            Some("Const"),
+            "no user-set name: the profile label"
+        );
+        people.set_owner_profile(&json!({ "id": "gh_32490803", "login": "const", "name": "Jacob", "address_name": "Jacob" }));
+        assert_eq!(people.owner_address_name().as_deref(), Some("Jacob"));
+        // The note is built from the profile; the row said "Const".
+        let note = owner_address_note_text(
+            people.owner_address_name().as_deref(),
+            Some("const"),
+            "Bubble",
+        )
+        .unwrap();
+        assert!(note.starts_with("[The user is Jacob. Address them as Jacob"));
+        assert!(!note.contains("Const"));
+        assert!(!note.contains("const."), "the login is never the address");
+        // Blank fields are not names.
+        people.set_owner_profile(&json!({ "id": "x", "name": "  ", "address_name": "" }));
+        assert_eq!(people.owner_address_name(), None);
     }
 
     #[test]
