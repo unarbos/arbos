@@ -637,6 +637,38 @@ impl Theme {
         c
     }
 
+    /// The chat header's glass ([feedback mac-header-glass-2026-10-25], Jacob
+    /// 2026-10-25; the iPhone's `HeaderGlassBackground`): what the name pill
+    /// and the header disc are filled with on Glass — white at 12 % over a
+    /// 50 % dark underlay (one composited colour: GPUI quads take one fill),
+    /// white at 60 % in light. Over the bright beach backdrop of Jacob's shots
+    /// white text measures 6.6:1 on it (`docs/glass-surface-directions.md`, B).
+    pub fn header_glass(&self) -> Hsla {
+        if self.is_light() {
+            hex_a(0xffffff, 0.60)
+        } else {
+            hex_a(0x3b3f45, 0.56)
+        }
+    }
+
+    /// The 1 pt light rim around a header control on Glass.
+    pub fn header_glass_rim(&self) -> Hsla {
+        if self.is_light() {
+            hex_a(0x000000, 0.10)
+        } else {
+            hex_a(0xffffff, 0.18)
+        }
+    }
+
+    /// The specular line along a header control's top edge on Glass.
+    pub fn header_glass_highlight(&self) -> Hsla {
+        if self.is_light() {
+            hex_a(0xffffff, 0.90)
+        } else {
+            hex_a(0xffffff, 0.30)
+        }
+    }
+
     pub fn window_background_appearance(&self) -> WindowBackgroundAppearance {
         if self.is_glass() {
             WindowBackgroundAppearance::Blurred

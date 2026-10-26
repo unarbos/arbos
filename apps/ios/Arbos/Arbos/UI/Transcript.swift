@@ -16,7 +16,9 @@ enum Block: Equatable, Hashable {
     case bullets([String])
     case numbered([String])
     case code(lang: String, code: String)
-    case table([String])
+    /// GitHub-style pipe table: header cells, then body rows (each padded or cut to the
+    /// header's width by the renderer).
+    case table(header: [String], rows: [[String]])
 }
 
 /// Grok Bot's quote header inside a reply bubble: speech-bubble glyph, then the replied-to
@@ -67,7 +69,7 @@ struct Quote: Equatable, Hashable {
             case .paragraph(let t), .heading(_, let t): pieces = [t]
             case .bullets(let items), .numbered(let items): pieces = items
             case .code(_, let code): pieces = [code]
-            case .table(let rows): pieces = rows.map { $0.replacingOccurrences(of: "|", with: " ") }
+            case .table(let header, let rows): pieces = header + rows.flatMap { $0 }
             }
             for piece in pieces {
                 let plain = (try? AttributedString(markdown: piece, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
@@ -105,7 +107,8 @@ struct Quote: Equatable, Hashable {
 }
 
 enum RowKind: Equatable {
-    case user(text: String, pending: Bool, quote: Quote?)
+    /// My bubble; `delivery` is its opacity (pending dimmed, delivered / failed full).
+    case user(text: String, delivery: Delivery, quote: Quote?)
     /// Another person's message in a people chat: left bubble with avatar; the name above
     /// only when the sender changed (`named`, Grok Bot's group style) and the chat names its
     /// senders at all (group / channel, `rows(multiParty:)`); the name sits inside the bubble
@@ -258,7 +261,7 @@ enum Transcript {
                     }
                     if mine {
                         chunk.append(Row(id: "\(message.id)#user", messageId: message.id, role: .user,
-                                         kind: .user(text: text, pending: message.pending, quote: quote)))
+                                         kind: .user(text: text, delivery: Delivery.of(message), quote: quote)))
                     } else {
                         chunk.append(Row(id: "\(message.id)#other", messageId: message.id, role: .project,
                                          kind: .other(text: text, handle: message.senderHandle ?? "someone", avatar: message.senderAvatar, named: named, quote: quote)))
@@ -793,7 +796,7 @@ enum Markdown {
             if !paragraph.isEmpty { out.append(.paragraph(paragraph.joined(separator: " "))); paragraph = [] }
             if !bullets.isEmpty { out.append(.bullets(bullets)); bullets = [] }
             if !numbered.isEmpty { out.append(.numbered(numbered)); numbered = [] }
-            if !table.isEmpty { out.append(.table(table)); table = [] }
+            if !table.isEmpty { out.append(tableBlock(table)); table = [] }
         }
 
         for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
@@ -832,11 +835,9 @@ enum Markdown {
                 numbered.append(trimmed[trimmed.index(dot, offsetBy: 2)...].trimmingCharacters(in: .whitespaces))
                 continue
             }
-            if trimmed.hasPrefix("|") {
+            if isTableRow(trimmed) {
                 if !paragraph.isEmpty || !bullets.isEmpty || !numbered.isEmpty { flush() }
-                if !trimmed.replacingOccurrences(of: "|", with: "").replacingOccurrences(of: "-", with: "").replacingOccurrences(of: ":", with: "").trimmingCharacters(in: .whitespaces).isEmpty {
-                    table.append(trimmed)
-                }
+                table.append(trimmed)
                 continue
             }
             if !bullets.isEmpty || !numbered.isEmpty || !table.isEmpty { flush() }
@@ -845,6 +846,40 @@ enum Markdown {
         if let c = code { out.append(.code(lang: lang, code: c.joined(separator: "\n"))) }
         flush()
         return out
+    }
+
+    /// `| a | b |`: starts and ends with a pipe.
+    static func isTableRow(_ line: String) -> Bool {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        return t.count > 2 && t.hasPrefix("|") && t.hasSuffix("|")
+    }
+
+    /// `| --- | :-: |`: the row under the header that makes pipe rows a GFM table.
+    static func isTableSeparator(_ line: String) -> Bool {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        return isTableRow(t) && t.contains("-") && t.allSatisfy { "|-: ".contains($0) }
+    }
+
+    /// The cells of one pipe row, outer pipes dropped, each trimmed.
+    static func splitTableRow(_ line: String) -> [String] {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        let inner = t.dropFirst().dropLast()
+        return inner.split(separator: "|", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+
+    /// A run of pipe rows: a table when the second row is the separator (Mac
+    /// `markdown.rs` parity); otherwise — no separator row, so not a GFM table — one
+    /// monospace block that keeps its columns and scrolls sideways rather than prose
+    /// with raw pipes. A single pipe row is prose.
+    static func tableBlock(_ lines: [String]) -> Block {
+        if lines.count >= 2, isTableSeparator(lines[1]) {
+            return .table(header: splitTableRow(lines[0]), rows: lines.dropFirst(2).map(splitTableRow))
+        }
+        if lines.count == 1 {
+            return .paragraph(lines[0])
+        }
+        return .code(lang: "", code: lines.joined(separator: "\n"))
     }
 
     /// A block that is really machine output (a JSON object/array) is not prose.
@@ -858,6 +893,12 @@ enum Markdown {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard t.hasPrefix("{") || t.hasPrefix("["), let data = t.data(using: .utf8) else { return false }
         return (try? JSONSerialization.jsonObject(with: data)) != nil
+    }
+
+    /// The text inline markdown renders to, markers removed (`[Name](url)` → `Name`).
+    static func plain(_ text: String) -> String {
+        (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+            .map { String($0.characters) } ?? text
     }
 
     /// Inline markdown with Mac-parity link paint and Grok-style code chips:
@@ -1038,11 +1079,29 @@ struct RowView: View, Equatable {
     @ViewBuilder
     private var bubble: some View {
         switch row.kind {
-        case .user(let text, let pending, let quote):
-            // My bubble: its delivery state is its opacity (pending < sent < seen), a
-            // failed one is full with a red mark on its outer edge; no caption
-            // (Jacob, 2026-10-24, feedback sent-state-opacity-2026-10-24).
-            DeliveryFade(model: model, chatId: chatId, messageId: row.messageId, pending: pending) {
+        case .user(let text, let delivery, let quote):
+            // My bubble: delivered is the full style at once; only pending is dimmed; a
+            // failed one is full with a red "! Retry" on its outer edge. No caption, no
+            // read-receipt dimming (Jacob, 2026-10-24 / 2026-10-25; docs/mac-design-rules.md).
+            HStack(spacing: 8) {
+                Spacer(minLength: 0)
+                if delivery == .failed {
+                    Button {
+                        model.resendFailed(chatId: chatId, messageId: row.messageId)
+                    } label: {
+                        Label("Retry", systemImage: "exclamationmark.circle.fill")
+                            .font(theme.font(Theme.tiny))
+                            .foregroundStyle(.red)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Not sent. Retry")
+                }
+                if delivery == .pending {
+                    Image(systemName: "clock")
+                        .font(.system(size: 12))
+                        .foregroundStyle(theme.muted)
+                        .accessibilityLabel("Sending")
+                }
                 VStack(alignment: .leading, spacing: 6) {
                     if let quote {
                         quoteHeader(quote, color: theme.userText)
@@ -1060,6 +1119,8 @@ struct RowView: View, Equatable {
                 .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleUser))
                 .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: true) }
                 .frame(maxWidth: maxBubble, alignment: .trailing)
+                .opacity(delivery.opacity)
+                .accessibilityIdentifier("own-bubble-\(delivery)")
             }
         case .other(let text, let handle, let avatar, let named, let quote):
             let openPerson = { model.openPersonProfile(handle: handle, avatarUrl: avatar, chatId: chatId) }
@@ -1219,7 +1280,8 @@ struct RowView: View, Equatable {
         case .image(let item, let fromUser, let caption):
             HStack {
                 if fromUser { Spacer(minLength: 0) }
-                ImageBubble(item: item, chatId: chatId, fromUser: fromUser, maxWidth: maxBubble, caption: caption)
+                ImageBubble(item: item, chatId: chatId, fromUser: fromUser, maxWidth: maxBubble, caption: caption,
+                            mentions: mentions)
                     .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: fromUser) }
                 if !fromUser { Spacer(minLength: 0) }
             }
@@ -1533,20 +1595,88 @@ struct BlockView: View {
                     }
                 }
             }
-        case .table(let lines):
-            ScrollView(.horizontal, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(Array(lines.enumerated()), id: \.offset) { i, line in
-                        Text(line.split(separator: "|").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.joined(separator: "    "))
-                            .font(theme.font(14, weight: i == 0 ? .semibold : .regular, design: .monospaced))
-                            .foregroundStyle(theme.text)
-                    }
-                }
-                .padding(10)
-            }
-            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.bg.opacity(0.6)))
+        case .table(let header, let rows):
+            TableBlock(header: header, rows: rows, mentions: mentions)
         case .code(let lang, let code):
             CodeCard(lang: lang, code: code)
+        }
+    }
+}
+
+/// A GFM table as a real table (the Mac's `render_block` table): a header row on
+/// the code wash, body rows with hairlines between them, one column per header
+/// cell with the same width in every row, each cell inline markdown — so a
+/// `[Name](url)` is a tappable link, never raw markup ([feedback
+/// markdown-tables-ios-2026-10-25]: Jacob's Lima bookstore table came out as a
+/// monospace block of `[…](https://…)` cut off at the bubble's edge). Wider
+/// than the bubble, the table keeps its columns and scrolls sideways.
+struct TableBlock: View {
+    @Environment(\.theme) private var theme
+    let header: [String]
+    let rows: [[String]]
+    let mentions: MentionTable
+
+    /// The narrowest a column is laid out at, in points.
+    static let columnMin: CGFloat = 72
+    /// The widest a column is laid out at before its cells wrap.
+    static let columnMax: CGFloat = 220
+    /// Average glyph advance of the 14 pt cell text, used to size columns before layout.
+    static let glyphAdvance: CGFloat = 7.4
+
+    /// One width per column, from the longest rendered cell (markup removed) in that
+    /// column, clamped to `columnMin…columnMax`; every row uses the same widths, so the
+    /// columns line up, and their sum is what the frame scrolls when the bubble is narrower.
+    static func columnWidths(header: [String], rows: [[String]]) -> [CGFloat] {
+        let cols = max(header.count, 1)
+        return (0..<cols).map { ci in
+            let longest = ([header] + rows)
+                .compactMap { ci < $0.count ? $0[ci] : nil }
+                .map { Markdown.plain($0).count }
+                .max() ?? 0
+            return min(max(CGFloat(longest) * glyphAdvance + 20, columnMin), columnMax)
+        }
+    }
+
+    /// `row` padded with empty cells or cut to the header's width.
+    static func fitted(_ row: [String], to cols: Int) -> [String] {
+        Array((row + Array(repeating: "", count: max(0, cols - row.count))).prefix(cols))
+    }
+
+    var body: some View {
+        let cols = max(header.count, 1)
+        let widths = Self.columnWidths(header: header, rows: rows)
+        ScrollView(.horizontal, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 0) {
+                tableRow(Self.fitted(header, to: cols), widths: widths, head: true)
+                    .background(theme.codeChip)
+                ForEach(Array(rows.enumerated()), id: \.offset) { ri, row in
+                    tableRow(Self.fitted(row, to: cols), widths: widths, head: false)
+                        .background(ri % 2 == 1 ? theme.codeChip.opacity(0.4) : .clear)
+                        .overlay(alignment: .top) { Rectangle().fill(theme.separator).frame(height: 0.5) }
+                }
+            }
+            .accessibilityIdentifier("table")
+        }
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.bg.opacity(0.6)))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(theme.separator, lineWidth: 0.5))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func tableRow(_ cells: [String], widths: [CGFloat], head: Bool) -> some View {
+        HStack(alignment: .top, spacing: 0) {
+            ForEach(Array(cells.enumerated()), id: \.offset) { ci, cell in
+                Markdown.inlineText(cell, color: head ? theme.text : theme.muted, link: theme.accent, codeChip: theme.codeChip, mentions: mentions)
+                    .font(theme.font(14, weight: head ? .semibold : .regular))
+                    .tint(theme.accent)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(width: widths[ci], alignment: .topLeading)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .overlay(alignment: .leading) {
+                        if ci > 0 { Rectangle().fill(theme.separator).frame(width: 0.5) }
+                    }
+            }
         }
     }
 }
@@ -1646,97 +1776,36 @@ private extension View {
     }
 }
 
-/// Where one of my own bubbles is on its way. No caption says it (Jacob,
-/// 2026-10-24: "remove these 'sent' items, just use coloring"): the bubble's
-/// opacity does — the same values as the Mac (`transcript.rs` `Delivery`,
+/// Where one of my own bubbles is on its way. No caption says it (Jacob, 2026-10-24:
+/// "remove these 'sent' items, just use coloring"), and nothing after delivery dims it
+/// (Jacob, 2026-10-25: delivered bubbles that waited for a read receipt "show up too dim,
+/// I think they have not been sent"). Same values as the Mac (`transcript.rs` `Delivery`,
 /// docs/mac-design-rules.md § Own-bubble delivery).
 enum Delivery: Equatable {
-    /// Not yet acknowledged by the relay.
+    /// Not yet acknowledged by the relay: the only dimmed state.
     case pending
-    /// The relay refused it: full opacity plus a red mark.
+    /// The relay refused it: full opacity plus a red "! Retry".
     case failed
-    /// Acknowledged, nobody has opened past it yet.
-    case sent
-    /// A peer's read watermark covers it, or an agent answered after it.
-    case seen
+    /// Acknowledged by the relay: the full own-bubble style, at once. Read receipts never
+    /// change how my bubble looks — agents send none, members on older builds send none, a
+    /// member who has not opened the chat sends none, and a bubble waiting for one reads as unsent.
+    case delivered
 
-    /// Whole-bubble alpha. 0.72 keeps white text at 4.9 : 1 (dark) / 7.7 : 1 (light) on
-    /// its fill while the bubble reads clearly lighter than a seen one; pending sits lower.
-    static let sentAlpha: CGFloat = 0.72
+    /// Whole-bubble alpha of a pending bubble (3.4 : 1 dark / 3.6 : 1 light text contrast,
+    /// transient until the relay's ACK).
     static let pendingAlpha: CGFloat = 0.5
 
     var opacity: CGFloat {
         switch self {
         case .pending: return Delivery.pendingAlpha
-        case .sent: return Delivery.sentAlpha
-        case .failed, .seen: return 1
+        case .failed, .delivered: return 1
         }
     }
 
-    /// `receipts`: peer handle → newest message id that peer has opened past (presence `seen`).
-    /// Seen when any watermark is at or after `message`, or an agent / project answered after it.
-    static func of(_ message: Message, in messages: [Message], receipts: [String: Id]) -> Delivery {
+    static func of(_ message: Message) -> Delivery {
         if message.pending { return .pending }
         if message.status == .error { return .failed }
-        guard let ix = messages.lastIndex(where: { $0.id == message.id }) else { return .sent }
-        for seenId in receipts.values {
-            if seenId == message.id { return .seen }
-            if let six = messages.lastIndex(where: { $0.id == seenId }), six >= ix { return .seen }
-        }
-        if messages[(ix + 1)...].contains(where: { $0.role == .assistant || $0.role == .project }) { return .seen }
-        return .sent
-    }
-}
-
-/// Peers' read watermarks per people chat (presence `seen`, the Mac's `message_receipts`).
-/// Observed only by [`DeliveryFade`] on my own bubbles, like [`SenderAccents`], so a presence
-/// tick never invalidates every row.
-final class ReadReceipts: ObservableObject {
-    static let shared = ReadReceipts()
-
-    /// chat id → peer handle → newest message id that peer has opened past.
-    @Published private(set) var seen: [Id: [String: Id]] = [:]
-
-    func note(_ header: [String: Any], chatId: Id) {
-        guard let handle = header["handle"] as? String, !handle.isEmpty,
-              let id = header["seen"] as? String, !id.isEmpty else { return }
-        if seen[chatId]?[handle] == id { return }
-        seen[chatId, default: [:]][handle] = id
-    }
-
-    func clear() { seen = [:] }
-}
-
-/// My bubble at its delivery opacity, with the red mark beside a failed one.
-private struct DeliveryFade<Content: View>: View {
-    @ObservedObject private var receipts = ReadReceipts.shared
-    let model: AppModel
-    let chatId: Id
-    let messageId: Id
-    let pending: Bool
-    @ViewBuilder let content: () -> Content
-
-    private var delivery: Delivery {
-        if pending { return .pending }
-        let list = model.messages[chatId] ?? []
-        guard let message = list.last(where: { $0.id == messageId }) else { return .seen }
-        return Delivery.of(message, in: list, receipts: receipts.seen[chatId] ?? [:])
-    }
-
-    var body: some View {
-        let state = delivery
-        HStack(spacing: 8) {
-            Spacer(minLength: 0)
-            if state == .failed {
-                Image(systemName: "exclamationmark.circle.fill")
-                    .font(.system(size: 16))
-                    .foregroundStyle(.red)
-                    .accessibilityLabel("Not sent")
-            }
-            content()
-                .opacity(state.opacity)
-                .accessibilityIdentifier("own-bubble-\(state)")
-        }
+        return .delivered
     }
 }
 
@@ -2039,8 +2108,14 @@ struct AvatarCluster: View {
 /// picture is its own bubble — uniform margins trimmed, aspect-fit at the
 /// bubble radius, no frame and no footer (Download / Forward live in the viewer
 /// it opens). Loaded with the device bearer (same as voice memos).
-/// When the send carried a description, a caption bar sits under the picture
-/// in the same bubble so the note is not a second message.
+/// When the send carried a description, the caption sits under the picture in
+/// the same rounded bubble so the note is not a second message — and that bubble
+/// is a normal text bubble in width: the caption wraps at the bubble cap
+/// (`maxWidth`), never at the picture's own width, which for a portrait
+/// screenshot is a ~150 pt sliver ([feedback image-caption-bubble-ios-2026-10-25]).
+/// A picture narrower than its bubble (portrait + long caption) sits centred at
+/// the top with a small inset and its own radius; one that spans the bubble is
+/// flush, exactly as a picture-only bubble.
 struct ImageBubble: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -2049,6 +2124,7 @@ struct ImageBubble: View {
     let fromUser: Bool
     let maxWidth: CGFloat
     var caption: String? = nil
+    var mentions: MentionTable? = nil
 
     @State private var image: UIImage?
     @State private var failed = false
@@ -2058,10 +2134,18 @@ struct ImageBubble: View {
     static let maxHeight: CGFloat = 320
     static let minWidth: CGFloat = 120
     static let placeholder = CGSize(width: 240, height: 160)
+    /// A picture narrower than its bubble: this far from the top (and centred), with
+    /// `pictureRadius` corners, so it reads as a photo inside the bubble, not a sliver
+    /// glued to one edge.
+    static let pictureInset: CGFloat = 8
+    static let pictureRadius: CGFloat = Theme.bubbleRadius - pictureInset
 
     private var bubbleWidth: CGFloat { min(280, maxWidth) }
     private var fill: Color { fromUser ? theme.bubbleUser : theme.bubbleAssistant }
-    private var captionText: String? {
+    private var captionText: String? { Self.captionText(caption) }
+
+    /// The caption as shown: trimmed, nil when blank.
+    static func captionText(_ caption: String?) -> String? {
         guard let caption else { return nil }
         let t = caption.trimmingCharacters(in: .whitespacesAndNewlines)
         return t.isEmpty ? nil : t
@@ -2084,44 +2168,66 @@ struct ImageBubble: View {
     }
 
     var body: some View {
-        Button { viewer = MediaOpen.state(for: item, chatId: chatId, model: model) } label: {
-            VStack(alignment: .leading, spacing: 0) {
-                ZStack {
-                    fill
-                    if let image {
-                        Image(uiImage: image)
-                            .resizable()
-                            .scaledToFit()
-                    } else if failed || item.blobRef == nil {
-                        Image(systemName: "photo")
-                            .font(theme.font(28))
-                            .foregroundStyle(fromUser ? theme.userText.opacity(0.7) : theme.muted)
-                    } else {
-                        ProgressView().tint(fromUser ? theme.userText.opacity(0.7) : theme.muted)
-                    }
-                }
-                .frame(width: size.width, height: size.height)
-                if let captionText {
-                    Text(captionText)
-                        .font(theme.font(Theme.body))
-                        .foregroundStyle(fromUser ? theme.userText : theme.text)
-                        .multilineTextAlignment(.leading)
-                        .padding(.horizontal, Theme.bubbleHPad)
-                        .padding(.vertical, Theme.bubbleVPad)
-                        .frame(width: size.width, alignment: .leading)
-                        .background(fill)
-                }
+        PhotoBubbleLayout(maxWidth: maxWidth, pictureInset: Self.pictureInset) {
+            Button { viewer = MediaOpen.state(for: item, chatId: chatId, model: model) } label: {
+                pictureTile
             }
-            .clipShape(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous))
+            .buttonStyle(.plain)
+            .accessibilityLabel(captionText == nil ? "Image, tap to view" : "Image with description, tap to view")
+            if let captionText {
+                // The same text as a text bubble: body size, body line spacing, links
+                // and mention chips (Jacob: "normal font size").
+                Markdown.inlineText(captionText, color: fromUser ? theme.userText : theme.text, link: theme.accent,
+                                    codeChip: fromUser ? theme.userCodeChip : theme.codeChip, mentions: mentions)
+                    .font(theme.font(Theme.body))
+                    .lineSpacing(Theme.bodyLineSpacing)
+                    .tint(theme.accent)
+                    .multilineTextAlignment(.leading)
+                    .padding(.horizontal, Theme.bubbleHPad)
+                    .padding(.vertical, Theme.bubbleVPad)
+                    .accessibilityIdentifier("photo-caption")
+            }
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(captionText == nil ? "Image, tap to view" : "Image with description, tap to view")
+        .background(fill)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous))
+        .accessibilityIdentifier("photo-bubble")
         .task(id: item.blobRef) { await load() }
         .fullScreenCover(item: $viewer) { v in
             MediaViewer(album: v.items, index: v.index, onClose: { viewer = nil })
                 .environmentObject(model)
                 .environment(\.theme, theme)
         }
+    }
+
+    /// The picture at its fitted size. The layout hands this tile the bubble's width:
+    /// when that is the picture's own width the picture is flush (a picture-only
+    /// bubble, or a caption no wider than the picture); when the bubble is wider the
+    /// picture sits centred, `pictureInset` down, with `pictureRadius` corners.
+    private var pictureTile: some View {
+        let picture = size
+        return GeometryReader { g in
+            let flush = PhotoBubbleLayout.pictureIsFlush(picture: picture, bubbleWidth: g.size.width)
+            ZStack {
+                if let image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                } else if failed || item.blobRef == nil {
+                    Image(systemName: "photo")
+                        .font(theme.font(28))
+                        .foregroundStyle(fromUser ? theme.userText.opacity(0.7) : theme.muted)
+                } else {
+                    ProgressView().tint(fromUser ? theme.userText.opacity(0.7) : theme.muted)
+                }
+            }
+            .frame(width: picture.width, height: picture.height)
+            .clipShape(RoundedRectangle(cornerRadius: flush ? 0 : Self.pictureRadius, style: .continuous))
+            .frame(width: g.size.width, height: g.size.height, alignment: flush ? .top : .bottom)
+        }
+        // Unproposed (the layout measuring) → the picture's size; placed → the tile the
+        // layout hands it.
+        .frame(minWidth: picture.width, idealWidth: picture.width, maxWidth: .infinity,
+               minHeight: picture.height, idealHeight: picture.height, maxHeight: .infinity)
     }
 
     private func load() async {
@@ -2131,6 +2237,81 @@ struct ImageBubble: View {
         } else {
             failed = true
         }
+    }
+}
+
+/// The photo bubble's geometry: the picture tile on top, the caption under it, the
+/// bubble as wide as the wider of the two — the caption measured at the bubble cap
+/// (`maxWidth`, a text bubble's width), never at the picture's width.
+/// `geometry(picture:caption:maxWidth:)` is the pure arithmetic the layout and the
+/// tests share ([feedback image-caption-bubble-ios-2026-10-25]).
+struct PhotoBubbleLayout: Layout {
+    let maxWidth: CGFloat
+    let pictureInset: CGFloat
+
+    struct Geometry: Equatable {
+        /// The bubble's size; the caption is placed at `captionTop`, full bubble width.
+        var size: CGSize
+        /// The picture tile's height: the picture plus its top inset when it floats.
+        var tileHeight: CGFloat
+        var captionTop: CGFloat { tileHeight }
+        /// Whether the picture spans the bubble (flush, no inset, square against the caption).
+        var pictureFlush: Bool
+    }
+
+    /// `picture` is the fitted picture; `caption` its wrapped size at `cap` (padding
+    /// included) or nil for a picture-only bubble; `cap` is what the row offers, at
+    /// most the bubble cap.
+    static func geometry(picture: CGSize, caption: CGSize?, cap: CGFloat, pictureInset: CGFloat) -> Geometry {
+        let width: CGFloat
+        if let caption {
+            width = min(cap, max(picture.width, caption.width))
+        } else {
+            width = min(cap, picture.width)
+        }
+        let flush = pictureIsFlush(picture: picture, bubbleWidth: width)
+        let tile = picture.height + (flush ? 0 : pictureInset)
+        return Geometry(size: CGSize(width: width, height: tile + (caption?.height ?? 0)),
+                        tileHeight: tile, pictureFlush: flush)
+    }
+
+    /// Flush when the bubble is no wider than the picture (half a point of slack for
+    /// rounding); a wider bubble floats the picture.
+    static func pictureIsFlush(picture: CGSize, bubbleWidth: CGFloat) -> Bool {
+        bubbleWidth <= picture.width + 0.5
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        measure(proposal: proposal, subviews: subviews).size
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let g = measure(proposal: proposal, subviews: subviews)
+        guard let picture = subviews.first else { return }
+        picture.place(at: bounds.origin, anchor: .topLeading,
+                      proposal: ProposedViewSize(width: g.size.width, height: g.tileHeight))
+        if subviews.count > 1 {
+            subviews[1].place(at: CGPoint(x: bounds.minX, y: bounds.minY + g.captionTop), anchor: .topLeading,
+                              proposal: ProposedViewSize(width: g.size.width, height: nil))
+        }
+    }
+
+    private func measure(proposal: ProposedViewSize, subviews: Subviews) -> Geometry {
+        let cap = min(maxWidth, proposal.width ?? maxWidth)
+        guard let pictureView = subviews.first else {
+            return Geometry(size: .zero, tileHeight: 0, pictureFlush: true)
+        }
+        let picture = pictureView.sizeThatFits(.unspecified)
+        guard subviews.count > 1 else {
+            return Self.geometry(picture: picture, caption: nil, cap: cap, pictureInset: pictureInset)
+        }
+        // Wrap the caption at the cap to learn the bubble's width, then once more at that
+        // width so the height matches what is placed.
+        let wide = subviews[1].sizeThatFits(ProposedViewSize(width: cap, height: nil))
+        let width = min(cap, max(picture.width, wide.width))
+        let caption = subviews[1].sizeThatFits(ProposedViewSize(width: width, height: nil))
+        return Self.geometry(picture: picture, caption: CGSize(width: min(width, caption.width), height: caption.height),
+                             cap: cap, pictureInset: pictureInset)
     }
 }
 

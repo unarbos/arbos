@@ -49,6 +49,9 @@ pub struct Hero {
     pub subtitle_color: Hsla,
     /// A click on the subtitle (the agent's "Add a label": edit it in place).
     pub subtitle_click: Option<HeroClick>,
+    /// A ready-made subtitle in place of the text (the foreign agent's
+    /// "Run by …" link, [feedback agent-pane-run-by-link-mac-2026-10-25]).
+    pub subtitle_element: Option<AnyElement>,
     /// Mac only: inline controls under the subtitle while the name is being
     /// edited (the own profile's handle field with Cancel / Save). The iPhone
     /// edits in a sheet, so its hero has no twin field.
@@ -267,6 +270,7 @@ pub fn render(pane: ProfilePane, shell: &Shell, cx: &mut Context<Shell>) -> Stat
             &subtitle,
             pane.hero.subtitle_color,
             pane.hero.subtitle_click,
+            pane.hero.subtitle_element,
             &theme,
         )
         .children(pane.hero.editor),

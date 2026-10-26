@@ -292,6 +292,10 @@ struct Project: Identifiable, Equatable, Codable {
     /// `imageKey` as a fetchable URL (the relay's `/blob/{id}/{key}?token=…`), filled in by the
     /// relay client; nil in the fixture.
     var imageURL: String? = nil
+    /// The relay's stamp (ms) of the agent's last avatar change (`avatar_version`); 0 when
+    /// unknown. Among the copies of one agent (my record, every roster card) the highest stamp
+    /// is drawn, so a change never flips back to the old picture (Jacob, 2026-10-25).
+    var avatarVersion: Int = 0
     /// Private standing instructions (owner only).
     var instructions: String = ""
     /// §9 public one-paragraph description (≤500), `PATCH {description}`.
@@ -350,6 +354,7 @@ extension Project {
         self.avatarLeaf = dto.avatar_leaf.map(Int.init)
         self.avatarLeafColor = dto.avatar_leaf_color.map(Int.init)
         self.imageKey = dto.image_key.flatMap { $0.isEmpty ? nil : $0 }
+        self.avatarVersion = dto.avatar_version.map(Int.init) ?? 0
         self.instructions = dto.instructions
         self.description = dto.description
         self.ownerName = dto.owner.name

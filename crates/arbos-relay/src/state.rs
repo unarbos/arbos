@@ -50,6 +50,10 @@ pub struct Config {
     pub channels_mock: bool,
     /// `ARBOS_IMAGE_MOCK=1`: image generation answers with a labelled placeholder PNG (F10).
     pub image_mock: bool,
+    /// Waits before the avatar generator's retries of a transient provider failure (timeout,
+    /// 429, 5xx) on one model — 2 s then 5 s by default (`ARBOS_AVATAR_RETRY_MS=2000,5000`);
+    /// tests set it empty or to zeros.
+    pub avatar_retry_backoff_ms: Vec<u64>,
     /// `ARBOS_VOICE_MOCK=1`: `/proxy/v1/audio/*` answer locally (F11).
     pub voice_mock: bool,
     /// OpenAI-compatible base for audio (STT/TTS); api.openai.com by default
@@ -251,6 +255,12 @@ pub struct AppState {
     pub voice_dispatched: Arc<Mutex<HashMap<String, i64>>>,
     /// What the voice worker last reported about itself (`POST /voice/worker/hello`).
     pub voice_worker: Arc<Mutex<Option<serde_json::Value>>>,
+    /// What landed in a chat while an agent call is live there (#1832): per (call, agent), the
+    /// finished bubbles and human messages the voice worker long-polls into the call's context.
+    pub voice_inbox: crate::voice::VoiceInbox,
+    /// The image provider's last health probe (`images::probe_provider`, every 5 min and on
+    /// `GET /admin/images/health?probe=1`); `healthz.images` reads it.
+    pub image_health: Arc<Mutex<Option<crate::images::ImageHealth>>>,
     /// device_id → the app version it last reported (`X-Arbos-Client`), see `releases.rs`.
     pub client_seen: Arc<crate::releases::ClientSeen>,
     /// Chats on Matrix (D88): mode, homeserver tokens and the outbox wake-up.
@@ -505,6 +515,7 @@ pub(crate) mod test_support {
             openai_direct_base: "https://api.openai.com/v1".into(),
             openai_route: super::OpenAiRoute::Auto,
             image_mock: false,
+            avatar_retry_backoff_ms: Vec::new(),
             voice_mock: true,
             openai_audio_base: String::new(),
             vault_mock: false,
@@ -567,6 +578,8 @@ pub(crate) mod test_support {
             restart: Arc::new(RestartSignal::default()),
             voice_dispatched: Arc::new(Mutex::new(HashMap::new())),
             voice_worker: Arc::new(Mutex::new(None)),
+            voice_inbox: crate::voice::VoiceInbox::default(),
+            image_health: Arc::new(Mutex::new(None)),
             client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
             matrix: crate::matrix::Matrix::new(crate::matrix::Config::off()),
         }

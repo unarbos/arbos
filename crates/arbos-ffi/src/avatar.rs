@@ -224,6 +224,9 @@ pub struct AgentCard {
     pub leaf_color: Option<u8>,
     pub color_index: Option<u8>,
     pub image_key: Option<String>,
+    /// The relay's stamp of the last avatar change (`0` when the source has none); among
+    /// copies of one agent the highest stamp is drawn.
+    pub avatar_version: i64,
 }
 
 impl From<AgentCard> for identity::AgentCard {
@@ -236,6 +239,7 @@ impl From<AgentCard> for identity::AgentCard {
             leaf_color: c.leaf_color,
             color_index: c.color_index,
             image_key: c.image_key,
+            avatar_version: c.avatar_version,
         }
     }
 }
@@ -249,6 +253,8 @@ pub struct AgentIdentity {
     pub leaf: LeafPick,
     pub color_index: u8,
     pub image_key: Option<String>,
+    /// Stamp of the copy drawn; part of any picture cache key.
+    pub avatar_version: i64,
     pub known: bool,
 }
 
@@ -261,6 +267,7 @@ impl From<identity::AgentIdentity> for AgentIdentity {
             leaf: a.leaf.into(),
             color_index: a.color_index,
             image_key: a.image_key,
+            avatar_version: a.avatar_version,
             known: a.known,
         }
     }
