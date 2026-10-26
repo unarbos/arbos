@@ -54,10 +54,33 @@ run_suite() {
   udid=$(test_sim_udid)
   [[ -n "$xctestrun" && -n "$udid" ]] || { echo "no xctestrun or no simulator '$TEST_SIM_NAME'" >"$log"; return 2; }
   xcrun simctl bootstatus "$udid" -b >/dev/null 2>&1
+  # xcodebuild sometimes never exits after the suite has finished (06:23 Oct 26: 222 tests done, the
+  # process idle on the main thread 8 min later). Run it in the background and stop it once the log
+  # carries the suite verdict (plus a 20 s grace for the result bundle), or after TEST_RUN_MAX_S.
   xcodebuild test-without-building -xctestrun "$xctestrun" \
     -destination "platform=iOS Simulator,id=$udid" -parallel-testing-enabled NO \
-    -only-testing:ArbosTests >"$log" 2>&1
+    -only-testing:ArbosTests >"$log" 2>&1 &
+  local pid=$! t0 done_at=0 now
+  t0=$(date +%s)
+  while kill -0 "$pid" 2>/dev/null; do
+    now=$(date +%s)
+    if (( done_at == 0 )) && grep -qE "Test Suite 'All tests' (passed|failed)|\*\* TEST (EXECUTE FAILED|SUCCEEDED) \*\*" "$log" 2>/dev/null; then
+      done_at=$now
+    fi
+    if (( done_at > 0 && now - done_at > 20 )) || (( now - t0 > TEST_RUN_MAX_S )); then
+      kill "$pid" 2>/dev/null; sleep 3; kill -9 "$pid" 2>/dev/null
+      echo "== tests: xcodebuild stopped by the watchdog ($(( now - t0 )) s; verdict $([ "$done_at" -gt 0 ] && echo present || echo MISSING))" >>"$log"
+      break
+    fi
+    sleep 5
+  done
+  wait "$pid" 2>/dev/null
+  # The verdict line, not xcodebuild's exit code, decides: a watchdog kill after a complete run is a pass/fail by the log.
+  grep -qE "Test Suite 'All tests' passed|\*\* TEST SUCCEEDED \*\*" "$log" && return 0
+  grep -qE "Test Suite 'All tests' failed|\*\* TEST EXECUTE FAILED \*\*" "$log" && return 65
+  return 70
 }
+TEST_RUN_MAX_S="${TEST_RUN_MAX_S:-900}"
 
 # baseline_for <main sha> → prints the cached failing set of main at that head, computing it once:
 # checks out the base in the gate tree, build-for-testing into the Debug derived data, runs the suite.
