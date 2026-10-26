@@ -354,11 +354,13 @@ pub fn set_badge(total: usize) {
     let _ = total;
 }
 
-/// Install the notification-center delegate (clicks, foreground banners).
-/// Call once on the main thread at start-up; a no-op off macOS.
+/// Install the notification-center delegate (clicks, foreground banners) and
+/// ask the OS where we stand on permission. Call once on the main thread at
+/// start-up; off macOS only the permission answer is recorded.
 pub fn init() {
     #[cfg(target_os = "macos")]
     mac::init();
+    refresh_permission();
 }
 
 /// Does this platform ask the user before showing notifications?
@@ -376,22 +378,114 @@ pub fn needs_permission() -> bool {
     }
 }
 
-const ASKED_MARK: &str = "notifications-asked";
-
-/// Has the one-time explainer already been shown (any answer)?
-pub fn permission_asked(config_dir: &Path) -> bool {
-    config_dir.join(ASKED_MARK).is_file()
+/// What the OS says about our permission to post notifications. The app used
+/// to remember only "the explainer was shown once" in a marker file, so a
+/// "Not now" (or a build before the explainer existed) left macOS undecided
+/// for good and every banner failed with "notifications are not allowed" on
+/// stderr — the cause of "no Mac notifications" reports. The system's own
+/// answer is the only state that counts now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Permission {
+    /// The OS has not answered yet (asked at start-up; a few ms).
+    Unknown,
+    /// Never asked, or asked and dismissed without an answer: ask again.
+    NotDetermined,
+    /// The user said no in the system prompt or turned us off in System Settings.
+    Denied,
+    Allowed,
 }
 
-pub fn mark_permission_asked(config_dir: &Path) {
-    let _ = std::fs::create_dir_all(config_dir);
-    let _ = std::fs::write(config_dir.join(ASKED_MARK), b"1");
+static PERMISSION: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn permission() -> Permission {
+    match PERMISSION.load(Ordering::Relaxed) {
+        1 => Permission::NotDetermined,
+        2 => Permission::Denied,
+        3 => Permission::Allowed,
+        _ => Permission::Unknown,
+    }
+}
+
+fn set_permission(p: Permission) {
+    let v = match p {
+        Permission::Unknown => 0,
+        Permission::NotDetermined => 1,
+        Permission::Denied => 2,
+        Permission::Allowed => 3,
+    };
+    PERMISSION.store(v, Ordering::Relaxed);
+}
+
+/// Ask the OS again (asynchronous on macOS; the answer lands in [`permission`]).
+pub fn refresh_permission() {
+    if std::env::var_os("ARBOS_NOTIFY_PROMPT").is_some() {
+        // Rigs: the explainer shows until Allow / Not now is clicked.
+        if permission() == Permission::Unknown {
+            set_permission(Permission::NotDetermined);
+        }
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if mac::available() {
+            mac::refresh_permission();
+            return;
+        }
+    }
+    // osascript / notify-send: nothing to ask.
+    set_permission(Permission::Allowed);
 }
 
 /// Show the system permission prompt (macOS). Elsewhere nothing to ask.
 pub fn request_permission() {
     #[cfg(target_os = "macos")]
-    mac::request_authorization();
+    {
+        if mac::available() {
+            mac::request_authorization();
+            return;
+        }
+    }
+    set_permission(Permission::Allowed);
+}
+
+const ASKED_MARK: &str = "notifications-asked";
+const SNOOZE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+
+/// "Not now" on the explainer snoozes it for a day (the marker's age); macOS
+/// stays undecided, so after that the card comes back — before this the
+/// marker was permanent and one "Not now" meant no banners ever. Rigs write
+/// the marker fresh before each run to keep the card out of screenshots.
+pub fn prompt_snoozed(config_dir: &Path) -> bool {
+    std::fs::metadata(config_dir.join(ASKED_MARK))
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age < SNOOZE)
+}
+
+pub fn snooze_prompt(config_dir: &Path) {
+    let _ = std::fs::create_dir_all(config_dir);
+    let _ = std::fs::write(config_dir.join(ASKED_MARK), b"1");
+}
+
+/// The user said "Not now": the OS stays undecided; this launch stays quiet.
+pub fn permission_dismissed(config_dir: &Path) {
+    snooze_prompt(config_dir);
+    if std::env::var_os("ARBOS_NOTIFY_PROMPT").is_some() {
+        set_permission(Permission::Denied);
+    }
+}
+
+/// System Settings → Notifications → Arbos (the only place a denied
+/// permission can be turned back on).
+pub fn open_system_settings() {
+    #[cfg(target_os = "macos")]
+    {
+        let bundle = mac::bundle_id().unwrap_or_else(|| "sh.arbos.mac".to_string());
+        spawn_quiet(Command::new("open").arg(format!(
+            "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id={bundle}"
+        )));
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -509,6 +603,7 @@ fn applescript_escape(s: &str) -> String {
 #[cfg(target_os = "macos")]
 mod mac {
     use std::cell::RefCell;
+    use std::ptr::NonNull;
     use std::sync::atomic::{AtomicU8, Ordering};
 
     use block2::RcBlock;
@@ -521,10 +616,11 @@ mod mac {
         NSArray, NSBundle, NSError, NSObject, NSObjectProtocol, NSString, NSURL,
     };
     use objc2_user_notifications::{
-        UNAuthorizationOptions, UNMutableNotificationContent, UNNotification, UNNotificationAction,
-        UNNotificationActionOptions, UNNotificationAttachment, UNNotificationCategory,
-        UNNotificationCategoryOptions, UNNotificationPresentationOptions, UNNotificationRequest,
-        UNNotificationResponse, UNNotificationSound, UNUserNotificationCenter,
+        UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent,
+        UNNotification, UNNotificationAction, UNNotificationActionOptions,
+        UNNotificationAttachment, UNNotificationCategory, UNNotificationCategoryOptions,
+        UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse,
+        UNNotificationSettings, UNNotificationSound, UNUserNotificationCenter,
         UNUserNotificationCenterDelegate,
     };
 
@@ -696,7 +792,11 @@ mod mac {
             if !error.is_null() {
                 // SAFETY: non-null NSError* handed to the completion block.
                 let error = unsafe { &*error };
-                eprintln!("notify: call: {}", error.localizedDescription());
+                log::warn!(
+                    "notify: call banner refused: {}",
+                    error.localizedDescription()
+                );
+                refresh_permission();
             }
         });
         UNUserNotificationCenter::currentNotificationCenter()
@@ -730,6 +830,29 @@ mod mac {
             RefCell::new(std::collections::HashMap::new());
     }
 
+    pub fn bundle_id() -> Option<String> {
+        NSBundle::mainBundle()
+            .bundleIdentifier()
+            .map(|s| s.to_string())
+    }
+
+    /// `getNotificationSettings`: the answer arrives on a background queue and
+    /// is kept in the crate-level [`super::permission`].
+    pub fn refresh_permission() {
+        let handler = RcBlock::new(|settings: NonNull<UNNotificationSettings>| {
+            // SAFETY: the center hands a live settings object to the block.
+            let status = unsafe { settings.as_ref() }.authorizationStatus();
+            let p = match status {
+                UNAuthorizationStatus::NotDetermined => super::Permission::NotDetermined,
+                UNAuthorizationStatus::Denied => super::Permission::Denied,
+                _ => super::Permission::Allowed,
+            };
+            super::set_permission(p);
+        });
+        UNUserNotificationCenter::currentNotificationCenter()
+            .getNotificationSettingsWithCompletionHandler(&handler);
+    }
+
     pub fn request_authorization() {
         if !available() {
             return;
@@ -738,8 +861,13 @@ mod mac {
             if !granted.as_bool() && !error.is_null() {
                 // SAFETY: non-null NSError* handed to the completion block.
                 let error = unsafe { &*error };
-                eprintln!("notify: permission: {}", error.localizedDescription());
+                log::warn!("notify: permission: {}", error.localizedDescription());
             }
+            super::set_permission(if granted.as_bool() {
+                super::Permission::Allowed
+            } else {
+                super::Permission::Denied
+            });
         });
         UNUserNotificationCenter::currentNotificationCenter()
             .requestAuthorizationWithOptions_completionHandler(
@@ -790,7 +918,10 @@ mod mac {
             if !error.is_null() {
                 // SAFETY: non-null NSError* handed to the completion block.
                 let error = unsafe { &*error };
-                eprintln!("notify: {}", error.localizedDescription());
+                // "Notifications are not allowed for this application" = the
+                // permission went missing; re-read it so Settings shows why.
+                log::warn!("notify: banner refused: {}", error.localizedDescription());
+                refresh_permission();
             }
         });
         UNUserNotificationCenter::currentNotificationCenter()
