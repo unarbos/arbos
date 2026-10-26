@@ -80,9 +80,10 @@ const OVERDRAW_PX: f32 = 320.0;
 /// width cap, so the agent bubble's left edge is the composer's left edge
 /// and my bubble's right edge is the composer's right edge, at any pane
 /// width. Grok Mac (refs 57/58, 2 px/pt): both at 16 pt from the pane. The
-/// cap is the composer pill at its widest as it has always shipped — the
-/// 820 pt input plus the two 28 pt circles — so the pill itself does not
-/// move; up to a 908 pt pane the margins bound both.
+/// cap is the composer pill at its widest — the 904 pt input plus the two
+/// 28 pt circles = Grok's 960 ([feedback mac-sidebar-rail-2026-10-26]; 876
+/// before) — so the pill itself does not move; up to a 992 pt pane the
+/// margins bound both.
 pub const COLUMN_MAX_WIDTH: f32 = COMPOSER_WIDTH + 2.0 * PLUS_BUTTON;
 /// Agent bubble cap, measured from Grok Mac on two pane widths (ref 57:
 /// 728 pt pane, 612 pt bubble; ref 58: 424 pt pane, 310 pt bubble): the
@@ -97,7 +98,7 @@ pub const ASSISTANT_RIGHT_GAP: f32 = 84.0;
 /// window): every wrapped agent bubble ends at 1120 px = **560 pt** in a
 /// 960 pt composer column (58 % of it) — the list bubble is content-sized
 /// narrower, nothing is wider. Ours filled the column minus the gap (792 at
-/// the 876 pt cap, 90 %), which is what Jacob saw as "Arbos bubbles are
+/// the then 876 pt cap, 90 %), which is what Jacob saw as "Arbos bubbles are
 /// wider" ([feedback bubble-width-2026-10-24]). The cap is the smaller of
 /// the two rules ([`assistant_cap`]): narrow panes keep Grok's fixed gap
 /// (refs 57/58: 612 in a 696 pill, 310 in 392), wide panes stop at 560.
@@ -115,8 +116,8 @@ const STAMP_GAP_MS: u64 = 60 * 60 * 1000;
 /// consecutive bubbles of one sender sit 6 pt apart, a change of sender opens
 /// 20 pt, a time stamp has 20 pt above and 24 below, and the last message keeps
 /// 54 pt clear of the composer.
-const ROW_GAP_HALF: f32 = 3.0;
-const TURN_GAP_EXTRA: f32 = 20.0 - 2.0 * ROW_GAP_HALF;
+pub(crate) const ROW_GAP_HALF: f32 = 3.0;
+pub(crate) const TURN_GAP_EXTRA: f32 = 20.0 - 2.0 * ROW_GAP_HALF;
 /// Measured glyph-to-bubble, like the reference: the stamp's 13 pt line box
 /// carries ~4 pt of its own above and ~7 below the glyphs (measured).
 const STAMP_PAD_TOP: f32 = 20.0 - ROW_GAP_HALF - 4.0;
@@ -140,8 +141,13 @@ const BULLET_CENTRE: f32 = 8.5;
 /// Clearance above the composer when pinned (54 pt glyph-to-pill, minus the
 /// composer row's own 6 pt top padding and the last row's half-gap). Kept as a
 /// trailing list row — not as container padding — so scrolling bubbles reach
-/// the real edge of the input instead of hitting an opaque black strip.
+/// the real edge of the input instead of hitting an opaque black strip. The
+/// presence row (who is typing / working) floats inside this clearance while
+/// the list is pinned (`presence::LIFT`), so it never adds to it.
 const BOTTOM_INSET: f32 = 54.0 - ROW_GAP_HALF - 6.0;
+/// The last bubble's bottom edge → the composer pill's top edge when pinned.
+#[cfg(test)]
+pub(crate) const LAST_BUBBLE_TO_COMPOSER: f32 = ROW_GAP_HALF + BOTTOM_INSET + 6.0;
 /// People chats (redesign mocks a/f): a 24 pt sender disc at the bubble's
 /// bottom-left, 8 pt from it; captions and earlier blocks keep the lane free.
 /// The avatar column (Jacob, 2026-10-23 15:20, [feedback
@@ -1043,6 +1049,20 @@ impl Transcript {
         .size_full()
     }
 
+    /// The list sits at its end (new rows glide into view). The shell draws the
+    /// presence row over the bottom clearance only then: scrolled into history,
+    /// bubbles pass through that band and the ↓ button takes it.
+    pub fn is_pinned_to_bottom(&self) -> bool {
+        self.pinned_to_bottom
+    }
+
+    /// Where the list drew row `row_id` in the last frame (its whole frame:
+    /// the bubble plus its gap padding), if it was on screen.
+    #[cfg(test)]
+    pub(crate) fn row_frame(&self, row_id: &str) -> Option<Bounds<Pixels>> {
+        self.measured.borrow().rows.get(row_id).copied()
+    }
+
     /// The first row of a message from a new sender opens the turn gap; a
     /// stamp between them already carries its own spacing.
     fn is_turn_start(&self, ix: usize) -> bool {
@@ -1080,7 +1100,7 @@ impl Transcript {
     /// Wheel/trackpad over the transcript: scrolling up (positive delta,
     /// toward older messages) breaks the pin at once; scrolling down asks the
     /// next frame to re-pin when within `STICK_THRESHOLD_PX` of the end.
-    fn on_wheel(&mut self, event: &gpui::ScrollWheelEvent, cx: &mut Context<Self>) {
+    pub(crate) fn on_wheel(&mut self, event: &gpui::ScrollWheelEvent, cx: &mut Context<Self>) {
         let dy = f32::from(event.delta.pixel_delta(px(20.0)).y);
         if dy > 0.0 {
             self.pinned_to_bottom = false;
@@ -3249,12 +3269,23 @@ pub fn build_rows(
     // the sender changed or a date stamp broke the run (Grok Bot's group style), and
     // only in chats that name their senders at all (`names_senders`).
     let mut prev_sender: Option<String> = None;
+    // The stamp pushed for the current message, with the state it replaced. A
+    // message that then draws nothing — a hidden job / worker row, a stream
+    // with no words yet — takes its stamp back, so no date line hangs over
+    // empty space above the status row ([feedback status-row-gap-mac-2026-10-26]).
+    let mut pending_stamp: Option<(usize, u64, Option<String>)> = None;
     for (mix, message) in messages.iter().enumerate() {
+        retract_dangling_stamp(
+            &mut rows,
+            &mut pending_stamp,
+            &mut last_stamp_at,
+            &mut prev_sender,
+        );
         let streaming = message.is_streaming();
         if message.created_at > 0 && message.created_at.saturating_sub(last_stamp_at) > STAMP_GAP_MS
         {
+            pending_stamp = Some((rows.len(), last_stamp_at, prev_sender.take()));
             last_stamp_at = message.created_at;
-            prev_sender = None;
             let label = crate::ui::sidebar::stamp_label(message.created_at);
             rows.push(Row {
                 version: hash_version(&label, false),
@@ -3914,9 +3945,15 @@ pub fn build_rows(
             prev_sender = Some(message.sender.clone());
         }
     }
+    retract_dangling_stamp(
+        &mut rows,
+        &mut pending_stamp,
+        &mut last_stamp_at,
+        &mut prev_sender,
+    );
     // Who is working is the presence row over the composer (`ui::presence`),
     // not a transcript row: one notice per agent, never a caption plus a line.
-    let _ = (running, queued);
+    let _ = (running, queued, last_stamp_at, prev_sender);
     // Trailing clearance: scrolls with the list so mid-thread bubbles can
     // reach the composer, while the pinned end still keeps 54 pt above it.
     if !rows.is_empty() {
@@ -3928,6 +3965,24 @@ pub fn build_rows(
         });
     }
     rows
+}
+
+/// A time stamp that ended up as the last row drew a line over nothing: the
+/// message it introduced added no row. Take it back and restore the stamp
+/// clock and the sender run to what they were before it.
+fn retract_dangling_stamp(
+    rows: &mut Vec<Row>,
+    pending: &mut Option<(usize, u64, Option<String>)>,
+    last_stamp_at: &mut u64,
+    prev_sender: &mut Option<String>,
+) {
+    if let Some((ix, at, sender)) = pending.take() {
+        if rows.len() == ix + 1 && matches!(rows[ix].kind, RowKind::Stamp { .. }) {
+            rows.pop();
+            *last_stamp_at = at;
+            *prev_sender = sender;
+        }
+    }
 }
 
 /// One chips row under a message that carries reactions.
@@ -6010,8 +6065,8 @@ mod layout_tests {
         );
         assert!(column - ASSISTANT_RIGHT_GAP > ASSISTANT_MAX_WIDTH);
         assert!((e.bubble_left - e.column_left).abs() <= 1.0);
-        // A wide pane: the column caps at the composer's 876; the bubble still
-        // stops at 560 — 64 % of the column (Grok: 560 of its 960 pt composer).
+        // A wide pane: the column caps at the composer's 960 (Grok's); the
+        // bubble still stops at 560 — 58 % of the column, as in Grok.
         let e = measure(cx, 1400.0);
         assert_eq!(e.column_width, COLUMN_MAX_WIDTH);
         assert_eq!(e.composer_width, COLUMN_MAX_WIDTH);
@@ -8256,6 +8311,93 @@ mod presence_rows_tests {
                 .count(),
             1,
             "one name, inside the first bubble"
+        );
+    }
+
+    /// What agentd writes for a background job (duplex §2.3): wordless, hidden.
+    fn hidden_job_row(id: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "chatId": "chat_testing", "role": "assistant", "sender": "agent:01PROJGIGCHAD",
+            "status": "streaming", "createdAt": at, "hidden": true, "worker": true,
+            "job": { "id": format!("j-{id}"), "title": "Searching", "kind": "research", "touches": [] },
+            "parts": [{ "id": format!("s-{id}"), "kind": "status", "code": "working", "message": "Working…" }],
+        }))
+        .expect("message")
+    }
+
+    fn stamps(rows: &[Row]) -> Vec<String> {
+        rows.iter()
+            .filter(|r| matches!(r.kind, RowKind::Stamp { .. }))
+            .map(|r| r.id.clone())
+            .collect()
+    }
+
+    /// [feedback status-row-gap-mac-2026-10-26]: a row that draws nothing — a stream
+    /// with no words yet, a hidden job row — an hour after the last bubble used to
+    /// leave its "Today 5:32 PM" stamp hanging over empty space above the status
+    /// row. The stamp comes with the first words, as it would have anyway.
+    #[test]
+    fn a_wordless_row_an_hour_later_brings_no_dangling_stamp() {
+        let now = now_ms();
+        let earlier = now - 2 * STAMP_GAP_MS;
+        let settled = [
+            agent_message(
+                "done",
+                "Three decisions: keep the canvas infinite.",
+                earlier,
+            ),
+            agent_message("streaming", "", now),
+        ];
+        let rows = rows_of(&settled);
+        assert_eq!(
+            stamps(&rows),
+            vec![format!("m-{earlier}#stamp")],
+            "only the bubble's own stamp: {:?}",
+            rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
+        );
+        assert!(
+            matches!(rows[rows.len() - 1].kind, RowKind::BottomInset)
+                && !matches!(rows[rows.len() - 2].kind, RowKind::Stamp { .. }),
+            "nothing but the clearance after the last bubble"
+        );
+
+        let with_job = [
+            agent_message(
+                "done",
+                "Three decisions: keep the canvas infinite.",
+                earlier,
+            ),
+            hidden_job_row("j1", now),
+        ];
+        assert_eq!(
+            stamps(&rows_of(&with_job)),
+            vec![format!("m-{earlier}#stamp")],
+            "a hidden job row leaves no stamp either"
+        );
+
+        // The reply lands: its stamp arrives with its bubble, and the sender run
+        // the retracted stamp would have broken is unchanged for later rows.
+        let landed = [
+            agent_message(
+                "done",
+                "Three decisions: keep the canvas infinite.",
+                earlier,
+            ),
+            agent_message("done", "Here is the chart.", now),
+        ];
+        let rows = rows_of(&landed);
+        assert_eq!(
+            stamps(&rows),
+            vec![format!("m-{earlier}#stamp"), format!("m-{now}#stamp")],
+            "the reply's stamp comes with the reply"
+        );
+        let reply_ix = rows
+            .iter()
+            .position(|r| r.id == format!("m-{now}#stamp"))
+            .expect("stamp");
+        assert!(
+            matches!(rows[reply_ix + 1].kind, RowKind::Markdown { .. }),
+            "the bubble sits right under its stamp"
         );
     }
 }
