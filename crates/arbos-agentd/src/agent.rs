@@ -6135,9 +6135,26 @@ impl Agent {
     /// Turn end, send tool `On`: a turn that posted nothing, started no background work and
     /// still holds prose posts that prose once, so a model that forgot the tool never leaves
     /// the user with silence. `Strict` never posts it; silence is a valid outcome.
+    ///
+    /// Shared (people) chat exception (#1779 / feedback app-01M5WGH5…): an empty `route reply`
+    /// is intentional quiet. Leftover prose outside `send_message` ("staying silent", "nothing
+    /// to add") must not become a fallback bubble — that started agent-to-agent echo loops.
     async fn post_fallback_if_silent(&self, host: &SharedHost, t: &mut TurnState) {
-        if t.send_tool != crate::config::SendTool::On || t.stopped || t.routine_turn || t.act_to_job
-        {
+        if t.stopped || t.routine_turn || t.act_to_job {
+            return;
+        }
+        if empty_reply_route(t) && self.people.is_people_chat(&t.chat_id) {
+            if !t.unposted_text.trim().is_empty() {
+                tracing::info!(
+                    chat_id = %t.chat_id,
+                    chars = t.unposted_text.chars().count(),
+                    "send tool: leftover prose discarded — empty reply in a shared chat stays quiet"
+                );
+                t.unposted_text.clear();
+            }
+            return;
+        }
+        if t.send_tool != crate::config::SendTool::On {
             return;
         }
         if Self::posted_result(t) || t.unposted_text.trim().is_empty() {
@@ -8261,10 +8278,21 @@ pub fn route_name(r: &ValidRoute) -> &'static str {
 
 /// Main-turn wall-clock deadline in seconds. `ARBOS_TURN_DEADLINE_SECS` (default 900).
 /// A user row from a voice-call tool (`ask_agent` / `look`): `voice: true` and/or `source: "voice"`.
+/// True when the turn routed `reply` with nothing in the `reply` field (and no pending
+/// `route_reply_text`). The shared-chat quiet path and the no-fallback rule both use this.
+pub(crate) fn empty_reply_route(t: &TurnState) -> bool {
+    matches!(&t.route, Some(ValidRoute::Reply { reply }) if reply.as_deref().is_none_or(|r| r.trim().is_empty()))
+        && t.route_reply_text
+            .as_deref()
+            .is_none_or(|r| r.trim().is_empty())
+}
+
 /// A turn that is the agent staying quiet in a shared chat (#1779): it routed `reply`, said
-/// nothing anywhere (no streamed prose, no ack, no `reply` text, no progress note), nothing
-/// failed, and the chat is shared with people. Not a user-turn fallback case: in the agent's own
-/// chat an empty answer stays visible as the stock line, because there someone is waiting.
+/// nothing to the user (no streamed prose, no ack, no `reply` text, no progress note), nothing
+/// failed, and the chat is shared with people. Leftover notes outside `send_message` do not
+/// count as speech — `post_fallback_if_silent` discards them so they never become a bubble.
+/// Not a user-turn fallback case: in the agent's own chat an empty answer stays visible as the
+/// stock line, because there someone is waiting.
 pub(crate) fn quiet_in_shared_chat(
     t: &TurnState,
     shared_chat: bool,
@@ -8276,14 +8304,10 @@ pub(crate) fn quiet_in_shared_chat(
         && no_error
         && !t.stopped
         && !t.metrics.route_missing
-        && matches!(&t.route, Some(ValidRoute::Reply { reply }) if reply.as_deref().is_none_or(|r| r.trim().is_empty()))
+        && empty_reply_route(t)
         && t.streamed_text.trim().is_empty()
         && t.ack_text.trim().is_empty()
-        && t.unposted_text.trim().is_empty()
         && t.progress_texts.iter().all(|p| p.trim().is_empty())
-        && t.route_reply_text
-            .as_deref()
-            .is_none_or(|r| r.trim().is_empty())
         && t.metrics.tool_calls == 0
 }
 
@@ -9684,6 +9708,8 @@ mod tests {
     /// quiet here: that message was addressed to Priya". Staying quiet is a `route reply` with
     /// nothing to say in a shared chat — the row is removed; the same shape in the agent's own
     /// chat, or with any words, any tool, a failure or a missing route, is not quiet.
+    /// Feedback app-01M5WGH5…: leftover "staying silent" / "nothing to add" notes outside
+    /// `send_message` still count as quiet (they must never become a fallback bubble).
     #[test]
     fn empty_reply_in_a_shared_chat_is_quiet_and_only_there() {
         let mut t = TurnState::claim("c1", "m1", false);
@@ -9713,6 +9739,15 @@ mod tests {
         streamed.route = Some(ValidRoute::Reply { reply: None });
         streamed.streamed_text = "That was for Priya.".into();
         assert!(!quiet_in_shared_chat(&streamed, true, true, true));
+        let mut notes = TurnState::claim("c1", "m1", false);
+        notes.route = Some(ValidRoute::Reply { reply: None });
+        notes.unposted_text =
+            "Addressed to @hezbola; staying silent. That question is for Hezbola; nothing to add."
+                .into();
+        assert!(
+            quiet_in_shared_chat(&notes, true, true, true),
+            "notes outside send_message are not speech"
+        );
         let mut acted = TurnState::claim("c1", "m1", false);
         acted.route = Some(ValidRoute::Act {
             plan: "look".into(),

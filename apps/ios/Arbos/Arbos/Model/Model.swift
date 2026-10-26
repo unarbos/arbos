@@ -241,7 +241,8 @@ enum WorkspaceState: String, Codable, Equatable {
 /// `avatar_leaf` = `LeafArt.neutral`, the name's initial on a grey disc — never an automatic
 /// leaf).
 enum DraftPicture: Equatable {
-    /// The photo as chosen, already a 512 px JPEG; uploaded into the new entity's slot.
+    /// The photo as chosen, already the encoded master (PNG or JPEG, ≤ 1024 px —
+    /// `PictureMaster`); uploaded into the new entity's slot.
     case jpeg(Data)
     /// A picture the relay already holds in my own slot (`users:{me}`): copied over.
     case generated(key: String)
