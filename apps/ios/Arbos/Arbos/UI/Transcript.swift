@@ -19,6 +19,9 @@ enum Block: Equatable, Hashable {
     /// GitHub-style pipe table: header cells, then body rows (each padded or cut to the
     /// header's width by the renderer).
     case table(header: [String], rows: [[String]])
+    /// Display math on its own line(s): `$$ … $$` or `\[ … \]`; `source` is the LaTeX between
+    /// the delimiters ([feedback math-render-ios-2026-10-26]).
+    case math(source: String)
 }
 
 /// Grok Bot's quote header inside a reply bubble: speech-bubble glyph, then the replied-to
@@ -82,11 +85,10 @@ struct Quote: Equatable, Hashable {
             case .bullets(let items), .numbered(let items): pieces = items
             case .code(_, let code): pieces = [code]
             case .table(let header, let rows): pieces = header + rows.flatMap { $0 }
+            case .math(let source): pieces = [MathText.plain(source)]
             }
             for piece in pieces {
-                let plain = (try? AttributedString(markdown: piece, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
-                    .map { String($0.characters) } ?? piece
-                words.append(contentsOf: plain.split(whereSeparator: \.isWhitespace))
+                words.append(contentsOf: Markdown.plain(piece).split(whereSeparator: \.isWhitespace))
             }
         }
         return words.joined(separator: " ")
@@ -819,6 +821,11 @@ enum Markdown {
         var table: [String] = []
         var code: [String]? = nil
         var lang = ""
+        // Inside a `$$` / `\[` display-math block: its lines so far, the closer that ends
+        // it, and the raw lines (prose as typed if it never closes).
+        var math: [String]? = nil
+        var mathCloser = ""
+        var mathRaw: [String] = []
 
         func flush() {
             if !paragraph.isEmpty { out.append(.paragraph(paragraph.joined(separator: " "))); paragraph = [] }
@@ -843,6 +850,37 @@ enum Markdown {
                 flush()
                 lang = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
                 code = []
+                continue
+            }
+            if var m = math {
+                if trimmed.isEmpty { continue }
+                mathRaw.append(trimmed)
+                if trimmed.hasSuffix(mathCloser) {
+                    let inner = String(trimmed.dropLast(mathCloser.count)).trimmingCharacters(in: .whitespaces)
+                    if !inner.isEmpty { m.append(inner) }
+                    out.append(.math(source: m.joined(separator: "\n")))
+                    math = nil
+                } else {
+                    m.append(trimmed)
+                    math = m
+                }
+                continue
+            }
+            if let (opener, closer) = MathText.displayDelimiters(trimmed) {
+                let rest = String(trimmed.dropFirst(opener.count))
+                if rest.hasSuffix(closer) {
+                    let inner = String(rest.dropLast(closer.count)).trimmingCharacters(in: .whitespaces)
+                    if !inner.isEmpty {
+                        flush()
+                        out.append(.math(source: inner))
+                        continue
+                    }
+                }
+                flush()
+                let first = rest.trimmingCharacters(in: .whitespaces)
+                math = first.isEmpty ? [] : [first]
+                mathCloser = closer
+                mathRaw = [trimmed]
                 continue
             }
             if trimmed.isEmpty { flush(); continue }
@@ -872,6 +910,7 @@ enum Markdown {
             paragraph.append(trimmed)
         }
         if let c = code { out.append(.code(lang: lang, code: c.joined(separator: "\n"))) }
+        if math != nil { paragraph.append(contentsOf: mathRaw) }
         flush()
         return out
     }
@@ -923,11 +962,43 @@ enum Markdown {
         return (try? JSONSerialization.jsonObject(with: data)) != nil
     }
 
-    /// The text inline markdown renders to, markers removed (`[Name](url)` → `Name`).
+    /// The text inline markdown renders to, markers removed (`[Name](url)` → `Name`,
+    /// `$O(n^2)$` → `O(n²)`).
     static func plain(_ text: String) -> String {
-        (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
-            .map { String($0.characters) } ?? text
+        MathText.pieces(text).map { piece in
+            switch piece {
+            case .prose(let p):
+                return (try? AttributedString(markdown: p, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+                    .map { String($0.characters) } ?? p
+            case .math(let src):
+                return MathText.plain(src)
+            }
+        }.joined()
     }
+
+    /// Typeset TeX as attributed text: variables italic in the serif face, digits and
+    /// operators upright, `\mathbf` bold — KaTeX's look in Grok Bot, at `size` points.
+    static func math(_ source: String, color: Color, size: CGFloat) -> AttributedString {
+        var out = AttributedString()
+        for run in MathText.typeset(source) {
+            var piece = AttributedString(run.text)
+            piece.swiftUI.foregroundColor = color
+            piece.swiftUI.font = mathFont(size, run.style)
+            out.append(piece)
+        }
+        return out
+    }
+
+    static func mathFont(_ size: CGFloat, _ style: MathText.Style) -> Font {
+        switch style {
+        case .italic: return .system(size: size, design: .serif).italic()
+        case .upright: return .system(size: size, design: .serif)
+        case .bold: return .system(size: size, weight: .bold, design: .serif)
+        }
+    }
+
+    /// Display math is this much larger than body text.
+    static let displayMathScale: CGFloat = 1.15
 
     /// Inline markdown with Mac-parity link paint and Grok-style code chips:
     /// accent + underline on links; monospaced (a point under body) on a soft
@@ -955,6 +1026,23 @@ enum Markdown {
     }()
 
     private static func inlineUncached(_ text: String, color: Color, link: Color, codeChip: Color) -> AttributedString {
+        // Math is cut out before the markdown parse (`_` and `*` mean something else in TeX)
+        // and typeset in its place.
+        let pieces = MathText.pieces(text)
+        if pieces.count == 1, case .prose(let prose) = pieces[0] {
+            return inlineProse(prose, color: color, link: link, codeChip: codeChip)
+        }
+        var attr = AttributedString()
+        for piece in pieces {
+            switch piece {
+            case .prose(let prose): attr.append(inlineProse(prose, color: color, link: link, codeChip: codeChip))
+            case .math(let source): attr.append(math(source, color: color, size: Theme.body))
+            }
+        }
+        return attr
+    }
+
+    private static func inlineProse(_ text: String, color: Color, link: Color, codeChip: Color) -> AttributedString {
         var attr = (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
             ?? AttributedString(text)
         linkBareURLs(&attr)
@@ -1649,6 +1737,14 @@ struct BlockView: View {
             TableBlock(header: header, rows: rows, mentions: mentions)
         case .code(let lang, let code):
             CodeCard(lang: lang, code: code)
+        case .math(let source):
+            // Display math: typeset, a size up, centred on its own line (KaTeX's display
+            // mode in Grok Bot).
+            Text(Markdown.math(source, color: theme.text, size: Theme.body * Markdown.displayMathScale))
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.vertical, 4)
+                .accessibilityIdentifier("display-math")
         }
     }
 }
