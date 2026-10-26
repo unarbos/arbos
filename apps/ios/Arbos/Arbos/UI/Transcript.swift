@@ -1629,6 +1629,8 @@ struct RowView: View, Equatable {
 
 struct BlockView: View {
     @Environment(\.theme) private var theme
+    /// Site icons for the block's named links: the block redraws when one arrives.
+    @ObservedObject private var linkIcons = LinkIcons.shared
     let block: Block
     let live: Bool
     /// Shared mention table from the row (built once per directory sync).
@@ -1650,7 +1652,7 @@ struct BlockView: View {
                     .tint(theme.accent)
             }
         case .heading(_, let text):
-            Text(Markdown.inline(text, color: theme.text, link: theme.accent, codeChip: theme.codeChip))
+            Markdown.inlineText(text, color: theme.text, link: theme.accent, codeChip: theme.codeChip, mentions: mentions)
                 .font(theme.font(Theme.body, weight: .semibold))
                 .tint(theme.accent)
         case .bullets(let items), .numbered(let items):
@@ -1693,6 +1695,9 @@ struct BlockView: View {
 /// than the bubble, the table keeps its columns and scrolls sideways.
 struct TableBlock: View {
     @Environment(\.theme) private var theme
+    /// The cells' link icons: the table redraws when one arrives (its inputs alone do not
+    /// change, so SwiftUI would otherwise keep the placeholders).
+    @ObservedObject private var linkIcons = LinkIcons.shared
     let header: [String]
     let rows: [[String]]
     let mentions: MentionTable
