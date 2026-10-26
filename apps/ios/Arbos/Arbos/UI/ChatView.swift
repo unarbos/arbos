@@ -1098,6 +1098,14 @@ struct ChatSession: View {
                             model.fixtureAppendAssistant(chatId: chatId, text: AppModel.codeReply)
                         }
                         #endif
+                    case "table":
+                        // Rig: Jacob's Lima bookstore turn — a GFM table of linked stores
+                        // between two prose bubbles (fixture only).
+                        #if DEBUG
+                        if model.isFixture {
+                            model.fixtureLimaReply(chatId: chatId)
+                        }
+                        #endif
                     case "agent-message", "agent-message-received":
                         // Rig: agent-to-agent messaging rows (fixture only) — the sender's
                         // hand-off + confirm + relayed reply, or the receiver's labelled row.
