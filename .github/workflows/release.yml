@@ -267,9 +267,13 @@ jobs:
         if: runner.environment == 'self-hosted'
         run: |
           set -euo pipefail
-          mkdir -p "$HOME/arbos-release-target"
-          echo "CARGO_TARGET_DIR=$HOME/arbos-release-target" >> "$GITHUB_ENV"
-          echo "target dir: $HOME/arbos-release-target ($(du -sh "$HOME/arbos-release-target" 2>/dev/null | cut -f1) so far)"
+          # ARBOS_SCRATCH (the Mac mini's internal SSD, rebuildable caches only — #1846) when mounted, else $HOME.
+          ARBOS_SCRATCH="${ARBOS_SCRATCH:-/Volumes/ArbosScratch}"
+          if [ -d "$ARBOS_SCRATCH/$USER" ]; then target="$ARBOS_SCRATCH/$USER/arbos-release-target"; else target="$HOME/arbos-release-target"; fi
+          mkdir -p "$target"
+          echo "CARGO_TARGET_DIR=$target" >> "$GITHUB_ENV"
+          echo "ARBOS_RELEASE_TARGET_ROOT=$(dirname "$target")" >> "$GITHUB_ENV"
+          echo "target dir: $target ($(du -sh "$target" 2>/dev/null | cut -f1) so far)"
       # The certificate goes into a throwaway keychain in $RUNNER_TEMP and is
       # removed by the last step whatever happens. No tracing in these steps.
       - name: Import the Developer ID certificate
@@ -308,7 +312,7 @@ jobs:
           # changes cargo's metadata hash, so each release left ~1.7 GB of stale debug artifacts in the
           # release target dir — 36 GB a day, #1439). The release trees are untouched by this step.
           if [[ "${RUNNER_ENVIRONMENT:-}" == "self-hosted" ]]; then
-            export CARGO_TARGET_DIR="$HOME/arbos-release-smoke-target"
+            export CARGO_TARGET_DIR="${ARBOS_RELEASE_TARGET_ROOT:-$HOME}/arbos-release-smoke-target"
             mkdir -p "$CARGO_TARGET_DIR"
             trap 'scripts/release/smoke-target-prune.sh "$CARGO_TARGET_DIR" 25 || true' EXIT
           fi
