@@ -1554,6 +1554,15 @@ pub struct PeopleMessagePayloadDto {
     #[typeshare(serialized_as = "I54")]
     pub seq: i64,
     pub sender: SenderDto,
+    /// The project id for an agent's reply in a project chat; absent (`people`) for DMs and
+    /// people groups. Agents' announcements queue this push since 2026-10-26 (before, only a
+    /// device's own row did, so an agent reply never showed an in-app banner).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    /// The announced message's first line, when the sender announced one (agents do; a
+    /// device's row-level push has none and the banner says "New message").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }
 
 /// `people_chat_updated` payload.
