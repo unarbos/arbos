@@ -16,8 +16,9 @@ use crate::auth;
 use crate::calls::{self, CallCmd, CallEvent};
 use crate::model::SpaceKind;
 use crate::model::{
-    add_members_plan, call_ended_line, created_group, reachable_line, AccountView, Call, CallEnded,
-    CallKind, CallMissed, Person, Reachable, Sender, Voice,
+    add_members_plan, added_line, call_ended_line, created_group, reachable_line,
+    reconcile_optimistic_notices, trace_rows, AccountView, Call, CallEnded, CallKind, CallMissed,
+    OptimisticNotice, Person, Reachable, Sender, Voice,
 };
 use crate::model::{
     new_id, now_ms, Attachment, AttachmentKind, BoxReport, BoxState, ChannelSel, ChannelsView,
@@ -498,6 +499,8 @@ pub struct AppState {
     pub skills: Vec<Skill>,
     pub chats: HashMap<Id, Vec<Chat>>,
     pub messages: HashMap<Id, Vec<Message>>,
+    /// Membership notices this device shows ahead of the relay's row (ARB-393), per chat.
+    pub optimistic_notices: HashMap<Id, Vec<OptimisticNotice>>,
     pub chat_ui: HashMap<Id, ChatUi>,
     pub blobs: HashMap<String, BlobView>,
     /// Decoded inline thumbnails of image attachments, by blob key (F10).
@@ -978,6 +981,7 @@ impl AppState {
             skills: Vec::new(),
             chats: HashMap::new(),
             messages: HashMap::new(),
+            optimistic_notices: HashMap::new(),
             chat_ui: HashMap::new(),
             blobs: HashMap::new(),
             thumbnails: HashMap::new(),
@@ -1395,7 +1399,31 @@ impl AppState {
         rx
     }
 
+    /// One sync event into the state. A panic while applying it (a row shape the code did
+    /// not expect: 2026-10-26, Mac 0.6.268 crashed at every launch restoring the saved
+    /// chats) is caught here, logged by the panic hook (`panic_log`) and the event is skipped
+    /// — the app stays up with that one row missing instead of aborting on the main thread.
     pub(crate) fn apply(&mut self, event: SyncEvent, cx: &mut Context<Self>) {
+        let label = sync_event_label(&event);
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.apply_inner(event, cx)));
+        if result.is_err() {
+            log::error!(target: "arbos_mac::diagnostic", "sync event skipped after a panic: {label}");
+            self.push_notice(
+                "One update could not be shown; it was skipped. The details are in the log."
+                    .to_owned(),
+            );
+            cx.notify();
+        }
+    }
+
+    fn apply_inner(&mut self, event: SyncEvent, cx: &mut Context<Self>) {
+        #[cfg(test)]
+        if let SyncEvent::Notice(text) = &event {
+            // The restore guard's regression test: a notice that reads "panic!" is the
+            // stand-in for a row shape that panics deep inside an apply.
+            assert!(text != "panic!", "test poison event");
+        }
         match event {
             SyncEvent::NeedsPairing { relay_url } => {
                 let mode = self
@@ -1528,6 +1556,7 @@ impl AppState {
             }
             SyncEvent::PeopleError(err) => {
                 self.people_busy = false;
+                self.withdraw_optimistic_notices(cx);
                 // The New Message sheet shows the error inline; a DM started
                 // from a person's pane (its Message pill) has no sheet, so the
                 // relay's words ("this person is not available") go to a notice.
@@ -1603,6 +1632,12 @@ impl AppState {
                 }
                 let image = rgba.and_then(bgra_frame).map(Arc::new);
                 self.avatars.insert(url, image);
+                cx.notify();
+            }
+            SyncEvent::AvatarMissing { url } => {
+                // Not "no picture" for good: a later `want_avatar` (the next registry event,
+                // a reconnect) requests it again instead of drawing the placeholder forever.
+                self.avatars.remove(&url);
                 cx.notify();
             }
             SyncEvent::PairingFailed(err) => {
@@ -1935,6 +1970,25 @@ impl AppState {
                         }
                         if let Some(person) = person {
                             self.toggle_group_person(person, cx);
+                        }
+                    }
+                    // Rig: `ARBOS_RIG_ADD_AGENT=<project id>[:<delay ms>]` adds that agent to
+                    // the restored people chat the way the picker does — optimistic notice,
+                    // relay call, reconciliation — after the delay (default 8 s, so a frame
+                    // grabber is running), for the agent-added-notice recordings.
+                    if let Ok(spec) = std::env::var("ARBOS_RIG_ADD_AGENT") {
+                        if let Some(chat) = self.active_chat_id() {
+                            let (pid, delay_ms) = match spec.split_once(':') {
+                                Some((p, d)) => (p.to_owned(), d.parse().unwrap_or(8_000)),
+                                None => (spec.clone(), 8_000u64),
+                            };
+                            cx.spawn(async move |this, cx| {
+                                cx.background_executor()
+                                    .timer(std::time::Duration::from_millis(delay_ms))
+                                    .await;
+                                let _ = this.update(cx, |s, cx| s.add_agent(chat, pid, cx));
+                            })
+                            .detach();
                         }
                     }
                     // Rig: `ARBOS_REPLY_TO=1` arms a reply to the restored chat's
@@ -2311,7 +2365,18 @@ impl AppState {
                 }
                 cx.notify();
             }
-            SyncEvent::ChatSnapshot { chat_id, messages } => {
+            SyncEvent::ChatSnapshot {
+                chat_id,
+                mut messages,
+            } => {
+                if trace_rows() {
+                    eprintln!(
+                        "rows: app-snapshot chat={chat_id} n={} at={}",
+                        messages.len(),
+                        now_ms()
+                    );
+                }
+                self.fold_optimistic_notices(&chat_id, &mut messages);
                 let dropped = !messages.is_empty();
                 let ui = self.chat_ui.entry(chat_id.clone()).or_default();
                 if dropped {
@@ -7998,9 +8063,25 @@ impl AppState {
             .filter(|p| plan.handles.contains(&p.handle))
             .cloned()
             .collect();
+        // Named the way the relay names them: a person by name, else @handle; an agent by
+        // its project name.
+        let mut names: Vec<String> = picked
+            .iter()
+            .map(|p| match p.name.as_deref().map(str::trim) {
+                Some(name) if !name.is_empty() => name.to_owned(),
+                _ => format!("@{}", p.handle),
+            })
+            .collect();
+        names.extend(plan.agent_ids.iter().filter_map(|id| {
+            self.projects
+                .iter()
+                .find(|p| &p.id == id)
+                .map(|p| p.name.clone())
+        }));
         if let Some(p) = self.projects.iter_mut().find(|p| p.id == plan.chat_id) {
             p.people.extend(picked);
         }
+        self.show_membership_notice(&plan.chat_id, &names, cx);
         self.command(ClientCommand::AddMembers {
             chat_id: plan.chat_id,
             handles: plan.handles,
@@ -8317,11 +8398,75 @@ impl AppState {
     }
 
     pub fn add_agent(&mut self, chat_id: Id, project_id: Id, cx: &mut Context<Self>) {
+        let names: Vec<String> = self
+            .projects
+            .iter()
+            .find(|p| p.id == project_id)
+            .map(|p| vec![p.name.clone()])
+            .unwrap_or_default();
+        self.show_membership_notice(&chat_id, &names, cx);
         self.command(ClientCommand::AddAgent {
             chat_id,
             project_id,
         });
         cx.notify();
+    }
+
+    /// The adding device's own "<me> added <names>" line, on screen the moment Add is pressed
+    /// (ARB-393). The relay writes the row of record; [`Self::fold_optimistic_notices`] swaps
+    /// this copy out when that row lands.
+    fn show_membership_notice(&mut self, chat_id: &str, names: &[String], cx: &mut Context<Self>) {
+        let Some(text) = added_line(&self.me_name(), names) else {
+            return;
+        };
+        let now = now_ms();
+        let notice = OptimisticNotice::new(text, now);
+        if trace_rows() {
+            eprintln!(
+                "rows: optimistic-notice chat={chat_id} id={} text={:?} at={now}",
+                notice.id, notice.text
+            );
+        }
+        let list = self.messages.entry(chat_id.to_owned()).or_default();
+        list.push(notice.message(chat_id));
+        self.optimistic_notices
+            .entry(chat_id.to_owned())
+            .or_default()
+            .push(notice);
+        cx.emit(AppEvent::TranscriptChanged {
+            chat_id: chat_id.to_owned(),
+        });
+    }
+
+    /// A fresh relay snapshot replaces the chat's list: keep the local notices it has not
+    /// confirmed yet, drop the ones it has (or that are past their TTL).
+    fn fold_optimistic_notices(&mut self, chat_id: &str, messages: &mut Vec<Message>) {
+        let Some(notices) = self.optimistic_notices.get_mut(chat_id) else {
+            return;
+        };
+        let before = notices.len();
+        let confirmed = reconcile_optimistic_notices(messages, notices, now_ms());
+        if trace_rows() && (confirmed > 0 || notices.len() != before) {
+            eprintln!(
+                "rows: notice-reconciled chat={chat_id} confirmed={confirmed} left={} at={}",
+                notices.len(),
+                now_ms()
+            );
+        }
+        if notices.is_empty() {
+            self.optimistic_notices.remove(chat_id);
+        }
+    }
+
+    /// A people-chat action failed: nothing was added, so no local notice may claim it was.
+    fn withdraw_optimistic_notices(&mut self, cx: &mut Context<Self>) {
+        let chats: Vec<Id> = self.optimistic_notices.drain().map(|(id, _)| id).collect();
+        for chat_id in chats {
+            if let Some(list) = self.messages.get_mut(&chat_id) {
+                list.retain(|m| !m.id.starts_with(OptimisticNotice::ID_PREFIX));
+            }
+            cx.emit(AppEvent::TranscriptChanged { chat_id });
+        }
     }
 
     pub fn remove_agent(&mut self, chat_id: Id, project_id: Id, cx: &mut Context<Self>) {
@@ -10817,5 +10962,30 @@ mod forward_filter_tests {
 impl search_index::SenderName for AppState {
     fn sender_name(&self, _chat_id: &str, message: &Message) -> String {
         self.viewer_sender_name(message)
+    }
+}
+
+/// The event kind for the skip log, without its payload: the Debug output is cut at the
+/// variant name (a snapshot's rows are never formatted).
+fn sync_event_label(event: &SyncEvent) -> String {
+    use std::fmt::Write as _;
+    struct Head(String);
+    impl std::fmt::Write for Head {
+        fn write_str(&mut self, s: &str) -> std::fmt::Result {
+            for c in s.chars() {
+                if matches!(c, ' ' | '(' | '{') || self.0.len() >= 48 {
+                    return Err(std::fmt::Error);
+                }
+                self.0.push(c);
+            }
+            Ok(())
+        }
+    }
+    let mut head = Head(String::new());
+    let _ = write!(head, "{event:?}");
+    if head.0.is_empty() {
+        "event".to_owned()
+    } else {
+        head.0
     }
 }

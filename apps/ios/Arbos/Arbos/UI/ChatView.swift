@@ -378,7 +378,7 @@ struct ChatSession: View {
     private var hasInCallBar: Bool {
         calls.isActive && !calls.isPresented && calls.call?.kind == .voice && calls.call?.chatId == chatId
     }
-    private var headerExtra: CGFloat { (hasCallBar ? 52 : 0) + (hasInCallBar ? 56 : 0) + (showSearch ? 46 : 0) }
+    private var headerExtra: CGFloat { (hasCallBar ? 52 : 0) + (hasInCallBar ? 56 : 0) + (showSearch ? Controls.height + 8 : 0) }
     /// Member chips under the header — off on iPhone (feedback ABDgl8tFlqeUlwP4DihfYhk).
     private var showsMemberChips: Bool { false }
 
@@ -707,7 +707,7 @@ struct ChatSession: View {
                 if let people, showsMemberChips { memberChips(people).padding(.horizontal, 16) }
                 if showSearch {
                     HStack(spacing: 8) {
-                        Image(systemName: "magnifyingglass").font(.system(size: 15, weight: .medium)).foregroundStyle(theme.muted)
+                        Image(systemName: "magnifyingglass").font(.system(size: Controls.glyph, weight: .medium)).foregroundStyle(theme.muted)
                         TextField("", text: $searchText, prompt: Text("Search in chat").foregroundStyle(theme.placeholder))
                             .font(theme.font(Theme.body)).foregroundStyle(theme.text)
                             .focused($searchFocused)
@@ -717,15 +717,16 @@ struct ChatSession: View {
                         }
                         .buttonStyle(.plain)
                     }
-                    .padding(.horizontal, 12).frame(height: 38)
-                    // The header's glass, not the flat field (Jacob 2026-10-25 22:53).
+                    // The family's field (48, capsule, text at 17) in the header's glass
+                    // (Jacob 2026-10-25 22:53; sized 2026-10-26).
+                    .padding(.horizontal, Controls.textInset).frame(height: Controls.height)
                     .background {
                         HeaderGlassBackground(
-                            shape: RoundedRectangle(cornerRadius: 12, style: .continuous),
+                            shape: Capsule(),
                             material: ChatHeaderGlass.searchBarMaterial(surface: theme.surface),
                             tinted: true)
                     }
-                    .padding(.horizontal, 16)
+                    .padding(.horizontal, Controls.inset)
                 }
                 if hasInCallBar, let c = calls.call {
                     InCallOverlay(expected: model.expectedCallPeople(c), inline: true)
@@ -1298,7 +1299,7 @@ struct ChatSession: View {
             }
             theme.bg.opacity(theme.isGlass ? 0.78 : 1)
         }
-        .frame(height: (showsMemberChips ? 156 : 118) + headerExtra)
+        .frame(height: (showsMemberChips ? 156 : 118) + (Controls.diameter - 42) + headerExtra)
         .mask(LinearGradient(colors: [.black, .black, .clear], startPoint: .top, endPoint: .bottom))
         .ignoresSafeArea(edges: .top)
         .allowsHitTesting(false)
@@ -1324,7 +1325,7 @@ struct ChatSession: View {
             Button { dismiss() } label: {
                 GlassCircle(material: headerMaterial) {
                     Image(systemName: "chevron.left")
-                        .font(theme.font(17, weight: .semibold))
+                        .font(theme.font(Controls.glyph, weight: .semibold))
                         .foregroundStyle(theme.text)
                 }
             }
@@ -1340,7 +1341,7 @@ struct ChatSession: View {
                         // name (never "#name": the glyph shows it, #1317).
                         HStack(spacing: Theme.headerPillGap) {
                             if let s = channelServer {
-                                ServerAvatar(server: s, size: Theme.avatar)
+                                ServerAvatar(server: s, size: Controls.avatar)
                             }
                             HStack(spacing: 5) {
                                 Text("#")
@@ -1362,34 +1363,34 @@ struct ChatSession: View {
                         HStack(spacing: Theme.headerPillGap) {
                             if people.isGroup, let url = groupImageURL(people) {
                                 // Custom group picture.
-                                PersonAvatar(url: url, handle: people.title, size: Theme.avatar, name: people.title, id: people.id)
+                                PersonAvatar(url: url, handle: people.title, size: Controls.avatar, name: people.title, id: people.id)
                                 Text(people.title)
                                     .font(.system(size: Theme.body, weight: .semibold))
                                     .foregroundStyle(theme.text)
                                     .lineLimit(1)
                             } else if people.isGroup, people.isNeutralAvatar {
-                                NeutralAvatar(name: people.title, size: Theme.avatar)
+                                NeutralAvatar(name: people.title, size: Controls.avatar)
                                 Text(people.title)
                                     .font(.system(size: Theme.body, weight: .semibold))
                                     .foregroundStyle(theme.text)
                                     .lineLimit(1)
                             } else if people.isGroup, let leaf = people.leafPick, LeafAvatarsFlag.shared.on {
                                 // D92 amendment: the leaf picked on the Create screen.
-                                LeafAvatar(pick: leaf, size: Theme.avatar)
+                                LeafAvatar(pick: leaf, size: Controls.avatar)
                                 Text(people.title)
                                     .font(.system(size: Theme.body, weight: .semibold))
                                     .foregroundStyle(theme.text)
                                     .lineLimit(1)
                             } else if let other = counterpart, !people.isGroup || people.kind == "dm" {
                                 // DM peer (including a DM that gained agents — still their face).
-                                PersonAvatar(url: other.avatarUrl, handle: other.handle, size: Theme.avatar, name: other.name, id: other.id, colorIndex: other.avatarColorIndex)
+                                PersonAvatar(url: other.avatarUrl, handle: other.handle, size: Controls.avatar, name: other.name, id: other.id, colorIndex: other.avatarColorIndex)
                                 Text(other.displayName)
                                     .font(.system(size: Theme.body, weight: .semibold))
                                     .foregroundStyle(theme.text)
                                     .lineLimit(1)
                             } else {
                                 // Named multi-human group with no picture: title initials.
-                                PersonAvatar(url: nil, handle: people.title, size: Theme.avatar, name: people.title, id: people.id)
+                                PersonAvatar(url: nil, handle: people.title, size: Controls.avatar, name: people.title, id: people.id)
                                 Text(people.title)
                                     .font(.system(size: Theme.body, weight: .semibold))
                                     .foregroundStyle(theme.text)
@@ -1403,7 +1404,7 @@ struct ChatSession: View {
                     } else {
                         HStack(spacing: Theme.headerPillGap) {
                             if let project {
-                                AgentAvatar(project: project, theme: theme, size: Theme.avatar, dot: machineDotColor(model.machine.state, theme: theme), working: streaming)
+                                AgentAvatar(project: project, theme: theme, size: Controls.avatar, dot: machineDotColor(model.machine.state, theme: theme), working: streaming)
                             }
                             Text(name)
                                 .font(.system(size: Theme.body, weight: .semibold))
@@ -1416,9 +1417,9 @@ struct ChatSession: View {
                         .accessibilityHint("Opens the agent profile")
                     }
                 }
-                .padding(.leading, 10)
-                .padding(.trailing, 16)
-                .frame(height: Theme.control)
+                .padding(.leading, Controls.avatarInset)
+                .padding(.trailing, Controls.textInset)
+                .frame(height: Controls.height)
                 .contentShape(Capsule())
             }
             Spacer()
@@ -1437,7 +1438,7 @@ struct ChatSession: View {
             } label: {
                 GlassCircle(material: headerMaterial) {
                     Image(systemName: "magnifyingglass")
-                        .font(theme.font(17, weight: .medium))
+                        .font(theme.font(Controls.glyph, weight: .medium))
                         .foregroundStyle(theme.text)
                 }
             }
@@ -1445,8 +1446,7 @@ struct ChatSession: View {
             .accessibilityLabel("Search in chat")
             .accessibilityIdentifier("chat-search-button")
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 6)
+        .controlBar()
     }
 
     private var composerSideInset: CGFloat {
@@ -1504,8 +1504,8 @@ struct ChatSession: View {
     /// transcript is decelerating — SwiftUI button gestures lose to UIScrollView.
     private var scrollToBottomButton: some View {
         ZStack {
-            Circle().fill(theme.field)
-            Circle().strokeBorder(theme.fieldBorder, lineWidth: 1)
+            Circle().fill(theme.field) // control-size: exception transcriptJumpChip
+            Circle().strokeBorder(theme.fieldBorder, lineWidth: 1) // control-size: exception transcriptJumpChip
             Image(systemName: "chevron.down")
                 .font(theme.font(15, weight: .medium))
                 .foregroundStyle(theme.text)
@@ -1532,8 +1532,8 @@ struct ChatSession: View {
         .foregroundStyle(theme.text)
         .padding(.horizontal, 14)
         .frame(height: Theme.voiceButton)
-        .background(Capsule().fill(theme.field))
-        .overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1))
+        .background(Capsule().fill(theme.field)) // control-size: exception transcriptJumpChip
+        .overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1)) // control-size: exception transcriptJumpChip
         .contentShape(Capsule().inset(by: -4))
         .overlay { ScrollInterruptTap(action: jumpToLatest) }
         .accessibilityElement(children: .ignore)
@@ -1545,9 +1545,20 @@ struct ChatSession: View {
 
     /// Drag left on the transcript to peek each bubble's send time (iMessage).
     /// Locks only after the pan is clearly horizontal-left so vertical scroll stays free.
+    /// Skips (and undoes) when a nested table is scrolling sideways
+    /// ([feedback ACQD4mUCTPxH7z3Y7YO8Vjw]).
     private var timeRevealGesture: some Gesture {
         DragGesture(minimumDistance: 12, coordinateSpace: .local)
             .onChanged { value in
+                if NestedHorizontalScroll.claiming {
+                    if timeRevealLocked || timeReveal != 0 {
+                        timeRevealLocked = false
+                        var t = Transaction()
+                        t.disablesAnimations = true
+                        withTransaction(t) { timeReveal = 0 }
+                    }
+                    return
+                }
                 let dx = value.translation.width
                 let dy = value.translation.height
                 if !timeRevealLocked {
@@ -2131,7 +2142,7 @@ struct ChatSession: View {
             .padding(.leading, 9)
             .padding(.trailing, 11)
             .frame(height: 22)
-            .background(Capsule().fill(theme.field))
+            .background(Capsule().fill(theme.field)) // control-size: exception inlineChips
             .accessibilityElement(children: .combine)
             .accessibilityIdentifier("link-pill")
             .onAppear { pulsePhase = true }
@@ -2413,10 +2424,9 @@ struct ChatSession: View {
     private var attachButton: some View {
         Button { showAttach = true } label: {
             ZStack {
-                Circle().fill(theme.field)
-                ComposerRim(shape: Circle())
+                ControlSurface(shape: Circle())
                 Image(systemName: "plus")
-                    .font(theme.font(Theme.plusGlyph, weight: .regular))
+                    .font(theme.font(Theme.plusGlyph, weight: .regular)) // control-size: exception plusGlyph
                     .foregroundStyle(theme.text)
             }
             .frame(width: Theme.plusButton, height: Theme.plusButton)
@@ -3015,7 +3025,7 @@ struct AttachSheet: View {
     private func row(icon: String, title: String, subtitle: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 14) {
-                GlassCircle(size: 44) {
+                GlassCircle(size: 44) { // control-size: exception rowIconTiles
                     Image(systemName: icon).font(.system(size: 18)).foregroundStyle(theme.text)
                 }
                 VStack(alignment: .leading, spacing: 2) {
@@ -3502,7 +3512,7 @@ private struct ComposerField: View {
         .fixedSize(horizontal: false, vertical: true)
         // A true capsule at one line (Grok's edge follows a circle); the radius stays
         // 24 pt as the field grows.
-        .background(fieldShape.fill(theme.field))
+        .background(fieldShape.fill(theme.field)) // control-size: source (the family's field, rim below)
         .overlay(ComposerRim(shape: fieldShape, tint: rimTint))
         .alert("Microphone access is off", isPresented: $recorder.permissionDenied) {
             Button("OK", role: .cancel) { }

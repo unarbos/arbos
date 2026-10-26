@@ -463,7 +463,7 @@ struct PanePillButton: View {
             }
             .foregroundStyle(theme.text)
             .padding(.horizontal, 22)
-            .frame(height: Theme.control)
+            .frame(height: Controls.height)
             .contentShape(Capsule())
         }
         .buttonStyle(PanePillStyle())
@@ -478,9 +478,8 @@ private struct PanePillStyle: ButtonStyle {
             .background {
                 ZStack {
                     if theme.isGlass { Capsule().fill(.ultraThinMaterial) }
-                    Capsule().fill(theme.field.opacity(theme.isGlass ? 0.85 : 1))
-                    if configuration.isPressed { Capsule().fill(theme.text.opacity(0.12)) }
-                    Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1)
+                    ControlSurface(shape: Capsule(), pressed: configuration.isPressed)
+                        .opacity(theme.isGlass ? ChatHeaderGlass.legacyTint : 1)
                 }
             }
     }
@@ -507,7 +506,7 @@ private struct PaneCrayon: ViewModifier {
                     .font(theme.font(13, weight: .semibold))
                     .foregroundStyle(theme.text)
                     .frame(width: 30, height: 30)
-                    .background(Circle().fill(theme.field))
+                    .background(Circle().fill(theme.field)) // control-size: exception rowIconTiles
                     .overlay(Circle().strokeBorder(theme.bg, lineWidth: 2))
             }
         }
@@ -2537,7 +2536,7 @@ struct GroupEditSheet: View {
                         ZStack(alignment: .bottomTrailing) {
                             AvatarCluster(members: clusterMembers, size: 72, imageUrl: existingImageURL, leaf: people?.leafPick, neutralName: people?.isNeutralAvatar == true ? people?.title : nil)
                                 .frame(width: 112, height: 112)
-                            GlassCircle(size: 36) {
+                            GlassCircle(size: 36) { // control-size: exception rowIconTiles
                                 Image(systemName: "camera.fill")
                                     .font(theme.font(14, weight: .semibold))
                                     .foregroundStyle(theme.text)
@@ -2556,9 +2555,7 @@ struct GroupEditSheet: View {
                             .autocorrectionDisabled()
                             .focused($nameFocused)
                             .background(SelectAllOnDoubleTap())
-                            .padding(.horizontal, 14).frame(height: Theme.fieldHeight)
-                            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
-                            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                            .controlField()
                     }
                     .padding(.horizontal, 16)
 
@@ -2568,10 +2565,7 @@ struct GroupEditSheet: View {
                             .font(theme.font(Theme.body))
                             .foregroundStyle(theme.text)
                             .lineLimit(3...6)
-                            .padding(.horizontal, 14).padding(.vertical, 12)
-                            .frame(minHeight: Theme.fieldHeight, alignment: .topLeading)
-                            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
-                            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                            .controlFieldGrowing()
                     }
                     .padding(.horizontal, 16)
 
