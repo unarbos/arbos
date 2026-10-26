@@ -3,9 +3,14 @@
 # `beta` reproduces the TestFlight path that already shipped build 7 of this
 # bundle from unarbos/arbos `.github/workflows/ios.yml`, step for step:
 #   1. archive with signing off (CODE_SIGNING_ALLOWED=NO),
-#   2. export with method app-store-connect / destination upload / automatic
-#      signing, letting Xcode mint the distribution certificate and profile
-#      through the App Store Connect API key (-allowProvisioningUpdates).
+#   2. ad-hoc-sign the archived app with the project's entitlements
+#      (aps-environment=production) — an unsigned archive has none and the
+#      export would otherwise drop them (no push token on any TestFlight phone
+#      until 2026-10-26),
+#   3. export with method app-store-connect / automatic signing, letting
+#      Xcode mint the distribution certificate and profile through the App
+#      Store Connect API key (-allowProvisioningUpdates), check the IPA
+#      carries aps-environment=production, then upload it.
 #
 # Secrets come from the environment under the same names as the repo secrets:
 #   AC_API_KEY_P8 (key contents) or AC_API_KEY_PATH (file), AC_API_KEY_ID,
@@ -52,6 +57,59 @@ end
 def spm_flags
   dir = ENV["ARBOS_SPM_DIR"]
   dir.to_s.empty? ? "" : "-clonedSourcePackagesDirPath '#{dir}' "
+end
+
+# The project's entitlements with `aps-environment` set to `production` — what an App Store /
+# TestFlight build must carry (a development value registers a sandbox token that the production
+# APNs host rejects with BadDeviceToken).
+def release_entitlements(source, tmp, name)
+  out = File.join(tmp, name)
+  FileUtils.cp(source, out)
+  if File.read(out).include?("aps-environment")
+    sh("/usr/libexec/PlistBuddy -c 'Set :aps-environment production' '#{out}'")
+  end
+  out
+end
+
+# Ad-hoc-sign the archived app (and its notification service extension) with the project's
+# entitlements so `-exportArchive` has entitlements to re-sign with. Nested code first, then the
+# app: codesign refuses an outer signature over unsigned nested code.
+def presign_archive_entitlements(archive_path, tmp)
+  app = "#{archive_path}/Products/Applications/Arbos.app"
+  app_ents = release_entitlements(File.expand_path("../Arbos/Arbos.entitlements", __dir__), tmp, "Arbos.entitlements")
+  nse_ents = release_entitlements(File.expand_path("../ArbosNotificationService/ArbosNotificationService.entitlements", __dir__), tmp, "NSE.entitlements")
+  Dir["#{app}/Frameworks/*.framework", "#{app}/Frameworks/*.dylib"].each do |nested|
+    sh("codesign --force --sign - '#{nested}'")
+  end
+  Dir["#{app}/PlugIns/*.appex"].each do |appex|
+    sh("codesign --force --sign - --entitlements '#{nse_ents}' '#{appex}'")
+  end
+  sh("codesign --force --sign - --entitlements '#{app_ents}' '#{app}'")
+  UI.user_error!("pre-sign failed: archived app has no aps-environment=production entitlement") unless aps_production?(app)
+  UI.message("archived app pre-signed with #{File.basename(app_ents)} (aps-environment=production)")
+end
+
+def entitlements_xml(app)
+  `codesign -d --entitlements - --xml '#{app}' 2>/dev/null | plutil -convert xml1 -o - - 2>/dev/null`
+end
+
+def aps_production?(app)
+  entitlements_xml(app) =~ %r{<key>aps-environment</key>\s*<string>production</string>} ? true : false
+end
+
+# The exported IPA must carry aps-environment=production in the app's signature.
+def verify_ipa_push_entitlement(ipa, tmp)
+  dir = File.join(tmp, "ipa-check")
+  FileUtils.rm_rf(dir)
+  FileUtils.mkdir_p(dir)
+  sh("unzip -q '#{ipa}' -d '#{dir}'")
+  app = Dir["#{dir}/Payload/*.app"].first
+  UI.user_error!("no Payload/*.app in #{ipa}") unless app
+  UI.message("exported app entitlements:\n#{entitlements_xml(app)}")
+  unless aps_production?(app)
+    UI.user_error!("exported app has no aps-environment=production entitlement: push notifications would be dead on this build. " \
+                   "Check the App ID com.unarbos.arbos.ios has the Push Notifications (and Communication Notifications) capability.")
+  end
 end
 
 # Runs an xcodebuild `command` (which starts in the fastlane directory). The
@@ -193,6 +251,15 @@ platform :ios do
         File.write(key_path, ENV["AC_API_KEY_P8"])
         File.chmod(0o600, key_path)
       end
+      # The archive is unsigned, so it carries NO entitlements, and -exportArchive re-signs an
+      # entitlement-less app with the profile baseline only (application-identifier, team id,
+      # get-task-allow, beta-reports-active): aps-environment and the communication-notifications
+      # entitlement were silently dropped from every TestFlight build, so no phone ever got an APNs
+      # token (push-apns audit 2026-10-26). Signing the archived app and its extension ad hoc with
+      # the project's entitlements first gives the export something to carry forward; it then
+      # re-signs with the distribution profile and keeps them (the profile must allow each one —
+      # the App ID needs the Push Notifications and Communication Notifications capabilities).
+      presign_archive_entitlements(archive_path, tmp)
       options = File.join(tmp, "ExportOptions.plist")
       File.write(options, <<~PLIST)
         <?xml version="1.0" encoding="UTF-8"?>
@@ -200,21 +267,38 @@ platform :ios do
         <plist version="1.0">
         <dict>
           <key>method</key><string>app-store-connect</string>
-          <key>destination</key><string>upload</string>
+          <key>destination</key><string>export</string>
           <key>signingStyle</key><string>automatic</string>
           <key>teamID</key><string>#{team_id}</string>
         </dict>
         </plist>
       PLIST
       export_path = "#{out_dir}/TestFlightExport"
-      with_transient_retry("TestFlight upload", log_path: "#{out_dir}/xcodebuild-export.log") do
+      FileUtils.rm_rf(export_path)
+      with_transient_retry("TestFlight export", log_path: "#{out_dir}/xcodebuild-export.log") do
         xcodebuild_logged("export",
           "xcodebuild -exportArchive -archivePath '#{archive_path}' -exportPath '#{export_path}' " \
           "-exportOptionsPlist '#{options}' -allowProvisioningUpdates " \
           "-authenticationKeyPath '#{key_path}' -authenticationKeyID '#{key_id}' " \
           "-authenticationKeyIssuerID '#{issuer_id}'")
       end
-      UI.success("Uploaded Arbos build #{number} to TestFlight (bundle com.unarbos.arbos.ios)")
+      ipa = Dir["#{export_path}/*.ipa"].first
+      UI.user_error!("export produced no .ipa in #{export_path}") unless ipa
+      # Hard gate before anything is uploaded: a build without aps-environment=production cannot
+      # register for push on a TestFlight phone. Better a red lane than another silent week.
+      verify_ipa_push_entitlement(ipa, tmp)
+      api_key = app_store_connect_api_key(key_id: key_id, issuer_id: issuer_id, key_filepath: key_path, in_house: false)
+      with_transient_retry("TestFlight upload") do
+        upload_to_testflight(
+          api_key: api_key,
+          app_identifier: "com.unarbos.arbos.ios",
+          app_platform: "ios",
+          ipa: ipa,
+          skip_waiting_for_build_processing: true,
+          skip_submission: true
+        )
+      end
+      UI.success("Uploaded Arbos build #{number} to TestFlight (bundle com.unarbos.arbos.ios, aps-environment=production)")
     ensure
       FileUtils.rm_rf(tmp)
     end
