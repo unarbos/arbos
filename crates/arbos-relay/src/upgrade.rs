@@ -3,15 +3,21 @@
 //! agent features until it is upgraded.
 //!
 //! Steps (one task per user, idempotent while it runs):
-//!   pack   — start the old sandbox if needed, stop its agentd, tar `/work` (logs excluded), pull
-//!            the tarball through the relay;
-//!   stop   — hibernate the old sandbox and record it in `box_history` (kept 7 days as fallback; the 2
-//!            newest per user stay unarchived, older retained ones are Daytona-archived at once);
-//!   create — a fresh box from the target snapshot (new tokens; the `boxes` row is replaced);
-//!   unpack — stop the new agentd, extract `/work`, reset the per-workspace owner markers;
-//!   start  — bounce the sandbox so the entrypoint starts agentd on the carried `/work`.
-//! Progress is in `GET /machine` (`upgrade.phase`); failures leave the old box as the user's box
-//! again when the new one was never created, else the new box with whatever was unpacked.
+//!   measure — start the old sandbox if needed and `du /work` while agentd keeps running; over the
+//!             carry limit (or no spool room on the relay) → refused: nothing stopped, box state
+//!             untouched, `upgrade.last_refused` says why (ARB-339; before, the box's agentd was
+//!             killed first and an oversize box was restarted on every attempt);
+//!   pack    — stop its agentd, list `/work` (logs excluded), carry it in parts through the relay's
+//!             spool disk (`upgrade_carry`: per-part tar → sha256 → download with a size-scaled
+//!             deadline and retries); a failure here revives the old box in place;
+//!   stop    — hibernate the old sandbox and record it in `box_history` (kept 7 days as fallback; the 2
+//!             newest per user stay unarchived, older retained ones are Daytona-archived at once);
+//!   create  — a fresh box from the target snapshot (new tokens; the `boxes` row is replaced);
+//!   unpack  — stop the new agentd, check room (bytes and inodes), upload / verify / extract part by
+//!             part, count the tree against the plan, reset the per-workspace owner markers;
+//!   start   — bounce the sandbox so the entrypoint starts agentd on the carried `/work`.
+//! Progress is in `GET /machine` (`upgrade.phase`, e.g. `pack 3/16`); failures leave the old box as
+//! the user's box again when the new one was never created, else the new box with whatever was unpacked.
 
 use std::time::{Duration, Instant};
 
@@ -29,7 +35,8 @@ use crate::auth::Principal;
 use crate::boxes::{self, Provider};
 use crate::daytona::SandboxState;
 use crate::signin::api_error;
-use crate::state::{AppState, UpgradeStatus};
+use crate::state::{AppState, UpgradeRefusal, UpgradeStatus};
+use crate::upgrade_carry::{self as carry, CarryConfig, Verdict};
 
 const KEEP_OLD_SANDBOX_MS: i64 = 7 * 24 * 3_600_000;
 /// Retained sandboxes a user keeps *unarchived* (started in seconds for rollback / repair); older ones
@@ -37,7 +44,9 @@ const KEEP_OLD_SANDBOX_MS: i64 = 7 * 24 * 3_600_000;
 /// early, just off the disk quota (2026-10-22: 308 retained 10 GiB sandboxes filled the 5000 GiB quota,
 /// `daytona create` answered 400 and four real users' boxes went to `error`).
 const KEEP_UNARCHIVED_RETAINED: usize = 2;
-const MAX_WORK_MIB: i64 = 3500;
+
+/// Phrase every refusal carries: the deploy worker's skip rule (#1941) matches on it.
+const REFUSED_PHRASE: &str = "too large to carry";
 
 /// Is the box behind the relay's default snapshot?
 pub fn image_outdated(state: &AppState, sb: &crate::db::Sandbox) -> bool {
@@ -48,22 +57,27 @@ pub fn image_outdated(state: &AppState, sb: &crate::db::Sandbox) -> bool {
             .is_some_and(|s| *s != state.default_snapshot())
 }
 
-/// `upgrade` object for `GET /machine` and `/admin/users`.
+/// `upgrade` object for `GET /machine` and `/admin/users`. `last_refused` (reason, at, work_mib)
+/// is present while the newest attempt was refused at the measure step: the box is fine and
+/// still on its old image; the deploy worker reads it to skip the box instead of waiting.
 pub async fn status_json(state: &AppState, user_id: &str) -> Value {
     let running = state.upgrading.lock().await.get(user_id).cloned();
-    match running {
+    let mut v = match running {
         Some(u) => json!({
             "in_progress": true, "phase": u.phase, "since": u.since,
             "from": u.from_snapshot, "to": u.to_snapshot,
         }),
         None => json!({ "in_progress": false }),
+    };
+    if let Some(r) = state.upgrade_refused.lock().await.get(user_id) {
+        v["last_refused"] = json!({ "reason": r.reason, "at": r.at, "work_mib": r.work_mib });
     }
+    v
 }
 
+/// Record the phase for `GET /machine` and mark the box as waking (it is being worked on).
 async fn set_phase(state: &AppState, user_id: &str, phase: &str) {
-    if let Some(u) = state.upgrading.lock().await.get_mut(user_id) {
-        u.phase = phase.to_owned();
-    }
+    note_phase(state, user_id, phase).await;
     state
         .set_box_state(
             user_id,
@@ -71,6 +85,43 @@ async fn set_phase(state: &AppState, user_id: &str, phase: &str) {
             Some(&format!("upgrading: {phase}")),
         )
         .await;
+}
+
+/// Record the phase only — the box keeps serving (measure step).
+async fn note_phase(state: &AppState, user_id: &str, phase: &str) {
+    if let Some(u) = state.upgrading.lock().await.get_mut(user_id) {
+        u.phase = phase.to_owned();
+    }
+}
+
+/// The measure step said no: remember why, log the line the deploy worker greps, leave the box
+/// exactly as it was.
+async fn record_refusal(state: &AppState, user_id: &str, reason: &str, work_mib: i64) {
+    debug_assert!(reason.contains(REFUSED_PHRASE));
+    tracing::error!(user = %user_id, error = %reason, "box upgrade failed");
+    tracing::warn!(user = %user_id, work_mib, reason, "box upgrade refused before quiescing; the box keeps running on its image");
+    state.upgrade_refused.lock().await.insert(
+        user_id.to_owned(),
+        UpgradeRefusal {
+            reason: reason.to_owned(),
+            at: now_ms(),
+            work_mib,
+        },
+    );
+    let _ = state.db.record_audit(
+        "relay-admin",
+        "box_upgrade_refused",
+        &json!({ "ts": now_ms(), "user_id": user_id, "reason": reason, "work_mib": work_mib }),
+    );
+}
+
+/// What `run` ended with.
+#[derive(Debug)]
+enum Outcome {
+    /// Carried; the report goes to the audit log.
+    Done(Value),
+    /// Refused at the measure step; nothing changed on the box.
+    Refused { reason: String, work_mib: i64 },
 }
 
 /// Start an upgrade for `user_id` in the background. `Ok(false)` when one is already running
@@ -123,33 +174,84 @@ pub async fn start(state: &AppState, user_id: &str, force: bool) -> Result<bool>
         let t0 = Instant::now();
         let outcome = run(&state2, &user, &target, Source::CurrentBox).await;
         state2.upgrading.lock().await.remove(&user);
-        match outcome {
-            Ok(report) => {
-                tracing::info!(user = %user, ?report, ms = t0.elapsed().as_millis() as i64, "box upgraded");
-                let _ = state2.db.record_audit(
-                    "relay-admin",
-                    "box_upgrade",
-                    &json!({ "ts": now_ms(), "user_id": user, "report": report, "ms": t0.elapsed().as_millis() as i64 }),
-                );
-            }
-            Err(e) => {
-                tracing::error!(user = %user, error = %format!("{e:#}"), "box upgrade failed");
-                let _ = state2.db.record_audit(
-                    "relay-admin",
-                    "box_upgrade_failed",
-                    &json!({ "ts": now_ms(), "user_id": user, "error": format!("{e:#}") }),
-                );
-                state2
-                    .set_box_state(
-                        &user,
-                        BoxState::Error,
-                        Some(&format!("upgrade failed: {e}")),
-                    )
-                    .await;
-            }
-        }
+        finish(&state2, &user, outcome, Task::Upgrade, t0).await;
     });
     Ok(true)
+}
+
+/// Which background task is ending — the two share `run` and `finish`.
+#[derive(Debug, Clone, Copy)]
+enum Task {
+    Upgrade,
+    Repair,
+}
+
+impl Task {
+    fn done(self) -> &'static str {
+        match self {
+            Task::Upgrade => "box upgraded",
+            Task::Repair => "box repaired",
+        }
+    }
+    /// The deploy worker greps `box upgrade failed user=<uid> error=…` — keep the words.
+    fn failed(self) -> &'static str {
+        match self {
+            Task::Upgrade => "box upgrade failed",
+            Task::Repair => "box repair failed",
+        }
+    }
+    fn audit(self) -> &'static str {
+        match self {
+            Task::Upgrade => "box_upgrade",
+            Task::Repair => "box_repair",
+        }
+    }
+    fn audit_failed(self) -> &'static str {
+        match self {
+            Task::Upgrade => "box_upgrade_failed",
+            Task::Repair => "box_repair_failed",
+        }
+    }
+    fn detail(self) -> &'static str {
+        match self {
+            Task::Upgrade => "upgrade failed",
+            Task::Repair => "repair failed",
+        }
+    }
+}
+
+/// Log, audit and set the box state for the end of an upgrade or repair task.
+async fn finish(state: &AppState, user: &str, outcome: Result<Outcome>, task: Task, t0: Instant) {
+    let ms = t0.elapsed().as_millis() as i64;
+    match outcome {
+        Ok(Outcome::Done(report)) => {
+            tracing::info!(user = %user, ?report, ms, "{}", task.done());
+            state.upgrade_refused.lock().await.remove(user);
+            let _ = state.db.record_audit(
+                "relay-admin",
+                task.audit(),
+                &json!({ "ts": now_ms(), "user_id": user, "report": report, "ms": ms }),
+            );
+        }
+        Ok(Outcome::Refused { reason, work_mib }) => {
+            record_refusal(state, user, &reason, work_mib).await;
+        }
+        Err(e) => {
+            tracing::error!(user = %user, error = %format!("{e:#}"), "{}", task.failed());
+            let _ = state.db.record_audit(
+                "relay-admin",
+                task.audit_failed(),
+                &json!({ "ts": now_ms(), "user_id": user, "error": format!("{e:#}") }),
+            );
+            state
+                .set_box_state(
+                    user,
+                    BoxState::Error,
+                    Some(&format!("{}: {e}", task.detail())),
+                )
+                .await;
+        }
+    }
 }
 
 /// gVisor sandbox (D89): the image roll is a container recreate on the same `/work` image —
@@ -229,9 +331,12 @@ pub enum Source {
     History { sandbox_id: String },
 }
 
-/// Pack `/work` of a sandbox into one tarball pulled through the relay. Starts it when stopped
-/// and quiesces agentd first. Returns `(bytes, mib)`.
-async fn pack(dt: &crate::daytona::Daytona, sandbox_id: &str) -> Result<(Vec<u8>, i64)> {
+/// Make sure the source sandbox runs (started when stopped) and hand back its toolbox. Nothing on
+/// the box is stopped here.
+async fn source_toolbox<'a>(
+    dt: &'a crate::daytona::Daytona,
+    sandbox_id: &str,
+) -> Result<crate::daytona::Toolbox<'a>> {
     let cur = dt.get(sandbox_id).await.context("source sandbox")?;
     if matches!(
         cur.state,
@@ -249,51 +354,57 @@ async fn pack(dt: &crate::daytona::Daytona, sandbox_id: &str) -> Result<(Vec<u8>
         .await?;
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
-    let _ = dt
-        .toolbox_exec(
-            sandbox_id,
-            "sudo -n pkill -TERM -x arbos-agentd 2>/dev/null; sleep 3; sudo -n pkill -KILL -x arbos-agentd 2>/dev/null; sudo -n pkill -KILL -f 'pi --mode rpc' 2>/dev/null; sudo -n pkill -KILL -x prime-agent 2>/dev/null; true",
-            60,
-        )
-        .await;
-    let du = dt
-        .toolbox_exec(sandbox_id, "sudo -n du -sm /work | cut -f1", 120)
-        .await?;
-    let mib: i64 = du
-        .get("result")
-        .and_then(Value::as_str)
-        .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(0);
-    if mib > MAX_WORK_MIB {
-        return Err(anyhow!(
-            "/work is {mib} MiB; too large to carry through the relay in one piece"
-        ));
-    }
-    let tar = dt
-        .toolbox_exec(
-            sandbox_id,
-            "sudo -n rm -f /home/daytona/arbos-upgrade.tgz; cd /work && sudo -n tar czf /home/daytona/arbos-upgrade.tgz --exclude='./.arbos/logs' --exclude='./*/.arbos/logs' . && sudo -n chmod 644 /home/daytona/arbos-upgrade.tgz && ls -l /home/daytona/arbos-upgrade.tgz",
-            900,
-        )
-        .await?;
-    if tar.get("exitCode").and_then(Value::as_i64).unwrap_or(1) != 0 {
-        return Err(anyhow!(
-            "tar on the source box failed: {}",
-            tar.get("result").and_then(Value::as_str).unwrap_or("")
-        ));
-    }
-    let bytes = dt
-        .toolbox_download(sandbox_id, "/home/daytona/arbos-upgrade.tgz")
-        .await
-        .context("download /work tarball")?;
-    let _ = dt
-        .toolbox_exec(
-            sandbox_id,
-            "sudo -n rm -f /home/daytona/arbos-upgrade.tgz",
-            60,
-        )
-        .await;
-    Ok((bytes, mib))
+    Ok(dt.toolbox(sandbox_id).await)
+}
+
+/// What `pack` carried: the spooled parts and the figures for the report and the room check.
+struct Packed {
+    parts: Vec<carry::SpooledPart>,
+    /// `(entries, bytes)` the new box must hold afterwards.
+    expected: (u64, u64),
+    work_mib: i64,
+    measure: carry::Measure,
+    skipped_rebuildable: bool,
+}
+
+/// Quiesce agentd, list `/work`, plan the parts and carry them onto the relay's spool disk. The
+/// caller has already measured and decided to go ahead.
+async fn pack(
+    state: &AppState,
+    user_id: &str,
+    tb: &crate::daytona::Toolbox<'_>,
+    work_mib: i64,
+    cfg: &CarryConfig,
+) -> Result<Packed> {
+    carry::quiesce(tb).await.context("quiesce the source box")?;
+    note_phase(state, user_id, "list").await;
+    let entries = carry::list_work(tb, cfg.attempts).await?;
+    let measure = carry::measure(&entries);
+    let parts = carry::partition(&entries, cfg.part_mib * 1024 * 1024, cfg.skip_rebuildable);
+    let expected = carry::expected_after_carry(&parts);
+    tracing::info!(
+        user = %user_id, work_mib, entries = measure.entries, bytes = measure.bytes,
+        parts = parts.len(), part_mib = cfg.part_mib,
+        rebuildable_mib = measure.rebuildable_bytes / (1024 * 1024),
+        rebuildable_entries = measure.rebuildable_entries,
+        projects_with_copies = measure.projects_with_copies.len(),
+        skip_rebuildable = cfg.skip_rebuildable,
+        "source /work listed and planned"
+    );
+    let spool = cfg.spool_root.join(user_id);
+    let n = parts.len();
+    let parts = carry::pack_parts(tb, &parts, &spool, cfg, |k, _| {
+        let (state, user) = (state.clone(), user_id.to_owned());
+        tokio::spawn(async move { note_phase(&state, &user, &format!("pack {k}/{n}")).await });
+    })
+    .await?;
+    Ok(Packed {
+        parts,
+        expected,
+        work_mib,
+        measure,
+        skipped_rebuildable: cfg.skip_rebuildable,
+    })
 }
 
 /// Put the carried `/work` onto a freshly created box and bounce it so agentd boots on it.
@@ -302,29 +413,42 @@ async fn unpack_and_start(
     dt: &crate::daytona::Daytona,
     user_id: &str,
     new_id: &str,
-    bytes: Vec<u8>,
+    packed: &Packed,
+    cfg: &CarryConfig,
 ) -> Result<()> {
-    let _ = dt
-        .toolbox_exec(
-            new_id,
+    let tb = dt.toolbox(new_id).await;
+    let _ = tb
+        .exec(
             "sudo -n pkill -TERM -x arbos-agentd 2>/dev/null; sleep 2; sudo -n pkill -KILL -x arbos-agentd 2>/dev/null; true",
             60,
         )
         .await;
-    dt.toolbox_upload(new_id, "/home/daytona/arbos-upgrade.tgz", bytes)
-        .await
-        .context("upload /work tarball")?;
-    let out = dt
-        .toolbox_exec(
-            new_id,
-            "sudo -n rm -rf /work/* /work/.[!.]* 2>/dev/null; sudo -n tar xzf /home/daytona/arbos-upgrade.tgz -C /work && sudo -n find /work -maxdepth 3 -name .owner -path '*/.arbos/.owner' -delete; rm -f /home/daytona/arbos-upgrade.tgz && echo ok",
-            900,
+    let (avail_mib, avail_inodes) = carry::destination_room(&tb).await?;
+    carry::destination_fits(
+        avail_mib,
+        avail_inodes,
+        packed.work_mib.max(0) as u64,
+        packed.expected.0,
+        cfg.part_mib,
+        carry::max_part_mib(&packed.parts),
+    )
+    .map_err(|m| anyhow!("{m}"))?;
+    let n = packed.parts.len();
+    carry::unpack_parts(&tb, &packed.parts, packed.expected, cfg, |k, _| {
+        let (state, user) = (state.clone(), user_id.to_owned());
+        tokio::spawn(async move { set_phase(&state, &user, &format!("unpack {k}/{n}")).await });
+    })
+    .await?;
+    let owners = tb
+        .exec(
+            "sudo -n find /work -maxdepth 3 -name .owner -path '*/.arbos/.owner' -delete; echo ok",
+            120,
         )
         .await?;
-    if out.get("exitCode").and_then(Value::as_i64).unwrap_or(1) != 0 {
+    if owners.get("exitCode").and_then(Value::as_i64).unwrap_or(1) != 0 {
         return Err(anyhow!(
-            "extract on the new box failed: {}",
-            out.get("result").and_then(Value::as_str).unwrap_or("")
+            "owner markers on the new box: {}",
+            owners.get("result").and_then(Value::as_str).unwrap_or("")
         ));
     }
     set_phase(state, user_id, "start").await;
@@ -378,11 +502,28 @@ async fn rollback(
     }
 }
 
-async fn run(state: &AppState, user_id: &str, target: &str, source: Source) -> Result<Value> {
+/// The pack step failed after agentd was quiesced but before the old sandbox was stopped or
+/// anything created: bring the user's box back as it was (start_box bounces a started-but-silent
+/// sandbox so the entrypoint starts agentd again).
+async fn revive_source(state: &AppState, user_id: &str, source: &Source) {
+    if !matches!(source, Source::CurrentBox) {
+        return;
+    }
+    tracing::warn!(user = %user_id, "pack failed; reviving the box in place");
+    state
+        .set_box_state(user_id, BoxState::Asleep, Some("upgrade did not start"))
+        .await;
+    if let Err(e) = boxes::start_box(state, user_id).await {
+        tracing::error!(user = %user_id, error = %e, "revive of the box after a failed pack failed");
+    }
+}
+
+async fn run(state: &AppState, user_id: &str, target: &str, source: Source) -> Result<Outcome> {
     let dt = state
         .daytona
         .as_ref()
         .ok_or_else(|| anyhow!("DAYTONA_API_KEY not configured"))?;
+    let cfg = CarryConfig::from_env(&state.cfg.data_dir);
     let (source_id, old_row) = match &source {
         Source::CurrentBox => {
             let old = state
@@ -398,20 +539,64 @@ async fn run(state: &AppState, user_id: &str, target: &str, source: Source) -> R
         Source::History { sandbox_id } => (sandbox_id.clone(), None),
     };
 
-    set_phase(state, user_id, "pack").await;
-    let (bytes, mib) = pack(dt, &source_id).await?;
-    tracing::info!(user = %user_id, mib, bytes = bytes.len(), "source /work packed");
+    // Measure first: nothing on the box is stopped until the carry is known to fit.
+    note_phase(state, user_id, "measure").await;
+    let tb = source_toolbox(dt, &source_id).await?;
+    let work_mib = carry::measure_du_mib(&tb).await?;
+    let spool_free = carry::free_mib(&cfg.spool_root).unwrap_or(0);
+    match carry::verdict(work_mib, spool_free, &cfg) {
+        Verdict::Carry => {}
+        v => {
+            let reason = v.reason().unwrap_or_default();
+            return Ok(Outcome::Refused { reason, work_mib });
+        }
+    }
 
+    set_phase(state, user_id, "pack").await;
+    let packed = match pack(state, user_id, &tb, work_mib, &cfg).await {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(cfg.spool_root.join(user_id));
+            revive_source(state, user_id, &source).await;
+            return Err(e.context("pack /work on the source box"));
+        }
+    };
+    tracing::info!(
+        user = %user_id, mib = packed.work_mib, parts = packed.parts.len(),
+        tar_bytes = packed.parts.iter().map(|p| p.tar_bytes).sum::<u64>(),
+        "source /work packed"
+    );
+    let spool_dir = cfg.spool_root.join(user_id);
+    let outcome = carry_onto_new_box(
+        state, dt, user_id, target, &source, &source_id, old_row, &packed, &cfg,
+    )
+    .await;
+    let _ = std::fs::remove_dir_all(&spool_dir);
+    outcome
+}
+
+/// Stop the old sandbox, create the new one and unpack onto it; every failure from here rolls the
+/// user back (normal upgrade) or leaves the retained sandbox untouched (repair).
+#[allow(clippy::too_many_arguments)]
+async fn carry_onto_new_box(
+    state: &AppState,
+    dt: &crate::daytona::Daytona,
+    user_id: &str,
+    target: &str,
+    source: &Source,
+    source_id: &str,
+    old_row: Option<crate::db::Sandbox>,
+    packed: &Packed,
+    cfg: &CarryConfig,
+) -> Result<Outcome> {
     if let Some(old) = &old_row {
         set_phase(state, user_id, "stop").await;
-        let _ = dt.stop(&source_id, false).await;
+        let _ = dt.stop(source_id, false).await;
         state
             .db
             .insert_box_history(old, now_ms() + KEEP_OLD_SANDBOX_MS)?;
     }
 
-    // From here on every failure rolls the user back to the old box (normal upgrade) or leaves
-    // the retained sandbox untouched (repair).
     set_phase(state, user_id, "create").await;
     let created = boxes::create_box(state, user_id, Provider::Daytona, Some(target)).await;
     let mut new = match created {
@@ -438,7 +623,7 @@ async fn run(state: &AppState, user_id: &str, target: &str, source: Source) -> R
     };
 
     set_phase(state, user_id, "unpack").await;
-    if let Err(e) = unpack_and_start(state, dt, user_id, &new_id, bytes).await {
+    if let Err(e) = unpack_and_start(state, dt, user_id, &new_id, packed, cfg).await {
         if let Some(old) = &old_row {
             rollback(state, dt, user_id, old, Some(&new_id)).await;
         } else {
@@ -451,12 +636,20 @@ async fn run(state: &AppState, user_id: &str, target: &str, source: Source) -> R
         return Err(e.context("carry /work onto the new box"));
     }
     let archived = archive_excess_retained(state, dt, Some(user_id)).await;
-    Ok(json!({
+    Ok(Outcome::Done(json!({
         "source_sandbox": source_id, "new_sandbox": new_id, "archived_retained": archived,
-        "from": old_row.as_ref().and_then(|o| o.snapshot.clone()), "to": target, "work_mib": mib,
+        "from": old_row.as_ref().and_then(|o| o.snapshot.clone()), "to": target,
+        "work_mib": packed.work_mib, "parts": packed.parts.len(), "part_mib": cfg.part_mib,
+        "tar_bytes": packed.parts.iter().map(|p| p.tar_bytes).sum::<u64>(),
+        "entries": packed.expected.0, "bytes": packed.expected.1,
+        "rebuildable": {
+            "entries": packed.measure.rebuildable_entries, "bytes": packed.measure.rebuildable_bytes,
+            "projects_with_copies": packed.measure.projects_with_copies,
+            "skipped": packed.skipped_rebuildable,
+        },
         "old_kept_until": old_row.as_ref().map(|_| now_ms() + KEEP_OLD_SANDBOX_MS),
         "repair": matches!(source, Source::History { .. }),
-    }))
+    })))
 }
 
 /// Daytona-archive every retained sandbox beyond the [`KEEP_UNARCHIVED_RETAINED`] newest (one user, or
@@ -574,29 +767,10 @@ pub async fn start_repair(state: &AppState, user_id: &str) -> Result<bool> {
     let state2 = state.clone();
     let user = user_id.to_owned();
     tokio::spawn(async move {
+        let t0 = Instant::now();
         let outcome = run(&state2, &user, &target, Source::History { sandbox_id }).await;
         state2.upgrading.lock().await.remove(&user);
-        match outcome {
-            Ok(report) => {
-                tracing::info!(user = %user, ?report, "box repaired");
-                let _ = state2.db.record_audit(
-                    "relay-admin",
-                    "box_repair",
-                    &json!({ "ts": now_ms(), "user_id": user, "report": report }),
-                );
-            }
-            Err(e) => {
-                tracing::error!(user = %user, error = %format!("{e:#}"), "box repair failed");
-                let _ = state2.db.record_audit(
-                    "relay-admin",
-                    "box_repair_failed",
-                    &json!({ "ts": now_ms(), "user_id": user, "error": format!("{e:#}") }),
-                );
-                state2
-                    .set_box_state(&user, BoxState::Error, Some(&format!("repair failed: {e}")))
-                    .await;
-            }
-        }
+        finish(&state2, &user, outcome, Task::Repair, t0).await;
     });
     Ok(true)
 }
