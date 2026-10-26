@@ -68,6 +68,11 @@ BUILD_USER="${BUILD_USER:-const}"
 
 REPO="$STATE/repo"
 LOG="$STATE/log"
+# `dry-tick` (#1880): run a whole tick against a throwaway copy of the state and the queue, with every
+# effect (deploy, image roll, hook request, systemd-run) replaced by a log line — the pre-install
+# smoke in install-deploy-hook.sh. A worker whose tick cannot get to the end is not installed.
+DRY_RUN="${ARBOS_DEPLOY_DRY_RUN:-0}"
+dry() { [[ "$DRY_RUN" == 1 ]]; }
 # Under systemd there is no HOME and no SUDO_UID: git would call the build user's clone
 # (/home/const/arbos-build/repo, used by deploy-relay.sh) "dubious ownership" and fail to
 # read its HEAD. Trust the checkouts this host deploys from.
@@ -263,6 +268,7 @@ relay_connect_probe() {
 
 deploy_relay() {
   local sha="$1" tmp t0
+  dry && { log "dry-run: would deploy relay $sha"; return 0; }
   tmp="$(mktemp -d)"
   git -C "$REPO" show "$sha:scripts/feedback/deploy-relay.sh" > "$tmp/deploy-relay.sh"
   t0=$(date +%s)
@@ -292,6 +298,7 @@ deploy_relay() {
 
 deploy_voice() {
   local sha="$1" t0
+  dry && { log "dry-run: would deploy voice $sha"; return 0; }
   t0=$(date +%s)
   log "voice: deploying $sha"
   git -C "$REPO" checkout -q --detach "$sha"
@@ -956,6 +963,7 @@ roll_unit_running() {
 }
 
 start_roll_unit() {
+  dry && { log "dry-run: would start the image roll unit for $1"; return 0; }
   # A finished (failed) transient unit stays loaded until reset; clear it, then start the roll.
   # --no-block: without it systemd-run waits for the oneshot to finish, so the tick (and with it
   # the timer and every other queued deploy) sat inside the 15–40 minute roll (22:27–22:58 Oct 21,
@@ -993,6 +1001,7 @@ auto_requests() {
     fi
     # shellcheck disable=SC2046
     if ! git -C "$REPO" diff --quiet "$deployed" "$head" -- $(paths_of "$kind"); then
+      if dry; then log "dry-run: would request $kind $head (newest green)"; continue; fi
       ARBOS_DEPLOY_QUEUE="$QUEUE" "$HOOK" "$kind" "$head" >/dev/null && log "auto: $kind differs from main in its paths; requested $head (newest green)"
     fi
   done
@@ -1188,6 +1197,7 @@ continue_roll_if_due() {
   local at
   at="$(sed -n 's/^at=//p' "$STATE/agentd.rolling" | head -1)"
   (( $(date -u +%s) - ${at:-0} >= ROLL_RETRY_EVERY_S )) || return 0
+  dry && { log "dry-run: would start a roll-continue unit"; return 0; }
   systemctl reset-failed arbos-deploy-agentd.service 2>/dev/null || true
   systemd-run --unit=arbos-deploy-agentd --collect --quiet --no-block \
     --property=Type=oneshot --property=StandardOutput=journal \
@@ -1197,7 +1207,22 @@ continue_roll_if_due() {
 
 tick() {
   need_root
-  [[ -e "$KILL_FILE" ]] && exit 0
+  if dry; then
+    # Throwaway state: the real metadata files and queue are copied, the repo clone is shared read-only
+    # (fetch only), the lock is private so a live tick is never blocked, nothing is removed or written
+    # anywhere real. KILL_FILE is ignored so the smoke runs even while deploys are paused.
+    local scratch real_state="$STATE" real_queue="$QUEUE"
+    scratch="$(mktemp -d /tmp/arbos-deploy-dry.XXXXXX)"
+    mkdir -p "$scratch/state/failed" "$scratch/state/runs" "$scratch/queue"
+    find "$real_state" -maxdepth 1 -type f -exec cp -a {} "$scratch/state/" \; 2>/dev/null || true
+    cp -a "$real_state/failed/." "$scratch/state/failed/" 2>/dev/null || true
+    cp -a "$real_queue/." "$scratch/queue/" 2>/dev/null || true
+    STATE="$scratch/state"; QUEUE="$scratch/queue"; LOG="$STATE/log"; EVENTS="$STATE/events.jsonl"
+    REPO="$real_state/repo"
+    log "dry-run tick: state copy $scratch (repo $REPO shared, fetch only)"
+  else
+    [[ -e "$KILL_FILE" ]] && exit 0
+  fi
   mkdir -p "$STATE"
   exec 9> "$STATE/.lock"
   flock -n 9 || exit 0
@@ -1209,6 +1234,10 @@ tick() {
     [[ -f "$f" ]] && handle_request "$f"
   done
   continue_roll_if_due
+  if dry; then
+    log "dry-run tick: reached the end (auto_requests, every queued request, roll-continue) — worker ok"
+    rm -rf "$(dirname "$STATE")"
+  fi
   return 0
 }
 
@@ -1258,6 +1287,7 @@ selftest() {
 
 case "${1:-}" in
   tick) tick ;;
+  dry-tick) DRY_RUN=1; tick ;;
   selftest) selftest ;;
   roll-image) roll_image "${2:?sha}" ;;
   roll-continue) roll_continue ;;
