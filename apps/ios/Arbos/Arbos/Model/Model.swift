@@ -289,8 +289,9 @@ struct Project: Identifiable, Equatable, Codable {
     /// D92 amendment: the agent's uploaded / generated picture — a blob name in the project's own
     /// slot (`/blob/{id}/{key}`); wins over the leaf while set.
     var imageKey: String? = nil
-    /// `imageKey` as a fetchable URL (the relay's `/blob/{id}/{key}?token=…`), filled in by the
-    /// relay client; nil in the fixture.
+    /// `imageKey` as a fetchable URL — the relay's public picture route
+    /// `/projects/{id}/avatar.jpg?v={avatarVersion}` (`Project.pictureURL`), filled in by the
+    /// relay client and by `AppModel.applyAgentAvatar`; nil in the fixture and without a picture.
     var imageURL: String? = nil
     /// The relay's stamp (ms) of the agent's last avatar change (`avatar_version`); 0 when
     /// unknown. Among the copies of one agent (my record, every roster card) the highest stamp
@@ -1694,5 +1695,19 @@ enum JobTabs {
             out.append(live)
         }
         return out
+    }
+}
+
+
+extension Project {
+    /// The one URL every surface fetches an agent's picture from: the relay's public route for
+    /// the agent's *current* picture, stamped with `avatar_version` so a change is a new URL and
+    /// no cache (URLCache, `AvatarImageCache`) ever serves the old bytes. Why not the blob slot:
+    /// `/blob/{project}/{key}` is readable by the owner and the project's guests only, so a
+    /// viewer who merely shares a group with the agent got 403 and drew the leaf (Jacob,
+    /// 2026-10-25, "Hezbola"). nil without a picture or without a relay.
+    static func pictureURL(httpUrl: String, id: Id, imageKey: String?, version: Int) -> String? {
+        guard let imageKey, !imageKey.isEmpty, !httpUrl.isEmpty else { return nil }
+        return "\(httpUrl)/projects/\(id)/avatar.jpg?v=\(version)"
     }
 }
