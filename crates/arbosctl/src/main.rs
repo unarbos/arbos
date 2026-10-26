@@ -352,6 +352,10 @@ enum ChatCmd {
         /// Reply to this message id (`replyTo` on the row, as the apps' reply arrow sets it).
         #[arg(long = "reply-to")]
         reply_to: Option<String>,
+        /// Reply in DM: a cross-chat reply reference as JSON (`replyRef` on the row, crdt-sync
+        /// §6.2): `{"chatId","projectId","messageId","chatTitle","sender","senderName","senderHandle","text"}`.
+        #[arg(long = "reply-ref")]
+        reply_ref: Option<String>,
     },
     /// Answer the agent's open question with a structured value (question widgets).
     Answer {
@@ -687,14 +691,23 @@ async fn main() -> Result<()> {
                 stream,
                 timeout,
                 reply_to,
+                reply_ref,
             } => {
                 let project = resolve_project(&relay, &project).await?;
+                let reply_ref = match reply_ref {
+                    Some(j) => Some(
+                        serde_json::from_str::<arbos_core::doc::ReplyRef>(&j)
+                            .map_err(|e| anyhow::anyhow!("--reply-ref: {e}"))?,
+                    ),
+                    None => None,
+                };
                 room::send(
                     &mut cfg,
                     &project,
                     &chat,
                     &text,
                     reply_to.as_deref(),
+                    reply_ref.as_ref(),
                     stream,
                     timeout,
                 )
@@ -1404,7 +1417,7 @@ async fn groups(cfg: &mut Config, relay: &Relay, cmd: GroupCmd, as_json: bool) -
             wait,
         } => {
             let host = resolve_project(relay, &host).await?;
-            room::send(cfg, &host, &chat, &text, None, stream, 600).await?;
+            room::send(cfg, &host, &chat, &text, None, None, stream, 600).await?;
             if stream && wait > 0 {
                 // The other Projects answer after the host's own reply; keep the room open.
                 room::stream(cfg, &host, &chat, false, wait).await?;
