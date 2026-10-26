@@ -67,6 +67,9 @@ pub fn migrate_accounts(c: &Connection) {
         // Where `name` came from: `github` (seeded from the profile at first sign-in) or `user`
         // (set through PATCH /me). Only a user-set name is how agents address the person.
         "ALTER TABLE users ADD COLUMN name_source TEXT NOT NULL DEFAULT 'github'",
+        // Earlier display names (JSON array), newest last: the box rewrites memory that named
+        // the owner by one of them to "the owner".
+        "ALTER TABLE users ADD COLUMN former_names TEXT NOT NULL DEFAULT '[]'",
     ] {
         let _ = c.execute(stmt, []);
     }
@@ -88,8 +91,8 @@ pub struct User {
     pub test: bool,
 }
 
-/// `(login, profile name, address name)` — see `Db::user_address`.
-pub type UserAddress = (Option<String>, Option<String>, Option<String>);
+/// `(login, profile name, address name, former names)` — see `Db::user_address`.
+pub type UserAddress = (Option<String>, Option<String>, Option<String>, Vec<String>);
 
 /// What GitHub tells us about the signed-in account.
 #[derive(Debug, Clone)]
@@ -446,14 +449,16 @@ impl Db {
     pub fn user_address(&self, user_id: &str) -> Result<Option<UserAddress>> {
         self.with(|c| {
             c.query_row(
-                "SELECT login, name, name_source FROM users WHERE id = ?1",
+                "SELECT login, name, name_source, former_names FROM users WHERE id = ?1",
                 params![user_id],
                 |r| {
                     let login: Option<String> = r.get(0)?;
                     let name: Option<String> = r.get(1)?;
                     let source: String = r.get(2)?;
+                    let former: String = r.get(3)?;
+                    let former: Vec<String> = serde_json::from_str(&former).unwrap_or_default();
                     let address = if source == "user" { name.clone() } else { None };
-                    Ok((login, name, address))
+                    Ok((login, name, address, former))
                 },
             )
             .optional()
@@ -473,6 +478,35 @@ impl Db {
         }
         let name_sql: Option<Option<&str>> =
             name.map(|s| if s.is_empty() { None } else { Some(s) });
+        if let Some(new_name) = name_sql {
+            // The old name joins `former_names` so boxes can retire it from memory.
+            let _ = self.with(|c| {
+                let prev: Option<(Option<String>, String)> = c
+                    .query_row(
+                        "SELECT name, former_names FROM users WHERE id = ?1",
+                        params![user_id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?;
+                if let Some((Some(old), former)) = prev {
+                    let old = old.trim().to_owned();
+                    if !old.is_empty() && Some(old.as_str()) != new_name {
+                        let mut v: Vec<String> = serde_json::from_str(&former).unwrap_or_default();
+                        if !v.iter().any(|x| x == &old) {
+                            v.push(old);
+                        }
+                        c.execute(
+                            "UPDATE users SET former_names = ?2 WHERE id = ?1",
+                            params![
+                                user_id,
+                                serde_json::to_string(&v).unwrap_or_else(|_| "[]".into())
+                            ],
+                        )?;
+                    }
+                }
+                Ok(())
+            });
+        }
         let n = self.with(|c| match (name_sql, login) {
             (Some(name), Some(login)) => c.execute(
                 "UPDATE users SET name = ?2, login = ?3, name_source = 'user' WHERE id = ?1",
@@ -1204,7 +1238,8 @@ mod address_name_tests {
         };
         let (u, created) = db.upsert_github_user(&gh, 20.0).unwrap();
         assert!(created);
-        let (login, name, address) = db.user_address(&u.id).unwrap().unwrap();
+        let (login, name, address, former) = db.user_address(&u.id).unwrap().unwrap();
+        assert!(former.is_empty());
         assert_eq!(login.as_deref(), Some("const"));
         assert_eq!(
             name.as_deref(),
@@ -1213,17 +1248,23 @@ mod address_name_tests {
         );
         assert_eq!(address, None, "but it is not an address");
         db.set_user_profile(&u.id, Some("Jacob"), None).unwrap();
-        let (_, name, address) = db.user_address(&u.id).unwrap().unwrap();
+        let (_, name, address, former) = db.user_address(&u.id).unwrap().unwrap();
         assert_eq!(name.as_deref(), Some("Jacob"));
         assert_eq!(address.as_deref(), Some("Jacob"));
+        assert_eq!(
+            former,
+            vec!["Const".to_owned()],
+            "the old label is remembered for the boxes"
+        );
         // Another GitHub sign-in keeps the user's choice.
         let (_, _) = db.upsert_github_user(&gh, 20.0).unwrap();
-        let (_, _, address) = db.user_address(&u.id).unwrap().unwrap();
+        let (_, _, address, _) = db.user_address(&u.id).unwrap().unwrap();
         assert_eq!(address.as_deref(), Some("Jacob"));
         // Clearing the name clears the address too; the source flips back only on a new name.
         db.set_user_profile(&u.id, Some(""), None).unwrap();
-        let (_, name, _) = db.user_address(&u.id).unwrap().unwrap();
+        let (_, name, _, former) = db.user_address(&u.id).unwrap().unwrap();
         assert_eq!(name, None);
+        assert_eq!(former, vec!["Const".to_owned(), "Jacob".to_owned()]);
         assert!(db.user_address("gh_nobody").unwrap().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }

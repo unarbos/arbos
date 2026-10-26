@@ -552,9 +552,6 @@ fn avatar_unavailable(project_id: &str, detail: impl Into<String>) -> Response {
     )
         .into_response()
 }
-/// The stored picture: a 512 px JPEG, like the pictures the apps upload themselves.
-const AVATAR_SIDE: u32 = 512;
-
 fn avatar_error(status: StatusCode, kind: &str, message: impl Into<String>) -> Response {
     (
         status,
@@ -563,19 +560,10 @@ fn avatar_error(status: StatusCode, kind: &str, message: impl Into<String>) -> R
         .into_response()
 }
 
-/// PNG (or anything `image` decodes) → 512 px JPEG q85 for the blob store.
-pub fn avatar_jpeg(bytes: &[u8]) -> Result<Vec<u8>, String> {
-    let img = image::load_from_memory(bytes).map_err(|e| format!("decode: {e}"))?;
-    let img = img.resize(
-        AVATAR_SIDE,
-        AVATAR_SIDE,
-        image::imageops::FilterType::Triangle,
-    );
-    let rgb = image::DynamicImage::ImageRgb8(img.to_rgb8());
-    let mut out = Vec::new();
-    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85);
-    enc.encode_image(&rgb).map_err(|e| format!("encode: {e}"))?;
-    Ok(out)
+/// The provider's PNG (or anything `image` decodes) → the stored master: ≤ 1024 px, Lanczos,
+/// JPEG q92 for the photographic pictures the models paint, PNG when flat (`avatar_image`).
+pub fn avatar_master(bytes: &[u8]) -> Result<crate::avatar_image::Master, String> {
+    crate::avatar_image::master(bytes)
 }
 
 #[derive(serde::Deserialize)]
@@ -682,7 +670,12 @@ pub const USER_BLOB_PREFIX: &str = "users:";
 /// and drew the automatic leaf instead of the owner's picture (Jacob, 2026-10-25: "Hezbola,
 /// run by @unarbos, purple leaf"). Clients append `?v={avatar_version}`, so a change is a new
 /// URL and the day-long cache never serves the old bytes. 404 while the agent has no picture.
-pub async fn project_avatar(State(state): State<AppState>, Path(file): Path<String>) -> Response {
+/// `?w=<px>` serves the picture at that bucket (`avatar_image`).
+pub async fn project_avatar(
+    State(state): State<AppState>,
+    Path(file): Path<String>,
+    axum::extract::Query(size): axum::extract::Query<crate::avatar_image::SizeQuery>,
+) -> Response {
     let project_id = file.strip_suffix(".jpg").unwrap_or(file.as_str());
     let Ok(Some(p)) = state.db.project(project_id) else {
         return crate::signin::api_error(StatusCode::NOT_FOUND, "not_found", "no such agent");
@@ -698,32 +691,19 @@ pub async fn project_avatar(State(state): State<AppState>, Path(file): Path<Stri
     let Some(bytes) = crate::blobs::read(&state, &p.id, key).await else {
         return crate::signin::api_error(StatusCode::NOT_FOUND, "not_found", "no picture");
     };
-    let mime = match crate::blobs::stored_image(&state, &p.id, key).await {
-        crate::blobs::StoredImage::Image(kind) => match kind {
-            crate::image_sniff::ImageKind::Png => "image/png",
-            crate::image_sniff::ImageKind::Jpeg => "image/jpeg",
-            crate::image_sniff::ImageKind::Gif => "image/gif",
-            crate::image_sniff::ImageKind::Webp => "image/webp",
-            crate::image_sniff::ImageKind::Heic => "image/heic",
-        },
+    let kind = match crate::blobs::stored_image(&state, &p.id, key).await {
+        crate::blobs::StoredImage::Image(kind) => kind,
         crate::blobs::StoredImage::Missing | crate::blobs::StoredImage::NotAnImage(_) => {
             return crate::signin::api_error(StatusCode::NOT_FOUND, "not_found", "no picture")
         }
     };
-    (
-        [
-            (
-                axum::http::header::CONTENT_TYPE,
-                axum::http::HeaderValue::from_static(mime),
-            ),
-            (
-                axum::http::header::CACHE_CONTROL,
-                axum::http::HeaderValue::from_static("public, max-age=86400"),
-            ),
-        ],
-        bytes,
+    crate::avatar_image::respond(
+        &state,
+        crate::avatar_image::Master { kind, bytes },
+        size.w,
+        Some("public, max-age=86400"),
     )
-        .into_response()
+    .await
 }
 
 /// The image provider's last health probe: `GET {images_base}/models/{first avatar model}` with
@@ -1034,12 +1014,24 @@ async fn generate_into(state: &AppState, target: AvatarTarget, prompt: &str) -> 
         crate::credits::charge(state, &target.payer, usd, "inference", Some(&model));
         png
     };
-    let jpeg = match avatar_jpeg(&png) {
-        Ok(j) => j,
-        Err(e) => return avatar_unavailable(&target.slot, e),
+    let stored = match tokio::task::spawn_blocking(move || avatar_master(&png)).await {
+        Ok(Ok(m)) => m,
+        Ok(Err(e)) => return avatar_unavailable(&target.slot, e),
+        Err(e) => return avatar_unavailable(&target.slot, e.to_string()),
     };
-    let image_key = format!("avatar-gen-{}.jpg", arbos_core::ids::ulid().to_lowercase());
-    if let Err(e) = crate::blobs::store(state, &target.slot, &image_key, "image/jpeg", &jpeg).await
+    let image_key = format!(
+        "avatar-gen-{}.{}",
+        arbos_core::ids::ulid().to_lowercase(),
+        stored.ext()
+    );
+    if let Err(e) = crate::blobs::store(
+        state,
+        &target.slot,
+        &image_key,
+        stored.mime(),
+        &stored.bytes,
+    )
+    .await
     {
         return avatar_error(StatusCode::INTERNAL_SERVER_ERROR, "store", e);
     }
@@ -1205,7 +1197,7 @@ mod avatar_generate_tests {
     }
 
     #[tokio::test]
-    async fn falls_through_to_the_next_model_and_stores_a_jpeg() {
+    async fn falls_through_to_the_next_model_and_stores_a_master() {
         // The default list is tried in order; the stub rejects the first the way OpenAI rejected
         // gpt-image-1 (no env override: these tests run in parallel threads).
         let (base, seen) = stub(&["gpt-image-1-mini"]).await;
@@ -1215,9 +1207,12 @@ mod avatar_generate_tests {
         assert_eq!(status, StatusCode::OK, "{v}");
         assert_eq!(v["model"], "gpt-image-2");
         let key = v["image_key"].as_str().unwrap();
+        // The stub paints a flat placeholder, so the master is PNG; a real painting is JPEG q92.
         assert!(matches!(
             crate::blobs::stored_image(&state, &pid, key).await,
-            crate::blobs::StoredImage::Image(crate::image_sniff::ImageKind::Jpeg)
+            crate::blobs::StoredImage::Image(
+                crate::image_sniff::ImageKind::Jpeg | crate::image_sniff::ImageKind::Png
+            )
         ));
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 2);
@@ -1290,9 +1285,12 @@ mod avatar_generate_tests {
         assert_eq!(status, StatusCode::OK, "{v}");
         let key = v["image_key"].as_str().unwrap();
         let slot = format!("{}{chat}", crate::people::PEOPLE_ACL_PREFIX);
+        // The stub paints a flat placeholder, so the master is PNG; a real painting is JPEG q92.
         assert!(matches!(
             crate::blobs::stored_image(&state, &slot, key).await,
-            crate::blobs::StoredImage::Image(crate::image_sniff::ImageKind::Jpeg)
+            crate::blobs::StoredImage::Image(
+                crate::image_sniff::ImageKind::Jpeg | crate::image_sniff::ImageKind::Png
+            )
         ));
         // Set avatar on the group accepts it (the same gate as an upload).
         let r = crate::people::chat_patch(
@@ -1367,9 +1365,12 @@ mod avatar_generate_tests {
             crate::matrix::servers::SERVER_BLOB_PREFIX,
             server.id
         );
+        // The stub paints a flat placeholder, so the master is PNG; a real painting is JPEG q92.
         assert!(matches!(
             crate::blobs::stored_image(&state, &slot, key).await,
-            crate::blobs::StoredImage::Image(crate::image_sniff::ImageKind::Jpeg)
+            crate::blobs::StoredImage::Image(
+                crate::image_sniff::ImageKind::Jpeg | crate::image_sniff::ImageKind::Png
+            )
         ));
         // Members read the slot (the apps fetch the picture); strangers do not.
         assert!(state.allows(&bob_dev, &slot));
@@ -1472,9 +1473,12 @@ mod avatar_generate_tests {
         let v: Value = serde_json::from_slice(&bytes).unwrap();
         let key = v["image_key"].as_str().unwrap().to_owned();
         let slot = format!("{USER_BLOB_PREFIX}{alice}");
+        // The stub paints a flat placeholder, so the master is PNG; a real painting is JPEG q92.
         assert!(matches!(
             crate::blobs::stored_image(&state, &slot, &key).await,
-            crate::blobs::StoredImage::Image(crate::image_sniff::ImageKind::Jpeg)
+            crate::blobs::StoredImage::Image(
+                crate::image_sniff::ImageKind::Jpeg | crate::image_sniff::ImageKind::Png
+            )
         ));
         assert!(state.allows(&alice_dev, &slot));
         assert!(!state.allows(&bob_dev, &slot));
@@ -1707,9 +1711,12 @@ mod avatar_generate_tests {
         let (status, v) = generate(&state, &alice_dev, &pid).await;
         assert_eq!(status, StatusCode::OK, "{v}");
         let key = v["image_key"].as_str().unwrap();
+        // The stub paints a flat placeholder, so the master is PNG; a real painting is JPEG q92.
         assert!(matches!(
             crate::blobs::stored_image(&state, &pid, key).await,
-            crate::blobs::StoredImage::Image(crate::image_sniff::ImageKind::Jpeg)
+            crate::blobs::StoredImage::Image(
+                crate::image_sniff::ImageKind::Jpeg | crate::image_sniff::ImageKind::Png
+            )
         ));
         eprintln!("smoke: {} generated {key}", v["model"]);
     }
