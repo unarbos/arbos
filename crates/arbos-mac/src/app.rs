@@ -7664,6 +7664,16 @@ impl AppState {
 
     fn notify_tick(&mut self, cx: &mut Context<Self>) {
         self.tick_calls(cx);
+        if self.account.is_some() {
+            // The explainer, once the OS has answered the start-up status query.
+            let before = self.notify_prompt;
+            self.maybe_prompt_notifications();
+            if self.notify_prompt != before {
+                cx.notify();
+            }
+        }
+        // Keep Settings → Notifications truthful (System Settings can change it any time).
+        notify::refresh_permission();
         let gates: HashMap<Id, Gate> = self
             .projects
             .iter()
@@ -7716,19 +7726,33 @@ impl AppState {
         notify::set_badge(total);
     }
 
-    /// First launch after sign-in: show the explainer once, if the platform
-    /// will ask for permission at all.
+    /// Signed in and macOS has not decided yet: show the explainer (once per
+    /// launch; "Not now" snoozes it for a day, then it comes back because the
+    /// system is still undecided). Allowed or denied in the system → nothing
+    /// to show; Settings → Notifications says which and opens System Settings
+    /// for a denial.
     fn maybe_prompt_notifications(&mut self) {
         if self.notify_prompt || self.notify_prompt_answered || !notify::needs_permission() {
             return;
         }
-        if !notify::permission_asked(&crate::sync::credentials::config_dir()) {
-            self.notify_prompt = true;
+        match notify::permission() {
+            notify::Permission::NotDetermined => {
+                if notify::prompt_snoozed(&crate::sync::credentials::config_dir()) {
+                    self.notify_prompt_answered = true;
+                } else {
+                    self.notify_prompt = true;
+                }
+            }
+            // The OS has not answered yet; `notify_tick` asks again.
+            notify::Permission::Unknown => {}
+            notify::Permission::Denied | notify::Permission::Allowed => {
+                self.notify_prompt_answered = true;
+            }
         }
     }
 
     pub fn allow_notifications(&mut self, cx: &mut Context<Self>) {
-        notify::mark_permission_asked(&crate::sync::credentials::config_dir());
+        notify::snooze_prompt(&crate::sync::credentials::config_dir());
         notify::request_permission();
         self.notify_prompt = false;
         self.notify_prompt_answered = true;
@@ -7736,10 +7760,20 @@ impl AppState {
     }
 
     pub fn dismiss_notify_prompt(&mut self, cx: &mut Context<Self>) {
-        notify::mark_permission_asked(&crate::sync::credentials::config_dir());
+        notify::permission_dismissed(&crate::sync::credentials::config_dir());
         self.notify_prompt = false;
         self.notify_prompt_answered = true;
         cx.notify();
+    }
+
+    /// Settings → Notifications: the system's answer, refreshed every tick so
+    /// a change made in System Settings shows up without a relaunch.
+    pub fn notification_permission(&self) -> notify::Permission {
+        notify::permission()
+    }
+
+    pub fn open_notification_settings(&mut self) {
+        notify::open_system_settings();
     }
 
     pub fn set_window_active(&mut self, active: bool, cx: &mut Context<Self>) {
