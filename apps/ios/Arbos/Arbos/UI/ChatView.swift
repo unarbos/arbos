@@ -1056,6 +1056,18 @@ struct ChatSession: View {
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { model.showProfile(.user(ProfilePerson(other))) }
                         }
                     case "members", "addperson": openHeaderProfile()
+                    case "foreignagent", "foreignagent-owner":
+                        // Someone else's agent in this group (needs `ARBOS_FIXTURE_FOREIGN_AGENT=1`):
+                        // its page; `-owner` then follows its "Run by …" link
+                        // ([feedback agent-pane-run-by-link-ios-2026-10-25]).
+                        if let agent = people?.agents.first(where: { $0.ownerId != model.user?.id }), let foreign = model.foreignAgent(agent.id) {
+                            model.showProfile(.agent(projectId: foreign.id))
+                            if show == "foreignagent-owner", let owner = agent.ownerHandle {
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                                    model.showProfile(.user(ProfilePerson(id: agent.ownerId ?? owner, handle: owner, name: foreign.ownerName, avatarUrl: foreign.ownerAvatarUrl)))
+                                }
+                            }
+                        }
                     // `agentprofile`: the first roster agent's profile hero (a foreign agent's
                     // picture — the avatar-flip rig).
                     case "agentprofile": if let a = people?.agents.first { model.showProfile(.agent(projectId: a.id)) }
