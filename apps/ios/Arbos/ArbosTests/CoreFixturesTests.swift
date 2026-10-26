@@ -837,8 +837,9 @@ final class CoreFixturesTests: XCTestCase {
         let fromRoster = try XCTUnwrap(MuteBanner.text(people: chat, pushMutedUntil: nil))
         XCTAssertTrue(fromRoster.hasPrefix("You're muted in this chat until "), fromRoster)
         // Push refusal wins over roster when present.
+        let indefinite: Int64?? = .some(nil)
         XCTAssertEqual(
-            MuteBanner.text(people: chat, pushMutedUntil: Optional.some(nil)),
+            MuteBanner.text(people: chat, pushMutedUntil: indefinite),
             "You're muted in this chat"
         )
     }

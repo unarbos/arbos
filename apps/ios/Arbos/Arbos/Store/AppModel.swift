@@ -707,7 +707,7 @@ final class AppModel: ObservableObject {
     /// Cleared by that room's next ACK (not by another room's ACK).
     private var pushRefused: Set<Id> = []
     /// Rooms refused with `muted`: chat id → mute end (epoch ms), or nil until unmuted.
-    private var pushMuted: [Id: Int64?] = []
+    private var pushMuted: [Id: Int64?] = [:]
     /// Rooms with a full re-read scheduled by `requestSnapshot` (one per coalesce window).
     private var snapshotPending: Set<Id> = []
     /// When each room's transcript was last re-read from its doc (`Date` seconds).
@@ -2588,10 +2588,10 @@ final class AppModel: ObservableObject {
 
     func peopleChat(_ id: String) -> PeopleChat? { peopleChats.first { $0.id == id } }
 
-    /// Live `muted` push refusal for this chat, if any (`Optional.some(nil)` = until unmuted).
+    /// Live `muted` push refusal for this chat, if any (`.some(nil)` = until unmuted).
     func pushMutedUntil(_ chatId: String) -> Int64?? {
         guard let wrapped = pushMuted[chatId] else { return nil }
-        return Optional.some(wrapped)
+        return .some(wrapped)
     }
 
     func isPeopleChat(_ id: String) -> Bool { peopleChat(id) != nil }

@@ -128,8 +128,8 @@ enum MuteBanner {
     static func text(people: PeopleChat?, pushMutedUntil: Int64??) -> String? {
         if let wrapped = pushMutedUntil {
             let now = Int64(Date().timeIntervalSince1970 * 1000)
-            if wrapped.map({ $0 > now }) != Some(false) {
-                // Indefinite (`nil`) or still in the future.
+            // Indefinite (`nil`) or still in the future — not an expired timed mute.
+            if wrapped == nil || wrapped! > now {
                 return text(untilMs: wrapped)
             }
             // Timed push mute ended — fall through to roster.
