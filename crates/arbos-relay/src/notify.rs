@@ -383,6 +383,24 @@ pub async fn announce_with(
         _ => brief(text),
     };
     let title = chat_title(state, chat);
+    // An agent's reply reaches the apps' in-app banner path (`/me/pushes` → local
+    // notification; what a phone gets while push is off or while it is open on another chat)
+    // only from here: a device's own row queues it in `people::on_room_push`, a box's row does
+    // not, and until 2026-10-26 nothing queued it for agents at all — an @doug-agent answer in
+    // a group never showed on the iPhone while a like on a bubble did.
+    let inapp = (sender.kind == "agent").then(|| {
+        let room = arbos_core::wire::room_name(chat.project_label(), &chat.chat_id);
+        let (head, _) = state.db.room_activity(&room).unwrap_or((0, 0));
+        arbos_core::api::PushEventDto::PeopleMessage(arbos_core::api::PeopleMessagePayloadDto {
+            chat_id: chat.chat_id.clone(),
+            from: format!("agent:{}", sender.id),
+            from_handle: sender.handle.clone(),
+            seq: head + 1,
+            sender: sender.dto(),
+            project_id: chat.project_id.clone(),
+            text: Some(body.clone()),
+        })
+    });
     for user in recipients(state, chat) {
         if sender.user_id.as_deref() == Some(user.as_str()) {
             continue;
@@ -392,17 +410,17 @@ pub async fn announce_with(
             // Queued after the message job for this chat, so the receipt lands on it.
             state.matrix.read(state, &chat.chat_id, &user);
         }
-        if !state.push.is_on() {
-            continue;
-        }
         // Archived = hidden on purpose: no banner, no badge (unread excludes it too).
-        if state
+        let archived = state
             .db
             .chat_archived_at(&user, &chat.chat_id)
             .ok()
             .flatten()
-            .is_some()
-        {
+            .is_some();
+        if let (Some(event), false) = (&inapp, archived) {
+            let _ = state.db.push_user_event(&user, event, Some(&chat.chat_id));
+        }
+        if !state.push.is_on() || archived {
             continue;
         }
         // Stage B: a flipped user's alerts come from the Matrix push gateway instead.
