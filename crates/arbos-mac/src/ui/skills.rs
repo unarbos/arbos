@@ -200,8 +200,12 @@ impl SkillsPanel {
     fn save(&mut self, cx: &mut Context<Self>) {
         let name = self.name.read(cx).text().trim().to_string();
         if name.is_empty() {
-            self.state
-                .update(cx, |s, _| s.push_notice("A skill needs a name"));
+            self.state.update(cx, |s, _| {
+                s.push_failure(
+                    crate::app::refused("save the skill", "A skill needs a name.").error,
+                    None,
+                )
+            });
             cx.notify();
             return;
         }
@@ -412,6 +416,7 @@ impl SkillsPanel {
                         .hover(|s| s.bg(theme.surface_2))
                 })
                 .when(danger, |el| {
+                    // error-ui: exception destructive-action (a Delete label, not a message)
                     el.text_color(theme.danger)
                         .hover(|s| s.bg(theme.danger_soft))
                 })

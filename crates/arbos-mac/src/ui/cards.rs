@@ -5,6 +5,8 @@
 use gpui::{div, prelude::*, px, App, Div, FontWeight, SharedString, Stateful};
 
 use crate::model::StatusKind;
+use crate::sync::user_error::{ErrorClass, UserError};
+use crate::ui::error_note;
 use crate::ui::motion::PulseClock;
 use crate::ui::theme::{Theme, PANEL_RADIUS};
 
@@ -114,7 +116,8 @@ pub fn status_row(code: StatusKind, text: &str, live: bool, theme: &Theme, cx: &
     }
 }
 
-/// S10: red-tinted chip with the short message and Retry.
+/// S10: an agent turn that failed — the shared error element in the transcript's flow (the
+/// agent's own sentence, the error code behind Details, Try again re-runs the turn).
 pub fn error_chip(
     row_id: &str,
     code: &str,
@@ -122,44 +125,41 @@ pub fn error_chip(
     theme: &Theme,
     on_retry: impl Fn(&mut App) + 'static,
 ) -> Stateful<Div> {
+    let error = UserError::of(
+        "",
+        ErrorClass::Refused {
+            message: Some(if message.trim().is_empty() {
+                "The agent's turn failed.".to_owned()
+            } else {
+                message.to_owned()
+            }),
+        },
+        code.to_owned(),
+    );
+    let error = UserError {
+        class: ErrorClass::Unknown,
+        ..error
+    };
+    let error = if message.trim().is_empty() {
+        error
+    } else {
+        UserError {
+            class: ErrorClass::Refused {
+                message: Some(message.to_owned()),
+            },
+            ..error
+        }
+    };
     div()
         .id(SharedString::from(row_id.to_string()))
         .my(px(4.0))
-        .flex()
-        .items_center()
-        .gap(px(10.0))
-        .px(px(12.0))
-        .py(px(8.0))
-        .rounded(px(PANEL_RADIUS))
-        .bg(theme.danger_soft)
-        .border_1()
-        .border_color(Theme::with_alpha(theme.danger, 0.4))
-        .child(
-            div()
-                .text_color(theme.danger)
-                .text_size(px(12.0))
-                .child("✗"),
-        )
-        .child(
-            div()
-                .flex_1()
-                .text_size(px(12.5))
-                .text_color(theme.text)
-                .child(message.to_string()),
-        )
-        .child(
-            div()
-                .text_size(px(11.0))
-                .text_color(theme.text_faint)
-                .child(code.to_string()),
-        )
-        .child(
-            div()
-                .id(SharedString::from(format!("{row_id}-retry")))
-                .text_size(px(12.0))
-                .text_color(theme.accent)
-                .cursor_pointer()
-                .child("Retry")
-                .on_click(move |_, _, cx| on_retry(cx)),
-        )
+        .w_full()
+        .child(error_note::render(
+            &format!("{row_id}-error"),
+            &error,
+            false,
+            error_note::Style::Inline,
+            theme,
+            error_note::Handlers::new().try_again(move |_, _, cx| on_retry(cx)),
+        ))
 }

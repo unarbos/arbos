@@ -25,8 +25,9 @@ use arbos_core::widget::{add_days, check_date, today_iso};
 use crate::app::AppState;
 use crate::model::{ChoiceOption, FieldKind, FormField, Id, Part, QuestionState, Widget};
 use crate::ui::composer::ComposerInput;
+use crate::ui::error_note;
 use crate::ui::icons::icon;
-use crate::ui::theme::{Appearance, Theme, TEXT_SMALL, TEXT_TINY};
+use crate::ui::theme::{Appearance, Theme, TEXT_SMALL};
 
 actions!(
     widgets,
@@ -685,13 +686,16 @@ impl Render for QuestionCard {
                 )
             })
             .when_some(self.error.clone(), |el, e| {
-                el.child(
-                    div()
-                        .px(px(2.0))
-                        .text_size(px(TEXT_TINY))
-                        .text_color(theme.danger)
-                        .child(e),
-                )
+                // The card's note: the shared element with the validation as its sentence.
+                let slot = crate::app::refused("send your answer", &e);
+                el.child(error_note::render(
+                    "question-card-error",
+                    &slot.error,
+                    false,
+                    error_note::Style::Inline,
+                    &theme,
+                    error_note::Handlers::new(),
+                ))
             })
             .into_any_element()
     }
