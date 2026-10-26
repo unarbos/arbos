@@ -1374,6 +1374,14 @@ impl Transcript {
         let old_len = self.rows.len();
         self.rows = new_rows;
         self.list.splice(prefix..old_len, self.rows.len() - prefix);
+        if crate::model::trace_rows() {
+            eprintln!(
+                "rows: transcript chat={} rows={} changed_from={prefix} at={}",
+                self.chat_id.as_deref().unwrap_or(""),
+                self.rows.len(),
+                crate::model::now_ms()
+            );
+        }
         // Reading history: a stale pin (scrollbar / list scroll that never
         // cleared it) must not spring to the new end when rows land below.
         let max = f32::from(self.list.max_offset_for_scrollbar().y);
@@ -1790,7 +1798,9 @@ impl Transcript {
                 .iter()
                 .find(|p| p.name.eq_ignore_ascii_case(name) && p.kind == SpaceKind::Project);
             let glyph: AnyElement = match mine {
-                Some(space) => crate::ui::avatars::project(space, 16.0, theme).into_any_element(),
+                Some(space) => {
+                    crate::ui::avatars::project_in(state, space, 16.0, theme).into_any_element()
+                }
                 // Not one of my projects (a subagent): initials on the name's gradient.
                 None => {
                     crate::ui::avatars::element(name, name, None, 16.0, theme).into_any_element()
