@@ -253,7 +253,7 @@ impl Shell {
                         .px(px(16.0))
                         .py(px(10.0))
                         .relative()
-                        .child(kit::hairline_below(16.0, &theme))
+                        .child(kit::hairline_below(&theme))
                         .child(
                             div()
                                 .text_size(px(TEXT_BODY))
@@ -347,7 +347,7 @@ impl Shell {
                 .py(px(6.0))
                 .child(action)
                 .into_any_element();
-            let actions = kit::section(vec![action_row], kit::INSET, &theme)
+            let actions = kit::section(vec![action_row], &theme)
                 .mx(px(0.0))
                 .mb(px(0.0));
             body = body.child(actions).child(footnote(
@@ -845,11 +845,7 @@ impl Shell {
                     );
                     rows.push(row.into_any_element());
                 }
-                body = body.child(
-                    kit::section(rows, kit::INSET + 30.0 + kit::GAP, &theme)
-                        .mx(px(0.0))
-                        .mb(px(0.0)),
-                );
+                body = body.child(kit::section(rows, &theme).mx(px(0.0)).mb(px(0.0)));
                 body = body.child(footnote(
                     "Every GitHub sign-in is a device. Signing one out ends its session at once; it can sign in again. This Mac signs out from the Settings tab."
                         .into(),
