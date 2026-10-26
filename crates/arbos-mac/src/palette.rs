@@ -11,14 +11,15 @@
 //! a member, a chat title), **Servers & channels**, **Messages** (message text
 //! anywhere on this Mac, from the `crate::search_index`; a row jumps to the
 //! message in its chat), **Files, media & links**. Inside a section: a name
-//! that starts with the query, then one that contains it, then indirect hits,
-//! newest activity first. With no query the palette shows **Recent** — every
+//! that the shared matcher ranks best (exact, then a name that starts with
+//! the query, then one where a word starts with it — `arbos_core::search`),
+//! then indirect hits, newest activity first. With no query the palette shows **Recent** — every
 //! chat and server by activity — and the first nine rows carry ⌘1–⌘9, like
 //! Grok's. App-wide whatever chat is open ([feedback
 //! search-palette-app-wide-2026-10-24]).
 
 use crate::model::{Id, Project};
-use crate::search::{HitKind, SearchHit};
+use crate::search::{HitKind, Match, SearchHit};
 
 /// What a row is; decides its glyph and its section.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -70,33 +71,28 @@ impl Section {
 /// How well a row's own name matched: decides the order inside a section.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Rank {
-    /// The name (or handle) starts with the query.
-    Prefix,
-    /// The name contains the query.
+    /// The name, @handle or title matched through the shared matcher
+    /// (`arbos_core::search`): exact > prefix > word-start, name before handle.
+    Direct(Match),
+    /// A message body, file name or link that contains the query.
     Contains,
     /// Something other than the name matched: a member, a chat title.
     Indirect,
 }
 
 impl Rank {
-    /// Rank a name against the folded query.
+    /// Every row's rank on an empty query (nothing to order by but activity).
+    pub const EVERYTHING: Rank = Rank::Direct(Match::EVERYTHING);
+
+    /// Rank a name against the normalized query.
     pub fn of(name: &str, q: &str) -> Rank {
-        let folded = crate::search::fold(name);
-        if folded.starts_with(q) {
-            Rank::Prefix
-        } else if folded.contains(q) {
-            Rank::Contains
-        } else {
-            Rank::Indirect
-        }
+        Rank::of_entity(name, "", None, q)
     }
 
-    /// The best of several names (display name and @handle).
-    pub fn best<'a>(names: impl IntoIterator<Item = &'a str>, q: &str) -> Rank {
-        names
-            .into_iter()
-            .map(|n| Rank::of(n, q))
-            .min()
+    /// Rank an entity (display name, @handle, title) against the normalized query.
+    pub fn of_entity(name: &str, handle: &str, title: Option<&str>, q: &str) -> Rank {
+        crate::search::match_entity(name, handle, title, q)
+            .map(Rank::Direct)
             .unwrap_or(Rank::Indirect)
     }
 }
@@ -189,7 +185,7 @@ pub fn space_entry(space: &Project, hit: SearchHit, when: u64, query: &str) -> E
             .unwrap_or_else(|| "Agent".into()),
     };
     let rank = if query.is_empty() {
-        Rank::Prefix
+        Rank::EVERYTHING
     } else if matches!(hit.kind, HitKind::Member | HitKind::Message)
         || hit
             .reason
@@ -198,10 +194,8 @@ pub fn space_entry(space: &Project, hit: SearchHit, when: u64, query: &str) -> E
     {
         Rank::Indirect
     } else {
-        match person {
-            Some(p) => Rank::best([p.display_name().as_str(), p.handle.as_str()], query),
-            None => Rank::of(&space.name, query),
-        }
+        // The matcher's own verdict on the name / @handle / title.
+        Rank::Direct(hit.matched)
     };
     let target = match &hit.message {
         Some((chat_id, message_id)) => Target::Message {
@@ -525,7 +519,14 @@ mod tests {
         assert_eq!(entry.kind, Kind::Person);
         assert_eq!(entry.title, "Carro");
         assert_eq!(entry.subtitle, "@robertalanm");
-        assert_eq!(entry.rank, Rank::Prefix, "\"carro\" starts the name");
+        assert_eq!(
+            entry.rank,
+            Rank::Direct(Match {
+                kind: arbos_core::search::MatchKind::Exact,
+                field: arbos_core::search::MatchField::Name
+            }),
+            "\"carro\" is the name"
+        );
         assert_eq!(entry.section(), Section::People);
         assert_eq!(entry.target, Target::Space("dm-1".into()));
 
@@ -577,24 +578,52 @@ mod tests {
         // No query: a plain recent row, never indirect.
         let hit = space_hit(&testing, "jacob", Vec::<(&str, &str)>::new(), Vec::new, "")
             .expect("everything matches the empty query");
-        assert_eq!(space_entry(&testing, hit, 1, "").rank, Rank::Prefix);
+        assert_eq!(space_entry(&testing, hit, 1, "").rank, Rank::EVERYTHING);
     }
 
     /// Rank per type (Jacob): a name that starts with the query beats one
-    /// that merely contains it, whatever their age; indirect hits last.
+    /// where only a later word starts with it, whatever their age; indirect
+    /// hits last. Through the shared matcher a handle hit sorts after a name
+    /// hit of the same kind, and a substring inside a word is no hit.
     #[test]
-    fn prefix_beats_contains_beats_indirect() {
-        assert_eq!(Rank::of("Scout", "sc"), Rank::Prefix);
-        assert_eq!(Rank::of("Affinity Scout", "sc"), Rank::Contains);
+    fn prefix_beats_word_start_beats_indirect() {
+        use arbos_core::search::{MatchField, MatchKind};
+        let direct = |kind, field| Rank::Direct(Match { kind, field });
+        assert_eq!(
+            Rank::of("Scout", "sc"),
+            direct(MatchKind::Prefix, MatchField::Name)
+        );
+        assert_eq!(
+            Rank::of("Affinity Scout", "sc"),
+            direct(MatchKind::WordStart, MatchField::Name)
+        );
         assert_eq!(Rank::of("Doug", "sc"), Rank::Indirect);
-        assert_eq!(Rank::best(["Carro", "robertalanm"], "rob"), Rank::Prefix);
+        assert_eq!(Rank::of("Affinity", "ffin"), Rank::Indirect);
+        assert_eq!(
+            Rank::of_entity("Carro", "robertalanm", None, "rob"),
+            direct(MatchKind::Prefix, MatchField::Handle)
+        );
+        assert!(
+            direct(MatchKind::Exact, MatchField::Handle)
+                < direct(MatchKind::Prefix, MatchField::Name)
+        );
+        assert!(
+            direct(MatchKind::Prefix, MatchField::Name)
+                < direct(MatchKind::Prefix, MatchField::Handle)
+        );
+        assert!(
+            direct(MatchKind::WordStart, MatchField::Handle)
+                < direct(MatchKind::Exact, MatchField::Title)
+        );
+        assert!(direct(MatchKind::WordStart, MatchField::Title) < Rank::Contains);
+        assert!(Rank::Contains < Rank::Indirect);
         let rows = vec![
             Entry {
-                rank: Rank::Contains,
+                rank: Rank::of("Affinity Scout", "sc"),
                 ..entry(Kind::Agent, "Affinity Scout", 99, false)
             },
             Entry {
-                rank: Rank::Prefix,
+                rank: Rank::of("Scout", "sc"),
                 ..entry(Kind::Agent, "Scout", 1, false)
             },
         ];
