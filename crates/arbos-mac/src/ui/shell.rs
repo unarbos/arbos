@@ -17,6 +17,7 @@ use crate::app::{AppState, DetailsTarget, ProfilePage, ServerSheet};
 use crate::image_picker;
 use crate::model::{now_ms, CallKind, MachineState};
 use crate::sign_in;
+use crate::sync::user_error::{ErrorClass, UserError};
 use crate::sync::PictureSource;
 use crate::ui::avatar_picker;
 use crate::ui::avatars::{self, leaf, LeafPick};
@@ -26,6 +27,7 @@ use crate::ui::composer::{self, Composer, ComposerEvent, ComposerInput};
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
 use crate::ui::create_entity::{self, Kind as CreateKind};
 use crate::ui::dropzone;
+use crate::ui::error_note;
 use crate::ui::feedback::{FeedbackSheet, SendFeedback};
 use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
 use crate::ui::glass::{self, WindowDrag};
@@ -54,6 +56,7 @@ use crate::ui::theme::{
     COMPOSER_BOTTOM, COMPOSER_WIDTH, DRAWER_WIDTH, GLASS_OPACITY_MAX, GLASS_OPACITY_MIN,
     HEADER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS, TAB_BAR_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
 };
+use crate::ui::transcript::COLUMN_MAX_WIDTH;
 use crate::ui::transcript::{column_row, Transcript, TranscriptEvent};
 use crate::ui::voice::Voice;
 use crate::ui::voicepicker;
@@ -352,6 +355,13 @@ pub struct Shell {
     pub(crate) member_remove_armed: Option<String>,
     /// Settings → Devices: the device whose Sign out is asking (Oct 23).
     pub(crate) device_revoke_armed: Option<String>,
+    /// Settings → Devices: the load-failure note's Details disclosure.
+    pub(crate) devices_error_details_open: bool,
+    /// Settings → Updates: the failed-install note's Details disclosure.
+    pub(crate) update_error_details_open: bool,
+    /// The chat-level notes' Details disclosures (machine error, delivery refusal).
+    pub(crate) machine_error_details_open: bool,
+    pub(crate) delivery_error_details_open: bool,
     /// A member row's menu on the group pane (Shift-click / right-click): View
     /// profile, Remove from group → arms `member_remove_armed`.
     pub(crate) member_menu: Option<member_menu::MemberMenu>,
@@ -558,14 +568,14 @@ impl Shell {
                             (Some(key), Some(url)) => {
                                 pk.generated = Some((key, url));
                                 pk.error = None;
-                                pk.error_detail = None;
                             }
                             _ => {
-                                pk.error = done
-                                    .error
-                                    .or_else(|| Some("Couldn't generate the image.".into()));
-                                pk.error_detail = done.detail;
-                                pk.details_open = false;
+                                pk.fail(done.error.unwrap_or_else(|| {
+                                    UserError::from_text(
+                                        "generate the image",
+                                        "No picture came back",
+                                    )
+                                }));
                             }
                         }
                     }
@@ -1013,6 +1023,10 @@ impl Shell {
             run_by_chip: Default::default(),
             member_remove_armed: None,
             device_revoke_armed: None,
+            devices_error_details_open: false,
+            update_error_details_open: false,
+            machine_error_details_open: false,
+            delivery_error_details_open: false,
             member_menu: None,
             library: Default::default(),
             chat_menu: None,
@@ -1563,8 +1577,6 @@ impl Shell {
         pk.generating = true;
         pk.started_at = Some(std::time::Instant::now());
         pk.error = None;
-        pk.error_detail = None;
-        pk.details_open = false;
         pk.reset = false;
         self.state.update(cx, |s, cx| {
             s.generate_image(target, prompt, cx);
@@ -2821,53 +2833,40 @@ impl Shell {
                     ),
                 )
             }
-            // Grok (refs 69/70): no red strip — a quiet block with a small
-            // monitor glyph, a short title, the reason in muted text and a
-            // capsule "Retry".
+            // The chat-level note (Jacob 2026-10-26): the shared error element in this slot
+            // under the header, the column's width. "Can't reach your machine" with Grok's
+            // reassurance as the sentence; Try again starts the machine; Details has the
+            // relay's words.
             MachineState::Error => {
-                let detail = machine.detail.clone().unwrap_or_else(|| {
-                    "Your agents are safe — their machine just can't be reached right now."
-                        .to_string()
-                });
-                Some(
-                    div()
-                        .w_full()
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.0))
-                        .px(px(COLUMN_MARGIN))
-                        .pt(px(12.0))
-                        .pb(px(8.0))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .text_size(px(TEXT_SMALL))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme.text)
-                                .child(icon("window", 13.0, theme.text_muted))
-                                .child("Can't reach your machine"),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(TEXT_TINY + 0.5))
-                                .text_color(theme.text_muted)
-                                .max_w(px(480.0))
-                                .child(detail),
-                        )
-                        .child(
-                            div().pt(px(4.0)).flex().child(
-                                glass::quiet_button("banner-retry", "Retry", &theme)
-                                    .h(px(30.0))
-                                    .px(px(14.0))
-                                    .bg(theme.surface_2)
-                                    .border_color(gpui::transparent_black())
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.state.update(cx, |s, cx| s.machine_start(cx));
-                                    })),
-                            ),
+                let detail = machine
+                    .detail
+                    .clone()
+                    .unwrap_or_else(|| "machine state: error".to_string());
+                let error = UserError::of(
+                    "",
+                    ErrorClass::Refused {
+                        message: Some(
+                            "Can't reach your machine. Your agents are safe — it just can't be reached right now."
+                                .into(),
                         ),
+                    },
+                    detail,
+                );
+                Some(
+                    self.chat_note(
+                        "machine-error",
+                        &error,
+                        self.machine_error_details_open,
+                        &theme,
+                        error_note::Handlers::new()
+                            .try_again(cx.listener(|this, _, _, cx| {
+                                this.state.update(cx, |s, cx| s.machine_start(cx));
+                            }))
+                            .toggle_details(cx.listener(|this, _, _, cx| {
+                                this.machine_error_details_open = !this.machine_error_details_open;
+                                cx.notify();
+                            })),
+                    ),
                 )
             }
             MachineState::Asleep
@@ -2875,6 +2874,77 @@ impl Shell {
             | MachineState::Stopped
             | MachineState::Unknown => None,
         }
+    }
+
+    /// A chat-level note in the slot under the header: the column's inset and width cap, 8 pt
+    /// under the bar, 8 over what follows.
+    fn chat_note(
+        &self,
+        id: &str,
+        error: &UserError,
+        details_open: bool,
+        theme: &Theme,
+        handlers: error_note::Handlers,
+    ) -> Div {
+        div()
+            .w_full()
+            .flex()
+            .justify_center()
+            .px(px(COLUMN_MARGIN))
+            .pt(px(8.0))
+            .pb(px(8.0))
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(COLUMN_MAX_WIDTH))
+                    .child(error_note::render(
+                        id,
+                        error,
+                        details_open,
+                        error_note::Style::Inline,
+                        theme,
+                        handlers,
+                    )),
+            )
+    }
+
+    /// The per-room push refusal (`not_available`): "Messages in this chat aren't being
+    /// delivered right now." in the same slot, while the relay refuses; it clears itself on
+    /// the room's next ACK (`SyncEvent::PushRefused { refused: false }`).
+    fn render_delivery_note(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let theme = Theme::of(cx).clone();
+        let state = self.state.read(cx);
+        let chat = state.active_chat_id()?;
+        if !state.push_refused.contains(&chat) {
+            return None;
+        }
+        let error = UserError::of(
+            "",
+            ErrorClass::Offline {
+                device_offline: false,
+            },
+            "the relay refused the push: not_available",
+        );
+        let error = UserError {
+            verb: String::new(),
+            class: ErrorClass::Refused {
+                message: Some(
+                    "Messages in this chat aren't being delivered right now. We'll keep trying."
+                        .into(),
+                ),
+            },
+            ..error
+        };
+        Some(self.chat_note(
+            "delivery-error",
+            &error,
+            self.delivery_error_details_open,
+            &theme,
+            error_note::Handlers::new().toggle_details(cx.listener(|this, _, _, cx| {
+                this.delivery_error_details_open = !this.delivery_error_details_open;
+                cx.notify();
+            })),
+        ))
     }
 
     // ----- sidebar overlay (narrow window) -------------------------------------
@@ -3075,6 +3145,7 @@ impl Shell {
             let pre: Vec<AnyElement> = self
                 .render_banner(cx)
                 .into_iter()
+                .chain(self.render_delivery_note(cx))
                 .map(IntoElement::into_any_element)
                 .collect();
             let bottom = div()
@@ -3187,6 +3258,9 @@ impl Shell {
         }
         if let Some(banner) = self.render_banner(cx) {
             pre.push(banner.into_any_element());
+        }
+        if let Some(note) = self.render_delivery_note(cx) {
+            pre.push(note.into_any_element());
         }
         if screen_open {
             if let Some(active) = my_call.as_ref() {
@@ -3917,13 +3991,26 @@ impl Shell {
                         )
                     })
                     .when_some(flow.error.clone(), |el, err| {
+                        // The sign-in note: under the button row and the hint, 420 wide —
+                        // the shared error element in its one spot on this screen.
                         el.child(
-                            div()
-                                .max_w(px(420.0))
-                                .text_center()
-                                .text_size(px(TEXT_SMALL))
-                                .text_color(theme.danger)
-                                .child(err),
+                            div().w(px(420.0)).max_w_full().child(error_note::render(
+                                "sign-in-error",
+                                &err,
+                                pairing.error_details_open,
+                                error_note::Style::Inline,
+                                &theme,
+                                error_note::Handlers::new()
+                                    .try_again(cx.listener(|this, _, _, cx| {
+                                        this.state.update(cx, |s, cx| s.sign_in(cx));
+                                    }))
+                                    .toggle_details(cx.listener(|this, _, _, cx| {
+                                        this.state.update(cx, |s, cx| {
+                                            s.toggle_sign_in_details();
+                                            cx.notify();
+                                        });
+                                    })),
+                            )),
                         )
                     })
             }
@@ -3938,11 +4025,7 @@ impl Shell {
                     .rounded_full()
                     .bg(theme.field)
                     .border_1()
-                    .border_color(if pairing.error.is_some() {
-                        theme.danger
-                    } else {
-                        theme.field_border
-                    })
+                    .border_color(theme.field_border)
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(self.pairing_input.clone())
                     .child(
@@ -3974,12 +4057,21 @@ impl Shell {
                             .child(frosted(22.0, PANEL_BLUR, input_row)),
                     )
                     .when_some(pairing.error.clone(), |el, err| {
-                        el.child(
-                            div()
-                                .text_size(px(TEXT_SMALL))
-                                .text_color(theme.danger)
-                                .child(err),
-                        )
+                        el.child(div().w(px(420.0)).max_w_full().child(error_note::render(
+                            "sign-in-error",
+                            &err,
+                            pairing.error_details_open,
+                            error_note::Style::Inline,
+                            &theme,
+                            error_note::Handlers::new()
+                                .try_again(cx.listener(|this, _, _, cx| this.submit_pairing(cx)))
+                                .toggle_details(cx.listener(|this, _, _, cx| {
+                                    this.state.update(cx, |s, cx| {
+                                        s.toggle_sign_in_details();
+                                        cx.notify();
+                                    });
+                                })),
+                        )))
                     })
             }
         }
@@ -4073,22 +4165,69 @@ impl Shell {
             return None;
         }
         PulseClock::request(cx);
-        // Top right, under the header: never over the composer's send / mic
-        // button or an error banner above it (the busy end of the column).
-        // Click dismisses — download status / HTTP errors must not stick around.
+        // Top right, under the header: never over the composer's send / mic button or a note
+        // above it (the busy end of the column). Info notices are the plain card (click
+        // dismisses); failures are the shared error element as a toast — ×, Details, Try
+        // again, 10 s, and the pointer on it holds it ([feedback error-messages-mac-2026-10-26]).
         let mut stack = div()
             .absolute()
             .right(px(16.0))
             .top(px(HEADER_HEIGHT + 12.0))
+            .w(px(error_note::TOAST_WIDTH))
             .flex()
             .flex_col()
             .gap(px(6.0));
         for n in notices {
             let at = n.at;
-            stack = stack.child(
-                div()
+            let element: gpui::AnyElement = match &n.error {
+                Some(error) => {
+                    let id = format!("notice-{at}");
+                    let mut handlers = error_note::Handlers::new()
+                        .toggle_details(cx.listener(move |this, _, _, cx| {
+                            this.state.update(cx, |s, cx| {
+                                s.toggle_notice_details(at);
+                                cx.notify();
+                            });
+                        }))
+                        .dismiss(cx.listener(move |this, _, _, cx| {
+                            this.state.update(cx, |s, cx| {
+                                s.dismiss_notice(at);
+                                cx.notify();
+                            });
+                        }));
+                    if n.retry.is_some() {
+                        handlers = handlers.try_again(cx.listener(move |this, _, _, cx| {
+                            this.state.update(cx, |s, cx| {
+                                s.retry_notice(at);
+                                cx.notify();
+                            });
+                        }));
+                    }
+                    if error.action() == crate::sync::user_error::Action::SignIn {
+                        handlers = handlers.sign_in(cx.listener(move |this, _, _, cx| {
+                            this.state.update(cx, |s, cx| {
+                                s.dismiss_notice(at);
+                                s.sign_in(cx);
+                            });
+                        }));
+                    }
+                    error_note::render(
+                        &id,
+                        error,
+                        n.details_open,
+                        error_note::Style::Toast,
+                        &theme,
+                        handlers,
+                    )
+                    .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
+                        let hovering = *hovering;
+                        this.state.update(cx, |s, _| s.hold_notice(at, hovering));
+                    }))
+                    .into_any_element()
+                }
+                None => div()
                     .id(SharedString::from(format!("notice-{at}")))
-                    .max_w(px(380.0))
+                    .w_full()
                     .px(px(14.0))
                     .py(px(10.0))
                     .rounded(px(PANEL_RADIUS))
@@ -4099,14 +4238,16 @@ impl Shell {
                     .text_size(px(TEXT_SMALL))
                     .text_color(theme.text)
                     .cursor_pointer()
-                    .child(n.text)
+                    .child(n.text.clone())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.state.update(cx, |s, cx| {
                             s.dismiss_notice(at);
                             cx.notify();
                         });
-                    })),
-            );
+                    }))
+                    .into_any_element(),
+            };
+            stack = stack.child(element);
         }
         Some(stack)
     }
