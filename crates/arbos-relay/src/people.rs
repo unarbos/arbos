@@ -1636,8 +1636,9 @@ pub async fn agent_add(
     if cm.chat.kind == "dm" {
         let _ = state.db.set_people_chat_kind(&id, "group");
     }
-    state.matrix.touch_chat(&state, &id, None);
-    agent_joined(&state, &cm, &me, &id, &project).await;
+    // The notice row goes out first (ARB-393): every device in the room sees "<me> added
+    // <agent>" as soon as the membership row exists, before the box wake, the pushes and the
+    // Matrix mirror have had their turn.
     let line = notices::added_line(
         &notices::person_name(&state, &me),
         std::slice::from_ref(&project.name),
@@ -1647,6 +1648,8 @@ pub async fn agent_add(
             tracing::warn!(chat = %id, error = %e, "membership notice not written");
         }
     }
+    state.matrix.touch_chat(&state, &id, None);
+    agent_joined(&state, &cm, &me, &id, &project).await;
     match load_chat(&state, &id) {
         Ok(cm) => Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response(),
         Err(r) => *r,
@@ -2012,17 +2015,21 @@ pub async fn member_add(
         ) {
             return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
         }
-        agent_joined(&state, &cm, &me, &id, project).await;
         names.push(project.name.clone());
     }
     if cm.chat.kind == "dm" {
         let _ = state.db.set_people_chat_kind(&id, "group");
     }
-    state.matrix.touch_chat(&state, &id, None);
+    // Notice row first (ARB-393), then the slower follow-up work: box wakes, agent pushes
+    // and the Matrix mirror.
     if let Some(line) = notices::added_line(&notices::person_name(&state, &me), &names) {
         if let Err(e) = notices::post_people_notice(&state, &id, &line).await {
             tracing::warn!(chat = %id, error = %e, "membership notice not written");
         }
+    }
+    state.matrix.touch_chat(&state, &id, None);
+    for project in &agents {
+        agent_joined(&state, &cm, &me, &id, project).await;
     }
     match load_chat(&state, &id) {
         Ok(cm) => Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response(),
