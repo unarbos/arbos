@@ -334,6 +334,15 @@ impl Shared {
         Ok(creds)
     }
 
+    /// The newest unreported panic of a previous run (`panic_log`), once, through the
+    /// silent-diagnostic feedback path — so a crash that only left a `.ips` behind on the
+    /// Mac still reaches the relay with its message and backtrace.
+    fn report_last_panic(self: &Arc<Self>) {
+        if let Some(entry) = crate::panic_log::take_unreported() {
+            self.diagnostic_always("panic", entry);
+        }
+    }
+
     fn me_user(&self) -> Option<credentials::AccountUser> {
         self.creds
             .read()
@@ -892,6 +901,7 @@ fn start_token_refresher(shared: &Arc<Shared>) {
 }
 
 fn start_after_pairing(shared: &Arc<Shared>) {
+    shared.report_last_panic();
     start_token_refresher(shared);
     open_store(shared);
     load_store(shared);
