@@ -6658,6 +6658,35 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             });
         }
+        ClientCommand::FetchLinkIcon { host } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                // 200 = the PNG; 204 = the site has none; anything else is treated as none
+                // too (the bubble keeps its placeholder) and only logged — nobody asked.
+                let resp = shared
+                    .http
+                    .get(format!("{}/link-icon", shared.http_url))
+                    .query(&[("domain", host.as_str())])
+                    .bearer_auth(shared.token())
+                    .send()
+                    .await;
+                let png = match resp {
+                    Ok(r) if r.status() == reqwest::StatusCode::OK => {
+                        r.bytes().await.ok().map(|b| Arc::new(b.to_vec()))
+                    }
+                    Ok(r) if r.status() == reqwest::StatusCode::NO_CONTENT => None,
+                    Ok(r) => {
+                        log::warn!(target: "arbos_mac::diagnostic", "link icon {host}: HTTP {}", r.status());
+                        None
+                    }
+                    Err(err) => {
+                        log::warn!(target: "arbos_mac::diagnostic", "link icon {host}: {err}");
+                        None
+                    }
+                };
+                let _ = shared.events.send(SyncEvent::LinkIcon { host, png });
+            });
+        }
         ClientCommand::FetchThumbnail { project_id, key } => {
             let shared = shared.clone();
             tokio::spawn(async move {

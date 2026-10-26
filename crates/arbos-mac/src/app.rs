@@ -511,6 +511,11 @@ pub struct AppState {
     pub thumbnails_trimmed: HashMap<String, Arc<RenderImage>>,
     /// Thumbnail fetches in flight or failed (never asked twice).
     thumbnails_requested: HashSet<String>,
+    /// Site icons for the bubbles' named links, by host: `Some` once the relay answered
+    /// with a picture, `None` when the site has none; a host still loading is absent.
+    pub link_icons: HashMap<String, Option<Arc<RenderImage>>>,
+    /// Link-icon fetches in flight or answered (never asked twice per session).
+    link_icons_requested: HashSet<String>,
     /// Blob keys whose thumbnail fetch failed: the card says "No preview" instead of loading.
     pub thumbnails_failed: HashSet<String>,
     pub notices: Vec<Notice>,
@@ -982,6 +987,8 @@ impl AppState {
             search_index: SearchIndex::default(),
             thumbnails_trimmed: HashMap::new(),
             thumbnails_requested: HashSet::new(),
+            link_icons: HashMap::new(),
+            link_icons_requested: HashSet::new(),
             thumbnails_failed: HashSet::new(),
             notices: Vec::new(),
             push_refused: HashSet::new(),
@@ -1665,6 +1672,11 @@ impl AppState {
                     },
                 );
                 self.details_open = Some(DetailsTarget::Blob(key));
+                cx.notify();
+            }
+            SyncEvent::LinkIcon { host, png } => {
+                let image = png.and_then(|b| decode_image(&b)).map(Arc::new);
+                self.link_icons.insert(host, image);
                 cx.notify();
             }
             SyncEvent::Thumbnail { key, bytes } => {
@@ -2366,6 +2378,8 @@ impl AppState {
                     self.unarchive_on_activity(&chat_id, cx);
                 }
                 self.request_thumbnails(&chat_id);
+                let all = self.messages.get(&chat_id).cloned().unwrap_or_default();
+                self.request_link_icons_for(&all);
                 if self.onboarding.is_some() {
                     self.onboarding_tick(cx);
                 }
@@ -2386,6 +2400,7 @@ impl AppState {
                     self.carry_local_previews(prior, &mut message);
                 }
                 self.request_thumbnails_for(&chat_id, std::slice::from_ref(&message));
+                self.request_link_icons_for(std::slice::from_ref(&message));
                 let list = self.messages.entry(chat_id.clone()).or_default();
                 let mut text_only = false;
                 let mut appended = 0;
@@ -8708,6 +8723,24 @@ impl AppState {
             save,
         });
         cx.notify();
+    }
+
+    /// Ask the source for the site icon of every named link in `messages` that has not been
+    /// asked for yet ([feedback link-icons-mac-2026-10-25]): the hosts of `[Name](https://…)`
+    /// in prose, lists and table cells of agent and people rows alike.
+    fn request_link_icons_for(&mut self, messages: &[Message]) {
+        for message in messages {
+            for part in &message.parts {
+                let Part::Text { text, .. } = part else {
+                    continue;
+                };
+                for host in crate::ui::markdown::link_hosts(text) {
+                    if self.link_icons_requested.insert(host.clone()) {
+                        self.command(ClientCommand::FetchLinkIcon { host });
+                    }
+                }
+            }
+        }
     }
 
     /// Ask the source for the bytes of every image attachment in a chat that has no thumbnail yet.
