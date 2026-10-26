@@ -357,9 +357,6 @@ final class AppModel: ObservableObject {
             }
         }
     }
-    /// Telegram-style root tab (Contacts · Calls · Chats · Settings). Opening a
-    /// chat from Contacts/Calls switches to Chats so `path` lands on HomeView's stack.
-    @Published var mainTab: MainTab = .chats
     /// True when the Debug fixture replaced the relay (screenshots).
     var isFixture = false
     /// Debug demo tours run once per process, whichever view instance starts them.
@@ -1389,7 +1386,6 @@ final class AppModel: ObservableObject {
         projects = []
         chats = [:]
         messages = [:]
-        ReadReceipts.shared.clear()
         caughtUp = []
         unacked = [:]
         peopleChats = []
@@ -2024,7 +2020,6 @@ final class AppModel: ObservableObject {
             room.onPresence = { [weak self] header in
                 self?.notePresence(header)
                 self?.noteTyping(header, chatId: key)
-                ReadReceipts.shared.note(header, chatId: key)
                 if let callId = header["in_call"] as? String { self?.peerInCall(callId, chatId: key) }
             }
         }
@@ -3738,6 +3733,12 @@ final class AppModel: ObservableObject {
     @Published var profilePath: [ProfileTarget] = []
     /// A chat the next ChatView should open with its search bar up (profile "search").
     @Published var pendingSearchChat: String?
+    /// A message the next ChatView should scroll to and tint (a search result opened
+    /// from the bottom bar, [feedback iphone-bottom-search-bar-2026-10-25]).
+    @Published var pendingReveal: MessageReveal?
+    /// App-wide search: message text, attachments and links per loaded chat, kept
+    /// current lazily against `messagesVersion` (`GlobalSearch`).
+    var searchIndex = SearchIndex()
     /// Unsent composer text kept per chat while the ChatView is off-screen (Mac `Composer.drafts`).
     private var composerDrafts: [Id: String] = [:]
     /// Last presence time per user id, from room presence frames this session.
@@ -4382,6 +4383,22 @@ final class AppModel: ObservableObject {
         return list.filter { $0.role != .system && !$0.plainText.isEmpty }
     }
 
+    /// Every loaded message of a chat for the app-wide search index — text or
+    /// attachments; system lines never count (`SearchStore`).
+    func indexableMessages(of chatId: Id) -> [Message] {
+        let list: [Message]
+        if let published = messages[chatId] {
+            list = published
+        } else if let rows = channelRows[chatId] {
+            list = rows
+        } else if let doc = docs[chatId], doc.count > 0 {
+            list = doc.readAll()
+        } else {
+            list = []
+        }
+        return list.filter { $0.role != .system }
+    }
+
     /// S8: the last assistant message asked a question and nothing was sent since.
     func chatNeedsAnswer(_ chatId: Id) -> Bool {
         guard let last = messages(of: chatId).last, last.role == .assistant, !last.isStreaming else { return false }
@@ -4506,6 +4523,19 @@ final class AppModel: ObservableObject {
         var name: String
         var mime: String
         var data: Data
+    }
+
+    /// Retry on one of my bubbles the relay refused (`status == .error`): the failed row
+    /// goes and its text + reply-to go out again as a new message through the normal send
+    /// path (attachments were picked at send time and are not re-read).
+    func resendFailed(chatId: Id, messageId: Id) {
+        guard var list = messages[chatId],
+              let ix = list.firstIndex(where: { $0.id == messageId && $0.status == .error }) else { return }
+        let failed = list.remove(at: ix)
+        messages[chatId] = list
+        let text = failed.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        send(chatId: chatId, text: text, replyTo: failed.replyTo)
     }
 
     /// `replyTo` = the message this send answers (reply-to); it lands on the row as `replyTo`
