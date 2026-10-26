@@ -421,7 +421,10 @@ struct AgentProfileView: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Change avatar")
         } else {
-            AgentAvatar(project: project, theme: theme, size: PaneKit.heroAvatar, working: model.isStreaming(project: project.id), idle: true)
+            // Someone else's agent: its picture opens full-size in the media viewer (a leaf opens nothing).
+            ViewablePicture(name: project.name, url: project.imageURL) {
+                AgentAvatar(project: project, theme: theme, size: PaneKit.heroAvatar, working: model.isStreaming(project: project.id), idle: true)
+            }
         }
     }
 

@@ -237,6 +237,8 @@ struct AvatarPickerSheet: View {
     @State private var reset = false
     @StateObject private var source = AvatarSourceState()
     @State private var saving = false
+    /// View (Jacob, 2026-10-25): the picture as it is now, full-size in the media viewer.
+    @State private var viewer: MediaViewerState?
     private var generatedKey: String? { source.generatedKey }
     private var uploadJpeg: Data? { source.uploadJpeg }
     private var uploadPreview: UIImage? { source.uploadPreview }
@@ -345,14 +347,45 @@ struct AvatarPickerSheet: View {
         .presentationDragIndicator(.visible)
         .onAppear {
             tab = tabs.contains(initialTab) ? initialTab : (tabs.first ?? .bot)
-            // Rig: a prefilled prompt runs Generate at once.
+            // Rig: a prefilled prompt runs Generate at once; `ARBOS_VIEW_PICTURE=1` presses View.
             if tab == .generate, let text = DebugHooks.avatarPrompt, !text.isEmpty {
                 source.prompt = text
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { generate() }
             }
+            if DebugHooks.viewPicture, let picture = Self.viewablePicture(target: target, model: model) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                    viewer = MediaViewerState(items: [MediaAlbum.picture(name: picture.name, url: picture.url)], index: 0)
+                }
+            }
         }
         .onChange(of: source.uploadJpeg) { _, jpeg in
             if jpeg != nil { reset = false }
+        }
+        .fullScreenCover(item: $viewer) { v in
+            MediaViewer(album: v.items, index: v.index, onClose: { viewer = nil })
+                .environmentObject(model)
+                .environment(\.theme, theme)
+        }
+    }
+
+    /// The target's current picture, when it has one — what View opens. Leaf / letter avatars
+    /// have nothing to view, so the bar shows no View.
+    static func viewablePicture(target: AvatarTarget, model: AppModel) -> (name: String, url: String)? {
+        switch target {
+        case .agent(let id):
+            guard let p = model.project(id), let url = p.imageURL, !url.isEmpty else { return nil }
+            return (p.name, url)
+        case .group(let id):
+            guard let c = model.peopleChats.first(where: { $0.id == id }), let key = c.imageKey,
+                  let url = model.blobURL(projectId: "\(peopleSlot):\(id)", key: key) else { return nil }
+            return (c.title.isEmpty ? "Group" : c.title, url.absoluteString)
+        case .server(let id):
+            guard let s = model.servers.first(where: { $0.id == id }), let key = s.imageKey,
+                  let url = model.blobURL(projectId: "servers:\(id)", key: key) else { return nil }
+            return (s.name, url.absoluteString)
+        case .me:
+            guard let u = model.user, let url = u.avatarUrl, !url.isEmpty else { return nil }
+            return (u.name ?? u.login, url)
         }
     }
 
@@ -362,6 +395,20 @@ struct AvatarPickerSheet: View {
         HStack(spacing: 2) {
             AvatarTabPill(tabs: tabs, tab: $tab) { errorText = nil }
             Spacer()
+            if let picture = Self.viewablePicture(target: target, model: model) {
+                Button {
+                    viewer = MediaViewerState(items: [MediaAlbum.picture(name: picture.name, url: picture.url)], index: 0)
+                } label: {
+                    Text("View")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(labelMuted)
+                        .padding(.horizontal, 6)
+                        .frame(height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("avatar-view")
+            }
             Button {
                 reset = true
                 pickedLeaf = nil
