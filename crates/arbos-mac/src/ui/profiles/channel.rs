@@ -77,6 +77,7 @@ pub(super) fn page(
         subtitle_click: None,
         subtitle_element: None,
         editor: None,
+        action: None,
     };
 
     let body = match tab {
