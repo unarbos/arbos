@@ -3,6 +3,7 @@
 //! and the debug Details drawer. Sheets (Settings, New Message, agent profile)
 //! float centred over everything.
 
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -40,6 +41,7 @@ use crate::ui::onboarding;
 use crate::ui::palette;
 use crate::ui::people;
 use crate::ui::profiles;
+use crate::ui::rail;
 use crate::ui::reactions;
 use crate::ui::routines::{RoutinesEvent, RoutinesPanel};
 use crate::ui::secrets::{SecretsEvent, SecretsPanel};
@@ -293,8 +295,26 @@ pub struct Shell {
     /// click-outside still clear it so leftover true never sticks.
     pub(crate) menu_open: bool,
     /// Which segment of the chat list's All · Agents · People · Servers
-    /// filter is selected ([feedback sidebar-strip-filter-2026-10-24]).
+    /// filter is selected ([feedback sidebar-strip-filter-2026-10-24]);
+    /// persisted with the rail state ([feedback mac-sidebar-rail-2026-10-26]).
     pub(crate) list_filter: sidebar::ListFilter,
+    /// Where the expanded sidebar's discs, pictures and footer picture rest,
+    /// recorded every frame they are painted; the rail morph reads it.
+    pub(crate) morph: rail::Morph,
+    /// The rail picture under the pointer (its name tip is drawn at the root).
+    pub(crate) rail_hover: Option<crate::model::Id>,
+    /// The rail's picture list scroll (the tip and the morph follow it).
+    pub(crate) rail_scroll: ScrollHandle,
+    /// Rig: `ARBOS_RIG_FULLSCREEN=1` lays the chrome out as native full
+    /// screen (the rail's toggle at its top-left slot) where the platform
+    /// cannot report it (headless Linux renders).
+    rig_fullscreen: bool,
+    /// Rig: `ARBOS_RIG_RAIL_T=0.4` freezes the collapse morph at that
+    /// progress (0 expanded … 1 rail) for still frames of the transition.
+    rig_rail_t: Option<f32>,
+    /// The viewport width as of the last render (the rig's timed toggle needs
+    /// it without a `Window`).
+    last_viewport_width: f32,
     /// Sidebar: the "Hidden chats" list is showing instead of the chat list
     /// (Jacob 2026-10-23; the footer opens it, ‹ back returns).
     pub(crate) hidden_open: bool,
@@ -484,6 +504,13 @@ impl Shell {
                 if let Some(pk) = this.avatar_picker.as_mut() {
                     pk.tab = tab;
                 }
+                // Rig: `…:avatar:upload=<path>` — the panel's pick, made for the shot.
+                if let Some(path) = state.update(cx, |s, _| s.avatar_rig_upload.take()) {
+                    if let Some(pk) = this.avatar_picker.as_mut() {
+                        pk.upload = Some(path);
+                        pk.reset = false;
+                    }
+                }
                 // Rig: type the prompt and press Generate so a shot shows prompt → result.
                 if let Some(prompt) = state.update(cx, |s, _| s.avatar_rig_prompt.take()) {
                     this.avatar_prompt_input
@@ -524,14 +551,19 @@ impl Shell {
                 if let Some(pk) = this.pending_picker_mut() {
                     if pk.target == done.target {
                         pk.generating = false;
+                        pk.started_at = None;
                         match (done.image_key, done.url) {
                             (Some(key), Some(url)) => {
                                 pk.generated = Some((key, url));
                                 pk.error = None;
+                                pk.error_detail = None;
                             }
                             _ => {
-                                pk.error =
-                                    done.error.or_else(|| Some("No picture came back".into()))
+                                pk.error = done
+                                    .error
+                                    .or_else(|| Some("Couldn't generate the image.".into()));
+                                pk.error_detail = done.detail;
+                                pk.details_open = false;
                             }
                         }
                     }
@@ -1013,11 +1045,18 @@ impl Shell {
             signing_in: false,
             fullscreen: false,
             menu_open: false,
-            // Rig: `ARBOS_SIDEBAR_FILTER=all|agents|people|servers` selects a segment at launch.
-            list_filter: std::env::var("ARBOS_SIDEBAR_FILTER")
+            // The saved segment; the rig's `ARBOS_SIDEBAR_FILTER=all|agents|people|servers`
+            // wins at launch.
+            list_filter: sidebar::ListFilter::load(),
+            morph: Default::default(),
+            rail_hover: None,
+            rail_scroll: ScrollHandle::new(),
+            rig_fullscreen: std::env::var("ARBOS_RIG_FULLSCREEN").is_ok_and(|v| v == "1"),
+            rig_rail_t: std::env::var("ARBOS_RIG_RAIL_T")
                 .ok()
-                .and_then(|v| sidebar::ListFilter::parse(&v))
-                .unwrap_or_default(),
+                .and_then(|v| v.trim().parse::<f32>().ok())
+                .map(|t| t.clamp(0.0, 1.0)),
+            last_viewport_width: crate::ui::theme::NARROW_WINDOW,
             hidden_open: false,
             server_input,
             channel_rename: None,
@@ -1057,6 +1096,26 @@ impl Shell {
             });
             if shell.settings_page == SettingsPage::Devices {
                 shell.state.update(cx, |s, cx| s.devices_refresh(cx));
+            }
+        }
+        // Rig: `ARBOS_RIG_TOGGLE_RAIL_MS=1500,3500` presses the sidebar toggle at those
+        // times after launch (a recording of the collapse / open where the display
+        // refuses synthetic clicks; the gate Mac, [feedback mac-sidebar-rail-2026-10-26]).
+        if let Ok(spec) = std::env::var("ARBOS_RIG_TOGGLE_RAIL_MS") {
+            for ms in spec.split(',').filter_map(|v| v.trim().parse::<u64>().ok()) {
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(ms))
+                        .await;
+                    let _ = this.update(cx, |this, cx| {
+                        let width = this.last_viewport_width;
+                        this.state.update(cx, |s, cx| {
+                            let narrow = s.window_is_narrow(width);
+                            s.toggle_rail(narrow, cx)
+                        });
+                    });
+                })
+                .detach();
             }
         }
         shell
@@ -1499,7 +1558,10 @@ impl Shell {
         }
         let target = pk.target.clone();
         pk.generating = true;
+        pk.started_at = Some(std::time::Instant::now());
         pk.error = None;
+        pk.error_detail = None;
+        pk.details_open = false;
         pk.reset = false;
         self.state.update(cx, |s, cx| {
             s.generate_image(target, prompt, cx);
@@ -1514,16 +1576,24 @@ impl Shell {
             let Ok(Some(path)) = rx.await else {
                 return;
             };
-            let _ = this.update(cx, |this, cx| {
-                if let Some(pk) = this.pending_picker_mut() {
-                    pk.upload = Some(path);
-                    pk.reset = false;
-                    pk.error = None;
-                }
-                cx.notify();
-            });
+            let _ = this.update(cx, |this, cx| this.avatar_file_chosen(path, cx));
         })
         .detach();
+    }
+
+    /// The panel's pick lands in the open picker (the sheet's or a Create sheet's). The preview
+    /// draws the mastered copy from the avatar cache (`file://` through the sync client), never
+    /// the raw file through the GPU sampler.
+    pub(crate) fn avatar_file_chosen(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, _| {
+            s.want_avatar(avatar_picker::file_url(&path));
+        });
+        if let Some(pk) = self.pending_picker_mut() {
+            pk.upload = Some(path);
+            pk.reset = false;
+            pk.error = None;
+        }
+        cx.notify();
     }
 
     /// "Set avatar": apply the sheet's pending choice and close it.
@@ -2416,6 +2486,10 @@ impl Shell {
         if self.close_agent_pick(Some(window), cx) {
             return;
         }
+        // The Secrets forms' "Add agent" dropdown folds first; the form stays.
+        if self.secrets.update(cx, |p, cx| p.close_agent_picker(cx)) {
+            return;
+        }
         // A session row's context menu closes alone; the dropdown under it
         // stays (standard menu behaviour).
         if self.chat_menu.is_some() {
@@ -2595,6 +2669,9 @@ impl Shell {
     /// Everything that floats closes on a click elsewhere.
     pub(crate) fn close_popovers(&mut self, cx: &mut Context<Self>) {
         self.close_agent_pick(None, cx);
+        self.secrets.update(cx, |p, cx| {
+            p.close_agent_picker(cx);
+        });
         self.state.update(cx, |s, cx| s.close_tasks(cx));
         if self.menu_open
             || self.members_open
@@ -3128,8 +3205,7 @@ impl Shell {
                 space.name.clone()
             };
             let hint = if is_people {
-                "Say hi. It lands for both of you at once; Add agent brings one of yours in."
-                    .to_string()
+                "Say hi. It lands for both of you at once.".to_string()
             } else {
                 format!("Ask {name} anything. It plans, delegates, or just answers.")
             };
@@ -3148,6 +3224,36 @@ impl Shell {
                 let state = self.state.read(cx);
                 hero = hero.child(crate::ui::groups::picture(&space, state, 88.0, &theme));
             }
+            // Empty people chat: a clear "Add agent" control so bringing your
+            // own agent in is discoverable ([feedback
+            // app-01M5WKBR85JVW1KKJH96FWZVK5]); the right pane has the same
+            // entry for chats that already have messages.
+            let add_agent = is_people.then(|| {
+                div()
+                    .id("empty-add-agent")
+                    .mt(px(4.0))
+                    .px(px(14.0))
+                    .py(px(7.0))
+                    .rounded(px(8.0))
+                    .bg(theme.surface_2)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.bubble_assistant))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(icon("sparkles", 14.0, theme.text_muted))
+                    .child(
+                        div()
+                            .text_size(px(TEXT_SMALL))
+                            .text_color(theme.text)
+                            .child("Add agent"),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.members_open = false;
+                        this.add_agent_open = true;
+                        cx.notify();
+                    }))
+            });
             column = column.child(
                 div()
                     .flex_1()
@@ -3173,6 +3279,7 @@ impl Shell {
                             .max_w(px(460.0))
                             .child(hint),
                     )
+                    .children(add_agent)
                     .child(
                         div()
                             .w(px(COMPOSER_WIDTH))
@@ -3187,7 +3294,15 @@ impl Shell {
             // a relative `top` inset (GPUI has no transform).
             // The tasks chip and drawer ride on the row while the agent has
             // background jobs open in this chat (`ui::tasks`, duplex §2.4).
-            let presence_row = presence.map(|p| {
+            // The row floats over the transcript's bottom clearance instead of
+            // sitting under it ([feedback status-row-gap-mac-2026-10-26]): the
+            // last bubble keeps its 54 pt to the pill with or without the row
+            // (Grok Mac), and the list is not resized when the row comes or
+            // goes. Only while the list is pinned at its end — scrolled into
+            // history, bubbles pass through that band (and the ↓ button sits
+            // there), so the row steps aside.
+            let pinned = self.transcript.read(cx).is_pinned_to_bottom();
+            let presence_row = presence.filter(|_| pinned).map(|p| {
                 let row = match chat_id.clone() {
                     Some(id) => {
                         let (jobs, open) = crate::ui::tasks::for_chat(self.state.read(cx), &id);
@@ -3204,7 +3319,18 @@ impl Shell {
                     }
                     None => crate::ui::presence::row(p, &theme, cx),
                 };
-                column_row(row.into_any_element())
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom(px(crate::ui::presence::LIFT))
+                    .debug_selector(|| "presence-float".into())
+                    // Wheel over the row scrolls the chat, like over the pill.
+                    .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
+                        this.transcript
+                            .update(cx, |t, cx| t.scroll_from_wheel(event, cx));
+                    }))
+                    .child(column_row(row.into_any_element()))
             });
             let composer_row = div()
                 .w_full()
@@ -3213,7 +3339,9 @@ impl Shell {
                 .items_center()
                 .pb(px(COMPOSER_BOTTOM))
                 .pt(px(6.0))
-                .children(presence_row)
+                // A zero-height anchor at the composer block's top edge: the
+                // floating row hangs off it and adds nothing to the column.
+                .child(div().relative().w_full().h(px(0.0)).children(presence_row))
                 .child(composer_block);
             let composer_row = if animating {
                 composer_row
@@ -4036,10 +4164,17 @@ impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let width: f32 = window.viewport_size().width.into();
-        self.fullscreen = window.is_fullscreen();
+        let height: f32 = window.viewport_size().height.into();
+        self.last_viewport_width = width;
+        self.fullscreen = window.is_fullscreen() || self.rig_fullscreen;
+        crate::ui::picture_fit::note_scale_factor(window.scale_factor());
         let state = self.state.read(cx);
         let narrow = state.window_is_narrow(width);
-        let sidebar_hidden = state.rail_collapsed || narrow;
+        // The narrow band hides the sidebar (an overlay brings it back);
+        // otherwise the toggle collapses it to the icon rail, never away
+        // ([feedback mac-sidebar-rail-2026-10-26]).
+        let sidebar_hidden = narrow;
+        let rail = state.rail_collapsed && !narrow;
         let sidebar_overlay = sidebar_hidden && state.sidebar_overlay;
         let sidebar_width = state.sidebar_width;
         let details = state.details_open.clone();
@@ -4159,6 +4294,7 @@ impl Render for Shell {
                 viewport_width: width,
                 sidebar_shown: !sidebar_hidden,
                 sidebar_width,
+                sidebar_rail: rail,
                 narrow,
                 pane_shown: profile.is_some(),
                 pane_width,
@@ -4166,7 +4302,15 @@ impl Render for Shell {
             },
             std::time::Instant::now(),
         );
-        if frame.animating() {
+        let frame = match self.rig_rail_t {
+            Some(t) if !sidebar_hidden => slide::Frame {
+                sidebar_visible: sidebar_width - t * (sidebar_width - rail::metrics::WIDTH),
+                sidebar_sliding: true,
+                ..frame
+            },
+            _ => frame,
+        };
+        if frame.animating() && self.rig_rail_t.is_none() {
             window.request_animation_frame();
         }
         let live_center = width - frame.sidebar_visible - frame.pane_visible;
@@ -4175,20 +4319,62 @@ impl Render for Shell {
         // at rest that is 72 + the disc with the sidebar hidden, nothing with
         // it docked; mid-slide the disc holds its spot (72 + 12) from the
         // moment the sidebar's own disc has left until the sidebar is back.
+        // With the rail the header's toggle is only for a plain window at rest
+        // (full screen puts it in the rail's top-left slot; the morph's
+        // overlay carries it in between) — and for the narrow band's hidden
+        // sidebar, as before.
+        let rail_progress = frame.rail_progress(sidebar_width);
+        let show_sidebar_toggle = rail::header_toggle_shown(
+            sidebar_hidden,
+            frame.sidebar_visible,
+            rail,
+            frame.sidebar_sliding,
+            self.fullscreen,
+        );
         let geometry = CenterGeometry {
             header_inset: (TRAFFIC_LIGHTS_INSET - frame.sidebar_visible).max(0.0),
-            show_sidebar_toggle: frame.sidebar_visible <= TRAFFIC_LIGHTS_INSET,
+            show_sidebar_toggle,
             chat_slide: frame.chat.map(|c| (c, live_center)),
         };
 
-        if frame.sidebar_sliding {
-            root = root.child(slide::sidebar_clip(
-                frame.sidebar_visible,
-                sidebar_width,
-                frosted(0.0, PANEL_BLUR, sidebar::render(self, cx)),
-            ));
-        } else if !sidebar_hidden {
-            root = root.child(frosted(0.0, PANEL_BLUR, sidebar::render(self, cx)));
+        let mut morph_overlay = None;
+        match (frame.sidebar_sliding, rail_progress) {
+            // Collapsing to / opening from the rail: the column morphs and the
+            // moving pieces travel over the window.
+            (true, Some(t)) => {
+                root = root.child(frosted(
+                    0.0,
+                    PANEL_BLUR,
+                    rail::render_morph(self, t, frame.sidebar_visible, cx),
+                ));
+                morph_overlay = Some(rail::render_overlay(self, t, height, cx));
+            }
+            // Coming back from hidden (the window widened past the narrow
+            // band): the clip reveals whichever layout the state wants.
+            (true, None) if rail => {
+                root = root.child(slide::sidebar_clip(
+                    frame.sidebar_visible,
+                    rail::metrics::WIDTH,
+                    frosted(0.0, PANEL_BLUR, rail::render(self, cx)),
+                ));
+            }
+            (true, None) => {
+                root = root.child(slide::sidebar_clip(
+                    frame.sidebar_visible,
+                    sidebar_width,
+                    frosted(0.0, PANEL_BLUR, sidebar::render(self, cx)),
+                ));
+            }
+            (false, _) if sidebar_hidden => {}
+            (false, _) if rail => {
+                root = root.child(frosted(0.0, PANEL_BLUR, rail::render(self, cx)));
+            }
+            (false, _) => {
+                root = root.child(frosted(0.0, PANEL_BLUR, sidebar::render(self, cx)));
+            }
+        }
+        if !rail && self.rail_hover.is_some() {
+            self.rail_hover = None;
         }
         if !sidebar_hidden && self.state.read(cx).sidebar_overlay {
             // Widened back past the band with the overlay up: it has docked.
@@ -4265,6 +4451,16 @@ impl Render for Shell {
                     root = root.child(slide::pane_clip(frame.pane_visible, blank));
                 }
                 (None, false) => {}
+            }
+        }
+        // The rail morph's travelling pieces and the hovered picture's name
+        // tip sit over the panes, under the floating menus.
+        if let Some(overlay) = morph_overlay {
+            root = root.child(overlay);
+        }
+        if rail && !frame.sidebar_sliding {
+            if let Some(tip) = rail::render_tip(self, cx) {
+                root = root.child(tip);
             }
         }
         if let Some(menu) = sidebar::row_menu(self, cx) {

@@ -661,6 +661,13 @@ mod picker_sites_tests {
             "fn agent_picker_rows",
             &["arbos_core::search::", "filter("],
         ),
+        // The Secrets agent picker (New secret, Connect 1Password, Give access on a
+        // secret / a vault): the same agent rows.
+        (
+            "src/ui/agent_picker.rs",
+            "fn candidates",
+            &["agent_picker_rows("],
+        ),
         // Forward-to chat picker.
         (
             "src/app.rs",
@@ -686,6 +693,7 @@ mod picker_sites_tests {
         "src/ui/palette.rs",
         "src/ui/sidebar.rs",
         "src/ui/secrets.rs",
+        "src/ui/agent_picker.rs",
         "src/ui/servers.rs",
         "src/ui/groups.rs",
     ];

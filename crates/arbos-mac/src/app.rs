@@ -426,6 +426,7 @@ pub struct AvatarGenerated {
     pub image_key: Option<String>,
     pub url: Option<String>,
     pub error: Option<String>,
+    pub detail: Option<String>,
 }
 
 pub struct AppState {
@@ -644,6 +645,9 @@ pub struct AppState {
     /// Rig: a prompt the shell types into the opened picker's Generate field and runs at once
     /// (`ARBOS_OPEN_PROFILE=me:avatar:generate=<prompt>`), so a shot can show prompt → result.
     pub avatar_rig_prompt: Option<String>,
+    /// Rig: a file for the picker's Upload tab (`ARBOS_OPEN_PROFILE=me:avatar:upload=<path>`,
+    /// also `agent:…`), applied as the file panel's pick so a shot shows the upload preview.
+    pub avatar_rig_upload: Option<std::path::PathBuf>,
     /// The Generate tab's answer, for the shell's open picker.
     pub avatar_generated: Option<AvatarGenerated>,
     /// Agent page: which settings row (model / reasoning / voice) is dropped down.
@@ -1015,7 +1019,7 @@ impl AppState {
             link: Link::Connecting,
             room_links: HashMap::new(),
             relay_link: (LinkState::Live, 0),
-            rail_collapsed: false,
+            rail_collapsed: crate::ui::theme::SidebarCollapsed::load(),
             sidebar_width: crate::ui::theme::SidebarWidth::load(),
             sidebar_overlay: false,
             details_open: None,
@@ -1048,6 +1052,7 @@ impl AppState {
             profile_opened: 0,
             avatar_picker_request: None,
             avatar_rig_prompt: None,
+            avatar_rig_upload: None,
             avatar_generated: None,
             agent_pick: None,
             profile_editing_description: false,
@@ -1629,6 +1634,7 @@ impl AppState {
                 image_key,
                 url,
                 error,
+                detail,
             } => {
                 if let Some(u) = url.clone() {
                     self.want_avatar(u);
@@ -1638,6 +1644,7 @@ impl AppState {
                     image_key,
                     url,
                     error,
+                    detail,
                 });
                 cx.notify();
             }
@@ -2109,13 +2116,17 @@ impl AppState {
                                     .set_profile_tab(crate::ui::profiles::agent::TAB_COMPUTER, cx),
                                 _ => {}
                             }
-                            // `agent:avatar[:generate|:upload]` opens the avatar picker sheet
-                            // (D92 amendment) on that tab.
+                            // `agent:avatar[:generate|:upload[=<path>]]` opens the avatar picker
+                            // sheet (D92 amendment) on that tab.
                             if let Some(tab) = rest.strip_prefix(":avatar") {
                                 use crate::ui::avatar_picker::{Tab, Target};
                                 let tab = match tab {
                                     ":generate" => Tab::Generate,
                                     ":upload" => Tab::Upload,
+                                    t if t.starts_with(":upload=") => {
+                                        self.rig_upload(&t[":upload=".len()..]);
+                                        Tab::Upload
+                                    }
                                     _ => Tab::Bot,
                                 };
                                 self.open_avatar_picker(Target::Agent(project_id), tab, cx);
@@ -2205,13 +2216,18 @@ impl AppState {
                                     self.open_picture_viewer(&a.name, &a.avatar_url, cx);
                                 }
                             }
-                            // `me:avatar[:generate[=<prompt>]|:upload]` — the avatar picker for
-                            // my own picture (Generate | Upload, Reset); with `=<prompt>` the
-                            // shell types the prompt and presses Generate.
+                            // `me:avatar[:generate[=<prompt>]|:upload[=<path>]]` — the avatar
+                            // picker for my own picture (Generate | Upload, Reset); with
+                            // `=<prompt>` the shell types the prompt and presses Generate; with
+                            // `=<path>` the Upload tab previews that file.
                             if let Some(tab) = rest.strip_prefix(":avatar") {
                                 use crate::ui::avatar_picker::{Tab, Target};
                                 let tab = match tab {
                                     ":upload" => Tab::Upload,
+                                    t if t.starts_with(":upload=") => {
+                                        self.rig_upload(&t[":upload=".len()..]);
+                                        Tab::Upload
+                                    }
                                     t => {
                                         if let Some(prompt) = t.strip_prefix(":generate=") {
                                             if !prompt.trim().is_empty() {
@@ -4291,6 +4307,31 @@ impl AppState {
         }
     }
 
+    /// A server's picture in the collapsed rail ([feedback mac-sidebar-rail-2026-10-26]):
+    /// its channel list is one toggle away, so the click lands on the server's newest
+    /// channel (last activity), `#general` when none has spoken, and marks the server
+    /// open so expanding shows its channels.
+    pub fn enter_server_latest(&mut self, server_id: Id, cx: &mut Context<Self>) {
+        let Some(server) = self.server(&server_id).cloned() else {
+            return;
+        };
+        let newest = self
+            .matrix_snapshot
+            .channels
+            .iter()
+            .filter(|c| c.server_id == server.id && c.last_ts > 0)
+            .max_by_key(|c| c.last_ts)
+            .and_then(|c| server.channels.iter().find(|ch| ch.id == c.channel_id))
+            .or_else(|| server.general())
+            .cloned();
+        self.open_server = Some(server_id.clone());
+        self.sidebar_overlay = false;
+        match newest {
+            Some(channel) => self.select_channel(server_id, channel.id.clone(), cx),
+            None => cx.notify(),
+        }
+    }
+
     /// Back arrow at the top of the channel list: the chat list again. The channel in the
     /// centre stays until a chat is picked.
     pub fn close_server_pane(&mut self, cx: &mut Context<Self>) {
@@ -6035,13 +6076,16 @@ impl AppState {
 
     /// ⌘B / the sidebar collapse control (next to "+") / the header expand
     /// button when the rail is hidden. In the narrow band the sidebar cannot
-    /// dock, so it floats as an overlay instead; otherwise it collapses or returns.
+    /// dock, so it floats as an overlay instead; otherwise it collapses to the
+    /// icon rail or returns, and the choice is saved
+    /// ([feedback mac-sidebar-rail-2026-10-26]).
     pub fn toggle_rail(&mut self, narrow: bool, cx: &mut Context<Self>) {
         if narrow {
             self.sidebar_overlay = !self.sidebar_overlay;
         } else {
             self.rail_collapsed = !self.rail_collapsed;
             self.sidebar_overlay = false;
+            crate::ui::theme::SidebarCollapsed::save(self.rail_collapsed);
         }
         cx.notify();
     }
@@ -6191,6 +6235,17 @@ impl AppState {
     ) {
         self.avatar_picker_request = Some((target, tab));
         cx.notify();
+    }
+
+    /// Rig: the Upload tab's pick, exactly as the file panel would hand it over (the preview is
+    /// fetched through the avatar cache as `file://…`).
+    fn rig_upload(&mut self, path: &str) {
+        let path = std::path::PathBuf::from(path.trim());
+        if path.as_os_str().is_empty() {
+            return;
+        }
+        self.want_avatar(crate::ui::avatar_picker::file_url(&path));
+        self.avatar_rig_upload = Some(path);
     }
 
     /// The agent's profile page (which holds the tree + colour picker).
