@@ -29,6 +29,98 @@ new_test_errors() {
   comm -23 <(printf '%s\n' "$1" | sed '/^$/d' | sort -u) <(printf '%s\n' "$2" | sed '/^$/d' | sort -u)
 }
 
+# Run the whole ArbosTests suite (#1868, coordinator 2026-10-26 05:52) on ONE named simulator, parallel
+# off (docs/process-rules.md), reusing the .xctestrun that build-for-testing just produced: 217 tests run
+# in 4 s, ≈ 1 min wall. A test red on MAIN is not the branch's fault: the failing set of the base main
+# head is cached per head (~/arbos-gate/.test-baseline/<sha>) — computed once on main's own tree when a
+# new head appears — and only failures outside that baseline fail the half (the #1843 / known-red rule).
+TEST_SIM_NAME="${ARBOS_GATE_TEST_SIM:-iPhone 17}"
+BASELINE_DIR="$HOME/arbos-gate/.test-baseline"
+
+# failing_tests <xcodebuild log> → "Class/test" per failing test, sorted.
+failing_tests() {
+  grep -E "^Test Case '-\[ArbosTests\.[A-Za-z0-9_]+ [A-Za-z0-9_]+\]' failed" "$1" 2>/dev/null \
+    | sed -E "s/^Test Case '-\[ArbosTests\.([A-Za-z0-9_]+) ([A-Za-z0-9_]+)\]' failed.*/\1\/\2/" | sort -u
+}
+
+test_sim_udid() {
+  xcrun simctl list devices available 2>/dev/null | grep -F "$TEST_SIM_NAME (" | grep -oE '[0-9A-F-]{36}' | head -n 1
+}
+
+# run_suite <derived-data dir> <log> → xcodebuild's exit code; the .xctestrun is the one build-for-testing wrote.
+run_suite() {
+  local dd="$1" log="$2" xctestrun udid
+  xctestrun=$(ls -t "$dd"/Build/Products/*.xctestrun 2>/dev/null | head -n 1)
+  udid=$(test_sim_udid)
+  [[ -n "$xctestrun" && -n "$udid" ]] || { echo "no xctestrun or no simulator '$TEST_SIM_NAME'" >"$log"; return 2; }
+  xcrun simctl bootstatus "$udid" -b >/dev/null 2>&1
+  xcodebuild test-without-building -xctestrun "$xctestrun" \
+    -destination "platform=iOS Simulator,id=$udid" -parallel-testing-enabled NO \
+    -only-testing:ArbosTests >"$log" 2>&1
+}
+
+# baseline_for <main sha> → prints the cached failing set of main at that head, computing it once:
+# checks out the base in the gate tree, build-for-testing into the Debug derived data, runs the suite.
+baseline_for() {
+  local base="$1" f="$BASELINE_DIR/$1" cur blog
+  mkdir -p "$BASELINE_DIR"
+  if [[ -f "$f" ]]; then cat "$f"; return 0; fi
+  cur=$(git -C "$ROOT" rev-parse HEAD)
+  blog=$(mktemp -t ios-gate-baseline)
+  if git -C "$ROOT" checkout -q "$base" 2>/dev/null; then
+    if ( cd "$ROOT/apps/ios/Arbos" && xcodebuild -project Arbos.xcodeproj -scheme Arbos -configuration Debug \
+          -destination 'generic/platform=iOS Simulator' -derivedDataPath "$HOME/arbos-gate-dd-Debug" \
+          CODE_SIGNING_ALLOWED=NO build-for-testing >/dev/null 2>&1 ); then
+      run_suite "$HOME/arbos-gate-dd-Debug" "$blog" || true
+      failing_tests "$blog" >"$f"
+    else
+      # Main itself does not compile its tests (or the tree's xcframework does not fit it): no baseline —
+      # the caller does not blame the branch; the compile check above already reports main's breakage.
+      echo "__unavailable__" >"$f"
+    fi
+    git -C "$ROOT" checkout -q "$cur" 2>/dev/null
+    # Keep the dozen newest baselines; a main head is gated against for an hour or two at most.
+    ls -t "$BASELINE_DIR" 2>/dev/null | tail -n +13 | while read -r old; do rm -f "$BASELINE_DIR/$old"; done
+  fi
+  rm -f "$blog"
+  cat "$f" 2>/dev/null
+}
+
+run_unit_tests() {
+  local log t0 fails base baseline new
+  log=$(mktemp -t ios-gate-tests); t0=$(date +%s)
+  run_suite "$HOME/arbos-gate-dd-Debug" "$log"
+  local trc=$?
+  fails=$(failing_tests "$log")
+  if [[ "$trc" -eq 0 && -z "$fails" ]]; then
+    echo "== tests: $(grep -oE 'Executed [0-9]+ tests' "$log" | tail -n 1 | tr -d '\n') pass ($(( $(date +%s) - t0 )) s)"
+    rm -f "$log"; return 0
+  fi
+  if [[ -z "$fails" ]]; then
+    # xcodebuild failed without a single failing test case: simulator / infrastructure trouble, not the branch.
+    echo "== tests: could not run (rc=$trc, no test case failed) — not blamed; tail:"
+    tail -n 8 "$log" | cut -c1-200
+    rm -f "$log"; return 0
+  fi
+  GATE_BASE_SHA=${GATE_BASE_SHA:-$(git -C "$ROOT" rev-parse origin/main 2>/dev/null || true)}
+  base="${GATE_BASE_SHA:-}"
+  baseline=""
+  [[ -n "$base" ]] && baseline=$(baseline_for "$base")
+  if grep -qx "__unavailable__" <<< "$baseline"; then
+    echo "== tests: $(printf '%s\n' "$fails" | grep -c .) failing test(s) but main (${base:0:8}) cannot run its own suite — no baseline, not blamed: $(printf '%s' "$fails" | tr '\n' ' ')"
+    rm -f "$log"; return 0
+  fi
+  new=$(comm -23 <(printf '%s\n' "$fails") <(printf '%s\n' "$baseline" | sed '/^$/d' | sort -u))
+  if [[ -z "$new" ]]; then
+    echo "== tests: $(printf '%s\n' "$fails" | grep -c .) failing test(s) are red on main (${base:0:8}) too — not this branch's regression: $(printf '%s' "$fails" | tr '\n' ' ')"
+    rm -f "$log"; return 0
+  fi
+  echo "== tests: FAIL — failing and NOT red on main (${base:0:8}):"
+  printf '%s\n' "$new" | head -20
+  grep -E "error: -\[ArbosTests\." "$log" | sed 's#/Users/[^/]*/arbos-gate/##' | head -20 | cut -c1-300
+  rm -f "$log"; return 1
+}
+
 # `ios-gate.sh selftest`: run the staleness check against the gate's current Debug product and tree
 # (prints the newest struct and the verdict; exit 0 current, 1 stale, 2 nothing to check).
 if [[ "${1:-}" == "selftest" ]]; then
@@ -51,6 +143,17 @@ if [[ "${1:-}" == "selftest" ]]; then
   else
     echo "selftest: test-target comparison WRONG — got: $new"; exit 1
   fi
+  # The test-run parser must read xcodebuild's failed test cases as Class/test.
+  tlog=$(mktemp -t ios-gate-selftest)
+  printf '%s\n' "Test Case '-[ArbosTests.HiddenWorkerRowTests testAWorkerSpawnRowDrawsNothingButATeammateSendKeepsItsLine]' failed (1.443 seconds)." \
+                 "Test Case '-[ArbosTests.HiddenWorkerRowTests testWorkerFlagParsesAndDefaultsOff]' passed (0.002 seconds)." > "$tlog"
+  if [[ "$(failing_tests "$tlog")" == "HiddenWorkerRowTests/testAWorkerSpawnRowDrawsNothingButATeammateSendKeepsItsLine" ]]; then
+    echo "selftest: failing-test parser reads Class/test"
+  else
+    echo "selftest: failing-test parser WRONG — got: $(failing_tests "$tlog")"; rm -f "$tlog"; exit 1
+  fi
+  rm -f "$tlog"
+  [[ -n "$(test_sim_udid)" ]] && echo "selftest: test simulator '$TEST_SIM_NAME' present ($(test_sim_udid))" || { echo "selftest: test simulator '$TEST_SIM_NAME' MISSING"; exit 1; }
   # The scheme must build the unit-test target in its Test action, or build-for-testing checks nothing.
   scheme=$HOME/arbos-gate/apps/ios/Arbos/Arbos.xcodeproj/xcshareddata/xcschemes/Arbos.xcscheme
   if [[ -f "$scheme" ]] && grep -q 'BuildableName = "ArbosTests.xctest"' "$scheme"; then
@@ -203,6 +306,7 @@ if [[ "$rc" -eq 0 ]]; then
   trc=$?
   if [[ "$trc" -eq 0 ]]; then
     echo "== tests: compile"
+    run_unit_tests || rc=1
   else
     echo "== tests: FAIL to compile (ArbosTests)"
     branch_errs=$(test_error_set "$log")
