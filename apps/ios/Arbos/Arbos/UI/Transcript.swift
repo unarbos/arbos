@@ -492,16 +492,17 @@ enum Transcript {
         return Self.withGaps(Self.mergeHandoffs(rows, handoffs))
     }
 
-    /// Spacing between neighbours (measured on the Grok Bot references).
+    /// Spacing between neighbours (Grok Bot / Mac: 6 same-sender, 20 turn /
+    /// stamp; was 8 / 24 — too open on iPhone).
     static func gap(from prev: Row, to cur: Row) -> CGFloat {
         if case .system = prev.kind { return 20 }
         if case .system = cur.kind { return 20 }
-        if prev.role != cur.role { return 24 }
+        if prev.role != cur.role { return 20 }
         // Same role: still open the turn gap when an agent starts a new message.
         if prev.messageId != cur.messageId && (cur.role == .assistant || cur.role == .project) {
-            return 24
+            return 20
         }
-        return 8
+        return 6
     }
 
     private static func withGaps(_ rows: [Row]) -> [Row] {
