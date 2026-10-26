@@ -1655,6 +1655,12 @@ final class AppModel: ObservableObject {
         if let data = store.get(StoreKey.unread), let counts = try? JSONDecoder().decode([String: Int].self, from: data) {
             unreadCounts = counts
         }
+        // One copy of each agent's avatar everywhere, before the first frame: the record and
+        // the roster copies came back from two caches written at different times; the
+        // newest wins and every picture URL is rebuilt on the public versioned route (a
+        // pre-#1813 cache held the owner-only blob URL — Jacob's relaunch leaf, 2026-10-26).
+        reconcileAgentAvatars()
+        AvatarImageCache.shared.warm(urls: projects.compactMap(\.imageURL))
         if !projects.isEmpty || !peopleChats.isEmpty { contentOrigin = "store" }
         LaunchClock.mark("kv-loaded", detail: "projects=\(projects.count) people=\(peopleChats.count)")
     }
