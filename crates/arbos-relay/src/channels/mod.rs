@@ -832,6 +832,7 @@ mod tests {
             restart: Arc::new(crate::state::RestartSignal::default()),
             voice_dispatched: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             voice_worker: Arc::new(tokio::sync::Mutex::new(None)),
+            voice_inbox: crate::voice::VoiceInbox::default(),
             image_health: Arc::new(tokio::sync::Mutex::new(None)),
             client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
             matrix: crate::matrix::Matrix::new(crate::matrix::Config::off()),
@@ -878,6 +879,7 @@ mod tests {
             avatar_leaf: None,
             avatar_leaf_color: None,
             image_key: None,
+            avatar_version: 0,
         };
         state.db.insert_project(&project).unwrap();
         state
@@ -1004,6 +1006,7 @@ mod tests {
             avatar_leaf: None,
             avatar_leaf_color: None,
             image_key: None,
+            avatar_version: 0,
         };
         state.db.insert_project(&project).unwrap();
         let binding = ChannelBinding {

@@ -203,6 +203,7 @@ extension ChatMember {
             // The uploaded / generated picture travels with the roster card (#1592); the
             // fetch URL is built by `AppModel.agent(member:)` where the relay token lives.
             project?.imageKey = p.image_key.flatMap { $0.isEmpty ? nil : $0 }
+            project?.avatarVersion = p.avatar_version.map(Int.init) ?? 0
         }
         self.id = id
         self.kind = isAgent ? .agent : .user

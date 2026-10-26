@@ -359,6 +359,7 @@ pub(crate) fn member_dto(state: &AppState, m: &Membership) -> ChatMemberDto {
                 avatar_leaf_effective: Some(i64::from(leaf.leaf)),
                 avatar_leaf_color_effective: Some(i64::from(leaf.color)),
                 image_key: p.image_key.clone(),
+                avatar_version: Some(p.avatar_version),
                 description: p.description.clone(),
                 model: p
                     .models
@@ -3492,6 +3493,63 @@ pub fn notify_agent_renamed(state: &AppState, project_id: &str) {
     }
 }
 
+/// Upper bound on the people told about one agent picture change (an agent in very large
+/// groups would otherwise write thousands of push rows per change).
+const AGENT_PROFILE_FAN_OUT_MAX: usize = 2000;
+
+/// The agents' `profile_updated`: an avatar change (`PATCH /projects/{id}` with `image_key`,
+/// a leaf or a colour pick) reaches every device that draws the agent — the owner's other
+/// devices (`except_device` already has the answer), the project's guests and every human in
+/// a people chat the agent sits on — as one `agent_profile_updated` push each, carrying the
+/// picture now in effect and the stamp every copy must reach. Without it (Jacob, 2026-10-25)
+/// a group's roster kept the old picture until some other event refreshed it, and the chat
+/// flipped between the stale and the current avatar.
+pub fn notify_agent_avatar_changed(
+    state: &AppState,
+    project: &crate::db::Project,
+    except_device: &str,
+) {
+    let event = PushEventDto::AgentProfileUpdated(arbos_core::api::AgentProfileUpdatedPayloadDto {
+        project_id: project.id.clone(),
+        avatar_version: project.avatar_version,
+        image_key: project.image_key.clone().filter(|k| !k.is_empty()),
+    });
+    if except_device.is_empty() {
+        let _ = state.db.push_user_event(&project.user_id, &event, None);
+    } else {
+        let _ = state
+            .db
+            .push_user_except_event(&project.user_id, except_device, &event);
+    }
+    for uid in agent_profile_audience(state, project) {
+        let _ = state.db.push_user_event(&uid, &event, None);
+    }
+}
+
+/// Who else draws the agent: the project's guests and the humans in its people chats, each
+/// once, never the owner, capped at `AGENT_PROFILE_FAN_OUT_MAX`.
+pub fn agent_profile_audience(state: &AppState, project: &crate::db::Project) -> Vec<String> {
+    let mut audience: Vec<String> = state
+        .db
+        .project_members(&project.id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(uid, _, _)| uid)
+        .collect();
+    for cm in state
+        .db
+        .chats_of_member(&format!("agent:{}", project.id))
+        .unwrap_or_default()
+    {
+        audience.extend(human_user_ids(&cm));
+    }
+    audience.sort();
+    audience.dedup();
+    audience.retain(|u| u != &project.user_id);
+    audience.truncate(AGENT_PROFILE_FAN_OUT_MAX);
+    audience
+}
+
 #[cfg(test)]
 mod push_rate_tests {
     //! Only accepted people pushes insert a rate event (#1570).
@@ -4372,6 +4430,8 @@ mod read_cursor_tests {
                 message_id: ulid(),
                 text: text.into(),
                 project_id: None,
+                kind: None,
+                voice_text: None,
             }),
         )
         .await;
@@ -4877,6 +4937,7 @@ pub(crate) mod tests_support {
             avatar_leaf: None,
             avatar_leaf_color: None,
             image_key: None,
+            avatar_version: 0,
         };
         state.db.insert_project(&project).expect("project");
         state

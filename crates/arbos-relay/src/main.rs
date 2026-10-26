@@ -339,6 +339,7 @@ async fn main() -> anyhow::Result<()> {
         restart: Arc::new(crate::state::RestartSignal::default()),
         voice_dispatched: Arc::new(Mutex::new(HashMap::new())),
         voice_worker: Arc::new(Mutex::new(None)),
+        voice_inbox: crate::voice::VoiceInbox::default(),
         image_health: Arc::new(Mutex::new(None)),
         client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
         matrix: matrix::Matrix::new(matrix::Config::from_env()?),
@@ -413,6 +414,7 @@ async fn main() -> anyhow::Result<()> {
             put(signin::put_avatar).delete(signin::delete_avatar),
         )
         .route("/avatars/{file}", get(signin::get_avatar))
+        .route("/projects/{file}/avatar.jpg", get(images::project_avatar))
         .route("/me/pushes", get(people::me_pushes))
         .route("/me/unread", get(notify::me_unread))
         .route("/chats/{id}/calls", post(calls::start_people_call))
@@ -541,6 +543,7 @@ async fn main() -> anyhow::Result<()> {
             axum::routing::put(voice::put_user_cap),
         )
         .route("/voice/worker/hello", post(voice::worker_hello))
+        .route("/voice/calls/{id}/inbox", get(voice::call_inbox))
         .route("/voices", get(voice::list_voices))
         .route("/voices/{id}/sample.mp3", get(voice::voice_sample))
         .route(

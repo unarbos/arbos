@@ -3826,7 +3826,7 @@ fn block_segments(block: &Block, literal: bool) -> Vec<Segment> {
                         _ => " | ",
                     };
                     let cell = row.get(ci).map(String::as_str).unwrap_or("");
-                    out.push(seg(lead.to_string(), cell.to_string()));
+                    out.push(seg(lead.to_string(), inline(cell)));
                 }
             }
             out
@@ -4288,46 +4288,48 @@ fn render_block(
         }
         Block::Table { header, rows } => {
             let cols = header.len().max(1);
-            let font = sans_font(theme);
-            let cell = |text: &str, head: bool, i: usize, start: usize| {
-                let mut font = font.clone();
-                if head {
-                    font.weight = FontWeight::SEMIBOLD;
-                }
+            let widths = table_column_widths(header, rows);
+            // A cell is inline markdown like any paragraph: `[Name](url)` is a
+            // clickable link, `**bold**` is bold ([feedback
+            // markdown-tables-mac-2026-10-25]: the Lima table showed raw
+            // `[…](https://…)` in every first column).
+            let cell = |text: &str, head: bool, ri: usize, i: usize, start: usize| {
                 let color = if head { theme.text } else { theme.text_muted };
+                let (full, mut runs, links) = inline_runs(text, color, theme);
+                if head {
+                    for run in &mut runs {
+                        if run.font.weight < FontWeight::SEMIBOLD {
+                            run.font.weight = FontWeight::SEMIBOLD;
+                        }
+                    }
+                }
                 div()
-                    .flex_1()
+                    .flex_grow(1.0)
+                    .flex_shrink_0()
+                    .flex_basis(px(widths[i]))
                     .min_w_0()
                     .px(px(10.0))
                     .py(px(6.0))
                     .when(i > 0, |el| el.border_l_1().border_color(theme.border))
                     .text_size(px(12.5))
-                    .when(head, |el| el.font_weight(FontWeight::SEMIBOLD))
                     .text_color(color)
-                    .child(bubble.text(
-                        start,
-                        text.to_string(),
-                        vec![TextRun {
-                            len: text.len(),
-                            font,
-                            color,
-                            background_color: None,
-                            underline: None,
-                            strikethrough: None,
-                        }],
-                    ))
+                    .debug_selector(move || format!("table-cell-r{ri}-c{i}"))
+                    .child(bubble.text(start, full, runs).with_links(links))
             };
+            // Taffy sizes a nested flex column from its cells' text, not their
+            // bases, so the table names its width: the bases' sum, never under
+            // the frame (`min_w_full`); the cells' `flex_grow` shares any slack.
+            let total: f32 = widths.iter().sum();
             let mut table = div()
                 .flex()
                 .flex_col()
-                .w_full()
-                .rounded(px(8.0))
-                .border_1()
-                .border_color(theme.border)
-                .overflow_hidden();
+                .flex_shrink_0()
+                .w(px(total))
+                .min_w_full()
+                .debug_selector(|| "table".into());
             let mut head_row = div().flex().bg(theme.code_bg);
             for (i, h) in header.iter().enumerate() {
-                head_row = head_row.child(cell(h, true, i, starts[i]));
+                head_row = head_row.child(cell(h, true, 0, i, starts[i]));
             }
             table = table.child(head_row);
             for (ri, row) in rows.iter().enumerate() {
@@ -4342,18 +4344,71 @@ fn render_block(
                     r = r.child(cell(
                         row.get(i).map(String::as_str).unwrap_or(""),
                         false,
+                        ri + 1,
                         i,
                         starts[(ri + 1) * cols + i],
                     ));
                 }
                 table = table.child(r);
             }
-            table.into_any_element()
+            // Wider than the bubble (many columns, long cells): the table keeps
+            // its column widths and scrolls sideways inside the frame instead
+            // of squeezing every cell to a word per line.
+            sideways_scroll(
+                div()
+                    .id(SharedString::from(format!("{row_id}#table")))
+                    .w_full()
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(theme.border),
+            )
+            .child(table)
+            .into_any_element()
         }
         Block::Code { lang, code } => code_fence_card(
             row_id, lang, code, theme.text, theme, bubble, starts[0], veil, now, copy,
         ),
     }
+}
+
+/// A frame whose content scrolls sideways only when the pointer's wheel or
+/// trackpad gesture is horizontal. GPUI otherwise turns a vertical wheel over a
+/// horizontal-only scroll area into sideways motion and the transcript stops
+/// scrolling under the pointer (`Style::restrict_scroll_to_axis`).
+fn sideways_scroll(frame: Stateful<Div>) -> Stateful<Div> {
+    // A flex row: its one child sizes to its content (max-content) and, with
+    // `flex_shrink_0` + `min_w_full`, is never narrower than the frame nor
+    // squeezed below its content — so the frame has something to scroll.
+    let mut frame = frame.flex().overflow_x_scroll();
+    frame.style().restrict_scroll_to_axis = Some(true);
+    frame
+}
+
+/// The narrowest a table column is laid out at, in points.
+pub const TABLE_COLUMN_MIN: f32 = 72.0;
+/// The widest a table column is laid out at before its cells wrap.
+pub const TABLE_COLUMN_MAX: f32 = 280.0;
+/// Average glyph advance of the 12.5 pt table text, used to size columns
+/// before layout (the exact width is not known until the text is shaped).
+const TABLE_GLYPH_ADVANCE: f32 = 6.6;
+
+/// One flex basis per column: wide enough for the longest cell's rendered
+/// text (markers removed) up to [`TABLE_COLUMN_MAX`], never under
+/// [`TABLE_COLUMN_MIN`]. Every row uses the same bases, so the columns line
+/// up, and their sum is what the frame scrolls when the bubble is narrower.
+pub fn table_column_widths(header: &[String], rows: &[Vec<String>]) -> Vec<f32> {
+    let cols = header.len().max(1);
+    (0..cols)
+        .map(|ci| {
+            let longest = std::iter::once(header)
+                .chain(rows.iter().map(Vec::as_slice))
+                .filter_map(|row| row.get(ci))
+                .map(|cell| inline_plain(cell).chars().count())
+                .max()
+                .unwrap_or(0);
+            (longest as f32 * TABLE_GLYPH_ADVANCE + 20.0).clamp(TABLE_COLUMN_MIN, TABLE_COLUMN_MAX)
+        })
+        .collect()
 }
 
 /// The code card's Copy pill, wired to its owner (Jacob 2026-10-24 22:22:
@@ -4476,13 +4531,26 @@ fn code_fence_card(
         Some(v) => apply_veil(runs, &v.spans(now), 0),
         None => runs,
     };
+    // Long lines (a fenced table, a wide log line) keep their columns and
+    // scroll sideways instead of wrapping into an unreadable stack.
     card = card.child(
-        div()
-            .px(px(10.0))
-            .py(px(8.0))
-            .text_size(px(12.5))
-            .line_height(px(18.0))
-            .child(bubble.text(at, code.to_string(), runs)),
+        sideways_scroll(
+            div()
+                .id(SharedString::from(format!("{row_id}#code")))
+                .w_full(),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .min_w_full()
+                .debug_selector(|| "code-body".into())
+                .px(px(10.0))
+                .py(px(8.0))
+                .text_size(px(12.5))
+                .line_height(px(18.0))
+                .whitespace_nowrap()
+                .child(bubble.text(at, code.to_string(), runs)),
+        ),
     );
     card.into_any_element()
 }
@@ -4695,6 +4763,221 @@ mod selection_tests {
         };
         assert_eq!(block_plain(&block, false), "a | b | c\n1 |  | \n2 | 3 | 4");
         assert_eq!(block_segments(&block, false).len(), 9);
+    }
+
+    /// The reply to Jacob's "Find me a book store in lima" (Bubble, 2026-10-25 21:31 UTC),
+    /// verbatim: a plain GFM table whose first column is inline links.
+    const LIMA_TABLE: &str = "| Store | Area | Sunday | What they sell |\n| --- | --- | --- | --- |\n| [Librería El Virrey](https://www.elvirrey.com/) | Miraflores, Calle Bolognesi 510 | 11am–7pm | Spanish literature, essays, history, art; some English at a higher price |\n| [Communitas](https://www.communitas.pe/) | San Isidro, Av. 2 de Mayo 1690 | 10:30am–7:30pm | Humanities, literature, law, history, science, in Spanish |\n| [Vallejo Librería Café](https://www.tangol.com/blog/en/the-3-best-bookstores-in-lima/n-15210) | San Isidro, Av. Camino Real 1119 | not listed | Books plus coffee or tea |\n| [Assouline Lima](https://www.assouline.com/pages/store/lima) | Miraflores, street not listed | not listed | Luxury and design books |";
+
+    /// [feedback markdown-tables-mac-2026-10-25]: the Lima table is one real table whose
+    /// cells are inline markdown — the store names are links (text = name, href = page),
+    /// never raw `[…](…)`; a selection copies the names, not the markup.
+    #[test]
+    fn the_lima_table_is_a_table_of_links() {
+        let blocks = split_blocks(LIMA_TABLE);
+        let [Block::Table { header, rows }] = blocks.as_slice() else {
+            panic!("one table, got {blocks:?}");
+        };
+        assert_eq!(header.len(), 4);
+        assert_eq!(rows.len(), 4);
+        let plain = bubble_plain(&blocks, false);
+        assert!(
+            !plain.contains("](") && !plain.contains("https://"),
+            "{plain}"
+        );
+        assert!(plain.starts_with(
+            "Store | Area | Sunday | What they sell\nLibrería El Virrey | Miraflores"
+        ));
+        let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+        let (text, runs, links) = inline_runs(&rows[0][0], theme.text_muted, &theme);
+        assert_eq!(text, "Librería El Virrey");
+        assert_eq!(
+            links,
+            vec![(0..text.len(), "https://www.elvirrey.com/".to_string())]
+        );
+        assert_eq!(
+            runs[0].color, theme.accent,
+            "a link is painted in the accent"
+        );
+        assert!(runs[0].underline.is_some());
+        // Columns: the long "What they sell" column caps out; "Sunday" stays narrow.
+        let widths = table_column_widths(header, rows);
+        assert_eq!(widths.len(), 4);
+        assert_eq!(widths[3], TABLE_COLUMN_MAX);
+        assert!(widths[2] < widths[1] && widths[1] < widths[3], "{widths:?}");
+        assert!(widths.iter().all(|w| *w >= TABLE_COLUMN_MIN));
+    }
+
+    /// Pipe rows without the `| --- |` row are not a table: they degrade to one monospace
+    /// block (the code card, which scrolls sideways) instead of prose with raw pipes. An
+    /// indented table still parses as a table.
+    #[test]
+    fn pipe_rows_without_a_separator_degrade_to_a_mono_block() {
+        let mut lines: Vec<&str> = LIMA_TABLE.lines().collect();
+        lines.remove(1);
+        let headless = lines.join("\n");
+        let blocks = split_blocks(&headless);
+        let [Block::Code { lang, code }] = blocks.as_slice() else {
+            panic!("one mono block, got {blocks:?}");
+        };
+        assert!(lang.is_empty());
+        assert_eq!(code, &headless);
+        let indented = LIMA_TABLE
+            .lines()
+            .map(|l| format!("    {l}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(matches!(
+            split_blocks(&indented).as_slice(),
+            [Block::Table { .. }]
+        ));
+        assert!(matches!(
+            split_blocks("one | pipe in prose\nnext line").as_slice(),
+            [Block::Paragraph(_)]
+        ));
+    }
+
+    struct TableHost {
+        selection: Entity<TextSelection>,
+        width: f32,
+        text: &'static str,
+    }
+
+    impl gpui::Render for TableHost {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
+            let blocks = split_blocks(self.text);
+            let texts = BubbleText::for_blocks(&blocks, false);
+            let selectable = Selectable::new(&self.selection, theme.accent_soft, cx);
+            let bubble = selectable.bubble("m1#text", texts[0].text.clone());
+            div()
+                .w(px(self.width))
+                .debug_selector(|| "test-host".into())
+                .child(render_block(
+                    "m1#t.0",
+                    &blocks[0],
+                    texts[0].at,
+                    None,
+                    Instant::now(),
+                    &theme,
+                    &bubble,
+                    &CodeCopy::default(),
+                ))
+        }
+    }
+
+    fn render_lima_table(
+        cx: &mut gpui::TestAppContext,
+        width: f32,
+    ) -> (
+        gpui::Bounds<Pixels>,
+        gpui::Bounds<Pixels>,
+        gpui::Bounds<Pixels>,
+        gpui::Bounds<Pixels>,
+    ) {
+        cx.update(|cx| {
+            let theme = crate::ui::theme::Theme::for_pref(
+                crate::ui::theme::AppearancePref::Dark,
+                crate::ui::theme::Surface::Matte,
+                cx,
+            );
+            cx.set_global(theme);
+        });
+        let (_view, vcx) = cx.add_window_view(|_, cx| TableHost {
+            selection: cx.new(TextSelection::new),
+            width,
+            text: LIMA_TABLE,
+        });
+        vcx.run_until_parked();
+        let host = vcx.debug_bounds("test-host").expect("host drawn");
+        let table = vcx.debug_bounds("table").expect("table drawn");
+        let first_link_cell = vcx
+            .debug_bounds("table-cell-r1-c0")
+            .expect("first body cell drawn");
+        let last_cell = vcx
+            .debug_bounds("table-cell-r0-c3")
+            .expect("last header-row cell drawn");
+        (host, table, first_link_cell, last_cell)
+    }
+
+    /// Headless render of the Lima table in a wide bubble: every cell is drawn, the columns
+    /// fill the bubble, nothing is squeezed under its minimum.
+    #[gpui::test]
+    fn the_lima_table_renders_as_cells_that_fill_a_wide_bubble(cx: &mut gpui::TestAppContext) {
+        let (host, table, first, last) = render_lima_table(cx, 900.0);
+        assert!(
+            (f32::from(table.size.width) - 900.0).abs() < 3.0,
+            "{:?}",
+            table.size
+        );
+        assert!(f32::from(first.size.width) >= TABLE_COLUMN_MIN);
+        assert!(
+            f32::from(last.size.width) >= TABLE_COLUMN_MAX,
+            "{:?}",
+            last.size
+        );
+        assert!(last.right() <= host.right() + px(1.0));
+    }
+
+    /// The same table in a narrow bubble (the iPhone-width case) overflows its frame — the
+    /// frame scrolls sideways — instead of shrinking the columns under their bases.
+    #[gpui::test]
+    fn the_lima_table_scrolls_sideways_in_a_narrow_bubble(cx: &mut gpui::TestAppContext) {
+        let blocks = split_blocks(LIMA_TABLE);
+        let Block::Table { header, rows } = &blocks[0] else {
+            unreachable!()
+        };
+        let bases: f32 = table_column_widths(header, rows).iter().sum();
+        let (host, table, first, last) = render_lima_table(cx, 360.0);
+        assert!((f32::from(host.size.width) - 360.0).abs() < 1.0);
+        assert!(
+            f32::from(table.size.width) >= bases - 1.0,
+            "{:?} vs {bases}",
+            table.size
+        );
+        assert!(f32::from(first.size.width) >= TABLE_COLUMN_MIN);
+        assert!(
+            last.right() > host.right(),
+            "the last column lies past the frame: scrollable"
+        );
+    }
+
+    /// A fenced (or separator-less) table that still arrives is a code card: its long lines
+    /// keep their columns and the card scrolls sideways instead of wrapping or cutting off.
+    #[gpui::test]
+    fn a_code_card_with_long_lines_scrolls_sideways(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let theme = crate::ui::theme::Theme::for_pref(
+                crate::ui::theme::AppearancePref::Dark,
+                crate::ui::theme::Surface::Matte,
+                cx,
+            );
+            cx.set_global(theme);
+        });
+        const FENCED: &str = "```\n| Store | Area | Sunday | What they sell | Phone | Source | Checked |\n| [Librería El Virrey](https://www.elvirrey.com/) | Miraflores, Calle Bolognesi 510 | 11am–7pm | Spanish literature | (511) 713 0505 | own site | yes |\n```";
+        let (_view, vcx) = cx.add_window_view(|_, cx| TableHost {
+            selection: cx.new(TextSelection::new),
+            width: 300.0,
+            text: FENCED,
+        });
+        vcx.run_until_parked();
+        let host = vcx.debug_bounds("test-host").expect("host drawn");
+        let body = vcx.debug_bounds("code-body").expect("code body drawn");
+        assert!(
+            body.size.width > host.size.width + px(200.0),
+            "{:?} vs {:?}: the line is laid out unwrapped, past the frame",
+            body.size,
+            host.size
+        );
+        assert!(
+            body.size.height < px(80.0),
+            "{:?}: two lines, not a wrapped stack",
+            body.size
+        );
     }
 
     /// Drag selection across the whole reply and copy: the clipboard text

@@ -712,7 +712,7 @@ impl Agent {
                 model_call = used_model,
                 "quick reply written"
             );
-            self.announce_reply(&room, &row_id, &text);
+            self.announce_reply_kind(&room, &row_id, &text, "quick", None);
             let _ = self.store.t3_append(
                 chat_id,
                 None,
@@ -1675,25 +1675,27 @@ pub(crate) mod tests {
         std::env::set_var("ARBOS_ACT_TO_JOB", "off");
         assert!(
             !agent
-                .maybe_convert_act_to_job(&host, Duration::from_secs(9))
+                .maybe_convert_act_to_job(&host, Duration::from_secs(13))
                 .await,
             "kill switch"
         );
         std::env::remove_var("ARBOS_ACT_TO_JOB");
+        // Cost knob 2 (2026-10-26): the threshold is 12 s by default; a 9 s one-search turn stays
+        // inline. The project file lowers it for this test's second half.
         assert!(
             !agent
-                .maybe_convert_act_to_job(&host, Duration::from_secs(5))
+                .maybe_convert_act_to_job(&host, Duration::from_secs(9))
                 .await,
-            "not yet at the threshold"
+            "not yet at the 12 s threshold"
         );
         assert!(
             agent
-                .maybe_convert_act_to_job(&host, Duration::from_secs(9))
+                .maybe_convert_act_to_job(&host, Duration::from_secs(13))
                 .await
         );
         assert!(
             !agent
-                .maybe_convert_act_to_job(&host, Duration::from_secs(12))
+                .maybe_convert_act_to_job(&host, Duration::from_secs(20))
                 .await,
             "converts once"
         );
