@@ -18,6 +18,7 @@ use crate::model::{
 use crate::ui::agent_picker::{self, AgentPicker};
 use crate::ui::avatars;
 use crate::ui::composer::ComposerInput;
+use crate::ui::error_note;
 use crate::ui::frost::{frosted, MENU_BLUR};
 use crate::ui::glass;
 use crate::ui::icons::icon;
@@ -28,6 +29,28 @@ pub enum SecretsEvent {
     /// "‹ Settings": return to the settings sheet.
     Back,
 }
+
+/// The failures the Secrets pane draws inline while one of its forms is up (the verbs
+/// `sync::relay` reports them under).
+const SECRETS_VERBS: &[&str] = &[
+    "save the secret",
+    "replace the value",
+    "delete the secret",
+    "change who may use it",
+    "revoke the access",
+    "change that person's access",
+    "remove that person",
+    "add @",
+    "change the pause",
+    "answer the request",
+    "connect 1Password",
+    "replace the token",
+    "change the vault access",
+    "save the item name",
+    "disconnect the vault",
+    "load your secrets",
+    "load the agent's secrets",
+];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Page {
@@ -87,6 +110,7 @@ pub struct SecretsPanel {
     hosts_input: Entity<ComposerInput>,
     token_input: Entity<ComposerInput>,
     error: Option<String>,
+    local_details_open: bool,
     /// Rig: a secret env name to open as soon as the list arrives.
     pending_env: Option<String>,
     /// Rig: with `pending_env`, open that secret's "Give a person access" sheet too.
@@ -154,6 +178,7 @@ impl SecretsPanel {
             hosts_input,
             token_input,
             error: None,
+            local_details_open: false,
             pending_env: None,
             pending_people: false,
             pending_vault: false,
@@ -1082,14 +1107,6 @@ impl SecretsPanel {
                     theme,
                 ));
             }
-            if let Some(e) = &self.error {
-                form = form.child(
-                    div()
-                        .text_size(px(TEXT_TINY))
-                        .text_color(theme.danger)
-                        .child(e.clone()),
-                );
-            }
             let sid2 = sid.clone();
             form = form.child(
                 div()
@@ -1589,6 +1606,69 @@ impl SecretsPanel {
         body
     }
 
+    /// The claimed relay failure first, else the form's validation (a refusal with the words).
+    fn note(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<Div> {
+        let claimed = self.state.read(cx).claimed_failure.clone();
+        let (slot, claimed_one) = match (claimed, &self.error) {
+            (Some(slot), _) => (slot, true),
+            (None, Some(words)) => (crate::app::refused(self.verb(), words), false),
+            (None, None) => return None,
+        };
+        let mut handlers = error_note::Handlers::new();
+        if claimed_one {
+            handlers = handlers
+                .toggle_details(cx.listener(|this, _, _, cx| {
+                    this.state.update(cx, |s, cx| {
+                        s.toggle_claimed_failure_details();
+                        cx.notify();
+                    });
+                }))
+                .try_again(cx.listener(|this, _, _, cx| this.retry_last(cx)));
+        } else {
+            handlers = handlers.toggle_details(cx.listener(|this, _, _, cx| {
+                this.local_details_open = !this.local_details_open;
+                cx.notify();
+            }));
+        }
+        let open = if claimed_one {
+            slot.details_open
+        } else {
+            self.local_details_open
+        };
+        Some(div().child(error_note::render(
+            "secrets-error",
+            &slot.error,
+            open,
+            error_note::Style::Inline,
+            theme,
+            handlers,
+        )))
+    }
+
+    /// What the open form does, for the validation note's sentence.
+    fn verb(&self) -> &'static str {
+        match self.page {
+            Page::Add => "save the secret",
+            Page::Connect => "connect 1Password",
+            Page::Vault(_) => "replace the token",
+            Page::Secret(_) => "save the secret",
+            Page::Agent(_) | Page::List => "save the change",
+        }
+    }
+
+    /// Try again on a claimed failure: the form's own action, once more.
+    fn retry_last(&mut self, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| {
+            s.clear_claimed_failure();
+            cx.notify();
+        });
+        match self.page {
+            Page::Add => self.submit_add(cx),
+            Page::Connect => self.submit_connect(cx),
+            Page::Vault(_) | Page::Secret(_) | Page::Agent(_) | Page::List => {}
+        }
+    }
+
     fn render_add(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let kind = self.add_kind;
         let segs = div()
@@ -1763,14 +1843,6 @@ impl SecretsPanel {
                         }),
                 ),
         );
-        if let Some(err) = &self.error {
-            form = form.child(
-                div()
-                    .text_size(px(TEXT_TINY))
-                    .text_color(theme.danger)
-                    .child(err.clone()),
-            );
-        }
         form.child(
             div()
                 .flex()
@@ -2068,7 +2140,7 @@ impl SecretsPanel {
                         .child(text.to_string()),
                 )
         };
-        let mut form = div()
+        let form = div()
             .flex()
             .flex_col()
             .gap(px(12.0))
@@ -2108,14 +2180,6 @@ impl SecretsPanel {
                     .child(agent_picker::render(self, &self.state.clone(), "connect", &[], theme, cx)),
             )
             .child(Self::field("Note", self.note_input.clone(), Some(VAULT_NOTE_HINT), theme));
-        if let Some(err) = &self.error {
-            form = form.child(
-                div()
-                    .text_size(px(TEXT_TINY))
-                    .text_color(theme.danger)
-                    .child(err.clone()),
-            );
-        }
         form.child(
             div()
                 .flex()
@@ -2390,14 +2454,6 @@ impl SecretsPanel {
                 Some("Stored encrypted. Arbos never shows it again."),
                 theme,
             ));
-            if let Some(e) = &self.error {
-                form = form.child(
-                    div()
-                        .text_size(px(TEXT_TINY))
-                        .text_color(theme.danger)
-                        .child(e.clone()),
-                );
-            }
             form = form.child(
                 div()
                     .flex()
@@ -2641,6 +2697,21 @@ impl Render for SecretsPanel {
             },
         };
 
+        // The page's note — under the header, before the first field (Jacob 2026-10-26): the
+        // relay's refusal of a save / connect / delete (claimed from the toast stack while a
+        // form is up) or the form's own validation, through the one shared element.
+        let form_open = matches!(
+            self.page,
+            Page::Add | Page::Connect | Page::Secret(_) | Page::Vault(_) | Page::Agent(_)
+        );
+        let claim = form_open.then_some(crate::app::FailureClaim {
+            surface: "secrets",
+            verbs: SECRETS_VERBS,
+        });
+        if self.state.read(cx).failure_claim != claim {
+            self.state.update(cx, |s, _| s.set_failure_claim(claim));
+        }
+        let note = self.note(&theme, cx);
         let card = div()
             .id("secrets-popover")
             .track_focus(&self.focus_handle)
@@ -2649,6 +2720,7 @@ impl Render for SecretsPanel {
             .gap(px(10.0))
             .p(px(12.0))
             .child(header)
+            .children(note)
             .child(
                 div()
                     .id("secrets-scroll")
