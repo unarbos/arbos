@@ -66,22 +66,7 @@ pub fn render(
     // pad is tighter than the people/group pill's. One gate with ⌘T and the
     // dropdown's New tab (`AppState::can_new_tab`): people rooms get none.
     let show_new_chat = state.can_new_tab();
-    let mut pill = div()
-        .id("header-title")
-        .flex()
-        .items_center()
-        .h(px(metrics::PILL_HEIGHT))
-        .pl(px(4.0))
-        .pr(px(if show_new_chat { 4.0 } else { 10.0 }))
-        .rounded_full()
-        .bg(theme.bubble_assistant)
-        .border_2()
-        .border_color(if pane_open {
-            theme.accent
-        } else {
-            gpui::transparent_black()
-        })
-        .min_w_0()
+    let mut pill = pill_frame(&theme, pane_open, if show_new_chat { 4.0 } else { 10.0 })
         // The header is a window_drag region: a mouse-down that bubbles to it
         // arms a window move, and the slightest pointer jitter before the
         // mouse-up turns the click into a drag that never completes — the
@@ -239,10 +224,31 @@ pub fn render(
 
     // ----- the bar: one frame for every chat kind ---------------------------------
     let sidebar_toggle = sidebar_hidden.then(|| sidebar_toggle(shell, &theme, cx));
-    bar_frame(
-        sidebar_toggle.map(IntoElement::into_any_element),
-        with_link_pill(pill, shell, cx),
-    )
+    bar_frame(sidebar_toggle, with_link_pill(pill, shell, cx))
+}
+
+/// The pill's frame, the same for every chat kind — agent, DM, group, server
+/// channel: `PILL_HEIGHT` tall, round, the header material for the theme
+/// (`glass::header_surface`: frost on Glass, `bubble_assistant` on Matte), a
+/// 2 pt accent ring while its right pane is open (mockups b, f; parity review
+/// 2026-10-20). `pr` is the right pad (tighter when a "+" follows the name).
+pub(crate) fn pill_frame(theme: &Theme, pane_open: bool, pr: f32) -> Stateful<Div> {
+    let pill = div()
+        .id("header-title")
+        .flex()
+        .items_center()
+        .h(px(metrics::PILL_HEIGHT))
+        .pl(px(4.0))
+        .pr(px(pr))
+        .rounded_full()
+        .border_2()
+        .border_color(if pane_open {
+            theme.accent
+        } else {
+            gpui::transparent_black()
+        })
+        .min_w_0();
+    glass::header_surface(pill, theme.bubble_assistant, theme)
 }
 
 /// The pill plus, hanging under it, the connection pill ([feedback
@@ -255,8 +261,11 @@ pub fn render(
 /// `metrics::PILL_TOP`, the drag catchment and the fade band are unchanged,
 /// and it floats over the list like the bar itself.
 fn with_link_pill(pill: Stateful<Div>, shell: &Shell, cx: &mut Context<Shell>) -> AnyElement {
+    let theme = Theme::of(cx).clone();
+    // On Glass the list blurs through the pill ([feedback mac-header-glass-2026-10-25]).
+    let pill = glass::header_frost(metrics::PILL_HEIGHT / 2.0, &theme, pill);
     let Some(status) = link_pill(shell, cx) else {
-        return pill.into_any_element();
+        return pill;
     };
     div()
         .relative()
@@ -332,9 +341,12 @@ fn link_pill(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
 /// The expand control while the sidebar is hidden: the same round disc as the
 /// sidebar strip's collapse toggle, beside the traffic lights (72 + 12 pt)
 /// ([feedback mac-collapsed-toggle-inline], [feedback sidebar-strip-filter-2026-10-24]).
-fn sidebar_toggle(shell: &Shell, theme: &Theme, cx: &mut Context<Shell>) -> Stateful<Div> {
+fn sidebar_toggle(shell: &Shell, theme: &Theme, cx: &mut Context<Shell>) -> AnyElement {
     let _ = shell.state.read(cx).sidebar_overlay;
-    glass::control_disc("header-sidebar", "sidebar-left", CONTROL_GLYPH_WIDE, theme)
+    let disc = glass::control_disc("header-sidebar", "sidebar-left", CONTROL_GLYPH_WIDE, theme);
+    // The header's material ([feedback mac-header-glass-2026-10-25]): frost on
+    // Glass, the strip disc's `surface_2` on Matte.
+    let disc = glass::header_surface(disc, theme.surface_2, theme)
         // The bar is a window-drag region; a control is not part of it.
         .on_mouse_down(
             gpui::MouseButton::Left,
@@ -349,7 +361,8 @@ fn sidebar_toggle(shell: &Shell, theme: &Theme, cx: &mut Context<Shell>) -> Stat
                 let narrow = s.window_is_narrow(width);
                 s.toggle_rail(narrow, cx)
             });
-        }))
+        }));
+    glass::header_frost(CONTROL / 2.0, theme, disc)
 }
 
 /// Geometry every chat header shares — one number each, read by the tests.
@@ -493,22 +506,7 @@ pub fn render_channel(
         let page = page.clone();
         this.state.update(cx, |s, cx| s.toggle_profile(page, cx));
     }));
-    let pill = div()
-        .id("header-title")
-        .flex()
-        .items_center()
-        .h(px(metrics::PILL_HEIGHT))
-        .pl(px(4.0))
-        .pr(px(10.0))
-        .rounded_full()
-        .bg(theme.bubble_assistant)
-        .border_2()
-        .border_color(if pane_open {
-            theme.accent
-        } else {
-            gpui::transparent_black()
-        })
-        .min_w_0()
+    let pill = pill_frame(&theme, pane_open, 10.0)
         .on_mouse_down(
             gpui::MouseButton::Left,
             cx.listener(|this, _, _, cx| {
@@ -520,10 +518,7 @@ pub fn render_channel(
 
     let sidebar_toggle = sidebar_hidden.then(|| sidebar_toggle(shell, &theme, cx));
     let _ = overlay;
-    bar_frame(
-        sidebar_toggle.map(IntoElement::into_any_element),
-        with_link_pill(pill, shell, cx),
-    )
+    bar_frame(sidebar_toggle, with_link_pill(pill, shell, cx))
 }
 
 /// "+" inside the agent pill: starts a new chat with this agent (same as ⌘T).
@@ -1318,5 +1313,106 @@ mod header_tests {
             "the pill is centred on the family's line"
         );
         assert_eq!(AVATAR_HEADER, CONTROL - 8.0, "picture 4 pt inside the pill");
+    }
+}
+
+/// [feedback mac-header-glass-2026-10-25]: the header pill and disc wear the
+/// header material — frost on Glass, solid on Matte — for every chat kind,
+/// and the frosted wrap leaves the bar's geometry untouched. The iPhone twin
+/// is `HeaderGlassStructureTests`.
+#[cfg(test)]
+mod glass_tests {
+    use gpui::{div, prelude::*, px, TestAppContext};
+
+    use super::{bar_frame, metrics, pill_frame};
+    use crate::ui::glass::{self, HeaderMaterial};
+    use crate::ui::theme::{Appearance, Surface, Theme, CONTROL};
+
+    const KINDS: [&str; 4] = ["agent", "dm", "group", "channel"];
+
+    #[test]
+    fn glass_gives_every_kind_a_translucent_pill_and_disc_matte_keeps_them_solid() {
+        for appearance in [Appearance::Dark, Appearance::Light] {
+            let glass = Theme::with(appearance, Surface::Glass);
+            let matte = Theme::with(appearance, Surface::Matte);
+            for _kind in KINDS {
+                for solid in [glass.bubble_assistant, glass.surface_2] {
+                    let g = glass::header_style(solid, &glass);
+                    assert_eq!(g.material, HeaderMaterial::Frosted);
+                    assert!(g.blur, "the list blurs through the control on Glass");
+                    assert!(
+                        g.fill.a < 1.0,
+                        "a see-through fill on Glass ({appearance:?})"
+                    );
+                    assert_ne!(g.fill, solid, "not the Matte fill");
+                    let m = glass::header_style(solid, &matte);
+                    assert_eq!(m.material, HeaderMaterial::Solid);
+                    assert!(!m.blur);
+                    assert_eq!(m.fill, solid, "Matte keeps today's fill");
+                }
+            }
+            // The pill and the disc share one fill and one rim on Glass.
+            assert_eq!(
+                glass::header_style(glass.bubble_assistant, &glass).fill,
+                glass::header_style(glass.surface_2, &glass).fill
+            );
+        }
+    }
+
+    struct GlassBar {
+        folded: bool,
+        pr: f32,
+    }
+
+    impl gpui::Render for GlassBar {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
+            let pill = pill_frame(&theme, false, self.pr).w(px(140.0));
+            let pill = glass::header_frost(metrics::PILL_HEIGHT / 2.0, &theme, pill);
+            let left = self.folded.then(|| {
+                let disc = glass::header_surface(
+                    div().id("toggle").size(px(CONTROL)).rounded_full(),
+                    theme.surface_2,
+                    &theme,
+                );
+                glass::header_frost(CONTROL / 2.0, &theme, disc)
+            });
+            div().w(px(884.0)).h(px(400.0)).child(
+                div()
+                    .when(self.folded, |el| el.pl(px(72.0)))
+                    .child(bar_frame(left, pill)),
+            )
+        }
+    }
+
+    /// Headless render on Glass: the frosted pill and disc draw, and the bar
+    /// keeps `metrics` for every kind (pads differ per kind: 4 with a "+", 10 without).
+    #[gpui::test]
+    fn frosted_header_renders_and_keeps_the_bar_geometry(cx: &mut TestAppContext) {
+        for appearance in [Appearance::Dark, Appearance::Light] {
+            cx.update(|cx| cx.set_global(Theme::with(appearance, Surface::Glass)));
+            for (kind, pr) in KINDS.iter().zip([4.0, 10.0, 10.0, 10.0]) {
+                for folded in [false, true] {
+                    let (_view, vcx) = cx.add_window_view(|_, _| GlassBar { folded, pr });
+                    vcx.run_until_parked();
+                    let bar = vcx.debug_bounds("chat-header-bar").expect("bar drawn");
+                    let pill = vcx.debug_bounds("chat-header-pill").expect("pill drawn");
+                    let h: f32 = bar.size.height.into();
+                    let top: f32 = (pill.origin.y - bar.origin.y).into();
+                    let ph: f32 = pill.size.height.into();
+                    assert_eq!(h, metrics::HEIGHT, "{kind} bar height, folded={folded}");
+                    assert_eq!(top, metrics::PILL_TOP, "{kind} pill top, folded={folded}");
+                    assert_eq!(
+                        ph,
+                        metrics::PILL_HEIGHT,
+                        "{kind} pill height, folded={folded}"
+                    );
+                }
+            }
+        }
     }
 }

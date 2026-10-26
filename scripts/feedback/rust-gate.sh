@@ -12,7 +12,15 @@
 # shared with no other session. One run at a time; the poller serialises.
 set -uo pipefail
 export PATH="$HOME/.cargo/bin:$PATH"
-export CARGO_TARGET_DIR="$HOME/arbos-rust-gate-target"
+# The cargo target lives on the Mac mini's internal SSD (/Volumes/ArbosScratch, #1846: rebuildable caches
+# only — the volume survives reboots, not a release of the EC2 dedicated host) when it is mounted; the
+# old home-directory tree is the fallback. One variable: ARBOS_GATE_TARGET_DIR.
+ARBOS_SCRATCH=${ARBOS_SCRATCH:-/Volumes/ArbosScratch}
+if [ -d "$ARBOS_SCRATCH/ec2-user" ]; then
+  export CARGO_TARGET_DIR="${ARBOS_GATE_TARGET_DIR:-$ARBOS_SCRATCH/ec2-user/arbos-rust-gate-target}"
+else
+  export CARGO_TARGET_DIR="${ARBOS_GATE_TARGET_DIR:-$HOME/arbos-rust-gate-target}"
+fi
 runs=$HOME/arbos-rust-gate-runs
 repo=$HOME/arbos-rust-gate
 mkdir -p "$runs"

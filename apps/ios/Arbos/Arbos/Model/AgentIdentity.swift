@@ -34,7 +34,8 @@ extension AppModel {
             leaf: p.avatarLeaf.map { UInt8(clamping: $0) },
             leafColor: p.avatarLeafColor.map { UInt8(clamping: $0) },
             colorIndex: p.effectiveAvatarColorIndex.map { UInt8(clamping: $0) },
-            imageKey: p.imageKey
+            imageKey: p.imageKey,
+            avatarVersion: Int64(p.avatarVersion)
         )
     }
 
@@ -42,7 +43,7 @@ extension AppModel {
         guard m.isAgent else { return nil }
         guard let p = m.project else {
             return AgentCard(id: m.id, name: m.name ?? "", handle: m.handle, leaf: nil, leafColor: nil,
-                             colorIndex: m.avatarColorIndex.map { UInt8(clamping: $0) }, imageKey: nil)
+                             colorIndex: m.avatarColorIndex.map { UInt8(clamping: $0) }, imageKey: nil, avatarVersion: 0)
         }
         var card = agentCard(p)
         if !m.handle.isEmpty, m.handle != "agent" { card.handle = m.handle }
