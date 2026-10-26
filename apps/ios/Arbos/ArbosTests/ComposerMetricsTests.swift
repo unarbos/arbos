@@ -24,8 +24,9 @@ final class ComposerMetricsTests: XCTestCase {
         XCTAssertEqual(Theme.composerInset, 31, "keyboard down keeps the 2026-10-15 reading")
         let fieldWidth = 420 - Theme.composerInsetKeyboard * 2 - Theme.plusButton - Theme.plusFieldGap
         XCTAssertEqual(fieldWidth, 326)
-        // Other text fields (Settings, search, secrets) did not grow with the composer.
-        XCTAssertEqual(Theme.fieldHeight, 42)
+        // Since [feedback iphone-header-composer-sizing-2026-10-26] every other field, pill
+        // and disc is the composer's size (`Controls`, `ControlMetricsTests`).
+        XCTAssertEqual(Theme.fieldHeight, Theme.composerHeight)
     }
 
     func testPlusGlyphIsGroksSize() {
