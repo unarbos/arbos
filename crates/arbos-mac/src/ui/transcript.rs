@@ -28,6 +28,7 @@ use crate::ui::icons::icon;
 use crate::ui::markdown::{
     self, has_fenced_code, inline_plain, inline_spans, polish_assistant_prose, split_blocks, Block,
 };
+use crate::ui::math;
 use crate::ui::mention::{self, Mentions};
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
@@ -341,6 +342,7 @@ pub fn one_line(text: &str) -> String {
                 .into_iter()
                 .chain(rows.into_iter().flatten())
                 .collect(),
+            Block::Math { source } => vec![math::plain(&source)],
         };
         for piece in pieces {
             // Spans are joined before splitting so "`site/launch/`;" stays one
@@ -1848,7 +1850,7 @@ impl Transcript {
                 .rounded_full()
                 .overflow_hidden()
                 .child(
-                    gpui::img(image)
+                    gpui::img(crate::ui::picture_fit::fit(&image, SENDER_DISC))
                         .size(px(SENDER_DISC))
                         .rounded_full()
                         .object_fit(gpui::ObjectFit::Cover),
@@ -2964,6 +2966,7 @@ fn block_text_len(block: &Block) -> usize {
             header.iter().map(|s| s.len() + 1).sum::<usize>()
                 + rows.iter().flatten().map(|s| s.len() + 1).sum::<usize>()
         }
+        Block::Math { source } => source.len(),
     }
 }
 
@@ -3165,7 +3168,8 @@ fn is_json_block(block: &Block) -> bool {
         | Block::Heading { .. }
         | Block::Bullets(_)
         | Block::Numbered(_)
-        | Block::Table { .. } => return false,
+        | Block::Table { .. }
+        | Block::Math { .. } => return false,
     };
     let t = text.trim();
     (t.starts_with('{') || t.starts_with('['))
@@ -3985,6 +3989,14 @@ fn block_segments(block: &Block, literal: bool) -> Vec<Segment> {
             out
         }
         Block::Code { code, .. } => vec![seg(String::new(), code.clone())],
+        Block::Math { source } => vec![seg(
+            String::new(),
+            if literal {
+                source.clone()
+            } else {
+                math::plain(source)
+            },
+        )],
     }
 }
 
@@ -4184,7 +4196,8 @@ fn user_message_body(
             | Block::Heading { .. }
             | Block::Bullets(_)
             | Block::Numbered(_)
-            | Block::Table { .. } => col.child(plain_text(
+            | Block::Table { .. }
+            | Block::Math { .. } => col.child(plain_text(
                 &block_plain(block, true),
                 color,
                 theme,
@@ -4260,15 +4273,17 @@ fn inline_runs(
     };
     for span in spans {
         let style = span.style;
-        let mut font = if style.code {
+        let mut font = if style.math {
+            math_font(theme, style.italic, style.bold)
+        } else if style.code {
             mono.clone()
         } else {
             sans.clone()
         };
-        if style.bold {
+        if style.bold && !style.math {
             font.weight = STRONG_WEIGHT;
         }
-        if style.italic {
+        if style.italic && !style.math {
             font.style = gpui::FontStyle::Italic;
         }
         let start = full.len();
@@ -4559,7 +4574,69 @@ fn render_block(
         Block::Code { lang, code } => code_fence_card(
             row_id, lang, code, theme.text, theme, bubble, starts[0], veil, now, copy,
         ),
+        // Display math: typeset, a size up, centred on its own line (KaTeX's
+        // display mode in Grok Bot).
+        Block::Math { source } => {
+            let (full, runs) = math_runs(source, theme.text, theme);
+            let runs = match veil {
+                Some(veil) => apply_veil(runs, &veil.spans(now), 0),
+                None => runs,
+            };
+            base.flex()
+                .justify_center()
+                .text_size(px(CHAT_BODY * DISPLAY_MATH_SCALE))
+                .line_height(px(CHAT_LINE_HEIGHT * DISPLAY_MATH_SCALE))
+                .py(px(4.0))
+                .debug_selector(|| "display-math".into())
+                .child(bubble.text(starts[0], full, runs))
+                .into_any_element()
+        }
     }
+}
+
+/// Display math is this much larger than body text.
+const DISPLAY_MATH_SCALE: f32 = 1.15;
+
+/// The math face for an inline or display run: the serif family with its
+/// glyph fallbacks, italic for variables, bold for `\mathbf`.
+fn math_font(theme: &Theme, italic: bool, bold: bool) -> gpui::Font {
+    gpui::Font {
+        family: theme.font_math.into(),
+        features: Default::default(),
+        fallbacks: Some(gpui::FontFallbacks::from_fonts(Theme::math_fallbacks())),
+        weight: if bold {
+            FontWeight::BOLD
+        } else {
+            FontWeight::NORMAL
+        },
+        style: if italic {
+            gpui::FontStyle::Italic
+        } else {
+            gpui::FontStyle::Normal
+        },
+    }
+}
+
+/// A display-math block's text and runs.
+fn math_runs(source: &str, color: gpui::Hsla, theme: &Theme) -> (String, Vec<TextRun>) {
+    let mut full = String::new();
+    let mut runs = Vec::new();
+    for run in math::typeset(source) {
+        runs.push(TextRun {
+            len: run.text.len(),
+            font: math_font(
+                theme,
+                run.style == math::MathStyle::Italic,
+                run.style == math::MathStyle::Bold,
+            ),
+            color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        });
+        full.push_str(&run.text);
+    }
+    (full, runs)
 }
 
 /// A frame whose content scrolls sideways only when the pointer's wheel or

@@ -51,7 +51,7 @@ pub fn avatar(image: Option<Arc<RenderImage>>, person: &Person, size: f32, theme
         .justify_center();
     match image {
         Some(image) => base.child(
-            gpui::img(image)
+            gpui::img(crate::ui::picture_fit::fit(&image, size))
                 .size(px(size))
                 .rounded_full()
                 .object_fit(gpui::ObjectFit::Cover),
@@ -101,15 +101,7 @@ pub fn new_chat_sheet(
     let servers_available = s.servers_available;
     // Servers hold people only: no agent rows in their picker.
     let my_agents: Vec<Project> = if group_mode && !add_to.as_ref().is_some_and(|t| t.is_server) {
-        let q = typed.to_lowercase();
-        s.my_projects()
-            .filter(|p| {
-                q.is_empty()
-                    || p.name.to_lowercase().contains(&q)
-                    || Project::mention_slug(&p.name).contains(&q)
-            })
-            .cloned()
-            .collect()
+        agent_picker_rows(s.my_projects().cloned().collect(), &query)
     } else {
         Vec::new()
     };
@@ -1417,6 +1409,57 @@ pub fn project_members_popover(
         .top(px(crate::ui::theme::TAB_BAR_HEIGHT + 6.0))
         .right(px(right))
         .child(frosted(PANEL_RADIUS, MENU_BLUR, card))
+}
+
+/// The agent rows of the New group / Add members picker for what was typed:
+/// my agents through the shared matcher (name, @slug, description), best
+/// first, list order inside a tie; an empty query keeps them all.
+pub fn agent_picker_rows(agents: Vec<Project>, query: &str) -> Vec<Project> {
+    use arbos_core::search::{filter, normalize_query, Fields};
+    filter(agents, &normalize_query(query), |p| {
+        Fields::new(p.name.clone(), Project::mention_slug(&p.name))
+            .with_title(p.description.clone().unwrap_or_default())
+    })
+}
+
+#[cfg(test)]
+mod agent_picker_tests {
+    //! [feedback shared-search-matcher-mac-2026-10-26]: the agent rows of the
+    //! group picker used a lower-cased substring; now the shared matcher.
+    use super::*;
+
+    fn agent(name: &str, description: &str) -> Project {
+        Project {
+            id: format!("p-{name}"),
+            name: name.into(),
+            description: (!description.is_empty()).then(|| description.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn names(v: &[Project]) -> Vec<&str> {
+        v.iter().map(|p| p.name.as_str()).collect()
+    }
+
+    #[test]
+    fn agents_match_name_slug_or_description_ranked() {
+        let all = vec![
+            agent("Comms", "Research assistant"),
+            agent("Research Bot", ""),
+            agent("Affine Research", ""),
+            agent("Doug", ""),
+        ];
+        assert_eq!(
+            names(&agent_picker_rows(all.clone(), "res")),
+            ["Research Bot", "Affine Research", "Comms"]
+        );
+        assert_eq!(
+            names(&agent_picker_rows(all.clone(), "@affine-res")),
+            ["Affine Research"]
+        );
+        assert_eq!(names(&agent_picker_rows(all.clone(), "")), names(&all));
+        assert!(agent_picker_rows(all, "zzq").is_empty());
+    }
 }
 
 #[cfg(test)]

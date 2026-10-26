@@ -4,8 +4,10 @@
 //! opens the 1:1 DM, or starts it through the same `/chats/dm` path the New
 //! Message sheet uses; never on your own pane, never when you blocked them),
 //! one tab pill Links | Groups, the list, and a single red "Block user" row.
-//! Nothing else: no last-seen line, no call / mute / search / more, no
-//! username field, no Add members (adding people starts in groups).
+//! When opened from a people chat (`space_id`), an **Add your agent** row
+//! sits above Block so a guest can bring their agent into that shared chat
+//! ([feedback app-01M5WKBR85JVW1KKJH96FWZVK5]). No Add members here —
+//! adding people starts in groups.
 
 use gpui::{prelude::*, Context, Div, ElementId, SharedString, Stateful};
 
@@ -48,7 +50,7 @@ pub(crate) fn shows_message(me: bool, blocked: bool) -> bool {
 
 pub(super) fn page(
     handle: &str,
-    _space_id: Option<&str>,
+    space_id: Option<&str>,
     shell: &Shell,
     cx: &mut Context<Shell>,
 ) -> Option<Stateful<Div>> {
@@ -197,19 +199,40 @@ pub(super) fn page(
         }
     };
 
-    // ----- the one action: Block user / Unblock ------------------------------------
-    // The label comes from the relay's block list (#1545), so it is right on
-    // re-open and relaunch; the pane stays open so the flip is visible.
-    let footer = if me {
-        Vec::new()
-    } else {
+    // ----- actions: Add your agent (from a shared chat) · Block / Unblock ----------
+    // Add your agent only when this pane was opened from a people chat — that
+    // is the chat the agent joins ([feedback app-01M5WKBR85JVW1KKJH96FWZVK5]).
+    // The Block label comes from the relay's block list (#1545), so it is right
+    // on re-open and relaunch; the pane stays open so the flip is visible.
+    let mut footer: Vec<Section> = Vec::new();
+    if space_id.is_some() {
+        footer.push(Section::Card(vec![kit::row(
+            "profile-add-agent",
+            kit::Leading::Glyph("sparkles"),
+            "Add your agent",
+            Some("Bring one of yours into this chat".into()),
+            None,
+            None,
+            false,
+            &theme,
+        )
+        .cursor_pointer()
+        .hover(|s| s.bg(theme.surface_2))
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.members_open = false;
+            this.add_agent_open = true;
+            cx.notify();
+        }))
+        .into_any_element()]));
+    }
+    if !me {
         let row = if blocked {
             kit::action_row("profile-block", block_row_label(true), theme.accent, &theme)
         } else {
             kit::danger_row("profile-block", block_row_label(false), &theme)
         };
         let target = person.clone();
-        vec![Section::Card(vec![row
+        footer.push(Section::Card(vec![row
             .on_click(cx.listener(move |this, _, _, cx| {
                 let target = target.clone();
                 this.state.update(cx, |s, cx| {
@@ -220,14 +243,14 @@ pub(super) fn page(
                     }
                 });
             }))
-            .into_any_element()])]
-    };
+            .into_any_element()]));
+    }
 
     Some(pane::render(
         ProfilePane {
             page: ProfilePage::User {
                 handle: handle.to_string(),
-                space_id: _space_id.map(str::to_string),
+                space_id: space_id.map(str::to_string),
             },
             hero,
             tabs: &TABS,
