@@ -7427,14 +7427,36 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             };
             let shared = shared.clone();
             let target = target.clone();
+            // Rig (error-state shots): a prompt with "timeout" answers the relay's 504 sentence
+            // after 2 s; one with "slow" paints for 25 s first (the progress state).
+            let lower = prompt.to_lowercase();
+            let fail = lower.contains("timeout");
+            let wait_ms = if lower.contains("slow") {
+                25_000
+            } else if fail {
+                2_000
+            } else {
+                1_400
+            };
             tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(1400)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                if fail {
+                    let _ = shared.events.send(SyncEvent::ImageGenerated {
+                        target,
+                        image_key: None,
+                        url: None,
+                        error: Some("Couldn't generate the image. The server took too long.".into()),
+                        detail: Some("HTTP 504 avatar_timeout — gpt-image-1-mini: operation timed out after 40 s (attempt 2 of 2); relay budget 75 s".into()),
+                    });
+                    return;
+                }
                 emit_avatar(&shared, &url);
                 let _ = shared.events.send(SyncEvent::ImageGenerated {
                     target,
                     image_key: Some(key),
                     url: Some(url),
                     error: None,
+                    detail: None,
                 });
             });
             true
