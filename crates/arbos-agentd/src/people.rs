@@ -49,6 +49,11 @@ pub struct PeopleChatInfo {
     pub slug: String,
     /// `dm` or `group` from the relay.
     pub kind: String,
+    /// The owner's current name from the relay profile (#1895's owner block) at the time this
+    /// snapshot was taken (every poll). One owner, found by `owner_user`, named by this — never
+    /// by a row's `senderName` of the time (Hezbola, 2026-10-26: "the chat uses two names for
+    /// the owner, Arbos and Jacob" — old rows said Arbos, the profile said Jacob).
+    pub owner_address: Option<String>,
 }
 
 impl PeopleChatInfo {
@@ -123,6 +128,13 @@ impl PeopleChatInfo {
 
     /// How to speak to / about this person: display name, else bare handle (no `@`).
     fn spoken_name_of(&self, user_id: &str) -> String {
+        if user_id == self.owner_user {
+            if let Some(a) = self.owner_address.as_deref().map(str::trim) {
+                if !a.is_empty() {
+                    return a.to_owned();
+                }
+            }
+        }
         self.members
             .iter()
             .find(|m| m["member"].as_str() == Some(&format!("user:{user_id}")))
@@ -237,17 +249,27 @@ fn author_handle(msg: &MessageView, info: &PeopleChatInfo, user_id: Option<&str>
         .unwrap_or_else(|| UNKNOWN_SPOKEN.to_owned())
 }
 
-/// Spoken name for a human row's author: `senderName`, else the roster's display name / handle
-/// for `user_id`, else the row's handle, else `a member`.
+/// Spoken name for a human row's author, resolved by identity, live: the owner (by user id)
+/// is the profile's current name; another member is the roster's current display name / handle;
+/// only an author the roster does not know keeps the row's `senderName` label, else the row's
+/// handle, else `a member`. A row's `senderName` is the label one device sent at the time — it
+/// must never make one person two names across a transcript.
 fn author_spoken(msg: &MessageView, info: &PeopleChatInfo, user_id: Option<&str>) -> String {
+    if let (Some(u), Some(owner)) = (user_id, info.owner_address.as_deref()) {
+        if u == info.owner_user && !owner.trim().is_empty() {
+            return owner.trim().to_owned();
+        }
+    }
     let from_roster = user_id.and_then(|u| {
         info.members
             .iter()
             .find(|m| m["member"].as_str() == Some(&format!("user:{u}")))
             .map(person_spoken_name)
     });
-    let fallback = from_roster.unwrap_or_else(|| author_handle(msg, info, user_id));
-    message_spoken_name(msg, &fallback)
+    match from_roster {
+        Some(name) => name,
+        None => message_spoken_name(msg, &author_handle(msg, info, user_id)),
+    }
 }
 
 /// Prefer display `name`; else bare `handle`. Never `@handle`.
@@ -1087,6 +1109,7 @@ impl Agent {
                     .and_then(Value::as_str)
                     .unwrap_or("dm")
                     .to_owned(),
+                owner_address: self.people.owner_address_name(),
                 members,
             };
             let fresh = self
@@ -2508,6 +2531,86 @@ mod tests {
         );
     }
 
+    /// Hezbola, 2026-10-26: "the chat uses two names for the owner, Arbos and Jacob". Old rows
+    /// carried `senderName: "Arbos"` (the GitHub-seeded label of the time), newer ones "Jacob";
+    /// the transcript lines must name one owner, by id, with the current profile name.
+    #[test]
+    fn one_owner_one_current_name_across_the_transcript() {
+        let info = PeopleChatInfo {
+            members: vec![
+                json!({ "member": "user:gh_268993031", "handle": "unarbos", "name": "Jacob" }),
+                json!({ "member": "user:gh_9", "handle": "ken", "name": "Ken" }),
+                json!({ "member": "agent:01HEZ", "handle": "hezbola" }),
+            ],
+            owner_user: "gh_268993031".into(),
+            slug: "hezbola".into(),
+            kind: "group".into(),
+            owner_address: Some("Jacob".into()),
+            ..Default::default()
+        };
+        let row = |id: &str, extra: Value, text: &str| -> MessageView {
+            let mut v = json!({ "id": id, "role": "user", "status": "done", "parts": [{ "kind": "text", "text": text }] });
+            for (k, val) in extra.as_object().unwrap() {
+                v[k] = val.clone();
+            }
+            serde_json::from_value(v).unwrap()
+        };
+        let old = row(
+            "m1",
+            json!({ "sender": "user:gh_268993031", "senderName": "Arbos", "senderHandle": "unarbos" }),
+            "keep up the roleplay",
+        );
+        let newer = row(
+            "m2",
+            json!({ "sender": "user:gh_268993031", "senderName": "Jacob", "senderHandle": "unarbos" }),
+            "progress update?",
+        );
+        let ken = row(
+            "m3",
+            json!({ "sender": "user:gh_9", "senderName": "Kenji", "senderHandle": "ken" }),
+            "hi all",
+        );
+        let guest_unknown = row(
+            "m4",
+            json!({ "senderName": "Priya N.", "senderHandle": "priya" }),
+            "hello",
+        );
+        let cur = row(
+            "m5",
+            json!({ "sender": "user:gh_268993031", "senderName": "Arbos" }),
+            "you have two owners?",
+        );
+        let lines = vec![old, newer, ken, guest_unknown, cur];
+        let ctx = recent_people_context(&lines, "m5", 10, &info);
+        assert_eq!(
+            ctx[0]["from"], "Jacob",
+            "an old row's label does not become a second owner"
+        );
+        assert_eq!(ctx[1]["from"], "Jacob");
+        assert_eq!(
+            ctx[2]["from"], "Ken",
+            "a roster member is named from the roster, not the row"
+        );
+        assert_eq!(
+            ctx[3]["from"], "Priya N.",
+            "someone the roster does not know keeps the row's label"
+        );
+        assert_eq!(info.spoken_name_of("gh_268993031"), "Jacob");
+        // The profile name wins even when the roster snapshot is older than the rename.
+        let stale_roster = PeopleChatInfo {
+            members: vec![
+                json!({ "member": "user:gh_268993031", "handle": "unarbos", "name": "Arbos" }),
+            ],
+            owner_address: Some("Jacob".into()),
+            ..info.clone()
+        };
+        assert_eq!(stale_roster.spoken_name_of("gh_268993031"), "Jacob");
+        assert_eq!(
+            author_spoken(&lines[0], &stale_roster, Some("gh_268993031")),
+            "Jacob"
+        );
+    }
+
     #[test]
     fn recent_context_stops_at_current_and_caps() {
         let mut lines = Vec::new();
@@ -2563,6 +2666,7 @@ mod attribution_tests {
             owner_user: "gh_owner".into(),
             slug: "lane-a".into(),
             kind: "group".into(),
+            owner_address: None,
         }
     }
 
@@ -2696,6 +2800,7 @@ mod gate_record_tests {
                 owner_user: "gh_1".into(),
                 slug: "doug".into(),
                 kind: "group".into(),
+                owner_address: None,
             },
         );
         let host = agent.sync.open_room(chat).await.unwrap();

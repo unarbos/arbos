@@ -458,6 +458,22 @@ impl Supervisor {
                     // addresses the owner from it, live, never from a row's `senderName`.
                     if let Some(o) = e.get("owner").or_else(|| listing.get("owner")) {
                         w.agent.people.set_owner_profile(o);
+                        let names: Vec<String> = ["address_name", "name"]
+                            .iter()
+                            .filter_map(|k| o.get(*k).and_then(Value::as_str))
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_owned)
+                            .chain(
+                                o.get("former_names")
+                                    .and_then(Value::as_array)
+                                    .into_iter()
+                                    .flatten()
+                                    .filter_map(Value::as_str)
+                                    .map(str::to_owned),
+                            )
+                            .collect();
+                        w.agent.memory.set_owner_names(names);
                     }
                     w.agent.note_people_chats(&people_chats, true).await;
                     seen.push(w.project_id.clone());
