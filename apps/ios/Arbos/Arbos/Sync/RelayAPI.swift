@@ -486,7 +486,8 @@ final class RelayAPI {
         return key
     }
 
-    /// `PUT /me/avatar` (raw JPEG) → `MeUserResponseDto`; updates the signed-in user's picture.
+    /// `PUT /me/avatar` (raw PNG or JPEG master) → `MeUserResponseDto`; updates the signed-in
+    /// user's picture. The relay checks that the type and the bytes agree.
     func putMeAvatar(jpeg: Data) async throws -> String {
         guard let url = URL(string: "\(endpoint.httpUrl)/me/avatar") else {
             throw RelayError(status: 0, message: "Bad relay URL")
@@ -494,7 +495,7 @@ final class RelayAPI {
         var req = URLRequest(url: url)
         req.httpMethod = "PUT"
         req.setValue("Bearer \(token())", forHTTPHeaderField: "Authorization")
-        req.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
+        req.setValue(PictureMaster.mime(jpeg), forHTTPHeaderField: "Content-Type")
         req.httpBody = jpeg
         let (body, response) = try await session.data(for: req)
         guard let http = response as? HTTPURLResponse, http.statusCode < 400 else {
