@@ -21,6 +21,7 @@ use gpui::{
 use crate::app::{AppEvent, AppState};
 use crate::audio::{self, Pcm, RATE};
 use crate::model::{now_ms, Id, Message, MessageStatus, Role};
+use crate::sync::user_error::UserError;
 use crate::ui::frost::{frosted, PANEL_BLUR};
 use crate::ui::theme::Theme;
 
@@ -839,7 +840,15 @@ impl Voice {
         let took = now_ms().saturating_sub(pending.started_at);
         let text = text.trim();
         if let Some(err) = error {
-            self.set_notice(format!("Transcription failed: {err}"));
+            // A failure is the composer's note (the shared error element), not a muted line.
+            let error = UserError::from_text("transcribe your memo", err);
+            self.notice = None;
+            self.state.update(cx, |s, cx| {
+                if let Some(chat) = s.active_chat_id() {
+                    s.set_send_error(chat, error);
+                }
+                cx.notify();
+            });
             if let Some(call) = &mut self.call {
                 call.phase = CallPhase::Listening;
             }
@@ -958,7 +967,11 @@ impl Voice {
         };
         self.mock = mock;
         if let Some(err) = error {
-            self.fail_speech(&message_id, format!("Speech failed: {err}"), cx);
+            self.fail_speech(
+                &message_id,
+                UserError::from_text("play the reply", err).sentence(),
+                cx,
+            );
             return;
         }
         if !mime.starts_with("audio/") && audio::decode_wav(&bytes).is_none() {
@@ -1019,7 +1032,12 @@ impl Voice {
     fn play(&mut self, message_id: Id, bytes: Arc<Vec<u8>>, cx: &mut Context<Self>) {
         self.stop_playback();
         let Some(pcm) = audio::decode_wav(&bytes) else {
-            self.fail_speech(&message_id, "Reply audio could not be decoded".into(), cx);
+            self.fail_speech(
+                &message_id,
+                UserError::from_text("play the reply", "Reply audio could not be decoded")
+                    .sentence(),
+                cx,
+            );
             return;
         };
         let secs = pcm.duration_secs();
@@ -1033,7 +1051,11 @@ impl Voice {
         let silent = matches!(self.player, Some(Player::Silent) | None);
         if let Some(player) = &mut self.player {
             if let Err(err) = player.play(&bytes) {
-                self.fail_speech(&message_id, format!("Playback failed: {err}"), cx);
+                self.fail_speech(
+                    &message_id,
+                    UserError::from_text("play the reply", err.to_string()).sentence(),
+                    cx,
+                );
                 return;
             }
         }
