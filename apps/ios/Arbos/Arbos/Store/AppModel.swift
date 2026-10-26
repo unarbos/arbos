@@ -3625,19 +3625,13 @@ final class AppModel: ObservableObject {
 
     /// D92 amendment: the Generate tab — the relay paints one picture and answers with its key.
     func generateProjectAvatar(projectId: Id, prompt: String) async throws -> String {
-        if isFixture {
-            try? await Task.sleep(nanoseconds: 1_200_000_000)
-            return "fixture-gen-\(prompt.lowercased().replacingOccurrences(of: " ", with: "-"))"
-        }
+        if isFixture { return try await Self.fixtureGenerate(prompt) }
         return try await api.generateProjectAvatar(projectId, prompt: prompt)
     }
 
     /// The same for a people group's picture (any member) — the key lands in `people:{chat}`.
     func generateGroupAvatar(chatId: String, prompt: String) async throws -> String {
-        if isFixture {
-            try? await Task.sleep(nanoseconds: 1_200_000_000)
-            return "fixture-gen-\(prompt.lowercased().replacingOccurrences(of: " ", with: "-"))"
-        }
+        if isFixture { return try await Self.fixtureGenerate(prompt) }
         return try await api.generateGroupAvatar(chatId, prompt: prompt)
     }
 
@@ -3696,13 +3690,25 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// The fixture's "generation": a key named after the prompt after 1.2 s. Rig (error-state
+    /// shots): a prompt with "timeout" fails with the relay's 504 sentence after 2 s, one with
+    /// "slow" paints 25 s first (the progress state).
+    static func fixtureGenerate(_ prompt: String) async throws -> String {
+        let lower = prompt.lowercased()
+        if lower.contains("slow") { try? await Task.sleep(nanoseconds: 25_000_000_000) }
+        if lower.contains("timeout") {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            throw RelayError(status: 504, message: "Couldn't generate the image. The server took too long.", type: "avatar_timeout",
+                             detail: "gpt-image-1-mini: operation timed out after 40 s (attempt 2 of 2); relay budget 75 s")
+        }
+        try? await Task.sleep(nanoseconds: 1_200_000_000)
+        return "fixture-gen-\(lower.replacingOccurrences(of: " ", with: "-"))"
+    }
+
     /// The avatar picker's Generate tab for my own picture: the relay paints one picture into
     /// my `users:{id}` slot and answers with its key (not yet set).
     func generateMyAvatar(prompt: String) async throws -> String {
-        if isFixture {
-            try? await Task.sleep(nanoseconds: 1_200_000_000)
-            return "fixture-gen-\(prompt.lowercased().replacingOccurrences(of: " ", with: "-"))"
-        }
+        if isFixture { return try await Self.fixtureGenerate(prompt) }
         return try await api.generateMyAvatar(prompt: prompt)
     }
 
@@ -5635,10 +5641,7 @@ final class AppModel: ObservableObject {
 
     /// Generate before the entity exists: into my own slot (`POST /me/avatar/generate`, #1789).
     func generateDraftAvatar(prompt: String) async throws -> String {
-        if isFixture {
-            try? await Task.sleep(nanoseconds: 1_200_000_000)
-            return "fixture-gen-\(prompt.lowercased().replacingOccurrences(of: " ", with: "-"))"
-        }
+        if isFixture { return try await Self.fixtureGenerate(prompt) }
         do {
             return try await api.generateMyAvatar(prompt: prompt)
         } catch let e as RelayError where e.status == 404 {
