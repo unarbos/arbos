@@ -17,7 +17,7 @@ use gpui::{
 use crate::app::{AppEvent, AppState, DetailsTarget};
 use crate::model::{
     now_ms, Attachment, AttachmentKind, Chat, Id, Message, MessageStatus, Part, Person, Project,
-    Role, SpaceKind, StatusKind, TurnKind,
+    ReplyRef, Role, SpaceKind, StatusKind, TurnKind,
 };
 use crate::ui::approve::{approval_card, ApprovalView};
 use crate::ui::attachments;
@@ -260,10 +260,21 @@ impl HoverFade {
 /// replied-to message's first words in quotes. Clicking it reveals the original.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Quote {
-    /// The message replied to (`replyTo` on the row).
+    /// The message replied to (`replyTo` on the row, or `replyRef.messageId`).
     pub message_id: Id,
     /// Its first line, cut to [`QUOTE_CHARS`] characters with an ellipsis.
     pub text: String,
+    /// Reply in DM (#1835): the original lives in another chat — its address
+    /// and the "Replying to <who> in <chat>" line. `None` for an in-chat reply.
+    pub source: Option<QuoteSource>,
+}
+
+/// Where a cross-chat quote came from.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct QuoteSource {
+    pub chat_id: Id,
+    /// "Replying to Jacob in Arbonites".
+    pub label: String,
 }
 
 /// The quote header shows this many characters of the original before "…".
@@ -281,7 +292,36 @@ impl Quote {
         Self {
             message_id: reply_to.to_owned(),
             text,
+            source: None,
         }
+    }
+
+    /// The quote for a cross-chat reply: drawn from the row's own snapshot, so
+    /// it needs nothing from the source chat.
+    pub fn for_reply_ref(r: &ReplyRef) -> Self {
+        let text = if r.text.trim().is_empty() {
+            "Message".to_owned()
+        } else {
+            first_words(&one_line(&r.text), QUOTE_CHARS)
+        };
+        Self {
+            message_id: r.message_id.clone(),
+            text,
+            source: Some(QuoteSource {
+                chat_id: r.chat_id.clone(),
+                label: reply_ref_label(r),
+            }),
+        }
+    }
+}
+
+/// "Replying to Jacob in Arbonites" — what a cross-chat quote says above the text.
+pub fn reply_ref_label(r: &ReplyRef) -> String {
+    let place = r.chat_title.trim();
+    if place.is_empty() {
+        format!("Replying to {}", r.who())
+    } else {
+        format!("Replying to {} in {place}", r.who())
     }
 }
 
@@ -1476,19 +1516,29 @@ impl Transcript {
     /// Grok's quote header at the top of a reply bubble: speech-bubble glyph,
     /// then the original's first words in quotes, one line, truncated. Click
     /// → scroll to the original and highlight it for a moment.
-    fn quote_header(&self, row_id: &str, quote: Quote, text_color: gpui::Hsla) -> Stateful<Div> {
+    fn quote_header(
+        &self,
+        row_id: &str,
+        quote: Quote,
+        text_color: gpui::Hsla,
+        cx: &App,
+    ) -> Stateful<Div> {
         let state = self.state.clone();
         let chat_id = self.chat_id.clone();
         let target = quote.message_id.clone();
         let muted = Theme::with_alpha(text_color, 0.72);
-        div()
-            .id(SharedString::from(format!("{row_id}#quote")))
+        // Reply in DM (#1835): the quote names its chat; it is a link only when
+        // the viewer can open that chat (a member), else just the words.
+        let source = quote.source.clone();
+        let linkable = match &source {
+            Some(src) => self.state.read(cx).is_member_of_chat(&src.chat_id),
+            None => true,
+        };
+        let quote_line = div()
             .flex()
             .items_center()
             .gap(px(6.0))
             .min_w_0()
-            .cursor_pointer()
-            .hover(|s| s.opacity(0.8))
             .child(icon("bubble", 12.0, muted))
             .child(
                 div()
@@ -1498,12 +1548,48 @@ impl Transcript {
                     .line_height(px(LINE_HEIGHT - 4.0))
                     .text_color(muted)
                     .child(format!("“{}”", quote.text)),
-            )
-            .on_click(move |_, _, cx| {
-                if let Some(chat_id) = chat_id.clone() {
-                    let target = target.clone();
-                    state.update(cx, |s, cx| s.reveal_reply(chat_id, target, cx));
-                }
+            );
+        let selector = format!("reply-quote-{row_id}");
+        let source_selector = format!("reply-quote-source-{row_id}");
+        div()
+            .id(SharedString::from(format!("{row_id}#quote")))
+            .debug_selector(move || selector.clone())
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .min_w_0()
+            .when(linkable, |el| el.cursor_pointer().hover(|s| s.opacity(0.8)))
+            .when_some(source.as_ref(), |el, src| {
+                el.child(
+                    div()
+                        .debug_selector(move || source_selector.clone())
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(TEXT_TINY))
+                        .line_height(px(LINE_HEIGHT - 6.0))
+                        .text_color(muted)
+                        .child(src.label.clone()),
+                )
+            })
+            .child(quote_line)
+            .when(linkable, |el| {
+                el.on_click(move |_, _, cx| match (&source, chat_id.clone()) {
+                    (Some(src), _) => {
+                        let r = ReplyRef {
+                            chat_id: src.chat_id.clone(),
+                            message_id: target.clone(),
+                            ..ReplyRef::default()
+                        };
+                        state.update(cx, |s, cx| {
+                            s.reveal_reply_ref(&r, cx);
+                        });
+                    }
+                    (None, Some(chat_id)) => {
+                        let target = target.clone();
+                        state.update(cx, |s, cx| s.reveal_reply(chat_id, target, cx));
+                    }
+                    (None, None) => {}
+                })
             })
     }
 
@@ -1875,9 +1961,10 @@ impl Transcript {
             _ => None,
         };
         let r = px(BUBBLE_RADIUS);
-        let quote_header = quote
-            .filter(|_| first)
-            .map(|q| self.quote_header(row_id, q, theme.text).into_any_element());
+        let quote_header = quote.filter(|_| first).map(|q| {
+            self.quote_header(row_id, q, theme.text, cx)
+                .into_any_element()
+        });
         let bubble = self
             .menu_target(
                 div().id(SharedString::from(format!("{}#bubble", row_id))),
@@ -2015,7 +2102,7 @@ impl Transcript {
                 // would carry its quote (a forward never quotes).
                 let quote_header = match forwarded_from {
                     Some(by) => Some(forwarded_header(by, text_color)),
-                    None => quote.map(|q| self.quote_header(&row.id, q, text_color)),
+                    None => quote.map(|q| self.quote_header(&row.id, q, text_color, cx)),
                 };
                 // Triple-backtick fences render as code cards (same as agent
                 // replies); other text stays plain so "# heading" is still literal.
@@ -3164,11 +3251,20 @@ pub fn build_rows(
                     && !(has_image && is_generic_media_label(&text))
                     && forwarded.is_none();
                 if show_text || attachment_parts.is_empty() {
+                    // A cross-chat reply (Reply in DM) quotes its own snapshot;
+                    // an in-chat reply quotes the row it points at.
                     let quote = message
-                        .reply_to
-                        .as_deref()
-                        .filter(|id| !id.is_empty())
-                        .map(|id| Quote::for_reply(id, messages));
+                        .reply_ref
+                        .as_ref()
+                        .filter(|r| !r.chat_id.is_empty() && !r.message_id.is_empty())
+                        .map(Quote::for_reply_ref)
+                        .or_else(|| {
+                            message
+                                .reply_to
+                                .as_deref()
+                                .filter(|id| !id.is_empty())
+                                .map(|id| Quote::for_reply(id, messages))
+                        });
                     let delivery = delivery_state(message, is_mine);
                     let forwarded_from = message
                         .forwarded_from
@@ -7857,5 +7953,335 @@ mod delivery_tests {
             f32::from(clock.origin.x + clock.size.width) <= f32::from(pending.origin.x),
             "the clock sits outside the pending bubble"
         );
+    }
+}
+
+#[cfg(test)]
+mod reply_in_dm_tests {
+    //! Reply in DM (#1835, Jacob 2026-10-25): a DM bubble that answers a message in
+    //! another chat draws the quote header plus "Replying to <who> in <chat>", and the
+    //! click opens that chat on the original — for a member; a non-member sees the
+    //! words and nothing to follow.
+    use std::collections::{HashMap, HashSet};
+
+    use futures::future::BoxFuture;
+    use gpui::{point, Bounds, Entity, Modifiers, Pixels, TestAppContext};
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::app::AppState;
+    use crate::sync::{ClientCommand, SyncEvent, SyncSource};
+    use crate::ui::motion::PulseClock;
+    use crate::ui::shell::Shell;
+
+    struct Idle;
+
+    impl SyncSource for Idle {
+        fn name(&self) -> &'static str {
+            "idle"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            _commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    const GROUP: &str = "01GROUPARBONITES0000000000";
+    const DM: &str = "01DMWITHSAM00000000000000";
+    const ORIGINAL: &str = "01ORIGINALMSG000000000000";
+
+    fn row(chat: &str, id: &str, sender: &str, handle: &str, text: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "chatId": chat, "role": "user", "sender": sender,
+            "senderHandle": handle, "status": "done", "createdAt": at, "completedAt": at,
+            "parts": [{ "id": format!("{id}-t"), "kind": "text", "text": text }],
+        }))
+        .expect("message")
+    }
+
+    fn reply_ref(chat_id: &str, chat_title: &str, message_id: &str, text: &str) -> ReplyRef {
+        ReplyRef {
+            chat_id: chat_id.into(),
+            project_id: "people".into(),
+            message_id: message_id.into(),
+            chat_title: chat_title.into(),
+            sender: "user:gh_1".into(),
+            sender_name: "Jacob".into(),
+            sender_handle: "unconst".into(),
+            text: text.into(),
+        }
+    }
+
+    /// `build_rows` alone: a `replyRef` row quotes its snapshot and names the chat; a
+    /// `replyTo` row quotes the in-chat original and names nothing.
+    #[test]
+    fn build_rows_carries_the_quote_and_the_chat_name() {
+        let t = 1_700_000_000_000u64;
+        let mut dm_reply = row(DM, "d1", "user:gh_2", "sam", "Works", t + 1_000);
+        dm_reply.reply_ref = Some(reply_ref(
+            GROUP,
+            "Arbonites",
+            ORIGINAL,
+            "Testing reply in dm — does the quote survive?",
+        ));
+        let mut in_chat = row(DM, "d2", "user:gh_me", "me", "and this?", t + 2_000);
+        in_chat.reply_to = Some("d1".into());
+        let messages = [
+            row(DM, "d0", "user:gh_me", "me", "hi", t),
+            dm_reply,
+            in_chat,
+        ];
+        let (spoken, failed) = (HashSet::new(), HashMap::new());
+        let rows = build_rows(
+            &messages,
+            false,
+            SpeechRows {
+                enabled: false,
+                spoken: &spoken,
+                failed: &failed,
+                voice_mode: false,
+            },
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+        );
+        let quotes: Vec<Option<Quote>> = rows
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::User { quote, .. } => Some(quote.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(quotes.len(), 3);
+        assert!(quotes[0].is_none());
+        let cross = quotes[1].clone().expect("the DM reply quotes");
+        assert_eq!(cross.message_id, ORIGINAL);
+        assert_eq!(cross.text, "Testing reply in dm — does the quote survive?");
+        assert_eq!(
+            cross.source.as_ref().map(|s| s.label.as_str()),
+            Some("Replying to Jacob in Arbonites")
+        );
+        assert_eq!(
+            cross.source.as_ref().map(|s| s.chat_id.as_str()),
+            Some(GROUP)
+        );
+        let local = quotes[2].clone().expect("the in-chat reply quotes");
+        assert_eq!(local.message_id, "d1");
+        assert_eq!(local.text, "Works");
+        assert!(local.source.is_none(), "an in-chat reply names no chat");
+    }
+
+    /// Me (`gh_me`) in the Arbonites group and in a DM with Sam. Sam's DM row
+    /// answers `ORIGINAL` in the group; a second row answers a chat I am not in.
+    fn mount(
+        cx: &mut TestAppContext,
+    ) -> (
+        tokio::runtime::Runtime,
+        Entity<AppState>,
+        Entity<Shell>,
+        &mut gpui::VisualTestContext,
+    ) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| {
+            gpui_tokio::init_from_handle(cx, handle);
+            cx.set_global(Theme::dark(crate::ui::theme::Surface::Matte));
+            if !cx.has_global::<PulseClock>() {
+                PulseClock::init(cx);
+            }
+        });
+        let state = cx.new(|cx| AppState::new(Box::new(Idle), cx));
+        let now = now_ms();
+        state.update(cx, |s, cx| {
+            let sam = Person {
+                id: "gh_2".into(),
+                handle: "sam".into(),
+                name: Some("Sam Rivera".into()),
+                ..Person::default()
+            };
+            s.projects.push(Project {
+                id: GROUP.into(),
+                name: "Arbonites".into(),
+                kind: SpaceKind::Group,
+                people: vec![sam.clone()],
+                ..Project::default()
+            });
+            s.projects.push(Project {
+                id: DM.into(),
+                name: "sam".into(),
+                kind: SpaceKind::Dm,
+                people: vec![sam],
+                ..Project::default()
+            });
+            let chat = |id: &str, title: &str| -> Chat {
+                serde_json::from_value(serde_json::json!({
+                    "id": id, "project_id": id, "title": title, "is_pinned": true,
+                    "is_system": false, "unread": false, "last_message_at": now,
+                }))
+                .expect("chat")
+            };
+            s.chats.insert(GROUP.into(), vec![chat(GROUP, "Arbonites")]);
+            s.chats.insert(DM.into(), vec![chat(DM, "sam")]);
+            s.messages.insert(
+                GROUP.into(),
+                vec![
+                    row(
+                        GROUP,
+                        "g0",
+                        "user:gh_2",
+                        "sam",
+                        "morning all",
+                        now - 120_000,
+                    ),
+                    row(
+                        GROUP,
+                        ORIGINAL,
+                        "user:gh_me",
+                        "unconst",
+                        "Testing reply in dm",
+                        now - 90_000,
+                    ),
+                ],
+            );
+            let mut sams = row(DM, "d1", "user:gh_2", "sam", "Works", now - 60_000);
+            sams.reply_ref = Some(reply_ref(
+                GROUP,
+                "Arbonites",
+                ORIGINAL,
+                "Testing reply in dm",
+            ));
+            let mut outside = row(DM, "d2", "user:gh_2", "sam", "Same in ours", now - 30_000);
+            outside.reply_ref = Some(reply_ref(
+                "01NOTMYCHAT0000000000000000",
+                "Design crit",
+                "01NOTMYMSG00000000000000000",
+                "The tiers are stale",
+            ));
+            s.messages.insert(DM.into(), vec![sams, outside]);
+            s.selected_project = Some(DM.into());
+            s.active_tab.insert(GROUP.into(), GROUP.into());
+            s.active_tab.insert(DM.into(), DM.into());
+            cx.notify();
+        });
+        let (shell, vcx) = cx.add_window_view(|window, cx| Shell::new(state.clone(), window, cx));
+        vcx.run_until_parked();
+        settle(&state, &shell, vcx);
+        (rt, state, shell, vcx)
+    }
+
+    /// The transcript syncs on state notifications; give it (and the shell) a few frames.
+    fn settle(state: &Entity<AppState>, shell: &Entity<Shell>, vcx: &mut gpui::VisualTestContext) {
+        for _ in 0..3 {
+            state.update(vcx, |_, cx| cx.notify());
+            shell.update(vcx, |_, cx| cx.notify());
+            vcx.run_until_parked();
+        }
+    }
+
+    fn centre(b: Bounds<Pixels>) -> gpui::Point<Pixels> {
+        point(b.left() + b.size.width / 2.0, b.top() + b.size.height / 2.0)
+    }
+
+    #[gpui::test]
+    fn dm_bubble_draws_the_quote_with_its_chat_and_the_click_opens_the_original(
+        cx: &mut TestAppContext,
+    ) {
+        let (_rt, state, shell, vcx) = mount(cx);
+        // Both DM rows draw a quote with a source line; the transcript is the DM.
+        let drawn: Vec<(String, Option<String>, Option<String>)> =
+            shell.read_with(&*vcx, |sh, cx| {
+                sh.transcript
+                    .read(cx)
+                    .rows
+                    .iter()
+                    .filter_map(|r| match &r.kind {
+                        RowKind::User { quote: Some(q), .. } => Some((
+                            r.message_id.clone(),
+                            q.source.as_ref().map(|s| s.label.clone()),
+                            Some(q.text.clone()),
+                        )),
+                        _ => None,
+                    })
+                    .collect()
+            });
+        assert_eq!(
+            drawn,
+            vec![
+                (
+                    "d1".into(),
+                    Some("Replying to Jacob in Arbonites".into()),
+                    Some("Testing reply in dm".into())
+                ),
+                (
+                    "d2".into(),
+                    Some("Replying to Jacob in Design crit".into()),
+                    Some("The tiers are stale".into())
+                ),
+            ]
+        );
+        let first = vcx
+            .debug_bounds("reply-quote-d1#user")
+            .expect("Sam's first quote header is on screen");
+        assert!(vcx.debug_bounds("reply-quote-source-d1#user").is_some());
+        assert!(vcx.debug_bounds("reply-quote-d2#user").is_some());
+        assert!(vcx.debug_bounds("reply-quote-source-d2#user").is_some());
+        // Membership decides the link: the group is mine, Design crit is not.
+        let (member, outsider) = state.read_with(&*vcx, |s, _| {
+            (
+                s.is_member_of_chat(GROUP),
+                s.is_member_of_chat("01NOTMYCHAT0000000000000000"),
+            )
+        });
+        assert!(member && !outsider);
+
+        // Click the first quote: the group opens on the original, highlighted.
+        vcx.simulate_click(centre(first), Modifiers::default());
+        vcx.run_until_parked();
+        let (space, tab, reveal, highlight) = state.read_with(&*vcx, |s, _| {
+            (
+                s.selected_project.clone(),
+                s.active_tab.get(GROUP).cloned(),
+                s.reveal_message.clone(),
+                s.highlight_message.clone(),
+            )
+        });
+        assert_eq!(space.as_deref(), Some(GROUP), "the source chat is open");
+        assert_eq!(tab.as_deref(), Some(GROUP));
+        assert_eq!(reveal, Some((GROUP.to_owned(), ORIGINAL.to_owned())));
+        assert_eq!(highlight.as_deref(), Some(ORIGINAL));
+
+        // Back in the DM, the outsider quote is words only: the click goes nowhere.
+        state.update(vcx, |s, cx| s.select_project(DM.into(), cx));
+        settle(&state, &shell, vcx);
+        let second = vcx
+            .debug_bounds("reply-quote-d2#user")
+            .expect("the outsider quote is on screen");
+        vcx.simulate_click(centre(second), Modifiers::default());
+        vcx.run_until_parked();
+        let (space, reveal) = state.read_with(&*vcx, |s, _| {
+            (s.selected_project.clone(), s.reveal_message.clone())
+        });
+        assert_eq!(
+            space.as_deref(),
+            Some(DM),
+            "a non-member stays where they are"
+        );
+        assert_eq!(reveal, None);
+        // And the model agrees without a click.
+        let moved = state.update(vcx, |s, cx| {
+            s.reveal_reply_ref(
+                &reply_ref("01NOTMYCHAT0000000000000000", "Design crit", "x", ""),
+                cx,
+            )
+        });
+        assert!(!moved);
     }
 }

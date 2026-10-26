@@ -2,7 +2,7 @@
 //! message rides in front of their words in the **user** turn — never in the system prompt, so
 //! the byte-stable prefix (D87) and its prompt cache stay intact.
 
-use arbos_core::doc::{ChatDoc, MessageView};
+use arbos_core::doc::{ChatDoc, MessageView, ReplyRef};
 use serde_json::Value;
 
 /// Longer quoted messages are cut to this many characters (whole words) plus an ellipsis.
@@ -15,11 +15,48 @@ pub struct Me<'a> {
 }
 
 /// `[Replying to <who>: "<text>"]` for the message `msg` answers, or `None` when it answers
-/// nothing or the quoted row is gone.
+/// nothing or the quoted row is gone. A cross-chat reply ("Reply in DM", `replyRef`) quotes
+/// the snapshot the row carries and names the chat it came from, since that row is not in
+/// this doc.
 pub fn quoted_message_note(doc: &ChatDoc, msg: &MessageView, me: &Me<'_>) -> Option<String> {
+    if let Some(r) = ReplyRef::from_row(&msg.rest) {
+        return Some(render_cross_chat_note(&r, me));
+    }
     let reply_to = msg.rest.get("replyTo").and_then(Value::as_str)?;
     let quoted = doc.message(reply_to)?;
     Some(render_note(&quoted, msg, me))
+}
+
+fn render_cross_chat_note(r: &ReplyRef, me: &Me<'_>) -> String {
+    let mine = r.sender == "agent" || r.sender == format!("agent:{}", me.project_id);
+    let who = if mine {
+        format!("your earlier message (you, {})", me.name)
+    } else if r.sender.starts_with("agent") {
+        format!("{}'s message (another agent)", r.who())
+    } else {
+        format!("{}'s message", r.who())
+    };
+    let place = if r.chat_title.trim().is_empty() {
+        "another chat".to_owned()
+    } else {
+        format!("the chat \"{}\"", r.chat_title.trim())
+    };
+    let (body, cut) = excerpt(
+        if r.text.trim().is_empty() {
+            "(no text)"
+        } else {
+            r.text.trim()
+        },
+        EXCERPT_CHARS,
+    );
+    let tail = if cut {
+        " (excerpt of a longer message)"
+    } else {
+        ""
+    };
+    format!(
+        "[Replying here, privately, to {who} in {place}: \"{body}\"{tail}. That message is not in this chat; answer with it in mind.]\n\n"
+    )
 }
 
 fn render_note(quoted: &MessageView, replying: &MessageView, me: &Me<'_>) -> String {
@@ -248,5 +285,48 @@ mod tests {
         );
         assert!(render_note(&mine, &reply, &BOB)
             .starts_with("[Replying to your earlier message (you, Bob):"));
+    }
+
+    /// Reply in DM (reply-in-dm-context-2026-10-25): a `replyRef` row quotes the snapshot and
+    /// names the source chat, without needing that chat's doc; it wins over a stale `replyTo`.
+    #[test]
+    fn cross_chat_reply_quotes_the_snapshot_and_names_the_chat() {
+        let doc = ChatDoc::new(None, false);
+        let reply = view(
+            "d1",
+            "user",
+            "Works",
+            json!({
+                "sender": "user:gh_2", "senderName": "Bob",
+                "replyTo": "not-in-this-doc",
+                "replyRef": {
+                    "chatId": "01GROUP", "projectId": "people", "messageId": "01ORIG",
+                    "chatTitle": "Arbonites", "sender": "user:gh_1",
+                    "senderName": "Jacob", "senderHandle": "unconst",
+                    "text": "Testing reply in dm"
+                }
+            }),
+        );
+        let note = quoted_message_note(&doc, &reply, &BOB).expect("note");
+        assert!(
+            note.starts_with(
+                "[Replying here, privately, to Jacob's message in the chat \"Arbonites\": \"Testing reply in dm\""
+            ),
+            "{note}"
+        );
+        // My own quoted row is named as mine; another agent's as another agent's.
+        let mine = ReplyRef {
+            sender: "agent:01P1".into(),
+            text: "Done.".into(),
+            ..ReplyRef::default()
+        };
+        assert!(render_cross_chat_note(&mine, &BOB)
+            .contains("to your earlier message (you, Bob) in another chat"));
+        let theirs = ReplyRef {
+            sender: "agent:01P2".into(),
+            sender_handle: "ops".into(),
+            ..ReplyRef::default()
+        };
+        assert!(render_cross_chat_note(&theirs, &BOB).contains("to @ops's message (another agent)"));
     }
 }
