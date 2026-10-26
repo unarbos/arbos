@@ -830,7 +830,7 @@ struct ChatSession: View {
                 .padding(.horizontal, composerSideInset)
                 .animation(.easeOut(duration: 0.25), value: composerFocused)
             }
-            .padding(.top, 8)
+            .padding(.top, Theme.chatBarTopPad)
             // Grok: 18 pt between the field and the keyboard, 2 pt above the home indicator.
             .padding(.bottom, composerFocused ? Theme.composerBottomKeyboard : Theme.composerBottom)
             .background(alignment: .top) {
@@ -1183,6 +1183,14 @@ struct ChatSession: View {
                         #if DEBUG
                         if model.isFixture {
                             model.fixtureNYPostReply(chatId: chatId)
+                        }
+                        #endif
+                    case "math":
+                        // Rig: Jacob's bubble-sort turn — a Python code card, then prose
+                        // with inline `$O(n^2)$` math (fixture only).
+                        #if DEBUG
+                        if model.isFixture {
+                            model.fixtureBubbleSortReply(chatId: chatId)
                         }
                         #endif
                     case "agent-message", "agent-message-received":
@@ -1707,8 +1715,9 @@ struct ChatSession: View {
                     // Who is working is the presence row over the composer
                     // (`PresenceRow`), not a transcript row.
                     // Clears the 24 pt fade above the composer, so the last row
-                    // is never under the chat bar.
-                    Color.clear.frame(height: 28).id("bottom")
+                    // is never under the chat bar; the status row rises into it
+                    // (`Theme.presenceLift`).
+                    Color.clear.frame(height: Theme.transcriptTail).id("bottom")
                 }
                 .padding(.horizontal, 16)
                 // The avatar column follows the `+` as the composer inset animates with the keyboard.
@@ -2326,6 +2335,10 @@ struct ChatSession: View {
                     .padding(.horizontal, 16)
                     // Grok: 68 px from the picture's bottom to the composer's top.
                     .padding(.bottom, Theme.presenceBottomGap)
+                    // Grok: 42 px from the last bubble to the picture's top — the row
+                    // rises into the transcript's tail instead of stacking under it
+                    // ([feedback status-row-gap-ios-2026-10-26]).
+                    .padding(.top, -Theme.presenceLift)
             }
         }
     }
