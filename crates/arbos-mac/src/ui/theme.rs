@@ -396,6 +396,8 @@ pub struct Theme {
     pub code_bg: Hsla,
     pub font_sans: &'static str,
     pub font_mono: &'static str,
+    /// The serif face typeset math is painted in (KaTeX's look in Grok Bot).
+    pub font_math: &'static str,
 }
 
 impl Global for Theme {}
@@ -447,6 +449,7 @@ impl Theme {
             code_bg: hex_a(0x000000, 0.28),
             font_sans: Self::sans_family(),
             font_mono: Self::mono_family(),
+            font_math: Self::math_family(),
         }
     }
 
@@ -495,6 +498,7 @@ impl Theme {
             code_bg: hex_a(0x000000, 0.06),
             font_sans: Self::sans_family(),
             font_mono: Self::mono_family(),
+            font_math: Self::math_family(),
         }
     }
 
@@ -532,6 +536,26 @@ impl Theme {
             "Menlo"
         } else {
             "JetBrains Mono"
+        }
+    }
+
+    /// STIX Two ships with macOS (Supplemental fonts) and carries the maths
+    /// glyphs — ∑, ≤, ℝ, the small superscripts; Noto Serif is the Linux
+    /// stand-in. The renderer lists the fallbacks ([`Self::math_fallbacks`]).
+    fn math_family() -> &'static str {
+        if cfg!(target_os = "macos") {
+            "STIX Two Text"
+        } else {
+            "Noto Serif"
+        }
+    }
+
+    /// Faces tried for a glyph the math face lacks, then for the face itself.
+    pub fn math_fallbacks() -> Vec<String> {
+        if cfg!(target_os = "macos") {
+            vec!["STIX Two Math".into(), "Times New Roman".into()]
+        } else {
+            vec!["DejaVu Serif".into(), "Liberation Serif".into()]
         }
     }
 
