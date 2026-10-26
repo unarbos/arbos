@@ -1019,7 +1019,7 @@ impl AppState {
             link: Link::Connecting,
             room_links: HashMap::new(),
             relay_link: (LinkState::Live, 0),
-            rail_collapsed: false,
+            rail_collapsed: crate::ui::theme::SidebarCollapsed::load(),
             sidebar_width: crate::ui::theme::SidebarWidth::load(),
             sidebar_overlay: false,
             details_open: None,
@@ -4307,6 +4307,31 @@ impl AppState {
         }
     }
 
+    /// A server's picture in the collapsed rail ([feedback mac-sidebar-rail-2026-10-26]):
+    /// its channel list is one toggle away, so the click lands on the server's newest
+    /// channel (last activity), `#general` when none has spoken, and marks the server
+    /// open so expanding shows its channels.
+    pub fn enter_server_latest(&mut self, server_id: Id, cx: &mut Context<Self>) {
+        let Some(server) = self.server(&server_id).cloned() else {
+            return;
+        };
+        let newest = self
+            .matrix_snapshot
+            .channels
+            .iter()
+            .filter(|c| c.server_id == server.id && c.last_ts > 0)
+            .max_by_key(|c| c.last_ts)
+            .and_then(|c| server.channels.iter().find(|ch| ch.id == c.channel_id))
+            .or_else(|| server.general())
+            .cloned();
+        self.open_server = Some(server_id.clone());
+        self.sidebar_overlay = false;
+        match newest {
+            Some(channel) => self.select_channel(server_id, channel.id.clone(), cx),
+            None => cx.notify(),
+        }
+    }
+
     /// Back arrow at the top of the channel list: the chat list again. The channel in the
     /// centre stays until a chat is picked.
     pub fn close_server_pane(&mut self, cx: &mut Context<Self>) {
@@ -6051,13 +6076,16 @@ impl AppState {
 
     /// ⌘B / the sidebar collapse control (next to "+") / the header expand
     /// button when the rail is hidden. In the narrow band the sidebar cannot
-    /// dock, so it floats as an overlay instead; otherwise it collapses or returns.
+    /// dock, so it floats as an overlay instead; otherwise it collapses to the
+    /// icon rail or returns, and the choice is saved
+    /// ([feedback mac-sidebar-rail-2026-10-26]).
     pub fn toggle_rail(&mut self, narrow: bool, cx: &mut Context<Self>) {
         if narrow {
             self.sidebar_overlay = !self.sidebar_overlay;
         } else {
             self.rail_collapsed = !self.rail_collapsed;
             self.sidebar_overlay = false;
+            crate::ui::theme::SidebarCollapsed::save(self.rail_collapsed);
         }
         cx.notify();
     }
