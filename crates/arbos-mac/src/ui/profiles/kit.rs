@@ -21,7 +21,8 @@ use gpui::{
 use crate::ui::glass;
 use crate::ui::icons::icon;
 use crate::ui::identity;
-use crate::ui::theme::{Theme, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
+use crate::ui::sidebar::{DISC_HOVER_LIFT, DISC_PRESSED_LIFT};
+use crate::ui::theme::{Theme, CONTROL, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
 /// Row height, side inset, gap between leading and text. Grok Bot's pane
 /// cards ([feedback info-pane-chrome-2026-10-24], `grok-right-pane-details.png`
@@ -296,6 +297,46 @@ pub fn action_row(
         .text_color(color)
         .cursor_pointer()
         .hover(|s| s.bg(theme.surface_2))
+        .child(label.to_string())
+}
+
+/// The hero's action pill ("Message" on a person's pane,
+/// [feedback profile-message-button-mac-2026-10-25]): one of the Grok button
+/// family — [`CONTROL`] 36 tall, a capsule on the discs' `surface_2` fill,
+/// glyph and 13 pt semibold label in `text`; hover and pressed lift the fill
+/// in lightness like the footer disc (the chip rule: brighter under the
+/// pointer, brighter still while down).
+pub const PILL_PAD_X: f32 = 18.0;
+pub const PILL_GLYPH: f32 = 17.0;
+pub const PILL_GAP: f32 = 7.0;
+
+pub fn pill_button(
+    id: &'static str,
+    glyph: &'static str,
+    label: &str,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let hover = Theme::lighter(theme.surface_2, DISC_HOVER_LIFT);
+    let pressed = Theme::lighter(theme.surface_2, DISC_PRESSED_LIFT);
+    div()
+        .id(id)
+        .debug_selector(move || id.to_owned())
+        .h(px(CONTROL))
+        .px(px(PILL_PAD_X))
+        .flex_shrink_0()
+        .rounded_full()
+        .bg(theme.surface_2)
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(PILL_GAP))
+        .text_size(px(TEXT_SMALL))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(theme.text)
+        .cursor_pointer()
+        .hover(move |s| s.bg(hover))
+        .active(move |s| s.bg(pressed))
+        .child(icon(glyph, PILL_GLYPH, theme.text))
         .child(label.to_string())
 }
 
