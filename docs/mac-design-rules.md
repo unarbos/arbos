@@ -221,6 +221,23 @@ preference" and was reverted by Jacob ([feedback header-pill-restore-2026-10-24]
 Code: `header::bar_frame` (equal side slots, `justify_center`) and
 `header::metrics`; pinned by `header_tests::the_pill_is_centred_not_parked_at_the_left_edge`.
 
+### Material: frosted glass on both surfaces (Jacob 2026-10-25 + 2026-10-26, [feedback mac-header-glass-2026-10-25], [feedback mac-header-pill-glass-matte-2026-10-26])
+
+The pill and the folded-sidebar disc are **frosted glass whatever the
+surface** — Grok Bot's header pill over its flat black transcript is the
+reference, so Matte (no window vibrancy) is not an excuse for a flat fill.
+#1830 (v0.6.256) frosted them on Glass only; Jacob's Mac is on Matte (the D90
+default) and he saw the solid `bubble_assistant` pill on his AffineTeam group
+(v0.6.268). Recipe (`glass::header_surface` + `glass::header_frost`,
+`Theme::header_glass*`): the list blurred through the control's rounded
+bounds, a see-through fill (dark `#3b3f45` @ 56 %, light white @ 60 % — the
+same on both surfaces; the backdrop blur composites ≈ 20 % darker than its
+source on Metal and wgpu alike, so over flat `#fcfcfc` the light pill lands
+near the `#ededed` of the solid pill it replaces), a 1 pt rim (white 18 % /
+black 10 %), a top highlight (white 30 % / 90 %) and a 1 pt lift. Sizes and
+placements are untouched; the rest of the glass restyle stays paused. Pinned
+by `header::glass_tests` (every kind × surface × appearance).
+
 ## Message timestamps (Jacob 2026-10-24, [feedback timestamps-hover-only-2026-10-24])
 
 **Message timestamps are hover-only, never always-on.** A bubble never carries
@@ -398,6 +415,129 @@ does not re-create the window of bubbles (#1645; first-scrollable after open
 Code: `MessageActions.swift` `messageRowGestures`, `Transcript.swift` `RowView`,
 `AppModel.swift` `requestSnapshot` / `applySnapshot`.
 
+## iPhone composer and status row = Grok Bot's (Jacob 2026-10-25, [feedback iphone-composer-grok-parity-2026-10-25] #1841)
+
+**One composer and one status row for every chat kind** — agent 1:1, DM, group,
+server channel, job tab — laid out from `Theme`'s composer constants and
+pinned by `ArbosTests/ComposerMetricsTests`. The numbers are Jacob's Grok Bot
+shot of 2026-10-25 (iPhone Air, 420 pt, 3 px/pt, keyboard up), aligned on the
+composer's bottom line and the `+`; every value is a whole pixel at 3x. Grok
+changed its composer between the 2026-10-15 refs and this shot; this shot wins.
+
+| Item | Rule (pt) | Code |
+| --- | --- | --- |
+| `+` disc and field height | **48** (was 42), field edge on a true circle; radius stays 24 as the field grows | `Theme.plusButton`, `Theme.composerHeight` |
+| Rim on the `+` and the field (dark) | edge highlight fading in over 1 pt: 58 / 47 / 40 luminance over `#181818` — three nested inner strokes ⅓, ⅔, 1 pt; light keeps the 1 pt `fieldBorder` | `ComposerRim`, `Theme.composerRimLayers` |
+| `+` glyph | SF `plus` **22.5 pt regular** (54 px arms, 5 px stroke) | `Theme.plusGlyph` |
+| `+` → field | **10** (was 12) | `Theme.plusFieldGap` |
+| Side inset | 31 keyboard down (unchanged), **18 keyboard up** (was 19) | `Theme.composerInset`, `composerInsetKeyboard` |
+| Text start | caret centre **17** from the field's edge; one 22 pt line centred (13 top / bottom) | `Theme.composerTextInset`, `composerTextPadY`, `MentionTextView.insets` |
+| Placeholder / caret | 17 pt regular `#58585B`; 2 × 22 pt accent caret — unchanged (identical in the shot) | — |
+| Mic | **filled mic without a base bar**, 12 × 16⅓, `#96969C`; glyph centre **24 before the pill** (44 pt hit frame + 2) | `MicGlyph`, `Theme.micHitWidth`, `micPillGap` |
+| Right action | white **capsule 40 × 32** (was a 36 circle), 8 from the field's top and bottom, **8⅔ (26 px)** from its right edge | `Theme.actionPillWidth/Height/Trailing` |
+| Right action glyph, idle | Grok's **voice-wave**: five round bars 2 wide, 3.25 apart, 6.5 / 14.5 / 8.5 / 14.5 / 6.5 tall; **a tap still starts the call** (Arbos has calls, Grok has voice mode). With text or a recording: `arrow.up` 16 bold. Channels: the arrow, dimmed until there is text | `VoiceWaveGlyph`, `ComposerField.actionGlyph` |
+| Field → keyboard | **18** with the keyboard up (was 8); 2 above the home indicator otherwise | `Theme.composerBottomKeyboard`, `composerBottom` |
+| Status picture | **25⅓ (76 px)**, left edge **6 inside the `+` disc's left edge** (24 from the screen keyboard up, 37 down) — no longer the bubble's 42 pt disc, no longer centred on the `+` | `Theme.presenceAvatar`, `presenceAvatarOffset`, `presenceInset(composerInset:)` |
+| Status words | **17 pt body**, muted, shimmer unchanged; **14** after the picture (words at 190 px keyboard up) | `PresenceRow.textSize`, `Theme.presenceGap` |
+| Picture bottom → composer top | **22⅔ (68 px)**; the row is the picture tall, ChatView pads below it | `Theme.presenceBottomGap` |
+| Last bubble → picture top | **14 (42 px)** — the row rises 22 pt into the transcript's 28 pt tail instead of starting under the tail and the bar's 8 pt pad (was 36); bubble → composer with the row = Grok's 62⅓; the bar grows 26 pt (was 48) when the row appears ([feedback status-row-gap-ios-2026-10-26]) | `Theme.presenceTopGap`, `presenceLift`, `transcriptTail`, `chatBarTopPad` |
+| Tasks chip (#1696) and job-tab words (#1801) | ride the same row unchanged (20 pt chip inside the 25⅓ row) | `PresenceRow.tasksChip`, `onWords` |
+
+Not moved, on purpose: the people-chat **bubble picture stays 42 pt centred on
+the `+`** (the ask covered the composer and the row, not the bubbles — the `+`
+grew, the disc did not; `Theme.memberAvatar` is no longer `= plusButton`); the
+Settings / search / secrets fields keep `Theme.fieldHeight` 42; the status
+words' colour (both sides shimmer — one still cannot settle it); the light
+theme's rim colour (no Grok light reference for this composer — shots on the
+sheet for Jacob's yes). Measurement record and the before/after sheet:
+project store `docs/grokbot-design-parity.md` § "Composer and status row vs
+Jacob's 2026-10-25 Grok Bot shot" and `media/feedback/iphone-composer-parity/`.
+
+## iPhone control family — one size for every round button, pill, field and bar (iPhone only; Jacob 2026-10-26, [feedback iphone-header-composer-sizing-2026-10-26])
+
+**iPhone only.** The Mac keeps its own `CONTROL` family (36 pt discs and pill, 44 pt
+composer) unchanged — Jacob 08:52 CR: no Mac size or placement moves with this rule.
+
+Jacob's 08:49 shot (Bubble agent chat): the glass back / search discs and the name
+pill (#1829) were 42 pt over a 48 pt composer (#1841) — two families on one screen.
+There is now one: `Controls` in `apps/ios/Arbos/Arbos/UI/Theme.swift` is the single
+source; `Theme.control`, `Theme.fieldHeight`, `Theme.composerHeight`, `Theme.plusButton`,
+`plusFieldGap` and `composerTextInset` are aliases of it. The numbers are the composer's
+(Grok Bot's 2026-10-25 shot).
+
+| Token | Value (pt) | Used by |
+| --- | --- | --- |
+| `Controls.diameter` — round icon button | **48** (= composer `+`) | chat header back / search, home account + `+`, hidden-chats back, server back / `+`, call collapse, composer `+` |
+| `Controls.height` — pill, field, bar | **48** (= composer field) | header name pill, Search-in-chat bar, bottom search bar (#1810), settings / profile / secrets / sign-in / join-server fields, sheet search fields, pane Message pill, secrets action buttons |
+| `Controls.radius` | **24** (capsule; a growing field keeps 24, the composer's rule) | every field and pill (was 12 / 14 / 25 rounded rects) |
+| Outline | `ComposerRim` — #1841's thin light rim (⅓ / ⅔ / 1 pt inner strokes, dark); `fieldBorder` 1 pt in light | every member, Glass and Matte; on iOS 26 glass it overlays `glassEffect` |
+| `Controls.glyph` — SF symbol in a disc / bar | **19** (17 × 48 / 42) | chevrons, magnifiers, `+` outside the composer |
+| `Controls.inset` — top bar → screen edge | **16** (home was 20) | home, hidden chats, chat, server headers; the Search-in-chat bar |
+| `Controls.top` — bar → safe-area top | **6** | the same bars (`.controlBar()`) |
+| `Controls.gap` — adjacent controls | **10** (= `+` → field) | composer |
+| `Controls.textInset` — text start in a pill / field | **17** (= composer caret) | `.controlField()`, `.controlPill()`, pill trailing pad |
+| `Controls.avatar` / `avatarInset` — picture in a title pill | **32 / 8** (concentric with the capsule end; was 28 / 10 in 42) | chat and server header pills |
+
+Build with the helpers, never by hand: `GlassCircle` (disc), `GlassPill` (title pill),
+`.controlField()` (one-line field / bar), `.controlFieldGrowing()` (text area that grows
+from one line), `.controlPill()` (text pill button), `ControlSurface` (the fill + rim),
+`.controlBar()` (bar insets). Surfaces: the chat header's discs, pill and Search-in-chat
+bar take the Glass material (#1829); everything else is the `field` fill — both wear
+`ComposerRim`.
+
+**Drift guard.** `ArbosTests/ControlTokenLintTests` (and `apps/ios/scripts/control-size-lint.sh`)
+fails the iOS gate on any line outside `Theme.swift` that writes `GlassCircle(size: <number>)`,
+`.background(Capsule()/Circle()/RoundedRectangle(…).fill(theme.field))` or
+`strokeBorder(theme.fieldBorder` without `// control-size: exception <case>` naming one of
+`Controls.Exception`. `ArbosTests/ControlMetricsTests` pins the token relations and walks
+`Controls.Screen` (home, hidden chats, chat header, Search-in-chat, composer, bottom search,
+server header, settings fields, Message pill, sheet search, sign-in, secrets, call header):
+every disc is `diameter`, every pill / field / bar is `height`, every bar inset is `inset`.
+A new screen declares itself there.
+
+**Exceptions (keep their own size, on purpose):**
+
+| `Controls.Exception` | What | Why |
+| --- | --- | --- |
+| `composerSideInset` | composer side inset 31 keyboard down / 18 up | follows the keyboard; Grok's measurement (#1841), the avatar column hangs off it |
+| `plusGlyph` | composer `+` glyph 22.5 regular | Grok-measured (#1841); the family glyph is 19 |
+| `callControls` | call screen 64 pt action discs, 108 pt avatar disc, 150 pt ring, 44 pt chips | Grok's call UI, a different surface |
+| `inCallStrip` | in-call strip chip and voice button 36 | the strip is 48 tall |
+| `filterChips` | 30 pt All · Agents · People · Servers chips, pane tab pills | Grok's home filter |
+| `rowIconTiles` | 36–44 pt leading tiles in rows and sheets, the hero camera badge, avatar-cluster placeholder | row content, not a floating control |
+| `illustrationDiscs` | 72 / 92 / 112 pt discs (primer, feedback done, join link, hero) | illustration |
+| `transcriptJumpChip` | Grok's 36 pt scroll-to-bottom circle, the "New messages" chip | Grok-measured transcript furniture |
+| `inlineChips` | ≤ 32 pt chips and segments inside cards | not controls of the family |
+| `primaryCTA` | 50 pt filled capsules (Sign in, Pair, Create) | primary buttons, `primary` fill, no rim |
+| `textAreas` | feedback note / description areas, 18 pt corners | free-form, grow |
+
+## Glass surface: readable content, translucent chrome (Jacob 2026-10-26, [feedback mac-glass-contrast-2026-10-26])
+
+Jacob (09:55 CR): "the glass appearance is broken on the mac." Reproduced on
+v0.6.268 over white, black and busy desktops at Opacity 0 / 50 / 100 %: GPUI's
+`Blurred` window is an `NSVisualEffectView` with every tint layer stripped — a
+colourless gaussian of the desktop — so the only tone was the shell wash at
+the slider's value. Dark at 0 % over white: sidebar names white on `#afafaf`
+(1.9:1), previews gone, discs and hairlines flat; light at 0 % over black the
+mirror image. The blur itself survived an appearance switch (System pref
+toggled dark → light → dark, no flat frame); that risk did not reproduce.
+
+Rules (ARB-271, the wider Liquid / frosted / tinted restyle, stays paused —
+this is the correctness of the existing surface):
+
+| Layer | Rule | Code |
+| --- | --- | --- |
+| Window material | A real AppKit semantic material with its tint intact, installed once under GPUI's content view; its `appearance` follows the theme (dark material under a dark theme, whatever macOS is set to), so an appearance switch re-tones it and never drops it. Default `Sidebar` (Finder's). GPUI's own background is `Transparent` on Glass so the two do not stack. | `ui::vibrancy` (`BackdropPlan`, `apply`), `Theme::window_background_for`, `GlassMaterial` (`ARBOS_GLASS_MATERIAL=…` for the rig) |
+| Opacity slider | Still 0 … 100 %, floor **0 %** (#1425). It sets the shell wash only; legibility never depends on it. | `GlassOpacity`, `Theme::shell()` |
+| Chat column | Page-colour wash at **0.85** on both appearances (dark `bg`, light white; light had it since 2026-10-21). Body text ≥ 4.5:1 and muted ≥ 3:1 over white / black / mid grey at every slider value, counting the app's paint alone. | `CHAT_WASH_ALPHA`, `Theme::chat_wash()` / `pane()` |
+| Sidebar | Tint **0.60** both appearances (dark was 0.35): names ≥ 4.5:1 over any desktop by the app's paint alone; previews lean on the material below the default Opacity. | `CHROME_TINT_ALPHA`, `Theme::chrome()` |
+| Floating cards | Menus, sheets, pickers at **0.85** (dark was 0.50, light 0.72) with the header's 1 pt rim and top highlight on Glass. | `FROST_TINT_ALPHA`, `Theme::card()`, `glass::plate` |
+| Untouched | Traffic lights native; sizes and placements; bubbles, discs and hairlines keep their colours (they sit on the washed surfaces above); Matte. | — |
+
+Pinned by `theme::glass_contrast_tests` (the matrix above with a WCAG model of
+the compositing) and `vibrancy::tests` (material on Glass, none on Matte,
+kept across dark → light → dark).
+
 ## Full screen (Jacob 2026-10-24, [feedback fullscreen-traffic-lights-2026-10-24] → [feedback topbar-grok-parity-2026-10-24])
 
 **The traffic lights are macOS's own standard window buttons, always. The
@@ -450,6 +590,31 @@ Pinned by `profiles::chrome_tests` (`the_pane_is_the_chats_surface_in_both_appea
 `cards_are_inset_and_labelled_at_groks_margins`, `the_pane_edge_is_groks_hairline`),
 `pane::tests::every_kind_lays_out_hero_then_pill_then_options` and
 `pane::tests::only_the_agent_pane_may_have_a_share_disc`.
+
+### Grouped-card dividers: inset 16 at both ends (Jacob 2026-10-26, [feedback mac-settings-card-dividers-2026-10-26])
+
+**Every divider between two rows of a grouped card stops 16 pt short of the
+card's left edge and 16 pt short of its right edge — the row's own content
+padding — on every Mac grouped list: the agent pane's Settings card, group /
+server / person / channel info, the Settings pages, profile cards, the
+Library list, the New message / New channel sheets.** Jacob's v0.6.268 shot of
+the agent Settings card (Model · Reasoning · Voice): the lines started under
+the labels but ran into the card's right edge, so the card read lopsided.
+Before, the kit hung the line "under the label" (16 past an icon tile → 58,
+past an avatar → 62) and to the right edge, Apple's iOS 6 habit; Grok Bot's
+cards do not do this either.
+
+| Item | Rule | Code |
+|---|---|---|
+| Leading inset | **16** (`kit::DIVIDER_INSET` = `kit::INSET`, the row padding), whatever leads the row — nothing, a tile, an avatar, a thumbnail | `kit::divider_insets()` → `(16, 16)` |
+| Trailing inset | **16**, the same number | `kit::hairline_below` (hung 1 pt under a row, `.relative()` on the row) and `kit::divider` (in flow, for a card that places its own rows) both draw from it |
+| Height / colour | 1 pt, `theme.border`; none above the first row, none under the last (the card's clip swallows the hung one; `section_parts` places `rows − 1` in-flow ones) | unchanged |
+| Who draws it | **only the kit.** `glass::row` (Settings pages) hangs `kit::hairline_below`; the New message / New channel sheets and the Add-members lists use `kit::divider` / `kit::hairline_below` instead of their own 0.5 pt lines and `border_b_1()` rows. A card that needs a line between two custom children calls `kit::divider(theme)` | `kit::tests::no_card_outside_the_kit_draws_its_own_divider` scans `src/ui` for a left-margin-only hairline, a `left(..)/right(0)` one, a 0.5 pt one, or a list row's own bottom border |
+
+Pinned by `kit::tests::the_divider_is_inset_equally_at_both_ends_by_the_row_padding`
+(pure) and `kit::tests::every_shared_divider_stops_at_the_row_padding_on_both_sides`
+(headless render: tile row, avatar row, `glass::row`, `section` — each line's
+left and right gaps to its card measure 16). iPhone unchanged.
 
 ### Agent pane: Details · Library · Computer (Jacob 2026-10-24, [feedback agent-pane-details-tab-2026-10-24])
 
@@ -522,7 +687,7 @@ the agent pane (Details · Library · Computer); `profiles/library.rs`.
 | Item | Rule | Where |
 |---|---|---|
 | Grouping | one list, `when` descending, split by local day: **Today · Yesterday · weekday (last 7 days) · "Oct 18"** (the sidebar's words; "Oct 18, 2025" in another year); each day = `kit::section_title` + one `kit::card` | `group_days`, `day_label` |
-| Row | the kit's one-line row: **41** tall, inset 16, 10 right; **32** pt thumbnail (aspect-fill, radius 7) — a play glyph over a video, the extension ("PDF") on a `surface_2` tile for files, the link glyph for links; name 13 pt one line, tail-truncated; time 11.5 pt muted, compact ("now", "42m", "13h", "2d", "3w", "4mo"); hairline hung at 58 | `ROW_H`, `THUMB`, `rel_time` |
+| Row | the kit's one-line row: **41** tall, inset 16, 10 right; **32** pt thumbnail (aspect-fill, radius 7) — a play glyph over a video, the extension ("PDF") on a `surface_2` tile for files, the link glyph for links; name 13 pt one line, tail-truncated; time 11.5 pt muted, compact ("now", "42m", "13h", "2d", "3w", "4mo"); the kit's divider (16 / 16, below) | `ROW_H`, `THUMB`, `rel_time` |
 | Hover | row fill `surface_2`; the time gives way to a **24 pt ⋯ disc** (no layout shift) that opens the row's menu at the click: Open · Forward · Download for attachments, Open link · Copy link for links | `MORE_DISC`, `menu_items` |
 | Show more | after **5** rows a 36 pt "Show more ⌄" row unfolds the rest of that day in place ("Show less ⌃" folds it); per opened pane | `SHOW_MORE_AFTER`, `library_toggle_day` |
 | Preview card | after **300 ms** on a row: **300** wide, left **20** from the pane's edge, **8** above the row (under it when it would reach the window's top 8 pt band); padding 10, radius 12, a step over the card's fill (white in light) with the strong border and shadow; picture **278 × 156** radius 8 aspect-fill (files: the extension at 22 pt on the tile; links: a globe); type line 11.5 muted ("Image" / "Video" / "PDF" / "Link"); the full name 13 semibold on 17, up to 3 lines; the sender's 18 pt picture, name, "· Yesterday 10:06 PM" (`sidebar::stamp_label`) | `HOVER_DELAY_MS`, `CARD_*`, `card_above` |
@@ -541,6 +706,29 @@ on the real shell (one list by day, Show more, ⋯ in the time's place with no
 layout shift, the card 8 pt over the row after the delay, the menus). Rig:
 `ARBOS_OPEN_PROFILE=group:library` / `agent:library`; `ARBOS_LIBRARY_HOVER=<row>`
 draws that row hovered with its card up.
+
+### Person pane: the Message pill (Jacob 2026-10-25, [feedback profile-message-button-mac-2026-10-25])
+
+**Another person's pane carries one primary action — a Message pill under
+the name and @handle — that opens the 1:1 DM you have or starts one; your
+own pane and a person you blocked show no pill.** Jacob: "Add a message
+button to a user." The iPhone has the same button in the same place
+([feedback profile-message-button-ios-2026-10-25]).
+
+| Item | Rule | Where |
+|---|---|---|
+| Place | centred in the hero, 12 under the "@handle" line (the hero's 6 pt gap + `HERO_ACTION_GAP` 6), before the tab pill | `Hero.action`, `pane.rs` |
+| Shape | one of the Grok button family: `theme::CONTROL` **36** tall, a capsule, side padding 18; `surface_2` fill (the discs'), the `bubble` glyph at 17 and "Message" 13 pt semibold in `text`, 7 apart | `kit::pill_button`, `PILL_*` |
+| Pointer | hover lifts the fill `DISC_HOVER_LIFT` 0.06 in lightness, pressed `DISC_PRESSED_LIFT` 0.12 — the chip rule, as the footer's update disc | `kit::pill_button` |
+| Click | `AppState::start_dm(handle)`: the existing people space with that person is selected; else `POST /chats/dm` (the New Message sheet's path) and the DM is selected when the registry lists it. A relay refusal ("this person is not available" — they blocked you) shows as a notice | `user.rs`, `app.rs` |
+| Hidden | on your own pane; once *you* blocked them (`GET /blocks`); the reverse direction is not in any payload the client reads, so the relay's answer covers it | `user::shows_message` |
+
+Pinned by `profiles::user::tests::the_message_pill_is_for_other_unblocked_people`
+and the headless `profiles::user::render_tests` (under the @handle at 36,
+centred; click opens the DM we have / starts one; none on my own pane or a
+blocked person's, back once unblocked). Rig: `ARBOS_OPEN_PROFILE=user`
+(the DM peer's pane), `user:message` (the pill pressed), `group:member`
+(a member with no DM yet).
 
 ## Pane animations (Jacob 2026-10-24, [feedback right-pane-slide-2026-10-24], [feedback sidebar-slide-2026-10-24])
 

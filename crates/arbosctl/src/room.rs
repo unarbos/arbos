@@ -284,6 +284,8 @@ enum Mode {
         answer: Option<(String, serde_json::Value)>,
         /// The message this one replies to (`replyTo` on the row).
         reply_to: Option<String>,
+        /// Reply in DM: the quoted message in another chat (`replyRef` on the row).
+        reply_ref: Option<Box<arbos_core::doc::ReplyRef>>,
     },
     /// Append one out-of-band command (`stop`, `approve`, `reject`) and exit on its ack.
     Command {
@@ -473,6 +475,7 @@ async fn run(
                         stream: _,
                         answer,
                         reply_to,
+                        reply_ref,
                     } => {
                         s.print_new();
                         let msg_id = ulid();
@@ -524,6 +527,9 @@ async fn run(
                         if let Some(reply_to) = reply_to {
                             s.doc
                                 .set_message_fields(&msg_id, &[("replyTo", json!(reply_to))]);
+                        }
+                        if let Some(r) = reply_ref {
+                            s.doc.set_reply_ref(&msg_id, r.as_ref());
                         }
                         let bytes = s.doc.export_updates_since(&s.acked_vv);
                         let batch = ulid();
@@ -635,12 +641,14 @@ fn reply_done_for(doc: &ChatDoc, user_msg_id: &str) -> bool {
     !any_streaming
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn send(
     cfg: &mut Config,
     project: &str,
     chat: &str,
     text: &str,
     reply_to: Option<&str>,
+    reply_ref: Option<&arbos_core::doc::ReplyRef>,
     stream: bool,
     timeout_s: u64,
 ) -> Result<()> {
@@ -653,6 +661,7 @@ pub async fn send(
             stream,
             answer: None,
             reply_to: reply_to.map(str::to_owned),
+            reply_ref: reply_ref.cloned().map(Box::new),
         },
         Duration::from_secs(timeout_s),
     )
@@ -679,6 +688,7 @@ pub async fn answer(
             stream,
             answer: Some((question_id.unwrap_or("").to_owned(), value)),
             reply_to: None,
+            reply_ref: None,
         },
         Duration::from_secs(timeout_s),
     )

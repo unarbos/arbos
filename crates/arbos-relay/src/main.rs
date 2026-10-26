@@ -7,6 +7,7 @@ mod api_fixture_capture;
 mod apns;
 mod auth;
 mod avatar;
+mod avatar_image;
 mod blobs;
 mod boxes;
 mod browser;
@@ -36,6 +37,7 @@ mod groups;
 mod image_sniff;
 mod images;
 mod inspect;
+mod link_icons;
 mod livekit;
 mod local;
 mod matrix;
@@ -246,6 +248,18 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .map(|v| v.split(',').filter_map(|s| s.trim().parse().ok()).collect())
             .unwrap_or_else(|| vec![2_000, 5_000]),
+        avatar_attempt_timeout: std::time::Duration::from_secs(
+            std::env::var("ARBOS_AVATAR_ATTEMPT_TIMEOUT_S")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(40),
+        ),
+        avatar_total_timeout: std::time::Duration::from_secs(
+            std::env::var("ARBOS_AVATAR_TOTAL_TIMEOUT_S")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(75),
+        ),
         voice_mock: std::env::var("ARBOS_VOICE_MOCK").is_ok_and(|v| v == "1"),
         openai_audio_base: std::env::var("ARBOS_OPENAI_AUDIO_BASE")
             .ok()
@@ -796,6 +810,7 @@ async fn main() -> anyhow::Result<()> {
             delete(moderation::delete_message),
         )
         .route("/blob/{project}/{key}", get(blobs::get).put(blobs::put))
+        .route("/link-icon", get(link_icons::get))
         .route("/feedback", post(feedback::submit))
         .route("/feedback/capture/{id}", post(feedback::device_capture))
         .route("/box/feedback/capture", post(feedback::box_capture_request))

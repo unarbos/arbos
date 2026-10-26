@@ -1,6 +1,7 @@
 //! The message bubble's menu — right-click or the hover rail's ⋯ on the Mac,
 //! under the capsule on the iPhone's long-press (`MessageMenu.swift`):
-//! **Copy, Reply, Delete** and nothing else (Jacob, #1370). Reactions live in
+//! **Copy, Reply, Forward, Reply in DM, Delete** and nothing else (Jacob,
+//! #1370; Reply in DM joined with #1835, as on the iPhone). Reactions live in
 //! the capsule (`reactions.rs`), never in this menu. One builder for every
 //! bubble, and one placement rule: the menu always sits fully inside the
 //! window — flipped to the other side of the click near the right or bottom
@@ -24,6 +25,9 @@ pub enum MessageMenuItem {
     Copy,
     Reply,
     Forward,
+    /// Another person's message in a group / shared chat: answer them
+    /// privately, with the quote and its chat name on the DM bubble (#1835).
+    ReplyInDm,
     Delete,
 }
 
@@ -33,6 +37,7 @@ impl MessageMenuItem {
             MessageMenuItem::Copy => "Copy",
             MessageMenuItem::Reply => "Reply",
             MessageMenuItem::Forward => "Forward",
+            MessageMenuItem::ReplyInDm => "Reply in DM",
             MessageMenuItem::Delete => "Delete",
         }
     }
@@ -42,6 +47,7 @@ impl MessageMenuItem {
             MessageMenuItem::Copy => "copy",
             MessageMenuItem::Reply => "reply",
             MessageMenuItem::Forward => "forward",
+            MessageMenuItem::ReplyInDm => "bubble",
             MessageMenuItem::Delete => "trash",
         }
     }
@@ -53,20 +59,22 @@ impl MessageMenuItem {
 
 /// The menu's items, in order. One list for every bubble: the set is the
 /// contract, not a per-row choice.
-pub const ITEMS: [MessageMenuItem; 4] = [
+pub const ITEMS: [MessageMenuItem; 5] = [
     MessageMenuItem::Copy,
     MessageMenuItem::Reply,
     MessageMenuItem::Forward,
+    MessageMenuItem::ReplyInDm,
     MessageMenuItem::Delete,
 ];
 
-/// The items for one bubble: Copy and Reply always; Delete only when the
-/// relay would let this user delete it (`model::may_delete_message`) — a
-/// member sees Copy / Reply on someone else's message, the owner sees all.
-pub fn items_for(can_delete: bool) -> Vec<MessageMenuItem> {
+/// The items for one bubble: Copy, Reply and Forward always; Reply in DM only
+/// on another person's message (`can_dm`: a human who is not me — my own rows
+/// and an agent's have no peer to DM); Delete only when the relay would let
+/// this user delete it (`model::may_delete_message`).
+pub fn items_for(can_delete: bool, can_dm: bool) -> Vec<MessageMenuItem> {
     ITEMS
         .into_iter()
-        .filter(|i| can_delete || !i.danger())
+        .filter(|i| (can_delete || !i.danger()) && (can_dm || *i != MessageMenuItem::ReplyInDm))
         .collect()
 }
 
@@ -157,9 +165,22 @@ pub fn render(shell: &Shell, window: &Window, cx: &mut Context<Shell>) -> Option
             _ => false,
         }
     };
+    let can_dm = {
+        let state = shell.state.read(cx);
+        let me = format!("user:{}", state.me_id());
+        state
+            .messages_of(&chat_id)
+            .iter()
+            .find(|m| m.id == message_id)
+            .is_some_and(|m| {
+                m.sender.starts_with("user:")
+                    && m.sender != me
+                    && m.sender_handle.as_deref().is_some_and(|h| !h.is_empty())
+            })
+    };
     let (origin, _) = placed_rect(at, window.viewport_size());
     let mut body = div().flex().flex_col().gap(px(MENU_GAP));
-    for item in items_for(can_delete) {
+    for item in items_for(can_delete, can_dm) {
         if item.danger() {
             body = body.child(glass::menu_divider(&theme));
         }
@@ -212,6 +233,11 @@ fn run(
                 .state
                 .update(cx, |s, cx| s.open_forward_message(chat_id, message_id, cx));
         }
+        MessageMenuItem::ReplyInDm => {
+            shell
+                .state
+                .update(cx, |s, cx| s.reply_in_dm(chat_id, message_id, cx));
+        }
         MessageMenuItem::Delete => {
             // Deletes at once, for everyone (Jacob, feedback
             // remove-delete-confirms-2026-10-24: no "Delete message?" card). The
@@ -237,23 +263,39 @@ mod tests {
     }
 
     #[test]
-    fn items_are_exactly_copy_reply_forward_delete() {
+    fn items_are_exactly_copy_reply_forward_reply_in_dm_delete() {
         let labels: Vec<&str> = ITEMS.iter().map(|i| i.label()).collect();
-        assert_eq!(labels, ["Copy", "Reply", "Forward", "Delete"]);
-        // Forward sits above the divider, with the plain actions; Delete alone is red.
+        assert_eq!(
+            labels,
+            ["Copy", "Reply", "Forward", "Reply in DM", "Delete"]
+        );
+        // Forward and Reply in DM sit above the divider, with the plain actions; Delete alone is red.
         assert!(!MessageMenuItem::Forward.danger());
+        assert!(!MessageMenuItem::ReplyInDm.danger());
         // No emoji row: every label is plain ASCII text.
         assert!(ITEMS.iter().all(|i| i.label().is_ascii()));
     }
 
     #[test]
-    fn delete_is_offered_only_when_allowed() {
+    fn delete_and_reply_in_dm_are_offered_only_when_allowed() {
         let labels = |v: Vec<MessageMenuItem>| v.iter().map(|i| i.label()).collect::<Vec<_>>();
         assert_eq!(
-            labels(items_for(true)),
+            labels(items_for(true, true)),
+            ["Copy", "Reply", "Forward", "Reply in DM", "Delete"]
+        );
+        assert_eq!(
+            labels(items_for(false, true)),
+            ["Copy", "Reply", "Forward", "Reply in DM"]
+        );
+        // My own row / an agent's: nobody to DM.
+        assert_eq!(
+            labels(items_for(true, false)),
             ["Copy", "Reply", "Forward", "Delete"]
         );
-        assert_eq!(labels(items_for(false)), ["Copy", "Reply", "Forward"]);
+        assert_eq!(
+            labels(items_for(false, false)),
+            ["Copy", "Reply", "Forward"]
+        );
     }
 
     #[test]
@@ -302,8 +344,9 @@ mod tests {
     fn menu_clamps_when_the_window_is_short() {
         // A window shorter than twice the menu: neither side of a mid-height
         // click fits, so the menu hugs the bottom margin.
-        let viewport = size(px(600.0), px(200.0));
-        let (origin, size) = placed_rect(point(px(100.0), px(100.0)), viewport);
+        let viewport = size(px(600.0), px(260.0));
+        let (origin, size) = placed_rect(point(px(130.0), px(130.0)), viewport);
+        assert!(size.height < viewport.height && size.height * 2.0 > viewport.height);
         assert!(inside(origin, size, viewport), "{origin:?} {size:?}");
     }
 }

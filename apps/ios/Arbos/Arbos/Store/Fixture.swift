@@ -376,6 +376,29 @@ extension AppModel {
                     subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 6 * 60_000, completedAt: nil, pending: false,
                     parts: [.text(id: "d4t", text: "Sure — add it, and send the copy whenever you're ready.")], hiddenCount: 0, senderHandle: "jacob", senderName: "Jacob Steeves"),
         ]
+        // `ARBOS_FIXTURE_REPLY_DM=1` (rig, #1836): rows that answer messages in other chats —
+        // unconst replies here to Mira's Launch week line (a group I am in: linked); I reply
+        // to Sam's; and one from a chat I am not in (quote only, no link).
+        if DebugHooks.fixtureReplyDM {
+            var theirs = Message(id: "d5", chatId: "fx-dm-unconst", role: .user, sender: "user:gh_32490803", status: .done, turn: nil, decision: nil, subagentId: nil,
+                                 subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 5 * 60_000, completedAt: nil, pending: false,
+                                 parts: [.text(id: "d5t", text: "Works")], hiddenCount: 0, senderHandle: "unconst", senderName: "Unconst")
+            theirs.replyRef = ReplyRef(chatId: "fx-group-launch", projectId: "people", messageId: "g1", chatTitle: "Launch week",
+                                       sender: "user:fx-u3", senderName: "Mira Kaplan", senderHandle: "mira-k",
+                                       text: "Launch checklist is here: https://notion.so/arbos/launch-week")
+            var mine = Message(id: "d6", chatId: "fx-dm-unconst", role: .user, sender: "user:fx-me", status: .done, turn: nil, decision: nil, subagentId: nil,
+                               subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 4 * 60_000, completedAt: nil, pending: false,
+                               parts: [.text(id: "d6t", text: "Press kit looks good — ship it.")], hiddenCount: 0, senderHandle: "jacob", senderName: "Jacob Steeves")
+            mine.replyRef = ReplyRef(chatId: "fx-group-launch", projectId: "people", messageId: "g2", chatTitle: "Launch week",
+                                     sender: "user:fx-u4", senderName: "Sam Okafor", senderHandle: "sam", text: "press-kit-v3.pdf")
+            var outside = Message(id: "d7", chatId: "fx-dm-unconst", role: .user, sender: "user:gh_32490803", status: .done, turn: nil, decision: nil, subagentId: nil,
+                                  subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 3 * 60_000, completedAt: nil, pending: false,
+                                  parts: [.text(id: "d7t", text: "Same thing happened in ours.")], hiddenCount: 0, senderHandle: "unconst", senderName: "Unconst")
+            outside.replyRef = ReplyRef(chatId: "fx-not-my-chat", projectId: "people", messageId: "x1", chatTitle: "Design crit",
+                                        sender: "user:gh_900", senderName: "Alex Rivera", senderHandle: "alex-rivera",
+                                        text: "The pricing slide still shows last quarter's tiers.")
+            messages["fx-dm-unconst"]?.append(contentsOf: [theirs, mine, outside])
+        }
         caughtUp.insert("fx-dm-unconst")
         directory = [
             Person(id: "fx-u1", handle: "alex-rivera", avatarUrl: nil, name: "Alex Rivera", status: "member"),
@@ -526,6 +549,28 @@ extension AppModel {
 
     /// Sends in fixture mode append locally so the composer can be exercised,
     /// then a scripted reply lands as complete bubbles (ack → working → result).
+    /// Fixture `openDM`: the existing DM with `handle`, else a new one built from the member
+    /// as the group lists them (Reply in DM rig and tests, #1836). No relay.
+    func fixtureOpenDM(handle: String, navigate: Bool) -> PeopleChat? {
+        let handle = handle.trimmingCharacters(in: CharacterSet(charactersIn: "@ "))
+        if let dm = peopleChats.first(where: { $0.kind == "dm" && $0.humans.contains { $0.handle == handle } }) {
+            if navigate { path = [.chat(chatId: dm.id, projectId: peopleSlot)] }
+            return dm
+        }
+        guard let peer = peopleChats.flatMap(\.members).first(where: { !$0.isAgent && $0.handle == handle }),
+              let me = peopleChats.flatMap(\.members).first(where: { $0.member == myUserId })
+        else { return nil }
+        let id = "fx-dm-\(handle)"
+        let dm = PeopleChat(id: id, kind: "dm", createdBy: me.id, createdAt: nowMs(), title: "@\(handle)", pending: false,
+                            members: [peer, me], headSeq: 0, readSeq: 0, unread: false, lockState: "people_only",
+                            lastActivityAt: nowMs(), myRole: "owner", muted: false, silenced: false)
+        peopleChats.insert(dm, at: 0)
+        messages[id] = []
+        caughtUp.insert(id)
+        if navigate { path = [.chat(chatId: id, projectId: peopleSlot)] }
+        return dm
+    }
+
     func fixtureAppend(chatId: Id, text: String, attachments: [Attachment], replyTo: Id? = nil,
                        forwardedFrom: String? = nil) {
         var list = messages[chatId] ?? []
@@ -558,7 +603,7 @@ extension AppModel {
     /// Rig (`ARBOS_SHOW=table`): Jacob's "Find me a book store in lima" turn as agentd
     /// wrote it on 2026-10-25 — the ask, then the three `send_message` bubbles (conclusion,
     /// GFM table of linked stores, details) — for the table renderer's shots.
-    func fixtureLimaReply(chatId: Id) {
+    func fixtureLimaReply(chatId: Id, bubbles: Int = AppModel.limaReply.count) {
         var list = messages[chatId] ?? []
         if let i = list.lastIndex(where: { $0.isStreaming }) {
             list[i].status = .done
@@ -566,7 +611,7 @@ extension AppModel {
         }
         let t = nowMs()
         list.append(user(newId(), chatId, "Find me a book store in lima", at: t))
-        for (i, text) in AppModel.limaReply.enumerated() {
+        for (i, text) in AppModel.limaReply.prefix(bubbles).enumerated() {
             list.append(assistant(newId(), chatId, text, at: t + Int64(1_000 * (i + 1))))
         }
         messages[chatId] = list
@@ -618,6 +663,75 @@ extension AppModel {
     ```
 
     Rows are keyed by `{msg}#{part}.{block}` and re-spliced only when their bytes change.
+    """
+
+    /// Rig (`ARBOS_SHOW=math`): Jacob's "write bubble sort" turn (2026-10-26 10:50, his Mac
+    /// screenshot) — a Python code card, then prose with inline TeX — for the math renderer's shots.
+    func fixtureBubbleSortReply(chatId: Id) {
+        var list = messages[chatId] ?? []
+        if let i = list.lastIndex(where: { $0.isStreaming }) {
+            list[i].status = .done
+            list[i].parts = [.text(id: "\(list[i].id)-t", text: "Got it.")]
+        }
+        let t = nowMs()
+        list.append(user(newId(), chatId, "write bubble sort in python", at: t))
+        list.append(assistant(newId(), chatId, AppModel.bubbleSortReply, at: t + 1_000))
+        messages[chatId] = list
+    }
+
+    /// The reply to "write bubble sort in python" from Jacob's 2026-10-26 screenshot, byte for
+    /// byte (the Mac fixture's `ARBOS_FIXTURE_REPLY=math`): `$O(n^2)$` rendered as raw text.
+    static let bubbleSortReply = """
+    Here is a standard implementation of bubble sort in Python:
+
+    ```python
+    def bubble_sort(arr):
+        n = len(arr)
+        for i in range(n):
+            swapped = False
+            for j in range(0, n - i - 1):
+                if arr[j] > arr[j + 1]:
+                    arr[j], arr[j + 1] = arr[j + 1], arr[j]
+                    swapped = True
+            # If no two elements swapped, list is already sorted
+            if not swapped:
+                break
+        return arr
+
+    # Example usage:
+    items = [64, 34, 25, 12, 22, 11, 90]
+    print(bubble_sort(items))  # Output: [11, 12, 22, 25, 34, 64, 90]
+    ```
+
+    It runs in $O(n^2)$ time in the worst and average cases, and $O(n)$ time when the array is already sorted thanks to the `swapped` flag. Space complexity is $O(1)$.
+    """
+
+    /// Rig (`ARBOS_SHOW=links`): Jacob's "Read the latest from the New York post" turn — seven
+    /// linked headlines as bullets, then one line of prose — for the link icons' shots.
+    func fixtureNYPostReply(chatId: Id) {
+        var list = messages[chatId] ?? []
+        if let i = list.lastIndex(where: { $0.isStreaming }) {
+            list[i].status = .done
+            list[i].parts = [.text(id: "\(list[i].id)-t", text: "Got it.")]
+        }
+        let t = nowMs()
+        list.append(user(newId(), chatId, "Read the latest from the New York post", at: t))
+        list.append(assistant(newId(), chatId, AppModel.nyPostReply, at: t + 1_000))
+        messages[chatId] = list
+    }
+
+    /// The reply to "Read the latest from the New York post" (agent Bubble, 2026-10-25, Jacob's
+    /// screenshot), byte for byte in shape (the Mac fixture's `ARBOS_FIXTURE_REPLY=links`).
+    static let nyPostReply = """
+    - [Syringe attack: lawyer claims mistaken identity](https://nypost.com/2026/10/25/us-news/syringe-attack-lawyer-claims-mistaken-identity/)
+    - [Arrest story: a second Jewish victim minutes earlier](https://nypost.com/2026/10/25/us-news/arrest-story-second-jewish-victim-minutes-earlier/)
+    - [Ex-NYPD cop charged in a George Washington Bridge killing, free on $1M bail](https://nypost.com/2026/10/25/us-news/ex-nypd-cop-charged-in-gw-bridge-killing-free-on-1m-bail/)
+    - [Thomas Markle home search, child pornography, Philippine official’s comment](https://nypost.com/2026/10/25/world-news/thomas-markle-home-search-philippine-official-comment/)
+    - [Musk says SpaceX cut Ukraine’s Starlink access](https://nypost.com/2026/10/25/business/musk-says-spacex-cut-ukraines-starlink-access/)
+    - [Giants beat the Texans in overtime in J. J. McCarthy’s first start](https://nypost.com/2026/10/25/sports/giants-beat-texans-in-overtime-mccarthy-first-start/)
+    - [McCarthy’s wife after that win](https://nypost.com/2026/10/25/sports/mccarthys-wife-after-that-win/)
+
+    No times or bylines were on the page text I read. Want one of these opened?
     """
 
     /// The reply to "Find me a book store in lima" (agent Bubble, 2026-10-25 21:31 UTC),

@@ -208,12 +208,34 @@ enum AgentPane {
 
     /// The hero's subtitle: the description as the label, the placeholder for the owner,
     /// who runs it on someone else's agent.
-    static func subtitle(description: String, mine: Bool, ownerHandle: String?) -> String {
+    static func subtitle(description: String, mine: Bool, ownerHandle: String?, ownerName: String? = nil) -> String {
         let label = description.trimmingCharacters(in: .whitespacesAndNewlines)
         if !label.isEmpty { return label }
         if mine { return labelPlaceholder }
-        if let o = ownerHandle?.trimmingCharacters(in: CharacterSet(charactersIn: "@ ")), !o.isEmpty { return "Run by @\(o)" }
+        if let o = cleanHandle(ownerHandle) { return runByLabel(name: ownerName, handle: o) }
         return "Agent"
+    }
+
+    /// "Run by Name" / "Run by @handle" — the owner line under a foreign agent's name: the
+    /// display name when the owner has one, the handle otherwise (the no-raw-handle rule is
+    /// about agents' speech, not this label). The Mac's `run_by_label`.
+    static func runByLabel(name: String?, handle: String) -> String {
+        let n = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return n.isEmpty ? "Run by @\(handle)" : "Run by \(n)"
+    }
+
+    /// Who the "Run by …" line opens on someone else's agent (Jacob 2026-10-25, [feedback
+    /// agent-pane-run-by-link-ios-2026-10-25]): the label and the owner's handle; nil on my own
+    /// agent or when no owner is known. With no label the link is the subtitle; under a label
+    /// it is the line below it.
+    static func ownerLink(mine: Bool, ownerHandle: String?, ownerName: String?) -> (label: String, handle: String)? {
+        guard !mine, let o = cleanHandle(ownerHandle) else { return nil }
+        return (runByLabel(name: ownerName, handle: o), o)
+    }
+
+    private static func cleanHandle(_ handle: String?) -> String? {
+        guard let o = handle?.trimmingCharacters(in: CharacterSet(charactersIn: "@ ")), !o.isEmpty else { return nil }
+        return o
     }
 
     /// The Coding row's subtitle: what the agent is doing right now.

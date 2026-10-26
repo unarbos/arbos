@@ -8,8 +8,9 @@
 //! - **Generate**: a short prompt → `POST /projects/{id}/avatar/generate` (the relay's OpenAI
 //!   key, one low-quality square, metered and capped) → the picture previews here; Set makes it
 //!   the avatar.
-//! - **Upload**: the image-only file panel (PNG, JPEG, HEIC, GIF, WebP), uploaded as a 512 px
-//!   JPEG into the project's blob slot on Set.
+//! - **Upload**: the image-only file panel (PNG, JPEG, HEIC, GIF, WebP), uploaded as the
+//!   picture master (≤ 1024 px; PNG for a flat mark, JPEG q92 for a photo) into the project's
+//!   blob slot on Set.
 //!
 //! Groups and servers open the same sheet for their picture with the same three tabs (Bot = their
 //! leaf, Generate through `/chats/{id}` / `/servers/{id}` `/avatar/generate`, Upload into their
@@ -118,7 +119,13 @@ pub struct Picker {
     /// Generate tab: the relay's picture, `(image_key, url)`.
     pub generated: Option<(String, String)>,
     pub generating: bool,
+    /// When the running generation started (the status line counts the seconds).
+    pub started_at: Option<std::time::Instant>,
+    /// The failure as one short sentence (the relay's, or the client's for a transport error).
     pub error: Option<String>,
+    /// The raw words behind it, shown only behind the Details disclosure.
+    pub error_detail: Option<String>,
+    pub details_open: bool,
 }
 
 impl Picker {
@@ -133,8 +140,17 @@ impl Picker {
             upload: None,
             generated: None,
             generating: false,
+            started_at: None,
             error: None,
+            error_detail: None,
+            details_open: false,
         }
+    }
+
+    /// Seconds since Generate was pressed, while it runs.
+    pub fn generating_for_s(&self) -> Option<u64> {
+        self.generating
+            .then(|| self.started_at.map(|t| t.elapsed().as_secs()).unwrap_or(0))
     }
 
     /// The Create sheet's pending picture for the entity about to exist: the file, or the
@@ -231,20 +247,26 @@ pub(crate) fn pending_preview(picker: &Picker, state: &AppState, size: f32) -> O
             .overflow_hidden()
     };
     if let Some(path) = &picker.upload {
-        return Some(
-            frame().child(
-                gpui::img(path.clone())
-                    .size(px(size))
-                    .rounded_full()
-                    .object_fit(gpui::ObjectFit::Cover),
-            ),
-        );
+        // The chosen file goes through the avatar loader as `file://…` (decoded off the UI
+        // thread into the ≤ 1024 px master the upload will send), then through `picture_fit`
+        // like every other avatar. Handing GPUI the raw path drew a 4000 px texture into a
+        // 114 pt disc with no mipmaps — Jacob's stair-stepped edges (2026-10-26). Until the
+        // master is ready the frame is empty for a moment, never the aliased original.
+        let image = state.avatar(&file_url(path));
+        return Some(frame().children(image.map(|image| {
+            gpui::img(crate::ui::picture_fit::fit(&image, size))
+                .id("avatar-upload-preview")
+                .debug_selector(|| "avatar-upload-preview".into())
+                .size(px(size))
+                .rounded_full()
+                .object_fit(gpui::ObjectFit::Cover)
+        })));
     }
     if let Some((_, url)) = &picker.generated {
         if let Some(image) = state.avatar(url) {
             return Some(
                 frame().child(
-                    gpui::img(image)
+                    gpui::img(crate::ui::picture_fit::fit(&image, size))
                         .size(px(size))
                         .rounded_full()
                         .object_fit(gpui::ObjectFit::Cover),
@@ -253,6 +275,12 @@ pub(crate) fn pending_preview(picker: &Picker, state: &AppState, size: f32) -> O
         }
     }
     None
+}
+
+/// The avatar-cache URL of a picked file: `file://<path>`; the sync client reads and masters it
+/// (`sync::avatar_master`) and answers with `SyncEvent::Avatar` like a fetched picture.
+pub(crate) fn file_url(path: &std::path::Path) -> String {
+    format!("file://{}", path.display())
 }
 
 /// The round picture the Generate / Upload tabs preview: the pending choice, else the entity's
@@ -420,6 +448,8 @@ pub(crate) fn generate_body(
                 })
                 .child(if picker.generating {
                     "Generating…"
+                } else if picker.error.is_some() {
+                    "Try again"
                 } else if picker.generated.is_some() {
                     "Generate again"
                 } else {
@@ -430,16 +460,71 @@ pub(crate) fn generate_body(
             d.on_click(cx.listener(|this, _, _, cx| this.generate_avatar(cx)))
         });
     body.push(go.into_any_element());
-    if let Some(preview) = preview {
+    // The preview slot: the picture (dimmed under a spinner while painting), or — after a
+    // failure with Details open — the raw words, clamped to the slot so nothing reaches the
+    // footer (Jacob, 2026-10-26: a raw transport error had run over Cancel / Set avatar).
+    let slot_top = pill_top + PILL_H + 16.0;
+    let detail_open = picker.details_open && picker.error.is_some();
+    if detail_open {
+        let detail: SharedString = picker
+            .error_detail
+            .clone()
+            .unwrap_or_else(|| "No further detail.".into())
+            .into();
+        body.push(
+            div()
+                .id("avatar-generate-detail")
+                .debug_selector(|| "avatar-generate-detail".into())
+                .absolute()
+                .left(px(FIELD_INSET))
+                .right(px(FIELD_INSET))
+                .top(px(slot_top))
+                .h(px(PREVIEW))
+                .rounded(px(8.0))
+                .bg(p.cancel_bg)
+                .px(px(10.0))
+                .py(px(8.0))
+                .overflow_hidden()
+                .text_size(px(11.0))
+                .line_height(px(15.0))
+                .text_color(label_muted_for(theme))
+                .child(detail)
+                .into_any_element(),
+        );
+    } else if let Some(preview) = preview {
+        let painting = picker.generating;
         body.push(
             div()
                 .absolute()
                 .left_0()
                 .right_0()
-                .top(px(pill_top + PILL_H + 16.0))
+                .top(px(slot_top))
                 .flex()
                 .justify_center()
-                .child(preview)
+                .child(
+                    div()
+                        .relative()
+                        .size(px(PREVIEW))
+                        .child(
+                            div()
+                                .size(px(PREVIEW))
+                                .when(painting, |d| d.opacity(0.4))
+                                .child(preview),
+                        )
+                        .when(painting, |d| {
+                            d.child(
+                                div()
+                                    .id("avatar-generate-spinner")
+                                    .debug_selector(|| "avatar-generate-spinner".into())
+                                    .absolute()
+                                    .inset_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(crate::ui::cards::activity_spinner(28.0, theme, cx)),
+                            )
+                        }),
+                )
                 .into_any_element(),
         );
     }
@@ -449,35 +534,79 @@ pub(crate) fn generate_body(
             "Set avatar keeps this one."
         }
     };
+    if picker.generating {
+        // The seconds tick while it paints.
+        crate::ui::motion::PulseClock::request(cx);
+    }
     let status: SharedString = if let Some(e) = &picker.error {
         e.clone().into()
-    } else if picker.generating {
-        "Painting a picture — a few seconds.".into()
+    } else if let Some(s) = picker.generating_for_s() {
+        format!("Painting a picture — {s} s").into()
     } else if picker.generated.is_some() {
         keeps.into()
     } else {
         "A few words about the picture you want.".into()
     };
-    body.push(
-        div()
-            .id("avatar-generate-status")
-            .debug_selector(|| "avatar-generate-status".into())
-            .absolute()
-            .left(px(FIELD_INSET))
-            .right(px(FIELD_INSET))
-            .top(px(status_top))
-            .text_size(px(12.0))
-            .line_height(px(16.0))
-            .text_center()
-            .text_color(if picker.error.is_some() {
-                theme.danger
-            } else {
-                p.placeholder
-            })
-            .child(status)
-            .into_any_element(),
-    );
+    // One line, never more: the status slot sits 30 pt over the footer. An error gets a
+    // Details toggle beside the sentence; the raw words open in the preview slot above.
+    let mut line = div()
+        .id("avatar-generate-status")
+        .debug_selector(|| "avatar-generate-status".into())
+        .absolute()
+        .left(px(FIELD_INSET))
+        .right(px(FIELD_INSET))
+        .top(px(status_top))
+        .h(px(16.0))
+        .overflow_hidden()
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(8.0))
+        .text_size(px(12.0))
+        .line_height(px(16.0))
+        .text_color(if picker.error.is_some() {
+            theme.danger
+        } else {
+            p.placeholder
+        })
+        .child(
+            div()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(status),
+        );
+    if picker.error.is_some() {
+        line = line.child(
+            div()
+                .id("avatar-generate-details")
+                .debug_selector(|| "avatar-generate-details".into())
+                .flex_shrink_0()
+                .text_color(label_muted_for(theme))
+                .cursor_pointer()
+                .hover(|s| s.opacity(0.8))
+                .child(if detail_open {
+                    "Hide details"
+                } else {
+                    "Details"
+                })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(pk) = this.pending_picker_mut() {
+                        pk.details_open = !pk.details_open;
+                    }
+                    cx.notify();
+                })),
+        );
+    }
+    body.push(line.into_any_element());
     body
+}
+
+fn label_muted_for(theme: &Theme) -> Hsla {
+    match theme.appearance {
+        Appearance::Dark => hex(0x9A9A9A),
+        Appearance::Light => theme.text_muted,
+    }
 }
 
 /// The Upload tab's body: `preview` (when given) at `slots.top` with the "Choose a photo…" pill
@@ -545,7 +674,7 @@ pub(crate) fn upload_body(
             .unwrap_or("picture")
             .to_owned()
             .into(),
-        None => "PNG, JPEG, HEIC, GIF or WebP; kept at 512 px.".into(),
+        None => "PNG, JPEG, HEIC, GIF or WebP; kept at up to 1024 px.".into(),
     };
     body.push(
         div()
@@ -563,6 +692,27 @@ pub(crate) fn upload_body(
             .into_any_element(),
     );
     body
+}
+
+/// The target's picture as it is now — `(name, url)` — what the bar's View opens; `None` for a
+/// leaf / letter avatar (nothing to view) or an unknown target.
+pub(crate) fn viewable_picture(picker: &Picker, state: &AppState) -> Option<(String, String)> {
+    let (name, url) = match &picker.target {
+        Target::Agent(id) | Target::Group(id) => {
+            let p = state.projects.iter().find(|x| &x.id == id)?;
+            (p.name.clone(), p.image_url.clone()?)
+        }
+        Target::Server(id) => {
+            let s = state.servers.iter().find(|s| &s.id == id)?;
+            (s.name.clone(), s.image_url.clone()?)
+        }
+        Target::Me(_) => {
+            let a = state.account.as_ref()?;
+            (a.name.clone(), a.avatar_url.clone())
+        }
+        Target::Draft => return None,
+    };
+    (!url.is_empty()).then_some((name, url))
 }
 
 pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
@@ -620,11 +770,7 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
     };
     // View (Jacob, 2026-10-25): the picture as it is now, full-size in the media viewer — only
     // when there is a picture (a leaf / letter avatar has nothing to view).
-    let view_picture: Option<(String, String)> = project
-        .image_url
-        .clone()
-        .filter(|u| !u.is_empty())
-        .map(|url| (project.name.clone(), url));
+    let view_picture = viewable_picture(picker, state);
     // The Generate / Upload preview, built while `state` is borrowed (the bodies need `cx`).
     let tab_preview = preview(picker, &project, state, &theme);
 
@@ -1114,6 +1260,7 @@ mod me_picker_tests {
                     image_key: Some("avatar-gen-01.jpg".into()),
                     url: Some("https://relay.test/blob/users:gh_1/avatar-gen-01.jpg".into()),
                     error: None,
+                    detail: None,
                 },
                 cx,
             )
@@ -1182,10 +1329,21 @@ mod me_picker_tests {
             vcx.debug_bounds("avatar-view").is_some(),
             "a picture → View"
         );
+        // Some state in the picker: a typed prompt and a generated preview.
+        shell.update(vcx, |sh, cx| {
+            sh.avatar_prompt_input
+                .update(cx, |input, cx| input.set_text("a fox".into(), cx));
+            if let Some(pk) = sh.avatar_picker.as_mut() {
+                pk.generated = Some(("avatar-gen-9.jpg".into(), "fixture://avatar/me-9".into()));
+            }
+        });
+        settle(&shell, vcx);
         click(vcx, &shell, "avatar-view");
+        // Jacob, 2026-10-26: the picker stays underneath — the viewer is on top of it, and
+        // closing the viewer returns to the picker with its state intact.
         assert!(
-            shell.read_with(&*vcx, |sh, _| sh.avatar_picker.is_none()),
-            "View closes the picker"
+            shell.read_with(&*vcx, |sh, _| sh.avatar_picker.is_some()),
+            "View keeps the picker up"
         );
         let viewer = state.read_with(&*vcx, |s, _| s.media_viewer.clone());
         let viewer = viewer.expect("the media viewer is up");
@@ -1198,8 +1356,50 @@ mod me_picker_tests {
                 && vcx.debug_bounds("media-viewer-forward").is_none(),
             "a profile picture has no Download / Forward"
         );
+        let viewer_b = vcx.debug_bounds("media-viewer").expect("viewer root");
+        let picker_b = vcx.debug_bounds("avatar-set").expect("picker footer");
+        assert!(
+            viewer_b.contains(&centre(picker_b)),
+            "the viewer covers the picker: {viewer_b:?} over {picker_b:?}"
+        );
+        // The viewer's × closes the viewer only.
+        click(vcx, &shell, "media-viewer-close");
+        assert!(state.read_with(&*vcx, |s, _| s.media_viewer.is_none()));
+        let picker = shell.read_with(&*vcx, |sh, _| sh.avatar_picker.clone());
+        let picker = picker.expect("the picker is still up after the viewer's ×");
+        assert_eq!(picker.tab, Tab::Generate);
+        assert_eq!(
+            picker.generated.as_ref().map(|(k, _)| k.as_str()),
+            Some("avatar-gen-9.jpg"),
+            "the preview survived"
+        );
+        assert_eq!(
+            shell.read_with(&*vcx, |sh, cx| sh
+                .avatar_prompt_input
+                .read(cx)
+                .text()
+                .to_owned()),
+            "a fox",
+            "the typed prompt survived"
+        );
+        assert!(
+            vcx.debug_bounds("avatar-set").is_some(),
+            "the sheet is drawn again"
+        );
+        // Esc on the viewer: the same — viewer gone, picker stays; a second Esc is not sent.
+        click(vcx, &shell, "avatar-view");
+        assert!(state.read_with(&*vcx, |s, _| s.media_viewer.is_some()));
+        vcx.dispatch_action(crate::ui::shell::Escape);
+        settle(&shell, vcx);
+        assert!(state.read_with(&*vcx, |s, _| s.media_viewer.is_none()));
+        assert!(shell.read_with(&*vcx, |sh, _| sh.avatar_picker.is_some()));
+        // The Close pill too; then Cancel closes the picker as always.
+        click(vcx, &shell, "avatar-view");
         click(vcx, &shell, "media-viewer-close-pill");
         assert!(state.read_with(&*vcx, |s, _| s.media_viewer.is_none()));
+        assert!(shell.read_with(&*vcx, |sh, _| sh.avatar_picker.is_some()));
+        click(vcx, &shell, "avatar-cancel");
+        assert!(shell.read_with(&*vcx, |sh, _| sh.avatar_picker.is_none()));
 
         // Initials only: no View in the bar.
         state.update(vcx, |s, cx| {
@@ -1255,6 +1455,15 @@ mod me_picker_tests {
         );
         click(vcx, &shell, "media-viewer-close");
         assert!(state.read_with(&*vcx, |s, _| s.media_viewer.is_none()));
+        // The pane underneath is untouched by the viewer's × (Jacob, 2026-10-26).
+        assert_eq!(
+            state.read_with(&*vcx, |s, _| s.profile.clone()),
+            Some(ProfilePage::User {
+                handle: "sam".into(),
+                space_id: None,
+            })
+        );
+        assert!(vcx.debug_bounds("profile-avatar").is_some());
 
         // Kim has initials only: the hero is not a button.
         state.update(vcx, |s, cx| {
@@ -1272,5 +1481,116 @@ mod me_picker_tests {
             state.read_with(&*vcx, |s, _| s.media_viewer.is_none()),
             "initials open nothing"
         );
+    }
+
+    /// Jacob, 2026-10-26 ("nuke vampire"): a generation that times out must end in a clean
+    /// state — one short sentence inline above the footer, the raw words only behind Details,
+    /// the pill reading Try again and re-sending — and while it runs the sheet shows progress
+    /// (spinner over the preview, "Painting a picture — N s"). Nothing may reach the footer.
+    #[gpui::test]
+    fn a_timed_out_generation_shows_a_clean_error_with_details_and_try_again(
+        cx: &mut TestAppContext,
+    ) {
+        let (_rt, state, shell, vcx) = mount(cx, "");
+        let mut commands = state.update(vcx, |s, _| s.take_command_channel());
+        settle(&shell, vcx);
+        click(vcx, &shell, "me-avatar");
+        shell.update(vcx, |sh, cx| {
+            sh.avatar_prompt_input
+                .update(cx, |input, cx| input.set_text("nuke vampire".into(), cx));
+        });
+        click(vcx, &shell, "avatar-generate-go");
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ClientCommand::GenerateImage { .. })
+        ));
+
+        // Progress: the spinner sits on the preview and the status counts seconds.
+        assert!(
+            vcx.debug_bounds("avatar-generate-spinner").is_some(),
+            "spinner while painting"
+        );
+        let picker = shell
+            .read_with(&*vcx, |sh, _| sh.avatar_picker.clone())
+            .unwrap();
+        assert!(picker.generating && picker.started_at.is_some());
+        assert_eq!(picker.generating_for_s(), Some(0));
+        assert!(vcx.debug_bounds("avatar-generate-details").is_none());
+
+        // The relay's clean 504 (or the client's own timeout) arrives.
+        let raw = "HTTP 504 avatar_timeout — gpt-image-1-mini: operation timed out after 40 s (attempt 2 of 2); relay budget 75 s";
+        state.update(vcx, |s, cx| {
+            s.apply(
+                SyncEvent::ImageGenerated {
+                    target: Target::Me("gh_1".into()),
+                    image_key: None,
+                    url: None,
+                    error: Some("Couldn't generate the image. The server took too long.".into()),
+                    detail: Some(raw.into()),
+                },
+                cx,
+            )
+        });
+        settle(&shell, vcx);
+        let picker = shell
+            .read_with(&*vcx, |sh, _| sh.avatar_picker.clone())
+            .unwrap();
+        assert!(!picker.generating);
+        assert_eq!(
+            picker.error.as_deref(),
+            Some("Couldn't generate the image. The server took too long.")
+        );
+        assert_eq!(picker.error_detail.as_deref(), Some(raw));
+        assert!(!picker.details_open, "details start closed");
+        assert!(vcx.debug_bounds("avatar-generate-spinner").is_none());
+        assert!(vcx.debug_bounds("avatar-generate-detail").is_none());
+        // The status line stays above the footer: one line, inside the card, over the pills.
+        let status = vcx
+            .debug_bounds("avatar-generate-status")
+            .expect("status line");
+        let cancel = vcx.debug_bounds("avatar-cancel").expect("Cancel");
+        let set = vcx.debug_bounds("avatar-set").expect("Set avatar");
+        assert!(
+            status.bottom() <= cancel.top() && status.bottom() <= set.top(),
+            "the error sits above the footer: status {status:?} cancel {cancel:?}"
+        );
+        assert!(
+            f32::from(status.size.height) <= 16.5,
+            "one line: {status:?}"
+        );
+        assert!(
+            vcx.debug_bounds("avatar-generate-details").is_some(),
+            "a Details toggle"
+        );
+
+        // Details: the raw words open in the preview slot, still above the footer; then close.
+        click(vcx, &shell, "avatar-generate-details");
+        let detail = vcx
+            .debug_bounds("avatar-generate-detail")
+            .expect("the detail box");
+        assert!(
+            detail.bottom() <= status.top(),
+            "detail {detail:?} above status {status:?}"
+        );
+        assert!(shell.read_with(&*vcx, |sh, _| sh
+            .avatar_picker
+            .as_ref()
+            .is_some_and(|pk| pk.details_open)));
+        click(vcx, &shell, "avatar-generate-details");
+        assert!(vcx.debug_bounds("avatar-generate-detail").is_none());
+
+        // Try again re-sends the same prompt and clears the error.
+        click(vcx, &shell, "avatar-generate-go");
+        match commands.try_recv() {
+            Ok(ClientCommand::GenerateImage { prompt, .. }) => assert_eq!(prompt, "nuke vampire"),
+            other => panic!("expected GenerateImage, got {other:?}"),
+        }
+        let picker = shell
+            .read_with(&*vcx, |sh, _| sh.avatar_picker.clone())
+            .unwrap();
+        assert!(picker.generating && picker.error.is_none() && picker.error_detail.is_none());
+        assert!(vcx.debug_bounds("avatar-generate-spinner").is_some());
+        // Set avatar stays disabled through all of it (nothing to set).
+        assert!(!picker.dirty());
     }
 }

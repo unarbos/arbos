@@ -8,6 +8,7 @@
 //! the sources are candidates to move there later (`arbos-design.md` §7.2).
 
 pub mod agent_avatar;
+pub mod avatar_master;
 pub mod credentials;
 pub mod diagnostics;
 pub mod doc;
@@ -73,13 +74,22 @@ pub enum SyncEvent {
         url: String,
         bytes: Arc<Vec<u8>>,
     },
+    /// The picture at `url` could not be fetched (retries exhausted, or 404): the app forgets
+    /// the request so the next surface that wants it asks again.
+    AvatarMissing {
+        url: String,
+    },
     /// The avatar picker's generated picture is ready to preview (`url` fetches it; `image_key`
     /// is what "Set avatar" sends), or the generation failed (`error`).
     ImageGenerated {
         target: PictureTarget,
         image_key: Option<String>,
         url: Option<String>,
+        /// A short human sentence for the sheet ("Couldn't generate the image. The server took
+        /// too long."); the raw provider / transport words ride in `detail` for a Details
+        /// disclosure (Jacob, 2026-10-26: a raw reqwest error had spilled over the footer).
         error: Option<String>,
+        detail: Option<String>,
     },
     /// Error from a people-chat action (search, DM, members), shown inline.
     PeopleError(String),
@@ -236,6 +246,12 @@ pub enum SyncEvent {
     Thumbnail {
         key: String,
         bytes: Arc<Vec<u8>>,
+    },
+    /// The site icon for the named links to `host` (relay `GET /link-icon?domain=`): a
+    /// 64×64 PNG, or `None` when the site has none (the bubbles keep the placeholder).
+    LinkIcon {
+        host: String,
+        png: Option<Arc<Vec<u8>>>,
     },
     /// The thumbnail bytes could not be fetched; the card shows "No preview" instead of
     /// loading forever. The failure itself went to the log and the silent diagnostics path.
@@ -407,7 +423,7 @@ impl PictureTarget {
 /// leaf).
 #[derive(Clone, Debug, PartialEq)]
 pub enum DraftPicture {
-    /// A file the owner chose; uploaded as a 512 px JPEG into the new entity's slot.
+    /// A file the owner chose; uploaded as the picture master (≤ 1024 px PNG / JPEG) into the new entity's slot.
     File(std::path::PathBuf),
     /// A picture the relay already holds in my own slot (`users:{me}`): copied over.
     Generated { key: String },
@@ -416,7 +432,7 @@ pub enum DraftPicture {
 /// Where an agent's new picture comes from (`ClientCommand::SetProjectImage`).
 #[derive(Clone, Debug, PartialEq)]
 pub enum PictureSource {
-    /// A file the owner chose; uploaded as a 512 px JPEG.
+    /// A file the owner chose; uploaded as the picture master (≤ 1024 px PNG / JPEG).
     File(std::path::PathBuf),
     /// A blob the relay already stores under the project (a generated picture).
     Key(String),
@@ -561,6 +577,9 @@ pub enum ClientCommand {
         attachments: Vec<PathBuf>,
         /// People-chat / hover-reply: the message this send answers (`replyTo`).
         reply_to: Option<String>,
+        /// Reply in DM: the message in another chat this send answers, with its
+        /// snapshot (`replyRef`). Exclusive with `reply_to`.
+        reply_ref: Option<crate::model::ReplyRef>,
         /// Member ids of the composer's committed mention chips (#1596); the
         /// source unions them with the `@handle`s the text names.
         mentions: Vec<String>,
@@ -717,7 +736,7 @@ pub enum ClientCommand {
         server_id: Id,
         pick: Option<crate::ui::avatars::LeafPick>,
     },
-    /// My own picture (`PUT /me/avatar`, JPEG ≤ 2 MB): overrides the GitHub
+    /// My own picture (`PUT /me/avatar`, PNG / JPEG master ≤ 3 MB): overrides the GitHub
     /// avatar everywhere the relay serves me.
     SetMyAvatar {
         path: std::path::PathBuf,
@@ -843,6 +862,10 @@ pub enum ClientCommand {
     FetchThumbnail {
         project_id: Id,
         key: String,
+    },
+    /// Fetch the site icon the bubbles draw before named links to `host`.
+    FetchLinkIcon {
+        host: String,
     },
     /// Download an attachment to `~/Downloads/<name>` (F10).
     DownloadAttachment {
