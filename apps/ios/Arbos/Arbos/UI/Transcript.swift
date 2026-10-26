@@ -24,16 +24,28 @@ enum Block: Equatable, Hashable {
 /// Grok Bot's quote header inside a reply bubble: speech-bubble glyph, then the replied-to
 /// message's first words in quotes, one line, truncated with "…". Tapping it reveals the original.
 struct Quote: Equatable, Hashable {
-    /// The message replied to (`replyTo` on the row); empty on a forward header.
+    /// The message replied to (`replyTo` on the row, or `replyRef.messageId`); empty on a
+    /// forward header.
     var messageId: Id
     var text: String
     /// Set on a forwarded message: the header reads "Forwarded from <name>" with the
     /// forward glyph instead of a reply quote, and does not scroll anywhere.
     var forwardedFrom: String? = nil
+    /// Reply in DM (#1836): the original lives in another chat — its address and the
+    /// "Replying to <who> in <chat>" line. `nil` for an in-chat reply.
+    var source: ReplyRef? = nil
 
     /// The header for a forwarded message (`forwardedFrom` on the row).
     static func forwarded(from name: String) -> Quote {
         Quote(messageId: "", text: name, forwardedFrom: name)
+    }
+
+    /// The quote for a cross-chat reply: drawn from the row's own snapshot, so it needs
+    /// nothing from the source chat.
+    static func forReplyRef(_ r: ReplyRef) -> Quote {
+        let flat = oneLine(r.text)
+        let text = flat.isEmpty ? "Message" : firstWords(flat, maxChars: maxChars)
+        return Quote(messageId: r.messageId, text: text, source: r)
     }
 
     /// The header shows this many characters of the original before "…".
@@ -202,6 +214,11 @@ enum Transcript {
             // its status parts feed the presence line and the tasks sheet, never a bubble —
             // not while it runs, not the "no answer" stock line when it ends.
             if message.hidden || message.job != nil { continue }
+            // A background worker's spawn row (`worker: true`, Grok parity trait 15) draws nothing at
+            // all — no hand-off line, no legacy status line, no date separator. Its `activity` reaches
+            // the working line through `AppModel.currentActivity`. Skipping only the hand-off name
+            // (6e7261a5) left the legacy `.status(.handoff)` fallback drawing "Messaged ◉ <worker>".
+            if message.worker && message.turn?.isProgress == true { continue }
             // Build this message's visible rows first. Date separators only land when
             // something actually renders — otherwise an empty/hidden-only message leaves
             // a lone "Today 5:45 PM" in a blank chat.
@@ -258,6 +275,9 @@ enum Transcript {
                     let quote: Quote?
                     if let by = message.forwardedFrom?.trimmingCharacters(in: .whitespacesAndNewlines), !by.isEmpty {
                         quote = .forwarded(from: by)
+                    } else if let r = message.replyRef {
+                        // Reply in DM: the quote comes from the row's own snapshot.
+                        quote = .forReplyRef(r)
                     } else {
                         quote = message.replyTo.flatMap { $0.isEmpty ? nil : Quote.forReply($0, in: byId) }
                     }
@@ -1000,7 +1020,7 @@ struct RowView: View, Equatable {
     /// How far the transcript has been dragged left to reveal iMessage-style times (0…`timeRevealWidth`).
     var timeReveal: CGFloat = 0
     /// A tap on a reply bubble's quote header: the chat scrolls to this message id.
-    var onQuoteTap: ((Id) -> Void)? = nil
+    var onQuoteTap: ((Quote) -> Void)? = nil
     /// Briefly tinted after a quote tap landed on this row's message.
     var highlighted: Bool = false
     /// Shared mention table from ChatView (built once per directory sync).
@@ -1518,22 +1538,37 @@ struct RowView: View, Equatable {
     }
 
     private func replyQuoteHeader(_ quote: Quote, color: Color) -> some View {
-        Button {
-            onQuoteTap?(quote.messageId)
+        // Reply in DM (#1836): the quote names its chat; it is a link only when the viewer
+        // can open that chat (a member), else just the words.
+        let linkable = quote.source.map { model.isMember(ofChat: $0.chatId) } ?? true
+        return Button {
+            guard linkable else { return }
+            onQuoteTap?(quote)
         } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "bubble.left")
-                    .font(.system(size: 11, weight: .medium))
-                Text("“\(quote.text)”")
-                    .font(theme.font(Theme.small))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+            VStack(alignment: .leading, spacing: 2) {
+                if let src = quote.source {
+                    Text(src.label)
+                        .font(theme.font(Theme.tiny))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .accessibilityIdentifier("reply-quote-source")
+                }
+                HStack(spacing: 6) {
+                    Image(systemName: "bubble.left")
+                        .font(.system(size: 11, weight: .medium))
+                    Text("“\(quote.text)”")
+                        .font(theme.font(Theme.small))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
             }
             .foregroundStyle(color.opacity(0.72))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Replying to: \(quote.text)")
+        .disabled(!linkable)
+        .accessibilityIdentifier("reply-quote")
+        .accessibilityLabel(quote.source.map { "\($0.label): \(quote.text)" } ?? "Replying to: \(quote.text)")
     }
 
     /// "Messaged \u{FFFC}Affine" / "6 messages with \u{FFFC}A, \u{FFFC}B and \u{FFFC}C":
