@@ -579,7 +579,7 @@ fn row(
                 .child(rel_time(now, entry.when())),
         )
     };
-    el = el.child(kit::hairline_below(kit::INSET + THUMB + kit::GAP, theme));
+    el = el.child(kit::hairline_below(theme));
     if hover.is_some_and(|h| h.armed) {
         let above = shell
             .library
