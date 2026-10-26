@@ -4382,6 +4382,8 @@ mod read_cursor_tests {
                 message_id: ulid(),
                 text: text.into(),
                 project_id: None,
+                kind: None,
+                voice_text: None,
             }),
         )
         .await;

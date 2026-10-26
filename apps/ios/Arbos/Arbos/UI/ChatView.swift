@@ -393,6 +393,8 @@ struct ChatSession: View {
     @State private var highlightedMessage: Id?
     /// The bubble whose long-press actions (reaction capsule + menu) are open.
     @State private var actionsRow: Row?
+    /// The composer had the keyboard up when the bubble was pressed (`openActions`).
+    @State private var actionsRestoresKeyboard = false
     @State private var mentionQuery: String?
     /// Chip-picked addressees in a people chat: `agent:…` and/or `user:…` member ids.
     /// Empty means no chip: agent-only DMs may still infer the last agent; human-peer DMs stay
@@ -785,18 +787,23 @@ struct ChatSession: View {
                     .offset(y: -24)
             }
             .background(theme.bg)
+            // A drag that starts here selects text or slides the mic — never "back".
+            .backSwipeComposerBar()
         }
         .overlayPreferenceValue(RowFrameKey.self) { anchors in
             GeometryReader { geo in
                 if let row = actionsRow, let anchor = anchors[row.id] {
                     let frame = geo[anchor]
+                    // This reader ignores the safe area, so its own insets read 0; the
+                    // overlay needs the real status-bar / home-indicator insets to fit.
+                    let safeArea = KeyboardFrameObserver.windowSafeArea
                     MessageActionsOverlay(
                         row: row,
                         frame: frame,
                         width: geo.size.width,
                         height: geo.size.height,
-                        safeTop: geo.safeAreaInsets.top,
-                        safeBottom: geo.safeAreaInsets.bottom,
+                        safeTop: max(geo.safeAreaInsets.top, safeArea.top),
+                        safeBottom: max(geo.safeAreaInsets.bottom, safeArea.bottom),
                         held: heldReactions(row),
                         items: MessageMenu.items(forMessage: true,
                                                 canEdit: canEditMessage(row),
@@ -807,7 +814,7 @@ struct ChatSession: View {
                             model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: emoji)
                         },
                         onMenu: { item in
-                            closeActions()
+                            closeActions(after: item)
                             runMessageMenu(item, row: row)
                         },
                         onDismiss: { closeActions() },
@@ -821,15 +828,9 @@ struct ChatSession: View {
             }
             .ignoresSafeArea()
         }
-        .toolbar(.hidden, for: .navigationBar)
-        .toolbar(.hidden, for: .tabBar)
-        .navigationBarBackButtonHidden(true)
-        // Hiding the system back button also disables the edge-swipe pop; re-enable it
-        // except while the composer is focused so editing / selecting text in the bar
-        // cannot edge-swipe back to Home.
-        .background(InteractivePopGestureEnabler(enabled: !composerFocused))
-        // Full-chat swipes: right → previous agent chat (or Home), left → next (or create), up → archive + previous.
-        .simultaneousGesture(chatNavSwipe)
+        // Custom back chevron; swipe right (edge pop or anywhere outside the composer
+        // bar) goes back one level — `BackSwipe.swift`, shared by every chat screen.
+        .backSwipeToPop()
         .fullScreenCover(item: $rigViewer) { v in
             MediaViewer(album: v.items, index: v.index, onClose: { rigViewer = nil }, openForward: rigViewerForward)
                 .environmentObject(model)
@@ -1010,7 +1011,8 @@ struct ChatSession: View {
             let drive = DebugHooks.perfDrive
             if !drive.isEmpty { Task { @MainActor in await runPerfDrive(drive) } }
             #endif
-            if let show = DebugHooks.show {
+            if let show = DebugHooks.show, !model.showHookDone {
+                model.showHookDone = true
                 DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(DebugHooks.showDelayMs)) {
                     switch show {
                     case "keyboard": composerFocused = true
@@ -1128,7 +1130,14 @@ struct ChatSession: View {
                         #endif
                     case "actions":
                         // Rig: the long-press actions (capsule + menu) on the newest bubble.
-                        if let row = rows.last(where: { isMessageRow($0) }) { actionsRow = row }
+                        if let row = rows.last(where: { isMessageRow($0) }) { openActions(row) }
+                    case "keyboard-actions":
+                        // Rig (iphone-bubble-menu-keyboard): the composer keyboard is up, then the
+                        // newest bubble is long-pressed — the overlay must clear the keyboard.
+                        composerFocused = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(1200)) {
+                            if let row = rows.last(where: { isMessageRow($0) }) { openActions(row) }
+                        }
                     case "replied":
                         // Rig: a sent bubble quoting the newest agent message (fixture only).
                         #if DEBUG
@@ -1272,6 +1281,9 @@ struct ChatSession: View {
                 }
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Back")
+            // Names the open chat for the UI tests (which screen is on top after a swipe).
+            .accessibilityIdentifier("chat-back:\(chatId)")
             Spacer()
             GlassPill(material: headerMaterial) {
                 HStack(spacing: 6) {
@@ -1483,27 +1495,6 @@ struct ChatSession: View {
         .accessibilityAction { jumpToLatest() }
     }
 
-    // MARK: Chat navigation swipes
-
-    /// Swipe right goes back to Home (#916/#925). There is no swipe between
-    /// chats: the chats sheet (bubble icon to the right of the agent pill) switches chats.
-    private var chatNavSwipe: some Gesture {
-        DragGesture(minimumDistance: 50, coordinateSpace: .local)
-            .onEnded { value in handleChatSwipe(value) }
-    }
-
-    private func handleChatSwipe(_ value: DragGesture.Value) {
-        // Selecting or dragging in the focused composer is a horizontal pan;
-        // do not treat it as swipe-right → Home.
-        guard !composerFocused else { return }
-        let dx = value.translation.width
-        let absX = abs(dx), absY = abs(value.translation.height)
-        let vx = value.velocity.width, vy = value.velocity.height
-        if dx > 0, absX > 70, absX > absY * 1.25, abs(vx) >= abs(vy) || absX > 120 {
-            dismiss()
-        }
-    }
-
     /// Drag left on the transcript to peek each bubble's send time (iMessage).
     /// Locks only after the pan is clearly horizontal-left so vertical scroll stays free.
     private var timeRevealGesture: some Gesture {
@@ -1617,10 +1608,7 @@ struct ChatSession: View {
                         onQuoteTap: { revealQuoted($0) },
                         onMenu: { runMessageMenu($0, row: $1) },
                         actionsRowId: actionsRow?.id,
-                        onLongPress: { row in
-                            Haptics.pick()
-                            withAnimation(.easeOut(duration: 0.18)) { actionsRow = row }
-                        }
+                        onLongPress: { row in openActions(row) }
                     )
                     .equatable()
                     // Who is working is the presence row over the composer
@@ -1890,8 +1878,26 @@ struct ChatSession: View {
         }
     }
 
-    private func closeActions() {
+    /// Long-press on a bubble: the actions overlay (capsule + menu). The keyboard goes
+    /// down first so nothing of the menu sits under it (iMessage / Grok Bot; feedback
+    /// iphone-bubble-menu-keyboard-2026-10-25) — the typed draft stays in `composerDraft`,
+    /// only focus moves, and `closeActions` gives it back.
+    private func openActions(_ row: Row) {
+        Haptics.pick()
+        actionsRestoresKeyboard = composerFocused
+        composerFocused = false
+        searchFocused = false
+        withAnimation(.easeOut(duration: 0.18)) { actionsRow = row }
+    }
+
+    /// Close the overlay; `item` is the menu action chosen (nil for a tap outside or a
+    /// reaction). The composer is focused again only if it was before the press and the
+    /// action leaves the chat on screen (`MessageActionsKeyboard.restoresFocus`).
+    private func closeActions(after item: MessageMenuItem? = nil) {
+        let restore = MessageActionsKeyboard.restoresFocus(wasFocused: actionsRestoresKeyboard, after: item)
+        actionsRestoresKeyboard = false
         withAnimation(.easeOut(duration: 0.15)) { actionsRow = nil }
+        if restore { composerFocused = true }
     }
 
     /// Emoji I already put on this message (tinted in the capsule).
@@ -2883,70 +2889,6 @@ private struct ScrollInterruptTap: UIViewRepresentable {
             for child in view.subviews {
                 stopDeceleratingScrollViews(in: child)
             }
-        }
-    }
-}
-
-/// `.navigationBarBackButtonHidden(true)` turns off the system edge-swipe
-/// back gesture; this turns it back on for the enclosing UINavigationController.
-/// Shared with `SettingsPage` (and any other custom-back screen).
-/// Pass `enabled: false` while the composer is focused so an edge swipe
-/// (or text-selection drag near the left edge) cannot leave the chat.
-struct InteractivePopGestureEnabler: UIViewControllerRepresentable {
-    var enabled: Bool = true
-
-    func makeUIViewController(context: Context) -> Controller { Controller() }
-
-    func updateUIViewController(_ uiViewController: Controller, context: Context) {
-        uiViewController.isPopEnabled = enabled
-        uiViewController.applyPopEnabled()
-    }
-
-    final class Controller: UIViewController, UIGestureRecognizerDelegate {
-        var isPopEnabled = true
-
-        override func viewDidAppear(_ animated: Bool) {
-            super.viewDidAppear(animated)
-            applyPopEnabled()
-        }
-
-        override func viewWillDisappear(_ animated: Bool) {
-            super.viewWillDisappear(animated)
-            // Leave the nav controller able to pop after this screen is gone.
-            if let pop = enclosingNavigationController()?.interactivePopGestureRecognizer {
-                pop.isEnabled = true
-            }
-        }
-
-        func applyPopEnabled() {
-            guard let nav = enclosingNavigationController(),
-                  let pop = nav.interactivePopGestureRecognizer else { return }
-            pop.isEnabled = isPopEnabled
-            pop.delegate = self
-        }
-
-        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-            guard isPopEnabled else { return false }
-            return (enclosingNavigationController()?.viewControllers.count ?? 0) > 1
-        }
-
-        /// Background representables sometimes have a nil `navigationController`;
-        /// walk parents / the responder chain to find the stack that pushed chat.
-        private func enclosingNavigationController() -> UINavigationController? {
-            if let nav = navigationController { return nav }
-            var parent = self.parent
-            while let current = parent {
-                if let nav = current as? UINavigationController { return nav }
-                if let nav = current.navigationController { return nav }
-                parent = current.parent
-            }
-            var responder: UIResponder? = view
-            while let current = responder {
-                if let nav = current as? UINavigationController { return nav }
-                if let vc = current as? UIViewController, let nav = vc.navigationController { return nav }
-                responder = current.next
-            }
-            return nil
         }
     }
 }

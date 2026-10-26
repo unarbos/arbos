@@ -31,7 +31,12 @@ extension AppModel {
         let tints = ["fx-comms": 5, "fx-affine": 3, "fx-hyper": 1, "fx-expense": 6, "fx-invoices": 4, "fx-scout": 2]
         for i in list.indices { list[i].avatarColorIndexEffective = tints[list[i].id] }
         setFixture(projects: list, now: now)
-        if DebugHooks.fixtureServers { setFixtureServers(now: now) }
+        if DebugHooks.fixtureServers {
+            setFixtureServers(now: now)
+            // `ARBOS_OPEN_SERVER` lands on a server / channel; the live path applies it
+            // after `refreshServers`, which the fixture skips (back-swipe UI tests).
+            applyOpenServerHook()
+        }
     }
 
     /// Three servers for the home list's Servers segment (D88 servers otherwise come from the
