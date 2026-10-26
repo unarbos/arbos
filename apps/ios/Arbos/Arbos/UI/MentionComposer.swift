@@ -294,7 +294,8 @@ struct MentionTextView: UIViewRepresentable {
     var agentProject: (ChatMember) -> Project? = { $0.project }
     var maxLines: Int = 8
 
-    static let insets = UIEdgeInsets(top: 10, left: 16, bottom: 10, right: 0)
+    /// Grok: the caret 17 pt in from the field's edge, one 22 pt line centred in 48.
+    static let insets = UIEdgeInsets(top: Theme.composerTextPadY, left: Theme.composerTextInset, bottom: Theme.composerTextPadY, right: 0)
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
