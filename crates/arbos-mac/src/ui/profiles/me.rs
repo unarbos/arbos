@@ -13,7 +13,9 @@ use gpui::{
 
 use crate::app::ProfilePage;
 use crate::model::{now_ms, MachineState};
+use crate::sync::user_error::UserError;
 use crate::ui::devices;
+use crate::ui::error_note;
 use crate::ui::glass;
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
@@ -253,7 +255,7 @@ impl Shell {
                         .px(px(16.0))
                         .py(px(10.0))
                         .relative()
-                        .child(kit::hairline_below(16.0, &theme))
+                        .child(kit::hairline_below(&theme))
                         .child(
                             div()
                                 .text_size(px(TEXT_BODY))
@@ -347,7 +349,7 @@ impl Shell {
                 .py(px(6.0))
                 .child(action)
                 .into_any_element();
-            let actions = kit::section(vec![action_row], kit::INSET, &theme)
+            let actions = kit::section(vec![action_row], &theme)
                 .mx(px(0.0))
                 .mb(px(0.0));
             body = body.child(actions).child(footnote(
@@ -592,6 +594,30 @@ impl Shell {
 
         // ----- Updates page body -------------------------------------------------
         let updates_body = {
+            // A failed install is the page's note (under the pane header, before the card):
+            // the shared element with Try again (install again) and Details (the log's first
+            // line); the row underneath reads the plain version line.
+            let note = match &update.phase {
+                crate::update::UpdatePhase::Failed { message, .. } => {
+                    let error = UserError::from_text("install the update", message.clone());
+                    Some(error_note::render(
+                        "update-error",
+                        &error,
+                        self.update_error_details_open,
+                        error_note::Style::Inline,
+                        &theme,
+                        error_note::Handlers::new()
+                            .try_again(cx.listener(|this, _, _, cx| {
+                                this.state.update(cx, |s, cx| s.install_update(cx));
+                            }))
+                            .toggle_details(cx.listener(|this, _, _, cx| {
+                                this.update_error_details_open = !this.update_error_details_open;
+                                cx.notify();
+                            })),
+                    ))
+                }
+                _ => None,
+            };
             let mut actions = div().flex().items_center().gap(px(14.0));
             if let Some((id, label, installs)) = update_action {
                 actions = actions.child(link_button(id, label, false, &theme).on_click(
@@ -642,12 +668,12 @@ impl Shell {
                     let status = div()
                         .min_w_0()
                         .text_size(px(TEXT_BODY))
-                        .text_color(if update_failed {
-                            theme.danger
+                        .text_color(theme.text)
+                        .child(if update_failed {
+                            format!("Arbos {}", update.current_version)
                         } else {
-                            theme.text
-                        })
-                        .child(update.status_line());
+                            update.status_line()
+                        });
                     let row = div().min_h(px(44.0)).px(px(16.0)).py(px(10.0));
                     if update_failed {
                         row.flex()
@@ -668,6 +694,7 @@ impl Shell {
                 .flex()
                 .flex_col()
                 .gap(px(22.0))
+                .children(note)
                 .child(group)
                 .child(footnote(
                     if auto_update {
@@ -744,15 +771,23 @@ impl Shell {
             let view = devices_view;
             let armed = self.device_revoke_armed.clone();
             let mut body = div().flex().flex_col().gap(px(22.0));
-            if let Some(why) = view.error.clone().filter(|_| view.items.is_empty()) {
-                body = body
-                    .child(settings_group(&theme).child(
-                        glass::row("Devices", &theme).child(value("Could not load".into(), &theme)),
-                    ))
-                    .child(footnote(
-                        format!("{why}. Pull to try again: reopen Devices."),
-                        &theme,
-                    ));
+            if let Some(err) = view.error.clone().filter(|_| view.items.is_empty()) {
+                // The page's note: under the pane header, before the first card.
+                body = body.child(error_note::render(
+                    "devices-error",
+                    &err,
+                    self.devices_error_details_open,
+                    error_note::Style::Inline,
+                    &theme,
+                    error_note::Handlers::new()
+                        .try_again(cx.listener(|this, _, _, cx| {
+                            this.state.update(cx, |s, cx| s.devices_refresh(cx));
+                        }))
+                        .toggle_details(cx.listener(|this, _, _, cx| {
+                            this.devices_error_details_open = !this.devices_error_details_open;
+                            cx.notify();
+                        })),
+                ));
             } else if !view.loaded && view.items.is_empty() {
                 body = body.child(kit::empty("Loading…", &theme));
             } else if view.items.is_empty() {
@@ -845,11 +880,7 @@ impl Shell {
                     );
                     rows.push(row.into_any_element());
                 }
-                body = body.child(
-                    kit::section(rows, kit::INSET + 30.0 + kit::GAP, &theme)
-                        .mx(px(0.0))
-                        .mb(px(0.0)),
-                );
+                body = body.child(kit::section(rows, &theme).mx(px(0.0)).mb(px(0.0)));
                 body = body.child(footnote(
                     "Every GitHub sign-in is a device. Signing one out ends its session at once; it can sign in again. This Mac signs out from the Settings tab."
                         .into(),
@@ -1045,7 +1076,9 @@ impl Shell {
             subtitle: Some(who.clone().into()),
             subtitle_color: theme.text_muted,
             subtitle_click: None,
+            subtitle_element: None,
             editor,
+            action: None,
         };
 
         let mut body: Vec<Section> = Vec::new();

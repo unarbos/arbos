@@ -17,7 +17,7 @@ use gpui::{
 use crate::app::{AppEvent, AppState, DetailsTarget};
 use crate::model::{
     now_ms, Attachment, AttachmentKind, Chat, Id, Message, MessageStatus, Part, Person, Project,
-    Role, SpaceKind, StatusKind, TurnKind,
+    ReplyRef, Role, SpaceKind, StatusKind, TurnKind,
 };
 use crate::ui::approve::{approval_card, ApprovalView};
 use crate::ui::attachments;
@@ -26,12 +26,13 @@ use crate::ui::cards;
 use crate::ui::frost::edge_faded;
 use crate::ui::icons::icon;
 use crate::ui::markdown::{
-    has_fenced_code, inline_plain, inline_spans, polish_assistant_prose, split_blocks, Block,
+    self, has_fenced_code, inline_plain, inline_spans, polish_assistant_prose, split_blocks, Block,
 };
+use crate::ui::math;
 use crate::ui::mention::{self, Mentions};
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
-use crate::ui::select::{BubbleAt, BubbleSelectable, Selectable, Span, TextSelection};
+use crate::ui::select::{BubbleAt, BubbleSelectable, LinkIcons, Selectable, Span, TextSelection};
 use crate::ui::theme::{
     Theme, BUBBLE_PAD_X, BUBBLE_PAD_Y, BUBBLE_RADIUS, CHAT_BODY, CHAT_LINE_HEIGHT, COLUMN_MARGIN,
     COMPOSER_HEIGHT, COMPOSER_WIDTH, LINE_HEIGHT, PLUS_BUTTON, TEXT_SMALL, TEXT_TINY,
@@ -79,9 +80,10 @@ const OVERDRAW_PX: f32 = 320.0;
 /// width cap, so the agent bubble's left edge is the composer's left edge
 /// and my bubble's right edge is the composer's right edge, at any pane
 /// width. Grok Mac (refs 57/58, 2 px/pt): both at 16 pt from the pane. The
-/// cap is the composer pill at its widest as it has always shipped — the
-/// 820 pt input plus the two 28 pt circles — so the pill itself does not
-/// move; up to a 908 pt pane the margins bound both.
+/// cap is the composer pill at its widest — the 904 pt input plus the two
+/// 28 pt circles = Grok's 960 ([feedback mac-sidebar-rail-2026-10-26]; 876
+/// before) — so the pill itself does not move; up to a 992 pt pane the
+/// margins bound both.
 pub const COLUMN_MAX_WIDTH: f32 = COMPOSER_WIDTH + 2.0 * PLUS_BUTTON;
 /// Agent bubble cap, measured from Grok Mac on two pane widths (ref 57:
 /// 728 pt pane, 612 pt bubble; ref 58: 424 pt pane, 310 pt bubble): the
@@ -96,7 +98,7 @@ pub const ASSISTANT_RIGHT_GAP: f32 = 84.0;
 /// window): every wrapped agent bubble ends at 1120 px = **560 pt** in a
 /// 960 pt composer column (58 % of it) — the list bubble is content-sized
 /// narrower, nothing is wider. Ours filled the column minus the gap (792 at
-/// the 876 pt cap, 90 %), which is what Jacob saw as "Arbos bubbles are
+/// the then 876 pt cap, 90 %), which is what Jacob saw as "Arbos bubbles are
 /// wider" ([feedback bubble-width-2026-10-24]). The cap is the smaller of
 /// the two rules ([`assistant_cap`]): narrow panes keep Grok's fixed gap
 /// (refs 57/58: 612 in a 696 pill, 310 in 392), wide panes stop at 560.
@@ -114,8 +116,8 @@ const STAMP_GAP_MS: u64 = 60 * 60 * 1000;
 /// consecutive bubbles of one sender sit 6 pt apart, a change of sender opens
 /// 20 pt, a time stamp has 20 pt above and 24 below, and the last message keeps
 /// 54 pt clear of the composer.
-const ROW_GAP_HALF: f32 = 3.0;
-const TURN_GAP_EXTRA: f32 = 20.0 - 2.0 * ROW_GAP_HALF;
+pub(crate) const ROW_GAP_HALF: f32 = 3.0;
+pub(crate) const TURN_GAP_EXTRA: f32 = 20.0 - 2.0 * ROW_GAP_HALF;
 /// Measured glyph-to-bubble, like the reference: the stamp's 13 pt line box
 /// carries ~4 pt of its own above and ~7 below the glyphs (measured).
 const STAMP_PAD_TOP: f32 = 20.0 - ROW_GAP_HALF - 4.0;
@@ -139,8 +141,13 @@ const BULLET_CENTRE: f32 = 8.5;
 /// Clearance above the composer when pinned (54 pt glyph-to-pill, minus the
 /// composer row's own 6 pt top padding and the last row's half-gap). Kept as a
 /// trailing list row — not as container padding — so scrolling bubbles reach
-/// the real edge of the input instead of hitting an opaque black strip.
+/// the real edge of the input instead of hitting an opaque black strip. The
+/// presence row (who is typing / working) floats inside this clearance while
+/// the list is pinned (`presence::LIFT`), so it never adds to it.
 const BOTTOM_INSET: f32 = 54.0 - ROW_GAP_HALF - 6.0;
+/// The last bubble's bottom edge → the composer pill's top edge when pinned.
+#[cfg(test)]
+pub(crate) const LAST_BUBBLE_TO_COMPOSER: f32 = ROW_GAP_HALF + BOTTOM_INSET + 6.0;
 /// People chats (redesign mocks a/f): a 24 pt sender disc at the bubble's
 /// bottom-left, 8 pt from it; captions and earlier blocks keep the lane free.
 /// The avatar column (Jacob, 2026-10-23 15:20, [feedback
@@ -260,10 +267,21 @@ impl HoverFade {
 /// replied-to message's first words in quotes. Clicking it reveals the original.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Quote {
-    /// The message replied to (`replyTo` on the row).
+    /// The message replied to (`replyTo` on the row, or `replyRef.messageId`).
     pub message_id: Id,
     /// Its first line, cut to [`QUOTE_CHARS`] characters with an ellipsis.
     pub text: String,
+    /// Reply in DM (#1835): the original lives in another chat — its address
+    /// and the "Replying to <who> in <chat>" line. `None` for an in-chat reply.
+    pub source: Option<QuoteSource>,
+}
+
+/// Where a cross-chat quote came from.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct QuoteSource {
+    pub chat_id: Id,
+    /// "Replying to Jacob in Arbonites".
+    pub label: String,
 }
 
 /// The quote header shows this many characters of the original before "…".
@@ -281,7 +299,36 @@ impl Quote {
         Self {
             message_id: reply_to.to_owned(),
             text,
+            source: None,
         }
+    }
+
+    /// The quote for a cross-chat reply: drawn from the row's own snapshot, so
+    /// it needs nothing from the source chat.
+    pub fn for_reply_ref(r: &ReplyRef) -> Self {
+        let text = if r.text.trim().is_empty() {
+            "Message".to_owned()
+        } else {
+            first_words(&one_line(&r.text), QUOTE_CHARS)
+        };
+        Self {
+            message_id: r.message_id.clone(),
+            text,
+            source: Some(QuoteSource {
+                chat_id: r.chat_id.clone(),
+                label: reply_ref_label(r),
+            }),
+        }
+    }
+}
+
+/// "Replying to Jacob in Arbonites" — what a cross-chat quote says above the text.
+pub fn reply_ref_label(r: &ReplyRef) -> String {
+    let place = r.chat_title.trim();
+    if place.is_empty() {
+        format!("Replying to {}", r.who())
+    } else {
+        format!("Replying to {} in {place}", r.who())
     }
 }
 
@@ -301,6 +348,7 @@ pub fn one_line(text: &str) -> String {
                 .into_iter()
                 .chain(rows.into_iter().flatten())
                 .collect(),
+            Block::Math { source } => vec![math::plain(&source)],
         };
         for piece in pieces {
             // Spans are joined before splitting so "`site/launch/`;" stays one
@@ -627,6 +675,8 @@ pub struct Transcript {
     /// Who `@handle` resolves to in this chat's bubbles (mention chips),
     /// rebuilt with the rows.
     mentions: Rc<Mentions>,
+    /// Site pictures for the bubbles' named links (`AppState::link_icons`).
+    link_icons: Rc<LinkIcons>,
     /// Whether the right pane was open at the last sync: its opening or
     /// closing changes the column width, and the cached row layouts must go.
     pane_open: bool,
@@ -711,6 +761,7 @@ impl Transcript {
             list,
             rows: Vec::new(),
             mentions: Mentions::empty(),
+            link_icons: LinkIcons::empty(),
             pane_open: false,
             veils: HashMap::new(),
             cards: HashMap::new(),
@@ -976,6 +1027,20 @@ impl Transcript {
         .size_full()
     }
 
+    /// The list sits at its end (new rows glide into view). The shell draws the
+    /// presence row over the bottom clearance only then: scrolled into history,
+    /// bubbles pass through that band and the ↓ button takes it.
+    pub fn is_pinned_to_bottom(&self) -> bool {
+        self.pinned_to_bottom
+    }
+
+    /// Where the list drew row `row_id` in the last frame (its whole frame:
+    /// the bubble plus its gap padding), if it was on screen.
+    #[cfg(test)]
+    pub(crate) fn row_frame(&self, row_id: &str) -> Option<Bounds<Pixels>> {
+        self.measured.borrow().rows.get(row_id).copied()
+    }
+
     /// The first row of a message from a new sender opens the turn gap; a
     /// stamp between them already carries its own spacing.
     fn is_turn_start(&self, ix: usize) -> bool {
@@ -1013,7 +1078,7 @@ impl Transcript {
     /// Wheel/trackpad over the transcript: scrolling up (positive delta,
     /// toward older messages) breaks the pin at once; scrolling down asks the
     /// next frame to re-pin when within `STICK_THRESHOLD_PX` of the end.
-    fn on_wheel(&mut self, event: &gpui::ScrollWheelEvent, cx: &mut Context<Self>) {
+    pub(crate) fn on_wheel(&mut self, event: &gpui::ScrollWheelEvent, cx: &mut Context<Self>) {
         let dy = f32::from(event.delta.pixel_delta(px(20.0)).y);
         if dy > 0.0 {
             self.pinned_to_bottom = false;
@@ -1211,6 +1276,9 @@ impl Transcript {
     pub fn sync(&mut self, cx: &mut Context<Self>) {
         let theme = Theme::of(cx).clone();
         self.mentions = Mentions::from_state(&self.state, &theme, cx);
+        self.link_icons = Rc::new(LinkIcons {
+            by_host: self.state.read(cx).link_icons.clone(),
+        });
         let state = self.state.read(cx);
         let chat_id = state.active_chat_id();
         let chat_changed = chat_id != self.chat_id;
@@ -1328,6 +1396,14 @@ impl Transcript {
         let old_len = self.rows.len();
         self.rows = new_rows;
         self.list.splice(prefix..old_len, self.rows.len() - prefix);
+        if crate::model::trace_rows() {
+            eprintln!(
+                "rows: transcript chat={} rows={} changed_from={prefix} at={}",
+                self.chat_id.as_deref().unwrap_or(""),
+                self.rows.len(),
+                crate::model::now_ms()
+            );
+        }
         // Reading history: a stale pin (scrollbar / list scroll that never
         // cleared it) must not spring to the new end when rows land below.
         let max = f32::from(self.list.max_offset_for_scrollbar().y);
@@ -1476,19 +1552,29 @@ impl Transcript {
     /// Grok's quote header at the top of a reply bubble: speech-bubble glyph,
     /// then the original's first words in quotes, one line, truncated. Click
     /// → scroll to the original and highlight it for a moment.
-    fn quote_header(&self, row_id: &str, quote: Quote, text_color: gpui::Hsla) -> Stateful<Div> {
+    fn quote_header(
+        &self,
+        row_id: &str,
+        quote: Quote,
+        text_color: gpui::Hsla,
+        cx: &App,
+    ) -> Stateful<Div> {
         let state = self.state.clone();
         let chat_id = self.chat_id.clone();
         let target = quote.message_id.clone();
         let muted = Theme::with_alpha(text_color, 0.72);
-        div()
-            .id(SharedString::from(format!("{row_id}#quote")))
+        // Reply in DM (#1835): the quote names its chat; it is a link only when
+        // the viewer can open that chat (a member), else just the words.
+        let source = quote.source.clone();
+        let linkable = match &source {
+            Some(src) => self.state.read(cx).is_member_of_chat(&src.chat_id),
+            None => true,
+        };
+        let quote_line = div()
             .flex()
             .items_center()
             .gap(px(6.0))
             .min_w_0()
-            .cursor_pointer()
-            .hover(|s| s.opacity(0.8))
             .child(icon("bubble", 12.0, muted))
             .child(
                 div()
@@ -1498,12 +1584,48 @@ impl Transcript {
                     .line_height(px(LINE_HEIGHT - 4.0))
                     .text_color(muted)
                     .child(format!("“{}”", quote.text)),
-            )
-            .on_click(move |_, _, cx| {
-                if let Some(chat_id) = chat_id.clone() {
-                    let target = target.clone();
-                    state.update(cx, |s, cx| s.reveal_reply(chat_id, target, cx));
-                }
+            );
+        let selector = format!("reply-quote-{row_id}");
+        let source_selector = format!("reply-quote-source-{row_id}");
+        div()
+            .id(SharedString::from(format!("{row_id}#quote")))
+            .debug_selector(move || selector.clone())
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .min_w_0()
+            .when(linkable, |el| el.cursor_pointer().hover(|s| s.opacity(0.8)))
+            .when_some(source.as_ref(), |el, src| {
+                el.child(
+                    div()
+                        .debug_selector(move || source_selector.clone())
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(TEXT_TINY))
+                        .line_height(px(LINE_HEIGHT - 6.0))
+                        .text_color(muted)
+                        .child(src.label.clone()),
+                )
+            })
+            .child(quote_line)
+            .when(linkable, |el| {
+                el.on_click(move |_, _, cx| match (&source, chat_id.clone()) {
+                    (Some(src), _) => {
+                        let r = ReplyRef {
+                            chat_id: src.chat_id.clone(),
+                            message_id: target.clone(),
+                            ..ReplyRef::default()
+                        };
+                        state.update(cx, |s, cx| {
+                            s.reveal_reply_ref(&r, cx);
+                        });
+                    }
+                    (None, Some(chat_id)) => {
+                        let target = target.clone();
+                        state.update(cx, |s, cx| s.reveal_reply(chat_id, target, cx));
+                    }
+                    (None, None) => {}
+                })
             })
     }
 
@@ -1698,7 +1820,9 @@ impl Transcript {
                 .iter()
                 .find(|p| p.name.eq_ignore_ascii_case(name) && p.kind == SpaceKind::Project);
             let glyph: AnyElement = match mine {
-                Some(space) => crate::ui::avatars::project(space, 16.0, theme).into_any_element(),
+                Some(space) => {
+                    crate::ui::avatars::project_in(state, space, 16.0, theme).into_any_element()
+                }
                 // Not one of my projects (a subagent): initials on the name's gradient.
                 None => {
                     crate::ui::avatars::element(name, name, None, 16.0, theme).into_any_element()
@@ -1750,7 +1874,7 @@ impl Transcript {
                 .rounded_full()
                 .overflow_hidden()
                 .child(
-                    gpui::img(image)
+                    gpui::img(crate::ui::picture_fit::fit(&image, SENDER_DISC))
                         .size(px(SENDER_DISC))
                         .rounded_full()
                         .object_fit(gpui::ObjectFit::Cover),
@@ -1875,9 +1999,10 @@ impl Transcript {
             _ => None,
         };
         let r = px(BUBBLE_RADIUS);
-        let quote_header = quote
-            .filter(|_| first)
-            .map(|q| self.quote_header(row_id, q, theme.text).into_any_element());
+        let quote_header = quote.filter(|_| first).map(|q| {
+            self.quote_header(row_id, q, theme.text, cx)
+                .into_any_element()
+        });
         let bubble = self
             .menu_target(
                 div().id(SharedString::from(format!("{}#bubble", row_id))),
@@ -1977,7 +2102,37 @@ impl Transcript {
             .into_any_element()
     }
 
+    /// One row of the list. Building a row's element from a message the code did not expect
+    /// must not take the app down (2026-10-26: Mac 0.6.268 aborted at every launch on the
+    /// restored transcript): a panic here is caught, logged by the panic hook, and the row
+    /// shows a short note instead.
     fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.render_row_inner(ix, window, cx)
+        }));
+        match result {
+            Ok(element) => element,
+            Err(_) => {
+                let theme = Theme::of(cx).clone();
+                log::error!(target: "arbos_mac::diagnostic", "transcript row {ix} skipped after a panic");
+                div()
+                    .w_full()
+                    .px(px(BUBBLE_PAD_X))
+                    .py(px(6.0))
+                    .text_size(px(12.0))
+                    .text_color(theme.text_faint)
+                    .child("This message could not be shown.")
+                    .into_any_element()
+            }
+        }
+    }
+
+    fn render_row_inner(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         self.rows_laid_out += 1;
         let Some(row) = self.rows.get(ix).cloned() else {
             return div().into_any_element();
@@ -1989,6 +2144,7 @@ impl Transcript {
         // so a selection across bubbles knows which end comes first.
         let selectable = Selectable::new(&self.selection, theme.accent_soft, cx)
             .with_mentions(self.mentions.clone(), theme.accent)
+            .with_link_icons(self.link_icons.clone(), link_icon_placeholder(&theme))
             .ordered(self.message_order(ix));
         let inner: AnyElement = match row.kind {
             RowKind::User {
@@ -2015,7 +2171,7 @@ impl Transcript {
                 // would carry its quote (a forward never quotes).
                 let quote_header = match forwarded_from {
                     Some(by) => Some(forwarded_header(by, text_color)),
-                    None => quote.map(|q| self.quote_header(&row.id, q, text_color)),
+                    None => quote.map(|q| self.quote_header(&row.id, q, text_color, cx)),
                 };
                 // Triple-backtick fences render as code cards (same as agent
                 // replies); other text stays plain so "# heading" is still literal.
@@ -2834,6 +2990,7 @@ fn block_text_len(block: &Block) -> usize {
             header.iter().map(|s| s.len() + 1).sum::<usize>()
                 + rows.iter().flatten().map(|s| s.len() + 1).sum::<usize>()
         }
+        Block::Math { source } => source.len(),
     }
 }
 
@@ -2925,14 +3082,28 @@ fn rail_centre(
     let half = px(RAIL_BUTTON / 2.0 + RAIL_EDGE_INSET);
     let low = viewport.top() + px(HEADER_FADE_BAND) + half;
     let high = viewport.bottom() - half;
-    let centre = if high <= low {
-        centre
-    } else {
-        centre.clamp(low, high)
-    };
-    // Never outside the bubble itself (a short bubble at the very edge).
-    let centre = centre.clamp(top + px(RAIL_BUTTON / 2.0), bottom - px(RAIL_BUTTON / 2.0));
+    let centre = clamp_or_keep(centre, low, high);
+    // Never outside the bubble itself (a short bubble at the very edge). The bounds come
+    // from the list's measured rows, which can be of two layout generations while rows
+    // reflow (a row inserted above, a table that grew, a scroll): the span may then be
+    // shorter than the button or even inverted — `Ord::clamp` would panic on it
+    // (`assertion failed: min <= max`; Mac 0.6.268 aborted on exactly that, 2026-10-26).
+    let centre = clamp_or_keep(
+        centre,
+        top + px(RAIL_BUTTON / 2.0),
+        bottom - px(RAIL_BUTTON / 2.0),
+    );
     centre - last.top()
+}
+
+/// `value.clamp(low, high)` when the bounds are in order, `value` itself otherwise — the
+/// rail may sit a few points off on a frame whose measurements are mid-reflow, never panic.
+fn clamp_or_keep(value: Pixels, low: Pixels, high: Pixels) -> Pixels {
+    if high < low {
+        value
+    } else {
+        value.clamp(low, high)
+    }
 }
 
 /// The frame that hangs the rail (and the hover time) off a bubble's right
@@ -2993,20 +3164,18 @@ fn pending_glyph(theme: &Theme) -> Div {
         .child(icon("hourglass", 12.0, theme.text_muted))
 }
 
-/// The mark beside a bubble the relay refused: red glyph + "Retry", always
-/// visible, outside the bubble on its outer edge. [`Transcript::failed_retry`]
-/// makes it clickable.
+/// The mark beside a bubble the relay refused: the red glyph, always visible, outside the
+/// bubble on its outer edge (Jacob's own-bubble rule). The words and Try again are the
+/// composer's note ([feedback error-messages-mac-2026-10-26]); [`Transcript::failed_retry`]
+/// still makes the mark itself clickable.
 fn failed_glyph(theme: &Theme) -> Div {
     div()
         .flex_shrink_0()
         .flex()
         .items_center()
-        .gap(px(4.0))
-        .text_size(px(TEXT_TINY))
-        .text_color(theme.danger)
         .debug_selector(|| "own-bubble-failed-glyph".into())
+        // error-ui: exception failed-bubble-mark (the glyph is the mark, not a message)
         .child(icon("exclamation", RAIL_GLYPH, theme.danger))
-        .child("Retry")
 }
 
 /// A text block that is really machine output (a JSON object/array) is not
@@ -3021,7 +3190,8 @@ fn is_json_block(block: &Block) -> bool {
         | Block::Heading { .. }
         | Block::Bullets(_)
         | Block::Numbered(_)
-        | Block::Table { .. } => return false,
+        | Block::Table { .. }
+        | Block::Math { .. } => return false,
     };
     let t = text.trim();
     (t.starts_with('{') || t.starts_with('['))
@@ -3064,12 +3234,23 @@ pub fn build_rows(
     // the sender changed or a date stamp broke the run (Grok Bot's group style), and
     // only in chats that name their senders at all (`names_senders`).
     let mut prev_sender: Option<String> = None;
+    // The stamp pushed for the current message, with the state it replaced. A
+    // message that then draws nothing — a hidden job / worker row, a stream
+    // with no words yet — takes its stamp back, so no date line hangs over
+    // empty space above the status row ([feedback status-row-gap-mac-2026-10-26]).
+    let mut pending_stamp: Option<(usize, u64, Option<String>)> = None;
     for (mix, message) in messages.iter().enumerate() {
+        retract_dangling_stamp(
+            &mut rows,
+            &mut pending_stamp,
+            &mut last_stamp_at,
+            &mut prev_sender,
+        );
         let streaming = message.is_streaming();
         if message.created_at > 0 && message.created_at.saturating_sub(last_stamp_at) > STAMP_GAP_MS
         {
+            pending_stamp = Some((rows.len(), last_stamp_at, prev_sender.take()));
             last_stamp_at = message.created_at;
-            prev_sender = None;
             let label = crate::ui::sidebar::stamp_label(message.created_at);
             rows.push(Row {
                 version: hash_version(&label, false),
@@ -3164,11 +3345,20 @@ pub fn build_rows(
                     && !(has_image && is_generic_media_label(&text))
                     && forwarded.is_none();
                 if show_text || attachment_parts.is_empty() {
+                    // A cross-chat reply (Reply in DM) quotes its own snapshot;
+                    // an in-chat reply quotes the row it points at.
                     let quote = message
-                        .reply_to
-                        .as_deref()
-                        .filter(|id| !id.is_empty())
-                        .map(|id| Quote::for_reply(id, messages));
+                        .reply_ref
+                        .as_ref()
+                        .filter(|r| !r.chat_id.is_empty() && !r.message_id.is_empty())
+                        .map(Quote::for_reply_ref)
+                        .or_else(|| {
+                            message
+                                .reply_to
+                                .as_deref()
+                                .filter(|id| !id.is_empty())
+                                .map(|id| Quote::for_reply(id, messages))
+                        });
                     let delivery = delivery_state(message, is_mine);
                     let forwarded_from = message
                         .forwarded_from
@@ -3720,9 +3910,15 @@ pub fn build_rows(
             prev_sender = Some(message.sender.clone());
         }
     }
+    retract_dangling_stamp(
+        &mut rows,
+        &mut pending_stamp,
+        &mut last_stamp_at,
+        &mut prev_sender,
+    );
     // Who is working is the presence row over the composer (`ui::presence`),
     // not a transcript row: one notice per agent, never a caption plus a line.
-    let _ = (running, queued);
+    let _ = (running, queued, last_stamp_at, prev_sender);
     // Trailing clearance: scrolls with the list so mid-thread bubbles can
     // reach the composer, while the pinned end still keeps 54 pt above it.
     if !rows.is_empty() {
@@ -3734,6 +3930,24 @@ pub fn build_rows(
         });
     }
     rows
+}
+
+/// A time stamp that ended up as the last row drew a line over nothing: the
+/// message it introduced added no row. Take it back and restore the stamp
+/// clock and the sender run to what they were before it.
+fn retract_dangling_stamp(
+    rows: &mut Vec<Row>,
+    pending: &mut Option<(usize, u64, Option<String>)>,
+    last_stamp_at: &mut u64,
+    prev_sender: &mut Option<String>,
+) {
+    if let Some((ix, at, sender)) = pending.take() {
+        if rows.len() == ix + 1 && matches!(rows[ix].kind, RowKind::Stamp { .. }) {
+            rows.pop();
+            *last_stamp_at = at;
+            *prev_sender = sender;
+        }
+    }
 }
 
 /// One chips row under a message that carries reactions.
@@ -3826,12 +4040,20 @@ fn block_segments(block: &Block, literal: bool) -> Vec<Segment> {
                         _ => " | ",
                     };
                     let cell = row.get(ci).map(String::as_str).unwrap_or("");
-                    out.push(seg(lead.to_string(), cell.to_string()));
+                    out.push(seg(lead.to_string(), inline(cell)));
                 }
             }
             out
         }
         Block::Code { code, .. } => vec![seg(String::new(), code.clone())],
+        Block::Math { source } => vec![seg(
+            String::new(),
+            if literal {
+                source.clone()
+            } else {
+                math::plain(source)
+            },
+        )],
     }
 }
 
@@ -4031,7 +4253,8 @@ fn user_message_body(
             | Block::Heading { .. }
             | Block::Bullets(_)
             | Block::Numbered(_)
-            | Block::Table { .. } => col.child(plain_text(
+            | Block::Table { .. }
+            | Block::Math { .. } => col.child(plain_text(
                 &block_plain(block, true),
                 color,
                 theme,
@@ -4057,7 +4280,7 @@ fn styled_text(
     bubble: &BubbleSelectable,
     at: usize,
 ) -> AnyElement {
-    let (full, runs, links) = inline_runs(text, base_color, theme);
+    let (full, runs, links, icons) = inline_runs(text, base_color, theme);
     let runs = match veil {
         Some(veil) => apply_veil(runs, &veil.spans(now), veil_offset),
         None => runs,
@@ -4065,6 +4288,7 @@ fn styled_text(
     bubble
         .text(at, full, runs)
         .with_links(links)
+        .with_icons(icons)
         .into_any_element()
 }
 
@@ -4073,16 +4297,32 @@ fn styled_text(
 /// heavier cut than Arbos's semibold ([feedback bubble-markdown-2026-10-24]).
 const STRONG_WEIGHT: FontWeight = FontWeight::BOLD;
 
+/// The neutral rounded square a named link shows while its site's icon loads
+/// or when the site has none: the muted text colour at low alpha.
+pub fn link_icon_placeholder(theme: &Theme) -> gpui::Hsla {
+    Theme::with_alpha(theme.text_muted, 0.28)
+}
+
 /// Clickable link ranges of a rendered text (element-local bytes → href).
 type Links = Vec<(std::ops::Range<usize>, String)>;
+/// Icon cells of the named links (element-local bytes of the cell → site host).
+type Icons = Vec<(std::ops::Range<usize>, String)>;
 
-/// The rendered text, its styled runs and its link ranges for inline
-/// markdown `text` (`**bold**`, `*italic*`, `` `code` ``, links).
-fn inline_runs(text: &str, base_color: gpui::Hsla, theme: &Theme) -> (String, Vec<TextRun>, Links) {
+/// The rendered text, its styled runs, its link ranges and its icon cells for
+/// inline markdown `text` (`**bold**`, `*italic*`, `` `code` ``, links). A
+/// named link's cell ([`markdown::LINK_ICON_CELL`]) is an unpainted run — the
+/// site's picture goes there at paint time — and the link's click range
+/// covers cell and name.
+fn inline_runs(
+    text: &str,
+    base_color: gpui::Hsla,
+    theme: &Theme,
+) -> (String, Vec<TextRun>, Links, Icons) {
     let spans = inline_spans(text);
     let mut full = String::new();
     let mut runs: Vec<TextRun> = Vec::new();
     let mut links: Links = Vec::new();
+    let mut icons: Icons = Vec::new();
     let sans = sans_font(theme);
     let mono = gpui::Font {
         family: theme.font_mono.into(),
@@ -4090,23 +4330,41 @@ fn inline_runs(text: &str, base_color: gpui::Hsla, theme: &Theme) -> (String, Ve
     };
     for span in spans {
         let style = span.style;
-        let mut font = if style.code {
+        let mut font = if style.math {
+            math_font(theme, style.italic, style.bold)
+        } else if style.code {
             mono.clone()
         } else {
             sans.clone()
         };
-        if style.bold {
+        if style.bold && !style.math {
             font.weight = STRONG_WEIGHT;
         }
-        if style.italic {
+        if style.italic && !style.math {
             font.style = gpui::FontStyle::Italic;
         }
         let start = full.len();
         if let Some(href) = span.href.clone() {
             links.push((start..start + span.text.len(), href));
         }
+        let mut text_len = span.text.len();
+        if let Some(host) = span.icon.as_ref() {
+            let cell = markdown::LINK_ICON_CELL.len();
+            if span.text.starts_with(markdown::LINK_ICON_CELL) {
+                icons.push((start..start + cell, host.clone()));
+                runs.push(TextRun {
+                    len: cell,
+                    font: font.clone(),
+                    color: gpui::transparent_black(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                });
+                text_len -= cell;
+            }
+        }
         runs.push(TextRun {
-            len: span.text.len(),
+            len: text_len,
             font,
             color: if style.link { theme.accent } else { base_color },
             background_color: if style.code {
@@ -4127,7 +4385,7 @@ fn inline_runs(text: &str, base_color: gpui::Hsla, theme: &Theme) -> (String, Ve
         });
         full.push_str(&span.text);
     }
-    (full, runs, links)
+    (full, runs, links, icons)
 }
 
 /// Split runs at chunk boundaries and multiply alpha in (zeron veil.rs).
@@ -4288,46 +4546,53 @@ fn render_block(
         }
         Block::Table { header, rows } => {
             let cols = header.len().max(1);
-            let font = sans_font(theme);
-            let cell = |text: &str, head: bool, i: usize, start: usize| {
-                let mut font = font.clone();
-                if head {
-                    font.weight = FontWeight::SEMIBOLD;
-                }
+            let widths = table_column_widths(header, rows);
+            // A cell is inline markdown like any paragraph: `[Name](url)` is a
+            // clickable link, `**bold**` is bold ([feedback
+            // markdown-tables-mac-2026-10-25]: the Lima table showed raw
+            // `[…](https://…)` in every first column).
+            let cell = |text: &str, head: bool, ri: usize, i: usize, start: usize| {
                 let color = if head { theme.text } else { theme.text_muted };
+                let (full, mut runs, links, icons) = inline_runs(text, color, theme);
+                if head {
+                    for run in &mut runs {
+                        if run.font.weight < FontWeight::SEMIBOLD {
+                            run.font.weight = FontWeight::SEMIBOLD;
+                        }
+                    }
+                }
                 div()
-                    .flex_1()
+                    .flex_grow(1.0)
+                    .flex_shrink_0()
+                    .flex_basis(px(widths[i]))
                     .min_w_0()
                     .px(px(10.0))
                     .py(px(6.0))
                     .when(i > 0, |el| el.border_l_1().border_color(theme.border))
                     .text_size(px(12.5))
-                    .when(head, |el| el.font_weight(FontWeight::SEMIBOLD))
                     .text_color(color)
-                    .child(bubble.text(
-                        start,
-                        text.to_string(),
-                        vec![TextRun {
-                            len: text.len(),
-                            font,
-                            color,
-                            background_color: None,
-                            underline: None,
-                            strikethrough: None,
-                        }],
-                    ))
+                    .debug_selector(move || format!("table-cell-r{ri}-c{i}"))
+                    .child(
+                        bubble
+                            .text(start, full, runs)
+                            .with_links(links)
+                            .with_icons(icons),
+                    )
             };
+            // Taffy sizes a nested flex column from its cells' text, not their
+            // bases, so the table names its width: the bases' sum, never under
+            // the frame (`min_w_full`); the cells' `flex_grow` shares any slack.
+            let total: f32 = widths.iter().sum();
             let mut table = div()
                 .flex()
                 .flex_col()
-                .w_full()
-                .rounded(px(8.0))
-                .border_1()
-                .border_color(theme.border)
-                .overflow_hidden();
+                .flex_shrink_0()
+                .w(px(total))
+                .min_w_full()
+                .debug_selector(|| "table".into());
             let mut head_row = div().flex().bg(theme.code_bg);
             for (i, h) in header.iter().enumerate() {
-                head_row = head_row.child(cell(h, true, i, starts[i]));
+                head_row = head_row.child(cell(h, true, 0, i, starts[i]));
             }
             table = table.child(head_row);
             for (ri, row) in rows.iter().enumerate() {
@@ -4342,18 +4607,135 @@ fn render_block(
                     r = r.child(cell(
                         row.get(i).map(String::as_str).unwrap_or(""),
                         false,
+                        ri + 1,
                         i,
                         starts[(ri + 1) * cols + i],
                     ));
                 }
                 table = table.child(r);
             }
-            table.into_any_element()
+            // Wider than the bubble (many columns, long cells): the table keeps
+            // its column widths and scrolls sideways inside the frame instead
+            // of squeezing every cell to a word per line.
+            sideways_scroll(
+                div()
+                    .id(SharedString::from(format!("{row_id}#table")))
+                    .w_full()
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(theme.border),
+            )
+            .child(table)
+            .into_any_element()
         }
         Block::Code { lang, code } => code_fence_card(
             row_id, lang, code, theme.text, theme, bubble, starts[0], veil, now, copy,
         ),
+        // Display math: typeset, a size up, centred on its own line (KaTeX's
+        // display mode in Grok Bot).
+        Block::Math { source } => {
+            let (full, runs) = math_runs(source, theme.text, theme);
+            let runs = match veil {
+                Some(veil) => apply_veil(runs, &veil.spans(now), 0),
+                None => runs,
+            };
+            base.flex()
+                .justify_center()
+                .text_size(px(CHAT_BODY * DISPLAY_MATH_SCALE))
+                .line_height(px(CHAT_LINE_HEIGHT * DISPLAY_MATH_SCALE))
+                .py(px(4.0))
+                .debug_selector(|| "display-math".into())
+                .child(bubble.text(starts[0], full, runs))
+                .into_any_element()
+        }
     }
+}
+
+/// Display math is this much larger than body text.
+const DISPLAY_MATH_SCALE: f32 = 1.15;
+
+/// The math face for an inline or display run: the serif family with its
+/// glyph fallbacks, italic for variables, bold for `\mathbf`.
+fn math_font(theme: &Theme, italic: bool, bold: bool) -> gpui::Font {
+    gpui::Font {
+        family: theme.font_math.into(),
+        features: Default::default(),
+        fallbacks: Some(gpui::FontFallbacks::from_fonts(Theme::math_fallbacks())),
+        weight: if bold {
+            FontWeight::BOLD
+        } else {
+            FontWeight::NORMAL
+        },
+        style: if italic {
+            gpui::FontStyle::Italic
+        } else {
+            gpui::FontStyle::Normal
+        },
+    }
+}
+
+/// A display-math block's text and runs.
+fn math_runs(source: &str, color: gpui::Hsla, theme: &Theme) -> (String, Vec<TextRun>) {
+    let mut full = String::new();
+    let mut runs = Vec::new();
+    for run in math::typeset(source) {
+        runs.push(TextRun {
+            len: run.text.len(),
+            font: math_font(
+                theme,
+                run.style == math::MathStyle::Italic,
+                run.style == math::MathStyle::Bold,
+            ),
+            color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        });
+        full.push_str(&run.text);
+    }
+    (full, runs)
+}
+
+/// A frame whose content scrolls sideways only when the pointer's wheel or
+/// trackpad gesture is horizontal. GPUI otherwise turns a vertical wheel over a
+/// horizontal-only scroll area into sideways motion and the transcript stops
+/// scrolling under the pointer (`Style::restrict_scroll_to_axis`).
+fn sideways_scroll(frame: Stateful<Div>) -> Stateful<Div> {
+    // A flex row: its one child sizes to its content (max-content) and, with
+    // `flex_shrink_0` + `min_w_full`, is never narrower than the frame nor
+    // squeezed below its content — so the frame has something to scroll.
+    let mut frame = frame.flex().overflow_x_scroll();
+    frame.style().restrict_scroll_to_axis = Some(true);
+    frame
+}
+
+/// The narrowest a table column is laid out at, in points.
+pub const TABLE_COLUMN_MIN: f32 = 72.0;
+/// The widest a table column is laid out at before its cells wrap.
+pub const TABLE_COLUMN_MAX: f32 = 280.0;
+/// Average glyph advance of the 12.5 pt table text, used to size columns
+/// before layout (the exact width is not known until the text is shaped).
+const TABLE_GLYPH_ADVANCE: f32 = 7.0;
+
+/// One flex basis per column: wide enough for the longest cell's rendered
+/// text (markers removed) up to [`TABLE_COLUMN_MAX`], never under
+/// [`TABLE_COLUMN_MIN`]. Every row uses the same bases, so the columns line
+/// up, and their sum is what the frame scrolls when the bubble is narrower.
+pub fn table_column_widths(header: &[String], rows: &[Vec<String>]) -> Vec<f32> {
+    let cols = header.len().max(1);
+    (0..cols)
+        .map(|ci| {
+            let longest = std::iter::once(header)
+                .chain(rows.iter().map(Vec::as_slice))
+                .filter_map(|row| row.get(ci))
+                .map(|cell| inline_plain(cell).chars().count())
+                .max()
+                .unwrap_or(0);
+            // Padding on both sides plus a little slack so "10:30am–7:30pm" never breaks
+            // inside the word (the Lima shot of 2026-10-25 23:2x).
+            (longest as f32 * TABLE_GLYPH_ADVANCE + 28.0).clamp(TABLE_COLUMN_MIN, TABLE_COLUMN_MAX)
+        })
+        .collect()
 }
 
 /// The code card's Copy pill, wired to its owner (Jacob 2026-10-24 22:22:
@@ -4476,13 +4858,26 @@ fn code_fence_card(
         Some(v) => apply_veil(runs, &v.spans(now), 0),
         None => runs,
     };
+    // Long lines (a fenced table, a wide log line) keep their columns and
+    // scroll sideways instead of wrapping into an unreadable stack.
     card = card.child(
-        div()
-            .px(px(10.0))
-            .py(px(8.0))
-            .text_size(px(12.5))
-            .line_height(px(18.0))
-            .child(bubble.text(at, code.to_string(), runs)),
+        sideways_scroll(
+            div()
+                .id(SharedString::from(format!("{row_id}#code")))
+                .w_full(),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .min_w_full()
+                .debug_selector(|| "code-body".into())
+                .px(px(10.0))
+                .py(px(8.0))
+                .text_size(px(12.5))
+                .line_height(px(18.0))
+                .whitespace_nowrap()
+                .child(bubble.text(at, code.to_string(), runs)),
+        ),
     );
     card.into_any_element()
 }
@@ -4695,6 +5090,229 @@ mod selection_tests {
         };
         assert_eq!(block_plain(&block, false), "a | b | c\n1 |  | \n2 | 3 | 4");
         assert_eq!(block_segments(&block, false).len(), 9);
+    }
+
+    /// The reply to Jacob's "Find me a book store in lima" (Bubble, 2026-10-25 21:31 UTC),
+    /// verbatim: a plain GFM table whose first column is inline links.
+    const LIMA_TABLE: &str = "| Store | Area | Sunday | What they sell |\n| --- | --- | --- | --- |\n| [Librería El Virrey](https://www.elvirrey.com/) | Miraflores, Calle Bolognesi 510 | 11am–7pm | Spanish literature, essays, history, art; some English at a higher price |\n| [Communitas](https://www.communitas.pe/) | San Isidro, Av. 2 de Mayo 1690 | 10:30am–7:30pm | Humanities, literature, law, history, science, in Spanish |\n| [Vallejo Librería Café](https://www.tangol.com/blog/en/the-3-best-bookstores-in-lima/n-15210) | San Isidro, Av. Camino Real 1119 | not listed | Books plus coffee or tea |\n| [Assouline Lima](https://www.assouline.com/pages/store/lima) | Miraflores, street not listed | not listed | Luxury and design books |";
+
+    /// [feedback markdown-tables-mac-2026-10-25]: the Lima table is one real table whose
+    /// cells are inline markdown — the store names are links (text = name, href = page),
+    /// never raw `[…](…)`; a selection copies the names, not the markup.
+    #[test]
+    fn the_lima_table_is_a_table_of_links() {
+        let blocks = split_blocks(LIMA_TABLE);
+        let [Block::Table { header, rows }] = blocks.as_slice() else {
+            panic!("one table, got {blocks:?}");
+        };
+        assert_eq!(header.len(), 4);
+        assert_eq!(rows.len(), 4);
+        let plain = bubble_plain(&blocks, false);
+        assert!(
+            !plain.contains("](") && !plain.contains("https://"),
+            "{plain}"
+        );
+        assert!(plain.starts_with(&format!(
+            "Store | Area | Sunday | What they sell\n{}Librería El Virrey | Miraflores",
+            markdown::LINK_ICON_CELL
+        )));
+        let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+        let (text, runs, links, icons) = inline_runs(&rows[0][0], theme.text_muted, &theme);
+        let cell = markdown::LINK_ICON_CELL;
+        assert_eq!(text, format!("{cell}Librería El Virrey"));
+        assert_eq!(
+            links,
+            vec![(0..text.len(), "https://www.elvirrey.com/".to_string())]
+        );
+        assert_eq!(icons, vec![(0..cell.len(), "www.elvirrey.com".to_string())]);
+        assert_eq!(
+            runs[0].color,
+            gpui::transparent_black(),
+            "the icon cell is unpainted text"
+        );
+        assert_eq!(
+            runs[1].color, theme.accent,
+            "a link is painted in the accent"
+        );
+        assert!(runs[1].underline.is_some());
+        // Columns: the long "What they sell" column caps out; "Sunday" stays narrow.
+        let widths = table_column_widths(header, rows);
+        assert_eq!(widths.len(), 4);
+        assert_eq!(widths[3], TABLE_COLUMN_MAX);
+        assert!(widths[2] < widths[1] && widths[1] < widths[3], "{widths:?}");
+        assert!(widths.iter().all(|w| *w >= TABLE_COLUMN_MIN));
+    }
+
+    /// Pipe rows without the `| --- |` row are not a table: they degrade to one monospace
+    /// block (the code card, which scrolls sideways) instead of prose with raw pipes. An
+    /// indented table still parses as a table.
+    #[test]
+    fn pipe_rows_without_a_separator_degrade_to_a_mono_block() {
+        let mut lines: Vec<&str> = LIMA_TABLE.lines().collect();
+        lines.remove(1);
+        let headless = lines.join("\n");
+        let blocks = split_blocks(&headless);
+        let [Block::Code { lang, code }] = blocks.as_slice() else {
+            panic!("one mono block, got {blocks:?}");
+        };
+        assert!(lang.is_empty());
+        assert_eq!(code, &headless);
+        let indented = LIMA_TABLE
+            .lines()
+            .map(|l| format!("    {l}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(matches!(
+            split_blocks(&indented).as_slice(),
+            [Block::Table { .. }]
+        ));
+        assert!(matches!(
+            split_blocks("one | pipe in prose\nnext line").as_slice(),
+            [Block::Paragraph(_)]
+        ));
+    }
+
+    struct TableHost {
+        selection: Entity<TextSelection>,
+        width: f32,
+        text: &'static str,
+    }
+
+    impl gpui::Render for TableHost {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
+            let blocks = split_blocks(self.text);
+            let texts = BubbleText::for_blocks(&blocks, false);
+            let selectable = Selectable::new(&self.selection, theme.accent_soft, cx);
+            let bubble = selectable.bubble("m1#text", texts[0].text.clone());
+            div()
+                .w(px(self.width))
+                .debug_selector(|| "test-host".into())
+                .child(render_block(
+                    "m1#t.0",
+                    &blocks[0],
+                    texts[0].at,
+                    None,
+                    Instant::now(),
+                    &theme,
+                    &bubble,
+                    &CodeCopy::default(),
+                ))
+        }
+    }
+
+    fn render_lima_table(
+        cx: &mut gpui::TestAppContext,
+        width: f32,
+    ) -> (
+        gpui::Bounds<Pixels>,
+        gpui::Bounds<Pixels>,
+        gpui::Bounds<Pixels>,
+        gpui::Bounds<Pixels>,
+    ) {
+        cx.update(|cx| {
+            let theme = crate::ui::theme::Theme::for_pref(
+                crate::ui::theme::AppearancePref::Dark,
+                crate::ui::theme::Surface::Matte,
+                cx,
+            );
+            cx.set_global(theme);
+        });
+        let (_view, vcx) = cx.add_window_view(|_, cx| TableHost {
+            selection: cx.new(TextSelection::new),
+            width,
+            text: LIMA_TABLE,
+        });
+        vcx.run_until_parked();
+        let host = vcx.debug_bounds("test-host").expect("host drawn");
+        let table = vcx.debug_bounds("table").expect("table drawn");
+        let first_link_cell = vcx
+            .debug_bounds("table-cell-r1-c0")
+            .expect("first body cell drawn");
+        let last_cell = vcx
+            .debug_bounds("table-cell-r0-c3")
+            .expect("last header-row cell drawn");
+        (host, table, first_link_cell, last_cell)
+    }
+
+    /// Headless render of the Lima table in a wide bubble: every cell is drawn, the columns
+    /// fill the bubble, nothing is squeezed under its minimum.
+    #[gpui::test]
+    fn the_lima_table_renders_as_cells_that_fill_a_wide_bubble(cx: &mut gpui::TestAppContext) {
+        let (host, table, first, last) = render_lima_table(cx, 900.0);
+        assert!(
+            (f32::from(table.size.width) - 900.0).abs() < 3.0,
+            "{:?}",
+            table.size
+        );
+        assert!(f32::from(first.size.width) >= TABLE_COLUMN_MIN);
+        assert!(
+            f32::from(last.size.width) >= TABLE_COLUMN_MAX,
+            "{:?}",
+            last.size
+        );
+        assert!(last.right() <= host.right() + px(1.0));
+    }
+
+    /// The same table in a narrow bubble (the iPhone-width case) overflows its frame — the
+    /// frame scrolls sideways — instead of shrinking the columns under their bases.
+    #[gpui::test]
+    fn the_lima_table_scrolls_sideways_in_a_narrow_bubble(cx: &mut gpui::TestAppContext) {
+        let blocks = split_blocks(LIMA_TABLE);
+        let Block::Table { header, rows } = &blocks[0] else {
+            unreachable!()
+        };
+        let bases: f32 = table_column_widths(header, rows).iter().sum();
+        let (host, table, first, last) = render_lima_table(cx, 360.0);
+        assert!((f32::from(host.size.width) - 360.0).abs() < 1.0);
+        assert!(
+            f32::from(table.size.width) >= bases - 1.0,
+            "{:?} vs {bases}",
+            table.size
+        );
+        assert!(f32::from(first.size.width) >= TABLE_COLUMN_MIN);
+        assert!(
+            last.right() > host.right(),
+            "the last column lies past the frame: scrollable"
+        );
+    }
+
+    /// A fenced (or separator-less) table that still arrives is a code card: its long lines
+    /// keep their columns and the card scrolls sideways instead of wrapping or cutting off.
+    #[gpui::test]
+    fn a_code_card_with_long_lines_scrolls_sideways(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let theme = crate::ui::theme::Theme::for_pref(
+                crate::ui::theme::AppearancePref::Dark,
+                crate::ui::theme::Surface::Matte,
+                cx,
+            );
+            cx.set_global(theme);
+        });
+        const FENCED: &str = "```\n| Store | Area | Sunday | What they sell | Phone | Source | Checked |\n| [Librería El Virrey](https://www.elvirrey.com/) | Miraflores, Calle Bolognesi 510 | 11am–7pm | Spanish literature | (511) 713 0505 | own site | yes |\n```";
+        let (_view, vcx) = cx.add_window_view(|_, cx| TableHost {
+            selection: cx.new(TextSelection::new),
+            width: 300.0,
+            text: FENCED,
+        });
+        vcx.run_until_parked();
+        let host = vcx.debug_bounds("test-host").expect("host drawn");
+        let body = vcx.debug_bounds("code-body").expect("code body drawn");
+        assert!(
+            body.size.width > host.size.width + px(200.0),
+            "{:?} vs {:?}: the line is laid out unwrapped, past the frame",
+            body.size,
+            host.size
+        );
+        assert!(
+            body.size.height < px(80.0),
+            "{:?}: two lines, not a wrapped stack",
+            body.size
+        );
     }
 
     /// Drag selection across the whole reply and copy: the clipboard text
@@ -5412,8 +6030,8 @@ mod layout_tests {
         );
         assert!(column - ASSISTANT_RIGHT_GAP > ASSISTANT_MAX_WIDTH);
         assert!((e.bubble_left - e.column_left).abs() <= 1.0);
-        // A wide pane: the column caps at the composer's 876; the bubble still
-        // stops at 560 — 64 % of the column (Grok: 560 of its 960 pt composer).
+        // A wide pane: the column caps at the composer's 960 (Grok's); the
+        // bubble still stops at 560 — 58 % of the column, as in Grok.
         let e = measure(cx, 1400.0);
         assert_eq!(e.column_width, COLUMN_MAX_WIDTH);
         assert_eq!(e.composer_width, COLUMN_MAX_WIDTH);
@@ -6119,6 +6737,43 @@ mod transcript_smoke_tests {
         (rt, state, transcript)
     }
 
+    /// 2026-10-26, Mac 0.6.268: a row the code did not expect aborted the app at every
+    /// launch (a panic on the main thread unwinds into AppKit → `abort()`). A sync event whose
+    /// apply panics is skipped with a notice, the state keeps every other row, and the
+    /// transcript still renders; the panic hook records the message to `panic.log`.
+    #[gpui::test]
+    fn a_panicking_sync_event_is_skipped_not_fatal(cx: &mut TestAppContext) {
+        crate::panic_log::install();
+        let before = std::fs::read_to_string(crate::panic_log::log_path()).unwrap_or_default();
+        let (_rt, state, transcript) = mount(cx);
+        // (The hook also prints the poison to stderr; that line is expected in this test.)
+        state.update(cx, |s, cx| {
+            s.apply(SyncEvent::Notice("panic!".into()), cx);
+        });
+        state.read_with(cx, |s, _| {
+            assert_eq!(s.messages.get("c1").map(Vec::len), Some(2), "rows kept");
+            assert!(
+                s.notices.iter().any(|n| n.text.contains("skipped")),
+                "the user is told one update was skipped: {:?}",
+                s.notices.iter().map(|n| n.text.clone()).collect::<Vec<_>>()
+            );
+        });
+        transcript.update(cx, |t, cx| t.sync(cx));
+        let (_view, vcx) = cx.add_window_view(|_, _| Host {
+            transcript: transcript.clone(),
+        });
+        vcx.run_until_parked();
+        assert!(
+            vcx.debug_bounds("chat-column").is_some(),
+            "the transcript still draws"
+        );
+        let after = std::fs::read_to_string(crate::panic_log::log_path()).unwrap_or_default();
+        assert!(
+            after.len() > before.len() && after[before.len()..].contains("test poison event"),
+            "panic.log holds the message"
+        );
+    }
+
     /// The list renders the reply as block rows (no panic, every block drawn),
     /// and hovering the middle of the bubble shows the rail at the bubble's
     /// vertical centre — the whole of #1674 on the real transcript.
@@ -6442,6 +7097,166 @@ mod cross_bubble_copy_tests {
 }
 
 #[cfg(test)]
+mod link_icon_tests {
+    //! Jacob, 2026-10-25 22:34 UTC ([feedback link-icons-mac-2026-10-25]): every named
+    //! link in a reply — bullets, prose, table cells — carries its site's small rounded
+    //! icon before the name, as in Grok Bot; a site without one shows a neutral square.
+    //! His example: Bubble's New York Post headline list.
+    use std::sync::Arc;
+
+    use gpui::TestAppContext;
+
+    use super::*;
+    use crate::ui::select::{LinkIcons, PAINTED_LINK_ICONS};
+
+    /// The reply to "Read the latest from the New York post" (Jacob's iPhone screenshot),
+    /// seven linked headlines as bullets, then one line of prose.
+    const NYPOST: &str = "- [Syringe attack: lawyer claims mistaken identity](https://nypost.com/2026/10/25/us-news/syringe-attack/)\n- [Arrest story: a second Jewish victim minutes earlier](https://nypost.com/2026/10/25/us-news/arrest-story/)\n- [Ex-NYPD cop charged in a George Washington Bridge killing, free on $1M bail](https://nypost.com/2026/10/25/us-news/ex-nypd-cop/)\n- [Thomas Markle home search, child pornography, Philippine official’s comment](https://nypost.com/2026/10/25/world-news/thomas-markle/)\n- [Musk says SpaceX cut Ukraine’s Starlink access](https://nypost.com/2026/10/25/business/musk-starlink/)\n- [Giants beat the Texans in overtime in J. J. McCarthy’s first start](https://nypost.com/2026/10/25/sports/giants-texans/)\n- [McCarthy’s wife after that win](https://nypost.com/2026/10/25/sports/mccarthy-wife/)\n\nNo times or bylines were on the page text I read. Want one of these opened?";
+
+    #[test]
+    fn named_links_get_an_icon_cell_and_name_their_site() {
+        let cell = markdown::LINK_ICON_CELL;
+        let spans = inline_spans("See [El Virrey](https://www.elvirrey.com/shop) or https://x.com/a and [https://y.com](https://y.com).");
+        let links: Vec<_> = spans.iter().filter(|s| s.style.link).collect();
+        assert_eq!(links.len(), 3);
+        assert_eq!(links[0].text, format!("{cell}El Virrey"));
+        assert_eq!(links[0].icon.as_deref(), Some("www.elvirrey.com"));
+        assert_eq!(links[1].text, "https://x.com/a", "a bare URL has no cell");
+        assert_eq!(links[1].icon, None);
+        assert_eq!(
+            links[2].text, "https://y.com",
+            "a URL as its own label has no cell"
+        );
+        assert_eq!(links[2].icon, None);
+        assert_eq!(
+            markdown::link_host("https://user@Sub.Example.com:8443/p?q#f").as_deref(),
+            Some("sub.example.com")
+        );
+        assert_eq!(markdown::link_host("http://10.0.0.1/x"), None);
+        assert_eq!(markdown::link_host("mailto:a@b.com"), None);
+        assert_eq!(markdown::link_host("https://localhost/"), None);
+        // Every block kind but code yields its hosts, each once, in reading order.
+        let hosts = markdown::link_hosts(&format!(
+            "[A](https://a.com) and [B](https://b.org/x)\n\n{NYPOST}\n\n| k | v |\n| --- | --- |\n| [C](https://c.net) | [A again](https://a.com/2) |\n\n```\n[D](https://d.io)\n```"
+        ));
+        assert_eq!(hosts, vec!["a.com", "b.org", "nypost.com", "c.net"]);
+    }
+
+    struct ListHost {
+        selection: Entity<TextSelection>,
+        icons: Rc<LinkIcons>,
+    }
+
+    impl gpui::Render for ListHost {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
+            let blocks = split_blocks(NYPOST);
+            let texts = BubbleText::for_blocks(&blocks, false);
+            let selectable = Selectable::new(&self.selection, theme.accent_soft, cx)
+                .with_link_icons(self.icons.clone(), link_icon_placeholder(&theme));
+            let bubble = selectable.bubble("m1#text", texts[0].text.clone());
+            let mut col = div().w(px(520.0)).flex().flex_col();
+            for (i, block) in blocks.iter().enumerate() {
+                col = col.child(
+                    div()
+                        .debug_selector(move || format!("test-block-{i}"))
+                        .child(render_block(
+                            &format!("m1#t.{i}"),
+                            block,
+                            texts[i].at,
+                            None,
+                            Instant::now(),
+                            &theme,
+                            &bubble,
+                            &CodeCopy::default(),
+                        )),
+                );
+            }
+            col
+        }
+    }
+
+    /// Headless render of the list: seven bullets, each a link whose text starts with the
+    /// icon cell, and seven icons painted — the site's picture when the bubble has one, the
+    /// placeholder square while it loads or when there is none.
+    #[gpui::test]
+    fn the_nypost_list_paints_an_icon_before_every_headline(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let theme = crate::ui::theme::Theme::for_pref(
+                crate::ui::theme::AppearancePref::Dark,
+                crate::ui::theme::Surface::Matte,
+                cx,
+            );
+            cx.set_global(theme);
+        });
+        let blocks = split_blocks(NYPOST);
+        let [Block::Bullets(items), Block::Paragraph(_)] = blocks.as_slice() else {
+            panic!("a bullet list then prose, got {blocks:?}");
+        };
+        assert_eq!(items.len(), 7);
+        let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+        for item in items {
+            let (text, runs, links, icons) = inline_runs(item, theme.text, &theme);
+            assert!(text.starts_with(markdown::LINK_ICON_CELL), "{text}");
+            assert_eq!(icons.len(), 1);
+            assert_eq!(icons[0].1, "nypost.com");
+            assert_eq!(links.len(), 1);
+            assert_eq!(
+                links[0].0,
+                0..text.len(),
+                "the click target covers cell and name"
+            );
+            assert_eq!(runs[0].color, gpui::transparent_black());
+            assert_eq!(runs[0].len, markdown::LINK_ICON_CELL.len());
+        }
+        // One real picture for nypost.com; render twice: with it, and still loading.
+        let png = {
+            let img = image::RgbaImage::from_pixel(64, 64, image::Rgba([200, 30, 30, 255]));
+            let mut out = std::io::Cursor::new(Vec::new());
+            img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+            out.into_inner()
+        };
+        let picture = Arc::new(crate::app::decode_image(&png).expect("png decodes"));
+        for (icons, label) in [
+            (
+                Rc::new(LinkIcons {
+                    by_host: HashMap::from([("nypost.com".to_string(), Some(picture.clone()))]),
+                }),
+                "pictures",
+            ),
+            (LinkIcons::empty(), "placeholders"),
+        ] {
+            PAINTED_LINK_ICONS.with(|n| n.set(0));
+            let (_view, vcx) = cx.add_window_view(|_, cx| ListHost {
+                selection: cx.new(TextSelection::new),
+                icons,
+            });
+            vcx.run_until_parked();
+            let painted = PAINTED_LINK_ICONS.with(|n| n.get());
+            assert_eq!(painted, 7, "{label}: one icon per headline");
+            for i in 0..7 {
+                let text = vcx
+                    .debug_bounds(match i {
+                        0 => "list-text-0",
+                        1 => "list-text-1",
+                        2 => "list-text-2",
+                        3 => "list-text-3",
+                        4 => "list-text-4",
+                        5 => "list-text-5",
+                        _ => "list-text-6",
+                    })
+                    .expect("bullet text drawn");
+                assert!(text.size.height >= px(CHAT_LINE_HEIGHT));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod markdown_tests {
     //! Jacob, 2026-10-24 (Grok side by side, [feedback bubble-markdown-2026-10-24]):
     //! "Arbos list bullets are small dots with tighter heading weight; Grok
@@ -6471,7 +7286,7 @@ mod markdown_tests {
     #[test]
     fn strong_runs_are_bold() {
         let theme = Theme::dark(crate::ui::theme::Surface::Matte);
-        let (text, runs, _) = inline_runs("Surf **gear** list", theme.text, &theme);
+        let (text, runs, _, _) = inline_runs("Surf **gear** list", theme.text, &theme);
         assert_eq!(text, "Surf gear list");
         let weights: Vec<(usize, FontWeight)> =
             runs.iter().map(|r| (r.len, r.font.weight)).collect();
@@ -6634,6 +7449,30 @@ mod rail_tests {
         let settled = later + Duration::from_secs(1);
         assert_eq!(fade.opacity("m2#bubble", settled).0, 1.0);
         assert_eq!(fade.opacity("m1#bubble", settled).0, 0.0);
+    }
+
+    /// Mac 0.6.268, 2026-10-26 (Jacob: SIGABRT at 14:55:17, 15:21:53 and then at every
+    /// launch): the list's measured rows were of two layout generations — the rows above
+    /// still at their old place, the last row at its new one — so the bubble's span came out
+    /// inverted or shorter than the rail button, and `clamp` panicked on the main thread
+    /// (`assertion failed: min <= max`). Both shapes now give a centre, never a panic.
+    #[test]
+    fn stale_or_tiny_measurements_never_panic_the_rail() {
+        let viewport = b(0.0, 1000.0);
+        // Inverted: the last row was measured above the rows "above" it.
+        let rows = [Some(b(600.0, 100.0)), Some(b(700.0, 60.0))];
+        let last = b(300.0, 20.0);
+        let centre = rail_centre(&rows, last, viewport, (px(17.0), px(3.0)));
+        assert!(f32::from(centre).is_finite());
+        // Shorter than the button: a 10 pt bubble.
+        let centre = rail_centre(&[], b(500.0, 10.0), viewport, (px(3.0), px(3.0)));
+        assert!(f32::from(centre).is_finite());
+        // A viewport too short for the rail at all.
+        let centre = rail_centre(&[], b(10.0, 40.0), b(0.0, 20.0), NO_INSET);
+        assert!(f32::from(centre).is_finite());
+        assert_eq!(clamp_or_keep(px(5.0), px(10.0), px(0.0)), px(5.0));
+        assert_eq!(clamp_or_keep(px(5.0), px(0.0), px(10.0)), px(5.0));
+        assert_eq!(clamp_or_keep(px(50.0), px(0.0), px(10.0)), px(10.0));
     }
 
     /// The rail's centre is the middle of the whole bubble — the rows above
@@ -7355,6 +8194,93 @@ mod presence_rows_tests {
             "one name, inside the first bubble"
         );
     }
+
+    /// What agentd writes for a background job (duplex §2.3): wordless, hidden.
+    fn hidden_job_row(id: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "chatId": "chat_testing", "role": "assistant", "sender": "agent:01PROJGIGCHAD",
+            "status": "streaming", "createdAt": at, "hidden": true, "worker": true,
+            "job": { "id": format!("j-{id}"), "title": "Searching", "kind": "research", "touches": [] },
+            "parts": [{ "id": format!("s-{id}"), "kind": "status", "code": "working", "message": "Working…" }],
+        }))
+        .expect("message")
+    }
+
+    fn stamps(rows: &[Row]) -> Vec<String> {
+        rows.iter()
+            .filter(|r| matches!(r.kind, RowKind::Stamp { .. }))
+            .map(|r| r.id.clone())
+            .collect()
+    }
+
+    /// [feedback status-row-gap-mac-2026-10-26]: a row that draws nothing — a stream
+    /// with no words yet, a hidden job row — an hour after the last bubble used to
+    /// leave its "Today 5:32 PM" stamp hanging over empty space above the status
+    /// row. The stamp comes with the first words, as it would have anyway.
+    #[test]
+    fn a_wordless_row_an_hour_later_brings_no_dangling_stamp() {
+        let now = now_ms();
+        let earlier = now - 2 * STAMP_GAP_MS;
+        let settled = [
+            agent_message(
+                "done",
+                "Three decisions: keep the canvas infinite.",
+                earlier,
+            ),
+            agent_message("streaming", "", now),
+        ];
+        let rows = rows_of(&settled);
+        assert_eq!(
+            stamps(&rows),
+            vec![format!("m-{earlier}#stamp")],
+            "only the bubble's own stamp: {:?}",
+            rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
+        );
+        assert!(
+            matches!(rows[rows.len() - 1].kind, RowKind::BottomInset)
+                && !matches!(rows[rows.len() - 2].kind, RowKind::Stamp { .. }),
+            "nothing but the clearance after the last bubble"
+        );
+
+        let with_job = [
+            agent_message(
+                "done",
+                "Three decisions: keep the canvas infinite.",
+                earlier,
+            ),
+            hidden_job_row("j1", now),
+        ];
+        assert_eq!(
+            stamps(&rows_of(&with_job)),
+            vec![format!("m-{earlier}#stamp")],
+            "a hidden job row leaves no stamp either"
+        );
+
+        // The reply lands: its stamp arrives with its bubble, and the sender run
+        // the retracted stamp would have broken is unchanged for later rows.
+        let landed = [
+            agent_message(
+                "done",
+                "Three decisions: keep the canvas infinite.",
+                earlier,
+            ),
+            agent_message("done", "Here is the chart.", now),
+        ];
+        let rows = rows_of(&landed);
+        assert_eq!(
+            stamps(&rows),
+            vec![format!("m-{earlier}#stamp"), format!("m-{now}#stamp")],
+            "the reply's stamp comes with the reply"
+        );
+        let reply_ix = rows
+            .iter()
+            .position(|r| r.id == format!("m-{now}#stamp"))
+            .expect("stamp");
+        assert!(
+            matches!(rows[reply_ix + 1].kind, RowKind::Markdown { .. }),
+            "the bubble sits right under its stamp"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -7574,5 +8500,544 @@ mod delivery_tests {
             f32::from(clock.origin.x + clock.size.width) <= f32::from(pending.origin.x),
             "the clock sits outside the pending bubble"
         );
+    }
+}
+
+#[cfg(test)]
+mod reply_in_dm_tests {
+    //! Reply in DM (#1835, Jacob 2026-10-25): a DM bubble that answers a message in
+    //! another chat draws the quote header plus "Replying to <who> in <chat>", and the
+    //! click opens that chat on the original — for a member; a non-member sees the
+    //! words and nothing to follow.
+    use std::collections::{HashMap, HashSet};
+
+    use futures::future::BoxFuture;
+    use gpui::{point, Bounds, Entity, Modifiers, Pixels, TestAppContext};
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::app::AppState;
+    use crate::sync::{ClientCommand, SyncEvent, SyncSource};
+    use crate::ui::motion::PulseClock;
+    use crate::ui::shell::Shell;
+
+    struct Idle;
+
+    impl SyncSource for Idle {
+        fn name(&self) -> &'static str {
+            "idle"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            _commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    const GROUP: &str = "01GROUPARBONITES0000000000";
+    const DM: &str = "01DMWITHSAM00000000000000";
+    const ORIGINAL: &str = "01ORIGINALMSG000000000000";
+
+    fn row(chat: &str, id: &str, sender: &str, handle: &str, text: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "chatId": chat, "role": "user", "sender": sender,
+            "senderHandle": handle, "status": "done", "createdAt": at, "completedAt": at,
+            "parts": [{ "id": format!("{id}-t"), "kind": "text", "text": text }],
+        }))
+        .expect("message")
+    }
+
+    fn reply_ref(chat_id: &str, chat_title: &str, message_id: &str, text: &str) -> ReplyRef {
+        ReplyRef {
+            chat_id: chat_id.into(),
+            project_id: "people".into(),
+            message_id: message_id.into(),
+            chat_title: chat_title.into(),
+            sender: "user:gh_1".into(),
+            sender_name: "Jacob".into(),
+            sender_handle: "unconst".into(),
+            text: text.into(),
+        }
+    }
+
+    /// `build_rows` alone: a `replyRef` row quotes its snapshot and names the chat; a
+    /// `replyTo` row quotes the in-chat original and names nothing.
+    #[test]
+    fn build_rows_carries_the_quote_and_the_chat_name() {
+        let t = 1_700_000_000_000u64;
+        let mut dm_reply = row(DM, "d1", "user:gh_2", "sam", "Works", t + 1_000);
+        dm_reply.reply_ref = Some(reply_ref(
+            GROUP,
+            "Arbonites",
+            ORIGINAL,
+            "Testing reply in dm — does the quote survive?",
+        ));
+        let mut in_chat = row(DM, "d2", "user:gh_me", "me", "and this?", t + 2_000);
+        in_chat.reply_to = Some("d1".into());
+        let messages = [
+            row(DM, "d0", "user:gh_me", "me", "hi", t),
+            dm_reply,
+            in_chat,
+        ];
+        let (spoken, failed) = (HashSet::new(), HashMap::new());
+        let rows = build_rows(
+            &messages,
+            false,
+            SpeechRows {
+                enabled: false,
+                spoken: &spoken,
+                failed: &failed,
+                voice_mode: false,
+            },
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+        );
+        let quotes: Vec<Option<Quote>> = rows
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::User { quote, .. } => Some(quote.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(quotes.len(), 3);
+        assert!(quotes[0].is_none());
+        let cross = quotes[1].clone().expect("the DM reply quotes");
+        assert_eq!(cross.message_id, ORIGINAL);
+        assert_eq!(cross.text, "Testing reply in dm — does the quote survive?");
+        assert_eq!(
+            cross.source.as_ref().map(|s| s.label.as_str()),
+            Some("Replying to Jacob in Arbonites")
+        );
+        assert_eq!(
+            cross.source.as_ref().map(|s| s.chat_id.as_str()),
+            Some(GROUP)
+        );
+        let local = quotes[2].clone().expect("the in-chat reply quotes");
+        assert_eq!(local.message_id, "d1");
+        assert_eq!(local.text, "Works");
+        assert!(local.source.is_none(), "an in-chat reply names no chat");
+    }
+
+    /// Me (`gh_me`) in the Arbonites group and in a DM with Sam. Sam's DM row
+    /// answers `ORIGINAL` in the group; a second row answers a chat I am not in.
+    fn mount(
+        cx: &mut TestAppContext,
+    ) -> (
+        tokio::runtime::Runtime,
+        Entity<AppState>,
+        Entity<Shell>,
+        &mut gpui::VisualTestContext,
+    ) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| {
+            gpui_tokio::init_from_handle(cx, handle);
+            cx.set_global(Theme::dark(crate::ui::theme::Surface::Matte));
+            if !cx.has_global::<PulseClock>() {
+                PulseClock::init(cx);
+            }
+        });
+        let state = cx.new(|cx| AppState::new(Box::new(Idle), cx));
+        let now = now_ms();
+        state.update(cx, |s, cx| {
+            let sam = Person {
+                id: "gh_2".into(),
+                handle: "sam".into(),
+                name: Some("Sam Rivera".into()),
+                ..Person::default()
+            };
+            s.projects.push(Project {
+                id: GROUP.into(),
+                name: "Arbonites".into(),
+                kind: SpaceKind::Group,
+                people: vec![sam.clone()],
+                ..Project::default()
+            });
+            s.projects.push(Project {
+                id: DM.into(),
+                name: "sam".into(),
+                kind: SpaceKind::Dm,
+                people: vec![sam],
+                ..Project::default()
+            });
+            let chat = |id: &str, title: &str| -> Chat {
+                serde_json::from_value(serde_json::json!({
+                    "id": id, "project_id": id, "title": title, "is_pinned": true,
+                    "is_system": false, "unread": false, "last_message_at": now,
+                }))
+                .expect("chat")
+            };
+            s.chats.insert(GROUP.into(), vec![chat(GROUP, "Arbonites")]);
+            s.chats.insert(DM.into(), vec![chat(DM, "sam")]);
+            s.messages.insert(
+                GROUP.into(),
+                vec![
+                    row(
+                        GROUP,
+                        "g0",
+                        "user:gh_2",
+                        "sam",
+                        "morning all",
+                        now - 120_000,
+                    ),
+                    row(
+                        GROUP,
+                        ORIGINAL,
+                        "user:gh_me",
+                        "unconst",
+                        "Testing reply in dm",
+                        now - 90_000,
+                    ),
+                ],
+            );
+            let mut sams = row(DM, "d1", "user:gh_2", "sam", "Works", now - 60_000);
+            sams.reply_ref = Some(reply_ref(
+                GROUP,
+                "Arbonites",
+                ORIGINAL,
+                "Testing reply in dm",
+            ));
+            let mut outside = row(DM, "d2", "user:gh_2", "sam", "Same in ours", now - 30_000);
+            outside.reply_ref = Some(reply_ref(
+                "01NOTMYCHAT0000000000000000",
+                "Design crit",
+                "01NOTMYMSG00000000000000000",
+                "The tiers are stale",
+            ));
+            s.messages.insert(DM.into(), vec![sams, outside]);
+            s.selected_project = Some(DM.into());
+            s.active_tab.insert(GROUP.into(), GROUP.into());
+            s.active_tab.insert(DM.into(), DM.into());
+            cx.notify();
+        });
+        let (shell, vcx) = cx.add_window_view(|window, cx| Shell::new(state.clone(), window, cx));
+        vcx.run_until_parked();
+        settle(&state, &shell, vcx);
+        (rt, state, shell, vcx)
+    }
+
+    /// The transcript syncs on state notifications; give it (and the shell) a few frames.
+    fn settle(state: &Entity<AppState>, shell: &Entity<Shell>, vcx: &mut gpui::VisualTestContext) {
+        for _ in 0..3 {
+            state.update(vcx, |_, cx| cx.notify());
+            shell.update(vcx, |_, cx| cx.notify());
+            vcx.run_until_parked();
+        }
+    }
+
+    fn centre(b: Bounds<Pixels>) -> gpui::Point<Pixels> {
+        point(b.left() + b.size.width / 2.0, b.top() + b.size.height / 2.0)
+    }
+
+    #[gpui::test]
+    fn dm_bubble_draws_the_quote_with_its_chat_and_the_click_opens_the_original(
+        cx: &mut TestAppContext,
+    ) {
+        let (_rt, state, shell, vcx) = mount(cx);
+        // Both DM rows draw a quote with a source line; the transcript is the DM.
+        let drawn: Vec<(String, Option<String>, Option<String>)> =
+            shell.read_with(&*vcx, |sh, cx| {
+                sh.transcript
+                    .read(cx)
+                    .rows
+                    .iter()
+                    .filter_map(|r| match &r.kind {
+                        RowKind::User { quote: Some(q), .. } => Some((
+                            r.message_id.clone(),
+                            q.source.as_ref().map(|s| s.label.clone()),
+                            Some(q.text.clone()),
+                        )),
+                        _ => None,
+                    })
+                    .collect()
+            });
+        assert_eq!(
+            drawn,
+            vec![
+                (
+                    "d1".into(),
+                    Some("Replying to Jacob in Arbonites".into()),
+                    Some("Testing reply in dm".into())
+                ),
+                (
+                    "d2".into(),
+                    Some("Replying to Jacob in Design crit".into()),
+                    Some("The tiers are stale".into())
+                ),
+            ]
+        );
+        let first = vcx
+            .debug_bounds("reply-quote-d1#user")
+            .expect("Sam's first quote header is on screen");
+        assert!(vcx.debug_bounds("reply-quote-source-d1#user").is_some());
+        assert!(vcx.debug_bounds("reply-quote-d2#user").is_some());
+        assert!(vcx.debug_bounds("reply-quote-source-d2#user").is_some());
+        // Membership decides the link: the group is mine, Design crit is not.
+        let (member, outsider) = state.read_with(&*vcx, |s, _| {
+            (
+                s.is_member_of_chat(GROUP),
+                s.is_member_of_chat("01NOTMYCHAT0000000000000000"),
+            )
+        });
+        assert!(member && !outsider);
+
+        // Click the first quote: the group opens on the original, highlighted.
+        vcx.simulate_click(centre(first), Modifiers::default());
+        vcx.run_until_parked();
+        let (space, tab, reveal, highlight) = state.read_with(&*vcx, |s, _| {
+            (
+                s.selected_project.clone(),
+                s.active_tab.get(GROUP).cloned(),
+                s.reveal_message.clone(),
+                s.highlight_message.clone(),
+            )
+        });
+        assert_eq!(space.as_deref(), Some(GROUP), "the source chat is open");
+        assert_eq!(tab.as_deref(), Some(GROUP));
+        assert_eq!(reveal, Some((GROUP.to_owned(), ORIGINAL.to_owned())));
+        assert_eq!(highlight.as_deref(), Some(ORIGINAL));
+
+        // Back in the DM, the outsider quote is words only: the click goes nowhere.
+        state.update(vcx, |s, cx| s.select_project(DM.into(), cx));
+        settle(&state, &shell, vcx);
+        let second = vcx
+            .debug_bounds("reply-quote-d2#user")
+            .expect("the outsider quote is on screen");
+        vcx.simulate_click(centre(second), Modifiers::default());
+        vcx.run_until_parked();
+        let (space, reveal) = state.read_with(&*vcx, |s, _| {
+            (s.selected_project.clone(), s.reveal_message.clone())
+        });
+        assert_eq!(
+            space.as_deref(),
+            Some(DM),
+            "a non-member stays where they are"
+        );
+        assert_eq!(reveal, None);
+        // And the model agrees without a click.
+        let moved = state.update(vcx, |s, cx| {
+            s.reveal_reply_ref(
+                &reply_ref("01NOTMYCHAT0000000000000000", "Design crit", "x", ""),
+                cx,
+            )
+        });
+        assert!(!moved);
+    }
+}
+#[cfg(test)]
+mod crash_probe_tests {
+    //! Mac 0.6.268, 2026-10-26: the rows of Jacob's two crash windows (the Affine chat's empty-sender
+    //! SVG-attachment rows, the Arbonites table / markdown sample / roleplay replies) in a group
+    //! transcript, then the local actions he could have taken — scroll stops, a pointer sweep, clicks
+    //! everywhere. This is what found `rail_centre`'s clamp panic; it stays as the guard.
+    use futures::future::BoxFuture;
+    use gpui::TestAppContext;
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::sync::{ClientCommand, SyncEvent, SyncSource};
+    use gpui::{point, Modifiers};
+
+    const ARBONITES: &[(&str, &str)] = &[
+        ("user", "@hezbola give me a random markdown table"),
+        ("assistant", "| Fruit | Colour | Weight (g) |\n| --- | --- | --- |\n| Apple | Red | 180 |\n| Banana | Yellow | 120 |\n| Kiwi | Green | 75 |"),
+        ("user", "show me a couple things"),
+        ("assistant", "Here's a sample, Arbos.\n\n**Bold**, *italic*, and `inline code`.\n\n- A bullet list\n- With two items\n\n> A block quote.\n\n[Eater Austin's Austin guide](https://austin.eater.com/maps/best-restaurants-austin-eater-38)"),
+        ("user", "@doug-agent @hezbola  can you two engage in a 10 turn roleplay dialoge. doug is a product manager, and hezbola is a senior engineer."),
+        ("assistant", "Yes, Arbos, with some limits. I don't have matplotlib installed, but Pillow is there, so I can draw bar, line and pie charts as PNG images and hand them over as files."),
+        ("user", "Happy to, Affinity. Turn 1, PM hat on.\n\n@hezbola — kicking off a new prototype: a Sakata cracker stacking game, built in Blender. Scope for v0: a tower of rice crackers you drop one at a time, physics on, game over when one slides off."),
+        ("assistant", "Turn 2, engineer hat on. Doug, here's the cracker asset plan.\n\nGeometry: a 60 mm diameter disc, about 6 mm thick. The ridged edge comes from a displaced ring on the rim, and the sesame speckle is a small-scale bump texture, not extra geometry.\n\nPhysics: mass about 8 g, friction 0.6, bounce 0.05, and the collision margin set small so stacks settle.\n\nDrop: spawn the cracker 20 cm above the stack, with a small random tilt and offset so it doesn't land perfectly flat every time.\n\nI haven't built this in Blender yet. Should I start the scene script, or do you want the asset spec changed first?"),
+    ];
+
+    struct Idle;
+    impl SyncSource for Idle {
+        fn name(&self) -> &'static str {
+            "idle"
+        }
+        fn run(
+            self: Box<Self>,
+            _e: mpsc::UnboundedSender<SyncEvent>,
+            _c: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(std::future::pending())
+        }
+    }
+    struct Host {
+        transcript: Entity<Transcript>,
+    }
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(self.transcript.clone())
+        }
+    }
+
+    #[gpui::test]
+    fn crash_window_rows_survive_scroll_hover_and_clicks(cx: &mut TestAppContext) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let handle = rt.handle().clone();
+        cx.update(|cx| {
+            gpui_tokio::init_from_handle(cx, handle);
+            cx.set_global(Theme::dark(crate::ui::theme::Surface::Matte));
+            if !cx.has_global::<PulseClock>() {
+                PulseClock::init(cx);
+            }
+        });
+        let state = cx.new(|cx| AppState::new(Box::new(Idle), cx));
+        let t = 1_700_000_000_000u64;
+        let rows: Vec<(String, String, String)> = ARBONITES
+            .iter()
+            .map(|(k, t)| (String::new(), (*k).to_owned(), (*t).to_owned()))
+            .collect();
+        let mut messages: Vec<Message> = Vec::new();
+        let mut at = t;
+        for (i, (_, kind, text)) in rows.iter().enumerate() {
+            at += 10_000;
+            let role = if kind == "user" { "user" } else { "assistant" };
+            messages.push(serde_json::from_value(serde_json::json!({
+                "id": format!("m{i}"), "chatId": "g1", "role": role,
+                "sender": if role == "user" { "user:gh_1" } else { "agent:01M5NNT5FNTZNCT3THWNVEW8WM" },
+                "senderName": if role == "user" { "Affinity" } else { "Hezbola" },
+                "senderHandle": if role == "user" { "affinity" } else { "hezbola" },
+                "status": "done", "createdAt": at, "completedAt": at + 1_000,
+                "parts": [{ "id": format!("m{i}-t"), "kind": "text", "text": text }],
+            })).unwrap());
+        }
+        // (1) a hidden job-worker row: empty agent sender carrying an SVG attachment of kind image
+        at += 10_000;
+        messages.push(serde_json::from_value(serde_json::json!({
+            "id": "w1", "chatId": "g1", "role": "assistant", "sender": "agent:01M5N1WSR91G8CJKNYXKJESK7X",
+            "senderName": "", "senderHandle": "", "worker": true, "hidden": true,
+            "status": "done", "createdAt": at, "completedAt": at + 1_000,
+            "parts": [{ "id": "w1-a", "kind": "attachment", "attachment": { "name": "affine-favicon.svg", "mime": "image/svg+xml", "ref": "blob-svg-1", "bytes": 4031, "kind": "image", "title": "affine.io logo" } }],
+        })).unwrap());
+        // (2) the same shape as a visible row with sender {kind:"agent", name:""} and an SVG image
+        at += 10_000;
+        messages.push(serde_json::from_value(serde_json::json!({
+            "id": "w2", "chatId": "g1", "role": "assistant", "sender": "agent:01M5N1WSR91G8CJKNYXKJESK7X",
+            "senderName": "", "senderHandle": "", "senderAvatar": "", "senderAvatarUrl": "",
+            "status": "done", "createdAt": at, "completedAt": at + 1_000,
+            "parts": [
+                { "id": "w2-t", "kind": "text", "text": "I found the AFFiNE logo from affine.io. You can get the official SVG directly at [affine.io/favicon.svg](https://affine.io/favicon.svg) (a 1000×1000 vector mark), and I have also saved and attached a copy for you." },
+                { "id": "w2-a", "kind": "attachment", "attachment": { "name": "affine-favicon.svg", "mime": "image/svg+xml", "ref": "blob-svg-2", "kind": "image" } }
+            ],
+        })).unwrap());
+        // Mac-only shapes bc-3790a460 listed (`internal/mac-launch-crash-recovery-2026-10-26.md`
+        // §2): a user attachment whose upload failed (part without `ref`, still pending), a
+        // voice memo, and a Reply-in-DM quote (`replyRef`).
+        at += 10_000;
+        messages.push(serde_json::from_value(serde_json::json!({
+            "id": "u-noref", "chatId": "g1", "role": "user", "sender": "user:gh_1", "senderName": "Affinity",
+            "status": "done", "createdAt": at, "completedAt": at, "pending": true,
+            "parts": [{ "id": "u-noref-a", "kind": "attachment", "attachment": { "name": "Screenshot.png", "mime": "image/png", "kind": "image" } }],
+        })).unwrap());
+        at += 10_000;
+        messages.push(serde_json::from_value(serde_json::json!({
+            "id": "u-memo", "chatId": "g1", "role": "user", "sender": "user:gh_1", "senderName": "Affinity",
+            "status": "done", "createdAt": at, "completedAt": at,
+            "parts": [{ "id": "u-memo-a", "kind": "attachment", "attachment": { "name": "memo.m4a", "mime": "audio/mp4", "ref": "blob-memo", "kind": "audio", "bytes": 48213 } }],
+        })).unwrap());
+        at += 10_000;
+        messages.push(serde_json::from_value(serde_json::json!({
+            "id": "u-ref", "chatId": "g1", "role": "user", "sender": "user:gh_1", "senderName": "Affinity",
+            "status": "done", "createdAt": at, "completedAt": at,
+            "replyRef": { "chatId": "other", "projectId": "", "messageId": "m-far", "chatTitle": "Design", "sender": "user:gh_2", "senderName": "Sam", "senderHandle": "sam", "text": "" },
+            "parts": [{ "id": "u-ref-t", "kind": "text", "text": "replying across chats" }],
+        })).unwrap());
+        state.update(cx, |s, cx| {
+            s.projects.push(Project {
+                id: "g1".into(),
+                name: "Arbonites".into(),
+                kind: SpaceKind::Group,
+                ..Project::default()
+            });
+            let chat: Chat = serde_json::from_value(serde_json::json!({
+                "id": "g1", "project_id": "g1", "title": "Arbonites", "is_pinned": true,
+                "is_system": false, "unread": false, "last_message_at": at, "kind": "group",
+            }))
+            .unwrap();
+            s.chats.insert("g1".into(), vec![chat]);
+            s.messages.insert("g1".into(), messages);
+            s.selected_project = Some("g1".into());
+            s.active_tab.insert("g1".into(), "g1".into());
+            cx.notify();
+        });
+        // The SVG bytes arrive as a thumbnail for both refs (what FetchThumbnail returns).
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1000"><circle cx="500" cy="500" r="400"/></svg>"#.to_vec();
+        state.update(cx, |s, cx| {
+            for key in ["blob-svg-1", "blob-svg-2"] {
+                s.apply(
+                    SyncEvent::Thumbnail {
+                        key: key.into(),
+                        bytes: std::sync::Arc::new(svg.clone()),
+                    },
+                    cx,
+                );
+            }
+        });
+        // Real link icons for the sites in the texts (what the relay would answer).
+        let png = {
+            let img = image::RgbaImage::from_pixel(64, 64, image::Rgba([200, 30, 30, 255]));
+            let mut out = std::io::Cursor::new(Vec::new());
+            img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+            out.into_inner()
+        };
+        state.update(cx, |s, cx| {
+            for host in ["austin.eater.com", "affine.io", "nypost.com"] {
+                s.apply(
+                    SyncEvent::LinkIcon {
+                        host: host.into(),
+                        png: Some(std::sync::Arc::new(png.clone())),
+                    },
+                    cx,
+                );
+            }
+        });
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        transcript.update(cx, |t, cx| t.sync(cx));
+        let (_view, vcx) = cx.add_window_view(|_, _| Host {
+            transcript: transcript.clone(),
+        });
+        vcx.run_until_parked();
+        // Local actions: scroll through the whole list, sweep the pointer over every 24 pt
+        // band, click every link and the bubbles, open the hover rail — at each scroll stop.
+        let column = vcx.debug_bounds("chat-column").expect("column");
+        for stop in 0..12 {
+            transcript.update(vcx, |t, cx| {
+                t.list.scroll_to(gpui::ListOffset {
+                    item_ix: stop * 3,
+                    offset_in_item: px(0.0),
+                });
+                cx.notify();
+            });
+            vcx.run_until_parked();
+            let mut y = column.top() + px(8.0);
+            while y < column.bottom() {
+                for x in [
+                    column.left() + px(60.0),
+                    column.left() + px(200.0),
+                    column.left() + px(420.0),
+                    column.right() - px(40.0),
+                ] {
+                    vcx.simulate_mouse_move(point(x, y), None, Modifiers::default());
+                    vcx.run_until_parked();
+                    vcx.simulate_click(point(x, y), Modifiers::default());
+                    vcx.run_until_parked();
+                }
+                y += px(24.0);
+            }
+        }
+        assert!(vcx.debug_bounds("chat-column").is_some());
+        drop(rt);
     }
 }

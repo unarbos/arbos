@@ -7,6 +7,8 @@
 //! constants come from `arbos-core`; the client-side mirror (`doc.rs`) and
 //! the sources are candidates to move there later (`arbos-design.md` §7.2).
 
+pub mod agent_avatar;
+pub mod avatar_master;
 pub mod credentials;
 pub mod diagnostics;
 pub mod doc;
@@ -14,6 +16,7 @@ pub mod dto;
 pub mod fixture;
 pub mod relay;
 pub mod store;
+pub mod user_error;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -22,6 +25,8 @@ use std::sync::Arc;
 use arbos_matrix::{MessageRow, Snapshot};
 use futures::future::BoxFuture;
 use tokio::sync::mpsc;
+
+use crate::sync::user_error::UserError;
 
 use crate::model::{
     AccountView, Call, CallEnded, CallKind, CallMissed, Person, Reachable, Sender, ServerInfo,
@@ -72,16 +77,24 @@ pub enum SyncEvent {
         url: String,
         bytes: Arc<Vec<u8>>,
     },
+    /// The picture at `url` could not be fetched (retries exhausted, or 404): the app forgets
+    /// the request so the next surface that wants it asks again.
+    AvatarMissing {
+        url: String,
+    },
     /// The avatar picker's generated picture is ready to preview (`url` fetches it; `image_key`
     /// is what "Set avatar" sends), or the generation failed (`error`).
     ImageGenerated {
         target: PictureTarget,
         image_key: Option<String>,
         url: Option<String>,
-        error: Option<String>,
+        /// A short human sentence for the sheet ("Couldn't generate the image. The server took
+        /// too long."); the raw provider / transport words ride in `detail` for a Details
+        /// disclosure (Jacob, 2026-10-26: a raw reqwest error had spilled over the footer).
+        error: Option<UserError>,
     },
     /// Error from a people-chat action (search, DM, members), shown inline.
-    PeopleError(String),
+    PeopleError(UserError),
     /// The people I block (`GET /blocks`), sent on every registry refresh and after each
     /// block / unblock. The person pane derives its Block user / Unblock row from this list.
     Blocked(Vec<Person>),
@@ -114,10 +127,10 @@ pub enum SyncEvent {
         chat_id: Id,
         call_id: String,
     },
-    /// A call request failed; shown as a notice and the call UI resets.
+    /// A call request failed; shown as an error toast and the call UI resets.
     CallError {
         chat_id: Id,
-        message: String,
+        error: UserError,
     },
     /// Cold launch from the on-device store (#929): reopen what was on
     /// screen when the app last ran. Sent once, after the stored `Projects`.
@@ -173,7 +186,7 @@ pub enum SyncEvent {
     Paired {
         device_id: String,
     },
-    PairingFailed(String),
+    PairingFailed(UserError),
     /// Registry: the full project list, rail order.
     Projects(Vec<Project>),
     /// Model ids the relay proxy can serve (picker contents).
@@ -236,6 +249,12 @@ pub enum SyncEvent {
         key: String,
         bytes: Arc<Vec<u8>>,
     },
+    /// The site icon for the named links to `host` (relay `GET /link-icon?domain=`): a
+    /// 64×64 PNG, or `None` when the site has none (the bubbles keep the placeholder).
+    LinkIcon {
+        host: String,
+        png: Option<Arc<Vec<u8>>>,
+    },
     /// The thumbnail bytes could not be fetched; the card shows "No preview" instead of
     /// loading forever. The failure itself went to the log and the silent diagnostics path.
     ThumbnailFailed {
@@ -261,8 +280,16 @@ pub enum SyncEvent {
     /// What the relay's HTTP side says about reachability (the registry poll):
     /// `Offline` / `RelayDown` while it fails, `Live` as soon as a call succeeds.
     RelayLink(LinkState),
-    /// Short user-facing notice (errors from HTTP calls, etc.).
+    /// Short user-facing notice — something that worked or a plain status ("Forwarded to
+    /// Studio"). Never a failure: those are [`SyncEvent::Failure`].
     Notice(String),
+    /// Something the user asked for did not happen. Drawn by `ui::error_note` as an error
+    /// toast (or caught by the surface that owns the action); `retry` re-issues the command
+    /// behind Try again.
+    Failure {
+        error: UserError,
+        retry: Option<Box<ClientCommand>>,
+    },
     /// A room's pushes were refused (`not_available` / `muted`) or an ACK cleared that refusal.
     /// `refused: true` → show a per-room notice; `false` → clear it.
     /// `code` is `"muted"` / `"not_available"` while refused; empty when cleared.
@@ -283,7 +310,7 @@ pub enum SyncEvent {
     /// Settings → Secrets: secrets, accesses, requests, activity (never values; D83).
     Secrets(SecretsView),
     /// Settings → Devices: this account's signed-in devices, or why they could not be read.
-    Devices(Result<Vec<DeviceView>, String>),
+    Devices(Result<Vec<DeviceView>, UserError>),
     /// One agent's secrets page (`GET /projects/{id}/secrets`).
     ProjectSecrets {
         project_id: Id,
@@ -349,8 +376,9 @@ pub enum SyncEvent {
     ServerDetail(ServerInfo),
     /// D88: a server was just created or joined: select it and land on `#general`.
     ServerOpened(ServerInfo),
-    /// D88: a server/channel write failed; shown inline in the open sheet and as a notice.
-    ServerError(String),
+    /// D88: a server/channel write failed; shown inline in the open sheet (or as an error
+    /// toast when no sheet is up).
+    ServerError(UserError),
     /// D88: the room list of servers and channels changed.
     MatrixRooms(Snapshot),
     /// D88: rows of a channel after it was opened, and the whole list after every new row.
@@ -367,13 +395,13 @@ pub enum SyncEvent {
     ChannelSendFailed {
         room_id: String,
         local_id: String,
-        error: String,
+        error: UserError,
     },
     /// A chat send never reached the doc (no room yet, or NewChat failed); mark it failed.
     MessageSendFailed {
         chat_id: Id,
         message_id: Id,
-        error: String,
+        error: UserError,
     },
 }
 
@@ -410,7 +438,7 @@ impl PictureTarget {
 /// leaf).
 #[derive(Clone, Debug, PartialEq)]
 pub enum DraftPicture {
-    /// A file the owner chose; uploaded as a 512 px JPEG into the new entity's slot.
+    /// A file the owner chose; uploaded as the picture master (≤ 1024 px PNG / JPEG) into the new entity's slot.
     File(std::path::PathBuf),
     /// A picture the relay already holds in my own slot (`users:{me}`): copied over.
     Generated { key: String },
@@ -419,7 +447,7 @@ pub enum DraftPicture {
 /// Where an agent's new picture comes from (`ClientCommand::SetProjectImage`).
 #[derive(Clone, Debug, PartialEq)]
 pub enum PictureSource {
-    /// A file the owner chose; uploaded as a 512 px JPEG.
+    /// A file the owner chose; uploaded as the picture master (≤ 1024 px PNG / JPEG).
     File(std::path::PathBuf),
     /// A blob the relay already stores under the project (a generated picture).
     Key(String),
@@ -564,6 +592,9 @@ pub enum ClientCommand {
         attachments: Vec<PathBuf>,
         /// People-chat / hover-reply: the message this send answers (`replyTo`).
         reply_to: Option<String>,
+        /// Reply in DM: the message in another chat this send answers, with its
+        /// snapshot (`replyRef`). Exclusive with `reply_to`.
+        reply_ref: Option<crate::model::ReplyRef>,
         /// Member ids of the composer's committed mention chips (#1596); the
         /// source unions them with the `@handle`s the text names.
         mentions: Vec<String>,
@@ -714,7 +745,7 @@ pub enum ClientCommand {
         server_id: Id,
         pick: Option<crate::ui::avatars::LeafPick>,
     },
-    /// My own picture (`PUT /me/avatar`, JPEG ≤ 2 MB): overrides the GitHub
+    /// My own picture (`PUT /me/avatar`, PNG / JPEG master ≤ 3 MB): overrides the GitHub
     /// avatar everywhere the relay serves me.
     SetMyAvatar {
         path: std::path::PathBuf,
@@ -840,6 +871,10 @@ pub enum ClientCommand {
     FetchThumbnail {
         project_id: Id,
         key: String,
+    },
+    /// Fetch the site icon the bubbles draw before named links to `host`.
+    FetchLinkIcon {
+        host: String,
     },
     /// Download an attachment to `~/Downloads/<name>` (F10).
     DownloadAttachment {

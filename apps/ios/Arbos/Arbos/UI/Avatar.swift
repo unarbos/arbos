@@ -65,12 +65,10 @@ struct AgentAvatar: View {
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
-            if let url = project.imageURL.flatMap(URL.init(string:)) {
+            if let url = project.imageURL, !url.isEmpty {
                 // D92 amendment: the uploaded / generated picture wins over the leaf.
-                AsyncImage(url: url) { phase in
-                    if let image = phase.image {
-                        image.resizable().scaledToFill()
-                    } else if LeafArt.isNeutral(project.avatarLeaf) {
+                AgentPicture(url: url, size: size) {
+                    if LeafArt.isNeutral(project.avatarLeaf) {
                         NeutralAvatar(name: project.name, size: size)
                     } else if flag.on {
                         LeafAvatar(pick: LeafArt.pick(project), size: size)
@@ -78,8 +76,6 @@ struct AgentAvatar: View {
                         Circle().fill(theme.field)
                     }
                 }
-                .frame(width: size, height: size)
-                .clipShape(Circle())
             } else if LeafArt.isNeutral(project.avatarLeaf) {
                 // Jacob, 2026-10-25: created with no leaf — the name's initial on a neutral disc.
                 NeutralAvatar(name: project.name, size: size)
@@ -103,6 +99,43 @@ struct AgentAvatar: View {
             }
         }
         .frame(width: size, height: size)
+    }
+}
+
+/// An agent's uploaded / generated picture, through `AvatarImageCache` (one download per
+/// URL, URLCache behind it). While a *new* URL loads (the owner just changed the picture:
+/// the version in the URL moved) the picture last shown stays up — the leaf placeholder is
+/// drawn only when nothing has ever loaded. Jacob, 2026-10-25: the leaf flashing between the
+/// old and the new picture read as "sometimes the old pfp, sometimes the new one".
+struct AgentPicture<Placeholder: View>: View {
+    let url: String
+    let size: CGFloat
+    @ViewBuilder let placeholder: () -> Placeholder
+    @State private var image: UIImage?
+
+    private var displayed: UIImage? {
+        AvatarImageCache.shared.image(for: url) ?? image
+    }
+
+    var body: some View {
+        ZStack {
+            if let displayed {
+                Image(uiImage: displayed).resizable().scaledToFill()
+            } else {
+                placeholder()
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(Circle())
+        .task(id: url) {
+            if let cached = AvatarImageCache.shared.image(for: url) {
+                image = cached
+                return
+            }
+            if let loaded = await AvatarImageCache.shared.load(url) {
+                image = loaded
+            }
+        }
     }
 }
 

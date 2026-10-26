@@ -11,7 +11,14 @@
 //! and ignores a leading `@`. Ranking: people (display name / handle), then
 //! chats by title, then chats by a member's name, then message bodies.
 //! The iPhone has the same model in `HomeSearch.swift`.
+//!
+//! Names, handles and titles go through the one shared matcher,
+//! [`arbos_core::search`] (exact > prefix > word-start, display name before
+//! handle, diacritics folded) — the same rule every picker in both apps uses
+//! ([feedback shared-search-matcher-mac-2026-10-26]). Message bodies are not
+//! entities and keep the substring search here.
 
+pub use arbos_core::search::{fold, match_entity, normalize_query, Match};
 use unicode_normalization::char::is_combining_mark;
 use unicode_normalization::UnicodeNormalization;
 
@@ -33,6 +40,9 @@ pub enum HitKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SearchHit {
     pub kind: HitKind,
+    /// How well the entity matched (the shared matcher's verdict): orders rows
+    /// inside a kind. `Match::EVERYTHING` for an empty query and message hits.
+    pub matched: Match,
     /// Shown on the row's second line when the name alone does not explain the hit.
     pub reason: Option<String>,
     /// The message to scroll to (`Message` hits): (chat id, message id).
@@ -40,17 +50,19 @@ pub struct SearchHit {
 }
 
 impl SearchHit {
-    fn plain(kind: HitKind) -> Self {
+    fn plain(kind: HitKind, matched: Match) -> Self {
         Self {
             kind,
+            matched,
             reason: None,
             message: None,
         }
     }
 
-    fn with_reason(kind: HitKind, reason: String) -> Self {
+    fn with_reason(kind: HitKind, matched: Match, reason: String) -> Self {
         Self {
             kind,
+            matched,
             reason: Some(reason),
             message: None,
         }
@@ -66,25 +78,10 @@ pub struct MessageText {
     pub text: String,
 }
 
-/// Lower-case, diacritics stripped, trimmed: the form every haystack and the
-/// query are compared in.
-pub fn fold(s: &str) -> String {
-    s.trim()
-        .chars()
-        .flat_map(char::to_lowercase)
-        .nfd()
-        .filter(|c| !is_combining_mark(*c))
-        .collect()
-}
-
-/// The typed query as the matcher sees it: folded, a leading `@` dropped so
-/// "@robert" finds the handle too. Empty means "show everything".
-pub fn normalize_query(query: &str) -> String {
-    fold(query.trim().trim_start_matches('@'))
-}
-
-fn contains(hay: &str, q: &str) -> bool {
-    fold(hay).contains(q)
+/// A title-like text (a group name, a chat title, a channel) through the
+/// shared matcher, as a [`Match`] on the name field.
+fn title_match(text: &str, q: &str) -> Option<Match> {
+    match_entity(text, "", None, q)
 }
 
 /// How a DM / group / agent row matches `q` (already normalized, non-empty).
@@ -98,24 +95,29 @@ pub fn space_hit<'a>(
     q: &str,
 ) -> Option<SearchHit> {
     if q.is_empty() {
-        return Some(SearchHit::plain(HitKind::Title));
+        return Some(SearchHit::plain(HitKind::Title, Match::EVERYTHING));
     }
     let is_dm = space.is_people() && !space.is_people_group();
     if is_dm {
         if let Some(p) = space.person() {
-            if contains(&p.display_name(), q) || contains(&p.handle, q) {
-                return Some(SearchHit::plain(HitKind::Person));
+            if let Some(m) = match_entity(&p.display_name(), &p.handle, None, q) {
+                return Some(SearchHit::plain(HitKind::Person, m));
             }
         }
-    } else if contains(&space.name, q) {
-        return Some(SearchHit::plain(HitKind::Title));
+    } else if let Some(m) = match_entity(
+        &space.name,
+        "",
+        space.description.as_deref().filter(|_| !space.is_people()),
+        q,
+    ) {
+        return Some(SearchHit::plain(HitKind::Title, m));
     }
     if !is_dm {
-        if let Some(p) = space
+        if let Some((p, m)) = space
             .people
             .iter()
             .filter(|p| p.handle != me_handle)
-            .find(|p| contains(&p.display_name(), q) || contains(&p.handle, q))
+            .find_map(|p| match_entity(&p.display_name(), &p.handle, None, q).map(|m| (p, m)))
         {
             let name = p.display_name();
             let reason = if name == p.handle {
@@ -123,21 +125,29 @@ pub fn space_hit<'a>(
             } else {
                 format!("Member · {name} @{}", p.handle)
             };
-            return Some(SearchHit::with_reason(HitKind::Member, reason));
+            return Some(SearchHit::with_reason(HitKind::Member, m, reason));
         }
-        if let Some(a) = space.agents.iter().find(|a| contains(&a.name, q)) {
+        if let Some((a, m)) = space
+            .agents
+            .iter()
+            .find_map(|a| match_entity(&a.name, &a.handle, None, q).map(|m| (a, m)))
+        {
             return Some(SearchHit::with_reason(
                 HitKind::Member,
+                m,
                 format!("Agent · {}", a.name),
             ));
         }
     }
-    if let Some((_, title)) = chats
-        .into_iter()
-        .find(|(_, title)| !title.trim().is_empty() && contains(title, q))
-    {
+    if let Some((_, title, m)) = chats.into_iter().find_map(|(id, title)| {
+        if title.trim().is_empty() {
+            return None;
+        }
+        title_match(title, q).map(|m| (id, title, m))
+    }) {
         return Some(SearchHit::with_reason(
             HitKind::Title,
+            m,
             format!("Chat · {}", title.trim()),
         ));
     }
@@ -153,6 +163,7 @@ pub fn message_hit(messages: Vec<MessageText>, q: &str) -> Option<SearchHit> {
     let (m, snippet) = best;
     Some(SearchHit {
         kind: HitKind::Message,
+        matched: Match::EVERYTHING,
         reason: Some(format!("Message · {snippet}")),
         message: Some((m.chat_id, m.message_id)),
     })
@@ -160,14 +171,17 @@ pub fn message_hit(messages: Vec<MessageText>, q: &str) -> Option<SearchHit> {
 
 /// A server row: its name, or one of its channels (named in the reason).
 pub fn server_hit(server: &ServerInfo, q: &str) -> Option<SearchHit> {
-    if q.is_empty() || contains(&server.name, q) {
-        return Some(SearchHit::plain(HitKind::Title));
+    if q.is_empty() {
+        return Some(SearchHit::plain(HitKind::Title, Match::EVERYTHING));
+    }
+    if let Some(m) = title_match(&server.name, q) {
+        return Some(SearchHit::plain(HitKind::Title, m));
     }
     server
         .channels
         .iter()
-        .find(|c| contains(&c.name, q))
-        .map(|c| SearchHit::with_reason(HitKind::Title, format!("#{}", c.name)))
+        .find_map(|c| title_match(&c.name, q).map(|m| (c, m)))
+        .map(|(c, m)| SearchHit::with_reason(HitKind::Title, m, format!("#{}", c.name)))
 }
 
 /// Up to this many characters of context before the match in a snippet.
@@ -566,6 +580,34 @@ mod tests {
         assert_eq!(server_hit(&server, &normalize_query("carro")), None);
     }
 
+    /// Through the shared matcher an exact handle sorts before a name that
+    /// merely starts with the query, and a mid-word substring is no hit.
+    #[test]
+    fn hits_carry_the_shared_matchers_rank() {
+        use arbos_core::search::{MatchField, MatchKind};
+        let q = normalize_query("aff");
+        let andreas = dm("aff", Some("Andreas F"));
+        let affine = dm("affine-foundation", Some("Affine"));
+        let team = dm("team", Some("Team Affine"));
+        let hit = |space: &Project| space_hit(space, "jacob", no_chats(), Vec::new, &q).unwrap();
+        assert_eq!(hit(&andreas).matched.kind, MatchKind::Exact);
+        assert_eq!(hit(&andreas).matched.field, MatchField::Handle);
+        assert_eq!(hit(&affine).matched.kind, MatchKind::Prefix);
+        assert_eq!(hit(&team).matched.kind, MatchKind::WordStart);
+        assert!(hit(&andreas).matched < hit(&affine).matched);
+        assert!(hit(&affine).matched < hit(&team).matched);
+        assert_eq!(
+            space_hit(
+                &affine,
+                "jacob",
+                no_chats(),
+                Vec::new,
+                &normalize_query("ffin")
+            ),
+            None
+        );
+    }
+
     #[test]
     fn snippets_cut_around_the_match() {
         let long = "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty twenty-one twenty-two";
@@ -578,5 +620,139 @@ mod tests {
             Some("Zoë was here")
         );
         assert_eq!(snippet("plain", "x"), None);
+    }
+}
+
+#[cfg(test)]
+mod picker_sites_tests {
+    //! Every search box that lists people, agents, groups, servers or channels
+    //! goes through the one shared matcher (`arbos_core::search`), never an
+    //! ad-hoc lower-cased `contains` ([feedback
+    //! shared-search-matcher-mac-2026-10-26]). A new picker joins `SITES`; a
+    //! picker that grows its own filter fails here. The iPhone twin is
+    //! `ArbosTests/SharedSearchTests.swift`.
+    use std::path::Path;
+
+    /// (file, function, what counts as "through the matcher" inside it).
+    const SITES: &[(&str, &str, &[&str])] = &[
+        // Sidebar / palette chat rows: person, title, member, agent, chat title.
+        (
+            "src/search.rs",
+            "fn space_hit",
+            &["match_entity(", "title_match("],
+        ),
+        ("src/search.rs", "fn server_hit", &["title_match("]),
+        // ⌘⇧F palette ranks (people met in groups, servers, channels).
+        (
+            "src/palette.rs",
+            "fn of_entity",
+            &["crate::search::match_entity("],
+        ),
+        // New message / New group / Add members / Add server members /
+        // Give a person access (Secrets): people rows.
+        (
+            "src/app.rs",
+            "fn people_sheet_results",
+            &["arbos_core::search::", "filter("],
+        ),
+        // The same picker's agent rows.
+        (
+            "src/ui/people.rs",
+            "fn agent_picker_rows",
+            &["arbos_core::search::", "filter("],
+        ),
+        // The Secrets agent picker (New secret, Connect 1Password, Give access on a
+        // secret / a vault): the same agent rows.
+        (
+            "src/ui/agent_picker.rs",
+            "fn candidates",
+            &["agent_picker_rows("],
+        ),
+        // Forward-to chat picker.
+        (
+            "src/app.rs",
+            "fn filter_forward_targets",
+            &["arbos_core::search::", "rank("],
+        ),
+        // @mention completion in the composer.
+        (
+            "src/ui/composer.rs",
+            "fn mention_match",
+            &["search::match_entity("],
+        ),
+    ];
+
+    /// Files where no entity filter may lower-case-and-contain on its own.
+    const NO_ADHOC: &[&str] = &[
+        "src/app.rs",
+        "src/palette.rs",
+        "src/search.rs",
+        "src/ui/people.rs",
+        "src/ui/composer.rs",
+        "src/ui/mention.rs",
+        "src/ui/palette.rs",
+        "src/ui/sidebar.rs",
+        "src/ui/secrets.rs",
+        "src/ui/agent_picker.rs",
+        "src/ui/servers.rs",
+        "src/ui/groups.rs",
+    ];
+    const ADHOC: &[&str] = &[
+        ".to_lowercase().contains(&q",
+        ".to_lowercase().starts_with(&q",
+        ".to_ascii_lowercase().contains(&q",
+        "fold(hay).contains(",
+    ];
+
+    fn source(rel: &str) -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    }
+
+    /// The text of `fn name` up to the next item at column 0.
+    fn body<'a>(src: &'a str, name: &str) -> &'a str {
+        let start = src
+            .find(&format!("{name}("))
+            .or_else(|| src.find(&format!("{name}<")))
+            .unwrap_or_else(|| panic!("{name} not found"));
+        let rest = &src[start..];
+        let end = rest[1..]
+            .find("\n}\n")
+            .map(|i| i + 1 + 3)
+            .unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    #[test]
+    fn every_picker_routes_through_the_shared_matcher() {
+        for (file, name, markers) in SITES {
+            let src = source(file);
+            let body = body(&src, name);
+            assert!(
+                markers.iter().all(|m| body.contains(m)),
+                "{file} {name}: expected {markers:?} in\n{body}"
+            );
+            for bad in ADHOC {
+                assert!(!body.contains(bad), "{file} {name}: ad-hoc filter {bad:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn no_picker_file_keeps_an_ad_hoc_filter() {
+        for file in NO_ADHOC {
+            let src = source(file);
+            // This module's own `ADHOC` literals are not a picker.
+            let scan = src.split("mod picker_sites_tests").next().unwrap_or("");
+            for (n, line) in scan.lines().enumerate() {
+                for bad in ADHOC {
+                    assert!(
+                        !line.contains(bad),
+                        "{file}:{}: ad-hoc filter {bad:?}: {line}",
+                        n + 1
+                    );
+                }
+            }
+        }
     }
 }

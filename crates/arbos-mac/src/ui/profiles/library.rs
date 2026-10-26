@@ -115,10 +115,24 @@ impl Entry {
         }
     }
 
-    pub fn by(&self) -> &str {
-        match self {
-            Entry::Attachment(f) => &f.by,
-            Entry::Link(l) => &l.by,
+    /// Who shared it, by name: the agent's project name, a person's name, else
+    /// what the row carried ("@sam", "You").
+    pub fn by(&self, state: &AppState) -> String {
+        let raw = match self {
+            Entry::Attachment(f) => f.by.as_str(),
+            Entry::Link(l) => l.by.as_str(),
+        };
+        match self.sender() {
+            Sender::Agent(pid) => state
+                .project(pid)
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| raw.to_string()),
+            Sender::Person(p) => p
+                .name
+                .clone()
+                .filter(|n| !n.trim().is_empty())
+                .unwrap_or_else(|| raw.to_string()),
+            Sender::Me => raw.to_string(),
         }
     }
 
@@ -421,6 +435,7 @@ pub(super) fn sections(
                 when: f.when,
                 chat_id: f.chat_id.clone(),
                 part_id: f.part_id.clone(),
+                picture_url: None,
             })
             .collect(),
     );
@@ -564,7 +579,7 @@ fn row(
                 .child(rel_time(now, entry.when())),
         )
     };
-    el = el.child(kit::hairline_below(kit::INSET + THUMB + kit::GAP, theme));
+    el = el.child(kit::hairline_below(theme));
     if hover.is_some_and(|h| h.armed) {
         let above = shell
             .library
@@ -812,7 +827,7 @@ fn preview(entry: &Entry, state: &AppState, theme: &Theme) -> AnyElement {
                                 div()
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(theme.text)
-                                    .child(entry.by().to_string()),
+                                    .child(entry.by(state)),
                             )
                             .child(format!(" · {when}")),
                     ),

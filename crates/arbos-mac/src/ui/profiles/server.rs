@@ -22,7 +22,7 @@ use crate::ui::sidebar::server_picture;
 use crate::ui::theme::{Theme, TEXT_BODY, TEXT_SMALL};
 
 use super::pane::{self, Hero, Picture, ProfilePane, Section};
-use super::{editable_name, editable_picture, kit, list_row, HeroClick, HERO_AVATAR};
+use super::{editable_name, hero_picture, kit, list_row, HeroClick, HERO_AVATAR};
 
 pub(super) const TABS: [&str; 3] = ["Channels", "Members", "Settings"];
 
@@ -87,7 +87,18 @@ pub(super) fn page(
         });
         Box::new(f) as HeroClick
     });
-    let avatar = editable_picture("profile-avatar", picture, pic_click).into_any_element();
+    // A member who is not an admin: the picture opens full-size in the media viewer.
+    let view_click = (!can_admin)
+        .then(|| server.image_url.clone())
+        .flatten()
+        .map(|url| {
+            let name = server.name.clone();
+            let f = cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                this.view_picture(&name, &url, cx);
+            });
+            Box::new(f) as HeroClick
+        });
+    let avatar = hero_picture("profile-avatar", picture, pic_click, view_click).into_any_element();
     let sid_name = server.id.clone();
     let name_click = can_admin.then(|| {
         let f = cx.listener(move |this, _: &gpui::ClickEvent, window, cx| {
@@ -122,7 +133,9 @@ pub(super) fn page(
         subtitle: Some(subtitle.into()),
         subtitle_color: theme.text_muted,
         subtitle_click: None,
+        subtitle_element: None,
         editor: None,
+        action: None,
     };
 
     // ----- tabs: Channels | Members | Settings (the same set on the iPhone) ------

@@ -432,6 +432,18 @@ impl Store {
         })
     }
 
+    /// The model a session was started with (`upsert_session`), for a resume on the same model.
+    pub fn session_model(&self, id: &str) -> Result<Option<String>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT model FROM sessions WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()
+        })
+    }
+
     pub fn session_cursor(&self, id: &str) -> Result<Option<String>> {
         self.with(|c| {
             c.query_row(
@@ -1042,6 +1054,23 @@ impl Store {
             Ok(())
         })?;
         Ok(id)
+    }
+
+    /// Rewrite a record's text in place (FTS kept in step); the id, tier and provenance stay.
+    pub fn memory_set_text(&self, id: &str, text: &str) -> Result<()> {
+        let text = redact(text);
+        self.with(|c| {
+            c.execute(
+                "UPDATE memory SET text = ?2 WHERE id = ?1",
+                params![id, text],
+            )?;
+            c.execute("DELETE FROM memory_fts WHERE id = ?1", params![id])?;
+            c.execute(
+                "INSERT INTO memory_fts(text, id, tier) SELECT text, id, tier FROM memory WHERE id = ?1",
+                params![id],
+            )?;
+            Ok(())
+        })
     }
 
     /// INVALIDATE: set `invalid_at` and `expired_at`; the row stays (D7).

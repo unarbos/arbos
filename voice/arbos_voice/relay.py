@@ -85,6 +85,14 @@ class Relay:
             if r.status >= 400:
                 raise RelayError(r.status, await r.text())
 
+    async def inbox(self, call_id: str, project_id: str, after: int, wait: int) -> dict:
+        """`GET /voice/calls/{id}/inbox` (#1832): what landed in the chat since `after`, long-polled."""
+        return await self._json(
+            "GET",
+            f"/voice/calls/{call_id}/inbox?project_id={project_id}&after={after}&wait={wait}",
+            timeout=wait + 10.0,
+        )
+
     async def agent_settings(self, project_id: str) -> dict:
         """`GET /projects/{id}/voice` — chattiness, wake name, voice, vision_enabled (live re-read)."""
         return await self._json("GET", f"/projects/{project_id}/voice", timeout=5.0)

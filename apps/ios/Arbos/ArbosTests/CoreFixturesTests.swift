@@ -584,6 +584,12 @@ final class CoreFixturesTests: XCTestCase {
         XCTAssertEqual(p.user_id, "gh_201")
         XCTAssertEqual(p.avatar_url, "https://relay.example/avatars/gh_201.jpg?v=1700000000000")
 
+        let agentProfile = try XCTUnwrap(PushItem.parse(try apiFixtureJSON("push_agent_profile_updated.json")))
+        guard case .agentProfileUpdated(let a) = agentProfile.event else { return XCTFail("agent_profile_updated") }
+        XCTAssertEqual(a.project_id, "01FIXTUREAGENT")
+        XCTAssertEqual(a.avatar_version, 1_700_000_000_000)
+        XCTAssertEqual(a.image_key, "avatar-1700000000000.jpg")
+
         XCTAssertNil(PushItem.parse(try apiFixtureJSON("push_unknown_kind.json")))
         XCTAssertNil(PushItem.parse([
             "id": "bad", "created_at": 1, "kind": "not_a_real_push_kind", "payload": ["x": 1],

@@ -241,7 +241,8 @@ enum WorkspaceState: String, Codable, Equatable {
 /// `avatar_leaf` = `LeafArt.neutral`, the name's initial on a grey disc — never an automatic
 /// leaf).
 enum DraftPicture: Equatable {
-    /// The photo as chosen, already a 512 px JPEG; uploaded into the new entity's slot.
+    /// The photo as chosen, already the encoded master (PNG or JPEG, ≤ 1024 px —
+    /// `PictureMaster`); uploaded into the new entity's slot.
     case jpeg(Data)
     /// A picture the relay already holds in my own slot (`users:{me}`): copied over.
     case generated(key: String)
@@ -289,9 +290,14 @@ struct Project: Identifiable, Equatable, Codable {
     /// D92 amendment: the agent's uploaded / generated picture — a blob name in the project's own
     /// slot (`/blob/{id}/{key}`); wins over the leaf while set.
     var imageKey: String? = nil
-    /// `imageKey` as a fetchable URL (the relay's `/blob/{id}/{key}?token=…`), filled in by the
-    /// relay client; nil in the fixture.
+    /// `imageKey` as a fetchable URL — the relay's public picture route
+    /// `/projects/{id}/avatar.jpg?v={avatarVersion}` (`Project.pictureURL`), filled in by the
+    /// relay client and by `AppModel.applyAgentAvatar`; nil in the fixture and without a picture.
     var imageURL: String? = nil
+    /// The relay's stamp (ms) of the agent's last avatar change (`avatar_version`); 0 when
+    /// unknown. Among the copies of one agent (my record, every roster card) the highest stamp
+    /// is drawn, so a change never flips back to the old picture (Jacob, 2026-10-25).
+    var avatarVersion: Int = 0
     /// Private standing instructions (owner only).
     var instructions: String = ""
     /// §9 public one-paragraph description (≤500), `PATCH {description}`.
@@ -350,6 +356,7 @@ extension Project {
         self.avatarLeaf = dto.avatar_leaf.map(Int.init)
         self.avatarLeafColor = dto.avatar_leaf_color.map(Int.init)
         self.imageKey = dto.image_key.flatMap { $0.isEmpty ? nil : $0 }
+        self.avatarVersion = dto.avatar_version.map(Int.init) ?? 0
         self.instructions = dto.instructions
         self.description = dto.description
         self.ownerName = dto.owner.name
@@ -898,6 +905,71 @@ struct JobRollout: Equatable {
     }
 }
 
+/// A cross-chat reply reference (crdt-sync §6.2 `replyRef`, core `ReplyRef`): where the
+/// quoted message lives plus a snapshot of it, so a reader who is not in the source chat
+/// still sees the quote.
+struct ReplyRef: Equatable, Hashable {
+    var chatId: Id
+    /// `"people"` for DMs and people groups, else the project id.
+    var projectId: String
+    var messageId: Id
+    var chatTitle: String
+    /// `user:<id>` / `agent:<project>` / `agent` of the quoted row.
+    var sender: String
+    var senderName: String
+    var senderHandle: String
+    var text: String
+
+    /// The snapshot keeps this much of the quoted message (core `REPLY_REF_TEXT_CHARS`).
+    static let snapshotChars = 240
+
+    init(chatId: Id, projectId: String, messageId: Id, chatTitle: String, sender: String,
+         senderName: String, senderHandle: String, text: String) {
+        self.chatId = chatId; self.projectId = projectId; self.messageId = messageId
+        self.chatTitle = chatTitle; self.sender = sender; self.senderName = senderName
+        self.senderHandle = senderHandle; self.text = text
+    }
+
+    /// The row's `replyRef` map, when it is well-formed (chat and message ids present).
+    init?(row: Any?) {
+        guard let m = row as? [String: Any],
+              let chatId = m["chatId"] as? String, !chatId.isEmpty,
+              let messageId = m["messageId"] as? String, !messageId.isEmpty
+        else { return nil }
+        let s = { (k: String) -> String in (m[k] as? String) ?? "" }
+        self.init(chatId: chatId, projectId: s("projectId").isEmpty ? "people" : s("projectId"),
+                  messageId: messageId, chatTitle: s("chatTitle"), sender: s("sender"),
+                  senderName: s("senderName"), senderHandle: s("senderHandle"), text: s("text"))
+    }
+
+    /// Who the quote is from, for "Replying to <who> in <chat>".
+    var who: String {
+        let name = senderName.trimmingCharacters(in: .whitespaces)
+        if !name.isEmpty { return name }
+        let handle = senderHandle.trimmingCharacters(in: .whitespaces)
+        if !handle.isEmpty { return "@\(handle)" }
+        return "a message"
+    }
+
+    /// "Replying to Jacob in Arbonites" — the source line above the quote.
+    var label: String {
+        let place = chatTitle.trimmingCharacters(in: .whitespaces)
+        return place.isEmpty ? "Replying to \(who)" : "Replying to \(who) in \(place)"
+    }
+
+    /// Whitespace-collapsed first `snapshotChars` characters, cut on a word with an ellipsis.
+    static func snapshot(_ text: String) -> String {
+        let flat = text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        guard flat.count > snapshotChars else { return flat }
+        var cut = String(flat.prefix(snapshotChars))
+        if let space = cut.lastIndex(of: " "), cut.distance(from: cut.startIndex, to: space) > snapshotChars / 2 {
+            cut = String(cut[..<space])
+        }
+        while let last = cut.last, ",;:.".contains(last) { cut.removeLast() }
+        return cut + "…"
+    }
+}
+
 struct Message: Identifiable, Equatable {
     var id: Id
     var chatId: Id
@@ -945,6 +1017,10 @@ struct Message: Identifiable, Equatable {
     /// Bubble menu → Forward: the original sender's name; the bubble draws
     /// "Forwarded from <name>" above the text (`forwardedFrom` on the row).
     var forwardedFrom: String? = nil
+    /// Bubble menu → Reply in DM: the quoted message in another chat with its snapshot
+    /// (`replyRef` on the row, crdt-sync §6.2); the bubble draws the quote header plus
+    /// "Replying to <who> in <chat>".
+    var replyRef: ReplyRef? = nil
     /// What the agent is doing right now ("Cloning RaoFoundation/subtensor"),
     /// written by the harness while the turn runs; the working line shows it.
     var activity: String? = nil
@@ -1117,6 +1193,7 @@ enum DocJSON {
             mentions: (m["mentions"] as? [Any])?.compactMap { $0 as? String } ?? [],
             replyTo: str(m["replyTo"]),
             forwardedFrom: str(m["forwardedFrom"]).flatMap { $0.isEmpty ? nil : $0 },
+            replyRef: ReplyRef(row: m["replyRef"]),
             activity: str(m["activity"]).flatMap { $0.isEmpty ? nil : $0 },
             voice: bool(m["voice"]) || str(m["source"]) == "voice",
             greeting: bool(m["greeting"]),
@@ -1689,5 +1766,19 @@ enum JobTabs {
             out.append(live)
         }
         return out
+    }
+}
+
+
+extension Project {
+    /// The one URL every surface fetches an agent's picture from: the relay's public route for
+    /// the agent's *current* picture, stamped with `avatar_version` so a change is a new URL and
+    /// no cache (URLCache, `AvatarImageCache`) ever serves the old bytes. Why not the blob slot:
+    /// `/blob/{project}/{key}` is readable by the owner and the project's guests only, so a
+    /// viewer who merely shares a group with the agent got 403 and drew the leaf (Jacob,
+    /// 2026-10-25, "Hezbola"). nil without a picture or without a relay.
+    static func pictureURL(httpUrl: String, id: Id, imageKey: String?, version: Int) -> String? {
+        guard let imageKey, !imageKey.isEmpty, !httpUrl.isEmpty else { return nil }
+        return "\(httpUrl)/projects/\(id)/avatar.jpg?v=\(version)"
     }
 }

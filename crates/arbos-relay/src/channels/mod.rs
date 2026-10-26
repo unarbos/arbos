@@ -766,6 +766,8 @@ mod tests {
             openai_images_base: String::new(),
             image_mock: false,
             avatar_retry_backoff_ms: Vec::new(),
+            avatar_attempt_timeout: std::time::Duration::from_secs(40),
+            avatar_total_timeout: std::time::Duration::from_secs(75),
             voice_mock: true,
             openai_audio_base: String::new(),
             vault_mock: false,
@@ -810,6 +812,7 @@ mod tests {
             jwt_key: Arc::new(RelayKey::derive("test-key").subkey("jwt")),
             download_cache: Arc::new(Mutex::new(None)),
             upgrading: Arc::new(Mutex::new(HashMap::new())),
+            upgrade_refused: Arc::new(Mutex::new(HashMap::new())),
             stale_bounces: Arc::new(Mutex::new(HashMap::new())),
             local_conns: Arc::new(Mutex::new(HashMap::new())),
             refresh_grace: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
@@ -832,6 +835,7 @@ mod tests {
             restart: Arc::new(crate::state::RestartSignal::default()),
             voice_dispatched: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             voice_worker: Arc::new(tokio::sync::Mutex::new(None)),
+            voice_inbox: crate::voice::VoiceInbox::default(),
             image_health: Arc::new(tokio::sync::Mutex::new(None)),
             client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
             matrix: crate::matrix::Matrix::new(crate::matrix::Config::off()),
@@ -878,6 +882,7 @@ mod tests {
             avatar_leaf: None,
             avatar_leaf_color: None,
             image_key: None,
+            avatar_version: 0,
         };
         state.db.insert_project(&project).unwrap();
         state
@@ -1004,6 +1009,7 @@ mod tests {
             avatar_leaf: None,
             avatar_leaf_color: None,
             image_key: None,
+            avatar_version: 0,
         };
         state.db.insert_project(&project).unwrap();
         let binding = ChannelBinding {

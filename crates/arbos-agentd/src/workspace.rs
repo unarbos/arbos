@@ -454,6 +454,35 @@ impl Supervisor {
                 .unwrap_or_default();
             match self.ensure_workspace(project, &chats, &pushes).await {
                 Ok(w) => {
+                    // The owner's profile (address name) rides on every listing: the agent
+                    // addresses the owner from it, live, never from a row's `senderName`.
+                    if let Some(o) = e.get("owner").or_else(|| listing.get("owner")) {
+                        let before = w.agent.people.owner_profile();
+                        w.agent.people.set_owner_profile(o);
+                        if w.agent.people.owner_profile() != before {
+                            // The prompt's "Your owner" section follows the profile; the pi
+                            // session re-reads it (at once when idle, else after the turn).
+                            w.agent
+                                .refresh_session_prompt("owner profile changed")
+                                .await;
+                        }
+                        let names: Vec<String> = ["address_name", "name"]
+                            .iter()
+                            .filter_map(|k| o.get(*k).and_then(Value::as_str))
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_owned)
+                            .chain(
+                                o.get("former_names")
+                                    .and_then(Value::as_array)
+                                    .into_iter()
+                                    .flatten()
+                                    .filter_map(Value::as_str)
+                                    .map(str::to_owned),
+                            )
+                            .collect();
+                        w.agent.memory.set_owner_names(names);
+                    }
                     w.agent.note_people_chats(&people_chats, true).await;
                     seen.push(w.project_id.clone());
                 }
@@ -825,8 +854,27 @@ pub fn context_window_tokens() -> u64 {
 pub fn write_models_json(cfg: &Config, talking: &str, subagent: &str) -> Result<()> {
     let context_window = context_window_tokens();
     let mut window_overrides = serde_json::Map::new();
-    for id in [talking, subagent] {
-        window_overrides.insert(id.to_owned(), json!({ "contextWindow": context_window }));
+    // The research-job worker model (cost knob 1) must be in pi's catalog too; it is usually the
+    // talking model already, but a user may talk on another one.
+    let research = cfg.research_worker_model();
+    let mut ids = vec![talking, subagent];
+    if let Some(r) = research.as_deref() {
+        if !ids.contains(&r) {
+            ids.push(r);
+        }
+    }
+    for id in &ids {
+        window_overrides.insert((*id).to_owned(), json!({ "contextWindow": context_window }));
+    }
+    let mut relay_models = vec![
+        json!({ "id": talking, "name": format!("{talking} (relay)"), "reasoning": false, "input": ["text", "image"], "contextWindow": context_window, "maxTokens": 32000, "cost": { "input": 0.1, "output": 0.5, "cacheRead": 0.01, "cacheWrite": 0.125 } }),
+        json!({ "id": subagent, "name": format!("{subagent} (relay)"), "reasoning": true, "input": ["text", "image"], "contextWindow": context_window, "maxTokens": 64000, "cost": { "input": 2, "output": 10, "cacheRead": 0.2, "cacheWrite": 2.5 } }),
+    ];
+    if let Some(r) = research
+        .as_deref()
+        .filter(|r| *r != talking && *r != subagent)
+    {
+        relay_models.push(json!({ "id": r, "name": format!("{r} (relay)"), "reasoning": false, "input": ["text", "image"], "contextWindow": context_window, "maxTokens": 32000, "cost": { "input": 0.1, "output": 0.5, "cacheRead": 0.01, "cacheWrite": 0.125 } }));
     }
     let mut models = json!({
         "providers": {
@@ -835,10 +883,7 @@ pub fn write_models_json(cfg: &Config, talking: &str, subagent: &str) -> Result<
                 "baseUrl": format!("{}/v1", cfg.proxy_base()),
                 "api": "openai-completions",
                 "apiKey": cfg.box_token,
-                "models": [
-                    { "id": talking, "name": format!("{talking} (relay)"), "reasoning": false, "input": ["text", "image"], "contextWindow": context_window, "maxTokens": 32000, "cost": { "input": 0.1, "output": 0.5, "cacheRead": 0.01, "cacheWrite": 0.125 } },
-                    { "id": subagent, "name": format!("{subagent} (relay)"), "reasoning": true, "input": ["text", "image"], "contextWindow": context_window, "maxTokens": 64000, "cost": { "input": 2, "output": 10, "cacheRead": 0.2, "cacheWrite": 2.5 } }
-                ]
+                "models": relay_models
             }
         }
     });
@@ -898,18 +943,49 @@ pub fn compact_at_tokens() -> u64 {
 /// seed, so an image roll updates `arbos-pi-ext` (and every other seed file) in a workspace that
 /// already exists. Before this, an existing workspace kept the extension of the image it was first
 /// created on — a copy-if-missing rule — and never saw later deny rules, hooks or guardrails.
+///
+/// A symlink in the seed stays a symlink in the workspace. `pi-seed/extensions/arbos-pi-ext/
+/// node_modules/{typebox,@earendil-works}` point at pi's own package tree; following them copied
+/// 18 000 files (119 MB) into every project and emptied the 131 072-inode work image of the
+/// lt-eval box after seven projects (2026-10-26, "disk full" at 87 %). A copy an earlier image
+/// made in place of a seed symlink is removed and replaced by the link.
 fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
     std::fs::create_dir_all(dst)?;
     for e in std::fs::read_dir(src)? {
         let e = e?;
         let p = e.path();
         let target = dst.join(e.file_name());
-        if p.is_dir() {
+        let meta = std::fs::symlink_metadata(&p)?;
+        if meta.file_type().is_symlink() {
+            seed_symlink(&p, &target)?;
+        } else if meta.is_dir() {
             copy_dir(&p, &target)?;
         } else if seed_file_differs(&p, &target) {
             std::fs::copy(&p, &target)?;
         }
     }
+    Ok(())
+}
+
+/// Recreate seed symlink `seed` at `target`: nothing to do when the same link is there already;
+/// a file or a (dereferenced) directory tree in its place is removed first.
+fn seed_symlink(seed: &std::path::Path, target: &std::path::Path) -> Result<()> {
+    let link = std::fs::read_link(seed)?;
+    match std::fs::symlink_metadata(target) {
+        Ok(m) if m.file_type().is_symlink() => {
+            if std::fs::read_link(target).ok().as_deref() == Some(link.as_path()) {
+                return Ok(());
+            }
+            std::fs::remove_file(target)?;
+        }
+        Ok(m) if m.is_dir() => {
+            tracing::warn!(target = %target.display(), "seed symlink was copied as a tree; replacing it with the link");
+            std::fs::remove_dir_all(target)?;
+        }
+        Ok(_) => std::fs::remove_file(target)?,
+        Err(_) => {}
+    }
+    std::os::unix::fs::symlink(&link, target)?;
     Ok(())
 }
 
@@ -941,6 +1017,94 @@ mod tests {
         std::env::remove_var("ARBOS_CONTEXT_COMPACT_AT_TOKENS");
     }
     use super::*;
+
+    /// 2026-10-26: a seed symlink must stay a symlink in the workspace, and a tree an older
+    /// image copied in its place is replaced by the link (that tree cost 18 000 inodes per project).
+    #[test]
+    fn seed_symlinks_are_linked_not_copied() {
+        let root = std::env::temp_dir().join(format!("arbos-seed-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let seed = root.join("seed");
+        let shared = root.join("shared").join("pkg");
+        std::fs::create_dir_all(seed.join("node_modules")).unwrap();
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("a.js"), "x").unwrap();
+        std::fs::write(seed.join("index.ts"), "ext").unwrap();
+        std::os::unix::fs::symlink(&shared, seed.join("node_modules").join("pkg")).unwrap();
+        // The workspace already holds a dereferenced copy from an earlier image.
+        let ws = root.join("ws");
+        std::fs::create_dir_all(ws.join("node_modules").join("pkg").join("deep")).unwrap();
+        std::fs::write(
+            ws.join("node_modules")
+                .join("pkg")
+                .join("deep")
+                .join("b.js"),
+            "y",
+        )
+        .unwrap();
+        copy_dir(&seed, &ws).unwrap();
+        let linked = ws.join("node_modules").join("pkg");
+        assert!(std::fs::symlink_metadata(&linked)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_link(&linked).unwrap(), shared);
+        assert_eq!(std::fs::read_to_string(ws.join("index.ts")).unwrap(), "ext");
+        // Idempotent.
+        copy_dir(&seed, &ws).unwrap();
+        assert!(std::fs::symlink_metadata(&linked)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #1851 regression bound: a fresh project's own bytes from the seed copy stay tiny — the
+    /// 119 MB / 17 924 files behind the node_modules links must never be materialised again.
+    #[test]
+    fn fresh_project_seed_copy_stays_small() {
+        let root = std::env::temp_dir().join(format!("arbos-seed-size-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let seed = root.join("seed").join("extensions").join("ext");
+        let shared = root.join("global").join("pkg");
+        std::fs::create_dir_all(seed.join("node_modules")).unwrap();
+        std::fs::create_dir_all(&shared).unwrap();
+        for i in 0..200 {
+            std::fs::write(shared.join(format!("f{i}.js")), vec![b'x'; 16 * 1024]).unwrap();
+        }
+        std::fs::write(seed.join("index.ts"), "export {}").unwrap();
+        std::os::unix::fs::symlink(&shared, seed.join("node_modules").join("pkg")).unwrap();
+        let ws = root.join("fresh-project");
+        copy_dir(&root.join("seed"), &ws).unwrap();
+        let (bytes, files) = own(&ws);
+        assert!(bytes < 64 * 1024, "fresh project holds {bytes} own bytes");
+        assert!(files < 16, "fresh project holds {files} own files");
+        assert!(
+            ws.join("extensions/ext/node_modules/pkg/f0.js").exists(),
+            "link resolves"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+
+        /// Bytes and files really under `p` (symlinks counted as one entry, not followed).
+        fn own(p: &std::path::Path) -> (u64, u64) {
+            let (mut b, mut n) = (0, 0);
+            for e in std::fs::read_dir(p).unwrap().flatten() {
+                let m = std::fs::symlink_metadata(e.path()).unwrap();
+                n += 1;
+                if m.file_type().is_symlink() {
+                    continue;
+                }
+                if m.is_dir() {
+                    let (sb, sn) = own(&e.path());
+                    b += sb;
+                    n += sn;
+                } else {
+                    b += m.len();
+                }
+            }
+            (b, n)
+        }
+    }
 
     /// An image roll must reach existing workspaces: a seed file whose bytes changed is copied
     /// again, an unchanged one is left alone, a missing one is created.

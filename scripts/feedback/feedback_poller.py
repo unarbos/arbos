@@ -435,6 +435,8 @@ class GitHub:
         self.ledger: dict[str, list[int]] = {}
         self.rate_remaining: int | None = None
         self._feedback_refs: dict[str, str] | None = None
+        self._releases: list[dict] | None = None
+        self._contains: dict[tuple[str, str], bool] = {}
         self._login: str | None = None
 
     @staticmethod
@@ -617,20 +619,15 @@ class GitHub:
         return self._login
 
     def feedback_refs(self) -> dict[str, str]:
-        """Every `feedback/*` branch head in one listing (pages of 100), cached for this process (one tick).
+        """Every `feedback/*` branch head in one listing, cached for this process (one tick).
         The watches used to probe `/branches/feedback/<id>` per item; a deleted branch answers 404, which is
-        billed and never a 304 — ~200 such probes per tick (17:5x Oct 25) were the token's biggest consumer."""
+        billed and never a 304 — ~200 such probes per tick (17:5x Oct 25) were the token's biggest consumer.
+        `matching-refs` is NOT paginated: it returns every match and ignores `page`/`per_page`. The earlier
+        "pages of 100, stop under 100" loop never ended once the 101st feedback/* branch existed (15:53 Oct 26:
+        103 branches, a tick looped on the same 103-row answer at ~1 call/s until killed)."""
         if self._feedback_refs is None:
-            refs: dict[str, str] = {}
-            page = 1
-            while True:
-                batch = self.repo_api("GET", f"/git/matching-refs/heads/feedback/?per_page=100&page={page}") or []
-                for r in batch:
-                    refs[r["ref"].removeprefix("refs/heads/")] = r["object"]["sha"]
-                if len(batch) < 100:
-                    break
-                page += 1
-            self._feedback_refs = refs
+            batch = self.repo_api("GET", "/git/matching-refs/heads/feedback/") or []
+            self._feedback_refs = {r["ref"].removeprefix("refs/heads/"): r["object"]["sha"] for r in batch}
         return self._feedback_refs
 
     def compare(self, base: str, head: str) -> dict:
@@ -672,11 +669,15 @@ class GitHub:
         return stable[0] if stable else None
 
     def contains(self, ref: str, sha: str) -> bool:
-        """True when `ref` (tag/branch/sha) already contains commit `sha`."""
-        try:
-            return self.compare(ref, sha).get("status") in ("identical", "behind")
-        except HttpError:
-            return False
+        """True when `ref` (tag/branch/sha) already contains commit `sha`. Memoised per process (one tick):
+        check_ship and fixed_in ask the same (tag, sha) pairs several times per item."""
+        key = (ref, sha)
+        if key not in self._contains:
+            try:
+                self._contains[key] = self.compare(ref, sha).get("status") in ("identical", "behind")
+            except HttpError:
+                self._contains[key] = False
+        return self._contains[key]
 
     def dispatch_ci(self, branch: str) -> bool:
         """workflow_dispatch ci.yml on `branch`; False when the ref's workflow file has no dispatch trigger (422)."""
@@ -794,7 +795,31 @@ class GitHub:
         return None
 
     def releases(self) -> list[dict]:
-        return self.repo_api("GET", "/releases?per_page=60")
+        """The 60 newest releases, fetched once per process (one tick)."""
+        if self._releases is None:
+            self._releases = self.repo_api("GET", "/releases?per_page=60") or []
+        return self._releases
+
+    def release_carrying(self, sha: str, since: str, kind: str = "stable") -> dict | None:
+        """The newest published release whose tag contains `sha`: `stable` = vX.Y.Z, `edge` = edge-*.
+        Only releases published at or after `since` (the commit's own time) are compared — an older one cannot
+        carry the commit — so a fix that is in no release yet costs a handful of compares, not sixty. 16:28–16:35
+        Oct 26: three freshly merged non-Mac items × ~60 `compare` calls each (two passes) held one tick for
+        7 min while a P0's green gate waited to settle."""
+        stable = re.compile(r"v\d+\.\d+\.\d+")
+        for r in sorted(self.releases(), key=lambda r: r.get("published_at") or "", reverse=True):
+            if r.get("draft"):
+                continue
+            tag = r.get("tag_name") or ""
+            if kind == "stable" and (not stable.fullmatch(tag) or r.get("prerelease")):
+                continue
+            if kind == "edge" and not tag.startswith("edge-"):
+                continue
+            if since and (r.get("published_at") or "") < since:
+                return None
+            if self.contains(tag, sha):
+                return r
+        return None
 
 
 # ---------------------------------------------------------------- Cursor
@@ -2212,13 +2237,25 @@ class Loop:
                 out.append(fid)
         return out
 
+    # Lane hold (#1899, live-regression P0 on the Mac 2026-10-26 15:27): `arbos-feedback lane-hold mac on|off`
+    # keeps every unpinned item that touches crates/arbos-mac (or the workspace manifest) out of the gate, so
+    # the Mac release lane carries nothing but the pinned hotfix until it is published; iOS / relay / agentd
+    # items flow as usual. The hold is the cursor's `lane_hold` ("mac"); `status` shows it.
+    MAC_LANE_PATHS = ("crates/arbos-mac/", "Cargo.toml", "Cargo.lock")
+
+    def touches_mac_lane(self, st: dict) -> bool:
+        return any(f.startswith(self.MAC_LANE_PATHS[0]) or f in self.MAC_LANE_PATHS[1:] for f in (st.get("files") or []))
+
     def rust_gate_ready(self) -> list[tuple[str, dict]]:
         """Gating items that need a Rust verdict for their current head, oldest first."""
         out = []
+        hold = (self.store.cursor().get("lane_hold") or {}).get("mac")
         for fid in self.store.items():
             st = self.store.state(fid)
             if st.get("status") != "gating" or not (st.get("expects_rust") or st.get("expects_ios")) or not st.get("branch_head"):
                 continue
+            if hold and not st.get("gate_pinned") and self.touches_mac_lane(st):
+                continue  # Mac lane held for a hotfix; this item waits (it is not bumped, not bounced)
             done = st.get("rust_gate") or {}
             if done.get("head") == st["branch_head"] and done.get("ok"):
                 continue
@@ -2311,13 +2348,18 @@ class Loop:
             bounced = self.release_bounced_pins()
             if bounced:
                 log(f"Gate: pinned item(s) {', '.join(bounced)} are back with their owner; pin released, the pool runs on")
-        if not members:
+        # Pool-first (coordinator 2026-10-26 02:50: no pool batch had completed since 22:49 — pins, aborts, solo
+        # slots and deferred-fairness batches pre-empted it for 4 h): while `pool_first` is set, solo slots and
+        # the deferred-fairness batch do NOT jump the pool; bisect / plan halves still finish first; pins (Jacob
+        # P0 / live regression only) stay ahead. Cleared by itself once a pool batch merges something.
+        pool_first = bool(cur.get("pool_first"))
+        if not members and not pool_first:
             solo = sorted(((f, st) for f, st in ready if st.get("solo_next")), key=lambda fs: fs[1].get("created") or "")
             if solo:
                 fid, st = solo[0]
                 members = {fid: st["branch_head"]}
                 log(f"Gate: solo slot for {fid} (bumped {st.get('sibling_conflicts') or 0}× / {st.get('main_conflicts') or 0} main conflicts; runs alone)")
-        if not members:
+        if not members and not pool_first:
             # Fairness (2026-10-23 22:2x): a branch bumped twice for sibling conflicts gets a batch of the
             # deferred items only, right after the current run — ahead of bisect / plan halves AND the pool
             # (23:10: a leftover bisect half of 15 went first and the 14 deferred items waited another round).
@@ -2334,12 +2376,21 @@ class Loop:
             # Match by item, gate at its CURRENT head: a bisected item whose owner pushed a repair meanwhile keeps
             # its place in the queue instead of dropping to the back.
             members = self.compatible_batch([(f, st) for f, st in ready if f in half])
+        pool_batch = False
         if not members:
             members = self.compatible_batch(list(ready))
+            pool_batch = bool(members)
         cur["rust_gate_plan"] = plan
         self.store.save_cursor(cur)
         if members:
             self.rust_gate_start(members)
+            if pool_batch:
+                cur = self.store.cursor()
+                if cur.get("rust_gate"):
+                    cur["rust_gate"]["pool_batch"] = True
+                    self.store.save_cursor(cur)
+                if pool_first:
+                    log(f"Gate: pool-first — the full pool batch of {len(members)} runs now; solo slots and deferred-fairness wait behind it")
             return
         main_head = self.gh.branch_head("main")
         if main_head and cur.get("rust_gate_warm") != main_head and self.rust_gate_mac("start-batch", f"warm-{main_head[:8]}", main_head, "1") is not None:
@@ -2401,6 +2452,31 @@ class Loop:
             except HttpError:
                 return []
         stray = sorted(files - own)
+        # A merge commit may legitimately edit a file the branch never touched: main added a struct literal
+        # and the branch added the field, so the merge had to write `reply_ref: None` into voice.rs
+        # (reply-in-dm-context, 04:51 Oct 26 — a false positive, #1882). A REVERT puts main's file back to
+        # the pre-merge content (or deletes main's lines); a resolution only ADDS. Keep a stray file only
+        # when the merge deleted something from main's version or returned the file to the merge base.
+        if stray:
+            per_file = {f["filename"]: f for f in cmp.get("files", [])}
+            base_sha = (cmp.get("merge_base_commit") or {}).get("sha")
+            kept: list[str] = []
+            for name in stray:
+                info = per_file.get(name) or {}
+                if (info.get("deletions") or 0) == 0 and (info.get("additions") or 0) > 0:
+                    log(f"[{fid}] merge-revert probe: {name} only gains lines in the merge (+{info.get('additions')}); a resolution, not a revert")
+                    continue
+                if base_sha:
+                    try:
+                        at_head = self.gh.repo_api("GET", f"/contents/{urllib.parse.quote(name)}?ref={head}").get("sha")
+                        at_base = self.gh.repo_api("GET", f"/contents/{urllib.parse.quote(name)}?ref={base_sha}").get("sha")
+                    except HttpError:
+                        at_head, at_base = None, "?"
+                    if at_head and at_head == at_base:
+                        kept.append(f"{name} (back to the pre-merge content)")
+                        continue
+                kept.append(f"{name} (−{info.get('deletions') or 0} of main's lines)")
+            stray = kept
         st["merge_revert_checked"] = head
         self.store.save_state(fid, st)
         if not stray:
@@ -2541,9 +2617,14 @@ class Loop:
             log(f"ALERT main's iOS unit-test target does not compile at {m.group(1)} (seen by gate {active['id']}); branches are not blamed — "
                 f"route the fix to the test's owner: " + " | ".join(errors[:3]))
 
+    def gate_priority(self, active: dict) -> str:
+        """A batch with a pinned member (hotfix / operator gate-next) tells the Mac's heavy-job cap it has
+        priority: it may take the extra slot instead of queueing behind a pool gate and the TF lane."""
+        return "priority" if any(self.store.state(f).get("gate_pinned") for f in (active.get("members") or {})) else "normal"
+
     def rust_gate_mac_start(self, cur: dict) -> None:
         active = cur["rust_gate"]
-        if self.rust_gate_mac("start-batch", active["id"], active["tree"], "1") is not None:
+        if self.rust_gate_mac("start-batch", active["id"], active["tree"], "1", "mac", self.gate_priority(active)) is not None:
             active["mac_started"] = iso()
             self.store.save_cursor(cur)
             log(f"Rust gate {active['id']}: Mac release build started for {active['tree'][:8]}")
@@ -2671,7 +2752,7 @@ class Loop:
         if active.get("ios", "skipped") == "pending" and active["linux"] != "fail" and active["mac"] != "fail":
             ios_id = f"{active['id']}-ios"
             if not active.get("ios_started"):
-                if self.rust_gate_mac("start-ios", ios_id, active["branch"], active["tree"]) is not None:
+                if self.rust_gate_mac("start-ios", ios_id, active["branch"], active["tree"], self.gate_priority(active)) is not None:
                     active["ios_started"] = iso()
                     self.store.save_cursor(cur)
                     log(f"Gate {active['id']}: iOS half started for {active['tree'][:8]}")
@@ -2897,6 +2978,10 @@ class Loop:
                     log(f"[{fid}] merge after the Rust gate failed: {e}")
             cur = self.store.cursor()
             cur["rust_gate_warm"] = active["tree"] if active["mac"] == "ok" else None
+            if active.get("pool_batch") and cur.get("pool_first"):
+                cur.pop("pool_first", None)
+                self.store.event("_loop", "pool_first_cleared", run=active["id"], members=len(order))
+                log(f"Gate: pool-first satisfied by {active['id']} ({len(order)} member(s) green); normal ordering resumes")
             self.store.save_cursor(cur)
             self.note_green_half(active)
             with contextlib.suppress(Exception):
@@ -3090,6 +3175,9 @@ class Loop:
             with contextlib.suppress(HttpError, KeyError):
                 st["commit_date"] = self.gh.commit(sha)["commit"]["committer"]["date"]
         since = st.get("commit_date") or st["pushed_at"]
+        # Release cut-off: the earlier of the commit's own date and the loop's clock when it saw the push (a
+        # committer clock running ahead must never hide every release from the item).
+        rel_since = min(filter(None, [st.get("commit_date"), st.get("pushed_at")]), default="")
         runs = self.gh.runs_for_sha(sha)
         # The same commit may head other branches too (a worker's `cursor/**` mirror of its feedback branch); only
         # runs on main or the item's own branch say anything about what shipped (06:00 Oct 22: a red ios.yml run
@@ -3228,8 +3316,7 @@ class Loop:
                 # lets main move), so the run's head_sha may not contain the fix although the published tag does
                 # (#1241: merged 01:19, run head 76222502 from 01:13, tag v0.6.103 at 02:29). The release itself is
                 # the evidence: the newest published stable tag that carries the commit.
-                tag_rel = next((r for r in self.gh.releases() if not r.get("draft") and re.fullmatch(r"v\d+\.\d+\.\d+", r.get("tag_name") or "")
-                                and (r.get("published_at") or "") >= since and self.gh.contains(r["tag_name"], sha)), None)
+                tag_rel = self.gh.release_carrying(sha, rel_since, "stable")
                 if tag_rel:
                     later = {"head_sha": tag_rel["tag_name"], "html_url": tag_rel["html_url"], "status": "completed",
                              "conclusion": "success", "updated_at": tag_rel["published_at"]}
@@ -3243,13 +3330,15 @@ class Loop:
                 rels = [r for r in self.gh.releases() if not r.get("draft")]
                 # Auto-stable (D85): one vX.Y.Z per green batch, the bump commit sits on top of main (maybe only under the
                 # tag) — so match by "the release's commit contains the fix", stable first; edge-per-push is the fallback.
-                edge = next((r["tag_name"] for r in rels if re.fullmatch(r"v\d+\.\d+\.\d+", r["tag_name"]) and self.gh.contains(r["tag_name"], sha)), None) \
+                carrying = self.gh.release_carrying(sha, rel_since, "stable")
+                edge = (carrying["tag_name"] if carrying else None) \
                     or next((r["tag_name"] for r in rels if r["tag_name"].startswith("edge-") and r.get("target_commitish", "").startswith(built[:7])), None)
                 if not edge and any(f.startswith(("crates/arbos-mac/", "crates/arbos-update/")) for f in st.get("files") or []):
                     # A green Release run is not a release: with per-fix auto-stable tags the published release
                     # may lag or fail to publish. Find any release (stable or edge, newest first) whose commit
                     # contains the fix; until one exists the item stays `pushed` / fixed-on-main (#1079, 23:07).
-                    edge = next((r["tag_name"] for r in rels if r["tag_name"].startswith("edge-") and self.gh.contains(r["tag_name"], sha)), None)
+                    carrying = self.gh.release_carrying(sha, rel_since, "edge")
+                    edge = carrying["tag_name"] if carrying else None
                     if not edge:
                         if st.get("release_wait_noted") != rel["html_url"]:
                             st["release_wait_noted"] = rel["html_url"]
@@ -3387,11 +3476,8 @@ class Loop:
         if mac_files or (st.get("edge_release") or "").startswith("edge-"):
             tag = None
             if commit:
-                for r in self.gh.releases():
-                    if not r.get("prerelease") and not r.get("draft") and re.fullmatch(r"v\d+\.\d+\.\d+", r.get("tag_name") or "") \
-                            and self.gh.contains(r["tag_name"], commit):
-                        tag = r["tag_name"]  # newest stable release that carries the fix
-                        break
+                carrying = self.gh.release_carrying(commit, min(filter(None, [st.get("commit_date"), st.get("pushed_at")]), default=""), "stable")
+                tag = carrying["tag_name"] if carrying else None  # newest stable release that carries the fix
             edge = st.get("edge_release")
             if tag and edge and edge != tag and edge.startswith("edge-"):
                 parts.append(f"Mac {tag} ({edge})")
@@ -4355,6 +4441,11 @@ class Loop:
         pool = [fid for fid, _ in ready if fid not in queued]
         if pool:
             print(f"  pool (next batch after the pins, oldest first, {len(pool)}): " + ", ".join(tag(f) for f in pool))
+            if cur.get("pool_first"):
+                print(f"  POOL-FIRST since {cur['pool_first']}: solo slots and deferred-fairness wait behind the pool batch until it merges once")
+            for lane, h in (cur.get("lane_hold") or {}).items():
+                held = [f for f in self.store.items() if self.store.state(f).get("status") == "gating" and not self.store.state(f).get("gate_pinned") and self.touches_mac_lane(self.store.state(f))]
+                print(f"  LANE HOLD {lane} since {h.get('since')} ({h.get('reason')}): {len(held)} unpinned {lane} item(s) wait: " + ", ".join(tag(f) for f in held))
         with_owner = [fid for fid in self.store.items() if self.store.state(fid).get("status") == "handed_off" and self.store.state(fid).get("branch_head")]
         if with_owner:
             print(f"  with owner (red/conflict; a new commit on the branch re-enters the pool, {len(with_owner)}): " + ", ".join(tag(f) for f in with_owner))
@@ -4988,6 +5079,36 @@ def main(argv: list[str]) -> int:
             fcntl.flock(lock, fcntl.LOCK_EX)
             n = loop.lift_freeze()
         print(f"freeze lifted; {n} item(s) restored to their previous state and order")
+        return 0
+    if cmd == "lane-hold":
+        # `lane-hold mac on [reason] | off | status`: hold unpinned items touching crates/arbos-mac out of the gate.
+        store = Store(cfg)
+        with (cfg.state_dir / ".lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            cur = store.cursor()
+            lane, sub = (argv[2] if len(argv) > 2 else "mac"), (argv[3] if len(argv) > 3 else "status")
+            holds = cur.get("lane_hold") or {}
+            if sub == "on":
+                holds[lane] = {"since": iso(), "reason": " ".join(argv[4:]) or "operator"}
+                store.event("_loop", "lane_hold_on", lane=lane, reason=holds[lane]["reason"])
+            elif sub == "off":
+                holds.pop(lane, None); store.event("_loop", "lane_hold_off", lane=lane)
+            cur["lane_hold"] = holds; store.save_cursor(cur)
+            print(f"lane-hold {lane}: " + (f"ON since {holds[lane]['since']} — {holds[lane]['reason']}" if holds.get(lane) else "off"))
+        return 0
+    if cmd == "pool-first":
+        # `pool-first on|off|status`: until the next pool batch merges, solo slots and the deferred-fairness batch
+        # wait behind the pool (bisect halves and pins still go first).
+        store = Store(cfg)
+        with (cfg.state_dir / ".lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            cur = store.cursor()
+            sub = argv[2] if len(argv) > 2 else "status"
+            if sub == "on":
+                cur["pool_first"] = iso(); store.save_cursor(cur); store.event("_loop", "pool_first_on", by="operator")
+            elif sub == "off":
+                cur.pop("pool_first", None); store.save_cursor(cur); store.event("_loop", "pool_first_off", by="operator")
+            print(f"pool-first: {'on since ' + cur['pool_first'] if cur.get('pool_first') else 'off'}")
         return 0
     if cmd == "known-red":
         # `known-red add <test> [note…]` | `known-red remove <test>` | `known-red list`: the operator's list of

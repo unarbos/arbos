@@ -16,22 +16,39 @@ enum Block: Equatable, Hashable {
     case bullets([String])
     case numbered([String])
     case code(lang: String, code: String)
-    case table([String])
+    /// GitHub-style pipe table: header cells, then body rows (each padded or cut to the
+    /// header's width by the renderer).
+    case table(header: [String], rows: [[String]])
+    /// Display math on its own line(s): `$$ … $$` or `\[ … \]`; `source` is the LaTeX between
+    /// the delimiters ([feedback math-render-ios-2026-10-26]).
+    case math(source: String)
 }
 
 /// Grok Bot's quote header inside a reply bubble: speech-bubble glyph, then the replied-to
 /// message's first words in quotes, one line, truncated with "…". Tapping it reveals the original.
 struct Quote: Equatable, Hashable {
-    /// The message replied to (`replyTo` on the row); empty on a forward header.
+    /// The message replied to (`replyTo` on the row, or `replyRef.messageId`); empty on a
+    /// forward header.
     var messageId: Id
     var text: String
     /// Set on a forwarded message: the header reads "Forwarded from <name>" with the
     /// forward glyph instead of a reply quote, and does not scroll anywhere.
     var forwardedFrom: String? = nil
+    /// Reply in DM (#1836): the original lives in another chat — its address and the
+    /// "Replying to <who> in <chat>" line. `nil` for an in-chat reply.
+    var source: ReplyRef? = nil
 
     /// The header for a forwarded message (`forwardedFrom` on the row).
     static func forwarded(from name: String) -> Quote {
         Quote(messageId: "", text: name, forwardedFrom: name)
+    }
+
+    /// The quote for a cross-chat reply: drawn from the row's own snapshot, so it needs
+    /// nothing from the source chat.
+    static func forReplyRef(_ r: ReplyRef) -> Quote {
+        let flat = oneLine(r.text)
+        let text = flat.isEmpty ? "Message" : firstWords(flat, maxChars: maxChars)
+        return Quote(messageId: r.messageId, text: text, source: r)
     }
 
     /// The header shows this many characters of the original before "…".
@@ -67,12 +84,11 @@ struct Quote: Equatable, Hashable {
             case .paragraph(let t), .heading(_, let t): pieces = [t]
             case .bullets(let items), .numbered(let items): pieces = items
             case .code(_, let code): pieces = [code]
-            case .table(let rows): pieces = rows.map { $0.replacingOccurrences(of: "|", with: " ") }
+            case .table(let header, let rows): pieces = header + rows.flatMap { $0 }
+            case .math(let source): pieces = [MathText.plain(source)]
             }
             for piece in pieces {
-                let plain = (try? AttributedString(markdown: piece, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
-                    .map { String($0.characters) } ?? piece
-                words.append(contentsOf: plain.split(whereSeparator: \.isWhitespace))
+                words.append(contentsOf: Markdown.plain(piece).split(whereSeparator: \.isWhitespace))
             }
         }
         return words.joined(separator: " ")
@@ -135,7 +151,9 @@ enum RowKind: Equatable {
     case voiceMemo(name: String, projectId: Id, ref: String?, fromUser: Bool)
     /// A picture; tap opens the media viewer at its place in the chat's album.
     /// `caption` is the description bar under the picture when the send carried text.
-    case image(item: MediaItem, fromUser: Bool, caption: String?)
+    /// `lane`: in a people chat someone else's (person or agent) picture sits after the
+    /// sender's avatar lane, like their bubble (Mac `RowKind::Attachment.lane`).
+    case image(item: MediaItem, fromUser: Bool, caption: String?, lane: Bool)
     /// "Forwarded from <name>" under a forwarded attachment (media-viewer-2026-10-23).
     case forwardHint(text: String, fromUser: Bool)
     case error(code: String, message: String)
@@ -198,6 +216,11 @@ enum Transcript {
             // its status parts feed the presence line and the tasks sheet, never a bubble —
             // not while it runs, not the "no answer" stock line when it ends.
             if message.hidden || message.job != nil { continue }
+            // A background worker's spawn row (`worker: true`, Grok parity trait 15) draws nothing at
+            // all — no hand-off line, no legacy status line, no date separator. Its `activity` reaches
+            // the working line through `AppModel.currentActivity`. Skipping only the hand-off name
+            // (6e7261a5) left the legacy `.status(.handoff)` fallback drawing "Messaged ◉ <worker>".
+            if message.worker && message.turn?.isProgress == true { continue }
             // Build this message's visible rows first. Date separators only land when
             // something actually renders — otherwise an empty/hidden-only message leaves
             // a lone "Today 5:45 PM" in a blank chat.
@@ -237,10 +260,11 @@ enum Transcript {
                 }()
                 for (i, part) in mediaParts.enumerated() {
                     let cap = (i == lastCaptionable) ? mediaCaption : nil
-                    // Another person's picture / file sits left like their bubble.
+                    // Another person's picture / file sits left like their bubble —
+                    // after the avatar lane in a people chat (Mac Attachment.lane).
                     chunk.append(attachmentRow(id: "\(message.id)#\(part.id)", message: message, a: part.a,
                                                projectId: projectId, fromUser: mine, agentNames: agentNames,
-                                               caption: cap))
+                                               caption: cap, lane: !mine))
                 }
                 if let forwarded {
                     chunk.append(Row(id: "\(message.id)#forwarded", messageId: message.id, role: mine ? .user : .project,
@@ -254,6 +278,9 @@ enum Transcript {
                     let quote: Quote?
                     if let by = message.forwardedFrom?.trimmingCharacters(in: .whitespacesAndNewlines), !by.isEmpty {
                         quote = .forwarded(from: by)
+                    } else if let r = message.replyRef {
+                        // Reply in DM: the quote comes from the row's own snapshot.
+                        quote = .forReplyRef(r)
                     } else {
                         quote = message.replyTo.flatMap { $0.isEmpty ? nil : Quote.forReply($0, in: byId) }
                     }
@@ -350,7 +377,11 @@ enum Transcript {
                         chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .system,
                                          kind: .system(icon: "stop.circle", text: "Stopped", avatarProject: nil)))
                     case .attachment(let id, let a):
-                        chunk.append(attachmentRow(id: "\(message.id)#\(id)", message: message, a: a, projectId: projectId, fromUser: false, agentNames: agentNames))
+                        // People-chat agent media keeps the sender lane free, like the bubble
+                        // and the question card (Mac Attachment.lane / #1509).
+                        chunk.append(attachmentRow(id: "\(message.id)#\(id)", message: message, a: a,
+                                                   projectId: projectId, fromUser: false, agentNames: agentNames,
+                                                   lane: people && message.senderHandle != nil))
                     case .error(let id, let code, let text):
                         errors.append((id: id, code: code, text: text))
                     case .status, .tool, .subagentResult, .reasoning, .unknown:
@@ -603,7 +634,8 @@ enum Transcript {
     }
 
     private static func attachmentRow(id: String, message: Message, a: Attachment, projectId: Id, fromUser: Bool,
-                                      agentNames: [String: String], caption: String? = nil) -> Row {
+                                      agentNames: [String: String], caption: String? = nil,
+                                      lane: Bool = false) -> Row {
         guard let kind = MediaAlbum.kind(of: a) else {
             return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
                        kind: .voiceMemo(name: a.name, projectId: projectId, ref: a.blobRef, fromUser: fromUser))
@@ -612,7 +644,7 @@ enum Transcript {
                                    projectName: { agentNames[$0] })
         if kind == .image {
             return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
-                       kind: .image(item: item, fromUser: fromUser, caption: caption))
+                       kind: .image(item: item, fromUser: fromUser, caption: caption, lane: lane))
         }
         // Video shows as a file card in the bubble (poster + Play live in the viewer).
         // A typed description rides the card as a caption bar (pictures/videos only).
@@ -789,12 +821,17 @@ enum Markdown {
         var table: [String] = []
         var code: [String]? = nil
         var lang = ""
+        // Inside a `$$` / `\[` display-math block: its lines so far, the closer that ends
+        // it, and the raw lines (prose as typed if it never closes).
+        var math: [String]? = nil
+        var mathCloser = ""
+        var mathRaw: [String] = []
 
         func flush() {
             if !paragraph.isEmpty { out.append(.paragraph(paragraph.joined(separator: " "))); paragraph = [] }
             if !bullets.isEmpty { out.append(.bullets(bullets)); bullets = [] }
             if !numbered.isEmpty { out.append(.numbered(numbered)); numbered = [] }
-            if !table.isEmpty { out.append(.table(table)); table = [] }
+            if !table.isEmpty { out.append(tableBlock(table)); table = [] }
         }
 
         for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
@@ -815,6 +852,37 @@ enum Markdown {
                 code = []
                 continue
             }
+            if var m = math {
+                if trimmed.isEmpty { continue }
+                mathRaw.append(trimmed)
+                if trimmed.hasSuffix(mathCloser) {
+                    let inner = String(trimmed.dropLast(mathCloser.count)).trimmingCharacters(in: .whitespaces)
+                    if !inner.isEmpty { m.append(inner) }
+                    out.append(.math(source: m.joined(separator: "\n")))
+                    math = nil
+                } else {
+                    m.append(trimmed)
+                    math = m
+                }
+                continue
+            }
+            if let (opener, closer) = MathText.displayDelimiters(trimmed) {
+                let rest = String(trimmed.dropFirst(opener.count))
+                if rest.hasSuffix(closer) {
+                    let inner = String(rest.dropLast(closer.count)).trimmingCharacters(in: .whitespaces)
+                    if !inner.isEmpty {
+                        flush()
+                        out.append(.math(source: inner))
+                        continue
+                    }
+                }
+                flush()
+                let first = rest.trimmingCharacters(in: .whitespaces)
+                math = first.isEmpty ? [] : [first]
+                mathCloser = closer
+                mathRaw = [trimmed]
+                continue
+            }
             if trimmed.isEmpty { flush(); continue }
             if trimmed.hasPrefix("#") {
                 flush()
@@ -833,19 +901,52 @@ enum Markdown {
                 numbered.append(trimmed[trimmed.index(dot, offsetBy: 2)...].trimmingCharacters(in: .whitespaces))
                 continue
             }
-            if trimmed.hasPrefix("|") {
+            if isTableRow(trimmed) {
                 if !paragraph.isEmpty || !bullets.isEmpty || !numbered.isEmpty { flush() }
-                if !trimmed.replacingOccurrences(of: "|", with: "").replacingOccurrences(of: "-", with: "").replacingOccurrences(of: ":", with: "").trimmingCharacters(in: .whitespaces).isEmpty {
-                    table.append(trimmed)
-                }
+                table.append(trimmed)
                 continue
             }
             if !bullets.isEmpty || !numbered.isEmpty || !table.isEmpty { flush() }
             paragraph.append(trimmed)
         }
         if let c = code { out.append(.code(lang: lang, code: c.joined(separator: "\n"))) }
+        if math != nil { paragraph.append(contentsOf: mathRaw) }
         flush()
         return out
+    }
+
+    /// `| a | b |`: starts and ends with a pipe.
+    static func isTableRow(_ line: String) -> Bool {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        return t.count > 2 && t.hasPrefix("|") && t.hasSuffix("|")
+    }
+
+    /// `| --- | :-: |`: the row under the header that makes pipe rows a GFM table.
+    static func isTableSeparator(_ line: String) -> Bool {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        return isTableRow(t) && t.contains("-") && t.allSatisfy { "|-: ".contains($0) }
+    }
+
+    /// The cells of one pipe row, outer pipes dropped, each trimmed.
+    static func splitTableRow(_ line: String) -> [String] {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        let inner = t.dropFirst().dropLast()
+        return inner.split(separator: "|", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+
+    /// A run of pipe rows: a table when the second row is the separator (Mac
+    /// `markdown.rs` parity); otherwise — no separator row, so not a GFM table — one
+    /// monospace block that keeps its columns and scrolls sideways rather than prose
+    /// with raw pipes. A single pipe row is prose.
+    static func tableBlock(_ lines: [String]) -> Block {
+        if lines.count >= 2, isTableSeparator(lines[1]) {
+            return .table(header: splitTableRow(lines[0]), rows: lines.dropFirst(2).map(splitTableRow))
+        }
+        if lines.count == 1 {
+            return .paragraph(lines[0])
+        }
+        return .code(lang: "", code: lines.joined(separator: "\n"))
     }
 
     /// A block that is really machine output (a JSON object/array) is not prose.
@@ -860,6 +961,44 @@ enum Markdown {
         guard t.hasPrefix("{") || t.hasPrefix("["), let data = t.data(using: .utf8) else { return false }
         return (try? JSONSerialization.jsonObject(with: data)) != nil
     }
+
+    /// The text inline markdown renders to, markers removed (`[Name](url)` → `Name`,
+    /// `$O(n^2)$` → `O(n²)`).
+    static func plain(_ text: String) -> String {
+        MathText.pieces(text).map { piece in
+            switch piece {
+            case .prose(let p):
+                return (try? AttributedString(markdown: p, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+                    .map { String($0.characters) } ?? p
+            case .math(let src):
+                return MathText.plain(src)
+            }
+        }.joined()
+    }
+
+    /// Typeset TeX as attributed text: variables italic in the serif face, digits and
+    /// operators upright, `\mathbf` bold — KaTeX's look in Grok Bot, at `size` points.
+    static func math(_ source: String, color: Color, size: CGFloat) -> AttributedString {
+        var out = AttributedString()
+        for run in MathText.typeset(source) {
+            var piece = AttributedString(run.text)
+            piece.swiftUI.foregroundColor = color
+            piece.swiftUI.font = mathFont(size, run.style)
+            out.append(piece)
+        }
+        return out
+    }
+
+    static func mathFont(_ size: CGFloat, _ style: MathText.Style) -> Font {
+        switch style {
+        case .italic: return .system(size: size, design: .serif).italic()
+        case .upright: return .system(size: size, design: .serif)
+        case .bold: return .system(size: size, weight: .bold, design: .serif)
+        }
+    }
+
+    /// Display math is this much larger than body text.
+    static let displayMathScale: CGFloat = 1.15
 
     /// Inline markdown with Mac-parity link paint and Grok-style code chips:
     /// accent + underline on links; monospaced (a point under body) on a soft
@@ -887,6 +1026,23 @@ enum Markdown {
     }()
 
     private static func inlineUncached(_ text: String, color: Color, link: Color, codeChip: Color) -> AttributedString {
+        // Math is cut out before the markdown parse (`_` and `*` mean something else in TeX)
+        // and typeset in its place.
+        let pieces = MathText.pieces(text)
+        if pieces.count == 1, case .prose(let prose) = pieces[0] {
+            return inlineProse(prose, color: color, link: link, codeChip: codeChip)
+        }
+        var attr = AttributedString()
+        for piece in pieces {
+            switch piece {
+            case .prose(let prose): attr.append(inlineProse(prose, color: color, link: link, codeChip: codeChip))
+            case .math(let source): attr.append(math(source, color: color, size: Theme.body))
+            }
+        }
+        return attr
+    }
+
+    private static func inlineProse(_ text: String, color: Color, link: Color, codeChip: Color) -> AttributedString {
         var attr = (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
             ?? AttributedString(text)
         linkBareURLs(&attr)
@@ -946,7 +1102,7 @@ struct RowView: View, Equatable {
     /// How far the transcript has been dragged left to reveal iMessage-style times (0…`timeRevealWidth`).
     var timeReveal: CGFloat = 0
     /// A tap on a reply bubble's quote header: the chat scrolls to this message id.
-    var onQuoteTap: ((Id) -> Void)? = nil
+    var onQuoteTap: ((Quote) -> Void)? = nil
     /// Briefly tinted after a quote tap landed on this row's message.
     var highlighted: Bool = false
     /// Shared mention table from ChatView (built once per directory sync).
@@ -1237,10 +1393,15 @@ struct RowView: View, Equatable {
                     .frame(maxWidth: maxBubble, alignment: fromUser ? .trailing : .leading)
                 if !fromUser { Spacer(minLength: 0) }
             }
-        case .image(let item, let fromUser, let caption):
-            HStack {
+        case .image(let item, let fromUser, let caption, let lane):
+            // Same left edge and cap as an incoming bubble: after the avatar lane in a
+            // people chat ([feedback ADUIX9xlGQxCSzeXke7JVBw], Mac Attachment.lane).
+            HStack(spacing: 0) {
                 if fromUser { Spacer(minLength: 0) }
-                ImageBubble(item: item, chatId: chatId, fromUser: fromUser, maxWidth: maxBubble, caption: caption)
+                if lane { Color.clear.frame(width: Theme.memberLane(composerInset: composerInset), height: 1) }
+                ImageBubble(item: item, chatId: chatId, fromUser: fromUser,
+                            maxWidth: lane ? maxBubble - Theme.memberLane(composerInset: composerInset) : maxBubble,
+                            caption: caption, mentions: mentions)
                     .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: fromUser) }
                 if !fromUser { Spacer(minLength: 0) }
             }
@@ -1361,6 +1522,7 @@ struct RowView: View, Equatable {
         switch row.kind {
         case .other, .member: return Theme.memberLane(composerInset: composerInset)
         case .question(_, _, _, _, _, _, let lane, _): return lane ? Theme.memberLane(composerInset: composerInset) : 0
+        case .image(_, _, _, let lane): return lane ? Theme.memberLane(composerInset: composerInset) : 0
         default: return 0
         }
     }
@@ -1431,22 +1593,37 @@ struct RowView: View, Equatable {
     }
 
     private func replyQuoteHeader(_ quote: Quote, color: Color) -> some View {
-        Button {
-            onQuoteTap?(quote.messageId)
+        // Reply in DM (#1836): the quote names its chat; it is a link only when the viewer
+        // can open that chat (a member), else just the words.
+        let linkable = quote.source.map { model.isMember(ofChat: $0.chatId) } ?? true
+        return Button {
+            guard linkable else { return }
+            onQuoteTap?(quote)
         } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "bubble.left")
-                    .font(.system(size: 11, weight: .medium))
-                Text("“\(quote.text)”")
-                    .font(theme.font(Theme.small))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+            VStack(alignment: .leading, spacing: 2) {
+                if let src = quote.source {
+                    Text(src.label)
+                        .font(theme.font(Theme.tiny))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .accessibilityIdentifier("reply-quote-source")
+                }
+                HStack(spacing: 6) {
+                    Image(systemName: "bubble.left")
+                        .font(.system(size: 11, weight: .medium))
+                    Text("“\(quote.text)”")
+                        .font(theme.font(Theme.small))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
             }
             .foregroundStyle(color.opacity(0.72))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Replying to: \(quote.text)")
+        .disabled(!linkable)
+        .accessibilityIdentifier("reply-quote")
+        .accessibilityLabel(quote.source.map { "\($0.label): \(quote.text)" } ?? "Replying to: \(quote.text)")
     }
 
     /// "Messaged \u{FFFC}Affine" / "6 messages with \u{FFFC}A, \u{FFFC}B and \u{FFFC}C":
@@ -1507,6 +1684,8 @@ struct RowView: View, Equatable {
 
 struct BlockView: View {
     @Environment(\.theme) private var theme
+    /// Site icons for the block's named links: the block redraws when one arrives.
+    @ObservedObject private var linkIcons = LinkIcons.shared
     let block: Block
     let live: Bool
     /// Shared mention table from the row (built once per directory sync).
@@ -1528,7 +1707,7 @@ struct BlockView: View {
                     .tint(theme.accent)
             }
         case .heading(_, let text):
-            Text(Markdown.inline(text, color: theme.text, link: theme.accent, codeChip: theme.codeChip))
+            Markdown.inlineText(text, color: theme.text, link: theme.accent, codeChip: theme.codeChip, mentions: mentions)
                 .font(theme.font(Theme.body, weight: .semibold))
                 .tint(theme.accent)
         case .bullets(let items), .numbered(let items):
@@ -1554,20 +1733,191 @@ struct BlockView: View {
                     }
                 }
             }
-        case .table(let lines):
-            ScrollView(.horizontal, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(Array(lines.enumerated()), id: \.offset) { i, line in
-                        Text(line.split(separator: "|").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.joined(separator: "    "))
-                            .font(theme.font(14, weight: i == 0 ? .semibold : .regular, design: .monospaced))
-                            .foregroundStyle(theme.text)
-                    }
-                }
-                .padding(10)
-            }
-            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.bg.opacity(0.6)))
+        case .table(let header, let rows):
+            TableBlock(header: header, rows: rows, mentions: mentions)
         case .code(let lang, let code):
             CodeCard(lang: lang, code: code)
+        case .math(let source):
+            // Display math: typeset, a size up, centred on its own line (KaTeX's display
+            // mode in Grok Bot).
+            Text(Markdown.math(source, color: theme.text, size: Theme.body * Markdown.displayMathScale))
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.vertical, 4)
+                .accessibilityIdentifier("display-math")
+        }
+    }
+}
+
+/// True while a nested horizontal `ScrollView` (markdown table) is tracking a
+/// pan, so `ChatView`'s time-reveal drag does not also slide the chat
+/// ([feedback ACQD4mUCTPxH7z3Y7YO8Vjw]).
+enum NestedHorizontalScroll {
+    static var claiming = false
+}
+
+/// Finds the enclosing horizontal `UIScrollView` and, while its pan is active,
+/// cancels non-scroll pan recognizers (SwiftUI's time-reveal `DragGesture`) so
+/// the table can scroll sideways without sliding the transcript.
+private struct PreferHorizontalScroll: UIViewRepresentable {
+    func makeUIView(context: Context) -> Probe {
+        let probe = Probe()
+        probe.isUserInteractionEnabled = false
+        probe.backgroundColor = .clear
+        return probe
+    }
+
+    func updateUIView(_ uiView: Probe, context: Context) {
+        DispatchQueue.main.async { uiView.attachIfNeeded() }
+    }
+
+    final class Probe: UIView {
+        private weak var scroll: UIScrollView?
+        private var observing = false
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            attachIfNeeded()
+        }
+
+        deinit {
+            scroll?.panGestureRecognizer.removeTarget(self, action: #selector(pan(_:)))
+            if NestedHorizontalScroll.claiming { NestedHorizontalScroll.claiming = false }
+        }
+
+        func attachIfNeeded() {
+            guard window != nil, !observing else { return }
+            guard let found = Self.enclosingScrollView(from: self) else { return }
+            scroll = found
+            found.panGestureRecognizer.addTarget(self, action: #selector(pan(_:)))
+            observing = true
+        }
+
+        @objc private func pan(_ gr: UIPanGestureRecognizer) {
+            switch gr.state {
+            case .began, .changed:
+                // Only claim when the table is actually wider than its frame;
+                // a fitting table must still allow iMessage time reveal.
+                guard let scroll, scroll.contentSize.width > scroll.bounds.width + 1 else {
+                    NestedHorizontalScroll.claiming = false
+                    return
+                }
+                NestedHorizontalScroll.claiming = true
+                Self.cancelNonScrollPans(from: window, except: gr)
+            case .ended, .cancelled, .failed:
+                NestedHorizontalScroll.claiming = false
+            default:
+                break
+            }
+        }
+
+        private static func enclosingScrollView(from view: UIView) -> UIScrollView? {
+            var node: UIView? = view.superview
+            while let current = node {
+                if let scroll = current as? UIScrollView { return scroll }
+                node = current.superview
+            }
+            return nil
+        }
+
+        /// Drop SwiftUI pan recognizers (time reveal) mid-gesture; leave every
+        /// `UIScrollView` pan alone so the table and the transcript still scroll.
+        private static func cancelNonScrollPans(from root: UIView?, except keep: UIGestureRecognizer) {
+            guard let root else { return }
+            for gr in root.gestureRecognizers ?? [] where gr !== keep {
+                guard gr is UIPanGestureRecognizer, !(gr.view is UIScrollView) else { continue }
+                if gr.state == .possible || gr.state == .began || gr.state == .changed {
+                    gr.isEnabled = false
+                    gr.isEnabled = true
+                }
+            }
+            for sub in root.subviews {
+                cancelNonScrollPans(from: sub, except: keep)
+            }
+        }
+    }
+}
+
+/// A GFM table as a real table (the Mac's `render_block` table): a header row on
+/// the code wash, body rows with hairlines between them, one column per header
+/// cell with the same width in every row, each cell inline markdown — so a
+/// `[Name](url)` is a tappable link, never raw markup ([feedback
+/// markdown-tables-ios-2026-10-25]: Jacob's Lima bookstore table came out as a
+/// monospace block of `[…](https://…)` cut off at the bubble's edge). Wider
+/// than the bubble, the table keeps its columns and scrolls sideways.
+struct TableBlock: View {
+    @Environment(\.theme) private var theme
+    /// The cells' link icons: the table redraws when one arrives (its inputs alone do not
+    /// change, so SwiftUI would otherwise keep the placeholders).
+    @ObservedObject private var linkIcons = LinkIcons.shared
+    let header: [String]
+    let rows: [[String]]
+    let mentions: MentionTable
+
+    /// The narrowest a column is laid out at, in points.
+    static let columnMin: CGFloat = 72
+    /// The widest a column is laid out at before its cells wrap.
+    static let columnMax: CGFloat = 220
+    /// Average glyph advance of the 14 pt cell text, used to size columns before layout.
+    static let glyphAdvance: CGFloat = 7.4
+
+    /// One width per column, from the longest rendered cell (markup removed) in that
+    /// column, clamped to `columnMin…columnMax`; every row uses the same widths, so the
+    /// columns line up, and their sum is what the frame scrolls when the bubble is narrower.
+    static func columnWidths(header: [String], rows: [[String]]) -> [CGFloat] {
+        let cols = max(header.count, 1)
+        return (0..<cols).map { ci in
+            let longest = ([header] + rows)
+                .compactMap { ci < $0.count ? $0[ci] : nil }
+                .map { Markdown.plain($0).count }
+                .max() ?? 0
+            return min(max(CGFloat(longest) * glyphAdvance + 20, columnMin), columnMax)
+        }
+    }
+
+    /// `row` padded with empty cells or cut to the header's width.
+    static func fitted(_ row: [String], to cols: Int) -> [String] {
+        Array((row + Array(repeating: "", count: max(0, cols - row.count))).prefix(cols))
+    }
+
+    var body: some View {
+        let cols = max(header.count, 1)
+        let widths = Self.columnWidths(header: header, rows: rows)
+        ScrollView(.horizontal, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 0) {
+                tableRow(Self.fitted(header, to: cols), widths: widths, head: true)
+                    .background(theme.codeChip)
+                ForEach(Array(rows.enumerated()), id: \.offset) { ri, row in
+                    tableRow(Self.fitted(row, to: cols), widths: widths, head: false)
+                        .background(ri % 2 == 1 ? theme.codeChip.opacity(0.4) : .clear)
+                        .overlay(alignment: .top) { Rectangle().fill(theme.separator).frame(height: 0.5) }
+                }
+            }
+            .accessibilityIdentifier("table")
+            // Inside the scroll content so the probe's superview walk reaches the
+            // table's UIScrollView ([feedback ACQD4mUCTPxH7z3Y7YO8Vjw]).
+            .background(PreferHorizontalScroll())
+        }
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.bg.opacity(0.6)))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(theme.separator, lineWidth: 0.5))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func tableRow(_ cells: [String], widths: [CGFloat], head: Bool) -> some View {
+        HStack(alignment: .top, spacing: 0) {
+            ForEach(Array(cells.enumerated()), id: \.offset) { ci, cell in
+                Markdown.inlineText(cell, color: head ? theme.text : theme.muted, link: theme.accent, codeChip: theme.codeChip, mentions: mentions)
+                    .font(theme.font(14, weight: head ? .semibold : .regular))
+                    .tint(theme.accent)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(width: widths[ci], alignment: .topLeading)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .overlay(alignment: .leading) {
+                        if ci > 0 { Rectangle().fill(theme.separator).frame(width: 0.5) }
+                    }
+            }
         }
     }
 }
@@ -1820,8 +2170,25 @@ final class AvatarImageCache {
         url.flatMap { images[$0] }
     }
 
-    /// Pictures are kept at the largest size a row draws (128 pt hero at 3x).
+    /// Pictures are kept at the largest size a row draws (128 pt hero at 3x). The relay's
+    /// picture routes are asked for exactly this width (`?w=`), so the download is the 384 px
+    /// Lanczos copy of the 1024 px master, not the master itself.
     nonisolated static let maxPixelSize = 384
+
+    /// The relay's picture routes — `/avatars/{id}.jpg`, `/projects/{id}/avatar.jpg`,
+    /// `/blob/{slot}/{key}` — take `?w=<px>` and answer with that bucket of the master
+    /// (`avatar_image` on the relay). Other hosts' pictures (GitHub) are fetched as given.
+    nonisolated static func sizedURL(_ url: String, width: Int) -> URL? {
+        guard var comps = URLComponents(string: url) else { return URL(string: url) }
+        let path = comps.path
+        let relayPicture = path.contains("/avatars/") || path.hasSuffix("/avatar.jpg") || path.contains("/blob/")
+        guard relayPicture else { return comps.url }
+        var items = comps.queryItems ?? []
+        items.removeAll { $0.name == "w" }
+        items.append(URLQueryItem(name: "w", value: String(width)))
+        comps.queryItems = items
+        return comps.url
+    }
     /// How many of a list's pictures `warm` fetches ahead (several screens of rows;
     /// the rest load as they scroll in).
     nonisolated static let warmLimit = 48
@@ -1838,7 +2205,17 @@ final class AvatarImageCache {
         Task { _ = await load(url) }
     }
 
-    /// Shared download per URL; waiters resume together when the picture lands.
+    /// Waits between attempts. A cold launch asks for pictures before the network is up (a
+    /// phone that just woke, the relay mid-restart); one failed attempt used to leave the leaf
+    /// placeholder on every surface until the view was rebuilt (Jacob, 2026-10-26, Mac and
+    /// iPhone alike).
+    nonisolated static let retrySeconds: [UInt64] = [2, 5, 10, 20, 40]
+
+    /// Shared download per URL; waiters resume together when the picture lands. Picture URLs
+    /// name their version (`…/avatar.jpg?v=<stamp>`, `/avatars/<user>.jpg?v=…`), so the disk
+    /// cache is asked first: a relaunch paints the picture with no network at all, and a
+    /// changed picture is a new URL. Failures retry with backoff before giving up; a 404 ("no
+    /// picture") does not retry.
     func load(_ url: String) async -> UIImage? {
         if let img = images[url] { return img }
         if requested.contains(url) {
@@ -1846,12 +2223,26 @@ final class AvatarImageCache {
                 waiters[url, default: []].append(cont)
             }
         }
-        guard url.contains("://"), let u = URL(string: url) else { return nil }
+        guard url.contains("://"), let u = AvatarImageCache.sizedURL(url, width: AvatarImageCache.maxPixelSize) else { return nil }
         requested.insert(url)
-        let img: UIImage? = await Task.detached(priority: .userInitiated) {
-            guard let (data, _) = try? await URLSession.shared.data(from: u) else { return nil }
-            return AvatarImageCache.decode(data)
-        }.value
+        var img: UIImage?
+        var attempt = 0
+        while true {
+            let (data, status) = await Task.detached(priority: .userInitiated) { () -> (Data?, Int) in
+                var req = URLRequest(url: u)
+                req.cachePolicy = .returnCacheDataElseLoad
+                guard let (data, resp) = try? await URLSession.shared.data(for: req) else { return (nil, 0) }
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? 200
+                return (code / 100 == 2 ? data : nil, code)
+            }.value
+            if let data, let decoded = AvatarImageCache.decode(data) {
+                img = decoded
+                break
+            }
+            if status == 404 || attempt >= AvatarImageCache.retrySeconds.count { break }
+            try? await Task.sleep(nanoseconds: AvatarImageCache.retrySeconds[attempt] * 1_000_000_000)
+            attempt += 1
+        }
         if let img {
             images[url] = img
         } else {
@@ -1969,7 +2360,7 @@ struct AvatarCluster: View {
             .frame(width: size, height: size)
             .clipShape(Circle())
         } else if shown.isEmpty {
-            GlassCircle(size: size) {
+            GlassCircle(size: size) { // control-size: exception rowIconTiles (avatar cluster placeholder)
                 Image(systemName: "person.2.fill")
                     .font(theme.font(size * 0.4))
                     .foregroundStyle(theme.text)
@@ -1999,8 +2390,14 @@ struct AvatarCluster: View {
 /// picture is its own bubble — uniform margins trimmed, aspect-fit at the
 /// bubble radius, no frame and no footer (Download / Forward live in the viewer
 /// it opens). Loaded with the device bearer (same as voice memos).
-/// When the send carried a description, a caption bar sits under the picture
-/// in the same bubble so the note is not a second message.
+/// When the send carried a description, the caption sits under the picture in
+/// the same rounded bubble so the note is not a second message — and that bubble
+/// is a normal text bubble in width: the caption wraps at the bubble cap
+/// (`maxWidth`), never at the picture's own width, which for a portrait
+/// screenshot is a ~150 pt sliver ([feedback image-caption-bubble-ios-2026-10-25]).
+/// A picture narrower than its bubble (portrait + long caption) sits centred at
+/// the top with a small inset and its own radius; one that spans the bubble is
+/// flush, exactly as a picture-only bubble.
 struct ImageBubble: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -2009,6 +2406,7 @@ struct ImageBubble: View {
     let fromUser: Bool
     let maxWidth: CGFloat
     var caption: String? = nil
+    var mentions: MentionTable? = nil
 
     @State private var image: UIImage?
     @State private var failed = false
@@ -2018,10 +2416,18 @@ struct ImageBubble: View {
     static let maxHeight: CGFloat = 320
     static let minWidth: CGFloat = 120
     static let placeholder = CGSize(width: 240, height: 160)
+    /// A picture narrower than its bubble: this far from the top (and centred), with
+    /// `pictureRadius` corners, so it reads as a photo inside the bubble, not a sliver
+    /// glued to one edge.
+    static let pictureInset: CGFloat = 8
+    static let pictureRadius: CGFloat = Theme.bubbleRadius - pictureInset
 
     private var bubbleWidth: CGFloat { min(280, maxWidth) }
     private var fill: Color { fromUser ? theme.bubbleUser : theme.bubbleAssistant }
-    private var captionText: String? {
+    private var captionText: String? { Self.captionText(caption) }
+
+    /// The caption as shown: trimmed, nil when blank.
+    static func captionText(_ caption: String?) -> String? {
         guard let caption else { return nil }
         let t = caption.trimmingCharacters(in: .whitespacesAndNewlines)
         return t.isEmpty ? nil : t
@@ -2044,44 +2450,66 @@ struct ImageBubble: View {
     }
 
     var body: some View {
-        Button { viewer = MediaOpen.state(for: item, chatId: chatId, model: model) } label: {
-            VStack(alignment: .leading, spacing: 0) {
-                ZStack {
-                    fill
-                    if let image {
-                        Image(uiImage: image)
-                            .resizable()
-                            .scaledToFit()
-                    } else if failed || item.blobRef == nil {
-                        Image(systemName: "photo")
-                            .font(theme.font(28))
-                            .foregroundStyle(fromUser ? theme.userText.opacity(0.7) : theme.muted)
-                    } else {
-                        ProgressView().tint(fromUser ? theme.userText.opacity(0.7) : theme.muted)
-                    }
-                }
-                .frame(width: size.width, height: size.height)
-                if let captionText {
-                    Text(captionText)
-                        .font(theme.font(Theme.body))
-                        .foregroundStyle(fromUser ? theme.userText : theme.text)
-                        .multilineTextAlignment(.leading)
-                        .padding(.horizontal, Theme.bubbleHPad)
-                        .padding(.vertical, Theme.bubbleVPad)
-                        .frame(width: size.width, alignment: .leading)
-                        .background(fill)
-                }
+        PhotoBubbleLayout(maxWidth: maxWidth, pictureInset: Self.pictureInset) {
+            Button { viewer = MediaOpen.state(for: item, chatId: chatId, model: model) } label: {
+                pictureTile
             }
-            .clipShape(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous))
+            .buttonStyle(.plain)
+            .accessibilityLabel(captionText == nil ? "Image, tap to view" : "Image with description, tap to view")
+            if let captionText {
+                // The same text as a text bubble: body size, body line spacing, links
+                // and mention chips (Jacob: "normal font size").
+                Markdown.inlineText(captionText, color: fromUser ? theme.userText : theme.text, link: theme.accent,
+                                    codeChip: fromUser ? theme.userCodeChip : theme.codeChip, mentions: mentions)
+                    .font(theme.font(Theme.body))
+                    .lineSpacing(Theme.bodyLineSpacing)
+                    .tint(theme.accent)
+                    .multilineTextAlignment(.leading)
+                    .padding(.horizontal, Theme.bubbleHPad)
+                    .padding(.vertical, Theme.bubbleVPad)
+                    .accessibilityIdentifier("photo-caption")
+            }
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(captionText == nil ? "Image, tap to view" : "Image with description, tap to view")
+        .background(fill)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous))
+        .accessibilityIdentifier("photo-bubble")
         .task(id: item.blobRef) { await load() }
         .fullScreenCover(item: $viewer) { v in
             MediaViewer(album: v.items, index: v.index, onClose: { viewer = nil })
                 .environmentObject(model)
                 .environment(\.theme, theme)
         }
+    }
+
+    /// The picture at its fitted size. The layout hands this tile the bubble's width:
+    /// when that is the picture's own width the picture is flush (a picture-only
+    /// bubble, or a caption no wider than the picture); when the bubble is wider the
+    /// picture sits centred, `pictureInset` down, with `pictureRadius` corners.
+    private var pictureTile: some View {
+        let picture = size
+        return GeometryReader { g in
+            let flush = PhotoBubbleLayout.pictureIsFlush(picture: picture, bubbleWidth: g.size.width)
+            ZStack {
+                if let image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                } else if failed || item.blobRef == nil {
+                    Image(systemName: "photo")
+                        .font(theme.font(28))
+                        .foregroundStyle(fromUser ? theme.userText.opacity(0.7) : theme.muted)
+                } else {
+                    ProgressView().tint(fromUser ? theme.userText.opacity(0.7) : theme.muted)
+                }
+            }
+            .frame(width: picture.width, height: picture.height)
+            .clipShape(RoundedRectangle(cornerRadius: flush ? 0 : Self.pictureRadius, style: .continuous))
+            .frame(width: g.size.width, height: g.size.height, alignment: flush ? .top : .bottom)
+        }
+        // Unproposed (the layout measuring) → the picture's size; placed → the tile the
+        // layout hands it.
+        .frame(minWidth: picture.width, idealWidth: picture.width, maxWidth: .infinity,
+               minHeight: picture.height, idealHeight: picture.height, maxHeight: .infinity)
     }
 
     private func load() async {
@@ -2091,6 +2519,81 @@ struct ImageBubble: View {
         } else {
             failed = true
         }
+    }
+}
+
+/// The photo bubble's geometry: the picture tile on top, the caption under it, the
+/// bubble as wide as the wider of the two — the caption measured at the bubble cap
+/// (`maxWidth`, a text bubble's width), never at the picture's width.
+/// `geometry(picture:caption:maxWidth:)` is the pure arithmetic the layout and the
+/// tests share ([feedback image-caption-bubble-ios-2026-10-25]).
+struct PhotoBubbleLayout: Layout {
+    let maxWidth: CGFloat
+    let pictureInset: CGFloat
+
+    struct Geometry: Equatable {
+        /// The bubble's size; the caption is placed at `captionTop`, full bubble width.
+        var size: CGSize
+        /// The picture tile's height: the picture plus its top inset when it floats.
+        var tileHeight: CGFloat
+        var captionTop: CGFloat { tileHeight }
+        /// Whether the picture spans the bubble (flush, no inset, square against the caption).
+        var pictureFlush: Bool
+    }
+
+    /// `picture` is the fitted picture; `caption` its wrapped size at `cap` (padding
+    /// included) or nil for a picture-only bubble; `cap` is what the row offers, at
+    /// most the bubble cap.
+    static func geometry(picture: CGSize, caption: CGSize?, cap: CGFloat, pictureInset: CGFloat) -> Geometry {
+        let width: CGFloat
+        if let caption {
+            width = min(cap, max(picture.width, caption.width))
+        } else {
+            width = min(cap, picture.width)
+        }
+        let flush = pictureIsFlush(picture: picture, bubbleWidth: width)
+        let tile = picture.height + (flush ? 0 : pictureInset)
+        return Geometry(size: CGSize(width: width, height: tile + (caption?.height ?? 0)),
+                        tileHeight: tile, pictureFlush: flush)
+    }
+
+    /// Flush when the bubble is no wider than the picture (half a point of slack for
+    /// rounding); a wider bubble floats the picture.
+    static func pictureIsFlush(picture: CGSize, bubbleWidth: CGFloat) -> Bool {
+        bubbleWidth <= picture.width + 0.5
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        measure(proposal: proposal, subviews: subviews).size
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let g = measure(proposal: proposal, subviews: subviews)
+        guard let picture = subviews.first else { return }
+        picture.place(at: bounds.origin, anchor: .topLeading,
+                      proposal: ProposedViewSize(width: g.size.width, height: g.tileHeight))
+        if subviews.count > 1 {
+            subviews[1].place(at: CGPoint(x: bounds.minX, y: bounds.minY + g.captionTop), anchor: .topLeading,
+                              proposal: ProposedViewSize(width: g.size.width, height: nil))
+        }
+    }
+
+    private func measure(proposal: ProposedViewSize, subviews: Subviews) -> Geometry {
+        let cap = min(maxWidth, proposal.width ?? maxWidth)
+        guard let pictureView = subviews.first else {
+            return Geometry(size: .zero, tileHeight: 0, pictureFlush: true)
+        }
+        let picture = pictureView.sizeThatFits(.unspecified)
+        guard subviews.count > 1 else {
+            return Self.geometry(picture: picture, caption: nil, cap: cap, pictureInset: pictureInset)
+        }
+        // Wrap the caption at the cap to learn the bubble's width, then once more at that
+        // width so the height matches what is placed.
+        let wide = subviews[1].sizeThatFits(ProposedViewSize(width: cap, height: nil))
+        let width = min(cap, max(picture.width, wide.width))
+        let caption = subviews[1].sizeThatFits(ProposedViewSize(width: width, height: nil))
+        return Self.geometry(picture: picture, caption: CGSize(width: min(width, caption.width), height: caption.height),
+                             cap: cap, pictureInset: pictureInset)
     }
 }
 

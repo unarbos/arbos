@@ -244,6 +244,21 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.plan.outputs.sha }}
+      # Heavy-job cap on the shared EC2 Mac (#1839): at most two of {gate Mac half, gate iOS half, TF
+      # archive, Mac release} at a time; this job waits for a slot (bounded) and releases it at the end.
+      - name: Heavy-job slot
+        id: slot
+        if: runner.environment == 'self-hosted'
+        run: |
+          if [ -x /usr/local/bin/arbos-heavy-slot.sh ]; then
+            slot=$(/usr/local/bin/arbos-heavy-slot.sh acquire "mac-release" --pid "$PPID")
+          else
+            slot=none
+          fi
+          echo "slot=$slot" >> "$GITHUB_OUTPUT"
+          # Simulators this job boots are shut down at the end (two booted sims = ~300 runtime processes each
+          # side of the box, the load-average driver on 2026-10-25 23:5x); the GUI session's stay untouched.
+          xcrun simctl list devices booted 2>/dev/null | grep -oE '[0-9A-F-]{36}' | sort -u > "$RUNNER_TEMP/sims-before.txt" || true
       - name: Rust toolchain
         run: |
           set -euo pipefail
@@ -345,7 +360,12 @@ jobs:
             echo "::warning title=Not notarized::NOTARY_KEY_P8 / NOTARY_KEY_ID / NOTARY_ISSUER_ID are not all set."
           fi
           export ARBOS_DIST="$GITHUB_WORKSPACE/dist"
-          scripts/bundle-mac.sh
+          # The Mac shares its 8 cores with the gate's halves, the TestFlight archive and the rigs: two
+          # -j8 builds plus a simulator boot took it to load 263 on 2026-10-26 and ssh timed out for every
+          # worker. Half the codegen threads and a mild nice keep the box answering; a solo build is only
+          # slightly longer.
+          export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
+          nice -n 5 scripts/bundle-mac.sh
           source dist/build-info.env
           {
             echo "signing=$ARBOS_SIGNING"
@@ -383,6 +403,13 @@ jobs:
             dist/notarization-*.log
           retention-days: 7
           if-no-files-found: error
+      - name: Release the heavy-job slot
+        if: always() && runner.environment == 'self-hosted' && steps.slot.outputs.slot != ''
+        run: |
+          /usr/local/bin/arbos-heavy-slot.sh release "${{ steps.slot.outputs.slot }}" || true
+          for u in $(xcrun simctl list devices booted 2>/dev/null | grep -oE '[0-9A-F-]{36}' | sort -u); do
+            grep -qx "$u" "$RUNNER_TEMP/sims-before.txt" 2>/dev/null || xcrun simctl shutdown "$u" >/dev/null 2>&1 || true
+          done
 
   linux:
     name: Relay, agentd, arbosctl, image

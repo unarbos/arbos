@@ -23,10 +23,11 @@ use tokio::time::sleep;
 
 use crate::model::{
     AgentMember, Call, CallEnded, CallKind, LinkState, Machine, MachineState, Person,
-    ProjectDocView, ReplyPolicy, Sender, SpaceKind, ThreadInfo, Voice,
+    ProjectDocView, ReplyPolicy, ReplyRef, Sender, SpaceKind, ThreadInfo, Voice,
 };
 
 use super::doc::ChatDoc;
+use super::user_error::{ErrorClass, UserError};
 use super::{ClientCommand, DraftPicture, PictureSource, PictureTarget, SyncEvent, SyncSource};
 use crate::model::{
     new_id, now_ms, ApprovalRisk, ApprovalState, Attachment, AttachmentKind, BoxReport, BoxState,
@@ -234,6 +235,7 @@ impl SyncSource for FixtureSource {
             emit_servers_hook(&shared);
             let _ = events.send(SyncEvent::Link(Link::Live));
             emit_link_hook(&shared);
+            emit_failure_hook(&shared);
             emit_typing_hook(&shared);
             emit_working_hook(&shared);
             emit_jobs_hook(&shared);
@@ -386,6 +388,106 @@ fn emit_link_hook(shared: &Arc<Shared>) {
     });
 }
 
+/// Screenshot rig for the shared error element ([feedback error-messages-mac-2026-10-26]):
+/// `ARBOS_RIG_FAILURE=toast|composer|delivery|machine|secrets|people` raises that surface's
+/// note 1.5 s after start (so the opened chat / pane is up): `toast` = an error toast (a
+/// download that timed out, with Try again); `composer` = the opened chat's last own message
+/// refused, offline; `delivery` = that chat's pushes refused; `machine` = the machine in error;
+/// `secrets` = a 502 on Save (claimed by the open Secrets form); `people` = a refused search.
+fn emit_failure_hook(shared: &Arc<Shared>) {
+    let Ok(spec) = std::env::var("ARBOS_RIG_FAILURE") else {
+        return;
+    };
+    let spec = spec.trim().to_owned();
+    let shared = shared.clone();
+    tokio::spawn(async move {
+        sleep(Duration::from_millis(1500)).await;
+        // Every chat gets the note (the rig does not know which one is open).
+        let targets: Vec<(Id, Option<Id>)> = {
+            let chats: Vec<Id> = shared
+                .chats
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|c| c.id.clone())
+                .collect();
+            let docs = shared.docs.lock().unwrap();
+            chats
+                .into_iter()
+                .map(|id| {
+                    let mine = docs.get(&id).and_then(|d| {
+                        d.read_all()
+                            .into_iter()
+                            .rev()
+                            .find(|m| m.role == crate::model::Role::User)
+                            .map(|m| m.id.clone())
+                    });
+                    (id, mine)
+                })
+                .collect()
+        };
+        match spec.as_str() {
+            "toast" => {
+                let raw = anyhow::anyhow!(
+                    "error sending request for url (https://relay.arbos.life/blobs/x/report-q3.pdf): operation timed out"
+                )
+                .context("GET /blobs/01M5N1WSR91G8CJKNYXKJESK7X/report-q3.pdf");
+                let _ = shared.events.send(SyncEvent::Failure {
+                    error: UserError::classify("download report-q3.pdf", &raw),
+                    retry: Some(Box::new(ClientCommand::DevicesRefresh)),
+                });
+                let _ = shared
+                    .events
+                    .send(SyncEvent::Notice("Forwarded to Studio".into()));
+            }
+            "composer" => {
+                for (chat_id, last_mine) in targets {
+                    let raw = anyhow::anyhow!("dns error: failed to lookup address information")
+                        .context("POST /chats/01M5N1WSR91G8CJKNYXKJESK7X/messages");
+                    let _ = shared.events.send(SyncEvent::MessageSendFailed {
+                        chat_id,
+                        message_id: last_mine.unwrap_or_default(),
+                        error: UserError::classify("send your message", &raw),
+                    });
+                }
+            }
+            "delivery" => {
+                for (chat_id, _) in targets {
+                    let _ = shared.events.send(SyncEvent::PushRefused {
+                        chat_id,
+                        refused: true,
+                        code: "not_available".into(),
+                        until_ms: None,
+                    });
+                }
+            }
+            "machine" => {
+                {
+                    let mut m = shared.machine.lock().unwrap();
+                    m.state = MachineState::Error;
+                    m.detail =
+                        Some("GET /machine: HTTP 503 from the relay (upstream unreachable)".into());
+                }
+                emit_machine(&shared);
+            }
+            "secrets" => {
+                let _ = shared.events.send(SyncEvent::Failure {
+                    error: UserError::from_status("save the secret", 502, Some("Bad Gateway")),
+                    retry: None,
+                });
+            }
+            "people" => {
+                let raw = anyhow::anyhow!("error sending request for url (https://relay.arbos.life/users): operation timed out")
+                    .context("GET /users");
+                let _ = shared
+                    .events
+                    .send(SyncEvent::PeopleError(UserError::classify("search", &raw)));
+            }
+            _ => {}
+        }
+    });
+}
+
 /// How many agents `ARBOS_FIXTURE_WORKING=<n>` wants working (0 when unset).
 fn fixture_working_count() -> usize {
     std::env::var("ARBOS_FIXTURE_WORKING")
@@ -432,6 +534,7 @@ fn testagent_member() -> AgentMember {
         avatar_leaf: Some(3),
         avatar_leaf_color: Some(7),
         image_url: None,
+        avatar_version: 0,
         description: None,
         model: None,
         owner: None,
@@ -1100,6 +1203,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             text,
             attachments,
             reply_to,
+            reply_ref,
             mentions,
         } => {
             let attachments: Vec<Attachment> = attachments
@@ -1125,6 +1229,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 attachments,
                 reply_to,
                 None,
+                reply_ref,
                 mentions,
             );
         }
@@ -1143,6 +1248,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 message_id,
                 text,
                 vec![attachment],
+                None,
                 None,
                 None,
                 Vec::new(),
@@ -1165,9 +1271,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             match std::fs::write(&path, &bytes) {
                 Ok(()) => crate::ui::attachments::open_with_system(&path, quick_look),
                 Err(err) => {
-                    let _ = shared
-                        .events
-                        .send(SyncEvent::Notice(format!("Could not open {name}: {err}")));
+                    let _ = shared.events.send(SyncEvent::Failure {
+                        error: UserError::from_text(format!("open {name}"), err.to_string()),
+                        retry: None,
+                    });
                 }
             }
             let _ = shared.events.send(SyncEvent::AttachmentOpened { key });
@@ -1186,6 +1293,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 Vec::new(),
                 None,
                 Some(forwarded_from),
+                None,
                 Vec::new(),
             );
         }
@@ -1203,6 +1311,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 text,
                 Vec::new(),
                 reply_to,
+                None,
                 None,
                 Vec::new(),
             );
@@ -1230,6 +1339,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 message_id,
                 text,
                 attachments,
+                None,
                 None,
                 None,
                 Vec::new(),
@@ -1572,8 +1682,14 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             }
             emit_projects(shared);
         }
-        ClientCommand::SetMyAvatar { .. } => {
-            let url = "fixture://avatar/me-picture".to_string();
+        ClientCommand::SetMyAvatar { path } => {
+            // The chosen file itself (mastered by `emit_avatar`), so a rig shot shows the real
+            // picture on the hero and the rows after Set.
+            let url = if path.is_file() {
+                crate::ui::avatar_picker::file_url(&path)
+            } else {
+                "fixture://avatar/me-picture".to_string()
+            };
             emit_avatar(shared, &url);
             let _ = shared
                 .events
@@ -1758,6 +1874,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 avatar_leaf: leaf.map(|l| l.leaf),
                 avatar_leaf_color: leaf.map(|l| l.color),
                 image_url: image_url.clone(),
+                avatar_version: 0,
                 message_grants: Vec::new(),
             });
             if let Some(url) = &image_url {
@@ -1828,6 +1945,12 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 key,
             });
         }
+        ClientCommand::FetchLinkIcon { host } => {
+            // The real icons of the fixture replies' sites (`assets/link-icons`), so the
+            // shots show the feature; any other host has none → the placeholder.
+            let png = fixture_link_icon(&host).map(|b| Arc::new(b.to_vec()));
+            let _ = shared.events.send(SyncEvent::LinkIcon { host, png });
+        }
         ClientCommand::DownloadAttachment {
             project_id,
             key,
@@ -1847,9 +1970,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     let _ = shared.events.send(SyncEvent::AttachmentSaved { path });
                 }
                 Err(err) => {
-                    let _ = shared
-                        .events
-                        .send(SyncEvent::Notice(format!("Could not save {name}: {err}")));
+                    let _ = shared.events.send(SyncEvent::Failure {
+                        error: UserError::from_text(format!("save {name}"), err.to_string()),
+                        retry: None,
+                    });
                 }
             }
         }
@@ -2458,6 +2582,7 @@ fn send_user(
     attachments: Vec<Attachment>,
     reply_to: Option<String>,
     forwarded_from: Option<String>,
+    reply_ref: Option<ReplyRef>,
     tokens: Vec<String>,
 ) {
     let project_id = project_of(shared, &chat_id);
@@ -2485,6 +2610,9 @@ fn send_user(
                 if let Some(by) = forwarded_from.as_deref() {
                     d.set_message_fields(&message_id, &[("forwardedFrom", json!(by))]);
                 }
+                if let Some(r) = reply_ref.as_ref() {
+                    d.set_reply_ref(&message_id, r);
+                }
                 d.push_command("send", json!({ "messageId": message_id }), DEVICE);
             });
         });
@@ -2502,6 +2630,9 @@ fn send_user(
             let _ = d.append_user_message(&message_id, &text, DEVICE, &opts);
             if let Some(by) = forwarded_from.as_deref() {
                 d.set_message_fields(&message_id, &[("forwardedFrom", json!(by))]);
+            }
+            if let Some(r) = reply_ref.as_ref() {
+                d.set_reply_ref(&message_id, r);
             }
             if asleep {
                 set_status(d, &message_id, MessageStatus::Queued);
@@ -3427,6 +3558,24 @@ const REPLY_SIMPLE: &[&str] = &[
     "Agreed. Two sections only: the rail on the left and the chat in the center.",
     "Nothing else at rest. Details open only when you ask for them.",
 ];
+
+/// The reply to "Find me a book store in lima" (agent Bubble, 2026-10-25 21:31 UTC), one
+/// string per bubble, byte for byte: conclusion, GFM table of linked stores, details
+/// ([feedback markdown-tables-mac-2026-10-25]; the iPhone fixture's `limaReply`).
+const LIMA_REPLY: &[&str] = &[
+    "Go to Librería El Virrey in Miraflores. Their site lists Sunday hours as 11am–7pm, so it should still be open this afternoon.",
+    "| Store | Area | Sunday | What they sell |\n| --- | --- | --- | --- |\n| [Librería El Virrey](https://www.elvirrey.com/) | Miraflores, Calle Bolognesi 510 | 11am–7pm | Spanish literature, essays, history, art; some English at a higher price |\n| [Communitas](https://www.communitas.pe/) | San Isidro, Av. 2 de Mayo 1690 | 10:30am–7:30pm | Humanities, literature, law, history, science, in Spanish |\n| [Vallejo Librería Café](https://www.tangol.com/blog/en/the-3-best-bookstores-in-lima/n-15210) | San Isidro, Av. Camino Real 1119 | not listed | Books plus coffee or tea |\n| [Assouline Lima](https://www.assouline.com/pages/store/lima) | Miraflores, street not listed | not listed | Luxury and design books |",
+    "El Virrey’s phone is (511) 713 0505. Their own page says the shop dates to late 1973; a travel write-up said 1972. Communitas is the other store with Sunday hours on its site, but it is in San Isidro, not Miraflores, and the page does not clearly say it is a walk-in shop, so check before you go. Vallejo is a bookstore-café; I only have a travel blog for it, and hours were not listed. Assouline is a luxury boutique, not a general bookstore. La Casa de Kanu in Barranco was called a favorite on an expat guide, but I have no street address or hours.\n\nHours were not checked on a second source, and I did not confirm anyone is open right now. No used-book shop and no central Lima store made this list with an address I could verify.\n\nWant me to check whether El Virrey is open right now, or look for an English-language shop?",
+];
+
+/// The reply to "Read the latest from the New York post" (agent Bubble, 2026-10-25, Jacob's
+/// screenshot): seven linked headlines as bullets, then one line of prose.
+const NYPOST_REPLY: &str = "- [Syringe attack: lawyer claims mistaken identity](https://nypost.com/2026/10/25/us-news/syringe-attack-lawyer-claims-mistaken-identity/)\n- [Arrest story: a second Jewish victim minutes earlier](https://nypost.com/2026/10/25/us-news/arrest-story-second-jewish-victim-minutes-earlier/)\n- [Ex-NYPD cop charged in a George Washington Bridge killing, free on $1M bail](https://nypost.com/2026/10/25/us-news/ex-nypd-cop-charged-in-gw-bridge-killing-free-on-1m-bail/)\n- [Thomas Markle home search, child pornography, Philippine official’s comment](https://nypost.com/2026/10/25/world-news/thomas-markle-home-search-philippine-official-comment/)\n- [Musk says SpaceX cut Ukraine’s Starlink access](https://nypost.com/2026/10/25/business/musk-says-spacex-cut-ukraines-starlink-access/)\n- [Giants beat the Texans in overtime in J. J. McCarthy’s first start](https://nypost.com/2026/10/25/sports/giants-beat-texans-in-overtime-mccarthy-first-start/)\n- [McCarthy’s wife after that win](https://nypost.com/2026/10/25/sports/mccarthys-wife-after-that-win/)\n\nNo times or bylines were on the page text I read. Want one of these opened?";
+
+/// The reply to "write bubble sort in python" from Jacob's 2026-10-26 10:50 Mac screenshot,
+/// byte for byte: a Python code card, then prose whose `$O(n^2)$` showed its dollars and
+/// caret verbatim ([feedback math-render-mac-2026-10-26]). `ARBOS_FIXTURE_REPLY=math`.
+pub const BUBBLE_SORT_REPLY: &str = "Here is a standard implementation of bubble sort in Python:\n\n```python\ndef bubble_sort(arr):\n    n = len(arr)\n    for i in range(n):\n        swapped = False\n        for j in range(0, n - i - 1):\n            if arr[j] > arr[j + 1]:\n                arr[j], arr[j + 1] = arr[j + 1], arr[j]\n                swapped = True\n        # If no two elements swapped, list is already sorted\n        if not swapped:\n            break\n    return arr\n\n# Example usage:\nitems = [64, 34, 25, 12, 22, 11, 90]\nprint(bubble_sort(items))  # Output: [11, 12, 22, 25, 34, 64, 90]\n```\n\nIt runs in $O(n^2)$ time in the worst and average cases, and $O(n)$ time when the array is already sorted thanks to the `swapped` flag. Space complexity is $O(1)$.";
 
 const REPLY_CODE: &[&str] = &[
     "The transcript is a bottom-aligned list with one row per markdown block:",
@@ -4715,6 +4864,7 @@ fn seed_projects() -> Vec<Project> {
             avatar_leaf: None,
             avatar_leaf_color: None,
             image_url: None,
+            avatar_version: 0,
             message_grants: Vec::new(),
         },
         Project {
@@ -4752,6 +4902,7 @@ fn seed_projects() -> Vec<Project> {
             avatar_leaf: None,
             avatar_leaf_color: None,
             image_url: None,
+            avatar_version: 0,
             message_grants: Vec::new(),
         },
         Project {
@@ -4789,6 +4940,7 @@ fn seed_projects() -> Vec<Project> {
             avatar_leaf: None,
             avatar_leaf_color: None,
             image_url: None,
+            avatar_version: 0,
             message_grants: Vec::new(),
         },
     ]
@@ -5271,6 +5423,19 @@ fn attachment(name: &str, mime: &str, kind: AttachmentKind, title: &str, bytes: 
 }
 
 /// A 320×200 PNG (diagonal gradient tinted from the key) for fixture thumbnails and downloads.
+/// The 64×64 site icons the fixture's replies link to (what the relay's
+/// `/link-icon` would answer), by host.
+fn fixture_link_icon(host: &str) -> Option<&'static [u8]> {
+    Some(match host {
+        "www.elvirrey.com" => include_bytes!("../../assets/link-icons/www.elvirrey.com.png"),
+        "www.communitas.pe" => include_bytes!("../../assets/link-icons/www.communitas.pe.png"),
+        "www.tangol.com" => include_bytes!("../../assets/link-icons/www.tangol.com.png"),
+        "www.assouline.com" => include_bytes!("../../assets/link-icons/www.assouline.com.png"),
+        "nypost.com" => include_bytes!("../../assets/link-icons/nypost.com.png"),
+        _ => return None,
+    })
+}
+
 fn fixture_png(key: &str) -> Vec<u8> {
     if key.contains("Screenshot") {
         return fixture_page_png();
@@ -5369,6 +5534,9 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
         // message, so `ARBOS_REPLY_TO=1` arms the composer's reply preview on it.
         // `ARBOS_FIXTURE_REPLY=code`: the `REPLY_CODE` reply (a ```rust card) as
         // the last message, for the code card's Copy pill shots.
+        // `ARBOS_FIXTURE_REPLY=table`: the `LIMA_REPLY` turn (a linked GFM table
+        // between two prose bubbles), for the table renderer's shots.
+        // `ARBOS_FIXTURE_REPLY=math`: the `BUBBLE_SORT_REPLY` turn (code card + inline math).
         match std::env::var("ARBOS_FIXTURE_REPLY").as_deref() {
             Ok("1") => {
                 s.user_replying_to("Which tabs do you mean here?", &last);
@@ -5387,6 +5555,34 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
                     TurnKind::Reply,
                     MessageStatus::Done,
                     vec![text(&REPLY_CODE.join("\n\n"))],
+                );
+            }
+            // `ARBOS_FIXTURE_REPLY=table`: Jacob's Lima bookstore turn — the ask, then
+            // the three bubbles agentd posted (conclusion, linked GFM table, details).
+            Ok("table") => {
+                s.user("Find me a book store in lima");
+                for bubble in LIMA_REPLY {
+                    s.assistant(TurnKind::Reply, MessageStatus::Done, vec![text(bubble)]);
+                }
+            }
+            // `ARBOS_FIXTURE_REPLY=links`: Jacob's New York Post turn — a bullet list of
+            // linked headlines ([feedback link-icons-mac-2026-10-25]).
+            Ok("links") => {
+                s.user("Read the latest from the New York post");
+                s.assistant(
+                    TurnKind::Reply,
+                    MessageStatus::Done,
+                    vec![text(NYPOST_REPLY)],
+                );
+            }
+            // `ARBOS_FIXTURE_REPLY=math`: Jacob's bubble-sort turn — a Python code card,
+            // then prose with inline `$O(n^2)$` math ([feedback math-render-mac-2026-10-26]).
+            Ok("math") => {
+                s.user("write bubble sort in python");
+                s.assistant(
+                    TurnKind::Reply,
+                    MessageStatus::Done,
+                    vec![text(BUBBLE_SORT_REPLY)],
                 );
             }
             _ => {}
@@ -5926,6 +6122,7 @@ fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
         avatar_leaf: None,
         avatar_leaf_color: None,
         image_url: None,
+        avatar_version: 0,
         message_grants: Vec::new(),
     }
 }
@@ -5952,6 +6149,7 @@ fn launch_week() -> Project {
         avatar_leaf: None,
         avatar_leaf_color: None,
         image_url: None,
+        avatar_version: 0,
         description: None,
         model: None,
         owner: None,
@@ -5979,6 +6177,7 @@ fn launch_week() -> Project {
             avatar_leaf: Some(leaf),
             avatar_leaf_color: Some(color),
             image_url: None,
+            avatar_version: 0,
             description: None,
             model: None,
             owner: None,
@@ -6034,6 +6233,7 @@ fn seed_people_projects() -> Vec<Project> {
             avatar_leaf: None,
             avatar_leaf_color: None,
             image_url: None,
+            avatar_version: 0,
             message_grants: Vec::new(),
         },
     ]
@@ -6110,6 +6310,7 @@ fn human_message(chat_id: &str, who: &Person, text: &str, at: u64) -> Message {
         mentions: Vec::new(),
         reply_to: None,
         forwarded_from: None,
+        reply_ref: None,
         asked_by_handle: None,
         owner_handle: None,
         usage: None,
@@ -6267,6 +6468,72 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
         "Sending in a sec. Also: can we add your Arbos agent here so it can pull the numbers while we talk?",
         base + 150_000,
     ));
+    // The Launch week group's rows are built here so the DM can quote them
+    // (`ARBOS_FIXTURE_REPLY_DM=1`, #1835: Reply in DM carries the original).
+    let samir = person("gh_457", "samir", Some("Samir Haddad"), "member");
+    let sara = person("gh_458", "sara", Some("Sara Lind"), "member");
+    let deck = human_message(
+        GROUP_LAUNCH,
+        &samir,
+        "Deck v3 is in the shared folder. Sam, can you check the pricing slide before the run-through?",
+        base + 300_000,
+    );
+    let ask = human_message(
+        GROUP_LAUNCH,
+        &sam(),
+        "On it. @arbos pull the latest signup numbers into slide 4 while I read.",
+        base + 330_000,
+    );
+    if std::env::var("ARBOS_FIXTURE_REPLY_DM").is_ok_and(|v| v == "1") {
+        // Sam answers Samir's group line privately, here; I answer Sam's group ask.
+        let mut theirs = human_message(DM_SAM, &sam(), "Works", base + 400_000);
+        theirs.reply_ref = Some(ReplyRef {
+            chat_id: GROUP_LAUNCH.into(),
+            project_id: "people".into(),
+            message_id: deck.id.clone(),
+            chat_title: "Launch week".into(),
+            sender: deck.sender.clone(),
+            sender_name: "Samir Haddad".into(),
+            sender_handle: "samir".into(),
+            text: ReplyRef::snapshot_text(&deck.plain_text()),
+        });
+        insert_message_via_core(&doc, &theirs);
+        let mut mine = human_message(
+            DM_SAM,
+            &me(),
+            "Take your time — the numbers are in.",
+            base + 430_000,
+        );
+        mine.reply_ref = Some(ReplyRef {
+            chat_id: GROUP_LAUNCH.into(),
+            project_id: "people".into(),
+            message_id: ask.id.clone(),
+            chat_title: "Launch week".into(),
+            sender: ask.sender.clone(),
+            sender_name: "Sam Rivera".into(),
+            sender_handle: "sam".into(),
+            text: ReplyRef::snapshot_text(&ask.plain_text()),
+        });
+        insert_message_via_core(&doc, &mine);
+        // …and one from a chat I am not in: the quote without the link.
+        let mut outside = human_message(
+            DM_SAM,
+            &sam(),
+            "Same thing happened in ours.",
+            base + 460_000,
+        );
+        outside.reply_ref = Some(ReplyRef {
+            chat_id: "01J9NOTMYCHAT000000000000".into(),
+            project_id: "people".into(),
+            message_id: "01J9NOTMYMSG0000000000000".into(),
+            chat_title: "Design crit".into(),
+            sender: "user:gh_900".into(),
+            sender_name: "Mira Kaplan".into(),
+            sender_handle: "mira-k".into(),
+            text: "The pricing slide still shows last quarter's tiers.".into(),
+        });
+        insert_message_via_core(&doc, &outside);
+    }
     out.push(doc);
 
     // Sam's shared project: Sam wrote first, the agent answered with attribution.
@@ -6297,8 +6564,6 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
 
     // The Launch week group: three people and my agent, as in the redesign mockups.
     let group = ChatDoc::new(GROUP_LAUNCH, GROUP_LAUNCH);
-    let samir = person("gh_457", "samir", Some("Samir Haddad"), "member");
-    let sara = person("gh_458", "sara", Some("Sara Lind"), "member");
     // `ARBOS_FIXTURE_LONG_ROWS=<n>`: older synthetic history first — the list
     // only; header geometry is unchanged.
     if let Some(rows) = fixture_long_rows() {
@@ -6307,18 +6572,7 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
             insert_message_via_core(&group, &msg);
         }
     }
-    insert_message_via_core(&group, &human_message(
-        GROUP_LAUNCH,
-        &samir,
-        "Deck v3 is in the shared folder. Sam, can you check the pricing slide before the run-through?",
-        base + 300_000,
-    ));
-    let ask = human_message(
-        GROUP_LAUNCH,
-        &sam(),
-        "On it. @arbos pull the latest signup numbers into slide 4 while I read.",
-        base + 330_000,
-    );
+    insert_message_via_core(&group, &deck);
     insert_message_via_core(&group, &ask);
     let mut agent = human_message(GROUP_LAUNCH, &sam(), "", base + 360_000);
     agent.role = Role::Assistant;
@@ -6643,6 +6897,22 @@ fn draft_picture_url(kind: &str, picture: &DraftPicture) -> String {
 }
 
 fn emit_avatar(shared: &Shared, url: &str) {
+    // A picked file (`file://…`, the picker's Upload preview) is mastered like the relay client
+    // does, so the fixture rig shows the real picture at upload quality; everything else is
+    // the seeded placeholder.
+    if let Some(path) = url.strip_prefix("file://") {
+        if let Some(bytes) = std::fs::read(path)
+            .ok()
+            .and_then(|b| super::avatar_master::master(&b).ok())
+            .map(|m| m.bytes)
+        {
+            let _ = shared.events.send(SyncEvent::Avatar {
+                url: url.to_string(),
+                bytes: Arc::new(bytes),
+            });
+        }
+        return;
+    }
     let seed = url.rsplit('/').next().unwrap_or(url).to_string();
     let _ = shared.events.send(SyncEvent::Avatar {
         url: url.to_string(),
@@ -6655,6 +6925,17 @@ fn emit_people_seed(shared: &Shared) {
         emit_avatar(shared, &p.avatar_url);
     }
     emit_avatar(shared, &me().avatar_url);
+}
+
+/// The fixture's directory has no such GitHub user: the relay's own words, as a refusal.
+fn no_such_user(verb: &str, handle: &str) -> UserError {
+    UserError::of(
+        verb,
+        ErrorClass::Refused {
+            message: Some(format!("No GitHub user named @{handle}.")),
+        },
+        "fixture",
+    )
 }
 
 fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
@@ -6689,9 +6970,13 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
         ClientCommand::StartDm { handle } => {
             let handle = handle.trim().trim_start_matches('@').to_lowercase();
             if handle == ME_HANDLE {
-                let _ = shared
-                    .events
-                    .send(SyncEvent::PeopleError("That is you.".into()));
+                let _ = shared.events.send(SyncEvent::PeopleError(UserError::of(
+                    "start the chat",
+                    ErrorClass::Refused {
+                        message: Some("That is you.".into()),
+                    },
+                    "fixture",
+                )));
                 return true;
             }
             let existing = shared
@@ -6706,8 +6991,9 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                 return true;
             }
             let Some(other) = directory().into_iter().find(|p| p.handle == handle) else {
-                let _ = shared.events.send(SyncEvent::PeopleError(format!(
-                    "No GitHub user named @{handle}."
+                let _ = shared.events.send(SyncEvent::PeopleError(no_such_user(
+                    "start the chat",
+                    &handle,
                 )));
                 return true;
             };
@@ -6759,8 +7045,9 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                     continue;
                 }
                 let Some(other) = directory().into_iter().find(|p| p.handle == handle) else {
-                    let _ = shared.events.send(SyncEvent::PeopleError(format!(
-                        "No GitHub user named @{handle}."
+                    let _ = shared.events.send(SyncEvent::PeopleError(no_such_user(
+                        "create the group",
+                        &handle,
                     )));
                     return true;
                 };
@@ -6789,6 +7076,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                                 avatar_leaf: p.avatar_leaf,
                                 avatar_leaf_color: p.avatar_leaf_color,
                                 image_url: None,
+                                avatar_version: 0,
                                 description: None,
                                 model: None,
                                 owner: None,
@@ -6798,9 +7086,13 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             };
             // People, agents, or both — never nobody (the relay's rule).
             if members.is_empty() && agents.is_empty() {
-                let _ = shared.events.send(SyncEvent::PeopleError(
-                    "Pick at least one person or agent".into(),
-                ));
+                let _ = shared.events.send(SyncEvent::PeopleError(UserError::of(
+                    "create the group",
+                    ErrorClass::Refused {
+                        message: Some("Pick at least one person or agent".into()),
+                    },
+                    "fixture",
+                )));
                 return true;
             }
             let id = new_id();
@@ -6888,6 +7180,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                         avatar_leaf: p.avatar_leaf,
                         avatar_leaf_color: p.avatar_leaf_color,
                         image_url: None,
+                        avatar_version: 0,
                         description: None,
                         model: None,
                         owner: None,
@@ -6960,6 +7253,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                             avatar_leaf: p.avatar_leaf,
                             avatar_leaf_color: p.avatar_leaf_color,
                             image_url: None,
+                            avatar_version: 0,
                             description: None,
                             model: None,
                             owner: None,
@@ -7068,9 +7362,9 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                     let handle = grantee.trim_start_matches('@').to_lowercase();
                     let Some(other) = directory().into_iter().find(|p| p.handle == handle) else {
                         drop(projects);
-                        let _ = shared.events.send(SyncEvent::PeopleError(format!(
-                            "No GitHub user named @{handle}."
-                        )));
+                        let _ = shared
+                            .events
+                            .send(SyncEvent::PeopleError(no_such_user("give access", &handle)));
                         return true;
                     };
                     p.message_grants.push(crate::model::MessageGrant {
@@ -7107,9 +7401,9 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
         ClientCommand::InviteToProject { project_id, handle } => {
             let handle = handle.trim().trim_start_matches('@').to_lowercase();
             let Some(other) = directory().into_iter().find(|p| p.handle == handle) else {
-                let _ = shared.events.send(SyncEvent::PeopleError(format!(
-                    "No GitHub user named @{handle}."
-                )));
+                let _ = shared
+                    .events
+                    .send(SyncEvent::PeopleError(no_such_user("invite them", &handle)));
                 return true;
             };
             {
@@ -7158,6 +7452,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                                 avatar_leaf: p.avatar_leaf,
                                 avatar_leaf_color: p.avatar_leaf_color,
                                 image_url: None,
+                                avatar_version: 0,
                                 description: None,
                                 model: None,
                                 owner: None,
@@ -7269,8 +7564,32 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             };
             let shared = shared.clone();
             let target = target.clone();
+            // Rig (error-state shots): a prompt with "timeout" answers the relay's 504 sentence
+            // after 2 s; one with "slow" paints for 25 s first (the progress state).
+            let lower = prompt.to_lowercase();
+            let fail = lower.contains("timeout");
+            let wait_ms = if lower.contains("slow") {
+                25_000
+            } else if fail {
+                2_000
+            } else {
+                1_400
+            };
             tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(1400)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                if fail {
+                    let _ = shared.events.send(SyncEvent::ImageGenerated {
+                        target,
+                        image_key: None,
+                        url: None,
+                        error: Some(UserError::of(
+                            "generate the image",
+                            ErrorClass::Timeout,
+                            "HTTP 504 avatar_timeout — gpt-image-1-mini: operation timed out after 40 s (attempt 2 of 2); relay budget 75 s",
+                        )),
+                    });
+                    return;
+                }
                 emit_avatar(&shared, &url);
                 let _ = shared.events.send(SyncEvent::ImageGenerated {
                     target,
@@ -7835,7 +8154,7 @@ mod create_group_tests {
                 match rx.recv().await {
                     Some(SyncEvent::Projects(p)) => latest = p,
                     Some(SyncEvent::PeopleGroupCreated { chat_id }) => return (latest, chat_id),
-                    Some(SyncEvent::PeopleError(e)) => panic!("create failed: {e}"),
+                    Some(SyncEvent::PeopleError(e)) => panic!("create failed: {}", e.sentence()),
                     Some(_) => continue,
                     None => panic!("source ended"),
                 }
@@ -7930,6 +8249,10 @@ mod create_group_tests {
         })
         .await
         .expect("a PeopleError");
-        assert!(err.contains("person or agent"), "{err}");
+        assert!(
+            err.sentence().contains("person or agent"),
+            "{}",
+            err.sentence()
+        );
     }
 }
