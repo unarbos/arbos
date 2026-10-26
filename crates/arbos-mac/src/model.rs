@@ -2747,7 +2747,7 @@ pub struct DevicesView {
     pub items: Vec<DeviceView>,
     pub loaded: bool,
     /// Why the list could not be read, when it could not.
-    pub error: Option<String>,
+    pub error: Option<crate::sync::user_error::UserError>,
 }
 
 /// Settings → Secrets state (`GET /secrets` + `GET /secrets/requests`).

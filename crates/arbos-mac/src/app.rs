@@ -31,7 +31,9 @@ use crate::palette;
 use crate::search;
 use crate::search_index::{self, SearchIndex};
 use crate::sign_in;
+use crate::sync::user_error::{ErrorClass, UserError};
 use crate::sync::{ClientCommand, SyncEvent, SyncSource};
+use crate::ui::error_note;
 use crate::ui::notify::{self, Gate, Notifier, NotifyEvent, NotifyKind};
 use crate::ui::tones::{SamplePlayer, Tone, TonePlayer};
 
@@ -225,7 +227,9 @@ pub struct Pairing {
     /// Pairing-code mode: the code is being exchanged.
     pub busy: bool,
     /// Pairing-code mode: the last failure.
-    pub error: Option<String>,
+    pub error: Option<UserError>,
+    /// The sign-in note's Details disclosure (either mode).
+    pub error_details_open: bool,
     /// GitHub mode: the pill's state machine (copy, Cancel / Retry, timeout).
     pub flow: sign_in::Flow,
 }
@@ -238,14 +242,50 @@ pub struct BlobView {
     pub saved_to: Option<PathBuf>,
 }
 
-/// Transient bottom-right message.
+/// A local refusal (the form is not complete): the shared element with the words as the why.
+pub fn refused(verb: &str, why: &str) -> error_note::Slot {
+    error_note::Slot::new(UserError::of(
+        verb,
+        ErrorClass::Refused {
+            message: Some(why.to_owned()),
+        },
+        "",
+    ))
+}
+
+/// Which surface owns which failures while it is up (see `AppState::failure_claim`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FailureClaim {
+    pub surface: &'static str,
+    pub verbs: &'static [&'static str],
+}
+
+/// A toast in the top-right stack: an info notice (`error` none: "Forwarded to Studio") or a
+/// failure drawn by `ui::error_note` (Jacob, 2026-10-26). Info notices live 6 s, errors 10 s;
+/// the pointer on a toast holds it (`held`), a click on × or an info toast dismisses it.
 #[derive(Clone, Debug)]
 pub struct Notice {
     pub text: String,
     pub at: u64,
+    pub error: Option<UserError>,
+    pub details_open: bool,
+    pub held: bool,
+    /// Try again re-issues this command.
+    pub retry: Option<Box<ClientCommand>>,
+}
+
+impl Notice {
+    pub fn ttl_ms(&self) -> u64 {
+        if self.error.is_some() {
+            ERROR_NOTICE_TTL_MS
+        } else {
+            NOTICE_TTL_MS
+        }
+    }
 }
 
 pub const NOTICE_TTL_MS: u64 = 6_000;
+pub const ERROR_NOTICE_TTL_MS: u64 = 10_000;
 
 #[derive(Clone, Debug)]
 pub enum AppEvent {
@@ -425,8 +465,7 @@ pub struct AvatarGenerated {
     pub target: crate::sync::PictureTarget,
     pub image_key: Option<String>,
     pub url: Option<String>,
-    pub error: Option<String>,
-    pub detail: Option<String>,
+    pub error: Option<UserError>,
 }
 
 pub struct AppState {
@@ -451,7 +490,11 @@ pub struct AppState {
     /// The person pane's Block user / Unblock row derives from this, never from a local flag.
     pub blocked: Vec<Person>,
     pub people_busy: bool,
-    pub people_error: Option<String>,
+    /// The New Message / New group / Add members sheets' note (the shared error element).
+    pub people_error: Option<error_note::Slot>,
+    /// Per chat: the last send / attachment / recording failure, drawn above the composer
+    /// until Try again, a successful send, or the user dismisses it.
+    pub send_errors: HashMap<Id, error_note::Slot>,
     /// Everyone on Arbos (`GET /users`), fetched once the account is known and
     /// on every sheet open: the New Message sheet paints it on its first frame
     /// instead of "Searching…" that the list then replaces.
@@ -762,7 +805,11 @@ pub struct AppState {
     pub server_sheet: Option<ServerSheet>,
     /// D88: a server write is in flight (sheet buttons dim) and its last failure.
     pub server_busy: bool,
-    pub server_error: Option<String>,
+    pub server_error: Option<error_note::Slot>,
+    /// A surface that is up and owns some verbs' failures (Settings → Secrets with a form
+    /// open): a `Failure` for one of them is kept here for that surface instead of a toast.
+    pub failure_claim: Option<FailureClaim>,
+    pub claimed_failure: Option<error_note::Slot>,
     /// D88: a channel waiting for its room (`room_id` null right after creation).
     channel_pending_room: Option<(Id, Id)>,
     commands: mpsc::UnboundedSender<ClientCommand>,
@@ -970,6 +1017,7 @@ impl AppState {
             blocked: Vec::new(),
             people_busy: false,
             people_error: None,
+            send_errors: HashMap::new(),
             people_directory: Vec::new(),
             typing: HashMap::new(),
             avatars: HashMap::new(),
@@ -1110,6 +1158,8 @@ impl AppState {
             server_sheet: None,
             server_busy: false,
             server_error: None,
+            failure_claim: None,
+            claimed_failure: None,
             channel_pending_room: None,
             _pump: pump,
             _notify_tick: notify_tick,
@@ -1450,6 +1500,7 @@ impl AppState {
                     mode,
                     busy: false,
                     error: None,
+                    error_details_open: false,
                     flow: sign_in::Flow::default(),
                 });
                 self.device_id = None;
@@ -1556,7 +1607,7 @@ impl AppState {
                     self.command(ClientCommand::FetchCall { call_id });
                 }
             }
-            SyncEvent::CallError { chat_id, message } => {
+            SyncEvent::CallError { chat_id, error } => {
                 let _ = chat_id;
                 if matches!(
                     self.my_call.as_ref().map(|c| &c.status),
@@ -1566,7 +1617,7 @@ impl AppState {
                         drop_active_call_images(active, cx);
                     }
                 }
-                self.push_notice(message);
+                self.push_failure(error, None);
                 cx.notify();
             }
             SyncEvent::Blocked(people) => {
@@ -1582,13 +1633,13 @@ impl AppState {
             SyncEvent::PeopleError(err) => {
                 self.people_busy = false;
                 self.withdraw_optimistic_notices(cx);
-                // The New Message sheet shows the error inline; a DM started
+                // The New Message sheet shows the note inline; a DM started
                 // from a person's pane (its Message pill) has no sheet, so the
-                // relay's words ("this person is not available") go to a notice.
+                // relay's words ("this person is not available") go to a toast.
                 if !self.new_chat_open && self.awaiting_dm.is_some() {
-                    self.push_notice(err.clone());
+                    self.push_failure(err.clone(), None);
                 }
-                self.people_error = Some(err);
+                self.people_error = Some(error_note::Slot::new(err));
                 self.awaiting_dm = None;
                 self.awaiting_group = None;
                 cx.notify();
@@ -1634,7 +1685,6 @@ impl AppState {
                 image_key,
                 url,
                 error,
-                detail,
             } => {
                 if let Some(u) = url.clone() {
                     self.want_avatar(u);
@@ -1644,7 +1694,6 @@ impl AppState {
                     image_key,
                     url,
                     error,
-                    detail,
                 });
                 cx.notify();
             }
@@ -1783,11 +1832,23 @@ impl AppState {
                 cx.notify();
             }
             SyncEvent::Notice(text) => {
-                // Create/fork failed: stop waiting for a project that will not arrive.
-                if text.starts_with("New project failed") {
+                self.push_notice(text);
+                cx.notify();
+            }
+            SyncEvent::Failure { error, retry } => {
+                // Create failed: stop waiting for a project that will not arrive.
+                if error.verb == "create the agent" {
                     self.awaiting_new_project = false;
                 }
-                self.push_notice(text);
+                let claimed = self
+                    .failure_claim
+                    .as_ref()
+                    .is_some_and(|c| c.verbs.iter().any(|v| error.verb.starts_with(v)));
+                if claimed {
+                    self.claimed_failure = Some(error_note::Slot::new(error));
+                } else {
+                    self.push_failure(error, retry);
+                }
                 cx.notify();
             }
             SyncEvent::PushRefused { chat_id, refused } => {
@@ -2711,9 +2772,13 @@ impl AppState {
             SyncEvent::Servers(list) => self.on_servers(list, cx),
             SyncEvent::ServerDetail(server) => self.on_server_detail(server, cx),
             SyncEvent::ServerOpened(server) => self.on_server_opened(server, cx),
-            SyncEvent::ServerError(text) => {
+            SyncEvent::ServerError(err) => {
                 self.server_busy = false;
-                self.server_error = Some(text);
+                // Inline in the open sheet; a toast when no sheet is up to hold it.
+                if self.server_sheet.is_none() {
+                    self.push_failure(err.clone(), None);
+                }
+                self.server_error = Some(error_note::Slot::new(err));
                 cx.notify();
             }
             SyncEvent::MatrixRooms(snapshot) => self.on_matrix_rooms(snapshot, cx),
@@ -2734,7 +2799,10 @@ impl AppState {
                 local_id,
                 error,
             } => {
-                log::warn!("servers: send to {room_id} failed: {error}");
+                log::warn!("servers: send to {room_id} failed: {}", error.raw);
+                // A channel's chat id is its room id (`active_chat_id`).
+                self.send_errors
+                    .insert(room_id.clone(), error_note::Slot::new(error));
                 self.on_channel_send_failed(room_id, local_id, cx)
             }
             SyncEvent::MessageSendFailed {
@@ -2742,13 +2810,15 @@ impl AppState {
                 message_id,
                 error,
             } => {
-                log::warn!("send to {chat_id} failed: {error}");
+                log::warn!("send to {chat_id} failed: {}", error.raw);
                 if let Some(list) = self.messages.get_mut(&chat_id) {
                     if let Some(m) = list.iter_mut().find(|m| m.id == message_id) {
                         m.pending = false;
                         m.status = MessageStatus::Error;
                     }
                 }
+                self.send_errors
+                    .insert(chat_id.clone(), error_note::Slot::new(error));
                 cx.emit(AppEvent::TranscriptChanged { chat_id });
                 cx.notify();
             }
@@ -4028,6 +4098,8 @@ impl AppState {
         let Some(chat_id) = self.active_chat_id() else {
             return;
         };
+        // A new send clears the composer's note (the next failure brings its own).
+        self.send_errors.remove(&chat_id);
         if crate::jobtabs::is_job_chat(&chat_id) {
             self.steer_from_job_tab(&chat_id, text, cx);
             return;
@@ -7727,28 +7799,142 @@ impl AppState {
         cx.notify();
     }
 
+    /// An info toast: something that worked or a plain status. Never a failure — that is
+    /// [`Self::push_failure`] (`error_ui_lint` keeps raw error strings out of here).
     pub fn push_notice(&mut self, text: impl Into<String>) {
-        let now = now_ms();
-        self.notices
-            .retain(|n| now.saturating_sub(n.at) < NOTICE_TTL_MS);
+        let now = self.next_notice_at();
         self.notices.push(Notice {
             text: text.into(),
             at: now,
+            error: None,
+            details_open: false,
+            held: false,
+            retry: None,
         });
     }
 
-    /// Click on a notice bubble removes it (download status / errors must not sit forever).
+    /// An error toast (the shared error element, 10 s, hover holds, Details + Copy, Try again
+    /// re-issues `retry`). The surface that owns the action catches most failures first
+    /// (sheets, pane pages, the composer); this is for the rest.
+    pub fn push_failure(&mut self, error: UserError, retry: Option<Box<ClientCommand>>) {
+        let now = self.next_notice_at();
+        self.notices.push(Notice {
+            text: error.sentence(),
+            at: now,
+            error: Some(error),
+            details_open: false,
+            held: false,
+            retry,
+        });
+    }
+
+    /// Drops the expired toasts and returns a unique `at` for the next one (`at` is its id:
+    /// two toasts pushed in the same millisecond must not share it).
+    fn next_notice_at(&mut self) -> u64 {
+        let now = now_ms();
+        self.notices
+            .retain(|n| n.held || now.saturating_sub(n.at) < n.ttl_ms());
+        let last = self.notices.iter().map(|n| n.at).max().unwrap_or(0);
+        now.max(last + 1)
+    }
+
+    /// Click on × (or an info toast) removes it (download status / errors must not sit forever).
     pub fn dismiss_notice(&mut self, at: u64) {
         self.notices.retain(|n| n.at != at);
+    }
+
+    /// The pointer on a toast holds it; leaving restarts its clock.
+    pub fn hold_notice(&mut self, at: u64, held: bool) {
+        if let Some(n) = self.notices.iter_mut().find(|n| n.at == at) {
+            n.held = held;
+            if !held {
+                n.at = now_ms();
+            }
+        }
+    }
+
+    /// A surface with a form up takes its verbs' failures (drawn inline at its top); `None`
+    /// releases them. Changing the claim drops a note the old surface held.
+    pub fn set_failure_claim(&mut self, claim: Option<FailureClaim>) {
+        if self.failure_claim != claim {
+            self.failure_claim = claim;
+            self.claimed_failure = None;
+        }
+    }
+
+    pub fn clear_claimed_failure(&mut self) {
+        self.claimed_failure = None;
+    }
+
+    pub fn toggle_claimed_failure_details(&mut self) {
+        if let Some(slot) = self.claimed_failure.as_mut() {
+            slot.toggle_details();
+        }
+    }
+
+    pub fn toggle_sign_in_details(&mut self) {
+        if let Some(p) = &mut self.pairing {
+            p.error_details_open = !p.error_details_open;
+        }
+    }
+
+    pub fn toggle_notice_details(&mut self, at: u64) {
+        if let Some(n) = self.notices.iter_mut().find(|n| n.at == at) {
+            n.details_open = !n.details_open;
+            n.held = true;
+        }
+    }
+
+    /// Try again on an error toast: re-issue its command and drop the toast.
+    pub fn retry_notice(&mut self, at: u64) {
+        let retry = self
+            .notices
+            .iter()
+            .find(|n| n.at == at)
+            .and_then(|n| n.retry.clone());
+        self.dismiss_notice(at);
+        if let Some(cmd) = retry {
+            self.command(*cmd);
+        }
     }
 
     pub fn live_notices(&self) -> Vec<Notice> {
         let now = now_ms();
         self.notices
             .iter()
-            .filter(|n| now.saturating_sub(n.at) < NOTICE_TTL_MS)
+            .filter(|n| n.held || now.saturating_sub(n.at) < n.ttl_ms())
             .cloned()
             .collect()
+    }
+
+    /// The composer's note for `chat`, if a send / attachment / recording failed there.
+    pub fn send_error(&self, chat: &Id) -> Option<&error_note::Slot> {
+        self.send_errors.get(chat)
+    }
+
+    pub fn set_send_error(&mut self, chat: Id, error: UserError) {
+        self.send_errors.insert(chat, error_note::Slot::new(error));
+    }
+
+    pub fn toggle_send_error_details(&mut self, chat: &Id) {
+        if let Some(slot) = self.send_errors.get_mut(chat) {
+            slot.toggle_details();
+        }
+    }
+
+    /// Try again on the composer's note: re-send the newest failed message in that chat (the
+    /// note clears either way; an attachment / recording failure has nothing to re-send).
+    pub fn retry_send_error(&mut self, chat: Id, cx: &mut Context<Self>) {
+        self.send_errors.remove(&chat);
+        let failed = self
+            .messages
+            .get(&chat)
+            .and_then(|list| list.iter().rev().find(|m| m.status == MessageStatus::Error))
+            .map(|m| m.id.clone());
+        if let Some(message_id) = failed {
+            self.resend_failed(chat, message_id, cx);
+        }
+        cx.notify();
     }
 
     pub fn pair(&mut self, code: String, cx: &mut Context<Self>) {
@@ -7800,7 +7986,9 @@ impl AppState {
                 }
             }
             auth::Event::Finished(Ok(auth::SignIn::Cancelled)) => p.flow.cancelled(attempt),
-            auth::Event::Finished(Err(err)) => p.flow.failed(attempt, format!("{err:#}")),
+            auth::Event::Finished(Err(err)) => {
+                p.flow.failed(attempt, UserError::classify("sign in", &err))
+            }
         }
     }
 
@@ -7845,7 +8033,8 @@ impl AppState {
         auth::cancel();
         let url = auth::start_url(&p.relay_url, &device_name());
         if let Err(err) = auth::open_in_browser(&url) {
-            p.flow.failed(attempt, format!("{err:#}"));
+            p.flow
+                .failed(attempt, UserError::classify("open the browser", &err));
         } else {
             self.arm_sign_in_timeout(attempt, cx);
         }
@@ -7868,7 +8057,7 @@ impl AppState {
                     self.command(ClientCommand::SignIn { grant_code });
                 }
             }
-            Err(err) => p.flow.failed(attempt, format!("{err:#}")),
+            Err(err) => p.flow.failed(attempt, UserError::classify("sign in", &err)),
         }
         cx.notify();
     }
@@ -8146,7 +8335,10 @@ impl AppState {
             &self.new_group_agents,
         );
         if plan.handles.is_empty() && plan.agent_ids.is_empty() {
-            self.people_error = Some("Pick someone who is not in the group yet".into());
+            self.people_error = Some(refused(
+                "add members",
+                "Pick someone who is not in the group yet",
+            ));
             cx.notify();
             return false;
         }
@@ -8205,7 +8397,10 @@ impl AppState {
             .cloned()
             .collect();
         if new.is_empty() {
-            self.people_error = Some("Pick someone who is not on the list yet".into());
+            self.people_error = Some(refused(
+                "add them",
+                "Pick someone who is not on the list yet",
+            ));
             cx.notify();
             return false;
         }
@@ -8246,7 +8441,10 @@ impl AppState {
             .cloned()
             .collect();
         if new.is_empty() {
-            self.people_error = Some("Pick someone who is not in the server yet".into());
+            self.people_error = Some(refused(
+                "add members",
+                "Pick someone who is not in the server yet",
+            ));
             cx.notify();
             return false;
         }
@@ -8342,7 +8540,10 @@ impl AppState {
             .collect();
         let agent_ids = self.new_group_agents.clone();
         if handles.is_empty() && agent_ids.is_empty() {
-            self.people_error = Some("Pick at least one person or agent".into());
+            self.people_error = Some(refused(
+                "create the group",
+                "Pick at least one person or agent",
+            ));
             cx.notify();
             return;
         }
