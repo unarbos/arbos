@@ -330,6 +330,20 @@ pub async fn announce(
     message_id: &str,
     text: &str,
 ) -> Option<i64> {
+    announce_with(state, chat, sender, message_id, text, None).await
+}
+
+/// [`announce`] with an optional cross-chat reply reference (Reply in DM): the
+/// alert body says what it answers and each recipient's payload carries the
+/// address only when they can open the source chat.
+pub async fn announce_with(
+    state: &AppState,
+    chat: &ChatRef,
+    sender: &Sender,
+    message_id: &str,
+    text: &str,
+    reply_ref: Option<&ReplyRefBody>,
+) -> Option<i64> {
     let event_id = state
         .db
         .insert_chat_event(
@@ -357,7 +371,17 @@ pub async fn announce(
         &member,
         text,
     );
-    let body = brief(text);
+    let body = match reply_ref {
+        // "↩ Jacob in Arbonites: Works" — the banner says what the DM answers.
+        Some(r) if !r.sender_name.trim().is_empty() && !r.chat_title.trim().is_empty() => {
+            brief(&format!(
+                "↩ {} in {}: {text}",
+                r.sender_name.trim(),
+                r.chat_title.trim()
+            ))
+        }
+        _ => brief(text),
+    };
     let title = chat_title(state, chat);
     for user in recipients(state, chat) {
         if sender.user_id.as_deref() == Some(user.as_str()) {
@@ -390,9 +414,15 @@ pub async fn announce(
             continue;
         }
         let badge = state.db.unread_total(&user).unwrap_or(0);
+        let reply_ref_json = reply_ref.map(|r| r.for_recipient(state, &user));
         for t in tokens {
             if device_focused(state, &t.device_id, &chat.chat_id).await {
                 continue;
+            }
+            let mut payload =
+                alert_payload(chat, sender, message_id, &body, badge, title.as_deref());
+            if let Some(r) = &reply_ref_json {
+                payload["reply_ref"] = r.clone();
             }
             let out = Outgoing {
                 device_token: t.token.clone(),
@@ -400,7 +430,7 @@ pub async fn announce(
                 push_type: "alert",
                 topic: None,
                 collapse_id: Some(format!("msg:{}", message_id)),
-                payload: alert_payload(chat, sender, message_id, &body, badge, title.as_deref()),
+                payload,
             };
             deliver(state, &t, out).await;
         }
@@ -667,6 +697,11 @@ pub struct NotifyBody {
     /// People chats, box callers: which of the box's agents spoke.
     #[serde(default)]
     pub project_id: Option<String>,
+    /// Reply in DM: the message this one answers in another chat, with its snapshot
+    /// (crdt-sync §6.2 `replyRef`). Rides on the push so the banner reads
+    /// "↩ Jacob in Arbonites: Testing reply in dm" and the tap can land there.
+    #[serde(default)]
+    pub reply_ref: Option<ReplyRefBody>,
     /// Box callers (#1832): what kind of bubble this is for a live call in the chat —
     /// `result` (a turn's answer), `job` (a background job's outcome), `quick` (a status line
     /// while a turn runs). Devices send none (a person's message).
@@ -676,6 +711,57 @@ pub struct NotifyBody {
     /// body), when it differs from `text`.
     #[serde(default)]
     pub voice_text: Option<String>,
+}
+
+/// The cross-chat reference a client announces with its message.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub struct ReplyRefBody {
+    pub chat_id: String,
+    /// `"people"` for DMs and people groups, else the project id.
+    #[serde(default)]
+    pub project_id: String,
+    pub message_id: String,
+    #[serde(default)]
+    pub chat_title: String,
+    #[serde(default)]
+    pub sender_name: String,
+    #[serde(default)]
+    pub text: String,
+}
+
+impl ReplyRefBody {
+    /// Where the quoted message lives, as a [`ChatRef`].
+    fn source(&self) -> ChatRef {
+        if self.project_id.is_empty() || self.project_id == "people" {
+            ChatRef::people(&self.chat_id)
+        } else {
+            ChatRef::project(&self.project_id, &self.chat_id)
+        }
+    }
+
+    /// The payload a recipient gets: the snapshot always; the address (chat,
+    /// project, message id — what a tap opens) only when they are a member of
+    /// the source chat. A non-member sees the quote and nothing to follow.
+    pub fn for_recipient(&self, state: &AppState, user_id: &str) -> Value {
+        let mut v = json!({
+            "chat_title": self.chat_title,
+            "sender_name": self.sender_name,
+            "text": brief(&self.text),
+        });
+        if recipients(state, &self.source())
+            .iter()
+            .any(|u| u == user_id)
+        {
+            v["chat_id"] = json!(self.chat_id);
+            v["project_id"] = json!(if self.project_id.is_empty() {
+                "people"
+            } else {
+                self.project_id.as_str()
+            });
+            v["message_id"] = json!(self.message_id);
+        }
+        v
+    }
 }
 
 /// The sender behind a notify call: a device is its person; a box is one of its owner's agents.
@@ -736,7 +822,15 @@ pub async fn notify_people_chat(
         Err(r) => return *r,
     };
     let chat = ChatRef::people(&id);
-    let out = announce(&state, &chat, &sender, &b.message_id, &b.text).await;
+    let out = announce_with(
+        &state,
+        &chat,
+        &sender,
+        &b.message_id,
+        &b.text,
+        b.reply_ref.as_ref(),
+    )
+    .await;
     if out.is_some() {
         crate::voice::call_update(&state, &chat, &sender, &b).await;
     }
@@ -765,7 +859,15 @@ pub async fn notify_project_chat(
         Err(r) => return *r,
     };
     let chat = ChatRef::project(&project.id, &chat_id);
-    let out = announce(&state, &chat, &sender, &b.message_id, &b.text).await;
+    let out = announce_with(
+        &state,
+        &chat,
+        &sender,
+        &b.message_id,
+        &b.text,
+        b.reply_ref.as_ref(),
+    )
+    .await;
     if out.is_some() {
         crate::voice::call_update(&state, &chat, &sender, &b).await;
     }
@@ -892,6 +994,83 @@ mod tests {
         set_focus(&state, &device_id(&bob_dev), Some("other-chat")).await;
         announce(&state, &ChatRef::people(&chat), &sender, "m3", "?").await;
         assert_eq!(state.push.captured().await.len(), 5);
+    }
+
+    /// Reply in DM (reply-in-dm-context-2026-10-25): the DM's push carries the quoted
+    /// message's snapshot for everyone, the body says what it answers, and the address
+    /// (chat / message id — what a tap opens) only for a recipient who is a member of
+    /// the source chat. A non-member gets the quote and nothing to follow.
+    #[tokio::test]
+    async fn dm_reply_push_carries_the_quote_and_links_only_members() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let (carol, carol_dev) = person(&state, 3);
+        // The source: a group of alice + bob (carol is not in it).
+        let group = dm(&state, &alice, &bob);
+        // Two DMs alice replies in: with bob (member of the source) and carol (not).
+        let dm_bob = dm(&state, &alice, &bob);
+        let dm_carol = dm(&state, &alice, &carol);
+        let bob_tok = register(&state, &bob_dev, &bob);
+        let carol_tok = register(&state, &carol_dev, &carol);
+        let sender = Sender::user(&state, &alice);
+        let reply_ref = ReplyRefBody {
+            chat_id: group.clone(),
+            project_id: "people".into(),
+            message_id: "orig-1".into(),
+            chat_title: "Arbonites".into(),
+            sender_name: "Jacob".into(),
+            text: "Testing reply in dm".into(),
+        };
+
+        announce_with(
+            &state,
+            &ChatRef::people(&dm_bob),
+            &sender,
+            "r1",
+            "Works",
+            Some(&reply_ref),
+        )
+        .await
+        .expect("recorded");
+        announce_with(
+            &state,
+            &ChatRef::people(&dm_carol),
+            &sender,
+            "r2",
+            "Works",
+            Some(&reply_ref),
+        )
+        .await
+        .expect("recorded");
+
+        let sent = state.push.captured().await;
+        let to_bob = sent
+            .iter()
+            .find(|o| o.device_token == bob_tok)
+            .expect("bob's push");
+        let to_carol = sent
+            .iter()
+            .find(|o| o.device_token == carol_tok)
+            .expect("carol's push");
+        for p in [&to_bob.payload, &to_carol.payload] {
+            assert_eq!(p["aps"]["alert"]["body"], "↩ Jacob in Arbonites: Works");
+            assert_eq!(p["reply_ref"]["text"], "Testing reply in dm");
+            assert_eq!(p["reply_ref"]["chat_title"], "Arbonites");
+            assert_eq!(p["reply_ref"]["sender_name"], "Jacob");
+        }
+        // Bob is in the source group: his payload can open the original.
+        assert_eq!(to_bob.payload["reply_ref"]["chat_id"], group);
+        assert_eq!(to_bob.payload["reply_ref"]["project_id"], "people");
+        assert_eq!(to_bob.payload["reply_ref"]["message_id"], "orig-1");
+        // Carol is not: quote only, no address to follow.
+        assert!(to_carol.payload["reply_ref"].get("chat_id").is_none());
+        assert!(to_carol.payload["reply_ref"].get("message_id").is_none());
+        // A plain announcement carries no reply_ref at all.
+        announce(&state, &ChatRef::people(&dm_bob), &sender, "r3", "plain").await;
+        let last = state.push.captured().await.into_iter().last().unwrap();
+        assert!(last.payload.get("reply_ref").is_none());
+        assert_eq!(last.payload["aps"]["alert"]["body"], "plain");
     }
 
     #[tokio::test]

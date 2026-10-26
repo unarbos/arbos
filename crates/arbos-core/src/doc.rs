@@ -296,6 +296,73 @@ pub struct UserMessageOpts {
     pub tz: Option<String>,
 }
 
+/// Reply-to across chats ("Reply in DM", crdt-sync §6.2 `replyRef`): where the
+/// quoted message lives plus a snapshot of it, so a reader who is not in the
+/// source chat still sees the quote (and nobody has to open another doc to
+/// draw the header). `replyTo` stays the in-chat reply link.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplyRef {
+    /// The chat the quoted message is in.
+    pub chat_id: String,
+    /// `"people"` for DMs and people groups, else the project id.
+    pub project_id: String,
+    pub message_id: String,
+    /// Where the quote came from, as the header says it: "in Arbonites".
+    #[serde(default)]
+    pub chat_title: String,
+    /// `user:<id>` / `agent:<project>` / `agent` of the quoted row.
+    #[serde(default)]
+    pub sender: String,
+    #[serde(default)]
+    pub sender_name: String,
+    #[serde(default)]
+    pub sender_handle: String,
+    /// The quoted prose, one line, cut to [`REPLY_REF_TEXT_CHARS`].
+    #[serde(default)]
+    pub text: String,
+}
+
+/// Row field that carries a [`ReplyRef`].
+pub const REPLY_REF_FIELD: &str = "replyRef";
+/// The snapshot keeps this much of the quoted message.
+pub const REPLY_REF_TEXT_CHARS: usize = 240;
+
+impl ReplyRef {
+    /// Whitespace-collapsed first `REPLY_REF_TEXT_CHARS` characters of `text`,
+    /// cut on a word boundary with an ellipsis.
+    pub fn snapshot_text(text: &str) -> String {
+        let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if flat.chars().count() <= REPLY_REF_TEXT_CHARS {
+            return flat;
+        }
+        let mut cut: String = flat.chars().take(REPLY_REF_TEXT_CHARS).collect();
+        if let Some(ix) = cut.rfind(' ') {
+            if ix > REPLY_REF_TEXT_CHARS / 2 {
+                cut.truncate(ix);
+            }
+        }
+        format!("{}…", cut.trim_end_matches([',', ';', ':', '.']))
+    }
+
+    /// The `replyRef` of a row, when it carries a well-formed one.
+    pub fn from_row(row: &Value) -> Option<Self> {
+        let r: Self = serde_json::from_value(row.get(REPLY_REF_FIELD)?.clone()).ok()?;
+        (!r.chat_id.is_empty() && !r.message_id.is_empty()).then_some(r)
+    }
+
+    /// Who the quote is from, for "Replying to <who> in <chat>".
+    pub fn who(&self) -> String {
+        if !self.sender_name.trim().is_empty() {
+            return self.sender_name.trim().to_owned();
+        }
+        if !self.sender_handle.trim().is_empty() {
+            return format!("@{}", self.sender_handle.trim());
+        }
+        "a message".to_owned()
+    }
+}
+
 /// The device's IANA time zone, if the platform names one (macOS and iOS via
 /// CoreFoundation, Linux via /etc/localtime).
 pub fn device_time_zone() -> Option<String> {
@@ -1671,6 +1738,14 @@ impl ChatDoc {
         }
     }
 
+    /// Cross-chat reply: write `replyRef` on a row (a plain value map, so
+    /// every reader sees the whole snapshot at once).
+    pub fn set_reply_ref(&self, msg_id: &str, reply_ref: &ReplyRef) {
+        if let Ok(v) = serde_json::to_value(reply_ref) {
+            self.set_message_fields(msg_id, &[(REPLY_REF_FIELD, v)]);
+        }
+    }
+
     pub fn finish_message(&self, msg_id: &str, status: MessageStatus) {
         self.set_message_fields(
             msg_id,
@@ -2015,6 +2090,49 @@ mod tests {
         if let Some(zone) = device_time_zone() {
             assert!(!zone.trim().is_empty() && !zone.contains(' '), "{zone}");
         }
+    }
+
+    /// Reply in DM (feedback reply-in-dm-context-2026-10-25): a row's `replyRef`
+    /// round-trips as one value map — address + snapshot — so a reader who is
+    /// not in the source chat still has the quote; a bare `replyTo` is untouched.
+    #[test]
+    fn reply_ref_round_trips_on_a_user_row() {
+        let doc = ChatDoc::new(None, false);
+        doc.transact(|d| {
+            d.append_user_message("m1", "Works", "dev:ios", &UserMessageOpts::default())
+                .unwrap();
+            d.set_reply_ref(
+                "m1",
+                &ReplyRef {
+                    chat_id: "01CHAT".into(),
+                    project_id: "people".into(),
+                    message_id: "01MSG".into(),
+                    chat_title: "Arbonites".into(),
+                    sender: "user:gh_1".into(),
+                    sender_name: "Jacob".into(),
+                    sender_handle: "unconst".into(),
+                    text: ReplyRef::snapshot_text("Testing  reply\nin dm"),
+                },
+            );
+        });
+        let row = &doc.to_json()["messages"][0];
+        let r = ReplyRef::from_row(row).expect("replyRef");
+        assert_eq!(r.chat_id, "01CHAT");
+        assert_eq!(r.message_id, "01MSG");
+        assert_eq!(r.chat_title, "Arbonites");
+        assert_eq!(r.text, "Testing reply in dm");
+        assert_eq!(r.who(), "Jacob");
+        assert!(
+            row.get("replyTo").is_none(),
+            "a cross-chat reply is not an in-chat reply"
+        );
+        // A malformed ref (no message id) reads as none, never as a broken header.
+        assert!(
+            ReplyRef::from_row(&serde_json::json!({ "replyRef": { "chatId": "x" } })).is_none()
+        );
+        // Long originals are cut on a word with an ellipsis.
+        let long = ReplyRef::snapshot_text(&"word ".repeat(100));
+        assert!(long.ends_with('…') && long.chars().count() <= REPLY_REF_TEXT_CHARS + 1);
     }
 
     #[test]
