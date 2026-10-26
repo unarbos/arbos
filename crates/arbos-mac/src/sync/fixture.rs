@@ -1580,8 +1580,14 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             }
             emit_projects(shared);
         }
-        ClientCommand::SetMyAvatar { .. } => {
-            let url = "fixture://avatar/me-picture".to_string();
+        ClientCommand::SetMyAvatar { path } => {
+            // The chosen file itself (mastered by `emit_avatar`), so a rig shot shows the real
+            // picture on the hero and the rows after Set.
+            let url = if path.is_file() {
+                crate::ui::avatar_picker::file_url(&path)
+            } else {
+                "fixture://avatar/me-picture".to_string()
+            };
             emit_avatar(shared, &url);
             let _ = shared
                 .events
@@ -6766,6 +6772,22 @@ fn draft_picture_url(kind: &str, picture: &DraftPicture) -> String {
 }
 
 fn emit_avatar(shared: &Shared, url: &str) {
+    // A picked file (`file://…`, the picker's Upload preview) is mastered like the relay client
+    // does, so the fixture rig shows the real picture at upload quality; everything else is
+    // the seeded placeholder.
+    if let Some(path) = url.strip_prefix("file://") {
+        if let Some(bytes) = std::fs::read(path)
+            .ok()
+            .and_then(|b| super::avatar_master::master(&b).ok())
+            .map(|m| m.bytes)
+        {
+            let _ = shared.events.send(SyncEvent::Avatar {
+                url: url.to_string(),
+                bytes: Arc::new(bytes),
+            });
+        }
+        return;
+    }
     let seed = url.rsplit('/').next().unwrap_or(url).to_string();
     let _ = shared.events.send(SyncEvent::Avatar {
         url: url.to_string(),

@@ -644,6 +644,9 @@ pub struct AppState {
     /// Rig: a prompt the shell types into the opened picker's Generate field and runs at once
     /// (`ARBOS_OPEN_PROFILE=me:avatar:generate=<prompt>`), so a shot can show prompt → result.
     pub avatar_rig_prompt: Option<String>,
+    /// Rig: a file for the picker's Upload tab (`ARBOS_OPEN_PROFILE=me:avatar:upload=<path>`,
+    /// also `agent:…`), applied as the file panel's pick so a shot shows the upload preview.
+    pub avatar_rig_upload: Option<std::path::PathBuf>,
     /// The Generate tab's answer, for the shell's open picker.
     pub avatar_generated: Option<AvatarGenerated>,
     /// Agent page: which settings row (model / reasoning / voice) is dropped down.
@@ -1048,6 +1051,7 @@ impl AppState {
             profile_opened: 0,
             avatar_picker_request: None,
             avatar_rig_prompt: None,
+            avatar_rig_upload: None,
             avatar_generated: None,
             agent_pick: None,
             profile_editing_description: false,
@@ -2109,13 +2113,17 @@ impl AppState {
                                     .set_profile_tab(crate::ui::profiles::agent::TAB_COMPUTER, cx),
                                 _ => {}
                             }
-                            // `agent:avatar[:generate|:upload]` opens the avatar picker sheet
-                            // (D92 amendment) on that tab.
+                            // `agent:avatar[:generate|:upload[=<path>]]` opens the avatar picker
+                            // sheet (D92 amendment) on that tab.
                             if let Some(tab) = rest.strip_prefix(":avatar") {
                                 use crate::ui::avatar_picker::{Tab, Target};
                                 let tab = match tab {
                                     ":generate" => Tab::Generate,
                                     ":upload" => Tab::Upload,
+                                    t if t.starts_with(":upload=") => {
+                                        self.rig_upload(&t[":upload=".len()..]);
+                                        Tab::Upload
+                                    }
                                     _ => Tab::Bot,
                                 };
                                 self.open_avatar_picker(Target::Agent(project_id), tab, cx);
@@ -2205,13 +2213,18 @@ impl AppState {
                                     self.open_picture_viewer(&a.name, &a.avatar_url, cx);
                                 }
                             }
-                            // `me:avatar[:generate[=<prompt>]|:upload]` — the avatar picker for
-                            // my own picture (Generate | Upload, Reset); with `=<prompt>` the
-                            // shell types the prompt and presses Generate.
+                            // `me:avatar[:generate[=<prompt>]|:upload[=<path>]]` — the avatar
+                            // picker for my own picture (Generate | Upload, Reset); with
+                            // `=<prompt>` the shell types the prompt and presses Generate; with
+                            // `=<path>` the Upload tab previews that file.
                             if let Some(tab) = rest.strip_prefix(":avatar") {
                                 use crate::ui::avatar_picker::{Tab, Target};
                                 let tab = match tab {
                                     ":upload" => Tab::Upload,
+                                    t if t.starts_with(":upload=") => {
+                                        self.rig_upload(&t[":upload=".len()..]);
+                                        Tab::Upload
+                                    }
                                     t => {
                                         if let Some(prompt) = t.strip_prefix(":generate=") {
                                             if !prompt.trim().is_empty() {
@@ -6191,6 +6204,17 @@ impl AppState {
     ) {
         self.avatar_picker_request = Some((target, tab));
         cx.notify();
+    }
+
+    /// Rig: the Upload tab's pick, exactly as the file panel would hand it over (the preview is
+    /// fetched through the avatar cache as `file://…`).
+    fn rig_upload(&mut self, path: &str) {
+        let path = std::path::PathBuf::from(path.trim());
+        if path.as_os_str().is_empty() {
+            return;
+        }
+        self.want_avatar(crate::ui::avatar_picker::file_url(&path));
+        self.avatar_rig_upload = Some(path);
     }
 
     /// The agent's profile page (which holds the tree + colour picker).

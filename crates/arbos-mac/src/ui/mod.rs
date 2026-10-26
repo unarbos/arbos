@@ -1,6 +1,8 @@
 pub mod approve;
 pub mod attachments;
 pub mod avatar_picker;
+#[cfg(test)]
+mod avatar_upload_preview_tests;
 pub mod avatars;
 pub mod callview;
 pub mod cards;
@@ -31,6 +33,7 @@ pub mod notify;
 pub mod onboarding;
 pub mod palette;
 pub mod people;
+pub mod picture_fit;
 pub mod presence;
 pub mod profiles;
 pub mod reactions;
