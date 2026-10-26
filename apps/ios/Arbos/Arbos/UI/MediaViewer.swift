@@ -28,6 +28,13 @@ struct MediaItem: Identifiable, Equatable {
     /// Who shared it ("Samir Haddad", "You", the agent's name).
     var by: String
     var at: Int64
+    /// A profile picture (Jacob, 2026-10-25: tap the hero to view it): fetched from this URL
+    /// instead of a chat blob — no Download / Forward, and `caption` under the name.
+    var pictureURL: String? = nil
+    var caption: String? = nil
+
+    /// The line under the name: the caption of a profile picture, else when it was shared.
+    var subline: String { caption ?? whenLabel }
 
     /// "Today at 2:14 PM", "Yesterday at 9:03 AM", "Oct 12 at 4:40 PM".
     var whenLabel: String {
@@ -94,6 +101,12 @@ enum MediaAlbum {
         if m.sender.hasPrefix("agent:"), let n = projectName(String(m.sender.dropFirst(6))) { return n }
         if m.sender.hasPrefix("project:"), let n = projectName(String(m.sender.dropFirst(8))) { return n }
         return m.role == .assistant ? "Agent" : "You"
+    }
+
+    /// `name`'s profile picture at `url`, as a one-page album (Jacob, 2026-10-25).
+    static func picture(name: String, url: String) -> MediaItem {
+        MediaItem(id: "picture#\(url)", name: "Profile picture", mime: "image/jpeg", kind: .image, blobRef: nil, slot: "",
+                  by: name, at: 0, pictureURL: url, caption: "Profile picture")
     }
 
     /// The "Forwarded from <name>" line a forwarded attachment travels with (Mac
@@ -233,7 +246,7 @@ struct MediaViewer: View {
             if let item {
                 VStack(spacing: 2) {
                     Text(item.by).font(theme.font(15, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
-                    Text(item.whenLabel).font(theme.font(13)).foregroundStyle(.white.opacity(0.67)).lineLimit(1)
+                    Text(item.subline).font(theme.font(13)).foregroundStyle(.white.opacity(0.67)).lineLimit(1)
                 }
             }
 
@@ -279,12 +292,15 @@ struct MediaViewer: View {
                 // Close beside Download / Forward — same as Mac; always exits even
                 // when swipe-down or the top × lose the gesture race with zoom/paging.
                 pill("Close", system: "xmark") { close() }
-                pill("Download", system: "arrow.down.to.line") { Task { await download() } }
-                    .disabled(!canAct || busy)
-                    .opacity(canAct ? 1 : 0.5)
-                pill("Forward", system: "arrowshape.turn.up.right") { showForward = true }
-                    .disabled(!canAct || busy)
-                    .opacity(canAct ? 1 : 0.5)
+                // A profile picture is not a chat attachment: Close only.
+                if item?.pictureURL == nil {
+                    pill("Download", system: "arrow.down.to.line") { Task { await download() } }
+                        .disabled(!canAct || busy)
+                        .opacity(canAct ? 1 : 0.5)
+                    pill("Forward", system: "arrowshape.turn.up.right") { showForward = true }
+                        .disabled(!canAct || busy)
+                        .opacity(canAct ? 1 : 0.5)
+                }
             }
             .padding(.bottom, 14)
         }
@@ -442,7 +458,7 @@ private struct ZoomableImagePage: View {
                 }
             }
         }
-        .task(id: item.blobRef) {
+        .task(id: item.blobRef ?? item.pictureURL) {
             if let (data, _) = await MediaFetch.bytes(for: item, model: model), let img = UIImage(data: data) {
                 image = img
             } else {
@@ -706,6 +722,12 @@ enum MediaFetch {
     /// in the simulator fixture — a generated picture / PDF for `fixture-*` keys.
     @MainActor
     static func bytes(for item: MediaItem, model: AppModel) async -> (Data, String)? {
+        // A profile picture: its public URL (the relay's `/avatars/…`, GitHub's CDN, or a
+        // tokened blob URL) — never with the device bearer, which must not reach another host.
+        if let picture = item.pictureURL {
+            guard let url = URL(string: picture), url.scheme?.hasPrefix("http") == true else { return nil }
+            return await data(url, headers: [:])
+        }
         guard let ref = item.blobRef, !ref.hasPrefix("local:") else { return nil }
         #if DEBUG
         if model.isFixture, ref.hasPrefix("fixture-") {
@@ -761,7 +783,7 @@ struct BlobImage: View {
                 ProgressView().tint(theme.muted)
             }
         }
-        .task(id: item.blobRef) {
+        .task(id: item.blobRef ?? item.pictureURL) {
             if let (data, _) = await MediaFetch.bytes(for: item, model: model), let img = UIImage(data: data) {
                 image = img
             } else {

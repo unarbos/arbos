@@ -99,6 +99,9 @@ enum DebugHooks {
     /// With the avatar picker open on Generate: type this prompt and press Generate (a shot
     /// shows prompt → result).
     static var avatarPrompt: String? { value("ARBOS_AVATAR_PROMPT") }
+    /// `ARBOS_VIEW_PICTURE=1`: the first viewable hero picture on screen opens the media viewer
+    /// (the picker's View does the same with `ARBOS_SETTINGS_PAGE=avatar-view`).
+    static var viewPicture: Bool { value("ARBOS_VIEW_PICTURE") == "1" }
     /// With a Settings page open: scroll to the card with this id (e.g. `people` on a Secret page).
     static var settingsScroll: String? { value("ARBOS_SETTINGS_SCROLL") }
     /// On a Secret page: open a sheet at once — `people` (Give a person access), `person` (the
