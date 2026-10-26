@@ -123,9 +123,7 @@ struct AgentEditSheet: View {
                     .focused($nameFocused)
                     .submitLabel(.done)
                     .onSubmit(commitName)
-                    .padding(.horizontal, 16).frame(height: 46)
-                    .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(theme.field))
-                    .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                    .controlField()
                     .padding(.horizontal, 48)
             } else {
                 Button {
@@ -404,8 +402,8 @@ struct AgentProfileView: View {
             .onChange(of: labelDraft) { _, v in if v.count > 500 { labelDraft = String(v.prefix(500)) } }
             .padding(.horizontal, 12)
             .frame(height: 32)
-            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(theme.field))
-            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(theme.field)) // control-size: exception inlineChips
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1)) // control-size: exception inlineChips
             .padding(.horizontal, 56)
     }
 
