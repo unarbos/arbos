@@ -8,8 +8,9 @@
 //! - **Generate**: a short prompt → `POST /projects/{id}/avatar/generate` (the relay's OpenAI
 //!   key, one low-quality square, metered and capped) → the picture previews here; Set makes it
 //!   the avatar.
-//! - **Upload**: the image-only file panel (PNG, JPEG, HEIC, GIF, WebP), uploaded as a 512 px
-//!   JPEG into the project's blob slot on Set.
+//! - **Upload**: the image-only file panel (PNG, JPEG, HEIC, GIF, WebP), uploaded as the
+//!   picture master (≤ 1024 px; PNG for a flat mark, JPEG q92 for a photo) into the project's
+//!   blob slot on Set.
 //!
 //! Groups and servers open the same sheet for their picture with the same three tabs (Bot = their
 //! leaf, Generate through `/chats/{id}` / `/servers/{id}` `/avatar/generate`, Upload into their
@@ -231,20 +232,26 @@ pub(crate) fn pending_preview(picker: &Picker, state: &AppState, size: f32) -> O
             .overflow_hidden()
     };
     if let Some(path) = &picker.upload {
-        return Some(
-            frame().child(
-                gpui::img(path.clone())
-                    .size(px(size))
-                    .rounded_full()
-                    .object_fit(gpui::ObjectFit::Cover),
-            ),
-        );
+        // The chosen file goes through the avatar loader as `file://…` (decoded off the UI
+        // thread into the ≤ 1024 px master the upload will send), then through `picture_fit`
+        // like every other avatar. Handing GPUI the raw path drew a 4000 px texture into a
+        // 114 pt disc with no mipmaps — Jacob's stair-stepped edges (2026-10-26). Until the
+        // master is ready the frame is empty for a moment, never the aliased original.
+        let image = state.avatar(&file_url(path));
+        return Some(frame().children(image.map(|image| {
+            gpui::img(crate::ui::picture_fit::fit(&image, size))
+                .id("avatar-upload-preview")
+                .debug_selector(|| "avatar-upload-preview".into())
+                .size(px(size))
+                .rounded_full()
+                .object_fit(gpui::ObjectFit::Cover)
+        })));
     }
     if let Some((_, url)) = &picker.generated {
         if let Some(image) = state.avatar(url) {
             return Some(
                 frame().child(
-                    gpui::img(image)
+                    gpui::img(crate::ui::picture_fit::fit(&image, size))
                         .size(px(size))
                         .rounded_full()
                         .object_fit(gpui::ObjectFit::Cover),
@@ -253,6 +260,12 @@ pub(crate) fn pending_preview(picker: &Picker, state: &AppState, size: f32) -> O
         }
     }
     None
+}
+
+/// The avatar-cache URL of a picked file: `file://<path>`; the sync client reads and masters it
+/// (`sync::avatar_master`) and answers with `SyncEvent::Avatar` like a fetched picture.
+pub(crate) fn file_url(path: &std::path::Path) -> String {
+    format!("file://{}", path.display())
 }
 
 /// The round picture the Generate / Upload tabs preview: the pending choice, else the entity's
@@ -545,7 +558,7 @@ pub(crate) fn upload_body(
             .unwrap_or("picture")
             .to_owned()
             .into(),
-        None => "PNG, JPEG, HEIC, GIF or WebP; kept at 512 px.".into(),
+        None => "PNG, JPEG, HEIC, GIF or WebP; kept at up to 1024 px.".into(),
     };
     body.push(
         div()
