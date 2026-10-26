@@ -189,15 +189,80 @@ pub struct InlineStyle {
     pub link: bool,
 }
 
-/// One inline run: text, style, and the link target when `style.link`.
+/// One inline run: text, style, and the link target when `style.link`. A named link
+/// (`[Name](https://…)`, not a bare URL) starts with [`LINK_ICON_CELL`] and names the
+/// site in `icon`: the renderer draws the site's small picture in that cell (Jacob,
+/// 2026-10-25: every link in a reply carries its favicon, as in Grok Bot).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Span {
     pub text: String,
     pub style: InlineStyle,
     pub href: Option<String>,
+    pub icon: Option<String>,
 }
 
-type Styled = (String, InlineStyle, Option<String>);
+/// What a named link's text starts with: an em space and a three-per-em space, the
+/// cell a 14 pt icon and its gap fit in at body size. Copies carry it as whitespace.
+pub const LINK_ICON_CELL: &str = "\u{2003}\u{2004}";
+
+/// The host of `href` when it is an http(s) URL a site icon can be fetched for.
+pub fn link_host(href: &str) -> Option<String> {
+    let rest = href
+        .strip_prefix("https://")
+        .or_else(|| href.strip_prefix("http://"))?;
+    let host = rest
+        .split(['/', '?', '#'])
+        .next()?
+        .rsplit('@')
+        .next()?
+        .split(':')
+        .next()?
+        .trim()
+        .to_ascii_lowercase();
+    let ok = host.contains('.')
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+        && !host
+            .split('.')
+            .all(|l| l.chars().all(|c| c.is_ascii_digit()));
+    ok.then_some(host)
+}
+
+/// Whether a link label is itself a URL (then it gets no icon cell: the address is the text).
+fn label_is_url(label: &str) -> bool {
+    let l = label.trim();
+    l.starts_with("http://") || l.starts_with("https://") || l.starts_with("www.")
+}
+
+/// Every site an icon is wanted for in `text`'s rendered blocks (named links in prose,
+/// headings, lists and table cells; never inside code fences), each host once, in order.
+pub fn link_hosts(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |t: &str| {
+        for span in inline_spans(t) {
+            if let Some(h) = span.icon {
+                if !out.contains(&h) {
+                    out.push(h);
+                }
+            }
+        }
+    };
+    for block in split_blocks(text) {
+        match block {
+            Block::Paragraph(t) | Block::Heading { text: t, .. } => push(&t),
+            Block::Bullets(items) | Block::Numbered(items) => items.iter().for_each(|i| push(i)),
+            Block::Table { header, rows } => {
+                header.iter().for_each(|c| push(c));
+                rows.iter().flatten().for_each(|c| push(c));
+            }
+            Block::Code { .. } => {}
+        }
+    }
+    out
+}
+
+type Styled = (String, InlineStyle, Option<String>, Option<String>);
 
 /// Split inline markdown into styled spans. Unterminated markers are shown
 /// literally so a half-streamed `**bold` does not flicker. Links:
@@ -205,7 +270,12 @@ type Styled = (String, InlineStyle, Option<String>);
 pub fn inline_spans(text: &str) -> Vec<Span> {
     inline_styled(text)
         .into_iter()
-        .map(|(text, style, href)| Span { text, style, href })
+        .map(|(text, style, href, icon)| Span {
+            text,
+            style,
+            href,
+            icon,
+        })
         .collect()
 }
 
@@ -214,7 +284,7 @@ pub fn inline_spans(text: &str) -> Vec<Span> {
 pub fn inline_plain(text: &str) -> String {
     inline_styled(text)
         .into_iter()
-        .map(|(text, _, _)| text)
+        .map(|(text, _, _, _)| text)
         .collect()
 }
 
@@ -227,7 +297,7 @@ fn inline_styled(text: &str) -> Vec<Styled> {
 
     let push = |current: &mut String, style: InlineStyle, spans: &mut Vec<Styled>| {
         if !current.is_empty() {
-            spans.push((std::mem::take(current), style, None));
+            spans.push((std::mem::take(current), style, None, None));
         }
     };
 
@@ -240,13 +310,19 @@ fn inline_styled(text: &str) -> Vec<Styled> {
                         push(&mut current, style, &mut spans);
                         let label: String = chars[i + 1..close].iter().collect();
                         let href: String = chars[close + 2..end].iter().collect();
+                        let icon = (!label_is_url(&label)).then(|| link_host(&href)).flatten();
+                        let text = match &icon {
+                            Some(_) => format!("{LINK_ICON_CELL}{label}"),
+                            None => label,
+                        };
                         spans.push((
-                            label,
+                            text,
                             InlineStyle {
                                 link: true,
                                 ..style
                             },
                             Some(href),
+                            icon,
                         ));
                         i = end + 1;
                         continue;
@@ -271,6 +347,7 @@ fn inline_styled(text: &str) -> Vec<Styled> {
                     ..style
                 },
                 Some(url),
+                None,
             ));
             i = url_end;
             continue;
@@ -286,6 +363,7 @@ fn inline_styled(text: &str) -> Vec<Styled> {
                         ..style
                     },
                     None,
+                    None,
                 ));
                 i = end + 1;
                 continue;
@@ -295,7 +373,7 @@ fn inline_styled(text: &str) -> Vec<Styled> {
             if let Some(end) = find_pair(&chars, i + 2) {
                 push(&mut current, style, &mut spans);
                 let inner: String = chars[i + 2..end].iter().collect();
-                for (t, s, href) in inline_styled(&inner) {
+                for (t, s, href, icon) in inline_styled(&inner) {
                     spans.push((
                         t,
                         InlineStyle {
@@ -303,6 +381,7 @@ fn inline_styled(text: &str) -> Vec<Styled> {
                             ..merge(style, s)
                         },
                         href,
+                        icon,
                     ));
                 }
                 i = end + 2;
@@ -322,6 +401,7 @@ fn inline_styled(text: &str) -> Vec<Styled> {
                                 italic: true,
                                 ..style
                             },
+                            None,
                             None,
                         ));
                         i = end + 1;
