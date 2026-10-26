@@ -242,6 +242,10 @@ async fn main() -> anyhow::Result<()> {
         connectors_mock: std::env::var("ARBOS_CONNECTORS_MOCK").is_ok_and(|v| v == "1"),
         channels_mock: std::env::var("ARBOS_CHANNELS_MOCK").is_ok_and(|v| v == "1"),
         image_mock: std::env::var("ARBOS_IMAGE_MOCK").is_ok_and(|v| v == "1"),
+        avatar_retry_backoff_ms: std::env::var("ARBOS_AVATAR_RETRY_MS")
+            .ok()
+            .map(|v| v.split(',').filter_map(|s| s.trim().parse().ok()).collect())
+            .unwrap_or_else(|| vec![2_000, 5_000]),
         voice_mock: std::env::var("ARBOS_VOICE_MOCK").is_ok_and(|v| v == "1"),
         openai_audio_base: std::env::var("ARBOS_OPENAI_AUDIO_BASE")
             .ok()
@@ -335,6 +339,7 @@ async fn main() -> anyhow::Result<()> {
         restart: Arc::new(crate::state::RestartSignal::default()),
         voice_dispatched: Arc::new(Mutex::new(HashMap::new())),
         voice_worker: Arc::new(Mutex::new(None)),
+        image_health: Arc::new(Mutex::new(None)),
         client_seen: Arc::new(std::sync::Mutex::new(HashMap::new())),
         matrix: matrix::Matrix::new(matrix::Config::from_env()?),
     };
@@ -380,6 +385,7 @@ async fn main() -> anyhow::Result<()> {
     upgrade::spawn_history_sweeper(state.clone()).await;
     secrets::spawn_sweeper(state.clone()).await;
     calls::spawn_sweeper(state.clone()).await;
+    images::spawn_health_probe(state.clone());
     matrix::worker::spawn(state.clone());
     matrix::shadow::spawn_nightly(state.clone());
     boxes::spawn_project_purge(state.clone()).await;
@@ -816,6 +822,7 @@ async fn main() -> anyhow::Result<()> {
             post(images::server_avatar_generate),
         )
         .route("/me/avatar/generate", post(images::me_avatar_generate))
+        .route("/admin/images/health", get(images::admin_image_health))
         .route(
             "/proxy/v1/audio/transcriptions",
             post(proxy::audio_transcriptions),
