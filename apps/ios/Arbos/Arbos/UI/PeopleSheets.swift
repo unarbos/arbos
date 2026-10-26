@@ -261,7 +261,7 @@ struct NewChatSheet: View {
 
     private func actionRow(icon: String, title: String, subtitle: String) -> some View {
         HStack(spacing: SheetRow.gap) {
-            GlassCircle(size: SheetRow.avatar) {
+            GlassCircle(size: SheetRow.avatar) { // control-size: exception rowIconTiles
                 Image(systemName: icon).font(.system(size: 17, weight: .semibold)).foregroundStyle(theme.text)
             }
             VStack(alignment: .leading, spacing: 2) {
@@ -381,7 +381,7 @@ struct ServerPickRow: View {
                     .font(theme.font(11, weight: .medium))
                     .foregroundStyle(theme.online)
                     .padding(.horizontal, 9).padding(.vertical, 4)
-                    .background(Capsule().fill(theme.field))
+                    .background(Capsule().fill(theme.field)) // control-size: exception inlineChips
             }
         }
         .padding(.horizontal, SheetRow.paddingX)
@@ -433,7 +433,7 @@ struct PersonRow: View {
                     .font(theme.font(11, weight: .medium))
                     .foregroundStyle(person.status == "member" ? theme.online : theme.muted)
                     .padding(.horizontal, 9).padding(.vertical, 4)
-                    .background(Capsule().fill(theme.field))
+                    .background(Capsule().fill(theme.field)) // control-size: exception inlineChips
             }
         }
         .padding(.horizontal, SheetRow.paddingX)
@@ -1175,24 +1175,20 @@ struct ProjectMembersSheet: View {
 
 // MARK: - Shared sheet pieces
 
-/// The search field of the New Message / New group / Add person sheets. Grok's
-/// sheet field (iOS Plugins sheet; Mac ref 57): a 40 pt capsule with a hairline
-/// rim, a 16 pt magnifier 14 pt in, body-size placeholder, and side edges that
-/// line up with the row content below it (card inset 16 + row padding 14).
+/// The search field of the New Message / New group / Add person sheets: the
+/// control family's field ([feedback iphone-header-composer-sizing-2026-10-26]; was
+/// Grok's 40 pt sheet field), side edges lined up with the row content below it
+/// (card inset 16 + row padding 14).
 enum SheetSearchField {
-    static let height: CGFloat = 40
+    static let height: CGFloat = Controls.height
     static let inset: CGFloat = 30
-    static let iconSize: CGFloat = 16
+    static let iconSize: CGFloat = Controls.glyph
 }
 
 private struct SheetSearchFieldChrome: ViewModifier {
     let theme: Theme
     func body(content: Content) -> some View {
-        content
-            .padding(.horizontal, 14)
-            .frame(height: SheetSearchField.height)
-            .background(Capsule().fill(theme.field))
-            .overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1))
+        content.controlField()
     }
 }
 
@@ -1224,7 +1220,7 @@ struct GroupCallPickerSheet: View {
                     dismiss()
                 } label: {
                     HStack(spacing: SheetRow.gap) {
-                        GlassCircle(size: SheetRow.avatar) {
+                        GlassCircle(size: SheetRow.avatar) { // control-size: exception rowIconTiles
                             Image(systemName: "person.3.fill")
                                 .font(.system(size: 16, weight: .semibold))
                                 .foregroundStyle(theme.text)
@@ -1368,6 +1364,6 @@ struct MemberChip<Picture: View>: View {
                 .buttonStyle(.plain)
         }
         .padding(.leading, 4).padding(.trailing, 10).frame(height: 32)
-        .background(Capsule().fill(theme.field))
+        .background(Capsule().fill(theme.field)) // control-size: exception inlineChips
     }
 }
