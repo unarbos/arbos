@@ -5630,8 +5630,7 @@ impl Agent {
         host: &SharedHost,
         elapsed: Duration,
     ) -> bool {
-        if !self.cfg.act_to_job() || !self.cfg.jobs() || elapsed < crate::config::act_to_job_after()
-        {
+        if !self.cfg.act_to_job() || !self.cfg.jobs() || elapsed < self.cfg.act_to_job_after() {
             return false;
         }
         let mut tl = self.turn.lock().await;
@@ -7089,6 +7088,16 @@ impl Agent {
             })
             .unwrap_or(Harness::Prime);
         let (_, subagent_model) = self.live_models().await;
+        // Cost knob 1 (Jacob 2026-10-26): research jobs run on the research worker model (Haiku
+        // 5.5 by default); code and every other kind keep the subagent model.
+        let subagent_model = match &job {
+            Some(j) => crate::config::worker_model_for(
+                &j.kind,
+                self.cfg.research_worker_model().as_deref(),
+                &subagent_model,
+            ),
+            None => subagent_model,
+        };
         let (subagent_id, harness, is_new) = match existing {
             Some(id) => {
                 let row = match self.store.subagent(&id)? {
