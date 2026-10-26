@@ -67,6 +67,27 @@ and a 250 GB volume (five leftover 13 GB test-simulator clones took it from 60 t
 - The clean script's sweep (idle clones > 30 min, idle rig checkouts > 30 min, stale `Deleting-*` dirs) is the
   backstop, not the plan; a run that leaves the box under 20 GB free is a regression to raise on your issue.
 
+## Rigs take a heavy slot on the shared EC2 Mac (2026-10-26 20:30 UTC)
+
+The Mac's heavy-job cap (`/usr/local/bin/arbos-heavy-slot.sh`, versioned at `scripts/runner/arbos-heavy-slot.sh`;
+2 slots + 1 priority slot for hotfix pins) already covers the gate's Mac and iOS halves, the TestFlight archive
+and the Mac release job. Rigs did not take part: at 20:23 UTC on 2026-10-26 one rig's simulator boot
+(`launchd_sim` + healthd/healthappd/STExtraction/diagnosticd, ~490 % CPU for 90 s) on top of the two capped
+builds took the 8-core box to load 263 and ssh timed out for every worker (same at 20:0x and at 13:00,
+load 66–167). Rule, for every rig script under `/Users/Shared/arbos-*/` and every ad-hoc run on the box:
+
+- Before `xcrun simctl boot`, `xcodebuild`, `cargo build`/`cargo run`, `swift build` or launching the Mac app
+  from a rig: `slot=$(/usr/local/bin/arbos-heavy-slot.sh acquire <rig-name> --pid $$)`; after the heavy step
+  (the simulator is up and the app is running, or the build finished): `/usr/local/bin/arbos-heavy-slot.sh
+  release "$slot"`. Screenshots, clicks and `screencapture` on an already-running app need no slot — hold
+  the GUI lock (`gui-lock.sh`) for those as before. A slot is for the burst, not the whole session.
+- Builds in a rig run `nice -n 12` with `CARGO_BUILD_JOBS=4` (the gate does the same); a rig never needs the
+  `--priority` slot — that is for a pinned hotfix.
+- A rig that is refused for `WAIT_MAX_S` proceeds, as the gate does, and says so in its issue; a rig that
+  holds a slot with no heavy process alive is stale and gets reclaimed.
+- Shared simulators stay shut down when the rig is done (`xcrun simctl shutdown <udid>`): a booted idle
+  simulator keeps a dozen daemons runnable.
+
 ## Standing rules that this does not change
 
 - One issue per release; a hotfix marker (`[hotfix]`) is for P0s only.
