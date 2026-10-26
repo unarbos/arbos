@@ -72,21 +72,33 @@ pub(crate) struct RelayError {
     pub status: u16,
     pub kind: String,
     pub message: String,
+    /// `error.detail` when the relay sends one (the avatar routes: the provider's words).
+    pub detail: Option<String>,
 }
 
 impl RelayError {
     pub(crate) fn from_body(status: reqwest::StatusCode, body: &str) -> Self {
         if let Ok(dto) = serde_json::from_str::<ApiErrorDto>(body) {
+            let detail = serde_json::from_str::<Value>(body)
+                .ok()
+                .and_then(|v| {
+                    v.pointer("/error/detail")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .filter(|d| !d.is_empty());
             Self {
                 status: status.as_u16(),
                 kind: dto.error.type_,
                 message: dto.error.message,
+                detail,
             }
         } else {
             Self {
                 status: status.as_u16(),
                 kind: String::new(),
                 message: body.trim().to_owned(),
+                detail: None,
             }
         }
     }
@@ -630,17 +642,29 @@ impl Shared {
     }
 
     async fn post_json(self: &Arc<Self>, path: &str, body: Value) -> Result<Value> {
+        self.post_json_timeout(path, body, None).await
+    }
+
+    /// `post_json` with its own request timeout (the client's default is 30 s; an avatar
+    /// generation is given 90 s so the relay's 75 s budget always answers first).
+    async fn post_json_timeout(
+        self: &Arc<Self>,
+        path: &str,
+        body: Value,
+        timeout: Option<Duration>,
+    ) -> Result<Value> {
         let mut refreshed = false;
         loop {
             let token = self.token();
-            let resp = self
+            let mut req = self
                 .http
                 .post(format!("{}{}", self.http_url, path))
                 .bearer_auth(&token)
-                .json(&body)
-                .send()
-                .await
-                .with_context(|| format!("POST {path}"))?;
+                .json(&body);
+            if let Some(t) = timeout {
+                req = req.timeout(t);
+            }
+            let resp = req.send().await.with_context(|| format!("POST {path}"))?;
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             if !status.is_success() {
@@ -3733,6 +3757,46 @@ fn picture_url(shared: &Shared, target: &PictureTarget, key: Option<&str>) -> Op
     ))
 }
 
+/// How long one avatar generation may take on the wire: past the relay's 75 s budget (40 s per
+/// provider attempt), so the relay's own 504 reaches the sheet before this client gives up.
+const AVATAR_GENERATE_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// What the picker says when a generation failed: one short sentence, and the raw words for a
+/// Details disclosure (Jacob, 2026-10-26: `POST …/avatar/generate: error sending request …
+/// operation timed out` had been shown verbatim across the footer).
+fn generate_failure_words(target: &PictureTarget, err: &anyhow::Error) -> (String, Option<String>) {
+    if let Some(e) = err.downcast_ref::<RelayError>() {
+        // A relay without the own-slot route yet (#1789 not deployed): say so instead of 404.
+        if *target == PictureTarget::Draft && e.status == 404 {
+            return (
+                "Generate is not on this relay yet; upload a picture instead.".to_owned(),
+                None,
+            );
+        }
+        let sentence = if e.message.is_empty() {
+            "Couldn't generate the image.".to_owned()
+        } else {
+            e.message.clone()
+        };
+        let detail = match &e.detail {
+            Some(d) => format!("HTTP {} {} — {d}", e.status, e.kind),
+            None => format!("HTTP {} {}", e.status, e.kind),
+        };
+        return (sentence, Some(detail));
+    }
+    let raw = format!("{err:#}");
+    let timed_out = err.chain().any(|c| {
+        c.downcast_ref::<reqwest::Error>()
+            .is_some_and(|r| r.is_timeout())
+    }) || raw.contains("timed out");
+    let sentence = if timed_out {
+        "Couldn't generate the image. The server took too long."
+    } else {
+        "Couldn't reach the server. Check your connection and try again."
+    };
+    (sentence.to_owned(), Some(raw))
+}
+
 /// The answer to `PUT /me/avatar` (a JPEG body or `{image_key}`): the new `user` lands in the
 /// store and `/me` is re-read so every surface shows the picture; a failure is a notice.
 async fn my_avatar_saved(shared: &Arc<Shared>, put: Result<reqwest::Response, reqwest::Error>) {
@@ -6043,7 +6107,13 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     // The Create sheet: into my own slot (#1789's route); copied on Create.
                     PictureTarget::Draft | PictureTarget::Me(_) => "/me/avatar/generate".to_owned(),
                 };
-                let result = shared.post_json(&path, json!({ "prompt": prompt })).await;
+                let result = shared
+                    .post_json_timeout(
+                        &path,
+                        json!({ "prompt": prompt }),
+                        Some(AVATAR_GENERATE_TIMEOUT),
+                    )
+                    .await;
                 let event = match result {
                     Ok(v) => {
                         let key = v
@@ -6056,31 +6126,25 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                                 target,
                                 image_key: Some(key),
                                 error: None,
+                                detail: None,
                             },
                             None => SyncEvent::ImageGenerated {
                                 target,
                                 image_key: None,
                                 url: None,
-                                error: Some("The relay sent no picture".to_owned()),
+                                error: Some("Couldn't generate the image.".to_owned()),
+                                detail: Some("The relay sent no picture".to_owned()),
                             },
                         }
                     }
                     Err(err) => {
-                        // A relay without the own-slot route yet (#1789 not deployed): say so
-                        // instead of "HTTP 404".
-                        let error = if target == PictureTarget::Draft
-                            && err.to_string().contains("HTTP 404")
-                        {
-                            "Generate is not on this relay yet; upload a picture instead."
-                                .to_owned()
-                        } else {
-                            people_error(&err)
-                        };
+                        let (error, detail) = generate_failure_words(&target, &err);
                         SyncEvent::ImageGenerated {
                             target,
                             image_key: None,
                             url: None,
                             error: Some(error),
+                            detail,
                         }
                     }
                 };
@@ -8050,6 +8114,52 @@ impl Drop for Room {
 }
 
 #[cfg(test)]
+mod generate_failure_words_tests {
+    //! Jacob, 2026-10-26: the picker shows one short sentence, the raw words only as detail.
+    use super::*;
+
+    #[test]
+    fn a_relay_answer_keeps_its_sentence_and_detail() {
+        let err = RelayError::from_body(
+            reqwest::StatusCode::GATEWAY_TIMEOUT,
+            r#"{"error":{"type":"avatar_timeout","message":"Couldn't generate the image. The server took too long.","detail":"gpt-image-1-mini: operation timed out"}}"#,
+        );
+        assert_eq!(
+            err.detail.as_deref(),
+            Some("gpt-image-1-mini: operation timed out")
+        );
+        let (sentence, detail) =
+            generate_failure_words(&PictureTarget::Me("gh_1".into()), &anyhow::Error::from(err));
+        assert_eq!(
+            sentence,
+            "Couldn't generate the image. The server took too long."
+        );
+        assert_eq!(
+            detail.as_deref(),
+            Some("HTTP 504 avatar_timeout — gpt-image-1-mini: operation timed out")
+        );
+    }
+
+    #[test]
+    fn a_transport_timeout_is_the_plain_sentence_with_the_raw_words_as_detail() {
+        let raw = anyhow::anyhow!("error sending request for url (https://relay.arbos.life/projects/x/avatar/generate): operation timed out")
+            .context("POST /projects/x/avatar/generate");
+        let (sentence, detail) = generate_failure_words(&PictureTarget::Agent("x".into()), &raw);
+        assert_eq!(
+            sentence,
+            "Couldn't generate the image. The server took too long."
+        );
+        assert!(detail.as_deref().unwrap().contains("operation timed out"));
+        let other = anyhow::anyhow!("dns error").context("POST /projects/x/avatar/generate");
+        let (sentence, _) = generate_failure_words(&PictureTarget::Agent("x".into()), &other);
+        assert_eq!(
+            sentence,
+            "Couldn't reach the server. Check your connection and try again."
+        );
+    }
+}
+
+#[cfg(test)]
 mod link_fault_tests {
     use super::*;
     use std::io::{Error as IoError, ErrorKind as K};
@@ -8098,6 +8208,7 @@ mod link_fault_tests {
             status: 503,
             kind: String::new(),
             message: "bad gateway".into(),
+            detail: None,
         };
         assert_eq!(
             link_fault(&anyhow::Error::from(relay)),
@@ -8125,6 +8236,7 @@ mod link_fault_tests {
             status: 404,
             kind: "not_found".into(),
             message: String::new(),
+            detail: None,
         };
         assert_eq!(
             link_fault(&anyhow::Error::from(relay)),
