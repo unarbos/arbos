@@ -765,7 +765,7 @@ pub(super) fn link_list(
                 .overflow_hidden()
                 .bg(theme.surface_2)
                 .child(
-                    gpui::img(img)
+                    gpui::img(crate::ui::picture_fit::fit(&img, kit::AVATAR))
                         .size(px(kit::AVATAR))
                         .rounded(px(10.0))
                         .object_fit(gpui::ObjectFit::Cover),
