@@ -1401,15 +1401,50 @@ class Loop:
         touched = moved_files & set(st.get("files") or [])
         if touched:
             aw["ready"] = False
-            st.update(status="gating", awaiting=aw)
+            aw["regate_due"] = True
+            st["awaiting"] = aw
             self.store.save_state(fid, st)
-            self.store.event(fid, "awaiting_regate", main=main_head[:8], touched=sorted(touched)[:20])
-            log(f"[{fid}] main moved onto {len(touched)} of its files; re-gating before it is 'ready' again")
+            self.store.event(fid, "awaiting_stale", main=main_head[:8], touched=sorted(touched)[:20])
+            log(f"[{fid}] main moved onto {len(touched)} of its files; marked stale — re-gates when the pool has no Jacob-tier work (≤ 1 per 2 h)")
         else:
             aw["ready"] = True
             aw["ready_head"] = st["branch_head"]
             st["awaiting"] = aw
             self.store.save_state(fid, st)
+        self.regate_awaiting_if_idle(fid, st)
+
+    # Held items only need to be green at approval time (coordinator, 2026-10-25 23:37): re-gating #1654 on every
+    # main move took solo gate slots while 23 Jacob-tier items waited. A stale held item re-gates only when no
+    # Jacob-tier / coordinator item is queued or gating, at most once per AWAITING_REGATE_EVERY_S, and once more
+    # on `approve` (which clears the timer). Hotfix pins are not affected.
+    AWAITING_REGATE_EVERY_S = 2 * 3600
+
+    def jacob_tier_waiting(self) -> int:
+        n = 0
+        for other in self.store.items():
+            o = self.store.state(other)
+            if o.get("status") in ("queued", "gating") and not o.get("awaiting") \
+                    and self.freeze_allows(other, o, {"allow": self.APPROVAL_DEFAULT_ALLOW}):
+                n += 1
+        return n
+
+    def regate_awaiting_if_idle(self, fid: str, st: dict, force: bool = False) -> bool:
+        aw = st.get("awaiting") or {}
+        if st.get("status") != "awaiting_jacob" or not aw.get("regate_due") or aw.get("conflict"):
+            return False
+        last = aw.get("last_regate") or ""
+        if not force:
+            if last and (utcnow() - parse_iso(last)).total_seconds() < self.AWAITING_REGATE_EVERY_S:
+                return False
+            waiting = self.jacob_tier_waiting()
+            if waiting:
+                return False
+        aw.update(regate_due=False, last_regate=iso())
+        st.update(status="gating", awaiting=aw)
+        self.store.save_state(fid, st)
+        self.store.event(fid, "awaiting_regate", main=(aw.get("main_head") or "")[:8], forced=force)
+        log(f"[{fid}] held item re-gating ({'approve' if force else 'pool idle of Jacob-tier work'})")
+        return True
 
     def write_awaiting_doc(self) -> None:
         gate = self.approval_state()
@@ -1425,7 +1460,9 @@ class Loop:
             what = re.sub(r"\s+", " ", (st.get("agent_summary") or info.get("comment") or "")).strip()[:140]
             before = st.get("screenshot_urls") or []
             after = self.image_links(st.get("agent_summary") or "") + self.image_links(st.get("agent_report") or "")
-            state = "conflict — owner merging main" if aw.get("conflict") else ("re-gating after main moved" if st.get("status") == "gating" else "ready: current with main + green")
+            state = ("conflict — owner merging main" if aw.get("conflict") else "re-gating after main moved" if st.get("status") == "gating"
+                     else "stale: main moved onto its files — re-gates when the pool is idle of Jacob-tier work, or on approve" if aw.get("regate_due")
+                     else "ready: current with main + green")
             rows.append((aw.get("ready_since") or aw.get("since") or "", fid, st, what, before, after, state))
         rows.sort()
         lines = ["---", "cursor:", '  subagentId: "bc-7eefe9bf-713a-5b12-b1f3-e23bd1fdfe11"', "---", "",
@@ -4758,7 +4795,11 @@ def main(argv: list[str]) -> int:
             st = loop.store.state(fid)
             st["approved_by_jacob"] = iso()
             if st.get("status") == "awaiting_jacob":
-                st["status"] = "gating"
+                # Approval re-gates once more when main moved onto its files since the last green (gate() below
+                # merges at once when the head still has a fresh verdict); the 2-hour re-gate timer is cleared.
+                aw = st.get("awaiting") or {}
+                aw.update(regate_due=False, last_regate=None)
+                st.update(status="gating", awaiting=aw)
             loop.store.save_state(fid, st)
             loop.store.event(fid, "approved", by="Jacob")
             if st.get("issue"):
