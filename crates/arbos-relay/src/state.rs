@@ -54,6 +54,13 @@ pub struct Config {
     /// 429, 5xx) on one model — 2 s then 5 s by default (`ARBOS_AVATAR_RETRY_MS=2000,5000`);
     /// tests set it empty or to zeros.
     pub avatar_retry_backoff_ms: Vec<u64>,
+    /// How long one provider call for an avatar may take before it counts as a transient failure
+    /// (`ARBOS_AVATAR_ATTEMPT_TIMEOUT_S`, default 40), and the whole generate's budget before a
+    /// clean 504 (`ARBOS_AVATAR_TOTAL_TIMEOUT_S`, default 75). Jacob's "nuke vampire"
+    /// (2026-10-26 17:4x UTC) hung on the provider past the apps' 30 s; the relay had no
+    /// timeout at all, the client gave up, the dropped handler logged nothing.
+    pub avatar_attempt_timeout: std::time::Duration,
+    pub avatar_total_timeout: std::time::Duration,
     /// `ARBOS_VOICE_MOCK=1`: `/proxy/v1/audio/*` answer locally (F11).
     pub voice_mock: bool,
     /// OpenAI-compatible base for audio (STT/TTS); api.openai.com by default
@@ -214,6 +221,9 @@ pub struct AppState {
     pub download_cache: Arc<Mutex<Option<(i64, String)>>>,
     /// user_id → box upgrade in progress (`POST /machine/upgrade`).
     pub upgrading: Arc<Mutex<HashMap<String, UpgradeStatus>>>,
+    /// user_id → the last upgrade the relay refused before touching the box (ARB-339: `/work`
+    /// over the carry limit). Shown as `upgrade.last_refused`; cleared by the next success.
+    pub upgrade_refused: Arc<Mutex<HashMap<String, UpgradeRefusal>>>,
     /// Hash of a just-rotated refresh token → (when, the pair it was rotated into). Within
     /// `signin::REFRESH_GRACE_MS` the old token gets that same pair again instead of counting
     /// as a replay, so concurrent refreshers from one device converge on one rotation.
@@ -305,6 +315,14 @@ pub struct UpgradeStatus {
     pub since: i64,
     pub from_snapshot: Option<String>,
     pub to_snapshot: String,
+}
+
+/// An upgrade refused at the measure step: the box kept running, nothing was stopped or copied.
+#[derive(Debug, Clone)]
+pub struct UpgradeRefusal {
+    pub reason: String,
+    pub at: i64,
+    pub work_mib: i64,
 }
 
 impl AppState {
@@ -516,6 +534,8 @@ pub(crate) mod test_support {
             openai_route: super::OpenAiRoute::Auto,
             image_mock: false,
             avatar_retry_backoff_ms: Vec::new(),
+            avatar_attempt_timeout: std::time::Duration::from_secs(40),
+            avatar_total_timeout: std::time::Duration::from_secs(75),
             voice_mock: true,
             openai_audio_base: String::new(),
             vault_mock: false,
@@ -558,6 +578,7 @@ pub(crate) mod test_support {
             jwt_key: Arc::new(RelayKey::derive("test-key").subkey("jwt")),
             download_cache: Arc::new(Mutex::new(None)),
             upgrading: Arc::new(Mutex::new(HashMap::new())),
+            upgrade_refused: Arc::new(Mutex::new(HashMap::new())),
             stale_bounces: Arc::new(Mutex::new(HashMap::new())),
             local_conns: Arc::new(Mutex::new(HashMap::new())),
             refresh_grace: Arc::new(Mutex::new(HashMap::new())),

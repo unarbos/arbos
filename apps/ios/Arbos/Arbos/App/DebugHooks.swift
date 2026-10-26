@@ -105,8 +105,19 @@ enum DebugHooks {
     /// `ARBOS_VIEW_PICTURE=1`: the first viewable hero picture on screen opens the media viewer
     /// (the picker's View does the same with `ARBOS_SETTINGS_PAGE=avatar-view`).
     static var viewPicture: Bool { value("ARBOS_VIEW_PICTURE") == "1" }
+    /// `ARBOS_VIEWER_CLOSE_MS=<ms>`: the media viewer closes itself through its own Close path
+    /// that long after it appears (a shot of what is underneath afterwards).
+    static var viewerCloseMs: Int? { value("ARBOS_VIEWER_CLOSE_MS").flatMap(Int.init) }
     /// With a Settings page open: scroll to the card with this id (e.g. `people` on a Secret page).
     static var settingsScroll: String? { value("ARBOS_SETTINGS_SCROLL") }
+    /// `ARBOS_RIG_AGENT_PICKED=<name>,<name>`: a Secrets form's agent picker starts with these
+    /// agents as chips ([feedback secrets-agent-picker-ios-2026-10-26] shots).
+    static var agentPickerPicked: [String] {
+        (value("ARBOS_RIG_AGENT_PICKED") ?? "").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
+    /// `ARBOS_RIG_AGENT_PICKER=<query>`: the picker's "Add agent" sheet starts open with that
+    /// query typed (empty = open, nothing typed).
+    static var agentPickerQuery: String? { value("ARBOS_RIG_AGENT_PICKER") }
     /// On a Secret page: open a sheet at once — `people` (Give a person access), `person` (the
     /// first People row's note sheet).
     static var secretSheet: String? { value("ARBOS_SECRET_SHEET") }
