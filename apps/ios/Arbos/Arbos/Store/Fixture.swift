@@ -665,6 +665,47 @@ extension AppModel {
     Rows are keyed by `{msg}#{part}.{block}` and re-spliced only when their bytes change.
     """
 
+    /// Rig (`ARBOS_SHOW=math`): Jacob's "write bubble sort" turn (2026-10-26 10:50, his Mac
+    /// screenshot) — a Python code card, then prose with inline TeX — for the math renderer's shots.
+    func fixtureBubbleSortReply(chatId: Id) {
+        var list = messages[chatId] ?? []
+        if let i = list.lastIndex(where: { $0.isStreaming }) {
+            list[i].status = .done
+            list[i].parts = [.text(id: "\(list[i].id)-t", text: "Got it.")]
+        }
+        let t = nowMs()
+        list.append(user(newId(), chatId, "write bubble sort in python", at: t))
+        list.append(assistant(newId(), chatId, AppModel.bubbleSortReply, at: t + 1_000))
+        messages[chatId] = list
+    }
+
+    /// The reply to "write bubble sort in python" from Jacob's 2026-10-26 screenshot, byte for
+    /// byte (the Mac fixture's `ARBOS_FIXTURE_REPLY=math`): `$O(n^2)$` rendered as raw text.
+    static let bubbleSortReply = """
+    Here is a standard implementation of bubble sort in Python:
+
+    ```python
+    def bubble_sort(arr):
+        n = len(arr)
+        for i in range(n):
+            swapped = False
+            for j in range(0, n - i - 1):
+                if arr[j] > arr[j + 1]:
+                    arr[j], arr[j + 1] = arr[j + 1], arr[j]
+                    swapped = True
+            # If no two elements swapped, list is already sorted
+            if not swapped:
+                break
+        return arr
+
+    # Example usage:
+    items = [64, 34, 25, 12, 22, 11, 90]
+    print(bubble_sort(items))  # Output: [11, 12, 22, 25, 34, 64, 90]
+    ```
+
+    It runs in $O(n^2)$ time in the worst and average cases, and $O(n)$ time when the array is already sorted thanks to the `swapped` flag. Space complexity is $O(1)$.
+    """
+
     /// Rig (`ARBOS_SHOW=links`): Jacob's "Read the latest from the New York post" turn — seven
     /// linked headlines as bullets, then one line of prose — for the link icons' shots.
     func fixtureNYPostReply(chatId: Id) {

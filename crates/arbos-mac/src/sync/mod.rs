@@ -85,7 +85,11 @@ pub enum SyncEvent {
         target: PictureTarget,
         image_key: Option<String>,
         url: Option<String>,
+        /// A short human sentence for the sheet ("Couldn't generate the image. The server took
+        /// too long."); the raw provider / transport words ride in `detail` for a Details
+        /// disclosure (Jacob, 2026-10-26: a raw reqwest error had spilled over the footer).
         error: Option<String>,
+        detail: Option<String>,
     },
     /// Error from a people-chat action (search, DM, members), shown inline.
     PeopleError(String),

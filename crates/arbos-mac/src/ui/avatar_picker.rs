@@ -119,7 +119,13 @@ pub struct Picker {
     /// Generate tab: the relay's picture, `(image_key, url)`.
     pub generated: Option<(String, String)>,
     pub generating: bool,
+    /// When the running generation started (the status line counts the seconds).
+    pub started_at: Option<std::time::Instant>,
+    /// The failure as one short sentence (the relay's, or the client's for a transport error).
     pub error: Option<String>,
+    /// The raw words behind it, shown only behind the Details disclosure.
+    pub error_detail: Option<String>,
+    pub details_open: bool,
 }
 
 impl Picker {
@@ -134,8 +140,17 @@ impl Picker {
             upload: None,
             generated: None,
             generating: false,
+            started_at: None,
             error: None,
+            error_detail: None,
+            details_open: false,
         }
+    }
+
+    /// Seconds since Generate was pressed, while it runs.
+    pub fn generating_for_s(&self) -> Option<u64> {
+        self.generating
+            .then(|| self.started_at.map(|t| t.elapsed().as_secs()).unwrap_or(0))
     }
 
     /// The Create sheet's pending picture for the entity about to exist: the file, or the
@@ -433,6 +448,8 @@ pub(crate) fn generate_body(
                 })
                 .child(if picker.generating {
                     "Generating…"
+                } else if picker.error.is_some() {
+                    "Try again"
                 } else if picker.generated.is_some() {
                     "Generate again"
                 } else {
@@ -443,16 +460,71 @@ pub(crate) fn generate_body(
             d.on_click(cx.listener(|this, _, _, cx| this.generate_avatar(cx)))
         });
     body.push(go.into_any_element());
-    if let Some(preview) = preview {
+    // The preview slot: the picture (dimmed under a spinner while painting), or — after a
+    // failure with Details open — the raw words, clamped to the slot so nothing reaches the
+    // footer (Jacob, 2026-10-26: a raw transport error had run over Cancel / Set avatar).
+    let slot_top = pill_top + PILL_H + 16.0;
+    let detail_open = picker.details_open && picker.error.is_some();
+    if detail_open {
+        let detail: SharedString = picker
+            .error_detail
+            .clone()
+            .unwrap_or_else(|| "No further detail.".into())
+            .into();
+        body.push(
+            div()
+                .id("avatar-generate-detail")
+                .debug_selector(|| "avatar-generate-detail".into())
+                .absolute()
+                .left(px(FIELD_INSET))
+                .right(px(FIELD_INSET))
+                .top(px(slot_top))
+                .h(px(PREVIEW))
+                .rounded(px(8.0))
+                .bg(p.cancel_bg)
+                .px(px(10.0))
+                .py(px(8.0))
+                .overflow_hidden()
+                .text_size(px(11.0))
+                .line_height(px(15.0))
+                .text_color(label_muted_for(theme))
+                .child(detail)
+                .into_any_element(),
+        );
+    } else if let Some(preview) = preview {
+        let painting = picker.generating;
         body.push(
             div()
                 .absolute()
                 .left_0()
                 .right_0()
-                .top(px(pill_top + PILL_H + 16.0))
+                .top(px(slot_top))
                 .flex()
                 .justify_center()
-                .child(preview)
+                .child(
+                    div()
+                        .relative()
+                        .size(px(PREVIEW))
+                        .child(
+                            div()
+                                .size(px(PREVIEW))
+                                .when(painting, |d| d.opacity(0.4))
+                                .child(preview),
+                        )
+                        .when(painting, |d| {
+                            d.child(
+                                div()
+                                    .id("avatar-generate-spinner")
+                                    .debug_selector(|| "avatar-generate-spinner".into())
+                                    .absolute()
+                                    .inset_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(crate::ui::cards::activity_spinner(28.0, theme, cx)),
+                            )
+                        }),
+                )
                 .into_any_element(),
         );
     }
@@ -462,35 +534,79 @@ pub(crate) fn generate_body(
             "Set avatar keeps this one."
         }
     };
+    if picker.generating {
+        // The seconds tick while it paints.
+        crate::ui::motion::PulseClock::request(cx);
+    }
     let status: SharedString = if let Some(e) = &picker.error {
         e.clone().into()
-    } else if picker.generating {
-        "Painting a picture — a few seconds.".into()
+    } else if let Some(s) = picker.generating_for_s() {
+        format!("Painting a picture — {s} s").into()
     } else if picker.generated.is_some() {
         keeps.into()
     } else {
         "A few words about the picture you want.".into()
     };
-    body.push(
-        div()
-            .id("avatar-generate-status")
-            .debug_selector(|| "avatar-generate-status".into())
-            .absolute()
-            .left(px(FIELD_INSET))
-            .right(px(FIELD_INSET))
-            .top(px(status_top))
-            .text_size(px(12.0))
-            .line_height(px(16.0))
-            .text_center()
-            .text_color(if picker.error.is_some() {
-                theme.danger
-            } else {
-                p.placeholder
-            })
-            .child(status)
-            .into_any_element(),
-    );
+    // One line, never more: the status slot sits 30 pt over the footer. An error gets a
+    // Details toggle beside the sentence; the raw words open in the preview slot above.
+    let mut line = div()
+        .id("avatar-generate-status")
+        .debug_selector(|| "avatar-generate-status".into())
+        .absolute()
+        .left(px(FIELD_INSET))
+        .right(px(FIELD_INSET))
+        .top(px(status_top))
+        .h(px(16.0))
+        .overflow_hidden()
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(8.0))
+        .text_size(px(12.0))
+        .line_height(px(16.0))
+        .text_color(if picker.error.is_some() {
+            theme.danger
+        } else {
+            p.placeholder
+        })
+        .child(
+            div()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(status),
+        );
+    if picker.error.is_some() {
+        line = line.child(
+            div()
+                .id("avatar-generate-details")
+                .debug_selector(|| "avatar-generate-details".into())
+                .flex_shrink_0()
+                .text_color(label_muted_for(theme))
+                .cursor_pointer()
+                .hover(|s| s.opacity(0.8))
+                .child(if detail_open {
+                    "Hide details"
+                } else {
+                    "Details"
+                })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(pk) = this.pending_picker_mut() {
+                        pk.details_open = !pk.details_open;
+                    }
+                    cx.notify();
+                })),
+        );
+    }
+    body.push(line.into_any_element());
     body
+}
+
+fn label_muted_for(theme: &Theme) -> Hsla {
+    match theme.appearance {
+        Appearance::Dark => hex(0x9A9A9A),
+        Appearance::Light => theme.text_muted,
+    }
 }
 
 /// The Upload tab's body: `preview` (when given) at `slots.top` with the "Choose a photo…" pill
@@ -1144,6 +1260,7 @@ mod me_picker_tests {
                     image_key: Some("avatar-gen-01.jpg".into()),
                     url: Some("https://relay.test/blob/users:gh_1/avatar-gen-01.jpg".into()),
                     error: None,
+                    detail: None,
                 },
                 cx,
             )
@@ -1364,5 +1481,116 @@ mod me_picker_tests {
             state.read_with(&*vcx, |s, _| s.media_viewer.is_none()),
             "initials open nothing"
         );
+    }
+
+    /// Jacob, 2026-10-26 ("nuke vampire"): a generation that times out must end in a clean
+    /// state — one short sentence inline above the footer, the raw words only behind Details,
+    /// the pill reading Try again and re-sending — and while it runs the sheet shows progress
+    /// (spinner over the preview, "Painting a picture — N s"). Nothing may reach the footer.
+    #[gpui::test]
+    fn a_timed_out_generation_shows_a_clean_error_with_details_and_try_again(
+        cx: &mut TestAppContext,
+    ) {
+        let (_rt, state, shell, vcx) = mount(cx, "");
+        let mut commands = state.update(vcx, |s, _| s.take_command_channel());
+        settle(&shell, vcx);
+        click(vcx, &shell, "me-avatar");
+        shell.update(vcx, |sh, cx| {
+            sh.avatar_prompt_input
+                .update(cx, |input, cx| input.set_text("nuke vampire".into(), cx));
+        });
+        click(vcx, &shell, "avatar-generate-go");
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ClientCommand::GenerateImage { .. })
+        ));
+
+        // Progress: the spinner sits on the preview and the status counts seconds.
+        assert!(
+            vcx.debug_bounds("avatar-generate-spinner").is_some(),
+            "spinner while painting"
+        );
+        let picker = shell
+            .read_with(&*vcx, |sh, _| sh.avatar_picker.clone())
+            .unwrap();
+        assert!(picker.generating && picker.started_at.is_some());
+        assert_eq!(picker.generating_for_s(), Some(0));
+        assert!(vcx.debug_bounds("avatar-generate-details").is_none());
+
+        // The relay's clean 504 (or the client's own timeout) arrives.
+        let raw = "HTTP 504 avatar_timeout — gpt-image-1-mini: operation timed out after 40 s (attempt 2 of 2); relay budget 75 s";
+        state.update(vcx, |s, cx| {
+            s.apply(
+                SyncEvent::ImageGenerated {
+                    target: Target::Me("gh_1".into()),
+                    image_key: None,
+                    url: None,
+                    error: Some("Couldn't generate the image. The server took too long.".into()),
+                    detail: Some(raw.into()),
+                },
+                cx,
+            )
+        });
+        settle(&shell, vcx);
+        let picker = shell
+            .read_with(&*vcx, |sh, _| sh.avatar_picker.clone())
+            .unwrap();
+        assert!(!picker.generating);
+        assert_eq!(
+            picker.error.as_deref(),
+            Some("Couldn't generate the image. The server took too long.")
+        );
+        assert_eq!(picker.error_detail.as_deref(), Some(raw));
+        assert!(!picker.details_open, "details start closed");
+        assert!(vcx.debug_bounds("avatar-generate-spinner").is_none());
+        assert!(vcx.debug_bounds("avatar-generate-detail").is_none());
+        // The status line stays above the footer: one line, inside the card, over the pills.
+        let status = vcx
+            .debug_bounds("avatar-generate-status")
+            .expect("status line");
+        let cancel = vcx.debug_bounds("avatar-cancel").expect("Cancel");
+        let set = vcx.debug_bounds("avatar-set").expect("Set avatar");
+        assert!(
+            status.bottom() <= cancel.top() && status.bottom() <= set.top(),
+            "the error sits above the footer: status {status:?} cancel {cancel:?}"
+        );
+        assert!(
+            f32::from(status.size.height) <= 16.5,
+            "one line: {status:?}"
+        );
+        assert!(
+            vcx.debug_bounds("avatar-generate-details").is_some(),
+            "a Details toggle"
+        );
+
+        // Details: the raw words open in the preview slot, still above the footer; then close.
+        click(vcx, &shell, "avatar-generate-details");
+        let detail = vcx
+            .debug_bounds("avatar-generate-detail")
+            .expect("the detail box");
+        assert!(
+            detail.bottom() <= status.top(),
+            "detail {detail:?} above status {status:?}"
+        );
+        assert!(shell.read_with(&*vcx, |sh, _| sh
+            .avatar_picker
+            .as_ref()
+            .is_some_and(|pk| pk.details_open)));
+        click(vcx, &shell, "avatar-generate-details");
+        assert!(vcx.debug_bounds("avatar-generate-detail").is_none());
+
+        // Try again re-sends the same prompt and clears the error.
+        click(vcx, &shell, "avatar-generate-go");
+        match commands.try_recv() {
+            Ok(ClientCommand::GenerateImage { prompt, .. }) => assert_eq!(prompt, "nuke vampire"),
+            other => panic!("expected GenerateImage, got {other:?}"),
+        }
+        let picker = shell
+            .read_with(&*vcx, |sh, _| sh.avatar_picker.clone())
+            .unwrap();
+        assert!(picker.generating && picker.error.is_none() && picker.error_detail.is_none());
+        assert!(vcx.debug_bounds("avatar-generate-spinner").is_some());
+        // Set avatar stays disabled through all of it (nothing to set).
+        assert!(!picker.dirty());
     }
 }
