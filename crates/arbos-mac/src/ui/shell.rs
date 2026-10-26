@@ -3,6 +3,7 @@
 //! and the debug Details drawer. Sheets (Settings, New Message, agent profile)
 //! float centred over everything.
 
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -483,6 +484,13 @@ impl Shell {
                 this.open_avatar_picker(target, cx);
                 if let Some(pk) = this.avatar_picker.as_mut() {
                     pk.tab = tab;
+                }
+                // Rig: `…:avatar:upload=<path>` — the panel's pick, made for the shot.
+                if let Some(path) = state.update(cx, |s, _| s.avatar_rig_upload.take()) {
+                    if let Some(pk) = this.avatar_picker.as_mut() {
+                        pk.upload = Some(path);
+                        pk.reset = false;
+                    }
                 }
                 // Rig: type the prompt and press Generate so a shot shows prompt → result.
                 if let Some(prompt) = state.update(cx, |s, _| s.avatar_rig_prompt.take()) {
@@ -1514,16 +1522,24 @@ impl Shell {
             let Ok(Some(path)) = rx.await else {
                 return;
             };
-            let _ = this.update(cx, |this, cx| {
-                if let Some(pk) = this.pending_picker_mut() {
-                    pk.upload = Some(path);
-                    pk.reset = false;
-                    pk.error = None;
-                }
-                cx.notify();
-            });
+            let _ = this.update(cx, |this, cx| this.avatar_file_chosen(path, cx));
         })
         .detach();
+    }
+
+    /// The panel's pick lands in the open picker (the sheet's or a Create sheet's). The preview
+    /// draws the mastered copy from the avatar cache (`file://` through the sync client), never
+    /// the raw file through the GPU sampler.
+    pub(crate) fn avatar_file_chosen(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, _| {
+            s.want_avatar(avatar_picker::file_url(&path));
+        });
+        if let Some(pk) = self.pending_picker_mut() {
+            pk.upload = Some(path);
+            pk.reset = false;
+            pk.error = None;
+        }
+        cx.notify();
     }
 
     /// "Set avatar": apply the sheet's pending choice and close it.
@@ -4040,6 +4056,7 @@ impl Render for Shell {
         let theme = Theme::of(cx).clone();
         let width: f32 = window.viewport_size().width.into();
         self.fullscreen = window.is_fullscreen();
+        crate::ui::picture_fit::note_scale_factor(window.scale_factor());
         let state = self.state.read(cx);
         let narrow = state.window_is_narrow(width);
         let sidebar_hidden = state.rail_collapsed || narrow;
