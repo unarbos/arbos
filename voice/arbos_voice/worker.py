@@ -77,6 +77,7 @@ from .prompts import (
     system_prompt,
 )
 from .relay import EventBatcher, Relay, RelayError, ToolPending
+from .updates import CallUpdates, Update, context_item
 from .vision import Vision, wants_a_look
 
 log = logging.getLogger("arbos-voice")
@@ -226,6 +227,8 @@ class CallState:
     window: list[dict] = field(default_factory=list)
     # Last agent transcript line we wrote (skip interrupted + near-duplicate paraphrases).
     speaking_since: float | None = None
+    # When the agent last started a line (the ask_agent nudge: did it speak after the tool?).
+    last_speech_started_at: float = 0.0
     last_speech_s: float = 0.0
     last_agent_text: str = ""
     last_agent_at: float = 0.0
@@ -262,6 +265,7 @@ class VoiceCall:
         self.voice: str = meta.get("voice") or cfg.voice
         self.vision_enabled: bool = meta.get("vision_enabled", True) is not False
         self.vision: Vision | None = None
+        self.updates: CallUpdates | None = None
         self.relay = Relay(cfg, http)
         self.events = EventBatcher(self.relay, self.call_id, self.project_id)
         self.meter = CallMeter(model=cfg.model, stt_model=cfg.stt_model)
@@ -418,6 +422,7 @@ class VoiceCall:
             await self.start_group_listening()
         self.hook_realtime()
         self.start_vision()
+        self.start_updates()
         log.info("session started in %s mode (humans=%d, chattiness=%s, voice=%s, turn_detection=%s, vision=%s)", self.state.mode, len(self.humans()), self.chattiness, self.voice, self.cfg.turn_detection, "on" if self.vision_enabled else "off")
         self.spawn(self.usage_loop())
         self.spawn(self.idle_loop())
@@ -583,6 +588,8 @@ class VoiceCall:
         if self.vision:
             self.sync_vision_meter()
             await self.vision.stop()
+        if self.updates:
+            await self.updates.stop()
         try:
             await self.relay.usage(self.call_id, self.project_id, self.meter.usage(ended=True))
         except Exception as e:
@@ -609,6 +616,7 @@ class VoiceCall:
             self.state.agent_state = ev.new_state
             if ev.new_state == "speaking":
                 self.state.speaking_since = now
+                self.state.last_speech_started_at = now
                 src = self.state.pending_ttfa_from
                 if src is not None:
                     ttfa = int((now - src) * 1000)
@@ -1032,6 +1040,54 @@ class VoiceCall:
         self.spawn(self.finish("asked"))
         return "You are leaving the call now. Do not say anything else."
 
+    # ---- the chat, live, for the call (#1832) ---------------------------------------------------------
+
+    def room_quiet(self) -> bool:
+        """Nobody is talking and the agent is idle: a pause the agent may use."""
+        if self.agent_speaking():
+            return False
+        if self.state.mode == "duplex":
+            return self.state.user_state != "speaking"
+        return not (self.listeners and self.listeners.anyone_speaking()) and (
+            time.monotonic() - self.state.last_human_speech_at >= self.cfg.group_silence_s
+        )
+
+    def add_context(self, text: str) -> None:
+        """A note into the model's conversation, no reply asked for."""
+        rt = None
+        try:
+            rt = self.agent.realtime_llm_session if self.agent else None
+        except Exception:
+            rt = None
+        if rt is None:
+            return
+        rt.send_event(context_item(text))
+
+    async def say(self, instructions: str) -> None:
+        """One reply from the voice agent, played out. Never interrupts: callers wait for a pause."""
+        if self.state.leaving or not self.session or self.state.muted:
+            return
+        async with self._speak_lock:
+            if self.state.leaving or not self.session or self.state.muted:
+                return
+            handle = self.session.generate_reply(instructions=instructions)
+            try:
+                await asyncio.wait_for(handle.wait_for_playout(), timeout=45.0)
+            except asyncio.TimeoutError:
+                pass
+
+    def start_updates(self) -> None:
+        self.updates = CallUpdates(
+            agent_name=self.agent_name,
+            fetch=lambda after, wait: self.relay.inbox(self.call_id, self.project_id, after, wait),
+            add_context=self.add_context,
+            speak=self.say,
+            quiet=self.room_quiet,
+            leaving=lambda: self.state.leaving,
+            on_update=lambda u: self.event("update", kind=u.kind, message_id=u.message_id, chars=len(u.text)),
+        )
+        self.updates.start()
+
     # ---- vision ------------------------------------------------------------------------------------
 
     def start_vision(self) -> None:
@@ -1130,16 +1186,9 @@ class VoiceCall:
             return "Cancelled."
         except ToolPending:
             self.state.open_work -= 1
-            # Relay already timed out; chat may still get the answer. Say so out loud —
-            # returning only a tool string often leaves the call silent.
-            label = label_of(speaker) if speaker else "them"
-            self.spawn(
-                self._speak_callback(
-                    f"Tell {label} in one short sentence that the answer will show up in the chat when it is ready. "
-                    f"You must speak that line out loud."
-                )
-            )
-            return "Stay silent — that update is being spoken to the person."
+            # The relay's wait ran out; the answer lands in the chat later and reaches this
+            # call through the inbox. Say so.
+            return "The agent is still working on it; the answer will show up in the chat (and you will hear of it). Tell the person that in one short sentence."
         except RelayError as e:
             self.state.open_work -= 1
             self.event("tool", name="ask_agent", status="failed", request_id=request_id, error=str(e.body)[:300], ms=int((time.monotonic() - t0) * 1000))
@@ -1158,83 +1207,65 @@ class VoiceCall:
             return f"The agent could not do it: {result.get('error') or 'unknown error'}. Say so briefly."
         text = (result.get("text") or "").strip()
         log.info("ask_agent[%s] done in %d ms: %s", request_id, ms, text[:120])
-        # Do not hand the result to the realtime model and hope it speaks: after a multi-second
-        # tool it often stays silent while the prose only appears in the chat. Speak it ourselves
-        # the same way as the deferred path (generate_reply call-back).
+        # The same bubble also arrives through the inbox: seen once.
+        if self.updates:
+            self.updates.mark_seen(str(result.get("message_id") or ""))
+        # The voice agent speaks the result itself (Jacob's rule: one speaker). A realtime
+        # model sometimes stays silent after a slow tool; `nudge_after_tool` asks it once.
         label = label_of(speaker) if speaker else "them"
-        self.spawn(self._speak_tool_result(label, text))
+        self.spawn(self.nudge_after_tool(label))
         return (
-            "The answer is ready and will be spoken to the person next. "
-            "Say nothing else — do not summarise or read the result."
+            f"Result from your agent (the full text is already in the chat). Tell {label} what matters "
+            f"in one or two spoken sentences now — no tables, links or phone numbers:\n{text[:3000]}"
         )
 
-    async def wait_for_agent_idle(self, max_wait: float = 15.0) -> None:
-        """Do not start a new spoken reply while we are still talking (a second
-        generate_reply cancels the first and is often refused)."""
-        deadline = time.monotonic() + max_wait
-        while self.agent_speaking() and time.monotonic() < deadline:
-            await asyncio.sleep(0.05)
+    async def nudge_after_tool(self, label: str) -> None:
+        """If the agent said nothing within a few seconds of a tool result, ask it to."""
+        since = time.monotonic()
+        await asyncio.sleep(3.0)
+        if self.state.leaving or self.state.last_speech_started_at >= since or self.agent_speaking():
+            return
+        if self.state.mode == "duplex" and self.state.user_state == "speaking":
+            return
+        log.info("agent silent after the tool result; nudging")
+        await self.say(f"Tell {label} the result of the tool you just ran, in one or two short spoken sentences.")
 
     async def deliver_later(self, task: asyncio.Task, request_id: str, speaker: dict) -> None:
-        """Spoken call-back after ask_agent outlasts the quick wait: the model already
-        said it would report back; when the box finishes, say the answer on the call."""
-        label = label_of(speaker) if speaker else "them"
+        """ask_agent outlasted the quick wait: the model already said it would report back. When
+        the box finishes, the answer joins the call like any chat update — into the context,
+        then a short spoken summary at the next pause (the inbox may bring the same bubble;
+        it is seen once)."""
+        agent = {"kind": "agent", "name": self.agent_name, "handle": self.agent_sender.get("handle") or ""}
         try:
             result = await task
         except ToolPending:
             self.state.open_work -= 1
-            # Relay timed out; the answer may still land in chat. Tell them so out loud —
-            # previously we returned silently and the call-back never happened.
-            log.warning("deferred tool %s still pending after relay wait; prompting chat fallback", request_id)
-            await self._speak_callback(
-                f"Tell {label} in one short sentence that the answer will show up in the chat when it is ready. "
-                f"You must speak that line out loud."
-            )
+            log.warning("deferred tool %s still pending after relay wait; the inbox carries the answer", request_id)
+            if self.updates:
+                await self.updates.handle(
+                    Update(
+                        kind="quick",
+                        message_id=f"pending:{request_id}",
+                        text="The task from this call is still running on the computer; its answer will show up in the chat when it is ready.",
+                        sender=agent,
+                    )
+                )
             return
         except Exception as e:
             self.state.open_work -= 1
             log.warning("deferred tool %s failed: %s", request_id, e)
-            await self._speak_callback(
-                f"Tell {label} in one short sentence that the earlier task failed. You must speak that line out loud."
-            )
+            if self.updates:
+                await self.updates.handle(
+                    Update(kind="result", message_id=f"failed:{request_id}", text=f"The task from this call failed: {e}", sender=agent)
+                )
             return
         self.state.open_work -= 1
         text = (result.get("text") or "").strip() if result.get("ok") else f"it failed: {result.get('error')}"
-        self.event("tool", name="ask_agent", status="done" if result.get("ok") else "failed", request_id=request_id, message_id=result.get("message_id"), deferred=True)
-        log.info("deferred tool %s done; speaking call-back", request_id)
-        await self._speak_tool_result(label, text)
-
-    async def _speak_tool_result(self, label: str, text: str) -> None:
-        """Read ask_agent's answer out loud on the call (chat already has the full prose)."""
-        await self._speak_callback(
-            f"Speak out loud to {label} now. Summarise what matters in one or two short spoken sentences. "
-            f"They are on a voice call and cannot hear the chat. You must speak — do not stay silent. "
-            f"Result:\n{text[:3000]}"
-        )
-
-    async def _speak_callback(self, instructions: str) -> None:
-        """Speak a call-back: wait out any in-flight line, then play the answer on the call."""
-        if self.state.leaving or not self.session or self.state.muted:
-            return
-        async with self._speak_lock:
-            if self.state.leaving or not self.session or self.state.muted:
-                return
-            await self.wait_for_silence()
-            await self.wait_for_agent_idle()
-            if self.state.leaving or not self.session or self.state.muted:
-                return
-            if self.agent_speaking():
-                # Still talking after the wait — cut it so the result can play.
-                try:
-                    self.session.interrupt()
-                except Exception as e:
-                    log.warning("interrupt before call-back failed: %s", e)
-                await asyncio.sleep(0.15)
-            try:
-                handle = self.session.generate_reply(instructions=instructions)
-                await asyncio.wait_for(handle.wait_for_playout(), timeout=45.0)
-            except Exception as e:
-                log.warning("spoken call-back failed: %s", e)
+        message_id = str(result.get("message_id") or f"deferred:{request_id}")
+        self.event("tool", name="ask_agent", status="done" if result.get("ok") else "failed", request_id=request_id, message_id=message_id, deferred=True)
+        log.info("deferred tool %s done; into the call's context", request_id)
+        if self.updates:
+            await self.updates.handle(Update(kind="result", message_id=message_id, text=text, sender=agent))
 
     # ---- loops ----------------------------------------------------------------------------------------
 
