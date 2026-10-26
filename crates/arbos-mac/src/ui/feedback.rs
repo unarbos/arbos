@@ -783,13 +783,22 @@ fn capture_window(window: &mut Window) -> Result<Shot> {
     Shot::from_bytes(bytes, "Arbos window".into())
 }
 
+/// The Arbos window's AppKit window number for `CGWindowListCreateImage` / `screencapture -l`.
+///
+/// When the user has switched to another app, `keyWindow` and `mainWindow` are often nil even
+/// though the GPUI window is still on screen (same case as sign-in's `choose_anchor`). Fall
+/// back to any visible window so agent `feedback_capture` still gets a picture instead of
+/// `failed: no key window` ([feedback app-01M5WEV45EKGZKARM2DC79JGK0]).
 #[cfg(target_os = "macos")]
 fn key_window_number() -> Option<i64> {
     use objc2::MainThreadMarker;
     use objc2_app_kit::NSApplication;
     let mtm = MainThreadMarker::new()?;
     let app = NSApplication::sharedApplication(mtm);
-    let window = app.keyWindow().or_else(|| app.mainWindow())?;
+    let window = app
+        .keyWindow()
+        .or_else(|| app.mainWindow())
+        .or_else(|| app.windows().to_vec().into_iter().find(|w| w.isVisible()))?;
     let number = window.windowNumber();
     (number > 0).then_some(number as i64)
 }
