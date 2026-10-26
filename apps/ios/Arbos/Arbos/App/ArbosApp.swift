@@ -1,3 +1,4 @@
+import LocalAuthentication
 import SwiftUI
 
 @main
@@ -14,11 +15,127 @@ struct ArbosApp: App {
     }
 }
 
+/// On-device app lock (Face ID / Touch ID) and App Switcher privacy
+/// ([feedback app-01M5WRKRJGVD9DPE1R9TPAER3M]). Settings live on `AppModel`;
+/// this object only holds the live lock / blur state.
+@MainActor
+final class AppLock: ObservableObject {
+    static let shared = AppLock()
+
+    @Published private(set) var isLocked = false
+    @Published private(set) var hideForSwitcher = false
+    /// Avoid stacking Face ID prompts when scenePhase flips rapidly.
+    private var authenticating = false
+    /// Skip one lock-on-leave right after a successful Settings enable prompt.
+    private var suppressNextBackgroundLock = false
+
+    static var biometryLabel: String {
+        let ctx = LAContext()
+        _ = ctx.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil)
+        switch ctx.biometryType {
+        case .faceID: return "Face ID"
+        case .touchID: return "Touch ID"
+        case .opticID: return "Optic ID"
+        case .none: return "Face ID"
+        @unknown default: return "Face ID"
+        }
+    }
+
+    static var biometryAvailable: Bool {
+        var error: NSError?
+        return LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error)
+    }
+
+    func lock() {
+        isLocked = true
+    }
+
+    func unlock() {
+        isLocked = false
+    }
+
+    /// Prompt Face ID / Touch ID. `suppressBackgroundLock` skips one leave-lock
+    /// so turning the setting on in Settings does not immediately re-cover the sheet.
+    func authenticate(reason: String, suppressBackgroundLock: Bool = false) async throws {
+        let ctx = LAContext()
+        ctx.localizedCancelTitle = "Cancel"
+        var error: NSError?
+        guard ctx.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error) else {
+            let message = error?.localizedDescription ?? "\(Self.biometryLabel) is not available on this device."
+            throw AuthError(message: message)
+        }
+        do {
+            let ok = try await ctx.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: reason)
+            guard ok else { throw AuthError(message: "\(Self.biometryLabel) was not recognized.") }
+            isLocked = false
+            if suppressBackgroundLock { suppressNextBackgroundLock = true }
+        } catch let err as AuthError {
+            throw err
+        } catch let err as LAError where err.code == .userCancel || err.code == .appCancel || err.code == .systemCancel {
+            throw AuthError(message: "cancelled")
+        } catch {
+            throw AuthError(message: error.localizedDescription)
+        }
+    }
+
+    /// Prompt to clear the lock screen; failures leave the app locked.
+    func unlockIfNeeded(reason: String = "Unlock Arbos") async {
+        guard isLocked, !authenticating else { return }
+        authenticating = true
+        defer { authenticating = false }
+        do {
+            try await authenticate(reason: reason)
+        } catch {
+            // Stay locked; the Unlock button retries.
+        }
+    }
+
+    func handleScenePhase(_ phase: ScenePhase, model: AppModel) {
+        guard model.isPaired, !model.isFixture else {
+            isLocked = false
+            hideForSwitcher = false
+            return
+        }
+        switch phase {
+        case .active:
+            hideForSwitcher = false
+            if model.unlockWithFaceID, isLocked {
+                Task { await unlockIfNeeded() }
+            }
+        case .inactive:
+            if model.hideAppSwitcherContent {
+                hideForSwitcher = true
+            }
+        case .background:
+            hideForSwitcher = model.hideAppSwitcherContent
+            if model.unlockWithFaceID, model.lockWhenLeaving {
+                if suppressNextBackgroundLock {
+                    suppressNextBackgroundLock = false
+                } else {
+                    isLocked = true
+                }
+            }
+        @unknown default:
+            break
+        }
+    }
+
+    /// Cold launch: lock before the first frame when Face ID is on.
+    func applyLaunchLock(model: AppModel) {
+        guard model.isPaired, !model.isFixture, model.unlockWithFaceID else {
+            isLocked = false
+            return
+        }
+        isLocked = true
+    }
+}
+
 struct RootView: View {
     @EnvironmentObject private var model: AppModel
     @ObservedObject private var push = PushManager.shared
     @ObservedObject private var feedback = FeedbackCenter.shared
     @ObservedObject private var calls = CallManager.shared
+    @ObservedObject private var appLock = AppLock.shared
     @Environment(\.colorScheme) private var systemScheme
     @Environment(\.scenePhase) private var scenePhase
     @State private var showPrimer = false
@@ -42,8 +159,15 @@ struct RootView: View {
                     .zIndex(10)
                     .transition(.asymmetric(insertion: .identity, removal: .opacity))
             }
+            if appLock.hideForSwitcher || (appLock.isLocked && model.isPaired && model.unlockWithFaceID && !model.isFixture) {
+                AppLockCover(locked: appLock.isLocked && model.unlockWithFaceID)
+                    .zIndex(40)
+                    .transition(.opacity)
+            }
         }
         .animation(.easeInOut(duration: 0.25), value: model.firstLogin == nil)
+        .animation(.easeOut(duration: 0.15), value: appLock.isLocked)
+        .animation(.easeOut(duration: 0.12), value: appLock.hideForSwitcher)
         .onAppear {
             #if DEBUG
             PerfLog.shared.startIfRequested()
@@ -53,6 +177,10 @@ struct RootView: View {
             if DebugHooks.show == "onboarding" {
                 model.demoFirstLogin(stage: DebugHooks.onboardingStage)
                 if DebugHooks.onboardingProfile { model.needsProfileSetup = true }
+            }
+            appLock.applyLaunchLock(model: model)
+            if appLock.isLocked {
+                Task { await appLock.unlockIfNeeded() }
             }
         }
         .environment(\.theme, theme)
@@ -133,7 +261,19 @@ struct RootView: View {
             // After `.background`, rooms redial so Syncing… cannot stick
             // ([feedback app-01M5MVNNNBZHJWSRCZ81S04C8E]).
             model.noteScenePhase(phase)
+            appLock.handleScenePhase(phase, model: model)
             if phase == .active { Task { await push.refreshStatus(); await model.refreshUnread(); await CallManager.shared.sendVoipTokenIfNeeded(); await model.checkForUpdate() } }
+        }
+        .onChange(of: model.isPaired) { _, paired in
+            if paired {
+                appLock.applyLaunchLock(model: model)
+                if appLock.isLocked { Task { await appLock.unlockIfNeeded() } }
+            } else {
+                appLock.unlock()
+            }
+        }
+        .onChange(of: model.unlockWithFaceID) { _, on in
+            if !on { appLock.unlock() }
         }
         // Safari / Mac-style connector OAuth: relay redirects to arbos://connectors/callback.
         .onOpenURL { url in
@@ -191,6 +331,55 @@ struct RootView: View {
 struct MainShellView: View {
     var body: some View {
         HomeView()
+    }
+}
+
+/// Full-screen cover while Face ID is required, or a plain blur for the App Switcher.
+private struct AppLockCover: View {
+    @Environment(\.theme) private var theme
+    @ObservedObject private var appLock = AppLock.shared
+    let locked: Bool
+    @State private var busy = false
+
+    var body: some View {
+        ZStack {
+            theme.bg.ignoresSafeArea()
+            if locked {
+                VStack(spacing: 18) {
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: 36, weight: .semibold))
+                        .foregroundStyle(theme.text)
+                    Text("Arbos is locked")
+                        .font(theme.font(22, weight: .semibold))
+                        .foregroundStyle(theme.text)
+                    Text("Use \(AppLock.biometryLabel) to open your chats.")
+                        .font(theme.font(Theme.small))
+                        .foregroundStyle(theme.muted)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 32)
+                    Button {
+                        Task {
+                            busy = true
+                            defer { busy = false }
+                            await appLock.unlockIfNeeded()
+                        }
+                    } label: {
+                        Text(busy ? "Waiting…" : "Unlock with \(AppLock.biometryLabel)")
+                            .font(theme.font(Theme.body, weight: .semibold))
+                            .foregroundStyle(theme.onPrimary)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 50)
+                            .background(Capsule().fill(theme.primary))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(busy)
+                    .padding(.horizontal, 40)
+                    .padding(.top, 8)
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(locked ? .isModal : [])
     }
 }
 

@@ -6,6 +6,7 @@
 //   Account              Credits · Connected apps · On this iPhone
 //   Agents & Computer    Machine
 //   Notifications        Notifications (system permission + relay push)
+//   Privacy · Security   Group adds · Face ID unlock and related options
 //   Appearance           Theme · Surface (Glass / Matte)
 //   Help & About         Send feedback · About · Relay (debug builds)
 //   Sign out
@@ -43,6 +44,7 @@ struct SettingsView: View {
     @State private var showCreditsPage = DebugHooks.settingsPage == "credits"
     @State private var showNotificationsPage = DebugHooks.settingsPage == "notifications"
     @State private var showPrivacyPage = DebugHooks.settingsPage == "privacy"
+    @State private var showSecurityPage = DebugHooks.settingsPage == "security"
     @State private var showAboutPage = DebugHooks.settingsPage == "about"
     @State private var showDevicesPage = DebugHooks.settingsPage == "devices"
     @State private var showRelayPage = DebugHooks.settingsPage == "relay"
@@ -134,6 +136,7 @@ struct SettingsView: View {
             .navigationDestination(isPresented: $showCreditsPage) { CreditsPage() }
             .navigationDestination(isPresented: $showNotificationsPage) { NotificationsPage() }
             .navigationDestination(isPresented: $showPrivacyPage) { PrivacyPage() }
+            .navigationDestination(isPresented: $showSecurityPage) { SecurityPage() }
             .navigationDestination(isPresented: $showAboutPage) { AboutPage() }
             .navigationDestination(isPresented: $showDevicesPage) { DevicesPage() }
             .navigationDestination(isPresented: $showRelayPage) {
@@ -210,6 +213,9 @@ struct SettingsView: View {
             }),
             AnyView(NavigationLink { PrivacyPage() } label: {
                 SettingsRow(icon: "hand.raised.fill", title: "Privacy", value: privacySummary)
+            }),
+            AnyView(NavigationLink { SecurityPage() } label: {
+                SettingsRow(icon: "lock.fill", title: "Security", value: securitySummary)
             }),
             AnyView(NavigationLink { AppearancePage() } label: {
                 SettingsRow(icon: "circle.lefthalf.filled", title: "Appearance", value: appearanceSummary)
@@ -328,6 +334,10 @@ struct SettingsView: View {
 
     private var privacySummary: String {
         (GroupAddPolicy(rawValue: model.groupAddPolicy) ?? .anyone).summary
+    }
+
+    private var securitySummary: String? {
+        model.unlockWithFaceID ? AppLock.biometryLabel : nil
     }
 
     /// "12.4 MB · 23 chats" from the on-device store (#929).
@@ -1038,6 +1048,99 @@ struct PrivacyPage: View {
             Button("OK", role: .cancel) { error = nil }
         } message: {
             Text(error ?? "")
+        }
+    }
+}
+
+/// Optional Face ID unlock and related on-device privacy toggles
+/// ([feedback app-01M5WRKRJGVD9DPE1R9TPAER3M]). Off by default; does not change
+/// GitHub sign-in — it only gates opening the already-signed-in app.
+struct SecurityPage: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var error: String?
+    @State private var enablingFaceID = false
+
+    var body: some View {
+        SettingsPage(title: "Security") {
+            SettingsGroup(
+                header: "Unlock",
+                footer: "When on, \(AppLock.biometryLabel) is required to open Arbos after launch\(model.lockWhenLeaving ? " and whenever you leave the app" : ""). Your GitHub sign-in is unchanged."
+            ) {
+                PaneToggleRow(
+                    title: AppLock.biometryLabel,
+                    subtitle: AppLock.biometryAvailable
+                        ? "Require \(AppLock.biometryLabel) to open Arbos"
+                        : "Not available on this device",
+                    isOn: Binding(
+                        get: { model.unlockWithFaceID },
+                        set: { on in Task { await setFaceID(on) } }
+                    )
+                )
+                .disabled((!AppLock.biometryAvailable && !model.unlockWithFaceID) || enablingFaceID)
+                .opacity(AppLock.biometryAvailable || model.unlockWithFaceID ? 1 : 0.5)
+
+                PaneToggleRow(
+                    title: "Lock when leaving",
+                    subtitle: "Ask again when you leave Arbos, not only on a fresh launch",
+                    isOn: Binding(
+                        get: { model.lockWhenLeaving },
+                        set: { on in
+                            model.lockWhenLeaving = on
+                            if on, !model.unlockWithFaceID {
+                                Task { await setFaceID(true) }
+                            }
+                        }
+                    )
+                )
+                .disabled(!model.unlockWithFaceID && !AppLock.biometryAvailable)
+                .opacity(model.unlockWithFaceID || AppLock.biometryAvailable ? 1 : 0.5)
+            }
+
+            SettingsGroup(
+                header: "Privacy on this iPhone",
+                footer: "Hides chat previews when you switch apps. Nothing leaves the phone."
+            ) {
+                PaneToggleRow(
+                    title: "Hide in App Switcher",
+                    subtitle: "Blur Arbos while you are away",
+                    isOn: $model.hideAppSwitcherContent
+                )
+            }
+        }
+        .alert("Arbos", isPresented: Binding(
+            get: { error != nil },
+            set: { if !$0 { error = nil } }
+        )) {
+            Button("OK", role: .cancel) { error = nil }
+        } message: {
+            Text(error ?? "")
+        }
+    }
+
+    private func setFaceID(_ on: Bool) async {
+        if !on {
+            model.unlockWithFaceID = false
+            model.lockWhenLeaving = false
+            AppLock.shared.unlock()
+            return
+        }
+        enablingFaceID = true
+        defer { enablingFaceID = false }
+        do {
+            try await AppLock.shared.authenticate(
+                reason: "Turn on \(AppLock.biometryLabel) for Arbos",
+                suppressBackgroundLock: true
+            )
+            model.unlockWithFaceID = true
+            if !model.lockWhenLeaving { model.lockWhenLeaving = true }
+        } catch {
+            model.unlockWithFaceID = false
+            let msg = (error as? LocalizedError)?.errorDescription
+                ?? "Could not enable \(AppLock.biometryLabel)."
+            // User cancelled the Face ID sheet — leave the toggle off quietly.
+            if msg != "cancelled" {
+                self.error = msg
+            }
         }
     }
 }

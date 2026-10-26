@@ -127,6 +127,21 @@ final class AppModel: ObservableObject {
         didSet { UserDefaults.standard.set(surfaceSetting, forKey: "surface") }
     }
 
+    /// Optional: require Face ID / Touch ID to open the app after launch or leaving
+    /// ([feedback app-01M5WRKRJGVD9DPE1R9TPAER3M]). Off by default.
+    @Published var unlockWithFaceID: Bool = UserDefaults.standard.bool(forKey: "security.unlockWithFaceID") {
+        didSet { UserDefaults.standard.set(unlockWithFaceID, forKey: "security.unlockWithFaceID") }
+    }
+    /// Optional: blur the UI in the App Switcher so chat previews stay private.
+    @Published var hideAppSwitcherContent: Bool = UserDefaults.standard.bool(forKey: "security.hideAppSwitcherContent") {
+        didSet { UserDefaults.standard.set(hideAppSwitcherContent, forKey: "security.hideAppSwitcherContent") }
+    }
+    /// Optional: lock as soon as the app goes to the background (needs Face ID on).
+    /// When off, Face ID still runs on a cold launch.
+    @Published var lockWhenLeaving: Bool = UserDefaults.standard.bool(forKey: "security.lockWhenLeaving") {
+        didSet { UserDefaults.standard.set(lockWhenLeaving, forKey: "security.lockWhenLeaving") }
+    }
+
     /// Who may add me to people groups (`anyone` | `people_i_know` | `nobody`).
     /// Synced from `GET /me` → `privacy.group_add`; written with `PATCH /me`.
     @Published var groupAddPolicy: String = GroupAddPolicy.anyone.rawValue

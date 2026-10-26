@@ -96,7 +96,7 @@ enum DebugHooks {
     static var onboardingAutoplay: Bool { value("ARBOS_ONBOARDING_AUTOPLAY") == "1" }
     /// With `ARBOS_SHOW=onboarding`: also present the name/handle sheet over the terminal (rig).
     static var onboardingProfile: Bool { value("ARBOS_ONBOARDING_PROFILE") == "1" }
-    /// With `ARBOS_SHOW=settings`: the Settings page to land on — appearance, textsize, connectors, secrets, machine, credits, notifications, about, relay;
+    /// With `ARBOS_SHOW=settings`: the Settings page to land on — appearance, textsize, connectors, secrets, machine, credits, notifications, privacy, security, about, relay;
     /// `avatar[-generate|-upload]` opens the avatar picker over my picture.
     static var settingsPage: String? { value("ARBOS_SETTINGS_PAGE") }
     /// With the avatar picker open on Generate: type this prompt and press Generate (a shot
