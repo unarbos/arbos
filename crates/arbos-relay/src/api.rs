@@ -65,6 +65,10 @@ pub async fn healthz(State(state): State<AppState>) -> Response {
             "snapshot".into(),
             serde_json::json!(state.default_snapshot()),
         );
+        // The image provider's last probe (`images::probe_provider`): an outage, a revoked key or
+        // a retired model shows here before a person's Generate fails.
+        let images = state.image_health.try_lock().ok().and_then(|g| g.clone());
+        obj.insert("images".into(), serde_json::json!(images));
     }
     Json(v).into_response()
 }
