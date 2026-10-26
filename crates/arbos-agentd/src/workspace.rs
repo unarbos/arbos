@@ -457,7 +457,15 @@ impl Supervisor {
                     // The owner's profile (address name) rides on every listing: the agent
                     // addresses the owner from it, live, never from a row's `senderName`.
                     if let Some(o) = e.get("owner").or_else(|| listing.get("owner")) {
+                        let before = w.agent.people.owner_profile();
                         w.agent.people.set_owner_profile(o);
+                        if w.agent.people.owner_profile() != before {
+                            // The prompt's "Your owner" section follows the profile; the pi
+                            // session re-reads it (at once when idle, else after the turn).
+                            w.agent
+                                .refresh_session_prompt("owner profile changed")
+                                .await;
+                        }
                         let names: Vec<String> = ["address_name", "name"]
                             .iter()
                             .filter_map(|k| o.get(*k).and_then(Value::as_str))
