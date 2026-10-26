@@ -430,6 +430,7 @@ async fn announce_ended(
     reason: &str,
     writer_device: Option<&str>,
 ) {
+    state.voice_inbox.close_call(&call.id).await;
     let chat = chat_ref_of(call);
     let ended_at = call.ended_at.unwrap_or_else(now_ms);
     let duration_s = ((ended_at - call.started_at) / 1000).max(0);

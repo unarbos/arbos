@@ -4418,7 +4418,16 @@ impl Agent {
             turn.ack_text.as_str()
         };
         if matches!(final_status, MessageStatus::Done) && !announce.trim().is_empty() {
-            self.announce_reply(&room_name, &assistant_msg_id, announce);
+            // A live call gets the turn's whole prose (progress bubbles + the result), not
+            // only the push body: the answer to a spoken ask is often a progress bubble.
+            let voice_text = voice_prose_of(&turn.progress_texts, &turn.streamed_text);
+            self.announce_reply_kind(
+                &room_name,
+                &assistant_msg_id,
+                announce,
+                "result",
+                Some(&voice_text),
+            );
             if self.people.is_people_chat(chat_id) {
                 self.dispatch_agent_mentions(
                     chat_id,
@@ -4796,7 +4805,18 @@ impl Agent {
     /// Tell the relay a whole reply landed, so people who are not looking get a notification
     /// (`POST /chats/{id}/notify` for a people chat, `POST /projects/{p}/chats/{c}/notify`
     /// otherwise). Fire-and-forget: the message is in the doc either way.
-    pub fn announce_reply(self: &Arc<Self>, room: &str, message_id: &str, text: &str) {
+    /// Tell the relay a bubble landed (push notifications, Matrix, and — for a live call in the
+    /// chat, #1860 — the call's voice session): `kind` = `result` | `job` | `quick`,
+    /// `voice_text` = the whole prose of the turn when the push body (`text`) is only its
+    /// last part.
+    pub fn announce_reply_kind(
+        self: &Arc<Self>,
+        room: &str,
+        message_id: &str,
+        text: &str,
+        kind: &str,
+        voice_text: Option<&str>,
+    ) {
         let Some((project, chat_id)) = room.split_once('/') else {
             return;
         };
@@ -4812,6 +4832,8 @@ impl Agent {
             "message_id": message_id,
             "text": text.chars().take(600).collect::<String>(),
             "project_id": self.cfg.project_id,
+            "kind": kind,
+            "voice_text": voice_text.map(|t| t.chars().take(2000).collect::<String>()),
         });
         let me = self.clone();
         tokio::spawn(async move {
@@ -7970,7 +7992,7 @@ impl Agent {
             h.doc.finish_message(&row_id, MessageStatus::Done);
             h.room.clone()
         };
-        self.announce_reply(&room, &row_id, &text);
+        self.announce_reply_kind(&room, &row_id, &text, "job", Some(&text));
         let _ = self.store.t3_append(
             chat_id,
             None,
@@ -8344,6 +8366,21 @@ pub(crate) fn moment_note(now: chrono::DateTime<chrono::Utc>, tz: Option<&str>) 
             " The user's time zone is not known: when the answer depends on it, say the time where they asked about and ask once if it matters.".to_owned()
         });
     format!("[Now: {utc}.{local} \"Right now\" and \"tonight\" mean this moment; mention a clock change or a deadline inside the next day when it changes the answer.]\n\n")
+}
+
+/// The prose a turn posted, in order, for a live call's context (#1832): every progress bubble
+/// and the final streamed text, blank ones skipped, each once.
+pub(crate) fn voice_prose_of(progress_texts: &[String], streamed_text: &str) -> String {
+    let mut out: Vec<&str> = progress_texts
+        .iter()
+        .map(|t| t.trim())
+        .filter(|t| !t.is_empty())
+        .collect();
+    let last = streamed_text.trim();
+    if !last.is_empty() && out.last() != Some(&last) {
+        out.push(last);
+    }
+    out.join("\n\n")
 }
 
 fn message_from_voice(m: &arbos_core::doc::MessageView) -> bool {

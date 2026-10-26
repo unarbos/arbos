@@ -199,6 +199,57 @@ fn speaker_label(speaker: &Value) -> String {
         .unwrap_or_else(|| "someone on the call".to_owned())
 }
 
+fn turn_role(m: &arbos_core::doc::MessageView) -> &str {
+    m.rest.get("turnRole").and_then(Value::as_str).unwrap_or("")
+}
+
+/// Has the ask a finished answer — a done bubble that is neither the ack nor a progress line?
+pub(crate) fn reply_settled(replies: &[arbos_core::doc::MessageView]) -> bool {
+    replies
+        .iter()
+        .any(|m| m.status == "done" && !matches!(turn_role(m), "ack" | "progress"))
+}
+
+/// The row the call's tool result is attributed to: the last finished answer, else the last
+/// progress bubble, else the ack, else whatever is there (an error row).
+pub(crate) fn reply_pick(
+    replies: &[arbos_core::doc::MessageView],
+) -> Option<arbos_core::doc::MessageView> {
+    replies
+        .iter()
+        .rev()
+        .find(|m| m.status == "done" && !matches!(turn_role(m), "ack" | "progress"))
+        .or_else(|| {
+            replies
+                .iter()
+                .rev()
+                .find(|m| m.status == "done" && turn_role(m) == "progress")
+        })
+        .or_else(|| replies.iter().rev().find(|m| m.status == "done"))
+        .or(replies.last())
+        .cloned()
+}
+
+/// What the call reads back: every finished non-ack bubble of the ask in order (the ack alone
+/// when that is all there is), blank ones skipped.
+pub(crate) fn reply_text(replies: &[arbos_core::doc::MessageView]) -> String {
+    let mut parts: Vec<String> = replies
+        .iter()
+        .filter(|m| m.status == "done" && turn_role(m) != "ack")
+        .map(|m| m.text().trim().to_owned())
+        .filter(|t| !t.is_empty())
+        .collect();
+    if parts.is_empty() {
+        parts = replies
+            .iter()
+            .filter(|m| m.status == "done")
+            .map(|m| m.text().trim().to_owned())
+            .filter(|t| !t.is_empty())
+            .collect();
+    }
+    parts.join("\n\n")
+}
+
 impl Agent {
     /// The context pack for a call in `chat_id`: the voice system prompt and recent lines.
     pub async fn voice_context(&self, chat_id: &str, humans: &Value) -> Value {
@@ -343,9 +394,13 @@ impl Agent {
         };
         tracing::info!(call = %call_id, chat = %chat_id, from = %speaker_label(speaker), "voice request → turn");
         let outcome = self.handle_command(chat_id, cmd).await;
-        let pick = |h: &crate::sync::DocHost| -> Option<arbos_core::doc::MessageView> {
-            let replies: Vec<_> = h
-                .doc
+        // What the call hears back is the turn's answer, not its first bubble (#1860: the first
+        // finished bubble was "Looking up pizza delivery…", the answer came 45 s later as more
+        // progress bubbles under the same ask, and the call never heard of it). So: while this
+        // ask's turn still runs, or only an ack / a progress bubble has landed, keep waiting
+        // (bounded); then hand back every finished bubble of the ask, in order.
+        let replies_of = |h: &crate::sync::DocHost| -> Vec<arbos_core::doc::MessageView> {
+            h.doc
                 .messages()
                 .into_iter()
                 .filter(|m| {
@@ -353,47 +408,50 @@ impl Agent {
                         && m.rest.get("inReplyTo").and_then(Value::as_str) == Some(msg_id.as_str())
                         && m.rest.get("voice").and_then(Value::as_bool) != Some(true)
                 })
-                .collect();
-            // The result row is the last one; the ack is spoken live by the worker already.
-            replies
-                .iter()
-                .rev()
-                .find(|m| m.rest.get("turnRole").and_then(Value::as_str) != Some("ack"))
-                .or(replies.last())
-                .cloned()
+                .collect()
         };
-        let mut result = pick(&*host.lock().await);
-        // A turn that handed the work to a subagent ends after its ack; the outcome lands later
-        // as a separate assistant row. Wait for it (bounded) so the caller hears the answer.
-        if outcome.is_ok()
-            && result
-                .as_ref()
-                .is_some_and(|m| m.rest.get("turnRole").and_then(Value::as_str) == Some("ack"))
-        {
-            let ack_id = result.as_ref().map(|m| m.id.clone()).unwrap_or_default();
+        let mut replies = replies_of(&*host.lock().await);
+        if outcome.is_ok() {
             let deadline = std::time::Instant::now() + SUBAGENT_WAIT;
+            let mut quiet_since: Option<std::time::Instant> = None;
             while std::time::Instant::now() < deadline {
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                let h = host.lock().await;
-                let msgs = h.doc.messages();
-                let after_ack = msgs
-                    .iter()
-                    .position(|m| m.id == ack_id)
-                    .map(|i| &msgs[i + 1..])
-                    .unwrap_or(&[]);
-                if let Some(m) = after_ack.iter().rev().find(|m| {
-                    m.role == "assistant"
-                        && m.status == "done"
-                        && m.rest.get("voice").and_then(Value::as_bool) != Some(true)
-                        && !m.text().trim().is_empty()
-                }) {
-                    result = Some(m.clone());
+                let running = self
+                    .turn
+                    .lock()
+                    .await
+                    .as_ref()
+                    .is_some_and(|t| t.user_msg_id == msg_id && !t.stopped);
+                let settled = reply_settled(&replies);
+                if settled && !running {
                     break;
                 }
+                if !running {
+                    // Turn gone, no final bubble yet (a subagent / job delivers later): give it
+                    // the bounded wait, but stop early once nothing new lands for 3 s after an
+                    // ack-only or progress-only turn that was never going to add more.
+                    let since = *quiet_since.get_or_insert_with(std::time::Instant::now);
+                    if since.elapsed() > std::time::Duration::from_secs(3)
+                        && replies.iter().any(|m| {
+                            m.rest.get("turnRole").and_then(Value::as_str) == Some("progress")
+                        })
+                    {
+                        break;
+                    }
+                } else {
+                    quiet_since = None;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                let next = replies_of(&*host.lock().await);
+                if next.len() != replies.len() {
+                    quiet_since = None;
+                }
+                replies = next;
             }
         }
+        let result = reply_pick(&replies);
+        let spoken = reply_text(&replies);
         match (outcome, result) {
-            (Ok(()), Some(m)) if m.status == "done" => Ok((m.text(), m.id.clone())),
+            (Ok(()), Some(m)) if m.status == "done" => Ok((spoken, m.id.clone())),
             (Ok(()), Some(m)) if m.status == "error" => Err(anyhow!(
                 "the agent's turn failed: {}",
                 m.parts
@@ -572,5 +630,91 @@ mod tests {
         assert!(h.doc.commands().is_empty(), "{:?}", h.doc.commands());
         drop(h);
         let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod reply_tests {
+    //! #1860: what a spoken ask hears back is the turn's answer, not its first bubble.
+
+    use arbos_core::doc::MessageView;
+    use serde_json::json;
+
+    use super::{reply_pick, reply_settled, reply_text};
+
+    fn row(id: &str, role: &str, status: &str, text: &str) -> MessageView {
+        MessageView {
+            id: id.into(),
+            role: "assistant".into(),
+            status: status.into(),
+            parts: vec![json!({ "kind": "text", "text": text })],
+            rest: json!({ "turnRole": role }),
+        }
+    }
+
+    #[test]
+    fn a_progress_bubble_alone_is_not_settled_and_the_answer_is_every_bubble() {
+        // Jacob's call: "Looking up pizza delivery…" (progress, done) came first; the answer
+        // followed 45 s later as more progress bubbles under the same ask.
+        let first = vec![row(
+            "p1",
+            "progress",
+            "done",
+            "Looking up pizza delivery in Santa Teresa, not San José.",
+        )];
+        assert!(!reply_settled(&first));
+        assert_eq!(reply_pick(&first).unwrap().id, "p1");
+        let all = vec![
+            row("a", "ack", "done", "On it."),
+            row(
+                "p1",
+                "progress",
+                "done",
+                "Looking up pizza delivery in Santa Teresa, not San José.",
+            ),
+            row(
+                "p2",
+                "progress",
+                "done",
+                "| Place | Order |\n| Pizza Tomate | WhatsApp +506 8992 4888 |",
+            ),
+            row(
+                "p3",
+                "progress",
+                "done",
+                "Most of the numbers come from Onda Teresa's guide.",
+            ),
+        ];
+        assert!(
+            !reply_settled(&all),
+            "progress only: the turn decides when it is over"
+        );
+        let text = reply_text(&all);
+        assert!(text.starts_with("Looking up pizza"));
+        assert!(text.contains("Pizza Tomate") && text.ends_with("Onda Teresa's guide."));
+        assert!(!text.contains("On it."), "the ack was spoken live already");
+        assert_eq!(reply_pick(&all).unwrap().id, "p3");
+    }
+
+    #[test]
+    fn a_result_row_settles_the_ask_and_is_attributed() {
+        let rows = vec![
+            row("a", "ack", "done", "On it."),
+            row("p1", "progress", "done", "Checking."),
+            row("r", "result", "done", "Three places deliver tonight."),
+        ];
+        assert!(reply_settled(&rows));
+        assert_eq!(reply_pick(&rows).unwrap().id, "r");
+        assert_eq!(
+            reply_text(&rows),
+            "Checking.\n\nThree places deliver tonight."
+        );
+        // An ack-only turn (work handed off) reads back the ack, and is not settled.
+        let ack = vec![row("a", "ack", "done", "I'll run that in the background.")];
+        assert!(!reply_settled(&ack));
+        assert_eq!(reply_text(&ack), "I'll run that in the background.");
+        // A streaming (not done) result row is not settled yet.
+        let live = vec![row("r", "result", "streaming", "Three")];
+        assert!(!reply_settled(&live));
     }
 }
