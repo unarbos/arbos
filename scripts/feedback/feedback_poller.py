@@ -2212,13 +2212,25 @@ class Loop:
                 out.append(fid)
         return out
 
+    # Lane hold (#1899, live-regression P0 on the Mac 2026-10-26 15:27): `arbos-feedback lane-hold mac on|off`
+    # keeps every unpinned item that touches crates/arbos-mac (or the workspace manifest) out of the gate, so
+    # the Mac release lane carries nothing but the pinned hotfix until it is published; iOS / relay / agentd
+    # items flow as usual. The hold is the cursor's `lane_hold` ("mac"); `status` shows it.
+    MAC_LANE_PATHS = ("crates/arbos-mac/", "Cargo.toml", "Cargo.lock")
+
+    def touches_mac_lane(self, st: dict) -> bool:
+        return any(f.startswith(self.MAC_LANE_PATHS[0]) or f in self.MAC_LANE_PATHS[1:] for f in (st.get("files") or []))
+
     def rust_gate_ready(self) -> list[tuple[str, dict]]:
         """Gating items that need a Rust verdict for their current head, oldest first."""
         out = []
+        hold = (self.store.cursor().get("lane_hold") or {}).get("mac")
         for fid in self.store.items():
             st = self.store.state(fid)
             if st.get("status") != "gating" or not (st.get("expects_rust") or st.get("expects_ios")) or not st.get("branch_head"):
                 continue
+            if hold and not st.get("gate_pinned") and self.touches_mac_lane(st):
+                continue  # Mac lane held for a hotfix; this item waits (it is not bumped, not bounced)
             done = st.get("rust_gate") or {}
             if done.get("head") == st["branch_head"] and done.get("ok"):
                 continue
@@ -4405,6 +4417,9 @@ class Loop:
             print(f"  pool (next batch after the pins, oldest first, {len(pool)}): " + ", ".join(tag(f) for f in pool))
             if cur.get("pool_first"):
                 print(f"  POOL-FIRST since {cur['pool_first']}: solo slots and deferred-fairness wait behind the pool batch until it merges once")
+            for lane, h in (cur.get("lane_hold") or {}).items():
+                held = [f for f in self.store.items() if self.store.state(f).get("status") == "gating" and not self.store.state(f).get("gate_pinned") and self.touches_mac_lane(self.store.state(f))]
+                print(f"  LANE HOLD {lane} since {h.get('since')} ({h.get('reason')}): {len(held)} unpinned {lane} item(s) wait: " + ", ".join(tag(f) for f in held))
         with_owner = [fid for fid in self.store.items() if self.store.state(fid).get("status") == "handed_off" and self.store.state(fid).get("branch_head")]
         if with_owner:
             print(f"  with owner (red/conflict; a new commit on the branch re-enters the pool, {len(with_owner)}): " + ", ".join(tag(f) for f in with_owner))
@@ -5038,6 +5053,22 @@ def main(argv: list[str]) -> int:
             fcntl.flock(lock, fcntl.LOCK_EX)
             n = loop.lift_freeze()
         print(f"freeze lifted; {n} item(s) restored to their previous state and order")
+        return 0
+    if cmd == "lane-hold":
+        # `lane-hold mac on [reason] | off | status`: hold unpinned items touching crates/arbos-mac out of the gate.
+        store = Store(cfg)
+        with (cfg.state_dir / ".lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            cur = store.cursor()
+            lane, sub = (argv[2] if len(argv) > 2 else "mac"), (argv[3] if len(argv) > 3 else "status")
+            holds = cur.get("lane_hold") or {}
+            if sub == "on":
+                holds[lane] = {"since": iso(), "reason": " ".join(argv[4:]) or "operator"}
+                store.event("_loop", "lane_hold_on", lane=lane, reason=holds[lane]["reason"])
+            elif sub == "off":
+                holds.pop(lane, None); store.event("_loop", "lane_hold_off", lane=lane)
+            cur["lane_hold"] = holds; store.save_cursor(cur)
+            print(f"lane-hold {lane}: " + (f"ON since {holds[lane]['since']} — {holds[lane]['reason']}" if holds.get(lane) else "off"))
         return 0
     if cmd == "pool-first":
         # `pool-first on|off|status`: until the next pool batch merges, solo slots and the deferred-fairness batch
