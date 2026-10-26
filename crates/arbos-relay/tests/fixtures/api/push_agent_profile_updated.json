@@ -1,0 +1,10 @@
+{
+  "created_at": 1700000000000,
+  "id": "push_agent_profile_updated",
+  "kind": "agent_profile_updated",
+  "payload": {
+    "avatar_version": 1700000000000,
+    "image_key": "avatar-1700000000000.jpg",
+    "project_id": "01FIXTUREAGENT"
+  }
+}
