@@ -4236,10 +4236,22 @@ impl Render for Shell {
             root = root.child(menu);
         }
         if let Some(at) = self.rig_message_menu {
+            // `ARBOS_RIG_MESSAGE_MENU_FROM=someone` picks the newest message by another
+            // person instead (the Reply in DM item only shows on those, #1835).
+            let someone_else =
+                std::env::var("ARBOS_RIG_MESSAGE_MENU_FROM").is_ok_and(|v| v == "someone");
             let target = self.state.read(cx).active_chat_id().and_then(|chat| {
                 let state = self.state.read(cx);
-                let last = state.messages.get(&chat)?.last()?.id.clone();
-                Some((chat, last))
+                let me = format!("user:{}", state.me_id());
+                let rows = state.messages.get(&chat)?;
+                let pick = if someone_else {
+                    rows.iter()
+                        .rev()
+                        .find(|m| m.sender.starts_with("user:") && m.sender != me)?
+                } else {
+                    rows.last()?
+                };
+                Some((chat, pick.id.clone()))
             });
             if let Some((chat, message)) = target {
                 self.rig_message_menu = None;
