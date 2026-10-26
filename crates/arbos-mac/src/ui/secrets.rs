@@ -411,7 +411,7 @@ impl SecretsPanel {
             .min_h(px(52.0))
             .px(px(16.0))
             .py(px(8.0))
-            .child(kit::hairline_below(16.0, theme))
+            .child(kit::hairline_below(theme))
             .child(glass::icon_tile(glyph, theme).when(dim, |el| el.opacity(0.55)))
             .child(
                 div()
@@ -576,6 +576,8 @@ impl SecretsPanel {
             .filter(|p| !p.is_guest() && !exclude.contains(&p.id))
             .cloned()
             .collect();
+        // The agents' current pictures (Jacob, 2026-10-26: the chips drew the default leaf).
+        let images = avatars::project_images(self.state.read(cx));
         let mut row = div().flex().flex_wrap().gap(px(6.0));
         if projects.is_empty() {
             return row.child(
@@ -609,7 +611,12 @@ impl SecretsPanel {
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(if on { theme.on_primary } else { theme.text })
                     .cursor_pointer()
-                    .child(avatars::project(&p, 20.0, theme))
+                    .child(avatars::project_with(
+                        images.get(&p.id).cloned(),
+                        &p,
+                        20.0,
+                        theme,
+                    ))
                     .child(p.name.clone())
                     .when(on, |el| el.child(icon("check", 11.0, theme.on_primary)))
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -648,7 +655,7 @@ impl SecretsPanel {
                     .px(px(16.0))
                     .py(px(8.0))
                     .relative()
-                    .child(kit::hairline_below(16.0, theme))
+                    .child(kit::hairline_below(theme))
                     .child(
                         div()
                             .text_size(px(TEXT_SMALL))
@@ -718,7 +725,7 @@ impl SecretsPanel {
             .px(px(16.0))
             .py(px(10.0))
             .relative()
-            .child(kit::hairline_below(16.0, theme))
+            .child(kit::hairline_below(theme))
             .child(
                 div()
                     .text_size(px(TEXT_BODY))
@@ -903,6 +910,7 @@ impl SecretsPanel {
 
     fn render_secret(&self, s: &Secret, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let mut body = div().flex().flex_col().gap(px(18.0));
+        let images = avatars::project_images(self.state.read(cx));
         let (paused, projects, acts) = {
             let st = self.state.read(cx);
             let acts: Vec<SecretActivity> = st
@@ -973,7 +981,7 @@ impl SecretsPanel {
                 .px(px(16.0))
                 .py(px(10.0))
                 .relative()
-                .child(kit::hairline_below(16.0, theme));
+                .child(kit::hairline_below(theme));
             if s.kind == "login" {
                 form = form
                     .child(Self::field(
@@ -1143,7 +1151,7 @@ impl SecretsPanel {
             }
             sub.push(secret_usage(a.last_used_at, a.disabled_at, a.enabled));
             let avatar = match projects.iter().find(|p| p.id == a.project_id) {
-                Some(p) => avatars::project(p, 30.0, theme),
+                Some(p) => avatars::project_with(images.get(&p.id).cloned(), p, 30.0, theme),
                 None => avatars::agent(&a.project_id, &a.name, None, None, None, 30.0, theme),
             };
             let (sid_a, pid_a, on) = (sid.clone(), a.project_id.clone(), a.enabled);
@@ -1157,7 +1165,7 @@ impl SecretsPanel {
                     .px(px(16.0))
                     .py(px(8.0))
                     .relative()
-                    .child(kit::hairline_below(16.0, theme))
+                    .child(kit::hairline_below(theme))
                     .cursor_pointer()
                     .hover(|st| st.bg(theme.surface_2))
                     .child(avatar)
@@ -1296,7 +1304,7 @@ impl SecretsPanel {
                     .px(px(16.0))
                     .py(px(8.0))
                     .relative()
-                    .child(kit::hairline_below(16.0, theme))
+                    .child(kit::hairline_below(theme))
                     .cursor_pointer()
                     .hover(|st| st.bg(theme.surface_2))
                     .child(avatars::element(
@@ -2066,9 +2074,10 @@ impl SecretsPanel {
         body = body.child(g);
         let mut g = Self::group(theme);
         let projects = self.state.read(cx).projects.clone();
+        let images = avatars::project_images(self.state.read(cx));
         for a in &v.agents {
             let avatar = match projects.iter().find(|p| p.id == a.project_id) {
-                Some(p) => avatars::project(p, 30.0, theme),
+                Some(p) => avatars::project_with(images.get(&p.id).cloned(), p, 30.0, theme),
                 None => avatars::agent(&a.project_id, &a.name, None, None, None, 30.0, theme),
             };
             let (vid, pid, on) = (v.id.clone(), a.project_id.clone(), a.enabled);
@@ -2082,7 +2091,7 @@ impl SecretsPanel {
                     .px(px(16.0))
                     .py(px(8.0))
                     .relative()
-                    .child(kit::hairline_below(16.0, theme))
+                    .child(kit::hairline_below(theme))
                     .cursor_pointer()
                     .hover(|st| st.bg(theme.surface_2))
                     .child(avatar)
@@ -2204,7 +2213,7 @@ impl SecretsPanel {
                     .px(px(16.0))
                     .py(px(8.0))
                     .relative()
-                    .child(kit::hairline_below(16.0, theme))
+                    .child(kit::hairline_below(theme))
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.surface_2))
                     .child(
