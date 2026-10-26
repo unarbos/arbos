@@ -237,6 +237,12 @@ pub enum SyncEvent {
         key: String,
         bytes: Arc<Vec<u8>>,
     },
+    /// The site icon for the named links to `host` (relay `GET /link-icon?domain=`): a
+    /// 64×64 PNG, or `None` when the site has none (the bubbles keep the placeholder).
+    LinkIcon {
+        host: String,
+        png: Option<Arc<Vec<u8>>>,
+    },
     /// The thumbnail bytes could not be fetched; the card shows "No preview" instead of
     /// loading forever. The failure itself went to the log and the silent diagnostics path.
     ThumbnailFailed {
@@ -840,6 +846,10 @@ pub enum ClientCommand {
     FetchThumbnail {
         project_id: Id,
         key: String,
+    },
+    /// Fetch the site icon the bubbles draw before named links to `host`.
+    FetchLinkIcon {
+        host: String,
     },
     /// Download an attachment to `~/Downloads/<name>` (F10).
     DownloadAttachment {

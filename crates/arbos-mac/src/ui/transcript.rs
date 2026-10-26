@@ -26,12 +26,12 @@ use crate::ui::cards;
 use crate::ui::frost::edge_faded;
 use crate::ui::icons::icon;
 use crate::ui::markdown::{
-    has_fenced_code, inline_plain, inline_spans, polish_assistant_prose, split_blocks, Block,
+    self, has_fenced_code, inline_plain, inline_spans, polish_assistant_prose, split_blocks, Block,
 };
 use crate::ui::mention::{self, Mentions};
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
-use crate::ui::select::{BubbleAt, BubbleSelectable, Selectable, Span, TextSelection};
+use crate::ui::select::{BubbleAt, BubbleSelectable, LinkIcons, Selectable, Span, TextSelection};
 use crate::ui::theme::{
     Theme, BUBBLE_PAD_X, BUBBLE_PAD_Y, BUBBLE_RADIUS, CHAT_BODY, CHAT_LINE_HEIGHT, COLUMN_MARGIN,
     COMPOSER_HEIGHT, COMPOSER_WIDTH, LINE_HEIGHT, PLUS_BUTTON, TEXT_SMALL, TEXT_TINY,
@@ -667,6 +667,8 @@ pub struct Transcript {
     /// Who `@handle` resolves to in this chat's bubbles (mention chips),
     /// rebuilt with the rows.
     mentions: Rc<Mentions>,
+    /// Site pictures for the bubbles' named links (`AppState::link_icons`).
+    link_icons: Rc<LinkIcons>,
     /// Whether the right pane was open at the last sync: its opening or
     /// closing changes the column width, and the cached row layouts must go.
     pane_open: bool,
@@ -751,6 +753,7 @@ impl Transcript {
             list,
             rows: Vec::new(),
             mentions: Mentions::empty(),
+            link_icons: LinkIcons::empty(),
             pane_open: false,
             veils: HashMap::new(),
             cards: HashMap::new(),
@@ -1251,6 +1254,9 @@ impl Transcript {
     pub fn sync(&mut self, cx: &mut Context<Self>) {
         let theme = Theme::of(cx).clone();
         self.mentions = Mentions::from_state(&self.state, &theme, cx);
+        self.link_icons = Rc::new(LinkIcons {
+            by_host: self.state.read(cx).link_icons.clone(),
+        });
         let state = self.state.read(cx);
         let chat_id = state.active_chat_id();
         let chat_changed = chat_id != self.chat_id;
@@ -2076,6 +2082,7 @@ impl Transcript {
         // so a selection across bubbles knows which end comes first.
         let selectable = Selectable::new(&self.selection, theme.accent_soft, cx)
             .with_mentions(self.mentions.clone(), theme.accent)
+            .with_link_icons(self.link_icons.clone(), link_icon_placeholder(&theme))
             .ordered(self.message_order(ix));
         let inner: AnyElement = match row.kind {
             RowKind::User {
@@ -4153,7 +4160,7 @@ fn styled_text(
     bubble: &BubbleSelectable,
     at: usize,
 ) -> AnyElement {
-    let (full, runs, links) = inline_runs(text, base_color, theme);
+    let (full, runs, links, icons) = inline_runs(text, base_color, theme);
     let runs = match veil {
         Some(veil) => apply_veil(runs, &veil.spans(now), veil_offset),
         None => runs,
@@ -4161,6 +4168,7 @@ fn styled_text(
     bubble
         .text(at, full, runs)
         .with_links(links)
+        .with_icons(icons)
         .into_any_element()
 }
 
@@ -4169,16 +4177,32 @@ fn styled_text(
 /// heavier cut than Arbos's semibold ([feedback bubble-markdown-2026-10-24]).
 const STRONG_WEIGHT: FontWeight = FontWeight::BOLD;
 
+/// The neutral rounded square a named link shows while its site's icon loads
+/// or when the site has none: the muted text colour at low alpha.
+pub fn link_icon_placeholder(theme: &Theme) -> gpui::Hsla {
+    Theme::with_alpha(theme.text_muted, 0.28)
+}
+
 /// Clickable link ranges of a rendered text (element-local bytes → href).
 type Links = Vec<(std::ops::Range<usize>, String)>;
+/// Icon cells of the named links (element-local bytes of the cell → site host).
+type Icons = Vec<(std::ops::Range<usize>, String)>;
 
-/// The rendered text, its styled runs and its link ranges for inline
-/// markdown `text` (`**bold**`, `*italic*`, `` `code` ``, links).
-fn inline_runs(text: &str, base_color: gpui::Hsla, theme: &Theme) -> (String, Vec<TextRun>, Links) {
+/// The rendered text, its styled runs, its link ranges and its icon cells for
+/// inline markdown `text` (`**bold**`, `*italic*`, `` `code` ``, links). A
+/// named link's cell ([`markdown::LINK_ICON_CELL`]) is an unpainted run — the
+/// site's picture goes there at paint time — and the link's click range
+/// covers cell and name.
+fn inline_runs(
+    text: &str,
+    base_color: gpui::Hsla,
+    theme: &Theme,
+) -> (String, Vec<TextRun>, Links, Icons) {
     let spans = inline_spans(text);
     let mut full = String::new();
     let mut runs: Vec<TextRun> = Vec::new();
     let mut links: Links = Vec::new();
+    let mut icons: Icons = Vec::new();
     let sans = sans_font(theme);
     let mono = gpui::Font {
         family: theme.font_mono.into(),
@@ -4201,8 +4225,24 @@ fn inline_runs(text: &str, base_color: gpui::Hsla, theme: &Theme) -> (String, Ve
         if let Some(href) = span.href.clone() {
             links.push((start..start + span.text.len(), href));
         }
+        let mut text_len = span.text.len();
+        if let Some(host) = span.icon.as_ref() {
+            let cell = markdown::LINK_ICON_CELL.len();
+            if span.text.starts_with(markdown::LINK_ICON_CELL) {
+                icons.push((start..start + cell, host.clone()));
+                runs.push(TextRun {
+                    len: cell,
+                    font: font.clone(),
+                    color: gpui::transparent_black(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                });
+                text_len -= cell;
+            }
+        }
         runs.push(TextRun {
-            len: span.text.len(),
+            len: text_len,
             font,
             color: if style.link { theme.accent } else { base_color },
             background_color: if style.code {
@@ -4223,7 +4263,7 @@ fn inline_runs(text: &str, base_color: gpui::Hsla, theme: &Theme) -> (String, Ve
         });
         full.push_str(&span.text);
     }
-    (full, runs, links)
+    (full, runs, links, icons)
 }
 
 /// Split runs at chunk boundaries and multiply alpha in (zeron veil.rs).
@@ -4391,7 +4431,7 @@ fn render_block(
             // `[…](https://…)` in every first column).
             let cell = |text: &str, head: bool, ri: usize, i: usize, start: usize| {
                 let color = if head { theme.text } else { theme.text_muted };
-                let (full, mut runs, links) = inline_runs(text, color, theme);
+                let (full, mut runs, links, icons) = inline_runs(text, color, theme);
                 if head {
                     for run in &mut runs {
                         if run.font.weight < FontWeight::SEMIBOLD {
@@ -4410,7 +4450,12 @@ fn render_block(
                     .text_size(px(12.5))
                     .text_color(color)
                     .debug_selector(move || format!("table-cell-r{ri}-c{i}"))
-                    .child(bubble.text(start, full, runs).with_links(links))
+                    .child(
+                        bubble
+                            .text(start, full, runs)
+                            .with_links(links)
+                            .with_icons(icons),
+                    )
             };
             // Taffy sizes a nested flex column from its cells' text, not their
             // bases, so the table names its width: the bases' sum, never under
@@ -4486,7 +4531,7 @@ pub const TABLE_COLUMN_MIN: f32 = 72.0;
 pub const TABLE_COLUMN_MAX: f32 = 280.0;
 /// Average glyph advance of the 12.5 pt table text, used to size columns
 /// before layout (the exact width is not known until the text is shaped).
-const TABLE_GLYPH_ADVANCE: f32 = 6.6;
+const TABLE_GLYPH_ADVANCE: f32 = 7.0;
 
 /// One flex basis per column: wide enough for the longest cell's rendered
 /// text (markers removed) up to [`TABLE_COLUMN_MAX`], never under
@@ -4502,7 +4547,9 @@ pub fn table_column_widths(header: &[String], rows: &[Vec<String>]) -> Vec<f32> 
                 .map(|cell| inline_plain(cell).chars().count())
                 .max()
                 .unwrap_or(0);
-            (longest as f32 * TABLE_GLYPH_ADVANCE + 20.0).clamp(TABLE_COLUMN_MIN, TABLE_COLUMN_MAX)
+            // Padding on both sides plus a little slack so "10:30am–7:30pm" never breaks
+            // inside the word (the Lima shot of 2026-10-25 23:2x).
+            (longest as f32 * TABLE_GLYPH_ADVANCE + 28.0).clamp(TABLE_COLUMN_MIN, TABLE_COLUMN_MAX)
         })
         .collect()
 }
@@ -4881,21 +4928,29 @@ mod selection_tests {
             !plain.contains("](") && !plain.contains("https://"),
             "{plain}"
         );
-        assert!(plain.starts_with(
-            "Store | Area | Sunday | What they sell\nLibrería El Virrey | Miraflores"
-        ));
+        assert!(plain.starts_with(&format!(
+            "Store | Area | Sunday | What they sell\n{}Librería El Virrey | Miraflores",
+            markdown::LINK_ICON_CELL
+        )));
         let theme = Theme::dark(crate::ui::theme::Surface::Matte);
-        let (text, runs, links) = inline_runs(&rows[0][0], theme.text_muted, &theme);
-        assert_eq!(text, "Librería El Virrey");
+        let (text, runs, links, icons) = inline_runs(&rows[0][0], theme.text_muted, &theme);
+        let cell = markdown::LINK_ICON_CELL;
+        assert_eq!(text, format!("{cell}Librería El Virrey"));
         assert_eq!(
             links,
             vec![(0..text.len(), "https://www.elvirrey.com/".to_string())]
         );
+        assert_eq!(icons, vec![(0..cell.len(), "www.elvirrey.com".to_string())]);
         assert_eq!(
-            runs[0].color, theme.accent,
+            runs[0].color,
+            gpui::transparent_black(),
+            "the icon cell is unpainted text"
+        );
+        assert_eq!(
+            runs[1].color, theme.accent,
             "a link is painted in the accent"
         );
-        assert!(runs[0].underline.is_some());
+        assert!(runs[1].underline.is_some());
         // Columns: the long "What they sell" column caps out; "Sunday" stays narrow.
         let widths = table_column_widths(header, rows);
         assert_eq!(widths.len(), 4);
@@ -6821,6 +6876,166 @@ mod cross_bubble_copy_tests {
 }
 
 #[cfg(test)]
+mod link_icon_tests {
+    //! Jacob, 2026-10-25 22:34 UTC ([feedback link-icons-mac-2026-10-25]): every named
+    //! link in a reply — bullets, prose, table cells — carries its site's small rounded
+    //! icon before the name, as in Grok Bot; a site without one shows a neutral square.
+    //! His example: Bubble's New York Post headline list.
+    use std::sync::Arc;
+
+    use gpui::TestAppContext;
+
+    use super::*;
+    use crate::ui::select::{LinkIcons, PAINTED_LINK_ICONS};
+
+    /// The reply to "Read the latest from the New York post" (Jacob's iPhone screenshot),
+    /// seven linked headlines as bullets, then one line of prose.
+    const NYPOST: &str = "- [Syringe attack: lawyer claims mistaken identity](https://nypost.com/2026/10/25/us-news/syringe-attack/)\n- [Arrest story: a second Jewish victim minutes earlier](https://nypost.com/2026/10/25/us-news/arrest-story/)\n- [Ex-NYPD cop charged in a George Washington Bridge killing, free on $1M bail](https://nypost.com/2026/10/25/us-news/ex-nypd-cop/)\n- [Thomas Markle home search, child pornography, Philippine official’s comment](https://nypost.com/2026/10/25/world-news/thomas-markle/)\n- [Musk says SpaceX cut Ukraine’s Starlink access](https://nypost.com/2026/10/25/business/musk-starlink/)\n- [Giants beat the Texans in overtime in J. J. McCarthy’s first start](https://nypost.com/2026/10/25/sports/giants-texans/)\n- [McCarthy’s wife after that win](https://nypost.com/2026/10/25/sports/mccarthy-wife/)\n\nNo times or bylines were on the page text I read. Want one of these opened?";
+
+    #[test]
+    fn named_links_get_an_icon_cell_and_name_their_site() {
+        let cell = markdown::LINK_ICON_CELL;
+        let spans = inline_spans("See [El Virrey](https://www.elvirrey.com/shop) or https://x.com/a and [https://y.com](https://y.com).");
+        let links: Vec<_> = spans.iter().filter(|s| s.style.link).collect();
+        assert_eq!(links.len(), 3);
+        assert_eq!(links[0].text, format!("{cell}El Virrey"));
+        assert_eq!(links[0].icon.as_deref(), Some("www.elvirrey.com"));
+        assert_eq!(links[1].text, "https://x.com/a", "a bare URL has no cell");
+        assert_eq!(links[1].icon, None);
+        assert_eq!(
+            links[2].text, "https://y.com",
+            "a URL as its own label has no cell"
+        );
+        assert_eq!(links[2].icon, None);
+        assert_eq!(
+            markdown::link_host("https://user@Sub.Example.com:8443/p?q#f").as_deref(),
+            Some("sub.example.com")
+        );
+        assert_eq!(markdown::link_host("http://10.0.0.1/x"), None);
+        assert_eq!(markdown::link_host("mailto:a@b.com"), None);
+        assert_eq!(markdown::link_host("https://localhost/"), None);
+        // Every block kind but code yields its hosts, each once, in reading order.
+        let hosts = markdown::link_hosts(&format!(
+            "[A](https://a.com) and [B](https://b.org/x)\n\n{NYPOST}\n\n| k | v |\n| --- | --- |\n| [C](https://c.net) | [A again](https://a.com/2) |\n\n```\n[D](https://d.io)\n```"
+        ));
+        assert_eq!(hosts, vec!["a.com", "b.org", "nypost.com", "c.net"]);
+    }
+
+    struct ListHost {
+        selection: Entity<TextSelection>,
+        icons: Rc<LinkIcons>,
+    }
+
+    impl gpui::Render for ListHost {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
+            let blocks = split_blocks(NYPOST);
+            let texts = BubbleText::for_blocks(&blocks, false);
+            let selectable = Selectable::new(&self.selection, theme.accent_soft, cx)
+                .with_link_icons(self.icons.clone(), link_icon_placeholder(&theme));
+            let bubble = selectable.bubble("m1#text", texts[0].text.clone());
+            let mut col = div().w(px(520.0)).flex().flex_col();
+            for (i, block) in blocks.iter().enumerate() {
+                col = col.child(
+                    div()
+                        .debug_selector(move || format!("test-block-{i}"))
+                        .child(render_block(
+                            &format!("m1#t.{i}"),
+                            block,
+                            texts[i].at,
+                            None,
+                            Instant::now(),
+                            &theme,
+                            &bubble,
+                            &CodeCopy::default(),
+                        )),
+                );
+            }
+            col
+        }
+    }
+
+    /// Headless render of the list: seven bullets, each a link whose text starts with the
+    /// icon cell, and seven icons painted — the site's picture when the bubble has one, the
+    /// placeholder square while it loads or when there is none.
+    #[gpui::test]
+    fn the_nypost_list_paints_an_icon_before_every_headline(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let theme = crate::ui::theme::Theme::for_pref(
+                crate::ui::theme::AppearancePref::Dark,
+                crate::ui::theme::Surface::Matte,
+                cx,
+            );
+            cx.set_global(theme);
+        });
+        let blocks = split_blocks(NYPOST);
+        let [Block::Bullets(items), Block::Paragraph(_)] = blocks.as_slice() else {
+            panic!("a bullet list then prose, got {blocks:?}");
+        };
+        assert_eq!(items.len(), 7);
+        let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+        for item in items {
+            let (text, runs, links, icons) = inline_runs(item, theme.text, &theme);
+            assert!(text.starts_with(markdown::LINK_ICON_CELL), "{text}");
+            assert_eq!(icons.len(), 1);
+            assert_eq!(icons[0].1, "nypost.com");
+            assert_eq!(links.len(), 1);
+            assert_eq!(
+                links[0].0,
+                0..text.len(),
+                "the click target covers cell and name"
+            );
+            assert_eq!(runs[0].color, gpui::transparent_black());
+            assert_eq!(runs[0].len, markdown::LINK_ICON_CELL.len());
+        }
+        // One real picture for nypost.com; render twice: with it, and still loading.
+        let png = {
+            let img = image::RgbaImage::from_pixel(64, 64, image::Rgba([200, 30, 30, 255]));
+            let mut out = std::io::Cursor::new(Vec::new());
+            img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+            out.into_inner()
+        };
+        let picture = Arc::new(crate::app::decode_image(&png).expect("png decodes"));
+        for (icons, label) in [
+            (
+                Rc::new(LinkIcons {
+                    by_host: HashMap::from([("nypost.com".to_string(), Some(picture.clone()))]),
+                }),
+                "pictures",
+            ),
+            (LinkIcons::empty(), "placeholders"),
+        ] {
+            PAINTED_LINK_ICONS.with(|n| n.set(0));
+            let (_view, vcx) = cx.add_window_view(|_, cx| ListHost {
+                selection: cx.new(TextSelection::new),
+                icons,
+            });
+            vcx.run_until_parked();
+            let painted = PAINTED_LINK_ICONS.with(|n| n.get());
+            assert_eq!(painted, 7, "{label}: one icon per headline");
+            for i in 0..7 {
+                let text = vcx
+                    .debug_bounds(match i {
+                        0 => "list-text-0",
+                        1 => "list-text-1",
+                        2 => "list-text-2",
+                        3 => "list-text-3",
+                        4 => "list-text-4",
+                        5 => "list-text-5",
+                        _ => "list-text-6",
+                    })
+                    .expect("bullet text drawn");
+                assert!(text.size.height >= px(CHAT_LINE_HEIGHT));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod markdown_tests {
     //! Jacob, 2026-10-24 (Grok side by side, [feedback bubble-markdown-2026-10-24]):
     //! "Arbos list bullets are small dots with tighter heading weight; Grok
@@ -6850,7 +7065,7 @@ mod markdown_tests {
     #[test]
     fn strong_runs_are_bold() {
         let theme = Theme::dark(crate::ui::theme::Surface::Matte);
-        let (text, runs, _) = inline_runs("Surf **gear** list", theme.text, &theme);
+        let (text, runs, _, _) = inline_runs("Surf **gear** list", theme.text, &theme);
         assert_eq!(text, "Surf gear list");
         let weights: Vec<(usize, FontWeight)> =
             runs.iter().map(|r| (r.len, r.font.weight)).collect();
