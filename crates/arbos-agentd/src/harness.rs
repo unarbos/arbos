@@ -644,6 +644,7 @@ impl PiAdapter {
         extra: &[String],
         cwd: &std::path::Path,
         system_prompt: &str,
+        model: &str,
     ) -> Result<Arc<RpcChild>> {
         let sessions_dir = self.cfg.pi_dir().join("subagent-sessions");
         crate::isolation::ensure_worker_dir(&sessions_dir, self.cfg.run_as.as_ref())?;
@@ -657,12 +658,7 @@ impl PiAdapter {
             self.cfg.run_as.as_ref(),
         )?;
         std::fs::write(&prompt_path, system_prompt)?;
-        let mut args = Self::common_args(
-            &self.cfg,
-            &sessions_dir,
-            &self.cfg.subagent_model,
-            &prompt_path,
-        );
+        let mut args = Self::common_args(&self.cfg, &sessions_dir, model, &prompt_path);
         args.extend(extra.iter().cloned());
         let log = self
             .cfg
@@ -691,8 +687,19 @@ impl HarnessAdapter for PiAdapter {
 
     async fn start(&self, req: StartRequest) -> Result<()> {
         let extra = vec!["--session-id".into(), req.session_id.clone()];
+        let model = if req.model.trim().is_empty() {
+            self.cfg.subagent_model.clone()
+        } else {
+            req.model.clone()
+        };
         let child = self
-            .spawn(&req.session_id, &extra, &req.cwd, &req.system_prompt)
+            .spawn(
+                &req.session_id,
+                &extra,
+                &req.cwd,
+                &req.system_prompt,
+                &model,
+            )
             .await?;
         let state = child
             .call_ok(RpcCommand::GetState {
@@ -729,8 +736,16 @@ impl HarnessAdapter for PiAdapter {
                 .join(format!("{session_id}.md")),
         )
         .unwrap_or_default();
+        // A resumed worker keeps the model its session was started with when the store knows it.
+        let model = self
+            .store
+            .session_model(session_id)
+            .ok()
+            .flatten()
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or_else(|| self.cfg.subagent_model.clone());
         let child = self
-            .spawn(session_id, &extra, &self.cfg.work_dir, &pack)
+            .spawn(session_id, &extra, &self.cfg.work_dir, &pack, &model)
             .await?;
         self.sessions.attach(session_id, child, false).await;
         Ok(())

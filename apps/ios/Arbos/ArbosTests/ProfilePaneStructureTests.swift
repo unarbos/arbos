@@ -116,3 +116,34 @@ final class BlockRowTests: XCTestCase {
         XCTAssertEqual(BlockRow.title(blocked: BlockRow.entry(in: list, id: ken.id, handle: ken.handle) != nil), "Block user")
     }
 }
+
+/// Jacob 2026-10-25 ("Add a message button to a user"): the person pane's hero carries one
+/// Message pill — for another person I have not blocked, never on my own pane, never once I
+/// blocked them. The Mac twin is `crates/arbos-mac/src/ui/profiles/user.rs`
+/// `tests::the_message_pill_is_for_other_unblocked_people`
+/// ([feedback profile-message-button-ios-2026-10-25]).
+final class MessageButtonTests: XCTestCase {
+    func testTheMessagePillIsForOtherUnblockedPeople() {
+        XCTAssertTrue(MessageButton.shows(isMe: false, blocked: false))
+        XCTAssertFalse(MessageButton.shows(isMe: true, blocked: false), "not on my own pane")
+        XCTAssertFalse(MessageButton.shows(isMe: false, blocked: true), "not once I blocked them")
+        XCTAssertFalse(MessageButton.shows(isMe: true, blocked: true))
+        XCTAssertEqual(MessageButton.title, "Message")
+    }
+
+    func testThePillFollowsTheBlockList() {
+        let doug = Person(id: "gh_346940006", handle: "DaWizzaa")
+        var list: [Person] = []
+        XCTAssertTrue(MessageButton.shows(isMe: false, blocked: BlockRow.entry(in: list, id: doug.id, handle: doug.handle) != nil))
+        list.append(doug)
+        XCTAssertFalse(MessageButton.shows(isMe: false, blocked: BlockRow.entry(in: list, id: doug.id, handle: doug.handle) != nil))
+        list.removeAll { $0.id == doug.id }
+        XCTAssertTrue(MessageButton.shows(isMe: false, blocked: BlockRow.entry(in: list, id: doug.id, handle: doug.handle) != nil), "back once unblocked")
+    }
+
+    /// The hero keeps its order with the pill: picture, name, subtitle, then the action.
+    func testTheHeroActionSitsUnderTheSubtitle() {
+        XCTAssertEqual(PaneKit.heroActionGap, 6)
+        XCTAssertEqual(Theme.control, 42, "the pill is the control family's height")
+    }
+}

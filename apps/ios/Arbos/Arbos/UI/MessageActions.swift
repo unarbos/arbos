@@ -6,7 +6,9 @@ import UIKit
 /// (❤️ 👍🏽 💪🏽 👎🏻 👌🏾 🤝 🔥 💯 + add-emoji, which raises the system emoji
 /// keyboard) and the message menu (Copy · Reply · Delete, `MessageMenu`) below
 /// it. The Mac's `ui/reactions.rs` is the same capsule behind the hover rail's
-/// smiley.
+/// smiley. The composer keyboard goes down as the overlay opens and the group is
+/// fitted to the visible area by `MessageActionsLayout` (menu flips above the
+/// bubble when there is no room below).
 enum ReactionCapsule {
     /// Quick-react set; anything else comes from the emoji keyboard.
     static var palette: [String] { MessageReaction.palette }
@@ -53,6 +55,11 @@ struct MessageActionsOverlay<Bubble: View>: View {
 
     @State private var pickOpen = false
     @State private var picked = ""
+    /// The bubble's frame when the press landed. The composer's keyboard goes down as
+    /// the overlay opens and the transcript reflows under the blur; the held bubble
+    /// stays where the finger is (iMessage) instead of following that reflow.
+    @State private var pressedFrame: CGRect?
+    @ObservedObject private var keyboard = KeyboardFrameObserver.shared
 
     private var mine: Bool { row.role == .user }
     private var gap: CGFloat { 8 }
@@ -60,24 +67,44 @@ struct MessageActionsOverlay<Bubble: View>: View {
     private var menuHeight: CGFloat { CGFloat(items.count) * 44 + (items.contains(.delete) ? 8 : 0) }
 
     var body: some View {
-        let groupHeight = ReactionCapsule.height + gap + frame.height + gap + menuHeight
-        let wanted = frame.minY - ReactionCapsule.height - gap
-        let lowest = max(safeTop + 8, height - safeBottom - 8 - groupHeight)
-        let top = min(max(wanted, safeTop + 8), lowest)
-        ZStack(alignment: .topLeading) {
-            Rectangle()
-                .fill(.ultraThinMaterial)
-                .overlay(Color.black.opacity(theme.isDark ? 0.35 : 0.12))
-                .ignoresSafeArea()
-                .onTapGesture { onDismiss() }
-            VStack(alignment: mine ? .trailing : .leading, spacing: gap) {
+        GeometryReader { geo in
+            let bubbleFrame = pressedFrame ?? frame
+            let layout = MessageActionsLayout.compute(.init(
+                bubble: bubbleFrame,
+                capsuleHeight: ReactionCapsule.height,
+                menuHeight: menuHeight,
+                gap: gap,
+                height: height,
+                safeTop: safeTop,
+                safeBottom: safeBottom,
+                keyboardInset: keyboard.inset(overlayFrame: geo.frame(in: .global))
+            ))
+            ZStack(alignment: .topLeading) {
+                Rectangle()
+                    .fill(.ultraThinMaterial)
+                    .overlay(Color.black.opacity(theme.isDark ? 0.35 : 0.12))
+                    .ignoresSafeArea()
+                    .onTapGesture { onDismiss() }
                 capsule
+                    .frame(width: width, alignment: mine ? .trailing : .leading)
+                    .offset(y: layout.capsuleY)
+                    .accessibilityIdentifier("message-actions-capsule")
                 bubble()
                     .frame(width: width)
+                    // Only a bubble taller than the visible area is cut (layout rule 5).
+                    .frame(height: layout.bubbleHeight < bubbleFrame.height ? layout.bubbleHeight : nil, alignment: .top)
+                    .clipped()
+                    .offset(y: layout.bubbleY)
                 menu
+                    .frame(width: width, alignment: mine ? .trailing : .leading)
+                    .offset(y: layout.menuY)
+                    .accessibilityIdentifier("message-actions-menu")
             }
-            .frame(width: width, alignment: mine ? .trailing : .leading)
-            .offset(y: top)
+            .animation(.easeOut(duration: 0.2), value: layout)
+            .onAppear { if pressedFrame == nil { pressedFrame = frame } }
+        }
+        .ignoresSafeArea()
+        .overlay {
             if pickOpen {
                 EmojiKeyboardField(text: $picked) { text in
                     if let emoji = ReactionCapsule.pickedEmoji(text) { onReact(emoji) }
@@ -158,6 +185,58 @@ struct MessageActionsOverlay<Bubble: View>: View {
         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(theme.separator, lineWidth: 1))
         .shadow(color: .black.opacity(0.35), radius: 14, y: 6)
         .padding(.horizontal, 16)
+    }
+}
+
+/// Where the keyboard is on screen, from the moment the app starts, so the
+/// actions overlay keeps the capsule and the menu above it — the system keyboard
+/// while it animates down as the menu opens, the emoji keyboard the add-emoji
+/// control raises (feedback iphone-bubble-menu-keyboard-2026-10-25).
+@MainActor
+final class KeyboardFrameObserver: ObservableObject {
+    static let shared = KeyboardFrameObserver()
+
+    /// The keyboard's end frame in screen coordinates; `nil` when it is down.
+    @Published private(set) var frame: CGRect?
+
+    private var tokens: [NSObjectProtocol] = []
+
+    init() {
+        let center = NotificationCenter.default
+        tokens.append(center.addObserver(forName: UIResponder.keyboardWillChangeFrameNotification, object: nil, queue: .main) { [weak self] note in
+            // Documented as the *end* frame: a dismissal reports a frame below the screen.
+            let end = (note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue
+            MainActor.assumeIsolated { self?.update(end) }
+        })
+        tokens.append(center.addObserver(forName: UIResponder.keyboardWillHideNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.update(nil) }
+        })
+    }
+
+    private func update(_ end: CGRect?) {
+        guard let end, let screen = UIApplication.shared.connectedScenes
+            .compactMap({ ($0 as? UIWindowScene)?.screen }).first,
+              end.minY < screen.bounds.maxY, end.height > 0
+        else { frame = nil; return }
+        frame = end
+    }
+
+    /// How far the keyboard reaches up into an overlay whose frame (in `.global`
+    /// space) is `overlayFrame`; 0 when the keyboard is down or below it.
+    func inset(overlayFrame: CGRect) -> CGFloat {
+        guard let frame else { return 0 }
+        return max(0, overlayFrame.maxY - frame.minY)
+    }
+
+    /// The window's safe area (status bar / notch, home indicator). A `GeometryReader`
+    /// under `.ignoresSafeArea()` reports zero insets, so the full-screen overlay asks
+    /// the window instead.
+    static var windowSafeArea: UIEdgeInsets {
+        let window = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows)
+            .first { $0.isKeyWindow }
+        return window?.safeAreaInsets ?? .zero
     }
 }
 
