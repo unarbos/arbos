@@ -1056,6 +1056,23 @@ impl Store {
         Ok(id)
     }
 
+    /// Rewrite a record's text in place (FTS kept in step); the id, tier and provenance stay.
+    pub fn memory_set_text(&self, id: &str, text: &str) -> Result<()> {
+        let text = redact(text);
+        self.with(|c| {
+            c.execute(
+                "UPDATE memory SET text = ?2 WHERE id = ?1",
+                params![id, text],
+            )?;
+            c.execute("DELETE FROM memory_fts WHERE id = ?1", params![id])?;
+            c.execute(
+                "INSERT INTO memory_fts(text, id, tier) SELECT text, id, tier FROM memory WHERE id = ?1",
+                params![id],
+            )?;
+            Ok(())
+        })
+    }
+
     /// INVALIDATE: set `invalid_at` and `expired_at`; the row stays (D7).
     /// Soft-invalidate every live memory learned in one thread (an agent leaving a people chat,
     /// D7): rows keep their text and become `invalid_at = now`. Returns how many.
