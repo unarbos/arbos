@@ -143,6 +143,14 @@ final class RelayAPI {
         return (data, http)
     }
 
+    /// `GET /link-icon?domain=` — the site's 64×64 PNG for the bubbles' named links, `nil` when the
+    /// site has none (204) or the call failed (nobody asked; the bubble keeps its placeholder).
+    func linkIcon(host: String) async -> Data? {
+        guard let q = host.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return nil }
+        guard let (data, http) = try? await request("GET", "/link-icon?domain=\(q)") else { return nil }
+        return http.statusCode == 200 && !data.isEmpty ? data : nil
+    }
+
     func json(_ method: String, _ path: String, body: Any? = nil, auth: Bool = true) async throws -> Any {
         let (data, _) = try await request(method, path, body: body, auth: auth)
         if data.isEmpty { return NSNull() }
@@ -478,7 +486,8 @@ final class RelayAPI {
         return key
     }
 
-    /// `PUT /me/avatar` (raw JPEG) → `MeUserResponseDto`; updates the signed-in user's picture.
+    /// `PUT /me/avatar` (raw PNG or JPEG master) → `MeUserResponseDto`; updates the signed-in
+    /// user's picture. The relay checks that the type and the bytes agree.
     func putMeAvatar(jpeg: Data) async throws -> String {
         guard let url = URL(string: "\(endpoint.httpUrl)/me/avatar") else {
             throw RelayError(status: 0, message: "Bad relay URL")
@@ -486,7 +495,7 @@ final class RelayAPI {
         var req = URLRequest(url: url)
         req.httpMethod = "PUT"
         req.setValue("Bearer \(token())", forHTTPHeaderField: "Authorization")
-        req.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
+        req.setValue(PictureMaster.mime(jpeg), forHTTPHeaderField: "Content-Type")
         req.httpBody = jpeg
         let (body, response) = try await session.data(for: req)
         guard let http = response as? HTTPURLResponse, http.statusCode < 400 else {

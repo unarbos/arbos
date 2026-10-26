@@ -8,8 +8,9 @@
 //! - **Generate**: a short prompt → `POST /projects/{id}/avatar/generate` (the relay's OpenAI
 //!   key, one low-quality square, metered and capped) → the picture previews here; Set makes it
 //!   the avatar.
-//! - **Upload**: the image-only file panel (PNG, JPEG, HEIC, GIF, WebP), uploaded as a 512 px
-//!   JPEG into the project's blob slot on Set.
+//! - **Upload**: the image-only file panel (PNG, JPEG, HEIC, GIF, WebP), uploaded as the
+//!   picture master (≤ 1024 px; PNG for a flat mark, JPEG q92 for a photo) into the project's
+//!   blob slot on Set.
 //!
 //! Groups and servers open the same sheet for their picture with the same three tabs (Bot = their
 //! leaf, Generate through `/chats/{id}` / `/servers/{id}` `/avatar/generate`, Upload into their
@@ -231,20 +232,26 @@ pub(crate) fn pending_preview(picker: &Picker, state: &AppState, size: f32) -> O
             .overflow_hidden()
     };
     if let Some(path) = &picker.upload {
-        return Some(
-            frame().child(
-                gpui::img(path.clone())
-                    .size(px(size))
-                    .rounded_full()
-                    .object_fit(gpui::ObjectFit::Cover),
-            ),
-        );
+        // The chosen file goes through the avatar loader as `file://…` (decoded off the UI
+        // thread into the ≤ 1024 px master the upload will send), then through `picture_fit`
+        // like every other avatar. Handing GPUI the raw path drew a 4000 px texture into a
+        // 114 pt disc with no mipmaps — Jacob's stair-stepped edges (2026-10-26). Until the
+        // master is ready the frame is empty for a moment, never the aliased original.
+        let image = state.avatar(&file_url(path));
+        return Some(frame().children(image.map(|image| {
+            gpui::img(crate::ui::picture_fit::fit(&image, size))
+                .id("avatar-upload-preview")
+                .debug_selector(|| "avatar-upload-preview".into())
+                .size(px(size))
+                .rounded_full()
+                .object_fit(gpui::ObjectFit::Cover)
+        })));
     }
     if let Some((_, url)) = &picker.generated {
         if let Some(image) = state.avatar(url) {
             return Some(
                 frame().child(
-                    gpui::img(image)
+                    gpui::img(crate::ui::picture_fit::fit(&image, size))
                         .size(px(size))
                         .rounded_full()
                         .object_fit(gpui::ObjectFit::Cover),
@@ -253,6 +260,12 @@ pub(crate) fn pending_preview(picker: &Picker, state: &AppState, size: f32) -> O
         }
     }
     None
+}
+
+/// The avatar-cache URL of a picked file: `file://<path>`; the sync client reads and masters it
+/// (`sync::avatar_master`) and answers with `SyncEvent::Avatar` like a fetched picture.
+pub(crate) fn file_url(path: &std::path::Path) -> String {
+    format!("file://{}", path.display())
 }
 
 /// The round picture the Generate / Upload tabs preview: the pending choice, else the entity's
@@ -545,7 +558,7 @@ pub(crate) fn upload_body(
             .unwrap_or("picture")
             .to_owned()
             .into(),
-        None => "PNG, JPEG, HEIC, GIF or WebP; kept at 512 px.".into(),
+        None => "PNG, JPEG, HEIC, GIF or WebP; kept at up to 1024 px.".into(),
     };
     body.push(
         div()
@@ -563,6 +576,27 @@ pub(crate) fn upload_body(
             .into_any_element(),
     );
     body
+}
+
+/// The target's picture as it is now — `(name, url)` — what the bar's View opens; `None` for a
+/// leaf / letter avatar (nothing to view) or an unknown target.
+pub(crate) fn viewable_picture(picker: &Picker, state: &AppState) -> Option<(String, String)> {
+    let (name, url) = match &picker.target {
+        Target::Agent(id) | Target::Group(id) => {
+            let p = state.projects.iter().find(|x| &x.id == id)?;
+            (p.name.clone(), p.image_url.clone()?)
+        }
+        Target::Server(id) => {
+            let s = state.servers.iter().find(|s| &s.id == id)?;
+            (s.name.clone(), s.image_url.clone()?)
+        }
+        Target::Me(_) => {
+            let a = state.account.as_ref()?;
+            (a.name.clone(), a.avatar_url.clone())
+        }
+        Target::Draft => return None,
+    };
+    (!url.is_empty()).then_some((name, url))
 }
 
 pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
@@ -620,11 +654,7 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
     };
     // View (Jacob, 2026-10-25): the picture as it is now, full-size in the media viewer — only
     // when there is a picture (a leaf / letter avatar has nothing to view).
-    let view_picture: Option<(String, String)> = project
-        .image_url
-        .clone()
-        .filter(|u| !u.is_empty())
-        .map(|url| (project.name.clone(), url));
+    let view_picture = viewable_picture(picker, state);
     // The Generate / Upload preview, built while `state` is borrowed (the bodies need `cx`).
     let tab_preview = preview(picker, &project, state, &theme);
 
@@ -1182,10 +1212,21 @@ mod me_picker_tests {
             vcx.debug_bounds("avatar-view").is_some(),
             "a picture → View"
         );
+        // Some state in the picker: a typed prompt and a generated preview.
+        shell.update(vcx, |sh, cx| {
+            sh.avatar_prompt_input
+                .update(cx, |input, cx| input.set_text("a fox".into(), cx));
+            if let Some(pk) = sh.avatar_picker.as_mut() {
+                pk.generated = Some(("avatar-gen-9.jpg".into(), "fixture://avatar/me-9".into()));
+            }
+        });
+        settle(&shell, vcx);
         click(vcx, &shell, "avatar-view");
+        // Jacob, 2026-10-26: the picker stays underneath — the viewer is on top of it, and
+        // closing the viewer returns to the picker with its state intact.
         assert!(
-            shell.read_with(&*vcx, |sh, _| sh.avatar_picker.is_none()),
-            "View closes the picker"
+            shell.read_with(&*vcx, |sh, _| sh.avatar_picker.is_some()),
+            "View keeps the picker up"
         );
         let viewer = state.read_with(&*vcx, |s, _| s.media_viewer.clone());
         let viewer = viewer.expect("the media viewer is up");
@@ -1198,8 +1239,50 @@ mod me_picker_tests {
                 && vcx.debug_bounds("media-viewer-forward").is_none(),
             "a profile picture has no Download / Forward"
         );
+        let viewer_b = vcx.debug_bounds("media-viewer").expect("viewer root");
+        let picker_b = vcx.debug_bounds("avatar-set").expect("picker footer");
+        assert!(
+            viewer_b.contains(&centre(picker_b)),
+            "the viewer covers the picker: {viewer_b:?} over {picker_b:?}"
+        );
+        // The viewer's × closes the viewer only.
+        click(vcx, &shell, "media-viewer-close");
+        assert!(state.read_with(&*vcx, |s, _| s.media_viewer.is_none()));
+        let picker = shell.read_with(&*vcx, |sh, _| sh.avatar_picker.clone());
+        let picker = picker.expect("the picker is still up after the viewer's ×");
+        assert_eq!(picker.tab, Tab::Generate);
+        assert_eq!(
+            picker.generated.as_ref().map(|(k, _)| k.as_str()),
+            Some("avatar-gen-9.jpg"),
+            "the preview survived"
+        );
+        assert_eq!(
+            shell.read_with(&*vcx, |sh, cx| sh
+                .avatar_prompt_input
+                .read(cx)
+                .text()
+                .to_owned()),
+            "a fox",
+            "the typed prompt survived"
+        );
+        assert!(
+            vcx.debug_bounds("avatar-set").is_some(),
+            "the sheet is drawn again"
+        );
+        // Esc on the viewer: the same — viewer gone, picker stays; a second Esc is not sent.
+        click(vcx, &shell, "avatar-view");
+        assert!(state.read_with(&*vcx, |s, _| s.media_viewer.is_some()));
+        vcx.dispatch_action(crate::ui::shell::Escape);
+        settle(&shell, vcx);
+        assert!(state.read_with(&*vcx, |s, _| s.media_viewer.is_none()));
+        assert!(shell.read_with(&*vcx, |sh, _| sh.avatar_picker.is_some()));
+        // The Close pill too; then Cancel closes the picker as always.
+        click(vcx, &shell, "avatar-view");
         click(vcx, &shell, "media-viewer-close-pill");
         assert!(state.read_with(&*vcx, |s, _| s.media_viewer.is_none()));
+        assert!(shell.read_with(&*vcx, |sh, _| sh.avatar_picker.is_some()));
+        click(vcx, &shell, "avatar-cancel");
+        assert!(shell.read_with(&*vcx, |sh, _| sh.avatar_picker.is_none()));
 
         // Initials only: no View in the bar.
         state.update(vcx, |s, cx| {
@@ -1255,6 +1338,15 @@ mod me_picker_tests {
         );
         click(vcx, &shell, "media-viewer-close");
         assert!(state.read_with(&*vcx, |s, _| s.media_viewer.is_none()));
+        // The pane underneath is untouched by the viewer's × (Jacob, 2026-10-26).
+        assert_eq!(
+            state.read_with(&*vcx, |s, _| s.profile.clone()),
+            Some(ProfilePage::User {
+                handle: "sam".into(),
+                space_id: None,
+            })
+        );
+        assert!(vcx.debug_bounds("profile-avatar").is_some());
 
         // Kim has initials only: the hero is not a button.
         state.update(vcx, |s, cx| {

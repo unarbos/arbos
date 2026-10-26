@@ -26,12 +26,12 @@ use crate::ui::cards;
 use crate::ui::frost::edge_faded;
 use crate::ui::icons::icon;
 use crate::ui::markdown::{
-    has_fenced_code, inline_plain, inline_spans, polish_assistant_prose, split_blocks, Block,
+    self, has_fenced_code, inline_plain, inline_spans, polish_assistant_prose, split_blocks, Block,
 };
 use crate::ui::mention::{self, Mentions};
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
-use crate::ui::select::{BubbleAt, BubbleSelectable, Selectable, Span, TextSelection};
+use crate::ui::select::{BubbleAt, BubbleSelectable, LinkIcons, Selectable, Span, TextSelection};
 use crate::ui::theme::{
     Theme, BUBBLE_PAD_X, BUBBLE_PAD_Y, BUBBLE_RADIUS, CHAT_BODY, CHAT_LINE_HEIGHT, COLUMN_MARGIN,
     COMPOSER_HEIGHT, COMPOSER_WIDTH, LINE_HEIGHT, PLUS_BUTTON, TEXT_SMALL, TEXT_TINY,
@@ -667,6 +667,8 @@ pub struct Transcript {
     /// Who `@handle` resolves to in this chat's bubbles (mention chips),
     /// rebuilt with the rows.
     mentions: Rc<Mentions>,
+    /// Site pictures for the bubbles' named links (`AppState::link_icons`).
+    link_icons: Rc<LinkIcons>,
     /// Whether the right pane was open at the last sync: its opening or
     /// closing changes the column width, and the cached row layouts must go.
     pane_open: bool,
@@ -751,6 +753,7 @@ impl Transcript {
             list,
             rows: Vec::new(),
             mentions: Mentions::empty(),
+            link_icons: LinkIcons::empty(),
             pane_open: false,
             veils: HashMap::new(),
             cards: HashMap::new(),
@@ -1251,6 +1254,9 @@ impl Transcript {
     pub fn sync(&mut self, cx: &mut Context<Self>) {
         let theme = Theme::of(cx).clone();
         self.mentions = Mentions::from_state(&self.state, &theme, cx);
+        self.link_icons = Rc::new(LinkIcons {
+            by_host: self.state.read(cx).link_icons.clone(),
+        });
         let state = self.state.read(cx);
         let chat_id = state.active_chat_id();
         let chat_changed = chat_id != self.chat_id;
@@ -1368,6 +1374,14 @@ impl Transcript {
         let old_len = self.rows.len();
         self.rows = new_rows;
         self.list.splice(prefix..old_len, self.rows.len() - prefix);
+        if crate::model::trace_rows() {
+            eprintln!(
+                "rows: transcript chat={} rows={} changed_from={prefix} at={}",
+                self.chat_id.as_deref().unwrap_or(""),
+                self.rows.len(),
+                crate::model::now_ms()
+            );
+        }
         // Reading history: a stale pin (scrollbar / list scroll that never
         // cleared it) must not spring to the new end when rows land below.
         let max = f32::from(self.list.max_offset_for_scrollbar().y);
@@ -1784,7 +1798,9 @@ impl Transcript {
                 .iter()
                 .find(|p| p.name.eq_ignore_ascii_case(name) && p.kind == SpaceKind::Project);
             let glyph: AnyElement = match mine {
-                Some(space) => crate::ui::avatars::project(space, 16.0, theme).into_any_element(),
+                Some(space) => {
+                    crate::ui::avatars::project_in(state, space, 16.0, theme).into_any_element()
+                }
                 // Not one of my projects (a subagent): initials on the name's gradient.
                 None => {
                     crate::ui::avatars::element(name, name, None, 16.0, theme).into_any_element()
@@ -1836,7 +1852,7 @@ impl Transcript {
                 .rounded_full()
                 .overflow_hidden()
                 .child(
-                    gpui::img(image)
+                    gpui::img(crate::ui::picture_fit::fit(&image, SENDER_DISC))
                         .size(px(SENDER_DISC))
                         .rounded_full()
                         .object_fit(gpui::ObjectFit::Cover),
@@ -2064,7 +2080,37 @@ impl Transcript {
             .into_any_element()
     }
 
+    /// One row of the list. Building a row's element from a message the code did not expect
+    /// must not take the app down (2026-10-26: Mac 0.6.268 aborted at every launch on the
+    /// restored transcript): a panic here is caught, logged by the panic hook, and the row
+    /// shows a short note instead.
     fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.render_row_inner(ix, window, cx)
+        }));
+        match result {
+            Ok(element) => element,
+            Err(_) => {
+                let theme = Theme::of(cx).clone();
+                log::error!(target: "arbos_mac::diagnostic", "transcript row {ix} skipped after a panic");
+                div()
+                    .w_full()
+                    .px(px(BUBBLE_PAD_X))
+                    .py(px(6.0))
+                    .text_size(px(12.0))
+                    .text_color(theme.text_faint)
+                    .child("This message could not be shown.")
+                    .into_any_element()
+            }
+        }
+    }
+
+    fn render_row_inner(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         self.rows_laid_out += 1;
         let Some(row) = self.rows.get(ix).cloned() else {
             return div().into_any_element();
@@ -2076,6 +2122,7 @@ impl Transcript {
         // so a selection across bubbles knows which end comes first.
         let selectable = Selectable::new(&self.selection, theme.accent_soft, cx)
             .with_mentions(self.mentions.clone(), theme.accent)
+            .with_link_icons(self.link_icons.clone(), link_icon_placeholder(&theme))
             .ordered(self.message_order(ix));
         let inner: AnyElement = match row.kind {
             RowKind::User {
@@ -3012,14 +3059,28 @@ fn rail_centre(
     let half = px(RAIL_BUTTON / 2.0 + RAIL_EDGE_INSET);
     let low = viewport.top() + px(HEADER_FADE_BAND) + half;
     let high = viewport.bottom() - half;
-    let centre = if high <= low {
-        centre
-    } else {
-        centre.clamp(low, high)
-    };
-    // Never outside the bubble itself (a short bubble at the very edge).
-    let centre = centre.clamp(top + px(RAIL_BUTTON / 2.0), bottom - px(RAIL_BUTTON / 2.0));
+    let centre = clamp_or_keep(centre, low, high);
+    // Never outside the bubble itself (a short bubble at the very edge). The bounds come
+    // from the list's measured rows, which can be of two layout generations while rows
+    // reflow (a row inserted above, a table that grew, a scroll): the span may then be
+    // shorter than the button or even inverted — `Ord::clamp` would panic on it
+    // (`assertion failed: min <= max`; Mac 0.6.268 aborted on exactly that, 2026-10-26).
+    let centre = clamp_or_keep(
+        centre,
+        top + px(RAIL_BUTTON / 2.0),
+        bottom - px(RAIL_BUTTON / 2.0),
+    );
     centre - last.top()
+}
+
+/// `value.clamp(low, high)` when the bounds are in order, `value` itself otherwise — the
+/// rail may sit a few points off on a frame whose measurements are mid-reflow, never panic.
+fn clamp_or_keep(value: Pixels, low: Pixels, high: Pixels) -> Pixels {
+    if high < low {
+        value
+    } else {
+        value.clamp(low, high)
+    }
 }
 
 /// The frame that hangs the rail (and the hover time) off a bubble's right
@@ -4153,7 +4214,7 @@ fn styled_text(
     bubble: &BubbleSelectable,
     at: usize,
 ) -> AnyElement {
-    let (full, runs, links) = inline_runs(text, base_color, theme);
+    let (full, runs, links, icons) = inline_runs(text, base_color, theme);
     let runs = match veil {
         Some(veil) => apply_veil(runs, &veil.spans(now), veil_offset),
         None => runs,
@@ -4161,6 +4222,7 @@ fn styled_text(
     bubble
         .text(at, full, runs)
         .with_links(links)
+        .with_icons(icons)
         .into_any_element()
 }
 
@@ -4169,16 +4231,32 @@ fn styled_text(
 /// heavier cut than Arbos's semibold ([feedback bubble-markdown-2026-10-24]).
 const STRONG_WEIGHT: FontWeight = FontWeight::BOLD;
 
+/// The neutral rounded square a named link shows while its site's icon loads
+/// or when the site has none: the muted text colour at low alpha.
+pub fn link_icon_placeholder(theme: &Theme) -> gpui::Hsla {
+    Theme::with_alpha(theme.text_muted, 0.28)
+}
+
 /// Clickable link ranges of a rendered text (element-local bytes → href).
 type Links = Vec<(std::ops::Range<usize>, String)>;
+/// Icon cells of the named links (element-local bytes of the cell → site host).
+type Icons = Vec<(std::ops::Range<usize>, String)>;
 
-/// The rendered text, its styled runs and its link ranges for inline
-/// markdown `text` (`**bold**`, `*italic*`, `` `code` ``, links).
-fn inline_runs(text: &str, base_color: gpui::Hsla, theme: &Theme) -> (String, Vec<TextRun>, Links) {
+/// The rendered text, its styled runs, its link ranges and its icon cells for
+/// inline markdown `text` (`**bold**`, `*italic*`, `` `code` ``, links). A
+/// named link's cell ([`markdown::LINK_ICON_CELL`]) is an unpainted run — the
+/// site's picture goes there at paint time — and the link's click range
+/// covers cell and name.
+fn inline_runs(
+    text: &str,
+    base_color: gpui::Hsla,
+    theme: &Theme,
+) -> (String, Vec<TextRun>, Links, Icons) {
     let spans = inline_spans(text);
     let mut full = String::new();
     let mut runs: Vec<TextRun> = Vec::new();
     let mut links: Links = Vec::new();
+    let mut icons: Icons = Vec::new();
     let sans = sans_font(theme);
     let mono = gpui::Font {
         family: theme.font_mono.into(),
@@ -4201,8 +4279,24 @@ fn inline_runs(text: &str, base_color: gpui::Hsla, theme: &Theme) -> (String, Ve
         if let Some(href) = span.href.clone() {
             links.push((start..start + span.text.len(), href));
         }
+        let mut text_len = span.text.len();
+        if let Some(host) = span.icon.as_ref() {
+            let cell = markdown::LINK_ICON_CELL.len();
+            if span.text.starts_with(markdown::LINK_ICON_CELL) {
+                icons.push((start..start + cell, host.clone()));
+                runs.push(TextRun {
+                    len: cell,
+                    font: font.clone(),
+                    color: gpui::transparent_black(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                });
+                text_len -= cell;
+            }
+        }
         runs.push(TextRun {
-            len: span.text.len(),
+            len: text_len,
             font,
             color: if style.link { theme.accent } else { base_color },
             background_color: if style.code {
@@ -4223,7 +4317,7 @@ fn inline_runs(text: &str, base_color: gpui::Hsla, theme: &Theme) -> (String, Ve
         });
         full.push_str(&span.text);
     }
-    (full, runs, links)
+    (full, runs, links, icons)
 }
 
 /// Split runs at chunk boundaries and multiply alpha in (zeron veil.rs).
@@ -4391,7 +4485,7 @@ fn render_block(
             // `[…](https://…)` in every first column).
             let cell = |text: &str, head: bool, ri: usize, i: usize, start: usize| {
                 let color = if head { theme.text } else { theme.text_muted };
-                let (full, mut runs, links) = inline_runs(text, color, theme);
+                let (full, mut runs, links, icons) = inline_runs(text, color, theme);
                 if head {
                     for run in &mut runs {
                         if run.font.weight < FontWeight::SEMIBOLD {
@@ -4410,7 +4504,12 @@ fn render_block(
                     .text_size(px(12.5))
                     .text_color(color)
                     .debug_selector(move || format!("table-cell-r{ri}-c{i}"))
-                    .child(bubble.text(start, full, runs).with_links(links))
+                    .child(
+                        bubble
+                            .text(start, full, runs)
+                            .with_links(links)
+                            .with_icons(icons),
+                    )
             };
             // Taffy sizes a nested flex column from its cells' text, not their
             // bases, so the table names its width: the bases' sum, never under
@@ -4486,7 +4585,7 @@ pub const TABLE_COLUMN_MIN: f32 = 72.0;
 pub const TABLE_COLUMN_MAX: f32 = 280.0;
 /// Average glyph advance of the 12.5 pt table text, used to size columns
 /// before layout (the exact width is not known until the text is shaped).
-const TABLE_GLYPH_ADVANCE: f32 = 6.6;
+const TABLE_GLYPH_ADVANCE: f32 = 7.0;
 
 /// One flex basis per column: wide enough for the longest cell's rendered
 /// text (markers removed) up to [`TABLE_COLUMN_MAX`], never under
@@ -4502,7 +4601,9 @@ pub fn table_column_widths(header: &[String], rows: &[Vec<String>]) -> Vec<f32> 
                 .map(|cell| inline_plain(cell).chars().count())
                 .max()
                 .unwrap_or(0);
-            (longest as f32 * TABLE_GLYPH_ADVANCE + 20.0).clamp(TABLE_COLUMN_MIN, TABLE_COLUMN_MAX)
+            // Padding on both sides plus a little slack so "10:30am–7:30pm" never breaks
+            // inside the word (the Lima shot of 2026-10-25 23:2x).
+            (longest as f32 * TABLE_GLYPH_ADVANCE + 28.0).clamp(TABLE_COLUMN_MIN, TABLE_COLUMN_MAX)
         })
         .collect()
 }
@@ -4881,21 +4982,29 @@ mod selection_tests {
             !plain.contains("](") && !plain.contains("https://"),
             "{plain}"
         );
-        assert!(plain.starts_with(
-            "Store | Area | Sunday | What they sell\nLibrería El Virrey | Miraflores"
-        ));
+        assert!(plain.starts_with(&format!(
+            "Store | Area | Sunday | What they sell\n{}Librería El Virrey | Miraflores",
+            markdown::LINK_ICON_CELL
+        )));
         let theme = Theme::dark(crate::ui::theme::Surface::Matte);
-        let (text, runs, links) = inline_runs(&rows[0][0], theme.text_muted, &theme);
-        assert_eq!(text, "Librería El Virrey");
+        let (text, runs, links, icons) = inline_runs(&rows[0][0], theme.text_muted, &theme);
+        let cell = markdown::LINK_ICON_CELL;
+        assert_eq!(text, format!("{cell}Librería El Virrey"));
         assert_eq!(
             links,
             vec![(0..text.len(), "https://www.elvirrey.com/".to_string())]
         );
+        assert_eq!(icons, vec![(0..cell.len(), "www.elvirrey.com".to_string())]);
         assert_eq!(
-            runs[0].color, theme.accent,
+            runs[0].color,
+            gpui::transparent_black(),
+            "the icon cell is unpainted text"
+        );
+        assert_eq!(
+            runs[1].color, theme.accent,
             "a link is painted in the accent"
         );
-        assert!(runs[0].underline.is_some());
+        assert!(runs[1].underline.is_some());
         // Columns: the long "What they sell" column caps out; "Sunday" stays narrow.
         let widths = table_column_widths(header, rows);
         assert_eq!(widths.len(), 4);
@@ -6498,6 +6607,43 @@ mod transcript_smoke_tests {
         (rt, state, transcript)
     }
 
+    /// 2026-10-26, Mac 0.6.268: a row the code did not expect aborted the app at every
+    /// launch (a panic on the main thread unwinds into AppKit → `abort()`). A sync event whose
+    /// apply panics is skipped with a notice, the state keeps every other row, and the
+    /// transcript still renders; the panic hook records the message to `panic.log`.
+    #[gpui::test]
+    fn a_panicking_sync_event_is_skipped_not_fatal(cx: &mut TestAppContext) {
+        crate::panic_log::install();
+        let before = std::fs::read_to_string(crate::panic_log::log_path()).unwrap_or_default();
+        let (_rt, state, transcript) = mount(cx);
+        // (The hook also prints the poison to stderr; that line is expected in this test.)
+        state.update(cx, |s, cx| {
+            s.apply(SyncEvent::Notice("panic!".into()), cx);
+        });
+        state.read_with(cx, |s, _| {
+            assert_eq!(s.messages.get("c1").map(Vec::len), Some(2), "rows kept");
+            assert!(
+                s.notices.iter().any(|n| n.text.contains("skipped")),
+                "the user is told one update was skipped: {:?}",
+                s.notices.iter().map(|n| n.text.clone()).collect::<Vec<_>>()
+            );
+        });
+        transcript.update(cx, |t, cx| t.sync(cx));
+        let (_view, vcx) = cx.add_window_view(|_, _| Host {
+            transcript: transcript.clone(),
+        });
+        vcx.run_until_parked();
+        assert!(
+            vcx.debug_bounds("chat-column").is_some(),
+            "the transcript still draws"
+        );
+        let after = std::fs::read_to_string(crate::panic_log::log_path()).unwrap_or_default();
+        assert!(
+            after.len() > before.len() && after[before.len()..].contains("test poison event"),
+            "panic.log holds the message"
+        );
+    }
+
     /// The list renders the reply as block rows (no panic, every block drawn),
     /// and hovering the middle of the bubble shows the rail at the bubble's
     /// vertical centre — the whole of #1674 on the real transcript.
@@ -6821,6 +6967,166 @@ mod cross_bubble_copy_tests {
 }
 
 #[cfg(test)]
+mod link_icon_tests {
+    //! Jacob, 2026-10-25 22:34 UTC ([feedback link-icons-mac-2026-10-25]): every named
+    //! link in a reply — bullets, prose, table cells — carries its site's small rounded
+    //! icon before the name, as in Grok Bot; a site without one shows a neutral square.
+    //! His example: Bubble's New York Post headline list.
+    use std::sync::Arc;
+
+    use gpui::TestAppContext;
+
+    use super::*;
+    use crate::ui::select::{LinkIcons, PAINTED_LINK_ICONS};
+
+    /// The reply to "Read the latest from the New York post" (Jacob's iPhone screenshot),
+    /// seven linked headlines as bullets, then one line of prose.
+    const NYPOST: &str = "- [Syringe attack: lawyer claims mistaken identity](https://nypost.com/2026/10/25/us-news/syringe-attack/)\n- [Arrest story: a second Jewish victim minutes earlier](https://nypost.com/2026/10/25/us-news/arrest-story/)\n- [Ex-NYPD cop charged in a George Washington Bridge killing, free on $1M bail](https://nypost.com/2026/10/25/us-news/ex-nypd-cop/)\n- [Thomas Markle home search, child pornography, Philippine official’s comment](https://nypost.com/2026/10/25/world-news/thomas-markle/)\n- [Musk says SpaceX cut Ukraine’s Starlink access](https://nypost.com/2026/10/25/business/musk-starlink/)\n- [Giants beat the Texans in overtime in J. J. McCarthy’s first start](https://nypost.com/2026/10/25/sports/giants-texans/)\n- [McCarthy’s wife after that win](https://nypost.com/2026/10/25/sports/mccarthy-wife/)\n\nNo times or bylines were on the page text I read. Want one of these opened?";
+
+    #[test]
+    fn named_links_get_an_icon_cell_and_name_their_site() {
+        let cell = markdown::LINK_ICON_CELL;
+        let spans = inline_spans("See [El Virrey](https://www.elvirrey.com/shop) or https://x.com/a and [https://y.com](https://y.com).");
+        let links: Vec<_> = spans.iter().filter(|s| s.style.link).collect();
+        assert_eq!(links.len(), 3);
+        assert_eq!(links[0].text, format!("{cell}El Virrey"));
+        assert_eq!(links[0].icon.as_deref(), Some("www.elvirrey.com"));
+        assert_eq!(links[1].text, "https://x.com/a", "a bare URL has no cell");
+        assert_eq!(links[1].icon, None);
+        assert_eq!(
+            links[2].text, "https://y.com",
+            "a URL as its own label has no cell"
+        );
+        assert_eq!(links[2].icon, None);
+        assert_eq!(
+            markdown::link_host("https://user@Sub.Example.com:8443/p?q#f").as_deref(),
+            Some("sub.example.com")
+        );
+        assert_eq!(markdown::link_host("http://10.0.0.1/x"), None);
+        assert_eq!(markdown::link_host("mailto:a@b.com"), None);
+        assert_eq!(markdown::link_host("https://localhost/"), None);
+        // Every block kind but code yields its hosts, each once, in reading order.
+        let hosts = markdown::link_hosts(&format!(
+            "[A](https://a.com) and [B](https://b.org/x)\n\n{NYPOST}\n\n| k | v |\n| --- | --- |\n| [C](https://c.net) | [A again](https://a.com/2) |\n\n```\n[D](https://d.io)\n```"
+        ));
+        assert_eq!(hosts, vec!["a.com", "b.org", "nypost.com", "c.net"]);
+    }
+
+    struct ListHost {
+        selection: Entity<TextSelection>,
+        icons: Rc<LinkIcons>,
+    }
+
+    impl gpui::Render for ListHost {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
+            let blocks = split_blocks(NYPOST);
+            let texts = BubbleText::for_blocks(&blocks, false);
+            let selectable = Selectable::new(&self.selection, theme.accent_soft, cx)
+                .with_link_icons(self.icons.clone(), link_icon_placeholder(&theme));
+            let bubble = selectable.bubble("m1#text", texts[0].text.clone());
+            let mut col = div().w(px(520.0)).flex().flex_col();
+            for (i, block) in blocks.iter().enumerate() {
+                col = col.child(
+                    div()
+                        .debug_selector(move || format!("test-block-{i}"))
+                        .child(render_block(
+                            &format!("m1#t.{i}"),
+                            block,
+                            texts[i].at,
+                            None,
+                            Instant::now(),
+                            &theme,
+                            &bubble,
+                            &CodeCopy::default(),
+                        )),
+                );
+            }
+            col
+        }
+    }
+
+    /// Headless render of the list: seven bullets, each a link whose text starts with the
+    /// icon cell, and seven icons painted — the site's picture when the bubble has one, the
+    /// placeholder square while it loads or when there is none.
+    #[gpui::test]
+    fn the_nypost_list_paints_an_icon_before_every_headline(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let theme = crate::ui::theme::Theme::for_pref(
+                crate::ui::theme::AppearancePref::Dark,
+                crate::ui::theme::Surface::Matte,
+                cx,
+            );
+            cx.set_global(theme);
+        });
+        let blocks = split_blocks(NYPOST);
+        let [Block::Bullets(items), Block::Paragraph(_)] = blocks.as_slice() else {
+            panic!("a bullet list then prose, got {blocks:?}");
+        };
+        assert_eq!(items.len(), 7);
+        let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+        for item in items {
+            let (text, runs, links, icons) = inline_runs(item, theme.text, &theme);
+            assert!(text.starts_with(markdown::LINK_ICON_CELL), "{text}");
+            assert_eq!(icons.len(), 1);
+            assert_eq!(icons[0].1, "nypost.com");
+            assert_eq!(links.len(), 1);
+            assert_eq!(
+                links[0].0,
+                0..text.len(),
+                "the click target covers cell and name"
+            );
+            assert_eq!(runs[0].color, gpui::transparent_black());
+            assert_eq!(runs[0].len, markdown::LINK_ICON_CELL.len());
+        }
+        // One real picture for nypost.com; render twice: with it, and still loading.
+        let png = {
+            let img = image::RgbaImage::from_pixel(64, 64, image::Rgba([200, 30, 30, 255]));
+            let mut out = std::io::Cursor::new(Vec::new());
+            img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+            out.into_inner()
+        };
+        let picture = Arc::new(crate::app::decode_image(&png).expect("png decodes"));
+        for (icons, label) in [
+            (
+                Rc::new(LinkIcons {
+                    by_host: HashMap::from([("nypost.com".to_string(), Some(picture.clone()))]),
+                }),
+                "pictures",
+            ),
+            (LinkIcons::empty(), "placeholders"),
+        ] {
+            PAINTED_LINK_ICONS.with(|n| n.set(0));
+            let (_view, vcx) = cx.add_window_view(|_, cx| ListHost {
+                selection: cx.new(TextSelection::new),
+                icons,
+            });
+            vcx.run_until_parked();
+            let painted = PAINTED_LINK_ICONS.with(|n| n.get());
+            assert_eq!(painted, 7, "{label}: one icon per headline");
+            for i in 0..7 {
+                let text = vcx
+                    .debug_bounds(match i {
+                        0 => "list-text-0",
+                        1 => "list-text-1",
+                        2 => "list-text-2",
+                        3 => "list-text-3",
+                        4 => "list-text-4",
+                        5 => "list-text-5",
+                        _ => "list-text-6",
+                    })
+                    .expect("bullet text drawn");
+                assert!(text.size.height >= px(CHAT_LINE_HEIGHT));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod markdown_tests {
     //! Jacob, 2026-10-24 (Grok side by side, [feedback bubble-markdown-2026-10-24]):
     //! "Arbos list bullets are small dots with tighter heading weight; Grok
@@ -6850,7 +7156,7 @@ mod markdown_tests {
     #[test]
     fn strong_runs_are_bold() {
         let theme = Theme::dark(crate::ui::theme::Surface::Matte);
-        let (text, runs, _) = inline_runs("Surf **gear** list", theme.text, &theme);
+        let (text, runs, _, _) = inline_runs("Surf **gear** list", theme.text, &theme);
         assert_eq!(text, "Surf gear list");
         let weights: Vec<(usize, FontWeight)> =
             runs.iter().map(|r| (r.len, r.font.weight)).collect();
@@ -7013,6 +7319,30 @@ mod rail_tests {
         let settled = later + Duration::from_secs(1);
         assert_eq!(fade.opacity("m2#bubble", settled).0, 1.0);
         assert_eq!(fade.opacity("m1#bubble", settled).0, 0.0);
+    }
+
+    /// Mac 0.6.268, 2026-10-26 (Jacob: SIGABRT at 14:55:17, 15:21:53 and then at every
+    /// launch): the list's measured rows were of two layout generations — the rows above
+    /// still at their old place, the last row at its new one — so the bubble's span came out
+    /// inverted or shorter than the rail button, and `clamp` panicked on the main thread
+    /// (`assertion failed: min <= max`). Both shapes now give a centre, never a panic.
+    #[test]
+    fn stale_or_tiny_measurements_never_panic_the_rail() {
+        let viewport = b(0.0, 1000.0);
+        // Inverted: the last row was measured above the rows "above" it.
+        let rows = [Some(b(600.0, 100.0)), Some(b(700.0, 60.0))];
+        let last = b(300.0, 20.0);
+        let centre = rail_centre(&rows, last, viewport, (px(17.0), px(3.0)));
+        assert!(f32::from(centre).is_finite());
+        // Shorter than the button: a 10 pt bubble.
+        let centre = rail_centre(&[], b(500.0, 10.0), viewport, (px(3.0), px(3.0)));
+        assert!(f32::from(centre).is_finite());
+        // A viewport too short for the rail at all.
+        let centre = rail_centre(&[], b(10.0, 40.0), b(0.0, 20.0), NO_INSET);
+        assert!(f32::from(centre).is_finite());
+        assert_eq!(clamp_or_keep(px(5.0), px(10.0), px(0.0)), px(5.0));
+        assert_eq!(clamp_or_keep(px(5.0), px(0.0), px(10.0)), px(5.0));
+        assert_eq!(clamp_or_keep(px(50.0), px(0.0), px(10.0)), px(10.0));
     }
 
     /// The rail's centre is the middle of the whole bubble — the rows above
@@ -8283,5 +8613,214 @@ mod reply_in_dm_tests {
             )
         });
         assert!(!moved);
+    }
+}
+#[cfg(test)]
+mod crash_probe_tests {
+    //! Mac 0.6.268, 2026-10-26: the rows of Jacob's two crash windows (the Affine chat's empty-sender
+    //! SVG-attachment rows, the Arbonites table / markdown sample / roleplay replies) in a group
+    //! transcript, then the local actions he could have taken — scroll stops, a pointer sweep, clicks
+    //! everywhere. This is what found `rail_centre`'s clamp panic; it stays as the guard.
+    use futures::future::BoxFuture;
+    use gpui::TestAppContext;
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::sync::{ClientCommand, SyncEvent, SyncSource};
+    use gpui::{point, Modifiers};
+
+    const ARBONITES: &[(&str, &str)] = &[
+        ("user", "@hezbola give me a random markdown table"),
+        ("assistant", "| Fruit | Colour | Weight (g) |\n| --- | --- | --- |\n| Apple | Red | 180 |\n| Banana | Yellow | 120 |\n| Kiwi | Green | 75 |"),
+        ("user", "show me a couple things"),
+        ("assistant", "Here's a sample, Arbos.\n\n**Bold**, *italic*, and `inline code`.\n\n- A bullet list\n- With two items\n\n> A block quote.\n\n[Eater Austin's Austin guide](https://austin.eater.com/maps/best-restaurants-austin-eater-38)"),
+        ("user", "@doug-agent @hezbola  can you two engage in a 10 turn roleplay dialoge. doug is a product manager, and hezbola is a senior engineer."),
+        ("assistant", "Yes, Arbos, with some limits. I don't have matplotlib installed, but Pillow is there, so I can draw bar, line and pie charts as PNG images and hand them over as files."),
+        ("user", "Happy to, Affinity. Turn 1, PM hat on.\n\n@hezbola — kicking off a new prototype: a Sakata cracker stacking game, built in Blender. Scope for v0: a tower of rice crackers you drop one at a time, physics on, game over when one slides off."),
+        ("assistant", "Turn 2, engineer hat on. Doug, here's the cracker asset plan.\n\nGeometry: a 60 mm diameter disc, about 6 mm thick. The ridged edge comes from a displaced ring on the rim, and the sesame speckle is a small-scale bump texture, not extra geometry.\n\nPhysics: mass about 8 g, friction 0.6, bounce 0.05, and the collision margin set small so stacks settle.\n\nDrop: spawn the cracker 20 cm above the stack, with a small random tilt and offset so it doesn't land perfectly flat every time.\n\nI haven't built this in Blender yet. Should I start the scene script, or do you want the asset spec changed first?"),
+    ];
+
+    struct Idle;
+    impl SyncSource for Idle {
+        fn name(&self) -> &'static str {
+            "idle"
+        }
+        fn run(
+            self: Box<Self>,
+            _e: mpsc::UnboundedSender<SyncEvent>,
+            _c: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(std::future::pending())
+        }
+    }
+    struct Host {
+        transcript: Entity<Transcript>,
+    }
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(self.transcript.clone())
+        }
+    }
+
+    #[gpui::test]
+    fn crash_window_rows_survive_scroll_hover_and_clicks(cx: &mut TestAppContext) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let handle = rt.handle().clone();
+        cx.update(|cx| {
+            gpui_tokio::init_from_handle(cx, handle);
+            cx.set_global(Theme::dark(crate::ui::theme::Surface::Matte));
+            if !cx.has_global::<PulseClock>() {
+                PulseClock::init(cx);
+            }
+        });
+        let state = cx.new(|cx| AppState::new(Box::new(Idle), cx));
+        let t = 1_700_000_000_000u64;
+        let rows: Vec<(String, String, String)> = ARBONITES
+            .iter()
+            .map(|(k, t)| (String::new(), (*k).to_owned(), (*t).to_owned()))
+            .collect();
+        let mut messages: Vec<Message> = Vec::new();
+        let mut at = t;
+        for (i, (_, kind, text)) in rows.iter().enumerate() {
+            at += 10_000;
+            let role = if kind == "user" { "user" } else { "assistant" };
+            messages.push(serde_json::from_value(serde_json::json!({
+                "id": format!("m{i}"), "chatId": "g1", "role": role,
+                "sender": if role == "user" { "user:gh_1" } else { "agent:01M5NNT5FNTZNCT3THWNVEW8WM" },
+                "senderName": if role == "user" { "Affinity" } else { "Hezbola" },
+                "senderHandle": if role == "user" { "affinity" } else { "hezbola" },
+                "status": "done", "createdAt": at, "completedAt": at + 1_000,
+                "parts": [{ "id": format!("m{i}-t"), "kind": "text", "text": text }],
+            })).unwrap());
+        }
+        // (1) a hidden job-worker row: empty agent sender carrying an SVG attachment of kind image
+        at += 10_000;
+        messages.push(serde_json::from_value(serde_json::json!({
+            "id": "w1", "chatId": "g1", "role": "assistant", "sender": "agent:01M5N1WSR91G8CJKNYXKJESK7X",
+            "senderName": "", "senderHandle": "", "worker": true, "hidden": true,
+            "status": "done", "createdAt": at, "completedAt": at + 1_000,
+            "parts": [{ "id": "w1-a", "kind": "attachment", "attachment": { "name": "affine-favicon.svg", "mime": "image/svg+xml", "ref": "blob-svg-1", "bytes": 4031, "kind": "image", "title": "affine.io logo" } }],
+        })).unwrap());
+        // (2) the same shape as a visible row with sender {kind:"agent", name:""} and an SVG image
+        at += 10_000;
+        messages.push(serde_json::from_value(serde_json::json!({
+            "id": "w2", "chatId": "g1", "role": "assistant", "sender": "agent:01M5N1WSR91G8CJKNYXKJESK7X",
+            "senderName": "", "senderHandle": "", "senderAvatar": "", "senderAvatarUrl": "",
+            "status": "done", "createdAt": at, "completedAt": at + 1_000,
+            "parts": [
+                { "id": "w2-t", "kind": "text", "text": "I found the AFFiNE logo from affine.io. You can get the official SVG directly at [affine.io/favicon.svg](https://affine.io/favicon.svg) (a 1000×1000 vector mark), and I have also saved and attached a copy for you." },
+                { "id": "w2-a", "kind": "attachment", "attachment": { "name": "affine-favicon.svg", "mime": "image/svg+xml", "ref": "blob-svg-2", "kind": "image" } }
+            ],
+        })).unwrap());
+        // Mac-only shapes bc-3790a460 listed (`internal/mac-launch-crash-recovery-2026-10-26.md`
+        // §2): a user attachment whose upload failed (part without `ref`, still pending), a
+        // voice memo, and a Reply-in-DM quote (`replyRef`).
+        at += 10_000;
+        messages.push(serde_json::from_value(serde_json::json!({
+            "id": "u-noref", "chatId": "g1", "role": "user", "sender": "user:gh_1", "senderName": "Affinity",
+            "status": "done", "createdAt": at, "completedAt": at, "pending": true,
+            "parts": [{ "id": "u-noref-a", "kind": "attachment", "attachment": { "name": "Screenshot.png", "mime": "image/png", "kind": "image" } }],
+        })).unwrap());
+        at += 10_000;
+        messages.push(serde_json::from_value(serde_json::json!({
+            "id": "u-memo", "chatId": "g1", "role": "user", "sender": "user:gh_1", "senderName": "Affinity",
+            "status": "done", "createdAt": at, "completedAt": at,
+            "parts": [{ "id": "u-memo-a", "kind": "attachment", "attachment": { "name": "memo.m4a", "mime": "audio/mp4", "ref": "blob-memo", "kind": "audio", "bytes": 48213 } }],
+        })).unwrap());
+        at += 10_000;
+        messages.push(serde_json::from_value(serde_json::json!({
+            "id": "u-ref", "chatId": "g1", "role": "user", "sender": "user:gh_1", "senderName": "Affinity",
+            "status": "done", "createdAt": at, "completedAt": at,
+            "replyRef": { "chatId": "other", "projectId": "", "messageId": "m-far", "chatTitle": "Design", "sender": "user:gh_2", "senderName": "Sam", "senderHandle": "sam", "text": "" },
+            "parts": [{ "id": "u-ref-t", "kind": "text", "text": "replying across chats" }],
+        })).unwrap());
+        state.update(cx, |s, cx| {
+            s.projects.push(Project {
+                id: "g1".into(),
+                name: "Arbonites".into(),
+                kind: SpaceKind::Group,
+                ..Project::default()
+            });
+            let chat: Chat = serde_json::from_value(serde_json::json!({
+                "id": "g1", "project_id": "g1", "title": "Arbonites", "is_pinned": true,
+                "is_system": false, "unread": false, "last_message_at": at, "kind": "group",
+            }))
+            .unwrap();
+            s.chats.insert("g1".into(), vec![chat]);
+            s.messages.insert("g1".into(), messages);
+            s.selected_project = Some("g1".into());
+            s.active_tab.insert("g1".into(), "g1".into());
+            cx.notify();
+        });
+        // The SVG bytes arrive as a thumbnail for both refs (what FetchThumbnail returns).
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1000"><circle cx="500" cy="500" r="400"/></svg>"#.to_vec();
+        state.update(cx, |s, cx| {
+            for key in ["blob-svg-1", "blob-svg-2"] {
+                s.apply(
+                    SyncEvent::Thumbnail {
+                        key: key.into(),
+                        bytes: std::sync::Arc::new(svg.clone()),
+                    },
+                    cx,
+                );
+            }
+        });
+        // Real link icons for the sites in the texts (what the relay would answer).
+        let png = {
+            let img = image::RgbaImage::from_pixel(64, 64, image::Rgba([200, 30, 30, 255]));
+            let mut out = std::io::Cursor::new(Vec::new());
+            img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+            out.into_inner()
+        };
+        state.update(cx, |s, cx| {
+            for host in ["austin.eater.com", "affine.io", "nypost.com"] {
+                s.apply(
+                    SyncEvent::LinkIcon {
+                        host: host.into(),
+                        png: Some(std::sync::Arc::new(png.clone())),
+                    },
+                    cx,
+                );
+            }
+        });
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        transcript.update(cx, |t, cx| t.sync(cx));
+        let (_view, vcx) = cx.add_window_view(|_, _| Host {
+            transcript: transcript.clone(),
+        });
+        vcx.run_until_parked();
+        // Local actions: scroll through the whole list, sweep the pointer over every 24 pt
+        // band, click every link and the bubbles, open the hover rail — at each scroll stop.
+        let column = vcx.debug_bounds("chat-column").expect("column");
+        for stop in 0..12 {
+            transcript.update(vcx, |t, cx| {
+                t.list.scroll_to(gpui::ListOffset {
+                    item_ix: stop * 3,
+                    offset_in_item: px(0.0),
+                });
+                cx.notify();
+            });
+            vcx.run_until_parked();
+            let mut y = column.top() + px(8.0);
+            while y < column.bottom() {
+                for x in [
+                    column.left() + px(60.0),
+                    column.left() + px(200.0),
+                    column.left() + px(420.0),
+                    column.right() - px(40.0),
+                ] {
+                    vcx.simulate_mouse_move(point(x, y), None, Modifiers::default());
+                    vcx.run_until_parked();
+                    vcx.simulate_click(point(x, y), Modifiers::default());
+                    vcx.run_until_parked();
+                }
+                y += px(24.0);
+            }
+        }
+        assert!(vcx.debug_bounds("chat-column").is_some());
+        drop(rt);
     }
 }

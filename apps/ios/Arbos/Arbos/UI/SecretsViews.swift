@@ -162,21 +162,20 @@ struct SecretTextField: View {
                     }
             } else if secure {
                 SecureField("", text: $text, prompt: Text(placeholder).foregroundStyle(theme.placeholder))
-                    .padding(.horizontal, 14)
-                    .frame(height: Theme.fieldHeight)
+                    .padding(.horizontal, Controls.textInset)
+                    .frame(height: Controls.height)
             } else {
                 TextField("", text: $text, prompt: Text(placeholder).foregroundStyle(theme.placeholder))
                     .keyboardType(keyboard)
-                    .padding(.horizontal, 14)
-                    .frame(height: Theme.fieldHeight)
+                    .padding(.horizontal, Controls.textInset)
+                    .frame(height: Controls.height)
             }
         }
         .font(theme.font(Theme.body, design: mono ? .monospaced : .default))
         .foregroundStyle(theme.text)
         .textInputAutocapitalization(capitalization)
         .autocorrectionDisabled()
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+        .background(ControlSurface(shape: Capsule()))
     }
 }
 
@@ -206,7 +205,7 @@ struct RequestAnswers: View {
                 .foregroundStyle(destructive ? theme.danger : theme.text)
                 .padding(.horizontal, 10)
                 .frame(height: 28)
-                .background(Capsule().fill(theme.field))
+                .background(Capsule().fill(theme.field)) // control-size: exception inlineChips
         }
         .buttonStyle(.plain)
     }
@@ -563,8 +562,7 @@ struct SecretPage: View {
             if secret != nil {
                 Button("Edit") { showEdit = true }
                     .font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text)
-                    .padding(.horizontal, 14).frame(height: Theme.control)
-                    .background(Capsule().fill(theme.field))
+                    .controlPill()
                     .padding(.trailing, 20).padding(.top, 6)
                     .disabled(model.isFixture)
             }
@@ -985,7 +983,7 @@ struct OthersAskSegment: View {
             segment("Ask me", "card")
         }
         .padding(2)
-        .background(Capsule().fill(theme.field))
+        .background(Capsule().fill(theme.field)) // control-size: exception inlineChips
         .fixedSize()
     }
 
@@ -1037,8 +1035,8 @@ struct DirectorEditSheet: View {
                 Text("Remove from the list")
                     .font(theme.font(Theme.body, weight: .semibold))
                     .foregroundStyle(theme.danger)
-                    .frame(maxWidth: .infinity).frame(height: 48)
-                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
+                    .frame(maxWidth: .infinity).frame(height: Controls.height)
+                    .background(ControlSurface(shape: Capsule()))
             }
             .buttonStyle(.plain)
             .disabled(model.isFixture)
@@ -1133,8 +1131,8 @@ struct AccessEditSheet: View {
                 Text(access.enabled ? "Turn off" : "Turn on")
                     .font(theme.font(Theme.body, weight: .semibold))
                     .foregroundStyle(access.enabled ? theme.danger : theme.text)
-                    .frame(maxWidth: .infinity).frame(height: 48)
-                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
+                    .frame(maxWidth: .infinity).frame(height: Controls.height)
+                    .background(ControlSurface(shape: Capsule()))
             }
             .buttonStyle(.plain)
         }
@@ -1425,7 +1423,7 @@ struct VaultPage: View {
 
     private var vault: ConnectedVault? { model.secrets?.vaults.first { $0.id == vaultId } }
     private var filtered: [[String: Any]] {
-        search.isEmpty ? items : items.filter { (($0["title"] as? String) ?? "").localizedCaseInsensitiveContains(search) }
+        PeoplePicker.titled(items, query: search) { ($0["title"] as? String) ?? "" }
     }
 
     var body: some View {

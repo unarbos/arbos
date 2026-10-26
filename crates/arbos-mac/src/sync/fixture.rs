@@ -1579,8 +1579,14 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             }
             emit_projects(shared);
         }
-        ClientCommand::SetMyAvatar { .. } => {
-            let url = "fixture://avatar/me-picture".to_string();
+        ClientCommand::SetMyAvatar { path } => {
+            // The chosen file itself (mastered by `emit_avatar`), so a rig shot shows the real
+            // picture on the hero and the rows after Set.
+            let url = if path.is_file() {
+                crate::ui::avatar_picker::file_url(&path)
+            } else {
+                "fixture://avatar/me-picture".to_string()
+            };
             emit_avatar(shared, &url);
             let _ = shared
                 .events
@@ -1833,6 +1839,12 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 bytes: Arc::new(fixture_png(&key)),
                 key,
             });
+        }
+        ClientCommand::FetchLinkIcon { host } => {
+            // The real icons of the fixture replies' sites (`assets/link-icons`), so the
+            // shots show the feature; any other host has none → the placeholder.
+            let png = fixture_link_icon(&host).map(|b| Arc::new(b.to_vec()));
+            let _ = shared.events.send(SyncEvent::LinkIcon { host, png });
         }
         ClientCommand::DownloadAttachment {
             project_id,
@@ -3449,6 +3461,10 @@ const LIMA_REPLY: &[&str] = &[
     "| Store | Area | Sunday | What they sell |\n| --- | --- | --- | --- |\n| [Librería El Virrey](https://www.elvirrey.com/) | Miraflores, Calle Bolognesi 510 | 11am–7pm | Spanish literature, essays, history, art; some English at a higher price |\n| [Communitas](https://www.communitas.pe/) | San Isidro, Av. 2 de Mayo 1690 | 10:30am–7:30pm | Humanities, literature, law, history, science, in Spanish |\n| [Vallejo Librería Café](https://www.tangol.com/blog/en/the-3-best-bookstores-in-lima/n-15210) | San Isidro, Av. Camino Real 1119 | not listed | Books plus coffee or tea |\n| [Assouline Lima](https://www.assouline.com/pages/store/lima) | Miraflores, street not listed | not listed | Luxury and design books |",
     "El Virrey’s phone is (511) 713 0505. Their own page says the shop dates to late 1973; a travel write-up said 1972. Communitas is the other store with Sunday hours on its site, but it is in San Isidro, not Miraflores, and the page does not clearly say it is a walk-in shop, so check before you go. Vallejo is a bookstore-café; I only have a travel blog for it, and hours were not listed. Assouline is a luxury boutique, not a general bookstore. La Casa de Kanu in Barranco was called a favorite on an expat guide, but I have no street address or hours.\n\nHours were not checked on a second source, and I did not confirm anyone is open right now. No used-book shop and no central Lima store made this list with an address I could verify.\n\nWant me to check whether El Virrey is open right now, or look for an English-language shop?",
 ];
+
+/// The reply to "Read the latest from the New York post" (agent Bubble, 2026-10-25, Jacob's
+/// screenshot): seven linked headlines as bullets, then one line of prose.
+const NYPOST_REPLY: &str = "- [Syringe attack: lawyer claims mistaken identity](https://nypost.com/2026/10/25/us-news/syringe-attack-lawyer-claims-mistaken-identity/)\n- [Arrest story: a second Jewish victim minutes earlier](https://nypost.com/2026/10/25/us-news/arrest-story-second-jewish-victim-minutes-earlier/)\n- [Ex-NYPD cop charged in a George Washington Bridge killing, free on $1M bail](https://nypost.com/2026/10/25/us-news/ex-nypd-cop-charged-in-gw-bridge-killing-free-on-1m-bail/)\n- [Thomas Markle home search, child pornography, Philippine official’s comment](https://nypost.com/2026/10/25/world-news/thomas-markle-home-search-philippine-official-comment/)\n- [Musk says SpaceX cut Ukraine’s Starlink access](https://nypost.com/2026/10/25/business/musk-says-spacex-cut-ukraines-starlink-access/)\n- [Giants beat the Texans in overtime in J. J. McCarthy’s first start](https://nypost.com/2026/10/25/sports/giants-beat-texans-in-overtime-mccarthy-first-start/)\n- [McCarthy’s wife after that win](https://nypost.com/2026/10/25/sports/mccarthys-wife-after-that-win/)\n\nNo times or bylines were on the page text I read. Want one of these opened?";
 
 const REPLY_CODE: &[&str] = &[
     "The transcript is a bottom-aligned list with one row per markdown block:",
@@ -5290,6 +5306,19 @@ fn attachment(name: &str, mime: &str, kind: AttachmentKind, title: &str, bytes: 
 }
 
 /// A 320×200 PNG (diagonal gradient tinted from the key) for fixture thumbnails and downloads.
+/// The 64×64 site icons the fixture's replies link to (what the relay's
+/// `/link-icon` would answer), by host.
+fn fixture_link_icon(host: &str) -> Option<&'static [u8]> {
+    Some(match host {
+        "www.elvirrey.com" => include_bytes!("../../assets/link-icons/www.elvirrey.com.png"),
+        "www.communitas.pe" => include_bytes!("../../assets/link-icons/www.communitas.pe.png"),
+        "www.tangol.com" => include_bytes!("../../assets/link-icons/www.tangol.com.png"),
+        "www.assouline.com" => include_bytes!("../../assets/link-icons/www.assouline.com.png"),
+        "nypost.com" => include_bytes!("../../assets/link-icons/nypost.com.png"),
+        _ => return None,
+    })
+}
+
 fn fixture_png(key: &str) -> Vec<u8> {
     if key.contains("Screenshot") {
         return fixture_page_png();
@@ -5417,6 +5446,16 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
                 for bubble in LIMA_REPLY {
                     s.assistant(TurnKind::Reply, MessageStatus::Done, vec![text(bubble)]);
                 }
+            }
+            // `ARBOS_FIXTURE_REPLY=links`: Jacob's New York Post turn — a bullet list of
+            // linked headlines ([feedback link-icons-mac-2026-10-25]).
+            Ok("links") => {
+                s.user("Read the latest from the New York post");
+                s.assistant(
+                    TurnKind::Reply,
+                    MessageStatus::Done,
+                    vec![text(NYPOST_REPLY)],
+                );
             }
             _ => {}
         }
@@ -6726,6 +6765,22 @@ fn draft_picture_url(kind: &str, picture: &DraftPicture) -> String {
 }
 
 fn emit_avatar(shared: &Shared, url: &str) {
+    // A picked file (`file://…`, the picker's Upload preview) is mastered like the relay client
+    // does, so the fixture rig shows the real picture at upload quality; everything else is
+    // the seeded placeholder.
+    if let Some(path) = url.strip_prefix("file://") {
+        if let Some(bytes) = std::fs::read(path)
+            .ok()
+            .and_then(|b| super::avatar_master::master(&b).ok())
+            .map(|m| m.bytes)
+        {
+            let _ = shared.events.send(SyncEvent::Avatar {
+                url: url.to_string(),
+                bytes: Arc::new(bytes),
+            });
+        }
+        return;
+    }
     let seed = url.rsplit('/').next().unwrap_or(url).to_string();
     let _ = shared.events.send(SyncEvent::Avatar {
         url: url.to_string(),
