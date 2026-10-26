@@ -807,7 +807,9 @@ impl ProseFilter {
         if without_tail.trim().is_empty() {
             return String::new();
         }
-        Self::fix_glued_spaces(&without_tail)
+        // Tables reach the apps as plain GFM (no fence, no indent, a separator row) — the
+        // renderers draw nothing else as a table.
+        crate::markdown_tables::normalize_tables(&Self::fix_glued_spaces(&without_tail))
     }
 
     /// Put the whitespace that surrounded `original` back around `cleaned`, so what the filter
@@ -1297,6 +1299,10 @@ pub struct TurnState {
     pub unposted_text: String,
     /// The turn ended with nothing posted and `SendTool::On` posted the leftover prose once.
     pub posted_fallback: bool,
+    /// In a shared chat the model tried to post a bubble that only announced it was staying
+    /// silent ("that question is for X; nothing to add from me"); the guard dropped it, and the
+    /// turn ends as a quiet one (`silence.rs`).
+    pub silence_dropped: bool,
     /// The route's `ack` became a bubble (`new` / `wake`). An `act` ack is working-row status
     /// only, so it does not count as words the user read (duplex step 1 fallback rule).
     pub ack_posted: bool,
@@ -1308,7 +1314,29 @@ pub struct TurnState {
     /// A `TurnKind::JobFallback` turn: the job path already failed for this ask, so the work
     /// stays inline — no act→job conversion and `start_job` is refused.
     pub job_fallback: bool,
+    /// In-turn retries after a transient model failure (`MODEL_CALL_RETRIES`); the second one
+    /// runs on the fallback talking model.
+    pub model_retries: u8,
+    /// The one continuation after an opening line that promised parts already ran.
+    pub parts_continuation: bool,
+    /// Message ids of files/pictures `deliver_file` posted from this turn: a posted result like
+    /// a bubble (no fallback line, no "didn't answer" row after it).
+    pub attachments_posted: Vec<String>,
+    /// The row the ack bubble went out on, when the turn posted one: a failure after the retries
+    /// is written there as one message, never as a second bubble under it.
+    pub ack_row_id: Option<String>,
 }
+
+/// First line of every relay-turn prompt (mirrored by `RELAY_TURN_MARK` in arbos-pi-ext): the
+/// extension treats a `send_message` before `route` in such a turn as the `reply` route.
+pub(crate) const RELAY_TURN_MARK: &str = "[Arbos relay turn]";
+
+/// How many times a user turn's model call is retried in the same turn after a transient
+/// failure (a provider 5xx, overload, a timeout) before the user reads "the model call failed":
+/// once after 2 s on the same model, once more after 5 s on the fallback talking model
+/// (Jacob, 2026-10-25: retry with backoff and a fallback model before ever saying it failed).
+pub(crate) const MODEL_CALL_RETRIES: u8 = 2;
+pub(crate) const MODEL_CALL_BACKOFF_S: [u64; 2] = [2, 5];
 
 /// The direct tool call a turn is inside right now.
 #[derive(Clone, Debug)]
@@ -1344,6 +1372,13 @@ impl ModelError {
             .filter(|s| !s.trim().is_empty())
             .unwrap_or("provider error")
             .to_owned();
+        // pi reports an abort that lands mid tool call as `stopReason: error` with the abort
+        // text (Hezbola, 2026-10-25: the act→job conversion's Abort became "I couldn't answer
+        // that: the model call failed"). Every abort is agentd's own — stop, steer, deadline,
+        // conversion — and is announced where it happens.
+        if raw == Some("aborted") || is_abort_text(&detail) {
+            return None;
+        }
         let lower = detail.to_ascii_lowercase();
         Some(Self {
             refusal: raw == Some("refusal")
@@ -1371,6 +1406,19 @@ impl ModelError {
             return "Your workspace disk is full. Say *clean up* and I will remove caches and toolchains, or delete files yourself; then send your message again.".to_owned();
         }
         "I couldn't answer that: the model call failed. Ask me again in a moment.".to_owned()
+    }
+
+    /// The line when the user already read an acknowledgement bubble: it joins that bubble as
+    /// one message, so it says the started work did not finish rather than "I couldn't answer".
+    pub fn chat_line_after_ack(&self, owner: &str) -> String {
+        if self.refusal
+            || crate::budget::Refusal::classify(&self.detail).is_some()
+            || classify_hard_limit(&self.detail).is_some()
+            || crate::disk::is_enospc(&self.detail)
+        {
+            return self.chat_line_for(owner);
+        }
+        "I couldn't finish that: the model call failed, even after retrying. Ask me again in a moment.".to_owned()
     }
 
     /// Error-part code the clients key on.
@@ -1442,10 +1490,15 @@ impl TurnState {
             send_tool: crate::config::SendTool::Off,
             unposted_text: String::new(),
             posted_fallback: false,
+            silence_dropped: false,
             ack_posted: false,
             web_tool_used: false,
             act_to_job: false,
             job_fallback: false,
+            model_retries: 0,
+            parts_continuation: false,
+            attachments_posted: Vec::new(),
+            ack_row_id: None,
         }
     }
 }
@@ -1708,6 +1761,9 @@ impl Agent {
             &self.cfg.project_id,
             &self.cfg.work_dir.display().to_string(),
             &talking,
+        ));
+        s.push_str(&crate::identity::owner_section(
+            &self.people.owner_profile(),
         ));
         s.push('\n');
         s.push_str(&crate::media::prompt_section(&self.cfg));
@@ -3150,7 +3206,12 @@ impl Agent {
             (Some(ValidRoute::Act { plan }), true) => {
                 let brief = format!(
                     "Continue this task that the project agent started and could not finish within its limits.\n\nUser request: {user_text}\n\nPlan: {plan}\n\nAct so far:\n{}\n\nFinish the task. If what remains is waiting on a background process or job (a loop, a pipeline, a long build), do not wait for it in this session: check its state once, post what is done so far with send_message, then schedule the promised check-ins with routines_create (one-shot `once` triggers with `in_seconds` at the cadence the user was promised, the last one for the final summary; each prompt tells you to check the job and tell the user the outcome) and end. Every promised note must have a routine behind it.",
-                    turn.act_transcript.join("\n").chars().take(2400).collect::<String>()
+                    crate::truncate::clip_marked(
+                        &turn.act_transcript.join("\n"),
+                        2400,
+                        "",
+                        Some(&format!("read_thread {{\"thread_id\": \"{chat_id}\"}} (tool_output entries)")),
+                    )
                 );
                 Some((
                     None,
@@ -3405,6 +3466,7 @@ impl Agent {
                 .map(|m| m.id)
                 .collect();
             for id in stale {
+                h.doc.set_activity(&id, None);
                 h.doc.add_status_part(&id, "failed", "Failed");
                 if let (Some(line), false) = (line, told) {
                     h.doc.add_error_part(&id, "subagent_failed", line);
@@ -3967,13 +4029,28 @@ impl Agent {
             send_tool: self.cfg.send_tool(),
             unposted_text: String::new(),
             posted_fallback: false,
+            silence_dropped: false,
             ack_posted: false,
             web_tool_used: false,
             act_to_job: false,
             job_fallback: matches!(kind, TurnKind::JobFallback { .. }),
+            model_retries: 0,
+            parts_continuation: false,
+            attachments_posted: Vec::new(),
+            ack_row_id: None,
         });
         self.turn_running.store(true, Ordering::SeqCst);
         let keepalive = self.spawn_keepalive();
+        // A relay turn is stamped so the extension lets a `send_message` that comes before
+        // `route` stand as the `reply` route instead of blocking it (the result turn then wrote
+        // "Delivering the update now." and the user read only that; sweep 2026-10-25).
+        let stamped;
+        let prompt_text = if matches!(kind, TurnKind::User | TurnKind::JobFallback { .. }) {
+            prompt_text
+        } else {
+            stamped = format!("{RELAY_TURN_MARK}\n{prompt_text}");
+            stamped.as_str()
+        };
         let mut result = self.run_main_turn(chat_id, host, prompt_text).await;
         // A steer interrupted a long tool call (#1690): pi settled on the abort; carry on in the
         // same row with the steer as the prompt, as many times as the user steers.
@@ -4006,6 +4083,64 @@ impl Agent {
             );
             result = self.run_main_turn(chat_id, host, &prompt).await;
         }
+        // A transient model failure with nothing delivered is retried here, with backoff, and
+        // the last retry runs on the fallback talking model; the user reads "the model call
+        // failed" only after that (Jacob, 2026-10-25).
+        let mut fallback_model_on = false;
+        while result.is_ok() {
+            let Some((attempt, m)) = self.transient_model_error().await else {
+                break;
+            };
+            let wait =
+                MODEL_CALL_BACKOFF_S[usize::from(attempt).min(MODEL_CALL_BACKOFF_S.len() - 1)];
+            tracing::warn!(chat_id, attempt = attempt + 1, wait_s = wait, detail = %m.detail, "transient model failure; retrying in the same turn");
+            tokio::time::sleep(Duration::from_secs(wait)).await;
+            if self.turn.lock().await.as_ref().is_none_or(|t| t.stopped) {
+                break;
+            }
+            if attempt + 1 == MODEL_CALL_RETRIES && !fallback_model_on {
+                fallback_model_on = self.switch_talking_model(true).await;
+            }
+            let retry_prompt = {
+                let mut tl = self.turn.lock().await;
+                let Some(t) = tl.as_mut() else { break };
+                t.model_retries = attempt + 1;
+                t.model_error = None;
+                t.route = None;
+                t.route_attempts = 0;
+                t.metrics.route_missing = false;
+                model_retry_prompt(
+                    prompt_text,
+                    if t.ack_posted {
+                        Some(t.ack_text.as_str())
+                    } else {
+                        None
+                    },
+                )
+            };
+            result = self.run_main_turn(chat_id, host, &retry_prompt).await;
+        }
+        if fallback_model_on {
+            self.switch_talking_model(false).await;
+        }
+        // The turn's only words announce parts that never came ("delivered in parts below"): the
+        // model took the route's `reply` text for the answer and stopped. One continuation asks
+        // for the parts (proof run 1, 2026-10-26; the extension no longer ends such a turn, this
+        // is the net under it).
+        if result.is_ok() {
+            if let Some(opening) = self.unkept_parts_promise().await {
+                tracing::warn!(chat_id, opening = %opening, "turn promised parts and posted none; continuing once");
+                let prompt = format!(
+                    "{RELAY_TURN_MARK}\n[Arbos] Your message \"{opening}\" is in the chat, but the parts it announces were never posted. Post them now with send_message — each part its own call (conclusion, linked table, details + sources, one next-step offer) — then end the turn. Do not repeat the opening line."
+                );
+                if let Some(t) = self.turn.lock().await.as_mut() {
+                    t.route = None;
+                    t.route_attempts = 0;
+                    t.parts_continuation = true;
+                }
+                result = self.run_main_turn(chat_id, host, &prompt).await;
+            }
+        }
         // An empty turn is usually the model window, not the question: a provider refusal on a
         // bloated session (Lium, 2026-10-21: six turns, 208–242k tokens, zero output) or a settle
         // with no `route` and no prose (mr.agi group + DM, feedback app-01M5GCK…: consecutive
@@ -4029,7 +4164,7 @@ impl Agent {
                         // placed after the memory block so they are the nearest context.
                         let recap = {
                             let h = host.lock().await;
-                            chat_recap(&h.doc.messages(), user_msg_id, &self.name())
+                            chat_recap(&h.doc.messages(), user_msg_id, &self.name(), chat_id)
                         };
                         let retry_prompt = with_chat_recap(prompt_text, &recap);
                         result = self.run_main_turn(chat_id, host, &retry_prompt).await;
@@ -4119,7 +4254,11 @@ impl Agent {
                 Some(chat_id),
                 "quiet",
                 Some("system"),
-                "stayed quiet: route reply with nothing to say in a shared chat (no row)",
+                if turn.silence_dropped {
+                    "stayed quiet: the silence announcement was dropped in a shared chat (no row)"
+                } else {
+                    "stayed quiet: route reply with nothing to say in a shared chat (no row)"
+                },
                 Some(&json!({ "message_id": assistant_msg_id, "user_message_id": user_msg_id })),
             );
             tracing::info!(
@@ -4143,6 +4282,7 @@ impl Agent {
         }
         let room_name;
         let mut trimmed = "kept";
+        let mut merged_into_ack = false;
         {
             let h = host.lock().await;
             if let Some(e) = &err_text {
@@ -4153,14 +4293,45 @@ impl Agent {
                 );
             }
             if let Some(m) = &model_failed {
-                h.doc
-                    .add_error_part(&assistant_msg_id, m.code(), &m.chat_line_for(&owner_label));
-                h.doc.add_hidden_part(
-                    &assistant_msg_id,
-                    "model_error_detail",
-                    &m.detail,
-                    &json!({ "refusal": m.refusal, "sessionRotated": turn.session_rotated }),
-                );
+                let detail = json!({ "refusal": m.refusal, "sessionRotated": turn.session_rotated, "retries": turn.model_retries });
+                match turn
+                    .ack_row_id
+                    .as_deref()
+                    .filter(|id| *id != assistant_msg_id)
+                {
+                    // The ack bubble already went out: the failure joins it as one message
+                    // ("Searching the web for X now." + the line), and the wordless result
+                    // row goes, so the user never reads ack + failure as two bubbles.
+                    Some(ack_row) if turn.progress_texts.iter().all(|p| p.trim().is_empty()) => {
+                        let line = m.chat_line_after_ack(&owner_label);
+                        if let Some(part) = h.doc.add_text_part(ack_row, "text") {
+                            h.doc.append_text(ack_row, &part, &format!("\n\n{line}"));
+                        }
+                        h.doc
+                            .add_hidden_part(ack_row, "model_error_detail", &m.detail, &detail);
+                        h.doc.set_message_fields(
+                            ack_row,
+                            &[("modelFailedAfterAck", json!(m.code()))],
+                        );
+                        if let Err(e) = h.doc.delete_message(&assistant_msg_id) {
+                            tracing::warn!(chat_id, error = %e, "model failure after ack: could not remove the result row");
+                        }
+                        merged_into_ack = true;
+                    }
+                    _ => {
+                        h.doc.add_error_part(
+                            &assistant_msg_id,
+                            m.code(),
+                            &m.chat_line_for(&owner_label),
+                        );
+                        h.doc.add_hidden_part(
+                            &assistant_msg_id,
+                            "model_error_detail",
+                            &m.detail,
+                            &detail,
+                        );
+                    }
+                }
             }
             if silent_no_route {
                 h.doc.add_error_part(
@@ -4178,20 +4349,22 @@ impl Agent {
             if turn.activity.is_some() {
                 h.doc.set_activity(&assistant_msg_id, None);
             }
-            h.doc.set_message_fields(
-                &assistant_msg_id,
-                &[
-                    ("decision", json!(route_name)),
-                    ("turn", json!({ "kind": turn_kind })),
-                    ("model", json!(talking_model)),
-                    ("usage", turn.metrics.usage_for_doc()),
-                ],
-            );
-            if turn.ack_split && !turn.row_closed {
-                h.doc
-                    .set_message_fields(&assistant_msg_id, &[("turnRole", json!("result"))]);
+            if !merged_into_ack {
+                h.doc.set_message_fields(
+                    &assistant_msg_id,
+                    &[
+                        ("decision", json!(route_name)),
+                        ("turn", json!({ "kind": turn_kind })),
+                        ("model", json!(talking_model)),
+                        ("usage", turn.metrics.usage_for_doc()),
+                    ],
+                );
+                if turn.ack_split && !turn.row_closed {
+                    h.doc
+                        .set_message_fields(&assistant_msg_id, &[("turnRole", json!("result"))]);
+                }
+                h.doc.finish_message(&assistant_msg_id, final_status);
             }
-            h.doc.finish_message(&assistant_msg_id, final_status);
             // The row this turn ended on may be the fresh `result` row `send_message` opened
             // after the last bubble — wordless, nothing but "Working…". Left finished and empty,
             // the Mac and iPhone draw their stock "<name> didn't answer. Ask again." under the
@@ -4199,7 +4372,10 @@ impl Agent {
             // turn put a visible row in front of the user, that empty row goes: deleted when it
             // holds nothing, kept hidden when it carries tool detail for the Details drawer.
             if final_status == MessageStatus::Done
-                && (turn.ack_posted || turn.progress_texts.iter().any(|p| !p.trim().is_empty()))
+                && !merged_into_ack
+                && (turn.ack_posted
+                    || !turn.attachments_posted.is_empty()
+                    || turn.progress_texts.iter().any(|p| !p.trim().is_empty()))
             {
                 trimmed = trim_wordless_result_row(&h.doc, &assistant_msg_id);
             }
@@ -4217,11 +4393,14 @@ impl Agent {
                 .post_timing("trailing_wordless_row", 1, Some(trimmed))
                 .await;
         }
-        if turn.activity.is_some() {
-            self.post_activity(chat_id, None);
+        if turn.activity.is_some() || final_status != MessageStatus::Done || model_failed.is_some()
+        {
+            // No "Searching…" may outlive the turn on an error path; the presence line falls
+            // back to a job still running in this chat, else nothing (Hezbola, 2026-10-25).
+            self.refresh_job_activity(chat_id).await;
         }
         if let Some(m) = &model_failed {
-            tracing::warn!(chat_id, refusal = m.refusal, session_rotated = turn.session_rotated, detail = %m.detail, "model call failed; error line shown in chat");
+            tracing::warn!(chat_id, refusal = m.refusal, retries = turn.model_retries, session_rotated = turn.session_rotated, detail = %m.detail, "model call failed; error line shown in chat");
             self.append_audit(
                 "model_call_failed",
                 json!({
@@ -4264,7 +4443,16 @@ impl Agent {
             turn.ack_text.as_str()
         };
         if matches!(final_status, MessageStatus::Done) && !announce.trim().is_empty() {
-            self.announce_reply(&room_name, &assistant_msg_id, announce);
+            // A live call gets the turn's whole prose (progress bubbles + the result), not
+            // only the push body: the answer to a spoken ask is often a progress bubble.
+            let voice_text = voice_prose_of(&turn.progress_texts, &turn.streamed_text);
+            self.announce_reply_kind(
+                &room_name,
+                &assistant_msg_id,
+                announce,
+                "result",
+                Some(&voice_text),
+            );
             if self.people.is_people_chat(chat_id) {
                 self.dispatch_agent_mentions(
                     chat_id,
@@ -4393,7 +4581,14 @@ impl Agent {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let raw_trim: String = raw.chars().take(7000).collect();
+        let raw_trim = crate::truncate::clip_marked(
+            raw,
+            7000,
+            "",
+            Some(&format!(
+                "read_thread {{\"thread_id\": \"{subagent_id}\"}} (the worker's own thread)"
+            )),
+        );
         let mut prompt = match job {
             Some(j) => format!(
                 "[Arbos] Job \"{}\" ({}) finished · status {status} · {:.0} s.\n\nThe user originally asked (message id {user_msg_id}): {}\n",
@@ -4417,13 +4612,16 @@ impl Agent {
             ));
         }
         prompt.push_str(&format!(
-            "\nSubagent output (for you only; the user has not seen it):\n<<<\n{raw_trim}\n>>>\n\nRoute `reply`, then deliver the update with `send_message` like a colleague in chat: what got done and the outcome, what changed that they care about, and what is open or needs their answer. Research or a comparison comes in parts, each its own `send_message`: the conclusion in one or two sentences; a markdown table with one row per item (name linked to its page, the compared facts as columns); then details and caveats, the sources used and what could not be checked, ending with one concrete next-step offer. Anything else is one short message. Speak as if you did the work; do not mention the subagent, its name, the harness, the model, tool calls, commands, scratch paths, or token counts. No JSON, no quoted output, no list of steps."
+            "\nSubagent output (for you only; the user has not seen it):\n<<<\n{raw_trim}\n>>>\n\nRoute `reply`, then deliver the update with `send_message` like a colleague in chat: what got done and the outcome, what changed that they care about, and what is open or needs their answer. Research or a comparison comes in parts, each its own `send_message`: the conclusion in one or two sentences; a plain GitHub-flavoured markdown table with one row per item (header row, then the `| --- |` separator row, every row starting and ending with `|`, no indentation, no code fence; the name an inline `[Name](https://…)` link, the compared facts as columns); then details and caveats, the sources used and what could not be checked, ending with one concrete next-step offer. Anything else is one short message. Speak as if you did the work; do not mention the subagent, its name, the harness, the model, tool calls, commands, scratch paths, or token counts. No JSON, no quoted output, no list of steps."
         ));
         if job.is_some() {
             prompt.push_str(&format!(
                 "\n\nThis was a job you started with start_job; the user has not seen its output. Deliver the answer now with send_message, each part its own call, with reply_to = {user_msg_id} so it threads under their ask. Never mention a job, a worker or that anything ran in the background."
             ));
         }
+        prompt.push_str(
+            "\n\nFiles and pictures: a file is in the chat only where the output above shows a deliver_file result with `posted: true` and a message id — those are already visible to the user as cards or inline pictures, so refer to them, do not post them again. If the output shows a deliver_file error or no deliver_file call, no file is in the chat: post it yourself now with deliver_file(path) if the file exists, or say plainly that it could not be posted. Never say you attached or posted something otherwise.",
+        );
         let kind = TurnKind::SubagentResult {
             subagent_id: subagent_id.to_owned(),
             name: name.to_owned(),
@@ -4642,7 +4840,18 @@ impl Agent {
     /// Tell the relay a whole reply landed, so people who are not looking get a notification
     /// (`POST /chats/{id}/notify` for a people chat, `POST /projects/{p}/chats/{c}/notify`
     /// otherwise). Fire-and-forget: the message is in the doc either way.
-    pub fn announce_reply(self: &Arc<Self>, room: &str, message_id: &str, text: &str) {
+    /// Tell the relay a bubble landed (push notifications, Matrix, and — for a live call in the
+    /// chat, #1860 — the call's voice session): `kind` = `result` | `job` | `quick`,
+    /// `voice_text` = the whole prose of the turn when the push body (`text`) is only its
+    /// last part.
+    pub fn announce_reply_kind(
+        self: &Arc<Self>,
+        room: &str,
+        message_id: &str,
+        text: &str,
+        kind: &str,
+        voice_text: Option<&str>,
+    ) {
         let Some((project, chat_id)) = room.split_once('/') else {
             return;
         };
@@ -4658,6 +4867,8 @@ impl Agent {
             "message_id": message_id,
             "text": text.chars().take(600).collect::<String>(),
             "project_id": self.cfg.project_id,
+            "kind": kind,
+            "voice_text": voice_text.map(|t| t.chars().take(2000).collect::<String>()),
         });
         let me = self.clone();
         tokio::spawn(async move {
@@ -4987,6 +5198,7 @@ impl Agent {
                         // `aborted` stop is ours and stays quiet); older builds sent a string.
                         let m = match error {
                             Some(v) if v.get("stopReason").is_some() => ModelError::from_message(v),
+                            Some(v) if is_abort_text(&v.to_string()) => None,
                             Some(v) => Some(ModelError {
                                 detail: v.to_string(),
                                 refusal: false,
@@ -5338,7 +5550,7 @@ impl Agent {
     /// The #1521 rule for one answer row: quote the message it answers always in a shared chat
     /// (groups, channels, people chats, a row another agent sent), in a 1:1 only when a later
     /// user message exists — so every bubble of a turn threads under its ask (duplex design D6).
-    fn reply_to_wanted_for(
+    pub(crate) fn reply_to_wanted_for(
         &self,
         doc: &arbos_core::doc::ChatDoc,
         chat_id: &str,
@@ -5453,8 +5665,7 @@ impl Agent {
         host: &SharedHost,
         elapsed: Duration,
     ) -> bool {
-        if !self.cfg.act_to_job() || !self.cfg.jobs() || elapsed < crate::config::act_to_job_after()
-        {
+        if !self.cfg.act_to_job() || !self.cfg.jobs() || elapsed < self.cfg.act_to_job_after() {
             return false;
         }
         let mut tl = self.turn.lock().await;
@@ -5506,12 +5717,7 @@ impl Agent {
         plan: &str,
         turn: &TurnState,
     ) {
-        let edited = turn.act_transcript.iter().any(|l| {
-            l.starts_with("→ edit")
-                || l.starts_with("→ write")
-                || l.starts_with("→ bash")
-                || l.starts_with("→ codemode")
-        });
+        let edited = turn.act_transcript.iter().any(|l| act_line_edits(l));
         let kind = if turn.web_tool_used && !edited {
             "research"
         } else if edited {
@@ -5520,7 +5726,15 @@ impl Agent {
             "other"
         };
         let title = act_job_title(&turn.ack_text, turn.activity.as_deref(), kind);
-        let transcript: String = turn.act_transcript.join("\n").chars().take(2400).collect();
+        let transcript = crate::truncate::clip_marked(
+            &turn.act_transcript.join("\n"),
+            2400,
+            "",
+            Some(&format!(
+                "read_thread {{\"thread_id\": \"{}\"}} (tool_output entries)",
+                turn.chat_id
+            )),
+        );
         let brief = format!(
             "Continue this task the main agent started and could not finish quickly; the user has already seen a one-line acknowledgement.\n\nUser request: {user_text}\n\nPlan: {plan}\n\nDone so far:\n{transcript}\n\nFinish it and return the answer the user should read. For a comparison or research: each item with its page URL, the compared facts, the sources you used and what could not be checked. Do not repeat the acknowledgement."
         );
@@ -5588,6 +5802,9 @@ impl Agent {
 
     /// Close the live row as a finished prose bubble (ack or progress).
     async fn close_row(&self, host: &SharedHost, t: &mut TurnState, role: &str) {
+        if role == "ack" {
+            t.ack_row_id = Some(t.assistant_msg_id.clone());
+        }
         let h = host.lock().await;
         if t.activity.is_some() {
             h.doc.set_activity(&t.assistant_msg_id, None);
@@ -5833,6 +6050,17 @@ impl Agent {
         let Some(host) = self.sync.host(&t.chat_id).await else {
             return Err("no room for this chat".into());
         };
+        // Silence is an outcome, not a message: a bubble that only says the agent is not
+        // answering never reaches a shared chat. The tool answers as if posted, so the model
+        // ends the turn instead of rephrasing the announcement.
+        let text = if self
+            .drop_silence_announcement(t, text, "send_message")
+            .await
+        {
+            ""
+        } else {
+            text
+        };
         if !text.is_empty() {
             self.maybe_split_ack(&host, t, true).await;
             // Narration the act turn held back is not the message: it stays in T3 only.
@@ -5919,7 +6147,9 @@ impl Agent {
             return;
         }
         if t.send_tool == crate::config::SendTool::Off {
-            self.write_text(host, t, &cleaned).await;
+            if !self.drop_silence_announcement(t, &cleaned, "prose").await {
+                self.write_text(host, t, &cleaned).await;
+            }
             return;
         }
         if !t.unposted_text.is_empty() {
@@ -5938,20 +6168,75 @@ impl Agent {
         tracing::info!(chat_id = %t.chat_id, chars = cleaned.chars().count(), "prose outside send_message kept out of the chat");
     }
 
+    /// A people chat, a project group, or the "Projects ⇄" tab: rooms where staying silent is a
+    /// legitimate outcome of a turn.
+    pub(crate) fn shared_chat(&self, chat_id: &str) -> bool {
+        self.people.is_people_chat(chat_id)
+            || matches!(
+                self.chat_kind(chat_id).as_deref(),
+                Some("group") | Some("projects")
+            )
+    }
+
+    /// Jacob's mention rule, part 2 (2026-10-26): choosing silence is a structured outcome,
+    /// never a chat message. In a shared chat a post that only announces the silence
+    /// ("Addressed to Hezbola; staying silent. Nothing to add from me.") is dropped here, logged
+    /// to T3 (kind `quiet`) and counted (relay timing `silence_announcement_dropped`), and the
+    /// turn ends as a quiet one — the row goes away. Returns true when the text was dropped.
+    async fn drop_silence_announcement(&self, t: &mut TurnState, text: &str, via: &str) -> bool {
+        if !self.shared_chat(&t.chat_id) || !crate::silence::is_silence_announcement(text) {
+            return false;
+        }
+        t.silence_dropped = true;
+        tracing::info!(chat_id = %t.chat_id, via, text = %text.chars().take(200).collect::<String>(), "silence announcement dropped: the agent stays quiet instead");
+        let _ = self.store.t3_append(
+            &t.chat_id,
+            None,
+            Some(&t.chat_id),
+            "quiet",
+            Some("system"),
+            &format!("dropped a silence announcement ({via}): {text}"),
+            Some(&json!({ "message_id": t.assistant_msg_id, "user_message_id": t.user_msg_id, "via": via, "guard": "silence_announcement" })),
+        );
+        let _ = self
+            .post_timing("silence_announcement_dropped", 1, Some(via))
+            .await;
+        true
+    }
+
     /// Did this turn put an *answer* in front of the user — a `send_message` bubble or a posted
     /// `route.reply`? The ack is not the answer: on 0.1.131 an act ack promoted to a bubble
     /// counted as "posted", the fallback stayed quiet, and the user kept only "Reading the
     /// README … now." (#1776, six eval failures; the same shape as #1355 / #1699).
     fn posted_result(t: &TurnState) -> bool {
-        !t.streamed_text.trim().is_empty() || t.progress_texts.iter().any(|p| !p.trim().is_empty())
+        !t.streamed_text.trim().is_empty()
+            || t.progress_texts.iter().any(|p| !p.trim().is_empty())
+            || !t.attachments_posted.is_empty()
     }
 
     /// Turn end, send tool `On`: a turn that posted nothing, started no background work and
     /// still holds prose posts that prose once, so a model that forgot the tool never leaves
     /// the user with silence. `Strict` never posts it; silence is a valid outcome.
+    ///
+    /// Shared (people) chat exception (#1779 / feedback app-01M5WGH5…): an empty `route reply`
+    /// is intentional quiet. Leftover prose outside `send_message` ("staying silent", "nothing
+    /// to add") must not become a fallback bubble — that started agent-to-agent echo loops.
     async fn post_fallback_if_silent(&self, host: &SharedHost, t: &mut TurnState) {
-        if t.send_tool != crate::config::SendTool::On || t.stopped || t.routine_turn || t.act_to_job
-        {
+        if t.stopped || t.routine_turn || t.act_to_job {
+            return;
+        }
+        if empty_reply_route(t) && self.people.is_people_chat(&t.chat_id) {
+            if !t.unposted_text.trim().is_empty() {
+                tracing::info!(
+                    chat_id = %t.chat_id,
+                    chars = t.unposted_text.chars().count(),
+                    "send tool: leftover prose discarded — empty reply in a shared chat stays quiet"
+                );
+                t.unposted_text.clear();
+            }
+            return;
+        }
+        if t.send_tool != crate::config::SendTool::On {
             return;
         }
         if Self::posted_result(t) || t.unposted_text.trim().is_empty() {
@@ -5964,6 +6249,12 @@ impl Agent {
             return;
         }
         let text = std::mem::take(&mut t.unposted_text);
+        if self
+            .drop_silence_announcement(t, &text, "fallback prose")
+            .await
+        {
+            return;
+        }
         t.posted_fallback = true;
         tracing::info!(chat_id = %t.chat_id, chars = text.chars().count(), "send tool: leftover prose posted as the fallback bubble");
         self.write_text(host, t, &text).await;
@@ -5984,6 +6275,12 @@ impl Agent {
         }
         let cleaned = ProseFilter::clean_prose(&text);
         if cleaned.trim().is_empty() {
+            return;
+        }
+        if self
+            .drop_silence_announcement(t, &cleaned, "route.reply (turn end)")
+            .await
+        {
             return;
         }
         tracing::info!(chat_id = %t.chat_id, chars = cleaned.chars().count(), "route reply text taken from the call");
@@ -6069,7 +6366,11 @@ impl Agent {
                 if let Some(ValidRoute::Reply { reply: Some(text) }) = &t.route {
                     let text = text.trim().to_owned();
                     let answered = t.route_correcting && (t.has_prose() || Self::posted_result(t));
-                    if !text.is_empty() && !answered {
+                    let dropped = !text.is_empty()
+                        && self
+                            .drop_silence_announcement(t, &text, "route.reply")
+                            .await;
+                    if !text.is_empty() && !answered && !dropped {
                         if t.send_tool == crate::config::SendTool::Off {
                             t.route_reply_text = Some(text);
                         } else {
@@ -6242,6 +6543,10 @@ impl Agent {
         if t.model_error.is_some() {
             return;
         }
+        if t.act_to_job || t.stopped || t.steer_pending.is_some() || is_abort_text(&m.detail) {
+            tracing::info!(chat_id = %t.chat_id, detail = %m.detail, "model error after an abort of ours; ignored");
+            return;
+        }
         tracing::warn!(chat_id = %t.chat_id, refusal = m.refusal, detail = %m.detail, "model call ended in error");
         if !m.refusal {
             if let Some((notice, escalate)) = classify_hard_limit(&m.detail) {
@@ -6253,6 +6558,93 @@ impl Agent {
             }
         }
         t.model_error = Some(m);
+    }
+
+    /// The opening line of a turn that promised parts and posted nothing after it: the route's
+    /// `reply` text (or the one streamed/posted sentence) matches `promises_parts`, no later
+    /// bubble exists, and no continuation ran yet.
+    async fn unkept_parts_promise(&self) -> Option<String> {
+        let tl = self.turn.lock().await;
+        let t = tl.as_ref()?;
+        if t.stopped || t.parts_continuation || t.act_to_job {
+            return None;
+        }
+        let posted: Vec<&str> = t
+            .progress_texts
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once(t.streamed_text.as_str()))
+            .chain(t.route_reply_text.as_deref())
+            .filter(|s| !s.trim().is_empty())
+            .collect();
+        let [only] = posted.as_slice() else {
+            return None;
+        };
+        if promises_parts(only) {
+            Some(only.trim().chars().take(160).collect())
+        } else {
+            None
+        }
+    }
+
+    /// A model failure worth an in-turn retry: not a refusal, a budget or hard limit, a full
+    /// disk or an abort of ours; the user has read no answer yet (an ack bubble is fine); and the
+    /// retry budget is not spent. Returns the attempt index and the error.
+    async fn transient_model_error(&self) -> Option<(u8, ModelError)> {
+        let tl = self.turn.lock().await;
+        let t = tl.as_ref()?;
+        let m = t.model_error.clone()?;
+        if t.stopped
+            || t.act_to_job
+            || t.model_retries >= MODEL_CALL_RETRIES
+            || m.refusal
+            || is_abort_text(&m.detail)
+            || crate::budget::Refusal::classify(&m.detail).is_some()
+            || classify_hard_limit(&m.detail).is_some()
+            || crate::disk::is_enospc(&m.detail)
+            || !t.streamed_text.trim().is_empty()
+        {
+            return None;
+        }
+        Some((t.model_retries, m))
+    }
+
+    /// Move the live pi session onto the fallback talking model (`on`) or back to the one in
+    /// settings. The fallback is the subagent model: it is on this box's `models.json` already
+    /// and is a different provider lane from the talking model's. `false` when pi refused.
+    async fn switch_talking_model(&self, on: bool) -> bool {
+        let (talking, subagent) = self.live_models().await;
+        let target = if on { subagent } else { talking.clone() };
+        if on && target == talking {
+            return false;
+        }
+        let Ok(pi) = self.pi().await else {
+            return false;
+        };
+        match pi
+            .call_timeout(
+                RpcCommand::SetModel {
+                    id: pi.next_id("sm"),
+                    provider: self.cfg.pi_provider(),
+                    model_id: target.clone(),
+                },
+                Duration::from_secs(10),
+            )
+            .await
+        {
+            Ok(r) if r.success => {
+                tracing::warn!(model = %target, fallback = on, "talking model switched for a retry");
+                true
+            }
+            Ok(r) => {
+                tracing::warn!(model = %target, error = ?r.error, "fallback model refused by pi");
+                false
+            }
+            Err(e) => {
+                tracing::warn!(model = %target, error = %e, "fallback model switch failed");
+                false
+            }
+        }
     }
 
     /// When the turn showed the user nothing, return why a fresh-session retry is warranted
@@ -6388,6 +6780,9 @@ impl Agent {
                 .map(|m| m.id)
                 .collect();
             for id in stale {
+                // The step it was on ("Searching for …") must not outlive the row (sweep
+                // 2026-10-25: a cancelled row kept its activity line after a box restart).
+                h.doc.set_activity(&id, None);
                 h.doc.add_status_part(&id, "stopped", "Stopped");
                 h.doc.finish_message(&id, MessageStatus::Cancelled);
                 h.doc
@@ -6605,7 +7000,7 @@ impl Agent {
             s.push_str(&skills_text);
             s.push_str("\n\n");
         }
-        s.push_str("## Tools\n\nMCP server `arbos`: context_search, context_open, context_around (this Project's memory tree: raw events plus index cards of episodes and threads), history_search, history_read, read_thread, memory_search, memory_read (you may search and read the entire history of this Project), peek, sub_llm, remember/recall, projects_list, send_message (message another agent by name, @handle or id: it lands in that agent's own chat and its reply comes back to you; in a group chat, no `to` = the other agents there), ask_user (optional widget: choice, multi_select, text, date, form), skills_list/skills_read/skills_save (reusable how-tos), draft_message (an outbound email or chat message shown to the user as an approval card; nothing is sent without their click), connectors_list/connector_call (the user's Gmail, Calendar, Slack, GitHub, Harness Comms through the relay; write/send actions need the user's approval), local_devices/local_run/local_read/local_list (the user's own computer through the arbos-local helper; every command and, unless the user allowed reads, every file read needs the user's approval), deliver_file (hand a file you made to the user as a card), generate_image (an image from a prompt, delivered as a card), secrets_list/secrets_request/egress/browser_fill (the owner's secrets: you only ever get a placeholder such as `arbos-secret://STRIPE_KEY/value`, `$STRIPE_KEY` in a shell, or an `op://` reference; send it through `egress` or use it as `$NAME`; never try to read, print, encode or copy a value; a secret with no access → secrets_request and wait for the owner's card; if they deny or pause, stop and say so; logins are typed by browser_fill), routines_list/routines_create/routines_update/routines_delete (cron jobs and one-shot reminders on the relay scheduler), goals_list/goals_create/goals_update/goals_log/goals_delete (long-running objectives across days: plan, status, progress log, check-ins via routines; active goals stay pinned in the working set; autonomy ask|suggest|act), web_search/web_fetch (search the web; read a public page, spec or file as text), submit_feedback (file the user's feedback or bug report for them: captures their screen from their app, or attaches a PNG/JPEG they already provided via image_path; also attaches the recent conversation, tool calls and timings scrubbed of secrets, and returns a reference id; filing is irreversible from the chat — use it when they ask to submit, send or report feedback or a bug and have said what to report; when they only ask to file with no content, ask what to include first — never point them to a menu, settings screen or another channel).\n\n");
+        s.push_str("## Tools\n\nMCP server `arbos`: context_search, context_open, context_around (this Project's memory tree: raw events plus index cards of episodes and threads), history_search, history_read, read_thread, memory_search, memory_read (you may search and read the entire history of this Project), chat_messages (any chat message in full by id, or a page of a chat's history — use it whenever your context shows a [truncated …] or [N earlier messages not shown …] marker; never guess at a cut-off message), peek, sub_llm, remember/recall, projects_list, send_message (message another agent by name, @handle or id: it lands in that agent's own chat and its reply comes back to you; in a group chat, no `to` = the other agents there), ask_user (optional widget: choice, multi_select, text, date, form), skills_list/skills_read/skills_save (reusable how-tos), draft_message (an outbound email or chat message shown to the user as an approval card; nothing is sent without their click), connectors_list/connector_call (the user's Gmail, Calendar, Slack, GitHub, Harness Comms through the relay; write/send actions need the user's approval), local_devices/local_run/local_read/local_list (the user's own computer through the arbos-local helper; every command and, unless the user allowed reads, every file read needs the user's approval), deliver_file (hand a file you made to the user as a card), generate_image (an image from a prompt, delivered as a card), secrets_list/secrets_request/egress/browser_fill (the owner's secrets: you only ever get a placeholder such as `arbos-secret://STRIPE_KEY/value`, `$STRIPE_KEY` in a shell, or an `op://` reference; send it through `egress` or use it as `$NAME`; never try to read, print, encode or copy a value; a secret with no access → secrets_request and wait for the owner's card; if they deny or pause, stop and say so; logins are typed by browser_fill), routines_list/routines_create/routines_update/routines_delete (cron jobs and one-shot reminders on the relay scheduler), goals_list/goals_create/goals_update/goals_log/goals_delete (long-running objectives across days: plan, status, progress log, check-ins via routines; active goals stay pinned in the working set; autonomy ask|suggest|act), web_search/web_fetch (search the web; read a public page, spec or file as text), submit_feedback (file the user's feedback or bug report for them: captures their screen from their app, or attaches a PNG/JPEG they already provided via image_path; also attaches the recent conversation, tool calls and timings scrubbed of secrets, and returns a reference id; filing is irreversible from the chat — use it when they ask to submit, send or report feedback or a bug and have said what to report; when they only ask to file with no content, ask what to include first — never point them to a menu, settings screen or another channel).\n\n");
         s.push_str(WORK_RULES_SECTION);
         s.push_str(RESEARCH_SECTION);
         s.push_str(&crate::media::prompt_section(&self.cfg));
@@ -6820,6 +7215,16 @@ impl Agent {
             })
             .unwrap_or(Harness::Prime);
         let (_, subagent_model) = self.live_models().await;
+        // Cost knob 1 (Jacob 2026-10-26): research jobs run on the research worker model (Haiku
+        // 5.5 by default); code and every other kind keep the subagent model.
+        let subagent_model = match &job {
+            Some(j) => crate::config::worker_model_for(
+                &j.kind,
+                self.cfg.research_worker_model().as_deref(),
+                &subagent_model,
+            ),
+            None => subagent_model,
+        };
         let (subagent_id, harness, is_new) = match existing {
             Some(id) => {
                 let row = match self.store.subagent(&id)? {
@@ -7658,7 +8063,7 @@ impl Agent {
         let address = self.owner_address_note(chat_id, host, in_reply_to).await;
         let (talking_model, _) = self.live_models().await;
         let system = format!(
-            "{} You answer a message the user sent while you were busy with something else; the work for it is done (notes below). Write the answer the user should read, like a colleague in chat: what they asked for, what came out, what is open. First person; short when the answer is short; a markdown table with linked names when it compares several items, and then one line offering a concrete next step. Never mention a side task, helper, subagent, tool, command, model or that you were busy. If the notes hold no answer, say plainly what you could not do.{}",
+            "{} You answer a message the user sent while you were busy with something else; the work for it is done (notes below). Write the answer the user should read, like a colleague in chat: what they asked for, what came out, what is open. First person; short when the answer is short; a plain GitHub-flavoured markdown table (header row, `| --- |` separator row, rows starting and ending with `|`, no code fence) with `[Name](https://…)` links when it compares several items, and then one line offering a concrete next step. Never mention a side task, helper, subagent, tool, command, model or that you were busy. If the notes hold no answer, say plainly what you could not do.{}",
             if self.cfg.project_name.trim().is_empty() {
                 "You are this user's agent in Arbos.".to_owned()
             } else {
@@ -7666,7 +8071,12 @@ impl Agent {
             },
             address.map(|n| format!("\n{}", n.trim())).unwrap_or_default()
         );
-        let raw_trim: String = raw.chars().take(7000).collect();
+        let raw_trim = crate::truncate::clip_marked(
+            raw,
+            7000,
+            "",
+            Some(&format!("history_search {{\"query\": \"<a phrase from the notes>\", \"thread_id\": \"{chat_id}\"}}")),
+        );
         let user = format!(
             "The user's message: {}\n\nStatus of the work: {status}{}\n\nNotes from the work (for you only):\n<<<\n{}\n>>>",
             if ask.trim().is_empty() { "(see the notes)" } else { ask.trim() },
@@ -7723,7 +8133,7 @@ impl Agent {
             h.doc.finish_message(&row_id, MessageStatus::Done);
             h.room.clone()
         };
-        self.announce_reply(&room, &row_id, &text);
+        self.announce_reply_kind(&room, &row_id, &text, "job", Some(&text));
         let _ = self.store.t3_append(
             chat_id,
             None,
@@ -7971,30 +8381,41 @@ pub fn route_name(r: &ValidRoute) -> &'static str {
 
 /// Main-turn wall-clock deadline in seconds. `ARBOS_TURN_DEADLINE_SECS` (default 900).
 /// A user row from a voice-call tool (`ask_agent` / `look`): `voice: true` and/or `source: "voice"`.
+/// True when the turn routed `reply` with nothing in the `reply` field (and no pending
+/// `route_reply_text`). The shared-chat quiet path and the no-fallback rule both use this.
+pub(crate) fn empty_reply_route(t: &TurnState) -> bool {
+    matches!(&t.route, Some(ValidRoute::Reply { reply }) if reply.as_deref().is_none_or(|r| r.trim().is_empty()))
+        && t.route_reply_text
+            .as_deref()
+            .is_none_or(|r| r.trim().is_empty())
+}
+
 /// A turn that is the agent staying quiet in a shared chat (#1779): it routed `reply`, said
-/// nothing anywhere (no streamed prose, no ack, no `reply` text, no progress note), nothing
-/// failed, and the chat is shared with people. Not a user-turn fallback case: in the agent's own
-/// chat an empty answer stays visible as the stock line, because there someone is waiting.
+/// nothing to the user (no streamed prose, no ack, no `reply` text, no progress note), nothing
+/// failed, and the chat is shared with people. Leftover notes outside `send_message` do not
+/// count as speech — `post_fallback_if_silent` discards them so they never become a bubble.
+/// Not a user-turn fallback case: in the agent's own chat an empty answer stays visible as the
+/// stock line, because there someone is waiting.
 pub(crate) fn quiet_in_shared_chat(
     t: &TurnState,
     shared_chat: bool,
     model_ok: bool,
     no_error: bool,
 ) -> bool {
+    // A dropped silence announcement (`silence.rs`) is the same outcome: the route's words
+    // were the announcement, nothing else was posted.
+    let route_quiet = empty_reply_route(t)
+        || (t.silence_dropped && matches!(&t.route, Some(ValidRoute::Reply { .. })));
     shared_chat
         && model_ok
         && no_error
         && !t.stopped
         && !t.metrics.route_missing
-        && matches!(&t.route, Some(ValidRoute::Reply { reply }) if reply.as_deref().is_none_or(|r| r.trim().is_empty()))
+        && route_quiet
         && t.streamed_text.trim().is_empty()
         && t.ack_text.trim().is_empty()
-        && t.unposted_text.trim().is_empty()
         && t.progress_texts.iter().all(|p| p.trim().is_empty())
-        && t.route_reply_text
-            .as_deref()
-            .is_none_or(|r| r.trim().is_empty())
-        && t.metrics.tool_calls == 0
+        && (t.metrics.tool_calls == 0 || t.silence_dropped)
 }
 
 /// How many of this chat's recent rows the fresh-session retry carries, and how much of each.
@@ -8008,6 +8429,7 @@ pub(crate) fn chat_recap(
     rows: &[arbos_core::doc::MessageView],
     current_user_msg_id: &str,
     agent_name: &str,
+    chat_id: &str,
 ) -> String {
     let end = rows
         .iter()
@@ -8033,13 +8455,13 @@ pub(crate) fn chat_recap(
                 }
             }
         };
-        let body: String = text.chars().take(RECAP_ROW_CHARS).collect();
-        let cut = if text.chars().count() > RECAP_ROW_CHARS {
-            "…"
-        } else {
-            ""
-        };
-        lines.push(format!("- {who}: {body}{cut}"));
+        let body = crate::truncate::clip_marked(
+            &text,
+            RECAP_ROW_CHARS,
+            &m.id,
+            Some(&crate::truncate::fetch_message_hint(chat_id, &m.id)),
+        );
+        lines.push(format!("- {who}: {body}"));
     }
     if lines.is_empty() {
         return String::new();
@@ -8097,6 +8519,21 @@ pub(crate) fn moment_note(now: chrono::DateTime<chrono::Utc>, tz: Option<&str>) 
             " The user's time zone is not known: when the answer depends on it, say the time where they asked about and ask once if it matters.".to_owned()
         });
     format!("[Now: {utc}.{local} \"Right now\" and \"tonight\" mean this moment; mention a clock change or a deadline inside the next day when it changes the answer.]\n\n")
+}
+
+/// The prose a turn posted, in order, for a live call's context (#1832): every progress bubble
+/// and the final streamed text, blank ones skipped, each once.
+pub(crate) fn voice_prose_of(progress_texts: &[String], streamed_text: &str) -> String {
+    let mut out: Vec<&str> = progress_texts
+        .iter()
+        .map(|t| t.trim())
+        .filter(|t| !t.is_empty())
+        .collect();
+    let last = streamed_text.trim();
+    if !last.is_empty() && out.last() != Some(&last) {
+        out.push(last);
+    }
+    out.join("\n\n")
 }
 
 fn message_from_voice(m: &arbos_core::doc::MessageView) -> bool {
@@ -8421,6 +8858,88 @@ pub(crate) fn relay_turn_deadline_secs() -> u64 {
 /// How long a relay turn may keep a waiting user message behind it before it is cut short.
 pub(crate) const RELAY_TURN_YIELD_SECS: u64 = 15;
 
+/// Does this act-transcript line change anything (files, shell, git)? A `codemode` script that
+/// only calls the web tools is research (Hezbola, 2026-10-25: a `web_search` through codemode
+/// filed the converted job as `code`, with the folder lock and no auto-restart).
+pub(crate) fn act_line_edits(line: &str) -> bool {
+    if line.starts_with("→ edit") || line.starts_with("→ write") || line.starts_with("→ bash")
+    {
+        return true;
+    }
+    if let Some(code) = line.strip_prefix("→ codemode") {
+        let l = code.to_ascii_lowercase();
+        let web_only = (l.contains("web_search") || l.contains("web_fetch"))
+            && !["bash", "write", "edit", "fs.", "git", "spawn", "exec"]
+                .iter()
+                .any(|k| l.contains(k));
+        return !web_only;
+    }
+    false
+}
+
+/// The prompt of an in-turn retry after a transient model failure. With `ack`, the user already
+/// read the acknowledgement bubble: the retry must not post another.
+pub(crate) fn model_retry_prompt(prompt_text: &str, ack: Option<&str>) -> String {
+    match ack.map(str::trim).filter(|a| !a.is_empty()) {
+        Some(a) => format!(
+            "[Arbos] Your previous attempt at the message below failed on the model side and is being retried. The user already saw your acknowledgement (\"{a}\"): do not acknowledge again — do the work and deliver the answer.]\n\n{prompt_text}"
+        ),
+        None => format!(
+            "[Arbos] Your previous attempt at the message below failed on the model side and is being retried; answer it now.]\n\n{prompt_text}"
+        ),
+    }
+}
+
+/// A short message that announces more to come ("delivered in parts below", "the table
+/// follows") is an opening line, not an answer. Mirrors `promisesMore` in arbos-pi-ext.
+pub(crate) fn promises_parts(text: &str) -> bool {
+    let t = text.trim().to_ascii_lowercase();
+    if t.chars().count() > 400 {
+        return false;
+    }
+    let cues = [
+        "in parts",
+        "in part below",
+        "parts below",
+        "part below",
+        "parts follow",
+        "parts to follow",
+        "parts coming",
+        "below.",
+        "below:",
+        "below!",
+        "follows.",
+        "follows:",
+        "to follow.",
+        "coming up",
+        "coming next",
+        "coming right up",
+        "next message",
+        "here it comes",
+        "here they come",
+    ];
+    if cues
+        .iter()
+        .any(|c| t.ends_with(c) || t.contains(&format!("{c} ")))
+    {
+        return true;
+    }
+    let end = t.trim_end_matches(['.', ':', '!', ' ']);
+    end.ends_with("below") || end.ends_with("follows") || end.ends_with("in parts")
+}
+
+/// pi's wording for a request agentd cancelled (`AbortController` / MCP cancel), never a
+/// provider failure.
+pub(crate) fn is_abort_text(detail: &str) -> bool {
+    let l = detail.to_ascii_lowercase();
+    l.contains("operation was aborted")
+        || l.contains("request aborted")
+        || l.contains("request was aborted")
+        || l == "aborted"
+        || l.contains("abort")
+            && (l.contains("signal") || l.contains("cancel") || l.ends_with("aborted"))
+}
+
 /// The prompt of a `TurnKind::JobFallback` turn: the job is gone, do the ask here and now.
 pub(crate) fn job_fallback_prompt(
     job: &JobSpec,
@@ -8443,7 +8962,7 @@ pub(crate) fn job_fallback_prompt(
             brief.trim()
         ));
     }
-    let partial: String = partial.trim().chars().take(4000).collect();
+    let partial = crate::truncate::clip_marked(partial.trim(), 4000, "", None);
     if !partial.is_empty() {
         p.push_str(&format!(
             "\nWhat the last worker had written before it stopped (unverified):\n<<<\n{partial}\n>>>\n"
@@ -8555,10 +9074,11 @@ pub const ROUTER_PROMPT: &str = include_str!("../prompts/router.md");
 /// cheap: about 6k tokens (21.4 KB on 2026-10-23; 24.2 KB after agent-to-agent `to` disambiguation
 /// on 2026-10-24; 25.7 KB after the Grok-parity rules — moment, naming, research delivery —
 /// the same day; 28.2 KB on 2026-10-25 with the jobs section's steer/stop rule (#1692) and the
-/// steer rule — short waits, `[Arbos steer:` is never late — of #1690). The unit test fails when
-/// a prompt edit crosses it, so growth is a decision, not drift.
+/// steer rule — short waits, `[Arbos steer:` is never late — of #1690; 28.7 KB after the table and
+/// link format rule of [feedback markdown-tables-agentd-2026-10-25]). The unit test fails when a
+/// prompt edit crosses it, so growth is a decision, not drift.
 #[cfg(test)]
-pub const BASE_PROMPT_MAX_BYTES: usize = 28_400;
+pub const BASE_PROMPT_MAX_BYTES: usize = 28_900;
 
 /// The byte-stable part of the main agent's system prompt: core, then routing, then code mode
 /// when it is on. Everything per project (folder, model, instructions, memory) comes after it.
@@ -8681,6 +9201,102 @@ mod tests {
             worker_failure(None, "{\"status\":\"blocked\"}", 0, "blocked"),
             Some(("blocked".to_owned(), false))
         );
+    }
+
+    /// Hezbola, 2026-10-25 22:18 UTC: the act→job conversion's Abort reached pi mid tool call;
+    /// pi reported `stopReason: error, errorMessage: "This operation was aborted"` and the turn
+    /// wrote "the model call failed". An abort is agentd's own and is never a model error.
+    #[test]
+    fn an_abort_of_ours_is_not_a_model_error() {
+        assert!(is_abort_text("This operation was aborted"));
+        assert!(is_abort_text("MCP request aborted"));
+        assert!(is_abort_text("The operation was aborted due to signal"));
+        assert!(is_abort_text("aborted"));
+        assert!(!is_abort_text("overloaded_error: Overloaded"));
+        assert!(!is_abort_text("Internal server error"));
+        assert!(!is_abort_text("Request timed out"));
+        let aborted_mid_tool = json!({
+            "role": "assistant", "stopReason": "error",
+            "errorMessage": "This operation was aborted"
+        });
+        assert!(ModelError::from_message(&aborted_mid_tool).is_none());
+        let raw_aborted = json!({ "role": "assistant", "stopReason": "error", "rawStopReason": "aborted", "errorMessage": "x" });
+        assert!(ModelError::from_message(&raw_aborted).is_none());
+        let real = json!({ "role": "assistant", "stopReason": "error", "errorMessage": "529 overloaded_error" });
+        let m = ModelError::from_message(&real).unwrap();
+        assert!(!m.refusal);
+        assert_eq!(
+            m.chat_line_for("Jacob"),
+            "I couldn't answer that: the model call failed. Ask me again in a moment."
+        );
+        assert_eq!(
+            m.chat_line_after_ack("Jacob"),
+            "I couldn't finish that: the model call failed, even after retrying. Ask me again in a moment."
+        );
+        let refused = json!({ "role": "assistant", "stopReason": "error", "rawStopReason": "refusal", "errorMessage": "refused" });
+        let r = ModelError::from_message(&refused).unwrap();
+        assert!(r.refusal);
+        assert!(r.chat_line_after_ack("Jacob").contains("declined"));
+    }
+
+    /// Proof run 1 (2026-10-26 01:0x UTC): "Here are seven well-rated San Jose restaurants,
+    /// delivered in parts below." was the whole delivery. Such a line is a promise, not an answer.
+    #[test]
+    fn an_opening_line_that_promises_parts_is_not_an_answer() {
+        assert!(promises_parts(
+            "Here are seven well-rated San Jose restaurants, delivered in parts below."
+        ));
+        assert!(promises_parts(
+            "Seven places made the cut; the table follows."
+        ));
+        assert!(promises_parts("Details and sources below:"));
+        assert!(promises_parts("Here are the three schools, in parts."));
+        assert!(!promises_parts("London is 7 hours ahead of you right now."));
+        assert!(!promises_parts("42."));
+        assert!(!promises_parts(
+            "The place below the hotel is good and open till ten; no booking needed."
+        ));
+        let long = "x ".repeat(300) + "below.";
+        assert!(!promises_parts(&long));
+    }
+
+    /// The retry budget and its prompts: two in-turn retries (2 s, then 5 s on the fallback
+    /// model); a retry after a posted ack never acknowledges again.
+    #[test]
+    fn model_call_retry_shape() {
+        assert_eq!(MODEL_CALL_RETRIES, 2);
+        assert_eq!(MODEL_CALL_BACKOFF_S, [2, 5]);
+        let p = model_retry_prompt(
+            "Search them online",
+            Some("Searching the web for Hezbola now."),
+        );
+        assert!(p.starts_with("[Arbos] Your previous attempt"));
+        assert!(p.contains("do not acknowledge again"));
+        assert!(p.contains("Searching the web for Hezbola now."));
+        assert!(p.ends_with("Search them online"));
+        let p = model_retry_prompt("Hi", None);
+        assert!(!p.contains("acknowledge"));
+        assert!(p.ends_with("Hi"));
+    }
+
+    /// A codemode script that only searches the web is research, not an edit (the converted
+    /// job was filed as `code`: folder lock, no auto-restart).
+    #[test]
+    fn codemode_web_search_is_research() {
+        assert!(!act_line_edits(
+            "→ codemode {\"code\":\"const r = await tools.web_search({ query: \\\"Hezbola\\\" }); return r;\"}"
+        ));
+        assert!(!act_line_edits(
+            "→ codemode {\"code\":\"return await tools.mcp__arbos__web_fetch({url:'https://x'})\"}"
+        ));
+        assert!(act_line_edits(
+            "→ codemode {\"code\":\"await tools.bash({command:'ls'}); return 1\"}"
+        ));
+        assert!(act_line_edits("→ codemode {\"code\":\"const r = await tools.web_search({q:1}); await tools.write({path:'a',content:'b'})\"}"));
+        assert!(act_line_edits("→ codemode {\"code\":\"return 2+2\"}"));
+        assert!(act_line_edits("→ bash {\"command\":\"ls\"}"));
+        assert!(act_line_edits("→ edit {}"));
+        assert!(!act_line_edits("→ web_search {\"query\":\"x\"}"));
     }
 
     /// The inline fallback: `act` allowed, no new job for the same ask, and the user is never
@@ -9164,7 +9780,7 @@ mod tests {
             ),
             row("u3", "user", "Done? What was the last number?"),
         ];
-        let recap = chat_recap(&rows, "u3", "lane-c");
+        let recap = chat_recap(&rows, "u3", "lane-c", "c1");
         assert!(recap.starts_with("[This chat so far, newest last"));
         assert!(recap.contains("- user: Write the numbers 1 to 40"));
         assert!(recap.contains("- you (lane-c): Done: the run stops at 20."));
@@ -9187,7 +9803,7 @@ mod tests {
         assert!(with_chat_recap("Done?", &recap).starts_with("[This chat so far"));
         // Nothing earlier in the chat: the prompt is unchanged.
         assert_eq!(
-            with_chat_recap("hi", &chat_recap(&rows[4..], "u3", "lane-c")),
+            with_chat_recap("hi", &chat_recap(&rows[4..], "u3", "lane-c", "c1")),
             "hi"
         );
         // The router tells the model the same precedence.
@@ -9200,6 +9816,8 @@ mod tests {
     /// quiet here: that message was addressed to Priya". Staying quiet is a `route reply` with
     /// nothing to say in a shared chat — the row is removed; the same shape in the agent's own
     /// chat, or with any words, any tool, a failure or a missing route, is not quiet.
+    /// Feedback app-01M5WGH5…: leftover "staying silent" / "nothing to add" notes outside
+    /// `send_message` still count as quiet (they must never become a fallback bubble).
     #[test]
     fn empty_reply_in_a_shared_chat_is_quiet_and_only_there() {
         let mut t = TurnState::claim("c1", "m1", false);
@@ -9229,6 +9847,15 @@ mod tests {
         streamed.route = Some(ValidRoute::Reply { reply: None });
         streamed.streamed_text = "That was for Priya.".into();
         assert!(!quiet_in_shared_chat(&streamed, true, true, true));
+        let mut notes = TurnState::claim("c1", "m1", false);
+        notes.route = Some(ValidRoute::Reply { reply: None });
+        notes.unposted_text =
+            "Addressed to @hezbola; staying silent. That question is for Hezbola; nothing to add."
+                .into();
+        assert!(
+            quiet_in_shared_chat(&notes, true, true, true),
+            "notes outside send_message are not speech"
+        );
         let mut acted = TurnState::claim("c1", "m1", false);
         acted.route = Some(ValidRoute::Act {
             plan: "look".into(),
@@ -9299,6 +9926,27 @@ mod tests {
             cleaned.trim(),
             "Cloning RaoFoundation/subtensor into this project now."
         );
+    }
+
+    /// Jacob's Lima bookstore table ([feedback markdown-tables-agentd-2026-10-25]): a
+    /// comparison bubble reaches the doc as plain GFM — a fenced or indented table comes
+    /// out unfenced at column one with its separator row — and the router prompt spells the
+    /// same rule out for the model.
+    #[test]
+    fn clean_prose_delivers_tables_as_plain_gfm_and_the_prompt_says_so() {
+        let table = "| Store | Area |\n| --- | --- |\n| [Librería El Virrey](https://www.elvirrey.com/) | Miraflores |\n| [Communitas](https://www.communitas.pe/) | San Isidro |";
+        assert_eq!(ProseFilter::clean_prose(table), table);
+        let fenced = "```markdown\n  | Store | Area |\n  | [Librería El Virrey](https://www.elvirrey.com/) | Miraflores |\n  | [Communitas](https://www.communitas.pe/) | San Isidro |\n```";
+        assert_eq!(ProseFilter::clean_prose(fenced), table);
+        for rule in [
+            "Table and link format, exactly",
+            "plain GitHub-flavoured markdown",
+            "the separator row `| --- | --- |`",
+            "every row starts and ends with `|` at column one, never inside a code fence",
+            "an inline markdown link `[Name](https://…)`",
+        ] {
+            assert!(ROUTER_PROMPT.contains(rule), "router prompt lost: {rule}");
+        }
     }
 
     /// Meta-steering echoed before a greeting (bold-wrapped) leaves only the greeting.

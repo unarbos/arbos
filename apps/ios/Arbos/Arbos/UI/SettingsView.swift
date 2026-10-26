@@ -73,13 +73,8 @@ struct SettingsView: View {
                     }
                 }
                 .scrollIndicators(.visible)
-                // Sheet: dismiss closes Settings. Tab root: dismiss is a no-op — return to Chats.
-                ProfileTopBar(onBack: {
-                    dismiss()
-                    if model.mainTab == .settings {
-                        model.mainTab = .chats
-                    }
-                }) { EmptyView() }
+                // Settings is a sheet (from Home's account circle): back closes it.
+                ProfileTopBar(onBack: { dismiss() }) { EmptyView() }
             }
             .toolbar(.hidden, for: .navigationBar)
             .navigationBarBackButtonHidden(true)
@@ -773,7 +768,7 @@ struct ConnectorsPage: View {
                         .background(theme.field, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                         .overlay(
                             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .strokeBorder(theme.fieldBorder, lineWidth: 1)
+                                .strokeBorder(theme.fieldBorder, lineWidth: 1) // control-size: exception inlineChips
                         )
                     Button("Save") { saveToken(p) }
                         .font(theme.font(Theme.small, weight: .semibold))
@@ -963,7 +958,7 @@ struct DevicesPage: View {
                     .foregroundStyle(theme.muted)
                     .lineLimit(1).fixedSize()
                     .padding(.horizontal, 6).padding(.vertical, 2)
-                    .background(Capsule().fill(theme.field))
+                    .background(Capsule().fill(theme.field)) // control-size: exception inlineChips
             }
             if d.current {
                 Text("This iPhone").font(theme.font(Theme.small)).foregroundStyle(theme.muted).lineLimit(1).fixedSize()
@@ -1304,10 +1299,7 @@ struct ProfileEditView: View {
                 .focused($focus, equals: .name)
                 .submitLabel(.next)
                 .onSubmit { focus = .handle }
-                .padding(.horizontal, 14)
-                .frame(height: Theme.fieldHeight)
-                .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
-                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                .controlField()
         }
     }
 
@@ -1329,10 +1321,7 @@ struct ProfileEditView: View {
                         if cleaned != new { handle = cleaned }
                     }
             }
-            .padding(.horizontal, 14)
-            .frame(height: Theme.fieldHeight)
-            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
-            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+            .controlField()
         }
     }
 

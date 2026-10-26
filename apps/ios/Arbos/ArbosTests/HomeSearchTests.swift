@@ -1,3 +1,4 @@
+import ArbosFFI
 import XCTest
 @testable import Arbos
 
@@ -140,5 +141,174 @@ final class HomeListFilterTests: XCTestCase {
         XCTAssertFalse(HomeListFilter.servers.showsProjects)
         XCTAssertFalse(HomeListFilter.servers.showsPeople)
         XCTAssertEqual(HomeListFilter.servers.emptyCopy, "No servers yet")
+    }
+}
+
+/// The shared search matcher ([feedback shared-search-matcher-ios-2026-10-26]):
+/// Jacob, Mac v0.6.268, 2026-10-26 — "Give a person access" with "aff" typed
+/// listed only "Andreas F @aff"; every picker had its own handle-or-substring
+/// filter. One rule now, in the Rust core (`arbos_core::search`) through
+/// ArbosFFI (`EntitySearch`), for people, agents, groups, servers and
+/// channels on both platforms. Twin of crates/arbos-mac `picker_sites_tests`.
+final class SharedSearchTests: XCTestCase {
+    private func person(_ handle: String, _ name: String?) -> Person {
+        Person(id: "gh_\(handle)", handle: handle, name: name)
+    }
+
+    private var directory: [Person] {
+        [person("doug", "Doug"), person("team-affine", "Team Affine"), person("aff", "Andreas F"),
+         person("affine-foundation", "Affine"), person("robertalanm", "Carro"), person("affteam", "AffineTeam")]
+    }
+
+    func testAffFindsDisplayNamesAndTheHandleRanked() {
+        let rows = PeoplePicker.people(directory: directory, remote: [], me: nil, query: "aff")
+        XCTAssertEqual(rows.map(\.handle), ["aff", "affine-foundation", "affteam", "team-affine"],
+                       "exact @aff, then the names that start with aff (directory order), then the word-start")
+        // The relay's handle-prefix answer alone is what Jacob saw.
+        XCTAssertEqual(PeoplePicker.people(directory: [], remote: [person("aff", "Andreas F")], me: nil, query: "aff").map(\.handle), ["aff"])
+    }
+
+    func testRemoteHitsJoinTheDirectoryOnceAndNeverMe() {
+        let remote = [person("aff", "Andreas F"), person("affable", "Affable Bot"), person("me", "Affine Me")]
+        let rows = PeoplePicker.people(directory: directory, remote: remote, me: "gh_me", query: "@Aff")
+        XCTAssertEqual(rows.map(\.handle), ["aff", "affine-foundation", "affteam", "affable", "team-affine"])
+        XCTAssertEqual(rows.filter { $0.handle == "aff" }.count, 1, "one row per person")
+    }
+
+    func testEmptyQueryKeepsDirectoryOrderAndDiacriticsFold() {
+        XCTAssertEqual(PeoplePicker.people(directory: directory, remote: [], me: nil, query: "").map(\.handle), directory.map(\.handle))
+        let dir = [person("zoe-m", "Zoë Martín"), person("jose", "José")]
+        XCTAssertEqual(PeoplePicker.people(directory: dir, remote: [], me: nil, query: "martin").map(\.handle), ["zoe-m"])
+        XCTAssertEqual(PeoplePicker.people(directory: dir, remote: [], me: nil, query: "JOSÉ").map(\.handle), ["jose"])
+        XCTAssertEqual(PeoplePicker.people(directory: dir, remote: [], me: nil, query: "zoe mar").map(\.handle), ["zoe-m"])
+        XCTAssertTrue(PeoplePicker.people(directory: dir, remote: [], me: nil, query: "oe").isEmpty, "no mid-word substrings")
+    }
+
+    func testMatcherRanksExactPrefixWordStartNameBeforeHandle() {
+        let exactHandle = EntitySearch.match(name: "Andreas F", handle: "aff", query: "aff")
+        let prefixName = EntitySearch.match(name: "Affine", handle: "affine-foundation", query: "aff")
+        let wordStart = EntitySearch.match(name: "Team Affine", handle: "team", query: "aff")
+        XCTAssertEqual(exactHandle?.kind, .exact); XCTAssertEqual(exactHandle?.field, .handle)
+        XCTAssertEqual(prefixName?.kind, .prefix); XCTAssertEqual(prefixName?.field, .name)
+        XCTAssertEqual(wordStart?.kind, .wordStart)
+        XCTAssertLessThan(exactHandle!.order, prefixName!.order)
+        XCTAssertLessThan(prefixName!.order, wordStart!.order)
+        XCTAssertEqual(EntitySearch.match(name: "Sam", handle: "sam", query: "sam")?.field, .name, "name before handle on a tie")
+        XCTAssertNil(EntitySearch.match(name: "Carro", handle: "robertalanm", query: "alan"))
+        XCTAssertEqual(EntitySearch.match(name: "Andreas F", handle: "aff", query: "an f")?.kind, .wordStart, "multi-word, in order")
+        XCTAssertNil(EntitySearch.match(name: "Andreas F", handle: "aff", query: "f an"))
+        XCTAssertEqual(EntitySearch.match(name: "Comms", handle: "comms", title: "Research assistant", query: "res")?.field, .title)
+        XCTAssertEqual(EntitySearch.fold("Øyvind Ångström"), "oyvind angstrom")
+        XCTAssertEqual(EntitySearch.normalize("@Zoë  B"), "zoe b")
+        XCTAssertNotNil(EntitySearch.match(name: "A", handle: "a", query: " "), "empty query matches everything")
+    }
+
+    func testAgentAndServerPickersUseTheMatcher() {
+        let project = { (name: String, description: String) -> Project in
+            var p = Project(id: "p-\(name)", name: name, icon: "A", color: "#000000", state: .awake, stateSince: nil, stateDetail: nil,
+                            model: "", effort: .low, spendTodayUsd: 0, spendCapUsd: 0)
+            p.description = description
+            return p
+        }
+        let agents = [project("Comms", "Research assistant"), project("Research Bot", ""), project("Affine Research", ""), project("Doug", "")]
+        XCTAssertEqual(PeoplePicker.agents(agents, query: "res").map(\.name), ["Research Bot", "Affine Research", "Comms"])
+        XCTAssertEqual(PeoplePicker.agents(agents, query: "@affine-res").map(\.name), ["Affine Research"])
+        XCTAssertEqual(PeoplePicker.agents(agents, query: "").map(\.name), agents.map(\.name))
+        XCTAssertEqual(PeoplePicker.titled(["Deploy token", "Token zoe", "Zoë's key"], query: "zoe") { $0 }, ["Zoë's key", "Token zoe"],
+                       "prefix before word-start; diacritics fold")
+    }
+
+    func testMentionPickerRanksNameBeforeHandle() {
+        func human(_ id: String, _ handle: String, _ name: String?) -> ChatMember {
+            ChatMember(id: id, kind: .user, member: "user:\(id)", role: "member", handle: handle, avatarUrl: nil,
+                       name: name, status: "member", joinedAt: 0, project: nil, ownerId: nil, ownerHandle: nil, replyPolicy: nil)
+        }
+        let members = [human("gh_aff", "aff", "Andreas F"), human("gh_affine", "affine-foundation", "Affine"), human("gh_zoe", "zoe-m", "Zoë Martín")]
+        XCTAssertEqual(MentionDraft.candidates(query: "aff", members: members, me: nil).map(\.id), ["gh_aff", "gh_affine"], "exact handle, then prefix name")
+        XCTAssertEqual(MentionDraft.candidates(query: "affi", members: members, me: nil).map(\.id), ["gh_affine"])
+        XCTAssertEqual(MentionDraft.candidates(query: "martin", members: members, me: nil).map(\.id), ["gh_zoe"], "a word of the name, diacritics folded")
+        XCTAssertTrue(MentionDraft.candidates(query: "ffin", members: members, me: nil).isEmpty)
+    }
+
+    // MARK: - Every picker routes through the matcher (structure)
+
+    private static let appRoot: URL = {
+        // apps/ios/Arbos/ArbosTests/ThisFile.swift → apps/ios/Arbos/Arbos
+        URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Arbos")
+    }()
+
+    private func source(_ rel: String) throws -> String {
+        try String(contentsOf: Self.appRoot.appendingPathComponent(rel), encoding: .utf8)
+    }
+
+    /// The text of the first declaration containing `anchor`, up to the next `}` at its indentation.
+    private func body(_ src: String, _ anchor: String) -> String {
+        guard let start = src.range(of: anchor) else { return "" }
+        let lineStart = src[..<start.lowerBound].lastIndex(of: "\n").map { src.index(after: $0) } ?? src.startIndex
+        let indent = src[lineStart..<start.lowerBound].prefix { $0 == " " }
+        let closing = "\n\(indent)}"
+        let end = src.range(of: closing, range: start.upperBound..<src.endIndex)?.upperBound ?? src.endIndex
+        return String(src[lineStart..<end])
+    }
+
+    /// (file, anchor of the site, markers that mean "through the matcher").
+    private let sites: [(String, String, [String])] = [
+        // Home / app-wide search rows: person, title, member, agent, chat title, server, channel.
+        ("Model/HomeSearch.swift", "static func dmHit(", ["EntitySearch.matches("]),
+        ("Model/HomeSearch.swift", "static func titledHit(", ["EntitySearch.matches(", "EntitySearch.matchText("]),
+        ("Model/HomeSearch.swift", "static func serverHit(", ["EntitySearch.matchText("]),
+        ("Store/SearchStore.swift", "func globalSearchEntries(", ["EntitySearch.matchText(", "Rank.of(name:"]),
+        ("Model/GlobalSearch.swift", "static func of(name: String, handle: String", ["EntitySearch.match("]),
+        // New message sheet: agents, servers, people.
+        ("UI/PeopleSheets.swift", "private var agents: [Project]", ["PeoplePicker.agents("]),
+        ("UI/PeopleSheets.swift", "private var servers: [Server]", ["PeoplePicker.servers("]),
+        ("UI/PeopleSheets.swift", "private var people: [Person]", ["PeoplePicker.people("]),
+        // New group / Add members / Add server members / Give a person access.
+        ("UI/PeopleSheets.swift", "private var agentCandidates: [Project]", ["PeoplePicker.agents("]),
+        ("UI/PeopleSheets.swift", "private var candidates: [Person]", ["PeoplePicker.people("]),
+        // Project members: invite suggestions.
+        ("UI/PeopleSheets.swift", "private var suggestions: [Person]", ["PeoplePicker.people("]),
+        // The picker helpers themselves.
+        ("Model/HomeSearch.swift", "static func people(directory:", ["EntitySearch.filter("]),
+        ("Model/HomeSearch.swift", "static func agents(_ agents:", ["EntitySearch.filter("]),
+        ("Model/HomeSearch.swift", "static func servers(_ servers:", ["EntitySearch.filter("]),
+        ("Model/HomeSearch.swift", "static func titled<T>(", ["EntitySearch.filter("]),
+        // Secrets: a vault's items by title.
+        ("UI/SecretsViews.swift", "private var filtered: [[String: Any]]", ["PeoplePicker.titled("]),
+        // Secrets: the agent picker (New secret, Connect 1Password, Give access on a secret / a vault).
+        ("UI/AgentPicker.swift", "static func candidates(_ projects:", ["PeoplePicker.agents("]),
+        // @mention completion.
+        ("UI/MentionComposer.swift", "static func candidates(query:", ["EntitySearch.match("]),
+        // Forward-to chat picker.
+        ("UI/MediaViewer.swift", "func forwardTargets(matching", ["EntitySearch.filter("]),
+        // The fixture's people search.
+        ("Store/AppModel.swift", "func searchPeople(", ["PeoplePicker.people("]),
+    ]
+
+    private let adHoc = ["lowercased().contains(q", "lowercased().contains(needle", "localizedCaseInsensitiveContains(search", "fold(", ".hasPrefix(q)"]
+
+    func testEveryPickerRoutesThroughTheSharedMatcher() throws {
+        for (file, anchor, markers) in sites {
+            let src = try source(file)
+            let text = body(src, anchor)
+            XCTAssertFalse(text.isEmpty, "\(file): \(anchor) not found")
+            for m in markers {
+                XCTAssertTrue(text.contains(m), "\(file) \(anchor): expected \(m) in\n\(text)")
+            }
+            for bad in adHoc where !(file == "Model/HomeSearch.swift" && bad == "fold(") {
+                XCTAssertFalse(text.contains(bad), "\(file) \(anchor): ad-hoc filter \(bad)")
+            }
+        }
+    }
+
+    func testNoPickerFileKeepsAnAdHocFilter() throws {
+        for file in ["UI/PeopleSheets.swift", "UI/MentionComposer.swift", "UI/SecretsViews.swift", "Store/SearchStore.swift", "Model/GlobalSearch.swift"] {
+            let src = try source(file)
+            for (n, line) in src.components(separatedBy: "\n").enumerated() {
+                for bad in ["lowercased().contains(q", "HomeSearch.fold(", "localizedCaseInsensitiveContains("] {
+                    XCTAssertFalse(line.contains(bad), "\(file):\(n + 1): ad-hoc filter \(bad): \(line)")
+                }
+            }
+        }
     }
 }

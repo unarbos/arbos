@@ -6,8 +6,10 @@
 // in its hue (pastel disc, darker leaf); the ten hues in two rows of five. The per-id
 // automatic default stays: Reset goes back to it. Generate: a short prompt → the relay paints one
 // picture (`POST /projects/{id}/avatar/generate`) → previewed here; Set keeps it. Upload: Photos
-// (images only), uploaded as a 512 px JPEG on Set. Groups and servers open the same sheet with
-// the same three tabs (their own `/avatar/generate` route and blob slot).
+// (images only), uploaded as the picture master on Set — `PictureMaster`: a 1024 px square,
+// PNG for a flat mark, JPEG q92 for a photo (Jacob, 2026-10-26: a 4000 px mark came out
+// jagged through the old 512 px JPEG). Groups and servers open the same sheet with the same
+// three tabs (their own `/avatar/generate` route and blob slot).
 //
 // Grok's sizes from the 2x reference (612 × 794 px → 306 × 397 pt), inside the shipped
 // bottom-sheet frame: a 44 pt bar with a hairline, the Create sheet's 33 / 40 / 56 leaf grid,
@@ -69,9 +71,62 @@ final class AvatarSourceState: ObservableObject {
     @Published var prompt = ""
     @Published var generating = false
     @Published var generatedKey: String?
+    /// The failure as one short sentence (the relay's, or ours for a transport error).
     @Published var errorText: String?
+    /// The raw words behind it — shown only behind the Details disclosure (Jacob, 2026-10-26).
+    @Published var errorDetail: String?
+    @Published var detailsOpen = false
+    /// When the running generation started (the status line counts the seconds).
+    @Published var startedAt: Date?
     @Published var photoItem: PhotosPickerItem?
+
+    /// One generation: progress on, then the key or the (sentence, detail) of the failure.
+    /// Both sheets call this so the wording is the same everywhere.
+    func run(_ work: @escaping () async throws -> String) {
+        guard !generating else { return }
+        generating = true
+        startedAt = Date()
+        errorText = nil
+        errorDetail = nil
+        detailsOpen = false
+        Task { @MainActor in
+            do {
+                generatedKey = try await work()
+            } catch {
+                let (sentence, detail) = Self.failureWords(error)
+                errorText = sentence
+                errorDetail = detail
+            }
+            generating = false
+            startedAt = nil
+        }
+    }
+
+    /// What the sheet says when a generation failed: one short sentence and the raw words for
+    /// Details. A relay answer keeps its own sentence ("Couldn't generate the image. The server
+    /// took too long.", "That prompt was refused — try a different one."); a client-side
+    /// timeout gets the same timeout sentence; anything else "Couldn't reach the server".
+    static func failureWords(_ error: Error) -> (String, String?) {
+        if let relay = error as? RelayError {
+            let sentence = relay.message.isEmpty ? "Couldn't generate the image." : relay.message
+            let code = relay.type.map { "HTTP \(relay.status) \($0)" } ?? "HTTP \(relay.status)"
+            return (sentence, relay.detail.map { "\(code) — \($0)" } ?? code)
+        }
+        let ns = error as NSError
+        if ns.domain == NSURLErrorDomain && ns.code == NSURLErrorTimedOut {
+            return ("Couldn't generate the image. The server took too long.", error.localizedDescription)
+        }
+        return ("Couldn't reach the server. Check your connection and try again.", error.localizedDescription)
+    }
+
+    /// Seconds since Generate was pressed, while it runs.
+    func generatingFor(_ now: Date) -> Int? {
+        guard generating, let startedAt else { return nil }
+        return max(0, Int(now.timeIntervalSince(startedAt)))
+    }
     @Published var uploadPreview: UIImage?
+    /// The encoded master of the chosen photo (PNG or JPEG — `PictureMaster.mime` tells which;
+    /// the name predates the PNG case).
     @Published var uploadJpeg: Data?
 
     /// The entity about to be created gets this (Jacob, 2026-10-25): the chosen JPEG, the
@@ -84,14 +139,18 @@ final class AvatarSourceState: ObservableObject {
         }
     }
 
-    /// A Photos pick landed: square it at 512 px and keep the JPEG for the create / Set.
+    /// A Photos pick landed: square it at the master size and keep the encoded master for the
+    /// create / Set (`PictureMaster`).
     func tookPhoto(_ item: PhotosPickerItem?) async {
         guard let item,
               let data = try? await item.loadTransferable(type: Data.self),
               let img = UIImage(data: data) else { return }
-        let square = AvatarPickerSheet.square(img, side: 512)
-        uploadPreview = square
-        uploadJpeg = square.jpegData(compressionQuality: 0.85)
+        let square = AvatarPickerSheet.square(img, side: PictureMaster.side)
+        let encoded = PictureMaster.encode(square)
+        // The 114 pt preview draws a 384 px ImageIO thumbnail of the master (≈ 1 : 1 at 3 ×), not
+        // the 1024 px square through the layer's linear filter.
+        uploadPreview = encoded.flatMap(AvatarImageCache.decode) ?? square
+        uploadJpeg = encoded
         errorText = nil
     }
 }
@@ -139,9 +198,9 @@ struct AvatarSourceBody<Preview: View>: View {
     @FocusState private var promptFocused: Bool
 
     private var canGenerate: Bool { !state.prompt.trimmingCharacters(in: .whitespaces).isEmpty && !state.generating }
-    private var statusLine: String {
+    private func statusLine(_ now: Date) -> String {
         if let errorText = state.errorText { return errorText }
-        if state.generating { return "Painting a picture — a few seconds." }
+        if let s = state.generatingFor(now) { return "Painting a picture — \(s) s" }
         if state.generatedKey != nil { return keepsLine }
         return "A few words about the picture you want."
     }
@@ -169,7 +228,7 @@ struct AvatarSourceBody<Preview: View>: View {
                 .padding(.horizontal, 16.5)
                 .accessibilityIdentifier("avatar-generate-prompt")
             Button(action: go) {
-                Text(state.generating ? "Generating…" : (state.generatedKey == nil ? "Generate" : "Generate again"))
+                Text(pillLabel)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(canGenerate ? AvatarSheetPalette.title : AvatarSheetPalette.disabledText)
                     .padding(.horizontal, 18)
@@ -180,15 +239,60 @@ struct AvatarSourceBody<Preview: View>: View {
             .disabled(!canGenerate)
             .padding(.top, 12)
             .accessibilityIdentifier("avatar-generate-go")
-            preview()
-            Text(statusLine)
-                .font(.system(size: 12))
-                .foregroundStyle(state.errorText == nil ? AvatarSheetPalette.placeholder : theme.danger)
-                .multilineTextAlignment(.center)
+            // The preview slot: the picture (dimmed under a spinner while painting), or — after
+            // a failure with Details open — the raw words, clamped to the slot (Jacob,
+            // 2026-10-26: a raw transport error must never run into the footer).
+            if state.detailsOpen, state.errorText != nil {
+                Text(state.errorDetail ?? "No further detail.")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(AvatarSheetPalette.labelMuted)
+                    .lineLimit(6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10)
+                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(AvatarSheetPalette.pillBg))
+                    .padding(.horizontal, 16.5)
+                    .padding(.top, 16)
+                    .accessibilityIdentifier("avatar-generate-detail")
+            } else {
+                preview()
+                    .opacity(state.generating ? 0.4 : 1)
+                    .overlay {
+                        if state.generating {
+                            ProgressView().controlSize(.large).tint(theme.accent)
+                                .accessibilityIdentifier("avatar-generate-spinner")
+                        }
+                    }
+            }
+            // One line, never more; an error gets a Details toggle beside the sentence.
+            TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                HStack(spacing: 8) {
+                    Text(statusLine(ctx.date))
+                        .font(.system(size: 12))
+                        .foregroundStyle(state.errorText == nil ? AvatarSheetPalette.placeholder : theme.danger)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .accessibilityIdentifier("avatar-generate-status")
+                    if state.errorText != nil {
+                        Button { state.detailsOpen.toggle() } label: {
+                            Text(state.detailsOpen ? "Hide details" : "Details")
+                                .font(.system(size: 12))
+                                .foregroundStyle(AvatarSheetPalette.labelMuted)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("avatar-generate-details")
+                    }
+                }
                 .padding(.horizontal, 16.5)
                 .padding(.top, 12)
+            }
         }
         .frame(maxWidth: .infinity)
+    }
+
+    private var pillLabel: String {
+        if state.generating { return "Generating…" }
+        if state.errorText != nil { return "Try again" }
+        return state.generatedKey == nil ? "Generate" : "Generate again"
     }
 
     private func go() {
@@ -210,7 +314,7 @@ struct AvatarSourceBody<Preview: View>: View {
             }
             .buttonStyle(.plain)
             .accessibilityIdentifier("avatar-upload-choose")
-            Text(state.uploadJpeg == nil ? "A picture from Photos; kept at 512 px." : uploadsLine)
+            Text(state.uploadJpeg == nil ? "A picture from Photos; kept at up to 1024 px." : uploadsLine)
                 .font(.system(size: 12))
                 .foregroundStyle(AvatarSheetPalette.placeholder)
                 .multilineTextAlignment(.center)
@@ -237,6 +341,8 @@ struct AvatarPickerSheet: View {
     @State private var reset = false
     @StateObject private var source = AvatarSourceState()
     @State private var saving = false
+    /// View (Jacob, 2026-10-25): the picture as it is now, full-size in the media viewer.
+    @State private var viewer: MediaViewerState?
     private var generatedKey: String? { source.generatedKey }
     private var uploadJpeg: Data? { source.uploadJpeg }
     private var uploadPreview: UIImage? { source.uploadPreview }
@@ -345,14 +451,45 @@ struct AvatarPickerSheet: View {
         .presentationDragIndicator(.visible)
         .onAppear {
             tab = tabs.contains(initialTab) ? initialTab : (tabs.first ?? .bot)
-            // Rig: a prefilled prompt runs Generate at once.
+            // Rig: a prefilled prompt runs Generate at once; `ARBOS_VIEW_PICTURE=1` presses View.
             if tab == .generate, let text = DebugHooks.avatarPrompt, !text.isEmpty {
                 source.prompt = text
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { generate() }
             }
+            if DebugHooks.viewPicture, let picture = Self.viewablePicture(target: target, model: model) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                    viewer = MediaViewerState(items: [MediaAlbum.picture(name: picture.name, url: picture.url)], index: 0)
+                }
+            }
         }
         .onChange(of: source.uploadJpeg) { _, jpeg in
             if jpeg != nil { reset = false }
+        }
+        .fullScreenCover(item: $viewer) { v in
+            MediaViewer(album: v.items, index: v.index, onClose: { viewer = nil })
+                .environmentObject(model)
+                .environment(\.theme, theme)
+        }
+    }
+
+    /// The target's current picture, when it has one — what View opens. Leaf / letter avatars
+    /// have nothing to view, so the bar shows no View.
+    static func viewablePicture(target: AvatarTarget, model: AppModel) -> (name: String, url: String)? {
+        switch target {
+        case .agent(let id):
+            guard let p = model.project(id), let url = p.imageURL, !url.isEmpty else { return nil }
+            return (p.name, url)
+        case .group(let id):
+            guard let c = model.peopleChats.first(where: { $0.id == id }), let key = c.imageKey,
+                  let url = model.blobURL(projectId: "\(peopleSlot):\(id)", key: key) else { return nil }
+            return (c.title.isEmpty ? "Group" : c.title, url.absoluteString)
+        case .server(let id):
+            guard let s = model.servers.first(where: { $0.id == id }), let key = s.imageKey,
+                  let url = model.blobURL(projectId: "servers:\(id)", key: key) else { return nil }
+            return (s.name, url.absoluteString)
+        case .me:
+            guard let u = model.user, let url = u.avatarUrl, !url.isEmpty else { return nil }
+            return (u.name ?? u.login, url)
         }
     }
 
@@ -362,6 +499,20 @@ struct AvatarPickerSheet: View {
         HStack(spacing: 2) {
             AvatarTabPill(tabs: tabs, tab: $tab) { errorText = nil }
             Spacer()
+            if let picture = Self.viewablePicture(target: target, model: model) {
+                Button {
+                    viewer = MediaViewerState(items: [MediaAlbum.picture(name: picture.name, url: picture.url)], index: 0)
+                } label: {
+                    Text("View")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(labelMuted)
+                        .padding(.horizontal, 6)
+                        .frame(height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("avatar-view")
+            }
             Button {
                 reset = true
                 pickedLeaf = nil
@@ -452,21 +603,16 @@ struct AvatarPickerSheet: View {
     private func generate() {
         let text = source.prompt.trimmingCharacters(in: .whitespaces)
         guard !text.isEmpty, !source.generating else { return }
-        source.generating = true
-        source.errorText = nil
         reset = false
-        Task {
-            do {
-                switch target {
-                case .agent(let id): source.generatedKey = try await model.generateProjectAvatar(projectId: id, prompt: text)
-                case .group(let id): source.generatedKey = try await model.generateGroupAvatar(chatId: id, prompt: text)
-                case .server(let id): source.generatedKey = try await model.generateServerAvatar(id, prompt: text)
-                case .me: source.generatedKey = try await model.generateMyAvatar(prompt: text)
-                }
-            } catch {
-                source.errorText = error.localizedDescription
+        let target = target
+        let model = model
+        source.run {
+            switch target {
+            case .agent(let id): return try await model.generateProjectAvatar(projectId: id, prompt: text)
+            case .group(let id): return try await model.generateGroupAvatar(chatId: id, prompt: text)
+            case .server(let id): return try await model.generateServerAvatar(id, prompt: text)
+            case .me: return try await model.generateMyAvatar(prompt: text)
             }
-            source.generating = false
         }
     }
 
@@ -619,18 +765,105 @@ struct AvatarPickerSheet: View {
         }
     }
 
+    /// The centre square of `image`, `side` **pixels** on a side (scale 1 — not the screen's 3 ×,
+    /// which made a "512" picture 1536 px), drawn with high-quality interpolation so a 4000 px
+    /// export shrinks through an area filter, never point-sampled. A smaller picture is not
+    /// enlarged.
     static func square(_ image: UIImage, side: CGFloat) -> UIImage {
         let s = min(image.size.width, image.size.height)
         let rect = CGRect(x: (image.size.width - s) / 2, y: (image.size.height - s) / 2, width: s, height: s)
-        let renderer = UIGraphicsImageRenderer(size: CGSize(width: side, height: side))
-        return renderer.image { _ in
+        let sourcePx = s * image.scale
+        let out = min(side, max(1, sourcePx.rounded(.down)))
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = false
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: out, height: out), format: format)
+        return renderer.image { ctx in
+            ctx.cgContext.interpolationQuality = .high
             if let cg = image.cgImage?.cropping(to: CGRect(x: rect.origin.x * image.scale, y: rect.origin.y * image.scale,
                                                            width: rect.width * image.scale, height: rect.height * image.scale)) {
                 UIImage(cgImage: cg, scale: image.scale, orientation: image.imageOrientation)
-                    .draw(in: CGRect(x: 0, y: 0, width: side, height: side))
+                    .draw(in: CGRect(x: 0, y: 0, width: out, height: out))
             } else {
-                image.draw(in: CGRect(x: 0, y: 0, width: side, height: side))
+                image.draw(in: CGRect(x: 0, y: 0, width: out, height: out))
             }
         }
+    }
+}
+
+/// The picture master every avatar upload sends — the iPhone twin of the relay's
+/// `avatar_image::master` and the Mac's `sync::avatar_master`: ≤ 1024 px, alpha over white,
+/// **PNG** when the picture is a flat graphic (a mark, a logo: a handful of colours cover almost
+/// every pixel, the rest being its anti-aliased edges), **JPEG q92** for a photograph. The relay
+/// checks that the `Content-Type` and the bytes agree, so [`mime`] / [`ext`] read the bytes.
+enum PictureMaster {
+    /// Longest side of the master, in pixels.
+    static let side: CGFloat = 1024
+    /// The relay's cap for `PUT /me/avatar`.
+    static let maxBytes = 3 * 1024 * 1024
+    static let jpegQuality: CGFloat = 0.92
+    static let flatMaxColors = 64
+    static let flatCoverage = 0.90
+
+    /// Encode `image` (already squared / sized by `AvatarPickerSheet.square`).
+    static func encode(_ image: UIImage) -> Data? {
+        let flattened = overWhite(image)
+        if isFlatGraphic(flattened), let png = flattened.pngData(), png.count <= maxBytes {
+            return png
+        }
+        if let jpeg = flattened.jpegData(compressionQuality: jpegQuality), jpeg.count <= maxBytes {
+            return jpeg
+        }
+        return flattened.jpegData(compressionQuality: 0.85)
+    }
+
+    static func isPNG(_ data: Data) -> Bool {
+        data.starts(with: [0x89, 0x50, 0x4E, 0x47])
+    }
+
+    static func mime(_ data: Data) -> String {
+        isPNG(data) ? "image/png" : "image/jpeg"
+    }
+
+    static func ext(_ data: Data) -> String {
+        isPNG(data) ? "png" : "jpg"
+    }
+
+    /// Transparent pixels land on white (the routes serve JPEG too, and every disc draws on its
+    /// own background — one rule keeps the two formats alike).
+    static func overWhite(_ image: UIImage) -> UIImage {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = image.scale
+        format.opaque = true
+        return UIGraphicsImageRenderer(size: image.size, format: format).image { ctx in
+            UIColor.white.setFill()
+            ctx.fill(CGRect(origin: .zero, size: image.size))
+            image.draw(at: .zero)
+        }
+    }
+
+    /// Sampled on a 128 × 128 grid; colours quantised to 5 bits a channel.
+    static func isFlatGraphic(_ image: UIImage) -> Bool {
+        guard let cg = image.cgImage else { return false }
+        let side = 128
+        var pixels = [UInt8](repeating: 0, count: side * side * 4)
+        let info = CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
+        let drawn = pixels.withUnsafeMutableBytes { buf -> Bool in
+            guard let ctx = CGContext(data: buf.baseAddress, width: side, height: side, bitsPerComponent: 8,
+                                      bytesPerRow: side * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: info)
+            else { return false }
+            ctx.interpolationQuality = .high
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: side, height: side))
+            return true
+        }
+        guard drawn else { return false }
+        var counts: [UInt32: Int] = [:]
+        for i in stride(from: 0, to: pixels.count, by: 4) {
+            let key = UInt32(pixels[i] & 0xF8) << 16 | UInt32(pixels[i + 1] & 0xF8) << 8 | UInt32(pixels[i + 2] & 0xF8)
+            counts[key, default: 0] += 1
+        }
+        let total = side * side
+        let covered = counts.values.sorted(by: >).prefix(flatMaxColors).reduce(0, +)
+        return Double(covered) / Double(total) >= flatCoverage
     }
 }

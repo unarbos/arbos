@@ -1,7 +1,9 @@
 // Home, Grok Bot layout: top bar with the account circle (GitHub avatar, left)
-// and search + "+" circles (right), then All | Agents | People | Servers and the chat
+// and the "+" circle (right), then All | Agents | People | Servers and the chat
 // list (avatar, name, time, preview). One machine: its state is the small dot
-// on the account circle; the machine details live in Settings.
+// on the account circle; the machine details live in Settings. The bottom edge
+// holds one app-wide search bar and nothing else (Jacob, 2026-10-25, [feedback
+// iphone-bottom-search-bar-2026-10-25]; `GlobalSearchView.swift`).
 
 import ArbosFFI
 import SwiftUI
@@ -43,7 +45,9 @@ struct HomeView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     @State private var showNewChat = false
-    @State private var searching = false
+    /// Settings is a sheet from the account circle (as before the 2026-10-23 tab bar).
+    @State private var showSettings = false
+    /// The bottom bar's text; the results replace the list while it is focused or filled.
     @State private var query = ""
     @State private var slowConnect = false
     /// "Offline · saved chats": the list came from the on-device store and the
@@ -77,14 +81,171 @@ struct HomeView: View {
     private var hiddenCount: Int { hiddenProjects.count + hiddenPeople.count + hiddenServers.count }
     @FocusState private var searchFocused: Bool
 
-
     /// Folded query (case + diacritics, leading `@` stripped) so "@robert" and "Zoe" find their rows.
     private var searchQuery: String { HomeSearch.normalizeQuery(query) }
+    /// The bar is focused or holds text: the results are up instead of the list.
+    private var searching: Bool { searchFocused || !query.isEmpty }
 
     var body: some View {
         NavigationStack(path: $model.path) {
             ZStack(alignment: .top) {
                 theme.bg.ignoresSafeArea()
+                if searching {
+                    GlobalSearchResults(query: query, folded: searchQuery, onOpen: closeSearch)
+                        .transition(.opacity)
+                } else {
+                    homeList
+                }
+                topBar
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) { bottomBar }
+            .animation(.easeOut(duration: 0.18), value: searching)
+            .task(id: model.link) {
+                // Quiet for 4 s after a from-disk launch → say so; live again → hide.
+                guard model.showingSavedCopy else {
+                    withAnimation(.easeOut(duration: 0.2)) { offlineHint = false }
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                if !Task.isCancelled, model.showingSavedCopy {
+                    withAnimation(.easeOut(duration: 0.2)) { offlineHint = true }
+                }
+            }
+            .toolbar(.hidden, for: .navigationBar)
+            .navigationDestination(for: AppModel.Route.self) { route in
+                switch route {
+                case .chat(let chatId, let projectId):
+                    // `.id(chatId)` forces a fresh ChatView when switching threads of the
+                    // same agent from the Chats sheet; without it NavigationStack reuses
+                    // the destination and the tap looks like it does nothing.
+                    ChatView(chatId: chatId, projectId: projectId)
+                        .id(chatId)
+                case .server(let serverId):
+                    // D88: the server's channel list (the slid-in left pane).
+                    ServerChannelsView(serverId: serverId)
+                        .id(serverId)
+                }
+            }
+            .navigationDestination(isPresented: $showHidden) {
+                HiddenChatsView().environmentObject(model).environment(\.theme, theme)
+            }
+            .navigationDestination(isPresented: $showGoals) {
+                GoalsPage().environmentObject(model).environment(\.theme, theme)
+            }
+            .navigationDestination(isPresented: Binding(
+                get: { openGoalId != nil },
+                set: { if !$0 { openGoalId = nil } }
+            )) {
+                GoalDetailPage(goalId: openGoalId ?? "")
+                    .environmentObject(model)
+                    .environment(\.theme, theme)
+            }
+            .sheet(isPresented: $showNewChat) {
+                NewChatSheet().environmentObject(model).environment(\.theme, theme)
+            }
+            .sheet(isPresented: $showSettings) {
+                SettingsView().environmentObject(model).environment(\.theme, theme)
+            }
+        }
+        .task {
+            if DebugHooks.demo, model.isFixture {
+                try? await Task.sleep(nanoseconds: 2_600_000_000)
+                if let p = model.project("fx-comms") { model.open(project: p) }
+            }
+            if DebugHooks.liveDemo, let id = DebugHooks.openProject {
+                while model.project(id) == nil || model.machine.reported == false { try? await Task.sleep(nanoseconds: 300_000_000) }
+                try? await Task.sleep(nanoseconds: 5_500_000_000)
+                if let p = model.project(id) { model.open(project: p) }
+            }
+            if let id = DebugHooks.openPeople {
+                while !model.peopleChats.contains(where: { $0.id == id }) { try? await Task.sleep(nanoseconds: 300_000_000) }
+                try? await Task.sleep(nanoseconds: 800_000_000)
+                if let c = model.peopleChats.first(where: { $0.id == id }) { model.open(peopleChat: c) }
+            }
+        }
+        .task { await model.refreshGoals() }
+        .onAppear {
+            // Rig: the New Message sheet, which hosts the Create screens (`newagent`,
+            // `newgroup`, `newserver`) and the group member picker (`newgroup2`).
+            if ["newchat", "newagent", "newgroup", "newgroup2", "newserver"].contains(DebugHooks.show ?? ""),
+               DebugHooks.openProject == nil {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showNewChat = true }
+            }
+            if DebugHooks.show == "hidden", DebugHooks.openProject == nil {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showHidden = true }
+            }
+            if DebugHooks.show == "settings", DebugHooks.openProject == nil {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showSettings = true }
+            }
+            // Rig: `ARBOS_HOME_FILTER=all|agents|people|servers` selects a segment at launch.
+            if let raw = DebugHooks.homeFilter,
+               let f = HomeListFilter.allCases.first(where: { $0.rawValue.lowercased() == raw.lowercased() }) {
+                listFilter = f
+            }
+            // Rig: `ARBOS_SEARCH=<text>` opens the bottom search with that query
+            // (`ARBOS_SEARCH=-` focuses the empty bar).
+            if let q = DebugHooks.search, DebugHooks.openProject == nil {
+                model.paintTranscriptsForSearch()
+                query = q == "-" ? "" : q
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { searchFocused = true }
+            }
+            #if DEBUG
+            if DebugHooks.show == "notify", DebugHooks.openProject == nil {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { model.postSampleNotifications() }
+            }
+            #endif
+            if !DebugHooks.liveDemo, DebugHooks.openProject == peopleSlot, let cid = DebugHooks.openChat, model.path.isEmpty, let c = model.peopleChat(cid) {
+                model.open(peopleChat: c)
+            } else if !DebugHooks.liveDemo, let id = DebugHooks.openProject, model.path.isEmpty, let p = model.project(id) {
+                if let cid = DebugHooks.openChat, let c = model.chat(cid) { model.open(chat: c) } else { model.open(project: p) }
+            }
+        }
+        .onChange(of: model.projects.count) { _, _ in
+            if !DebugHooks.liveDemo, let id = DebugHooks.openProject, model.path.isEmpty, let p = model.project(id) {
+                if let cid = DebugHooks.openChat, let c = model.chat(cid) { model.open(chat: c) } else { model.open(project: p) }
+            }
+        }
+        .onChange(of: model.peopleChats.count) { _, _ in
+            if DebugHooks.openProject == peopleSlot, model.path.isEmpty, let cid = DebugHooks.openChat, let c = model.peopleChat(cid) {
+                model.open(peopleChat: c)
+            }
+        }
+        .onChange(of: searchFocused) { _, focused in
+            // Rooms may finish a checkpoint while the field is focused — paint
+            // any still-unpublished transcripts so message search can see them;
+            // and load the directory so people without a DM can be found.
+            guard focused else { return }
+            model.paintTranscriptsForSearch()
+            Task { await model.loadDirectory() }
+        }
+        .onChange(of: query) { _, _ in
+            if !searchQuery.isEmpty { model.paintTranscriptsForSearch() }
+        }
+    }
+
+    /// Clear the bar and drop the keyboard: back to the list.
+    private func closeSearch() {
+        query = ""
+        searchFocused = false
+    }
+
+    /// The one control on Home's bottom edge: the app-wide search capsule, 20 pt
+    /// side margins like the header, over a fade so rows slide under it. It sits in
+    /// the bottom safe-area inset, so it rides the keyboard and clears the home indicator.
+    private var bottomBar: some View {
+        VStack(spacing: 0) {
+            LinearGradient(colors: [theme.bg.opacity(0), theme.bg], startPoint: .top, endPoint: .bottom)
+                .frame(height: 18)
+                .allowsHitTesting(false)
+            HomeSearchBar(query: $query, focused: $searchFocused, active: searching, onClose: closeSearch)
+                .padding(.horizontal, 20)
+                .padding(.bottom, 8)
+                .background(theme.bg)
+        }
+        .accessibilityIdentifier("home-bottom-bar")
+    }
+
+    private var homeList: some View {
                 List {
                     Color.clear.frame(height: 66)
                         .listRowInsets(EdgeInsets())
@@ -101,7 +262,7 @@ struct HomeView: View {
                             .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 8, trailing: 20))
                             .listRowSeparator(.hidden)
                             .listRowBackground(theme.bg)
-                        Text(homeEmptyCopy)
+                        Text(listFilter.emptyCopy)
                             .font(theme.font(Theme.small))
                             .foregroundStyle(theme.muted)
                             .frame(maxWidth: .infinity)
@@ -109,28 +270,26 @@ struct HomeView: View {
                             .listRowInsets(EdgeInsets())
                             .listRowSeparator(.hidden)
                             .listRowBackground(Color.clear)
-                            .accessibilityIdentifier(searchQuery.isEmpty ? "home-filter-empty" : "home-search-empty")
+                            .accessibilityIdentifier("home-filter-empty")
                     } else {
                         listFilterBar
                             .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 8, trailing: 20))
                             .listRowSeparator(.hidden)
                             .listRowBackground(theme.bg)
-                        if searchQuery.isEmpty {
-                            if let update = model.availableUpdate {
-                                UpdateCard(update: update)
-                                    .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
-                                    .listRowSeparator(.hidden)
-                                    .listRowBackground(theme.bg)
-                            }
-                            if let position = model.waitlistPosition {
-                                WaitlistCard(position: position)
-                                    .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
-                                    .listRowSeparator(.hidden)
-                                    .listRowBackground(theme.bg)
-                            }
-                            if !plannedTasks.isEmpty {
-                                plannedTasksSection
-                            }
+                        if let update = model.availableUpdate {
+                            UpdateCard(update: update)
+                                .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
+                                .listRowSeparator(.hidden)
+                                .listRowBackground(theme.bg)
+                        }
+                        if let position = model.waitlistPosition {
+                            WaitlistCard(position: position)
+                                .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
+                                .listRowSeparator(.hidden)
+                                .listRowBackground(theme.bg)
+                        }
+                        if !plannedTasks.isEmpty {
+                            plannedTasksSection
                         }
                         ForEach(homeRows) { entry in
                             switch entry.row {
@@ -344,7 +503,7 @@ struct HomeView: View {
                                 .listRowBackground(theme.bg)
                             }
                         }
-                        if searchQuery.isEmpty, hiddenCount > 0 {
+                        if hiddenCount > 0 {
                             hiddenFooter
                                 .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
                                 .listRowSeparator(.hidden)
@@ -373,116 +532,6 @@ struct HomeView: View {
                         .allowsHitTesting(false)
                 }
                 .refreshable { await model.refreshRegistry() }
-                topBar
-            }
-            .task(id: model.link) {
-                // Quiet for 4 s after a from-disk launch → say so; live again → hide.
-                guard model.showingSavedCopy else {
-                    withAnimation(.easeOut(duration: 0.2)) { offlineHint = false }
-                    return
-                }
-                try? await Task.sleep(nanoseconds: 4_000_000_000)
-                if !Task.isCancelled, model.showingSavedCopy {
-                    withAnimation(.easeOut(duration: 0.2)) { offlineHint = true }
-                }
-            }
-            .toolbar(.hidden, for: .navigationBar)
-            .navigationDestination(for: AppModel.Route.self) { route in
-                switch route {
-                case .chat(let chatId, let projectId):
-                    // `.id(chatId)` forces a fresh ChatView when switching threads of the
-                    // same agent from the Chats sheet; without it NavigationStack reuses
-                    // the destination and the tap looks like it does nothing.
-                    ChatView(chatId: chatId, projectId: projectId)
-                        .id(chatId)
-                case .server(let serverId):
-                    // D88: the server's channel list (the slid-in left pane).
-                    ServerChannelsView(serverId: serverId)
-                        .id(serverId)
-                }
-            }
-            .navigationDestination(isPresented: $showHidden) {
-                HiddenChatsView().environmentObject(model).environment(\.theme, theme)
-            }
-            .navigationDestination(isPresented: $showGoals) {
-                GoalsPage().environmentObject(model).environment(\.theme, theme)
-            }
-            .navigationDestination(isPresented: Binding(
-                get: { openGoalId != nil },
-                set: { if !$0 { openGoalId = nil } }
-            )) {
-                GoalDetailPage(goalId: openGoalId ?? "")
-                    .environmentObject(model)
-                    .environment(\.theme, theme)
-            }
-            .sheet(isPresented: $showNewChat) {
-                NewChatSheet().environmentObject(model).environment(\.theme, theme)
-            }
-        }
-        .task {
-            if DebugHooks.demo, model.isFixture {
-                try? await Task.sleep(nanoseconds: 2_600_000_000)
-                if let p = model.project("fx-comms") { model.open(project: p) }
-            }
-            if DebugHooks.liveDemo, let id = DebugHooks.openProject {
-                while model.project(id) == nil || model.machine.reported == false { try? await Task.sleep(nanoseconds: 300_000_000) }
-                try? await Task.sleep(nanoseconds: 5_500_000_000)
-                if let p = model.project(id) { model.open(project: p) }
-            }
-            if let id = DebugHooks.openPeople {
-                while !model.peopleChats.contains(where: { $0.id == id }) { try? await Task.sleep(nanoseconds: 300_000_000) }
-                try? await Task.sleep(nanoseconds: 800_000_000)
-                if let c = model.peopleChats.first(where: { $0.id == id }) { model.open(peopleChat: c) }
-            }
-        }
-        .task { await model.refreshGoals() }
-        .onAppear {
-            // Rig: the New Message sheet, which hosts the Create screens (`newagent`,
-            // `newgroup`, `newserver`) and the group member picker (`newgroup2`).
-            if ["newchat", "newagent", "newgroup", "newgroup2", "newserver"].contains(DebugHooks.show ?? ""),
-               DebugHooks.openProject == nil {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showNewChat = true }
-            }
-            if DebugHooks.show == "hidden", DebugHooks.openProject == nil {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showHidden = true }
-            }
-            // Rig: `ARBOS_HOME_FILTER=all|agents|people|servers` selects a segment at launch.
-            if let raw = DebugHooks.homeFilter,
-               let f = HomeListFilter.allCases.first(where: { $0.rawValue.lowercased() == raw.lowercased() }) {
-                listFilter = f
-            }
-            // Rig: `ARBOS_SEARCH=<text>` opens the home search with that query.
-            if let q = DebugHooks.search, DebugHooks.openProject == nil {
-                model.paintTranscriptsForSearch()
-                searching = true
-                query = q
-            }
-            #if DEBUG
-            if DebugHooks.show == "notify", DebugHooks.openProject == nil {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { model.postSampleNotifications() }
-            }
-            #endif
-            if !DebugHooks.liveDemo, DebugHooks.openProject == peopleSlot, let cid = DebugHooks.openChat, model.path.isEmpty, let c = model.peopleChat(cid) {
-                model.open(peopleChat: c)
-            } else if !DebugHooks.liveDemo, let id = DebugHooks.openProject, model.path.isEmpty, let p = model.project(id) {
-                if let cid = DebugHooks.openChat, let c = model.chat(cid) { model.open(chat: c) } else { model.open(project: p) }
-            }
-        }
-        .onChange(of: model.projects.count) { _, _ in
-            if !DebugHooks.liveDemo, let id = DebugHooks.openProject, model.path.isEmpty, let p = model.project(id) {
-                if let cid = DebugHooks.openChat, let c = model.chat(cid) { model.open(chat: c) } else { model.open(project: p) }
-            }
-        }
-        .onChange(of: model.peopleChats.count) { _, _ in
-            if DebugHooks.openProject == peopleSlot, model.path.isEmpty, let cid = DebugHooks.openChat, let c = model.peopleChat(cid) {
-                model.open(peopleChat: c)
-            }
-        }
-        .onChange(of: query) { _, _ in
-            // Rooms may finish a checkpoint while the field is focused — paint
-            // any still-unpublished transcripts so message search can see them.
-            if searching, !searchQuery.isEmpty { model.paintTranscriptsForSearch() }
-        }
     }
 
     // MARK: Top bar
@@ -601,9 +650,11 @@ struct HomeView: View {
         .accessibilityLabel("Hidden chats, \(hiddenCount)")
     }
 
+    /// Account circle (→ Settings) left, the + circle right. Search lives in the
+    /// bottom bar, so the header carries no search disc.
     private var topBar: some View {
         HStack(spacing: 10) {
-            Button { model.mainTab = .settings } label: {
+            Button { showSettings = true } label: {
                 ZStack(alignment: .bottomTrailing) {
                     PersonAvatar(url: model.user?.avatarUrl, handle: model.user?.login ?? "?", size: Theme.control, name: model.user?.name, id: model.user?.id, colorIndex: model.user?.avatarColorIndexEffective)
                     Circle()
@@ -615,74 +666,35 @@ struct HomeView: View {
                 .frame(width: Theme.control, height: Theme.control)
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Account and machine · \(model.machine.label)")
-            if searching {
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass").foregroundStyle(theme.icon)
-                    TextField("", text: $query, prompt: Text("Search").foregroundStyle(theme.placeholder))
-                        .font(theme.font(Theme.body))
+            .accessibilityLabel("Account, machine and settings · \(model.machine.label)")
+            .accessibilityIdentifier("home-account")
+            Spacer()
+                .overlay {
+                    // Between the account circle and the button, where nothing else lives.
+                    if offlineHint {
+                        Text("Offline · showing saved chats")
+                            .font(theme.font(Theme.small))
+                            .foregroundStyle(theme.muted)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                            .transition(.opacity)
+                            .accessibilityIdentifier("offline-hint")
+                    }
+                }
+            Button { showNewChat = true } label: {
+                GlassCircle {
+                    Image(systemName: "plus")
+                        .font(theme.font(Controls.glyph, weight: .regular))
                         .foregroundStyle(theme.text)
-                        .focused($searchFocused)
-                        .submitLabel(.search)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                        .accessibilityIdentifier("home-search-field")
-                    Button {
-                        query = ""
-                        searching = false
-                        searchFocused = false
-                    } label: {
-                        Image(systemName: "xmark.circle.fill").foregroundStyle(theme.icon)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Clear search")
                 }
-                .padding(.horizontal, 14)
-                .frame(height: Theme.control)
-                .background(Capsule().fill(theme.field))
-                .overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1))
-                .transition(.opacity)
-            } else {
-                Spacer()
-                    .overlay {
-                        // Between the account circle and the buttons, where nothing else lives.
-                        if offlineHint {
-                            Text("Offline · showing saved chats")
-                                .font(theme.font(Theme.small))
-                                .foregroundStyle(theme.muted)
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.8)
-                                .transition(.opacity)
-                                .accessibilityIdentifier("offline-hint")
-                        }
-                    }
-                Button {
-                    model.paintTranscriptsForSearch()
-                    withAnimation(.easeOut(duration: 0.18)) { searching = true }
-                    // Focus after the field is in the tree (same pattern as in-chat search).
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { searchFocused = true }
-                } label: {
-                    GlassCircle {
-                        Image(systemName: "magnifyingglass")
-                            .font(theme.font(17, weight: .medium))
-                            .foregroundStyle(theme.text)
-                    }
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Search conversations")
-                Button { showNewChat = true } label: {
-                    GlassCircle {
-                        Image(systemName: "plus")
-                            .font(theme.font(19, weight: .regular))
-                            .foregroundStyle(theme.text)
-                    }
-                }
-                .buttonStyle(.plain)
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel("New message")
+            .accessibilityIdentifier("home-new")
         }
-        // Grok home header: 20 pt side margins, 42 pt circles.
-        .padding(.horizontal, 20)
-        .padding(.top, 6)
+        // One top bar for every screen: `Controls.inset` / `Controls.top` (was Grok's 20 here
+        // and 16 in chats; [feedback iphone-header-composer-sizing-2026-10-26]).
+        .controlBar()
         .zIndex(1)
     }
 
@@ -752,94 +764,49 @@ struct HomeView: View {
         var activity: Int64 { 0 }
     }
 
-    /// One home row with how it matched the search (every row is a `title`
-    /// hit without a query, so the list is pinned-first in pin order, then by activity).
+    /// One home row. Every row is a plain `title` hit: the list is no longer
+    /// narrowed by typed text (search is the bottom bar, as the Mac's palette);
+    /// the segment alone scopes it.
     struct HomeEntry: Identifiable {
         var row: HomeRow
         var hit: HomeSearch.Hit
         var id: String { row.id }
     }
 
-    /// Projects, DMs and servers in one list. Without a query: pinned first (in the
-    /// user's pin order), then newest activity. With one: people (display name /
-    /// @handle) first, then rows matched by title, then by a member, then by a
-    /// message — newest first inside each group; a hit beyond the row's own name is
-    /// explained on its second line. `listFilter` scopes the rows: Agents hides
+    /// Projects, DMs and servers in one list: pinned first (in the user's pin
+    /// order), then newest activity. `listFilter` scopes the rows: Agents hides
     /// people and servers, People hides agents and servers, Servers shows only
-    /// servers (`HomeListFilter`).
+    /// servers (`HomeListFilter`). Archived rows stay out (Hidden chats).
     private var homeRows: [HomeEntry] {
-        let q = searchQuery
         // pinRank: strip index when pinned (0 = top), Int.max when not.
-        var rows: [(HomeSearch.Kind, Int, Int64, HomeEntry)] = []
+        var rows: [(Int, Int64, HomeEntry)] = []
+        let hit = HomeSearch.Hit(kind: .title)
         if listFilter.showsProjects {
             for p in model.projects {
                 // Agents: my agents only (`!shared`) — no shared-in agents.
                 if !listFilter.admitsProject(shared: p.shared) { continue }
-                // Archived agents stay out of the home list until search (or open).
-                if q.isEmpty && model.isArchived(p.id) { continue }
-                guard let hit = projectHit(p, q: q) else { continue }
+                if model.isArchived(p.id) { continue }
                 let pinRank = model.homePinIndex(projectId: p.id) ?? Int.max
-                rows.append((hit.kind, pinRank, lastActivity(p), HomeEntry(row: .project(p), hit: hit)))
+                rows.append((pinRank, lastActivity(p), HomeEntry(row: .project(p), hit: hit)))
             }
         }
         if listFilter.showsPeople {
-            for c in model.peopleChats {
-                // Archived people stay out of the home list until search (or open).
-                if q.isEmpty && model.isArchived(peopleChatId: c.id) { continue }
-                guard let hit = peopleHit(c, q: q) else { continue }
+            for c in model.peopleChats where !model.isArchived(peopleChatId: c.id) {
                 let pinRank = model.homePinIndex(peopleChatId: c.id) ?? Int.max
-                rows.append((hit.kind, pinRank, peopleActivity(c), HomeEntry(row: .people(c), hit: hit)))
+                rows.append((pinRank, peopleActivity(c), HomeEntry(row: .people(c), hit: hit)))
             }
         }
         if listFilter.showsServers {
             // D88: servers sort among the chats by last activity (rule 1); the
             // Servers segment shows them alone (Mac parity, 2026-10-24).
-            for s in model.servers {
-                // Archived servers stay out of the home list until search (or Unarchive).
-                if q.isEmpty && model.isArchived(serverId: s.id) { continue }
-                guard let hit = HomeSearch.serverHit(name: s.name, channels: s.channels.map(\.name), q: q) else { continue }
-                rows.append((hit.kind, Int.max, model.serverActivity(s), HomeEntry(row: .server(s), hit: hit)))
+            for s in model.servers where !model.isArchived(serverId: s.id) {
+                rows.append((Int.max, model.serverActivity(s), HomeEntry(row: .server(s), hit: hit)))
             }
         }
         return rows.sorted {
             if $0.0 != $1.0 { return $0.0 < $1.0 }
-            if $0.1 != $1.1 { return $0.1 < $1.1 }
-            return $0.2 > $1.2
-        }.map(\.3)
-    }
-
-    /// Agent name; a shared project's owner; a chat title under the agent; a loaded message.
-    private func projectHit(_ p: Project, q: String) -> HomeSearch.Hit? {
-        let chats = model.chats(of: p.id)
-        var members: [HomeSearch.Member] = []
-        if p.shared, let owner = p.ownerHandle, owner != model.user?.login {
-            members.append(HomeSearch.Member(handle: owner, name: p.ownerName))
-        }
-        return HomeSearch.titledHit(title: p.name, members: members,
-                                    chats: chats.filter { !$0.isSystem }.map { HomeSearch.ChatTitle(id: $0.id, title: $0.title) },
-                                    messages: { searchableMessages(chats.map(\.id)) }, q: q)
-    }
-
-    /// DM: the other person's display name / @handle. Group: title, a member (not me), an agent.
-    private func peopleHit(_ c: PeopleChat, q: String) -> HomeSearch.Hit? {
-        let me = model.user?.id
-        if !c.isGroup, let other = c.counterpart(me: me) {
-            return HomeSearch.dmHit(name: other.displayName, handle: other.handle,
-                                    messages: { searchableMessages([c.id]) }, q: q)
-        }
-        let members = c.members.filter { $0.id != me }.map {
-            HomeSearch.Member(handle: $0.handle, name: $0.isAgent ? $0.displayName : $0.name, isAgent: $0.isAgent)
-        }
-        return HomeSearch.titledHit(title: c.title, members: members,
-                                    messages: { searchableMessages([c.id]) }, q: q)
-    }
-
-    private func searchableMessages(_ chatIds: [Id]) -> [HomeSearch.MessageText] {
-        chatIds.flatMap { chatId in
-            model.searchableMessages(of: chatId).map {
-                HomeSearch.MessageText(chatId: chatId, messageId: $0.id, createdAt: $0.createdAt, text: $0.plainText)
-            }
-        }
+            return $0.1 > $1.1
+        }.map(\.2)
     }
 
     /// All | Agents | People | Servers — same capsule pill as profile panes (`PaneTabs`).
@@ -856,15 +823,7 @@ struct HomeView: View {
             .accessibilityIdentifier("home-list-filter")
     }
 
-    /// Empty copy when the current filter (or search) has no rows.
-    private var homeEmptyCopy: String {
-        if !searchQuery.isEmpty {
-            return "No conversations match \"\(query.trimmingCharacters(in: .whitespaces))\""
-        }
-        return listFilter.emptyCopy
-    }
-
-    /// Open the chat the hit points at (a chat title or a message), else the agent's landing chat.
+    /// Open the chat the row points at, else the agent's landing chat.
     private func openSearchHit(_ project: Project, hit: HomeSearch.Hit) {
         if let chatId = hit.chatId, let chat = model.chat(chatId) {
             model.open(chat: chat)
@@ -969,7 +928,7 @@ struct UpdateCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
-                GlassCircle(size: 36) {
+                GlassCircle(size: 36) { // control-size: exception rowIconTiles
                     Image(systemName: "arrow.down.circle.fill").font(.system(size: 17)).foregroundStyle(theme.text)
                 }
                 VStack(alignment: .leading, spacing: 2) {
@@ -982,7 +941,7 @@ struct UpdateCard: View {
                 Button { model.dismissUpdate() } label: {
                     Text("Later").font(theme.font(Theme.small, weight: .semibold)).foregroundStyle(theme.text)
                         .frame(maxWidth: .infinity).frame(height: 38)
-                        .background(Capsule().fill(theme.field)).overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1))
+                        .background(Capsule().fill(theme.field)).overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1)) // control-size: exception inlineChips
                 }
                 .buttonStyle(.plain)
                 Button { model.openTestFlight() } label: {
@@ -1009,7 +968,7 @@ struct WaitlistCard: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            GlassCircle(size: 36) {
+            GlassCircle(size: 36) { // control-size: exception rowIconTiles
                 Image(systemName: "hourglass").font(.system(size: 16)).foregroundStyle(theme.text)
             }
             VStack(alignment: .leading, spacing: 2) {
@@ -1168,7 +1127,7 @@ struct HiddenChatsView: View {
                 Button { dismiss() } label: {
                     GlassCircle {
                         Image(systemName: "chevron.left")
-                            .font(theme.font(17, weight: .semibold))
+                            .font(theme.font(Controls.glyph, weight: .semibold))
                             .foregroundStyle(theme.text)
                     }
                 }
@@ -1178,14 +1137,13 @@ struct HiddenChatsView: View {
                     Text("Hidden chats")
                         .font(theme.font(Theme.body, weight: .semibold))
                         .foregroundStyle(theme.text)
-                        .padding(.horizontal, 16)
-                        .frame(height: Theme.control)
+                        .padding(.horizontal, Controls.textInset)
+                        .frame(height: Controls.height)
                 }
                 Spacer()
                 Color.clear.frame(width: Theme.control, height: Theme.control)
             }
-            .padding(.horizontal, 20)
-            .padding(.top, 6)
+            .controlBar()
         }
         .toolbar(.hidden, for: .navigationBar)
         .toolbar(.hidden, for: .tabBar)

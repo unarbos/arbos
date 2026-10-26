@@ -20,6 +20,9 @@ final class HiddenWorkerRowTests: XCTestCase {
 
     private func systemLines(_ rows: [Row]) -> [String] {
         rows.compactMap { row in
+            // The first rendered message always carries a date separator ("Nov 14, 2023 at 10:13 PM"),
+            // also a `.system` row; the assertion is about hand-off lines, not dates.
+            if row.id.hasSuffix("#date") { return nil }
             if case .system(_, let text, _) = row.kind { return text }
             return nil
         }

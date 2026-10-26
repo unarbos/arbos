@@ -38,6 +38,7 @@ use tokio::time::{interval, sleep, timeout};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
+use super::avatar_master::Master;
 use super::credentials::{self, DeviceCredentials};
 use super::diagnostics;
 use super::doc::ChatDoc;
@@ -51,11 +52,11 @@ use super::dto::{
 use super::store::{self, Store};
 use super::{ClientCommand, DraftPicture, PictureSource, PictureTarget, SyncEvent, SyncSource};
 use crate::model::{
-    new_id, now_ms, AccountView, Attachment, AttachmentKind, BoxReport, BoxState, Call, CallEnded,
-    CallLeft, CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView, Chat,
-    Effort, Id, Link, LinkState, Machine, MachineState, Message, Part, Person, Project,
-    ProjectDocView, ProjectSecrets, Reachable, Role, Routine, RoutineRun, Sender, ServerInfo,
-    ThreadInfo,
+    new_id, now_ms, trace_rows, AccountView, Attachment, AttachmentKind, BoxReport, BoxState, Call,
+    CallEnded, CallLeft, CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView,
+    Chat, Effort, Id, Link, LinkState, Machine, MachineState, Message, Part, Person, Project,
+    ProjectDocView, ProjectSecrets, Reachable, ReplyRef, Role, Routine, RoutineRun, Sender,
+    ServerInfo, ThreadInfo,
 };
 use crate::update;
 
@@ -71,21 +72,33 @@ pub(crate) struct RelayError {
     pub status: u16,
     pub kind: String,
     pub message: String,
+    /// `error.detail` when the relay sends one (the avatar routes: the provider's words).
+    pub detail: Option<String>,
 }
 
 impl RelayError {
     pub(crate) fn from_body(status: reqwest::StatusCode, body: &str) -> Self {
         if let Ok(dto) = serde_json::from_str::<ApiErrorDto>(body) {
+            let detail = serde_json::from_str::<Value>(body)
+                .ok()
+                .and_then(|v| {
+                    v.pointer("/error/detail")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .filter(|d| !d.is_empty());
             Self {
                 status: status.as_u16(),
                 kind: dto.error.type_,
                 message: dto.error.message,
+                detail,
             }
         } else {
             Self {
                 status: status.as_u16(),
                 kind: String::new(),
                 message: body.trim().to_owned(),
+                detail: None,
             }
         }
     }
@@ -154,6 +167,7 @@ struct QueuedSend {
     answer: Option<(String, serde_json::Value)>,
     reply_to: Option<String>,
     forwarded_from: Option<String>,
+    reply_ref: Option<ReplyRef>,
     mentions: Vec<String>,
 }
 
@@ -331,6 +345,15 @@ impl Shared {
         }
         *self.creds.write().unwrap() = Some(creds.clone());
         Ok(creds)
+    }
+
+    /// The newest unreported panic of a previous run (`panic_log`), once, through the
+    /// silent-diagnostic feedback path — so a crash that only left a `.ips` behind on the
+    /// Mac still reaches the relay with its message and backtrace.
+    fn report_last_panic(self: &Arc<Self>) {
+        if let Some(entry) = crate::panic_log::take_unreported() {
+            self.diagnostic_always("panic", entry);
+        }
     }
 
     fn me_user(&self) -> Option<credentials::AccountUser> {
@@ -617,17 +640,29 @@ impl Shared {
     }
 
     async fn post_json(self: &Arc<Self>, path: &str, body: Value) -> Result<Value> {
+        self.post_json_timeout(path, body, None).await
+    }
+
+    /// `post_json` with its own request timeout (the client's default is 30 s; an avatar
+    /// generation is given 90 s so the relay's 75 s budget always answers first).
+    async fn post_json_timeout(
+        self: &Arc<Self>,
+        path: &str,
+        body: Value,
+        timeout: Option<Duration>,
+    ) -> Result<Value> {
         let mut refreshed = false;
         loop {
             let token = self.token();
-            let resp = self
+            let mut req = self
                 .http
                 .post(format!("{}{}", self.http_url, path))
                 .bearer_auth(&token)
-                .json(&body)
-                .send()
-                .await
-                .with_context(|| format!("POST {path}"))?;
+                .json(&body);
+            if let Some(t) = timeout {
+                req = req.timeout(t);
+            }
+            let resp = req.send().await.with_context(|| format!("POST {path}"))?;
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             if !status.is_success() {
@@ -891,6 +926,7 @@ fn start_token_refresher(shared: &Arc<Shared>) {
 }
 
 fn start_after_pairing(shared: &Arc<Shared>) {
+    shared.report_last_panic();
     start_token_refresher(shared);
     open_store(shared);
     load_store(shared);
@@ -1069,6 +1105,17 @@ fn load_store(shared: &Arc<Shared>) {
     }
     *shared.projects.lock().unwrap() = projects.clone();
     *shared.chats.lock().unwrap() = chats;
+    // Pictures the last run fetched paint with the first content: no leaf placeholder on
+    // every agent while the fetches are out, and nothing to fetch for an unchanged picture.
+    for url in picture_urls(&projects) {
+        if let Some(bytes) = cached_avatar(shared, &url) {
+            shared.avatars_done.lock().unwrap().insert(url.clone());
+            let _ = shared.events.send(SyncEvent::Avatar {
+                url,
+                bytes: Arc::new(bytes),
+            });
+        }
+    }
     let _ = shared.events.send(SyncEvent::Projects(projects.clone()));
     log_first_paint("store", projects.len());
     emit_chats(shared);
@@ -1129,6 +1176,7 @@ fn save_registry(shared: &Arc<Shared>) {
     let projects = shared.projects.lock().unwrap().clone();
     let chats = shared.chats.lock().unwrap().clone();
     let people: Vec<Id> = shared.people.lock().unwrap().iter().cloned().collect();
+    let wanted: HashSet<String> = picture_urls(&projects).into_iter().collect();
     shared.with_store(|s| {
         if projects.is_empty() {
             s.remove(store::KEY_PROJECTS);
@@ -1138,7 +1186,32 @@ fn save_registry(shared: &Arc<Shared>) {
             s.put_json(store::KEY_CHATS, &chats);
         }
         s.put_json(store::KEY_PEOPLE, &people);
+        // A picture no current URL names (a changed avatar's old version, a left group) goes.
+        for key in s.keys_with_prefix(store::KEY_AVATAR_PREFIX) {
+            if !wanted.contains(&key[store::KEY_AVATAR_PREFIX.len()..]) {
+                s.remove(&key);
+            }
+        }
     });
+}
+
+/// Every picture URL the registry draws: agents' pictures (my records and roster copies),
+/// groups' pictures, people's avatars.
+pub(crate) fn picture_urls(projects: &[Project]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for p in projects {
+        out.extend(p.image_url.clone());
+        out.extend(p.agents.iter().filter_map(|a| a.image_url.clone()));
+        out.extend(
+            p.people
+                .iter()
+                .map(|x| x.avatar_url.clone())
+                .filter(|u| !u.is_empty()),
+        );
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 fn emit_store_usage(shared: &Arc<Shared>) {
@@ -1367,6 +1440,22 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
                 }
                 refresh = true;
                 refresh_servers = true;
+            }
+            // An agent's avatar changed (the agents' `profile_updated`): the new picture and
+            // stamp land in my record and every roster copy now; the re-read brings the rest.
+            PushEventDto::AgentProfileUpdated(payload) => {
+                let mut projects = shared.projects.lock().unwrap();
+                super::agent_avatar::apply_push(
+                    &mut projects,
+                    &shared.http_url,
+                    &payload.project_id,
+                    payload.image_key.as_deref(),
+                    payload.avatar_version,
+                );
+                let snapshot = projects.clone();
+                drop(projects);
+                let _ = shared.events.send(SyncEvent::Projects(snapshot));
+                refresh = true;
             }
             PushEventDto::PeopleMessage(_)
             | PushEventDto::PeopleChatDeleted(_)
@@ -1979,7 +2068,41 @@ async fn fetch_server_detail(shared: &Arc<Shared>, server_id: &str) {
     refresh_servers_list(shared).await;
 }
 
+/// Waits between picture fetch attempts. A cold launch fires the first fetch before the
+/// network is up (a Mac that just woke, the relay mid-restart), and until 2026-10-26 one failed
+/// attempt left the URL marked done forever: every surface drew the leaf placeholder for the
+/// rest of the session — Jacob's "old picture after relaunch" (#1813 / #1862 reopen).
+const AVATAR_RETRY_SECS: [u64; 6] = [2, 5, 10, 20, 40, 60];
+
+/// The store-cached bytes for a picture URL, if the last run fetched it.
+fn cached_avatar(shared: &Arc<Shared>, url: &str) -> Option<Vec<u8>> {
+    shared
+        .with_store(|s| s.get(&format!("{}{url}", store::KEY_AVATAR_PREFIX)))
+        .flatten()
+}
+
 async fn fetch_avatar(shared: Arc<Shared>, url: String) {
+    // `file://<path>` is a picked file (the avatar picker's Upload preview): read and mastered
+    // here, off the UI thread, so the preview shows exactly what the upload will send — never
+    // the raw 4000 px file through the GPU sampler (Jacob, 2026-10-26).
+    if let Some(path) = url.strip_prefix("file://") {
+        if !shared.avatars_done.lock().unwrap().insert(url.clone()) {
+            return;
+        }
+        let path = PathBuf::from(path);
+        let mastered = tokio::task::spawn_blocking(move || picture_master(&path)).await;
+        match mastered {
+            Ok(Ok(master)) => {
+                let _ = shared.events.send(SyncEvent::Avatar {
+                    url,
+                    bytes: Arc::new(master.bytes),
+                });
+            }
+            Ok(Err(err)) => shared.notice(format!("Picture: {err:#}")),
+            Err(_) => {}
+        }
+        return;
+    }
     // `/avatars/<user>.jpg?v=…` is the relay's own picture store (an Arbos
     // override of the GitHub avatar); everything else is absolute.
     let full = if url.starts_with('/') {
@@ -1993,18 +2116,41 @@ async fn fetch_avatar(shared: Arc<Shared>, url: String) {
     if !shared.avatars_done.lock().unwrap().insert(url.clone()) {
         return;
     }
-    let Ok(resp) = shared.http.get(&full).send().await else {
-        return;
-    };
-    if !resp.status().is_success() {
-        return;
-    }
-    if let Ok(bytes) = resp.bytes().await {
+    // The last run's bytes serve (the URL names the picture's version, so a cached copy is
+    // never stale; a changed picture is a new URL and a new fetch).
+    if let Some(bytes) = cached_avatar(&shared, &url) {
         let _ = shared.events.send(SyncEvent::Avatar {
-            url,
-            bytes: Arc::new(bytes.to_vec()),
+            url: url.clone(),
+            bytes: Arc::new(bytes),
         });
+        return;
     }
+    let mut attempt = 0usize;
+    loop {
+        let fetched = match shared.http.get(&full).send().await {
+            Ok(resp) if resp.status().is_success() => resp.bytes().await.ok(),
+            // 404 is "no picture": the leaf is right, nothing to retry.
+            Ok(resp) if resp.status() == reqwest::StatusCode::NOT_FOUND => break,
+            Ok(_) | Err(_) => None,
+        };
+        if let Some(bytes) = fetched {
+            let bytes = bytes.to_vec();
+            shared.with_store(|s| s.put(&format!("{}{url}", store::KEY_AVATAR_PREFIX), &bytes));
+            let _ = shared.events.send(SyncEvent::Avatar {
+                url,
+                bytes: Arc::new(bytes),
+            });
+            return;
+        }
+        let Some(wait) = AVATAR_RETRY_SECS.get(attempt) else {
+            break;
+        };
+        attempt += 1;
+        sleep(Duration::from_secs(*wait)).await;
+    }
+    // Gave up (or no picture): the next `want_avatar` for this URL may ask again.
+    shared.avatars_done.lock().unwrap().remove(&url);
+    let _ = shared.events.send(SyncEvent::AvatarMissing { url });
 }
 
 /// `GET /voices` → `SyncEvent::Voices` (a relay without it just leaves the list empty).
@@ -2257,12 +2403,12 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
             .find(|x| x.id == id)
             .cloned();
         let mut project = project_from_dto(&detail, members.as_ref());
-        // D92 amendment: the agent's uploaded / generated picture, fetched like a group's.
+        // D92 amendment: the agent's uploaded / generated picture — the public versioned route.
         project.image_url = project_image_url(
             &shared.http_url,
-            &shared.token(),
             &id,
             detail.project.image_key.as_deref(),
+            project.avatar_version,
         );
         // list_projects extras (shared / owner_handle) live on the list row.
         if let Some(shared_flag) = list_shared {
@@ -2404,6 +2550,9 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
         }
         *local = merged;
     }
+    // One copy of each agent's avatar everywhere: the newest stamp wins over any roster copy
+    // that arrived older (Jacob, 2026-10-25).
+    super::agent_avatar::reconcile(&mut projects);
     *shared.projects.lock().unwrap() = projects.clone();
     let _ = shared.events.send(SyncEvent::Projects(projects.clone()));
     log_first_paint("relay", projects.len());
@@ -2547,6 +2696,17 @@ fn emit_snapshot(shared: &Shared, chat_id: &str) {
     let mut messages = doc.read_all();
     for m in &mut messages {
         apply_pending(shared, m);
+    }
+    if trace_rows() {
+        let last = messages
+            .last()
+            .map(|m| format!("{:?}/{}", m.role, m.id))
+            .unwrap_or_default();
+        eprintln!(
+            "rows: snapshot chat={chat_id} n={} last={last} at={}",
+            messages.len(),
+            now_ms()
+        );
     }
     let _ = shared.events.send(SyncEvent::ChatSnapshot {
         chat_id: chat_id.to_string(),
@@ -3253,6 +3413,14 @@ async fn perform_room_actions(
                     }
                 }
                 RoomAction::ApplyBytes(bytes) => {
+                    if trace_rows() {
+                        eprintln!(
+                            "rows: row-apply room={} bytes={} at={}",
+                            session.room(),
+                            bytes.len(),
+                            now_ms()
+                        );
+                    }
                     // (failed, parked): parked = Loro holds the ops until their dependencies
                     // arrive; the session keeps the persisted cursor below that row.
                     let (import_failed, parked) = {
@@ -3531,12 +3699,10 @@ fn send_wake(shared: &Arc<Shared>, project_id: &str, reason: &'static str) {
     });
 }
 
-/// Any picked image → a JPEG the relay accepts (`PUT /me/avatar`, ≤ 2 MB):
-/// scaled to fit 512 × 512, quality 85.
-/// A picked picture file as the 512 px JPEG the relay stores. PNG, JPEG, GIF and WebP decode
-/// here; HEIC (Photos exports, iPhone shots) goes through macOS's own `sips` first, since
-/// the `image` crate has no HEIF decoder. Anything that is not an image is an error with a
-/// plain message.
+/// A picked picture file as the master the relay stores (`sync::avatar_master`: ≤ 1024 px,
+/// Lanczos, PNG for a flat mark, JPEG q92 for a photo). PNG, JPEG, GIF and WebP decode here;
+/// HEIC (Photos exports, iPhone shots) goes through macOS's own `sips` first, since the `image`
+/// crate has no HEIF decoder. Anything that is not an image is an error with a plain message.
 /// The blob slot a picker target's pictures live in; the draft's is my own (`users:{me}`).
 fn picture_slot(shared: &Shared, target: &PictureTarget) -> String {
     match target {
@@ -3557,6 +3723,46 @@ fn picture_url(shared: &Shared, target: &PictureTarget, key: Option<&str>) -> Op
         shared.http_url,
         shared.token()
     ))
+}
+
+/// How long one avatar generation may take on the wire: past the relay's 75 s budget (40 s per
+/// provider attempt), so the relay's own 504 reaches the sheet before this client gives up.
+const AVATAR_GENERATE_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// What the picker says when a generation failed: one short sentence, and the raw words for a
+/// Details disclosure (Jacob, 2026-10-26: `POST …/avatar/generate: error sending request …
+/// operation timed out` had been shown verbatim across the footer).
+fn generate_failure_words(target: &PictureTarget, err: &anyhow::Error) -> (String, Option<String>) {
+    if let Some(e) = err.downcast_ref::<RelayError>() {
+        // A relay without the own-slot route yet (#1789 not deployed): say so instead of 404.
+        if *target == PictureTarget::Draft && e.status == 404 {
+            return (
+                "Generate is not on this relay yet; upload a picture instead.".to_owned(),
+                None,
+            );
+        }
+        let sentence = if e.message.is_empty() {
+            "Couldn't generate the image.".to_owned()
+        } else {
+            e.message.clone()
+        };
+        let detail = match &e.detail {
+            Some(d) => format!("HTTP {} {} — {d}", e.status, e.kind),
+            None => format!("HTTP {} {}", e.status, e.kind),
+        };
+        return (sentence, Some(detail));
+    }
+    let raw = format!("{err:#}");
+    let timed_out = err.chain().any(|c| {
+        c.downcast_ref::<reqwest::Error>()
+            .is_some_and(|r| r.is_timeout())
+    }) || raw.contains("timed out");
+    let sentence = if timed_out {
+        "Couldn't generate the image. The server took too long."
+    } else {
+        "Couldn't reach the server. Check your connection and try again."
+    };
+    (sentence.to_owned(), Some(raw))
 }
 
 /// The answer to `PUT /me/avatar` (a JPEG body or `{image_key}`): the new `user` lands in the
@@ -3592,7 +3798,7 @@ async fn my_avatar_saved(shared: &Arc<Shared>, put: Result<reqwest::Response, re
 }
 
 /// The Create sheet's pending picture, once the entity exists: the file (or the bytes of the
-/// picture generated into my own slot) goes into the new entity's slot as a 512 px JPEG, then
+/// picture generated into my own slot) goes into the new entity's slot as a picture master, then
 /// `PATCH <patch_path> {image_key}`. `prefix` names the key (`avatar-` / `server-`). Errors are
 /// a notice — the entity itself is already created and shows its neutral initial.
 async fn adopt_draft_picture(
@@ -3602,10 +3808,10 @@ async fn adopt_draft_picture(
     prefix: &str,
     picture: DraftPicture,
 ) -> bool {
-    let jpeg = match picture {
+    let master = match picture {
         DraftPicture::File(path) => {
-            match tokio::task::spawn_blocking(move || picture_jpeg(&path)).await {
-                Ok(Ok(j)) => j,
+            match tokio::task::spawn_blocking(move || picture_master(&path)).await {
+                Ok(Ok(m)) => m,
                 Ok(Err(err)) => {
                     shared.notice(format!("Picture not uploaded: {err:#}"));
                     return false;
@@ -3618,7 +3824,11 @@ async fn adopt_draft_picture(
             let Some(from) = from else { return false };
             match shared.http.get(from).send().await {
                 Ok(r) if r.status().is_success() => match r.bytes().await {
-                    Ok(b) => b.to_vec(),
+                    // The relay's copy is already a master; its type travels with the bytes.
+                    Ok(b) => Master {
+                        png: b.starts_with(b"\x89PNG"),
+                        bytes: b.to_vec(),
+                    },
                     Err(err) => {
                         shared.notice(format!("Generated picture not copied: {err}"));
                         return false;
@@ -3635,13 +3845,13 @@ async fn adopt_draft_picture(
             }
         }
     };
-    let key = format!("{prefix}{}.jpg", new_id().to_lowercase());
+    let key = format!("{prefix}{}.{}", new_id().to_lowercase(), master.ext());
     let put = shared
         .http
         .put(format!("{}/blob/{slot}/{key}", shared.http_url))
         .bearer_auth(shared.token())
-        .header("content-type", "image/jpeg")
-        .body(jpeg)
+        .header("content-type", master.mime())
+        .body(master.bytes)
         .send()
         .await;
     match put {
@@ -3677,23 +3887,24 @@ fn with_server_picture(shared: &Shared, mut server: ServerInfo) -> ServerInfo {
     server
 }
 
-/// An agent's picture as the avatar loader fetches it: the blob in the project's own slot.
+/// An agent's picture as the avatar loader fetches it: the relay's public picture route,
+/// stamped with `avatar_version` (`sync::agent_avatar::picture_url`). The blob slot is the
+/// owner's and the guests' only — a viewer who merely shared a group got 403 and the leaf.
 fn project_image_url(
     http_url: &str,
-    token: &str,
     project_id: &str,
     key: Option<&str>,
+    version: i64,
 ) -> Option<String> {
-    let key = key.map(str::trim).filter(|k| !k.is_empty())?;
-    Some(format!("{http_url}/blob/{project_id}/{key}?token={token}"))
+    super::agent_avatar::picture_url(http_url, project_id, key, version)
 }
 
-fn picture_jpeg(path: &Path) -> Result<Vec<u8>> {
+fn picture_master(path: &Path) -> Result<Master> {
     let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
-    match avatar_jpeg(&bytes) {
-        Ok(jpeg) => Ok(jpeg),
+    match super::avatar_master::master(&bytes) {
+        Ok(master) => Ok(master),
         Err(err) => match heic_to_jpeg(path) {
-            Some(Ok(converted)) => avatar_jpeg(&converted),
+            Some(Ok(converted)) => super::avatar_master::master(&converted),
             Some(Err(conv)) => Err(conv),
             None => Err(err),
         },
@@ -3724,19 +3935,6 @@ fn heic_to_jpeg(path: &Path) -> Option<Result<Vec<u8>>> {
     };
     let _ = std::fs::remove_file(&out);
     Some(result)
-}
-
-fn avatar_jpeg(bytes: &[u8]) -> Result<Vec<u8>> {
-    let img = image::load_from_memory(bytes).context("not an image")?;
-    let img = img.resize(512, 512, image::imageops::FilterType::Triangle);
-    let rgb = image::DynamicImage::ImageRgb8(img.to_rgb8());
-    let mut out = Vec::new();
-    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85);
-    enc.encode_image(&rgb).context("encode")?;
-    if out.len() > 2_000_000 {
-        anyhow::bail!("the picture is too large even at 512 px");
-    }
-    Ok(out)
 }
 
 pub(crate) fn mime_for(path: &Path) -> &'static str {
@@ -3903,6 +4101,7 @@ async fn send_message(
     answer: Option<(String, serde_json::Value)>,
     reply_to: Option<String>,
     forwarded_from: Option<String>,
+    reply_ref: Option<ReplyRef>,
     mentions: Vec<String>,
 ) {
     // No room doc yet: queue while NewChat is in flight, otherwise fail visibly.
@@ -3919,6 +4118,7 @@ async fn send_message(
                     answer,
                     reply_to,
                     forwarded_from,
+                    reply_ref,
                     mentions,
                 });
                 return;
@@ -4097,6 +4297,9 @@ async fn send_message(
             let _ = d.append_user_message(&message_id, &text, &device, &opts);
             if let Some(by) = forwarded_from.as_deref() {
                 d.set_message_fields(&message_id, &[("forwardedFrom", json!(by))]);
+            }
+            if let Some(r) = reply_ref.as_ref() {
+                d.set_reply_ref(&message_id, r);
             }
             d.push_command(command, payload, &device);
             if let Some(ref title) = title {
@@ -4346,6 +4549,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 Vec::new(),
                 Some(wav),
                 "send",
+                None,
                 None,
                 None,
                 None,
@@ -5116,6 +5320,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             text,
             attachments,
             reply_to,
+            reply_ref,
             mentions,
         } => {
             tokio::spawn(send_message(
@@ -5129,6 +5334,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 None,
                 reply_to,
                 None,
+                reply_ref,
                 mentions,
             ));
         }
@@ -5153,6 +5359,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 None,
                 None,
                 None,
+                None,
                 Vec::new(),
             ));
         }
@@ -5173,6 +5380,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 None,
                 None,
                 Some(forwarded_from),
+                None,
                 Vec::new(),
             ));
         }
@@ -5192,6 +5400,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 "steer",
                 None,
                 reply_to,
+                None,
                 None,
                 Vec::new(),
             ));
@@ -5213,6 +5422,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 None,
                 "answer",
                 answer,
+                None,
                 None,
                 None,
                 Vec::new(),
@@ -5420,10 +5630,11 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         ClientCommand::SetGroupImage { chat_id, path } => {
             let shared = shared.clone();
             tokio::spawn(async move {
-                // Same shape as the profile picture: a 512 px JPEG, whatever was picked
+                // Same shape as the profile picture: the picture master, whatever was picked
                 // (HEIC from Photos included), so every client renders it.
-                let jpeg = match tokio::task::spawn_blocking(move || picture_jpeg(&path)).await {
-                    Ok(Ok(j)) => j,
+                let master = match tokio::task::spawn_blocking(move || picture_master(&path)).await
+                {
+                    Ok(Ok(m)) => m,
                     Ok(Err(err)) => {
                         shared.notice(format!("Group picture: {err:#}"));
                         return;
@@ -5433,7 +5644,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         return;
                     }
                 };
-                let key = format!("group-{}.jpg", new_id().to_lowercase());
+                let key = format!("group-{}.{}", new_id().to_lowercase(), master.ext());
                 let put = shared
                     .http
                     .put(format!(
@@ -5441,8 +5652,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         shared.http_url, chat_id, key
                     ))
                     .bearer_auth(shared.token())
-                    .header("content-type", "image/jpeg")
-                    .body(jpeg)
+                    .header("content-type", master.mime())
+                    .body(master.bytes)
                     .send()
                     .await;
                 match put {
@@ -5610,6 +5821,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                                 q.answer,
                                 q.reply_to,
                                 q.forwarded_from,
+                                q.reply_ref,
                                 q.mentions,
                             ));
                         }
@@ -5716,13 +5928,23 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             color,
         } => {
             {
+                // Optimistic, into every copy (sidebar record and each roster) at once; a leaf
+                // pick is "not a photo": the picture goes with it.
                 let mut projects = shared.projects.lock().unwrap();
-                if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
-                    p.avatar_leaf = leaf;
-                    p.avatar_leaf_color = color;
-                    // A leaf pick is "not a photo": the picture goes with it.
-                    p.image_url = None;
-                }
+                let local = super::agent_avatar::newest(&projects, &project_id)
+                    .map(|f| f.version + 1)
+                    .unwrap_or(1);
+                super::agent_avatar::apply(
+                    &mut projects,
+                    &project_id,
+                    &super::agent_avatar::Facts {
+                        image_url: None,
+                        leaf,
+                        leaf_color: color,
+                        version: local,
+                    },
+                    true,
+                );
                 let snapshot = projects.clone();
                 drop(projects);
                 let _ = shared.events.send(SyncEvent::Projects(snapshot));
@@ -5735,7 +5957,26 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .patch_json(&format!("/projects/{project_id}"), body)
                     .await
                 {
-                    Ok(_) => {}
+                    Ok(reply) => {
+                        let stamp = super::agent_avatar::stamp_of(&reply);
+                        if stamp > 0 {
+                            let mut projects = shared.projects.lock().unwrap();
+                            super::agent_avatar::apply(
+                                &mut projects,
+                                &project_id,
+                                &super::agent_avatar::Facts {
+                                    image_url: None,
+                                    leaf,
+                                    leaf_color: color,
+                                    version: stamp,
+                                },
+                                true,
+                            );
+                            let snapshot = projects.clone();
+                            drop(projects);
+                            let _ = shared.events.send(SyncEvent::Projects(snapshot));
+                        }
+                    }
                     Err(err) => {
                         // An older relay (no D92 columns) ignores unknown fields and answers
                         // 200; a 404 means no such project. Anything else is worth a line.
@@ -5752,22 +5993,25 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 let key = match source {
                     PictureSource::Key(key) => key,
                     PictureSource::File(path) => {
-                        let jpeg =
-                            match tokio::task::spawn_blocking(move || picture_jpeg(&path)).await {
-                                Ok(Ok(j)) => j,
-                                Ok(Err(err)) => {
-                                    shared.notice(format!("Picture not uploaded: {err:#}"));
-                                    return;
-                                }
-                                Err(_) => return,
-                            };
-                        let key = format!("avatar-{}.jpg", new_id().to_lowercase());
+                        let master = match tokio::task::spawn_blocking(move || {
+                            picture_master(&path)
+                        })
+                        .await
+                        {
+                            Ok(Ok(m)) => m,
+                            Ok(Err(err)) => {
+                                shared.notice(format!("Picture not uploaded: {err:#}"));
+                                return;
+                            }
+                            Err(_) => return,
+                        };
+                        let key = format!("avatar-{}.{}", new_id().to_lowercase(), master.ext());
                         let put = shared
                             .http
                             .put(format!("{}/blob/{}/{}", shared.http_url, project_id, key))
                             .bearer_auth(shared.token())
-                            .header("content-type", "image/jpeg")
-                            .body(jpeg)
+                            .header("content-type", master.mime())
+                            .body(master.bytes)
                             .send()
                             .await;
                         match put {
@@ -5791,17 +6035,26 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     )
                     .await
                 {
-                    Ok(_) => {
-                        let url = project_image_url(
-                            &shared.http_url,
-                            &shared.token(),
-                            &project_id,
-                            Some(&key),
-                        );
+                    Ok(reply) => {
+                        // The relay's stamp names the new URL; it lands in my record and in
+                        // every roster copy, so the bubbles and the sidebar agree at once.
                         let mut projects = shared.projects.lock().unwrap();
-                        if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
-                            p.image_url = url;
-                        }
+                        let base =
+                            super::agent_avatar::newest(&projects, &project_id).unwrap_or_default();
+                        let stamp = super::agent_avatar::stamp_of(&reply).max(base.version + 1);
+                        let url =
+                            project_image_url(&shared.http_url, &project_id, Some(&key), stamp);
+                        super::agent_avatar::apply(
+                            &mut projects,
+                            &project_id,
+                            &super::agent_avatar::Facts {
+                                image_url: url,
+                                leaf: base.leaf,
+                                leaf_color: base.leaf_color,
+                                version: stamp,
+                            },
+                            true,
+                        );
                         let snapshot = projects.clone();
                         drop(projects);
                         let _ = shared.events.send(SyncEvent::Projects(snapshot));
@@ -5822,7 +6075,13 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     // The Create sheet: into my own slot (#1789's route); copied on Create.
                     PictureTarget::Draft | PictureTarget::Me(_) => "/me/avatar/generate".to_owned(),
                 };
-                let result = shared.post_json(&path, json!({ "prompt": prompt })).await;
+                let result = shared
+                    .post_json_timeout(
+                        &path,
+                        json!({ "prompt": prompt }),
+                        Some(AVATAR_GENERATE_TIMEOUT),
+                    )
+                    .await;
                 let event = match result {
                     Ok(v) => {
                         let key = v
@@ -5835,31 +6094,25 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                                 target,
                                 image_key: Some(key),
                                 error: None,
+                                detail: None,
                             },
                             None => SyncEvent::ImageGenerated {
                                 target,
                                 image_key: None,
                                 url: None,
-                                error: Some("The relay sent no picture".to_owned()),
+                                error: Some("Couldn't generate the image.".to_owned()),
+                                detail: Some("The relay sent no picture".to_owned()),
                             },
                         }
                     }
                     Err(err) => {
-                        // A relay without the own-slot route yet (#1789 not deployed): say so
-                        // instead of "HTTP 404".
-                        let error = if target == PictureTarget::Draft
-                            && err.to_string().contains("HTTP 404")
-                        {
-                            "Generate is not on this relay yet; upload a picture instead."
-                                .to_owned()
-                        } else {
-                            people_error(&err)
-                        };
+                        let (error, detail) = generate_failure_words(&target, &err);
                         SyncEvent::ImageGenerated {
                             target,
                             image_key: None,
                             url: None,
                             error: Some(error),
+                            detail,
                         }
                     }
                 };
@@ -5903,16 +6156,19 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 let key = match source {
                     PictureSource::Key(key) => key,
                     PictureSource::File(path) => {
-                        let jpeg =
-                            match tokio::task::spawn_blocking(move || picture_jpeg(&path)).await {
-                                Ok(Ok(j)) => j,
-                                Ok(Err(err)) => {
-                                    shared.notice(format!("Picture not uploaded: {err:#}"));
-                                    return;
-                                }
-                                Err(_) => return,
-                            };
-                        let key = format!("server-{}.jpg", new_id().to_lowercase());
+                        let master = match tokio::task::spawn_blocking(move || {
+                            picture_master(&path)
+                        })
+                        .await
+                        {
+                            Ok(Ok(m)) => m,
+                            Ok(Err(err)) => {
+                                shared.notice(format!("Picture not uploaded: {err:#}"));
+                                return;
+                            }
+                            Err(_) => return,
+                        };
+                        let key = format!("server-{}.{}", new_id().to_lowercase(), master.ext());
                         let put = shared
                             .http
                             .put(format!(
@@ -5920,8 +6176,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                                 shared.http_url, server_id, key
                             ))
                             .bearer_auth(shared.token())
-                            .header("content-type", "image/jpeg")
-                            .body(jpeg)
+                            .header("content-type", master.mime())
+                            .body(master.bytes)
                             .send()
                             .await;
                         match put {
@@ -5974,10 +6230,11 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         ClientCommand::SetMyAvatar { path } => {
             let shared = shared.clone();
             tokio::spawn(async move {
-                // The relay takes a JPEG of at most 2 MB: re-encode whatever
-                // was picked, scaled to 512 pt.
-                let jpeg = match tokio::task::spawn_blocking(move || picture_jpeg(&path)).await {
-                    Ok(Ok(j)) => j,
+                // The relay takes a JPEG or PNG of at most 3 MB: whatever was picked becomes
+                // the ≤ 1024 px master (`sync::avatar_master`).
+                let master = match tokio::task::spawn_blocking(move || picture_master(&path)).await
+                {
+                    Ok(Ok(m)) => m,
                     Ok(Err(err)) => {
                         shared.notice(format!("Picture: {err:#}"));
                         return;
@@ -5987,14 +6244,32 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         return;
                     }
                 };
-                let put = shared
+                let mut put = shared
                     .http
                     .put(format!("{}/me/avatar", shared.http_url))
                     .bearer_auth(shared.token())
-                    .header("content-type", "image/jpeg")
-                    .body(jpeg)
+                    .header("content-type", master.mime())
+                    .body(master.bytes.clone())
                     .send()
                     .await;
+                // A relay from before the PNG master (415 "stored as JPEG"): send the same
+                // picture as JPEG q92 instead of a notice.
+                if master.png
+                    && matches!(&put, Ok(r) if r.status() == reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE)
+                {
+                    if let Ok(Ok(jpeg)) =
+                        tokio::task::spawn_blocking(move || master.to_jpeg()).await
+                    {
+                        put = shared
+                            .http
+                            .put(format!("{}/me/avatar", shared.http_url))
+                            .bearer_auth(shared.token())
+                            .header("content-type", jpeg.mime())
+                            .body(jpeg.bytes)
+                            .send()
+                            .await;
+                    }
+                }
                 my_avatar_saved(&shared, put).await;
             });
         }
@@ -6552,6 +6827,35 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     Ok(r) => shared.notice(format!("Blob {key}: HTTP {}", r.status())),
                     Err(err) => shared.notice(format!("Blob {key}: {err}")),
                 }
+            });
+        }
+        ClientCommand::FetchLinkIcon { host } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                // 200 = the PNG; 204 = the site has none; anything else is treated as none
+                // too (the bubble keeps its placeholder) and only logged — nobody asked.
+                let resp = shared
+                    .http
+                    .get(format!("{}/link-icon", shared.http_url))
+                    .query(&[("domain", host.as_str())])
+                    .bearer_auth(shared.token())
+                    .send()
+                    .await;
+                let png = match resp {
+                    Ok(r) if r.status() == reqwest::StatusCode::OK => {
+                        r.bytes().await.ok().map(|b| Arc::new(b.to_vec()))
+                    }
+                    Ok(r) if r.status() == reqwest::StatusCode::NO_CONTENT => None,
+                    Ok(r) => {
+                        log::warn!(target: "arbos_mac::diagnostic", "link icon {host}: HTTP {}", r.status());
+                        None
+                    }
+                    Err(err) => {
+                        log::warn!(target: "arbos_mac::diagnostic", "link icon {host}: {err}");
+                        None
+                    }
+                };
+                let _ = shared.events.send(SyncEvent::LinkIcon { host, png });
             });
         }
         ClientCommand::FetchThumbnail { project_id, key } => {
@@ -7778,6 +8082,52 @@ impl Drop for Room {
 }
 
 #[cfg(test)]
+mod generate_failure_words_tests {
+    //! Jacob, 2026-10-26: the picker shows one short sentence, the raw words only as detail.
+    use super::*;
+
+    #[test]
+    fn a_relay_answer_keeps_its_sentence_and_detail() {
+        let err = RelayError::from_body(
+            reqwest::StatusCode::GATEWAY_TIMEOUT,
+            r#"{"error":{"type":"avatar_timeout","message":"Couldn't generate the image. The server took too long.","detail":"gpt-image-1-mini: operation timed out"}}"#,
+        );
+        assert_eq!(
+            err.detail.as_deref(),
+            Some("gpt-image-1-mini: operation timed out")
+        );
+        let (sentence, detail) =
+            generate_failure_words(&PictureTarget::Me("gh_1".into()), &anyhow::Error::from(err));
+        assert_eq!(
+            sentence,
+            "Couldn't generate the image. The server took too long."
+        );
+        assert_eq!(
+            detail.as_deref(),
+            Some("HTTP 504 avatar_timeout — gpt-image-1-mini: operation timed out")
+        );
+    }
+
+    #[test]
+    fn a_transport_timeout_is_the_plain_sentence_with_the_raw_words_as_detail() {
+        let raw = anyhow::anyhow!("error sending request for url (https://relay.arbos.life/projects/x/avatar/generate): operation timed out")
+            .context("POST /projects/x/avatar/generate");
+        let (sentence, detail) = generate_failure_words(&PictureTarget::Agent("x".into()), &raw);
+        assert_eq!(
+            sentence,
+            "Couldn't generate the image. The server took too long."
+        );
+        assert!(detail.as_deref().unwrap().contains("operation timed out"));
+        let other = anyhow::anyhow!("dns error").context("POST /projects/x/avatar/generate");
+        let (sentence, _) = generate_failure_words(&PictureTarget::Agent("x".into()), &other);
+        assert_eq!(
+            sentence,
+            "Couldn't reach the server. Check your connection and try again."
+        );
+    }
+}
+
+#[cfg(test)]
 mod link_fault_tests {
     use super::*;
     use std::io::{Error as IoError, ErrorKind as K};
@@ -7826,6 +8176,7 @@ mod link_fault_tests {
             status: 503,
             kind: String::new(),
             message: "bad gateway".into(),
+            detail: None,
         };
         assert_eq!(
             link_fault(&anyhow::Error::from(relay)),
@@ -7853,6 +8204,7 @@ mod link_fault_tests {
             status: 404,
             kind: "not_found".into(),
             message: String::new(),
+            detail: None,
         };
         assert_eq!(
             link_fault(&anyhow::Error::from(relay)),

@@ -49,14 +49,11 @@ final class PresenceRowTests: XCTestCase {
         XCTAssertEqual(PresenceLine.firstName("@sam"), "@sam")
     }
 
-    func testPictureIsTheBubblePictureOnThePlusColumn() {
-        // Same rule as Mac (`SENDER_DISC = PLUS_BUTTON`): the row's picture and the
-        // bubble's picture are the `+` size at the `+` centre; the row's gap is the
-        // bubble row's gap, so the text starts where the body does.
-        XCTAssertEqual(Theme.memberAvatar, Theme.plusButton, "avatar disc = + disc")
-        XCTAssertEqual(PresenceRow.avatar, Theme.memberAvatar)
-        XCTAssertEqual(PresenceRow.gap, Theme.memberAvatarGap)
-        // The column follows the `+` through both composer insets (keyboard down / up).
+    func testBubblePictureStaysOnThePlusColumnAndTheRowPictureIsGroks() {
+        // The bubble's picture (people chats) keeps the 42 pt disc centred on the `+`
+        // through both composer insets; the `+` itself is Grok's 48 pt now
+        // ([feedback iphone-composer-grok-parity-2026-10-25]).
+        XCTAssertEqual(Theme.memberAvatar, 42)
         for composerInset in [Theme.composerInset, Theme.composerInsetKeyboard] {
             let center = 16 + Theme.avatarColumnInset(composerInset: composerInset) + Theme.memberAvatar / 2
             let plusCenter = composerInset + Theme.plusButton / 2
@@ -64,9 +61,13 @@ final class PresenceRowTests: XCTestCase {
             XCTAssertEqual(16 + Theme.memberLane(composerInset: composerInset),
                            16 + Theme.avatarColumnInset(composerInset: composerInset) + Theme.memberAvatar + Theme.memberAvatarGap)
         }
-        // Keyboard up: avatar spans the `+` (19–61), body after the gap at 74.
-        XCTAssertEqual(16 + Theme.avatarColumnInset(composerInset: Theme.composerInsetKeyboard), 19)
-        XCTAssertEqual(16 + Theme.memberLane(composerInset: Theme.composerInsetKeyboard), 74)
+        // Keyboard up: avatar spans 21–63 inside the `+` (18–66), body after the gap at 76.
+        XCTAssertEqual(16 + Theme.avatarColumnInset(composerInset: Theme.composerInsetKeyboard), 21)
+        XCTAssertEqual(16 + Theme.memberLane(composerInset: Theme.composerInsetKeyboard), 76)
+        // The row's own picture is Grok's smaller one, 6 pt inside the `+`, words 14 pt after it.
+        XCTAssertEqual(PresenceRow.avatar, Theme.presenceAvatar)
+        XCTAssertEqual(PresenceRow.gap, Theme.presenceGap)
+        XCTAssertEqual(16 + Theme.presenceInset(composerInset: Theme.composerInsetKeyboard), Theme.composerInsetKeyboard + 6)
         XCTAssertEqual(PresenceRow.maxPictures, 3)
     }
 }

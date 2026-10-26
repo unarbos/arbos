@@ -33,6 +33,10 @@ pub const KEY_LAST_CHATS: &str = "last_chats";
 pub const KEY_ARCHIVED_CHATS: &str = "archived_chats";
 /// Set once the local archived ids were pushed up to the relay (§9c union migration).
 pub const KEY_ARCHIVE_MIGRATED: &str = "archive_migrated";
+/// `avatar:<url>` → the picture's bytes. The URL carries the picture's version
+/// (`…/avatar.jpg?v=<stamp>`, `/avatars/<user>.jpg?v=…`), so a changed picture is a new key
+/// and a cached one can never be stale; keys no current URL names are pruned with the registry.
+pub const KEY_AVATAR_PREFIX: &str = "avatar:";
 
 #[derive(Clone, Debug)]
 pub struct SavedDoc {
@@ -92,7 +96,7 @@ impl Store {
         }
     }
 
-    fn open_at(path: &Path) -> Result<Store> {
+    pub(crate) fn open_at(path: &Path) -> Result<Store> {
         let conn = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
@@ -156,6 +160,26 @@ impl Store {
         let _ = self
             .conn
             .execute("DELETE FROM kv WHERE k = ?1", params![key]);
+    }
+
+    /// Every key under `prefix` (the avatar cache's URLs).
+    pub fn keys_with_prefix(&self, prefix: &str) -> Vec<String> {
+        let Ok(mut st) = self
+            .conn
+            .prepare("SELECT k FROM kv WHERE k LIKE ?1 ESCAPE '\\'")
+        else {
+            return Vec::new();
+        };
+        let pattern = format!(
+            "{}%",
+            prefix
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
+        st.query_map(params![pattern], |r| r.get::<_, String>(0))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
     }
 
     // --- docs ----------------------------------------------------------------

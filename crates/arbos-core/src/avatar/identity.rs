@@ -18,6 +18,16 @@
 //! is shown. Callers order the cards: the open chat's roster first (it is the
 //! relay's current truth for that chat), then the viewer's projects, then
 //! other chats' rosters.
+//!
+//! Several sources carry a copy of the same agent (my project record, every
+//! roster it sits on). After the owner changes its picture the copies disagree
+//! for a while — the one that got the change first is newer — and a surface
+//! that read the older copy drew the old picture while another drew the new
+//! one (Jacob, 2026-10-25: "sometimes it shows its old pfp, sometimes the new
+//! one switches in"). So once the hit names an agent, the copy with the
+//! highest `avatar_version` (the relay's stamp of its last avatar change) is
+//! the one drawn; equal stamps keep the caller's order. A copy from a source
+//! without the stamp counts as version 0, so a stamped copy always wins it.
 
 use super::leaf::{self, LeafPick};
 
@@ -37,6 +47,9 @@ pub struct AgentCard {
     pub color_index: Option<u8>,
     /// Uploaded / generated picture: a blob key in the project's slot.
     pub image_key: Option<String>,
+    /// The relay's stamp (ms) of the agent's last avatar change; `0` when the source has
+    /// none. Among copies of one agent the highest stamp is drawn.
+    pub avatar_version: i64,
 }
 
 /// The row / event being drawn: who sent it, as the doc says.
@@ -69,6 +82,9 @@ pub struct AgentIdentity {
     pub color_index: u8,
     /// The picture that wins over the leaf, when the agent has one.
     pub image_key: Option<String>,
+    /// The stamp of the copy drawn (see `AgentCard::avatar_version`); `0` when unknown.
+    /// Part of any picture cache key, so a change never serves the old bytes.
+    pub avatar_version: i64,
     /// `true` when a card answered; `false` when only the row's own fields did.
     pub known: bool,
 }
@@ -124,7 +140,8 @@ pub fn resolve<'c>(
                     .find(|c| same_handle(&c.handle, &s) || same_handle(&agent_slug(&c.name), &s))
             })
         })
-        .copied();
+        .copied()
+        .map(|hit| newest_copy(hit, &cards));
     match hit {
         Some(card) => {
             let card_handle = if card.handle.is_empty() {
@@ -140,6 +157,7 @@ pub fn resolve<'c>(
                 neutral: leaf::is_neutral(card.leaf),
                 color_index: super::index_for(&card.id, card.color_index),
                 image_key: card.image_key.clone().filter(|k| !k.is_empty()),
+                avatar_version: card.avatar_version,
                 known: true,
             }
         }
@@ -163,10 +181,32 @@ pub fn resolve<'c>(
                 neutral: false,
                 color_index: super::color_index(seed),
                 image_key: None,
+                avatar_version: 0,
                 known: false,
             }
         }
     }
+}
+
+/// Of every copy of `hit`'s agent in `cards`, the one with the highest avatar stamp. Among
+/// equal stamps a copy that carries the picture beats one that does not — the two describe
+/// the same state, so the pictureless one is a lossy copy (a roster row restored without
+/// its picture), not a reset: a reset moves the stamp. Otherwise the caller's order holds.
+fn newest_copy<'c>(hit: &'c AgentCard, cards: &[&'c AgentCard]) -> &'c AgentCard {
+    let has_picture = |c: &AgentCard| c.image_key.as_deref().is_some_and(|k| !k.is_empty());
+    cards
+        .iter()
+        .copied()
+        .filter(|c| c.id == hit.id)
+        .fold(hit, |best, c| {
+            if c.avatar_version > best.avatar_version
+                || (c.avatar_version == best.avatar_version && has_picture(c) && !has_picture(best))
+            {
+                c
+            } else {
+                best
+            }
+        })
 }
 
 /// The words a surface shows for an agent: the display name when there is one; the
@@ -382,6 +422,95 @@ mod tests {
         );
         assert!(r.neutral);
         assert_eq!(r.name, "Field notes");
+    }
+
+    /// The three chat surfaces (bubble disc, header / sidebar record, presence row) ask
+    /// with different rows and different card orders. After a picture change the copies
+    /// disagree; whichever order a surface uses, the newest copy is drawn — and never the
+    /// old one again once the stamp has moved.
+    #[test]
+    fn newest_copy_wins_on_every_surface_after_a_change() {
+        let stale_roster = AgentCard {
+            image_key: Some("avatar-1700000000000.jpg".into()),
+            avatar_version: 1_700_000_000_000,
+            ..card("01TEST", "TestAgent")
+        };
+        let fresh_mine = AgentCard {
+            image_key: Some("avatar-1700000099000.jpg".into()),
+            avatar_version: 1_700_000_099_000,
+            ..card("01TEST", "TestAgent")
+        };
+        let bubble = AgentQuery {
+            sender: "agent:01TEST",
+            handle: Some("testagent"),
+            name: Some("TestAgent"),
+        };
+        let presence = AgentQuery {
+            sender: "testagent",
+            handle: Some("testagent"),
+            name: Some("TestAgent"),
+        };
+        let header = AgentQuery {
+            sender: "01TEST",
+            handle: None,
+            name: None,
+        };
+        // Roster first (the open chat's order) and projects first (the header's order).
+        let roster_first = [stale_roster.clone(), fresh_mine.clone()];
+        let mine_first = [fresh_mine.clone(), stale_roster.clone()];
+        for cards in [&roster_first, &mine_first] {
+            for q in [&bubble, &presence, &header] {
+                let r = resolve(q, cards.iter());
+                assert_eq!(
+                    r.image_key.as_deref(),
+                    Some("avatar-1700000099000.jpg"),
+                    "{q:?} in {cards:?}"
+                );
+                assert_eq!(r.avatar_version, 1_700_000_099_000);
+            }
+        }
+
+        // Reset to the leaf: the newest copy has no picture, and it still wins over a
+        // stale copy that has one.
+        let reset = AgentCard {
+            image_key: None,
+            avatar_version: 1_700_000_200_000,
+            ..card("01TEST", "TestAgent")
+        };
+        let r = resolve(&bubble, [&stale_roster, &reset]);
+        assert_eq!(r.image_key, None);
+        assert_eq!(r.avatar_version, 1_700_000_200_000);
+
+        // Equal stamps, one copy without the picture (a roster row restored from disk without
+        // it — Jacob's relaunch, 2026-10-26): the copy with the picture wins in either order.
+        let lossy = card("01TEST", "TestAgent");
+        let whole = AgentCard {
+            image_key: Some("avatar-1.jpg".into()),
+            ..card("01TEST", "TestAgent")
+        };
+        for cards in [
+            [lossy.clone(), whole.clone()],
+            [whole.clone(), lossy.clone()],
+        ] {
+            let r = resolve(&bubble, cards.iter());
+            assert_eq!(r.image_key.as_deref(), Some("avatar-1.jpg"), "{cards:?}");
+        }
+
+        // Unstamped copies (an older relay) keep the caller's order: the roster wins.
+        let unstamped = [
+            AgentCard {
+                image_key: Some("roster.jpg".into()),
+                ..card("01TEST", "TestAgent")
+            },
+            AgentCard {
+                image_key: Some("mine.jpg".into()),
+                ..card("01TEST", "TestAgent")
+            },
+        ];
+        assert_eq!(
+            resolve(&bubble, &unstamped).image_key.as_deref(),
+            Some("roster.jpg")
+        );
     }
 
     #[test]
