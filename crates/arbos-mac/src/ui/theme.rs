@@ -29,6 +29,72 @@ pub const SIDEBAR_RESIZE_HANDLE: f32 = 10.0;
 pub const RAIL_WIDTH: f32 = SIDEBAR_WIDTH;
 
 const SIDEBAR_WIDTH_FILE: &str = "sidebar_width";
+const SIDEBAR_COLLAPSED_FILE: &str = "sidebar_collapsed";
+
+/// Whether the chat list is collapsed to the icon rail (`ui::rail`). Saved
+/// as `1` / `0` in `<config>/sidebar_collapsed` on every toggle, so the app
+/// reopens as it was left ([feedback mac-sidebar-rail-2026-10-26]). The
+/// rig's `ARBOS_SIDEBAR_COLLAPSED=1|0` wins at launch.
+pub struct SidebarCollapsed;
+
+impl SidebarCollapsed {
+    pub fn load() -> bool {
+        if let Ok(v) = std::env::var("ARBOS_SIDEBAR_COLLAPSED") {
+            return v.trim() == "1";
+        }
+        Self::load_from(&config_dir())
+    }
+
+    pub fn save(collapsed: bool) {
+        Self::save_to(&config_dir(), collapsed);
+    }
+
+    /// A missing or unreadable file means expanded (today's default).
+    pub fn load_from(dir: &std::path::Path) -> bool {
+        std::fs::read_to_string(dir.join(SIDEBAR_COLLAPSED_FILE)).is_ok_and(|s| s.trim() == "1")
+    }
+
+    pub fn save_to(dir: &std::path::Path, collapsed: bool) {
+        let _ = std::fs::create_dir_all(dir);
+        let _ = std::fs::write(
+            dir.join(SIDEBAR_COLLAPSED_FILE),
+            if collapsed { "1" } else { "0" },
+        );
+    }
+}
+
+#[cfg(test)]
+mod sidebar_state_tests {
+    use super::SidebarCollapsed;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("arbos-rail-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// The collapsed state survives a relaunch: saved on every toggle, read
+    /// at start, expanded when nothing was ever saved
+    /// ([feedback mac-sidebar-rail-2026-10-26]).
+    #[test]
+    fn the_collapsed_state_is_restored_from_the_config_dir() {
+        let dir = scratch("collapsed");
+        assert!(
+            !SidebarCollapsed::load_from(&dir),
+            "nothing saved → expanded"
+        );
+        SidebarCollapsed::save_to(&dir, true);
+        assert!(SidebarCollapsed::load_from(&dir));
+        SidebarCollapsed::save_to(&dir, false);
+        assert!(!SidebarCollapsed::load_from(&dir));
+        std::fs::write(dir.join("sidebar_collapsed"), "garbage").unwrap();
+        assert!(
+            !SidebarCollapsed::load_from(&dir),
+            "a bad file means expanded"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
 
 /// The user's chat-list column width. Saved as a float string in
 /// `<config>/sidebar_width` when dragged; a missing file keeps
@@ -80,7 +146,13 @@ pub const CONTROL_LINE: f32 = 30.0;
 pub const HEADER_HEIGHT: f32 = 2.0 * CONTROL_LINE;
 pub const TAB_BAR_HEIGHT: f32 = HEADER_HEIGHT;
 /// Composer: one pill with the "+" circle inside left and mic / send inside right.
-pub const COMPOSER_WIDTH: f32 = 820.0;
+/// The input's width cap; the pill around it (input + the two 28 pt circles =
+/// `transcript::COLUMN_MAX_WIDTH`) is Grok Bot's **960**: 959 pt measured on
+/// Jacob's 1720 pt rail shot (849–2766 px at 2 px/pt), 941–948 on two
+/// narrower shots — a 960 cap, the side margins below it. The transcript
+/// column shares the cap. Was 820 (an 876 pill)
+/// ([feedback mac-sidebar-rail-2026-10-26]).
+pub const COMPOSER_WIDTH: f32 = 904.0;
 /// Grok Mac, measured on the real app (refs 57/58, 2 px/pt): a 44 pt pill with
 /// 28 pt circles inset 8, 16 pt side margins and 16 pt below.
 pub const COMPOSER_HEIGHT: f32 = 44.0;
