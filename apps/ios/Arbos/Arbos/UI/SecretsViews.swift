@@ -1423,7 +1423,7 @@ struct VaultPage: View {
 
     private var vault: ConnectedVault? { model.secrets?.vaults.first { $0.id == vaultId } }
     private var filtered: [[String: Any]] {
-        search.isEmpty ? items : items.filter { (($0["title"] as? String) ?? "").localizedCaseInsensitiveContains(search) }
+        PeoplePicker.titled(items, query: search) { ($0["title"] as? String) ?? "" }
     }
 
     var body: some View {
