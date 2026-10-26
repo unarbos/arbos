@@ -1389,6 +1389,29 @@ impl Db {
         })
     }
 
+    /// Per-user box provider override (`users.box_provider`), `None` = the relay default.
+    pub fn user_provider(&self, user_id: &str) -> Result<Option<String>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT box_provider FROM users WHERE id = ?1",
+                params![user_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map(|o| o.flatten())
+        })
+    }
+
+    pub fn set_user_provider(&self, user_id: &str, provider: Option<&str>) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE users SET box_provider = ?2 WHERE id = ?1",
+                params![user_id, provider],
+            )
+            .map(|_| ())
+        })
+    }
+
     pub fn user_spend_cap(&self, user_id: &str) -> Result<f64> {
         self.with(|c| {
             c.query_row(

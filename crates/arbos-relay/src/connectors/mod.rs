@@ -876,6 +876,8 @@ mod tests {
             channels_mock: true,
             image_mock: false,
             avatar_retry_backoff_ms: Vec::new(),
+            avatar_attempt_timeout: std::time::Duration::from_secs(40),
+            avatar_total_timeout: std::time::Duration::from_secs(75),
             voice_mock: true,
             openai_audio_base: String::new(),
             vault_mock: false,
@@ -921,6 +923,7 @@ mod tests {
             jwt_key: Arc::new(crypto::RelayKey::derive("test-key").subkey("jwt")),
             download_cache: Arc::new(Mutex::new(None)),
             upgrading: Arc::new(Mutex::new(HashMap::new())),
+            upgrade_refused: Arc::new(Mutex::new(HashMap::new())),
             local_conns: Arc::new(Mutex::new(HashMap::new())),
             refresh_grace: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             push: Arc::new(crate::apns::Pusher::Capture(tokio::sync::Mutex::new(

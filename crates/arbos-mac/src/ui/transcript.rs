@@ -28,6 +28,7 @@ use crate::ui::icons::icon;
 use crate::ui::markdown::{
     self, has_fenced_code, inline_plain, inline_spans, polish_assistant_prose, split_blocks, Block,
 };
+use crate::ui::math;
 use crate::ui::mention::{self, Mentions};
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
@@ -79,9 +80,10 @@ const OVERDRAW_PX: f32 = 320.0;
 /// width cap, so the agent bubble's left edge is the composer's left edge
 /// and my bubble's right edge is the composer's right edge, at any pane
 /// width. Grok Mac (refs 57/58, 2 px/pt): both at 16 pt from the pane. The
-/// cap is the composer pill at its widest as it has always shipped — the
-/// 820 pt input plus the two 28 pt circles — so the pill itself does not
-/// move; up to a 908 pt pane the margins bound both.
+/// cap is the composer pill at its widest — the 904 pt input plus the two
+/// 28 pt circles = Grok's 960 ([feedback mac-sidebar-rail-2026-10-26]; 876
+/// before) — so the pill itself does not move; up to a 992 pt pane the
+/// margins bound both.
 pub const COLUMN_MAX_WIDTH: f32 = COMPOSER_WIDTH + 2.0 * PLUS_BUTTON;
 /// Agent bubble cap, measured from Grok Mac on two pane widths (ref 57:
 /// 728 pt pane, 612 pt bubble; ref 58: 424 pt pane, 310 pt bubble): the
@@ -96,7 +98,7 @@ pub const ASSISTANT_RIGHT_GAP: f32 = 84.0;
 /// window): every wrapped agent bubble ends at 1120 px = **560 pt** in a
 /// 960 pt composer column (58 % of it) — the list bubble is content-sized
 /// narrower, nothing is wider. Ours filled the column minus the gap (792 at
-/// the 876 pt cap, 90 %), which is what Jacob saw as "Arbos bubbles are
+/// the then 876 pt cap, 90 %), which is what Jacob saw as "Arbos bubbles are
 /// wider" ([feedback bubble-width-2026-10-24]). The cap is the smaller of
 /// the two rules ([`assistant_cap`]): narrow panes keep Grok's fixed gap
 /// (refs 57/58: 612 in a 696 pill, 310 in 392), wide panes stop at 560.
@@ -114,8 +116,8 @@ const STAMP_GAP_MS: u64 = 60 * 60 * 1000;
 /// consecutive bubbles of one sender sit 6 pt apart, a change of sender opens
 /// 20 pt, a time stamp has 20 pt above and 24 below, and the last message keeps
 /// 54 pt clear of the composer.
-const ROW_GAP_HALF: f32 = 3.0;
-const TURN_GAP_EXTRA: f32 = 20.0 - 2.0 * ROW_GAP_HALF;
+pub(crate) const ROW_GAP_HALF: f32 = 3.0;
+pub(crate) const TURN_GAP_EXTRA: f32 = 20.0 - 2.0 * ROW_GAP_HALF;
 /// Measured glyph-to-bubble, like the reference: the stamp's 13 pt line box
 /// carries ~4 pt of its own above and ~7 below the glyphs (measured).
 const STAMP_PAD_TOP: f32 = 20.0 - ROW_GAP_HALF - 4.0;
@@ -139,8 +141,13 @@ const BULLET_CENTRE: f32 = 8.5;
 /// Clearance above the composer when pinned (54 pt glyph-to-pill, minus the
 /// composer row's own 6 pt top padding and the last row's half-gap). Kept as a
 /// trailing list row — not as container padding — so scrolling bubbles reach
-/// the real edge of the input instead of hitting an opaque black strip.
+/// the real edge of the input instead of hitting an opaque black strip. The
+/// presence row (who is typing / working) floats inside this clearance while
+/// the list is pinned (`presence::LIFT`), so it never adds to it.
 const BOTTOM_INSET: f32 = 54.0 - ROW_GAP_HALF - 6.0;
+/// The last bubble's bottom edge → the composer pill's top edge when pinned.
+#[cfg(test)]
+pub(crate) const LAST_BUBBLE_TO_COMPOSER: f32 = ROW_GAP_HALF + BOTTOM_INSET + 6.0;
 /// People chats (redesign mocks a/f): a 24 pt sender disc at the bubble's
 /// bottom-left, 8 pt from it; captions and earlier blocks keep the lane free.
 /// The avatar column (Jacob, 2026-10-23 15:20, [feedback
@@ -341,6 +348,7 @@ pub fn one_line(text: &str) -> String {
                 .into_iter()
                 .chain(rows.into_iter().flatten())
                 .collect(),
+            Block::Math { source } => vec![math::plain(&source)],
         };
         for piece in pieces {
             // Spans are joined before splitting so "`site/launch/`;" stays one
@@ -1019,6 +1027,20 @@ impl Transcript {
         .size_full()
     }
 
+    /// The list sits at its end (new rows glide into view). The shell draws the
+    /// presence row over the bottom clearance only then: scrolled into history,
+    /// bubbles pass through that band and the ↓ button takes it.
+    pub fn is_pinned_to_bottom(&self) -> bool {
+        self.pinned_to_bottom
+    }
+
+    /// Where the list drew row `row_id` in the last frame (its whole frame:
+    /// the bubble plus its gap padding), if it was on screen.
+    #[cfg(test)]
+    pub(crate) fn row_frame(&self, row_id: &str) -> Option<Bounds<Pixels>> {
+        self.measured.borrow().rows.get(row_id).copied()
+    }
+
     /// The first row of a message from a new sender opens the turn gap; a
     /// stamp between them already carries its own spacing.
     fn is_turn_start(&self, ix: usize) -> bool {
@@ -1056,7 +1078,7 @@ impl Transcript {
     /// Wheel/trackpad over the transcript: scrolling up (positive delta,
     /// toward older messages) breaks the pin at once; scrolling down asks the
     /// next frame to re-pin when within `STICK_THRESHOLD_PX` of the end.
-    fn on_wheel(&mut self, event: &gpui::ScrollWheelEvent, cx: &mut Context<Self>) {
+    pub(crate) fn on_wheel(&mut self, event: &gpui::ScrollWheelEvent, cx: &mut Context<Self>) {
         let dy = f32::from(event.delta.pixel_delta(px(20.0)).y);
         if dy > 0.0 {
             self.pinned_to_bottom = false;
@@ -1374,6 +1396,14 @@ impl Transcript {
         let old_len = self.rows.len();
         self.rows = new_rows;
         self.list.splice(prefix..old_len, self.rows.len() - prefix);
+        if crate::model::trace_rows() {
+            eprintln!(
+                "rows: transcript chat={} rows={} changed_from={prefix} at={}",
+                self.chat_id.as_deref().unwrap_or(""),
+                self.rows.len(),
+                crate::model::now_ms()
+            );
+        }
         // Reading history: a stale pin (scrollbar / list scroll that never
         // cleared it) must not spring to the new end when rows land below.
         let max = f32::from(self.list.max_offset_for_scrollbar().y);
@@ -1790,7 +1820,9 @@ impl Transcript {
                 .iter()
                 .find(|p| p.name.eq_ignore_ascii_case(name) && p.kind == SpaceKind::Project);
             let glyph: AnyElement = match mine {
-                Some(space) => crate::ui::avatars::project(space, 16.0, theme).into_any_element(),
+                Some(space) => {
+                    crate::ui::avatars::project_in(state, space, 16.0, theme).into_any_element()
+                }
                 // Not one of my projects (a subagent): initials on the name's gradient.
                 None => {
                     crate::ui::avatars::element(name, name, None, 16.0, theme).into_any_element()
@@ -1842,7 +1874,7 @@ impl Transcript {
                 .rounded_full()
                 .overflow_hidden()
                 .child(
-                    gpui::img(image)
+                    gpui::img(crate::ui::picture_fit::fit(&image, SENDER_DISC))
                         .size(px(SENDER_DISC))
                         .rounded_full()
                         .object_fit(gpui::ObjectFit::Cover),
@@ -2070,7 +2102,37 @@ impl Transcript {
             .into_any_element()
     }
 
+    /// One row of the list. Building a row's element from a message the code did not expect
+    /// must not take the app down (2026-10-26: Mac 0.6.268 aborted at every launch on the
+    /// restored transcript): a panic here is caught, logged by the panic hook, and the row
+    /// shows a short note instead.
     fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.render_row_inner(ix, window, cx)
+        }));
+        match result {
+            Ok(element) => element,
+            Err(_) => {
+                let theme = Theme::of(cx).clone();
+                log::error!(target: "arbos_mac::diagnostic", "transcript row {ix} skipped after a panic");
+                div()
+                    .w_full()
+                    .px(px(BUBBLE_PAD_X))
+                    .py(px(6.0))
+                    .text_size(px(12.0))
+                    .text_color(theme.text_faint)
+                    .child("This message could not be shown.")
+                    .into_any_element()
+            }
+        }
+    }
+
+    fn render_row_inner(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         self.rows_laid_out += 1;
         let Some(row) = self.rows.get(ix).cloned() else {
             return div().into_any_element();
@@ -2928,6 +2990,7 @@ fn block_text_len(block: &Block) -> usize {
             header.iter().map(|s| s.len() + 1).sum::<usize>()
                 + rows.iter().flatten().map(|s| s.len() + 1).sum::<usize>()
         }
+        Block::Math { source } => source.len(),
     }
 }
 
@@ -3019,14 +3082,28 @@ fn rail_centre(
     let half = px(RAIL_BUTTON / 2.0 + RAIL_EDGE_INSET);
     let low = viewport.top() + px(HEADER_FADE_BAND) + half;
     let high = viewport.bottom() - half;
-    let centre = if high <= low {
-        centre
-    } else {
-        centre.clamp(low, high)
-    };
-    // Never outside the bubble itself (a short bubble at the very edge).
-    let centre = centre.clamp(top + px(RAIL_BUTTON / 2.0), bottom - px(RAIL_BUTTON / 2.0));
+    let centre = clamp_or_keep(centre, low, high);
+    // Never outside the bubble itself (a short bubble at the very edge). The bounds come
+    // from the list's measured rows, which can be of two layout generations while rows
+    // reflow (a row inserted above, a table that grew, a scroll): the span may then be
+    // shorter than the button or even inverted — `Ord::clamp` would panic on it
+    // (`assertion failed: min <= max`; Mac 0.6.268 aborted on exactly that, 2026-10-26).
+    let centre = clamp_or_keep(
+        centre,
+        top + px(RAIL_BUTTON / 2.0),
+        bottom - px(RAIL_BUTTON / 2.0),
+    );
     centre - last.top()
+}
+
+/// `value.clamp(low, high)` when the bounds are in order, `value` itself otherwise — the
+/// rail may sit a few points off on a frame whose measurements are mid-reflow, never panic.
+fn clamp_or_keep(value: Pixels, low: Pixels, high: Pixels) -> Pixels {
+    if high < low {
+        value
+    } else {
+        value.clamp(low, high)
+    }
 }
 
 /// The frame that hangs the rail (and the hover time) off a bubble's right
@@ -3087,20 +3164,18 @@ fn pending_glyph(theme: &Theme) -> Div {
         .child(icon("hourglass", 12.0, theme.text_muted))
 }
 
-/// The mark beside a bubble the relay refused: red glyph + "Retry", always
-/// visible, outside the bubble on its outer edge. [`Transcript::failed_retry`]
-/// makes it clickable.
+/// The mark beside a bubble the relay refused: the red glyph, always visible, outside the
+/// bubble on its outer edge (Jacob's own-bubble rule). The words and Try again are the
+/// composer's note ([feedback error-messages-mac-2026-10-26]); [`Transcript::failed_retry`]
+/// still makes the mark itself clickable.
 fn failed_glyph(theme: &Theme) -> Div {
     div()
         .flex_shrink_0()
         .flex()
         .items_center()
-        .gap(px(4.0))
-        .text_size(px(TEXT_TINY))
-        .text_color(theme.danger)
         .debug_selector(|| "own-bubble-failed-glyph".into())
+        // error-ui: exception failed-bubble-mark (the glyph is the mark, not a message)
         .child(icon("exclamation", RAIL_GLYPH, theme.danger))
-        .child("Retry")
 }
 
 /// A text block that is really machine output (a JSON object/array) is not
@@ -3115,7 +3190,8 @@ fn is_json_block(block: &Block) -> bool {
         | Block::Heading { .. }
         | Block::Bullets(_)
         | Block::Numbered(_)
-        | Block::Table { .. } => return false,
+        | Block::Table { .. }
+        | Block::Math { .. } => return false,
     };
     let t = text.trim();
     (t.starts_with('{') || t.starts_with('['))
@@ -3158,12 +3234,23 @@ pub fn build_rows(
     // the sender changed or a date stamp broke the run (Grok Bot's group style), and
     // only in chats that name their senders at all (`names_senders`).
     let mut prev_sender: Option<String> = None;
+    // The stamp pushed for the current message, with the state it replaced. A
+    // message that then draws nothing — a hidden job / worker row, a stream
+    // with no words yet — takes its stamp back, so no date line hangs over
+    // empty space above the status row ([feedback status-row-gap-mac-2026-10-26]).
+    let mut pending_stamp: Option<(usize, u64, Option<String>)> = None;
     for (mix, message) in messages.iter().enumerate() {
+        retract_dangling_stamp(
+            &mut rows,
+            &mut pending_stamp,
+            &mut last_stamp_at,
+            &mut prev_sender,
+        );
         let streaming = message.is_streaming();
         if message.created_at > 0 && message.created_at.saturating_sub(last_stamp_at) > STAMP_GAP_MS
         {
+            pending_stamp = Some((rows.len(), last_stamp_at, prev_sender.take()));
             last_stamp_at = message.created_at;
-            prev_sender = None;
             let label = crate::ui::sidebar::stamp_label(message.created_at);
             rows.push(Row {
                 version: hash_version(&label, false),
@@ -3823,9 +3910,15 @@ pub fn build_rows(
             prev_sender = Some(message.sender.clone());
         }
     }
+    retract_dangling_stamp(
+        &mut rows,
+        &mut pending_stamp,
+        &mut last_stamp_at,
+        &mut prev_sender,
+    );
     // Who is working is the presence row over the composer (`ui::presence`),
     // not a transcript row: one notice per agent, never a caption plus a line.
-    let _ = (running, queued);
+    let _ = (running, queued, last_stamp_at, prev_sender);
     // Trailing clearance: scrolls with the list so mid-thread bubbles can
     // reach the composer, while the pinned end still keeps 54 pt above it.
     if !rows.is_empty() {
@@ -3837,6 +3930,24 @@ pub fn build_rows(
         });
     }
     rows
+}
+
+/// A time stamp that ended up as the last row drew a line over nothing: the
+/// message it introduced added no row. Take it back and restore the stamp
+/// clock and the sender run to what they were before it.
+fn retract_dangling_stamp(
+    rows: &mut Vec<Row>,
+    pending: &mut Option<(usize, u64, Option<String>)>,
+    last_stamp_at: &mut u64,
+    prev_sender: &mut Option<String>,
+) {
+    if let Some((ix, at, sender)) = pending.take() {
+        if rows.len() == ix + 1 && matches!(rows[ix].kind, RowKind::Stamp { .. }) {
+            rows.pop();
+            *last_stamp_at = at;
+            *prev_sender = sender;
+        }
+    }
 }
 
 /// One chips row under a message that carries reactions.
@@ -3935,6 +4046,14 @@ fn block_segments(block: &Block, literal: bool) -> Vec<Segment> {
             out
         }
         Block::Code { code, .. } => vec![seg(String::new(), code.clone())],
+        Block::Math { source } => vec![seg(
+            String::new(),
+            if literal {
+                source.clone()
+            } else {
+                math::plain(source)
+            },
+        )],
     }
 }
 
@@ -4134,7 +4253,8 @@ fn user_message_body(
             | Block::Heading { .. }
             | Block::Bullets(_)
             | Block::Numbered(_)
-            | Block::Table { .. } => col.child(plain_text(
+            | Block::Table { .. }
+            | Block::Math { .. } => col.child(plain_text(
                 &block_plain(block, true),
                 color,
                 theme,
@@ -4210,15 +4330,17 @@ fn inline_runs(
     };
     for span in spans {
         let style = span.style;
-        let mut font = if style.code {
+        let mut font = if style.math {
+            math_font(theme, style.italic, style.bold)
+        } else if style.code {
             mono.clone()
         } else {
             sans.clone()
         };
-        if style.bold {
+        if style.bold && !style.math {
             font.weight = STRONG_WEIGHT;
         }
-        if style.italic {
+        if style.italic && !style.math {
             font.style = gpui::FontStyle::Italic;
         }
         let start = full.len();
@@ -4509,7 +4631,69 @@ fn render_block(
         Block::Code { lang, code } => code_fence_card(
             row_id, lang, code, theme.text, theme, bubble, starts[0], veil, now, copy,
         ),
+        // Display math: typeset, a size up, centred on its own line (KaTeX's
+        // display mode in Grok Bot).
+        Block::Math { source } => {
+            let (full, runs) = math_runs(source, theme.text, theme);
+            let runs = match veil {
+                Some(veil) => apply_veil(runs, &veil.spans(now), 0),
+                None => runs,
+            };
+            base.flex()
+                .justify_center()
+                .text_size(px(CHAT_BODY * DISPLAY_MATH_SCALE))
+                .line_height(px(CHAT_LINE_HEIGHT * DISPLAY_MATH_SCALE))
+                .py(px(4.0))
+                .debug_selector(|| "display-math".into())
+                .child(bubble.text(starts[0], full, runs))
+                .into_any_element()
+        }
     }
+}
+
+/// Display math is this much larger than body text.
+const DISPLAY_MATH_SCALE: f32 = 1.15;
+
+/// The math face for an inline or display run: the serif family with its
+/// glyph fallbacks, italic for variables, bold for `\mathbf`.
+fn math_font(theme: &Theme, italic: bool, bold: bool) -> gpui::Font {
+    gpui::Font {
+        family: theme.font_math.into(),
+        features: Default::default(),
+        fallbacks: Some(gpui::FontFallbacks::from_fonts(Theme::math_fallbacks())),
+        weight: if bold {
+            FontWeight::BOLD
+        } else {
+            FontWeight::NORMAL
+        },
+        style: if italic {
+            gpui::FontStyle::Italic
+        } else {
+            gpui::FontStyle::Normal
+        },
+    }
+}
+
+/// A display-math block's text and runs.
+fn math_runs(source: &str, color: gpui::Hsla, theme: &Theme) -> (String, Vec<TextRun>) {
+    let mut full = String::new();
+    let mut runs = Vec::new();
+    for run in math::typeset(source) {
+        runs.push(TextRun {
+            len: run.text.len(),
+            font: math_font(
+                theme,
+                run.style == math::MathStyle::Italic,
+                run.style == math::MathStyle::Bold,
+            ),
+            color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        });
+        full.push_str(&run.text);
+    }
+    (full, runs)
 }
 
 /// A frame whose content scrolls sideways only when the pointer's wheel or
@@ -5846,8 +6030,8 @@ mod layout_tests {
         );
         assert!(column - ASSISTANT_RIGHT_GAP > ASSISTANT_MAX_WIDTH);
         assert!((e.bubble_left - e.column_left).abs() <= 1.0);
-        // A wide pane: the column caps at the composer's 876; the bubble still
-        // stops at 560 — 64 % of the column (Grok: 560 of its 960 pt composer).
+        // A wide pane: the column caps at the composer's 960 (Grok's); the
+        // bubble still stops at 560 — 58 % of the column, as in Grok.
         let e = measure(cx, 1400.0);
         assert_eq!(e.column_width, COLUMN_MAX_WIDTH);
         assert_eq!(e.composer_width, COLUMN_MAX_WIDTH);
@@ -6553,6 +6737,43 @@ mod transcript_smoke_tests {
         (rt, state, transcript)
     }
 
+    /// 2026-10-26, Mac 0.6.268: a row the code did not expect aborted the app at every
+    /// launch (a panic on the main thread unwinds into AppKit → `abort()`). A sync event whose
+    /// apply panics is skipped with a notice, the state keeps every other row, and the
+    /// transcript still renders; the panic hook records the message to `panic.log`.
+    #[gpui::test]
+    fn a_panicking_sync_event_is_skipped_not_fatal(cx: &mut TestAppContext) {
+        crate::panic_log::install();
+        let before = std::fs::read_to_string(crate::panic_log::log_path()).unwrap_or_default();
+        let (_rt, state, transcript) = mount(cx);
+        // (The hook also prints the poison to stderr; that line is expected in this test.)
+        state.update(cx, |s, cx| {
+            s.apply(SyncEvent::Notice("panic!".into()), cx);
+        });
+        state.read_with(cx, |s, _| {
+            assert_eq!(s.messages.get("c1").map(Vec::len), Some(2), "rows kept");
+            assert!(
+                s.notices.iter().any(|n| n.text.contains("skipped")),
+                "the user is told one update was skipped: {:?}",
+                s.notices.iter().map(|n| n.text.clone()).collect::<Vec<_>>()
+            );
+        });
+        transcript.update(cx, |t, cx| t.sync(cx));
+        let (_view, vcx) = cx.add_window_view(|_, _| Host {
+            transcript: transcript.clone(),
+        });
+        vcx.run_until_parked();
+        assert!(
+            vcx.debug_bounds("chat-column").is_some(),
+            "the transcript still draws"
+        );
+        let after = std::fs::read_to_string(crate::panic_log::log_path()).unwrap_or_default();
+        assert!(
+            after.len() > before.len() && after[before.len()..].contains("test poison event"),
+            "panic.log holds the message"
+        );
+    }
+
     /// The list renders the reply as block rows (no panic, every block drawn),
     /// and hovering the middle of the bubble shows the rail at the bubble's
     /// vertical centre — the whole of #1674 on the real transcript.
@@ -7228,6 +7449,30 @@ mod rail_tests {
         let settled = later + Duration::from_secs(1);
         assert_eq!(fade.opacity("m2#bubble", settled).0, 1.0);
         assert_eq!(fade.opacity("m1#bubble", settled).0, 0.0);
+    }
+
+    /// Mac 0.6.268, 2026-10-26 (Jacob: SIGABRT at 14:55:17, 15:21:53 and then at every
+    /// launch): the list's measured rows were of two layout generations — the rows above
+    /// still at their old place, the last row at its new one — so the bubble's span came out
+    /// inverted or shorter than the rail button, and `clamp` panicked on the main thread
+    /// (`assertion failed: min <= max`). Both shapes now give a centre, never a panic.
+    #[test]
+    fn stale_or_tiny_measurements_never_panic_the_rail() {
+        let viewport = b(0.0, 1000.0);
+        // Inverted: the last row was measured above the rows "above" it.
+        let rows = [Some(b(600.0, 100.0)), Some(b(700.0, 60.0))];
+        let last = b(300.0, 20.0);
+        let centre = rail_centre(&rows, last, viewport, (px(17.0), px(3.0)));
+        assert!(f32::from(centre).is_finite());
+        // Shorter than the button: a 10 pt bubble.
+        let centre = rail_centre(&[], b(500.0, 10.0), viewport, (px(3.0), px(3.0)));
+        assert!(f32::from(centre).is_finite());
+        // A viewport too short for the rail at all.
+        let centre = rail_centre(&[], b(10.0, 40.0), b(0.0, 20.0), NO_INSET);
+        assert!(f32::from(centre).is_finite());
+        assert_eq!(clamp_or_keep(px(5.0), px(10.0), px(0.0)), px(5.0));
+        assert_eq!(clamp_or_keep(px(5.0), px(0.0), px(10.0)), px(5.0));
+        assert_eq!(clamp_or_keep(px(50.0), px(0.0), px(10.0)), px(10.0));
     }
 
     /// The rail's centre is the middle of the whole bubble — the rows above
@@ -7949,6 +8194,93 @@ mod presence_rows_tests {
             "one name, inside the first bubble"
         );
     }
+
+    /// What agentd writes for a background job (duplex §2.3): wordless, hidden.
+    fn hidden_job_row(id: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "chatId": "chat_testing", "role": "assistant", "sender": "agent:01PROJGIGCHAD",
+            "status": "streaming", "createdAt": at, "hidden": true, "worker": true,
+            "job": { "id": format!("j-{id}"), "title": "Searching", "kind": "research", "touches": [] },
+            "parts": [{ "id": format!("s-{id}"), "kind": "status", "code": "working", "message": "Working…" }],
+        }))
+        .expect("message")
+    }
+
+    fn stamps(rows: &[Row]) -> Vec<String> {
+        rows.iter()
+            .filter(|r| matches!(r.kind, RowKind::Stamp { .. }))
+            .map(|r| r.id.clone())
+            .collect()
+    }
+
+    /// [feedback status-row-gap-mac-2026-10-26]: a row that draws nothing — a stream
+    /// with no words yet, a hidden job row — an hour after the last bubble used to
+    /// leave its "Today 5:32 PM" stamp hanging over empty space above the status
+    /// row. The stamp comes with the first words, as it would have anyway.
+    #[test]
+    fn a_wordless_row_an_hour_later_brings_no_dangling_stamp() {
+        let now = now_ms();
+        let earlier = now - 2 * STAMP_GAP_MS;
+        let settled = [
+            agent_message(
+                "done",
+                "Three decisions: keep the canvas infinite.",
+                earlier,
+            ),
+            agent_message("streaming", "", now),
+        ];
+        let rows = rows_of(&settled);
+        assert_eq!(
+            stamps(&rows),
+            vec![format!("m-{earlier}#stamp")],
+            "only the bubble's own stamp: {:?}",
+            rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
+        );
+        assert!(
+            matches!(rows[rows.len() - 1].kind, RowKind::BottomInset)
+                && !matches!(rows[rows.len() - 2].kind, RowKind::Stamp { .. }),
+            "nothing but the clearance after the last bubble"
+        );
+
+        let with_job = [
+            agent_message(
+                "done",
+                "Three decisions: keep the canvas infinite.",
+                earlier,
+            ),
+            hidden_job_row("j1", now),
+        ];
+        assert_eq!(
+            stamps(&rows_of(&with_job)),
+            vec![format!("m-{earlier}#stamp")],
+            "a hidden job row leaves no stamp either"
+        );
+
+        // The reply lands: its stamp arrives with its bubble, and the sender run
+        // the retracted stamp would have broken is unchanged for later rows.
+        let landed = [
+            agent_message(
+                "done",
+                "Three decisions: keep the canvas infinite.",
+                earlier,
+            ),
+            agent_message("done", "Here is the chart.", now),
+        ];
+        let rows = rows_of(&landed);
+        assert_eq!(
+            stamps(&rows),
+            vec![format!("m-{earlier}#stamp"), format!("m-{now}#stamp")],
+            "the reply's stamp comes with the reply"
+        );
+        let reply_ix = rows
+            .iter()
+            .position(|r| r.id == format!("m-{now}#stamp"))
+            .expect("stamp");
+        assert!(
+            matches!(rows[reply_ix + 1].kind, RowKind::Markdown { .. }),
+            "the bubble sits right under its stamp"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -8498,5 +8830,214 @@ mod reply_in_dm_tests {
             )
         });
         assert!(!moved);
+    }
+}
+#[cfg(test)]
+mod crash_probe_tests {
+    //! Mac 0.6.268, 2026-10-26: the rows of Jacob's two crash windows (the Affine chat's empty-sender
+    //! SVG-attachment rows, the Arbonites table / markdown sample / roleplay replies) in a group
+    //! transcript, then the local actions he could have taken — scroll stops, a pointer sweep, clicks
+    //! everywhere. This is what found `rail_centre`'s clamp panic; it stays as the guard.
+    use futures::future::BoxFuture;
+    use gpui::TestAppContext;
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::sync::{ClientCommand, SyncEvent, SyncSource};
+    use gpui::{point, Modifiers};
+
+    const ARBONITES: &[(&str, &str)] = &[
+        ("user", "@hezbola give me a random markdown table"),
+        ("assistant", "| Fruit | Colour | Weight (g) |\n| --- | --- | --- |\n| Apple | Red | 180 |\n| Banana | Yellow | 120 |\n| Kiwi | Green | 75 |"),
+        ("user", "show me a couple things"),
+        ("assistant", "Here's a sample, Arbos.\n\n**Bold**, *italic*, and `inline code`.\n\n- A bullet list\n- With two items\n\n> A block quote.\n\n[Eater Austin's Austin guide](https://austin.eater.com/maps/best-restaurants-austin-eater-38)"),
+        ("user", "@doug-agent @hezbola  can you two engage in a 10 turn roleplay dialoge. doug is a product manager, and hezbola is a senior engineer."),
+        ("assistant", "Yes, Arbos, with some limits. I don't have matplotlib installed, but Pillow is there, so I can draw bar, line and pie charts as PNG images and hand them over as files."),
+        ("user", "Happy to, Affinity. Turn 1, PM hat on.\n\n@hezbola — kicking off a new prototype: a Sakata cracker stacking game, built in Blender. Scope for v0: a tower of rice crackers you drop one at a time, physics on, game over when one slides off."),
+        ("assistant", "Turn 2, engineer hat on. Doug, here's the cracker asset plan.\n\nGeometry: a 60 mm diameter disc, about 6 mm thick. The ridged edge comes from a displaced ring on the rim, and the sesame speckle is a small-scale bump texture, not extra geometry.\n\nPhysics: mass about 8 g, friction 0.6, bounce 0.05, and the collision margin set small so stacks settle.\n\nDrop: spawn the cracker 20 cm above the stack, with a small random tilt and offset so it doesn't land perfectly flat every time.\n\nI haven't built this in Blender yet. Should I start the scene script, or do you want the asset spec changed first?"),
+    ];
+
+    struct Idle;
+    impl SyncSource for Idle {
+        fn name(&self) -> &'static str {
+            "idle"
+        }
+        fn run(
+            self: Box<Self>,
+            _e: mpsc::UnboundedSender<SyncEvent>,
+            _c: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(std::future::pending())
+        }
+    }
+    struct Host {
+        transcript: Entity<Transcript>,
+    }
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(self.transcript.clone())
+        }
+    }
+
+    #[gpui::test]
+    fn crash_window_rows_survive_scroll_hover_and_clicks(cx: &mut TestAppContext) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let handle = rt.handle().clone();
+        cx.update(|cx| {
+            gpui_tokio::init_from_handle(cx, handle);
+            cx.set_global(Theme::dark(crate::ui::theme::Surface::Matte));
+            if !cx.has_global::<PulseClock>() {
+                PulseClock::init(cx);
+            }
+        });
+        let state = cx.new(|cx| AppState::new(Box::new(Idle), cx));
+        let t = 1_700_000_000_000u64;
+        let rows: Vec<(String, String, String)> = ARBONITES
+            .iter()
+            .map(|(k, t)| (String::new(), (*k).to_owned(), (*t).to_owned()))
+            .collect();
+        let mut messages: Vec<Message> = Vec::new();
+        let mut at = t;
+        for (i, (_, kind, text)) in rows.iter().enumerate() {
+            at += 10_000;
+            let role = if kind == "user" { "user" } else { "assistant" };
+            messages.push(serde_json::from_value(serde_json::json!({
+                "id": format!("m{i}"), "chatId": "g1", "role": role,
+                "sender": if role == "user" { "user:gh_1" } else { "agent:01M5NNT5FNTZNCT3THWNVEW8WM" },
+                "senderName": if role == "user" { "Affinity" } else { "Hezbola" },
+                "senderHandle": if role == "user" { "affinity" } else { "hezbola" },
+                "status": "done", "createdAt": at, "completedAt": at + 1_000,
+                "parts": [{ "id": format!("m{i}-t"), "kind": "text", "text": text }],
+            })).unwrap());
+        }
+        // (1) a hidden job-worker row: empty agent sender carrying an SVG attachment of kind image
+        at += 10_000;
+        messages.push(serde_json::from_value(serde_json::json!({
+            "id": "w1", "chatId": "g1", "role": "assistant", "sender": "agent:01M5N1WSR91G8CJKNYXKJESK7X",
+            "senderName": "", "senderHandle": "", "worker": true, "hidden": true,
+            "status": "done", "createdAt": at, "completedAt": at + 1_000,
+            "parts": [{ "id": "w1-a", "kind": "attachment", "attachment": { "name": "affine-favicon.svg", "mime": "image/svg+xml", "ref": "blob-svg-1", "bytes": 4031, "kind": "image", "title": "affine.io logo" } }],
+        })).unwrap());
+        // (2) the same shape as a visible row with sender {kind:"agent", name:""} and an SVG image
+        at += 10_000;
+        messages.push(serde_json::from_value(serde_json::json!({
+            "id": "w2", "chatId": "g1", "role": "assistant", "sender": "agent:01M5N1WSR91G8CJKNYXKJESK7X",
+            "senderName": "", "senderHandle": "", "senderAvatar": "", "senderAvatarUrl": "",
+            "status": "done", "createdAt": at, "completedAt": at + 1_000,
+            "parts": [
+                { "id": "w2-t", "kind": "text", "text": "I found the AFFiNE logo from affine.io. You can get the official SVG directly at [affine.io/favicon.svg](https://affine.io/favicon.svg) (a 1000×1000 vector mark), and I have also saved and attached a copy for you." },
+                { "id": "w2-a", "kind": "attachment", "attachment": { "name": "affine-favicon.svg", "mime": "image/svg+xml", "ref": "blob-svg-2", "kind": "image" } }
+            ],
+        })).unwrap());
+        // Mac-only shapes bc-3790a460 listed (`internal/mac-launch-crash-recovery-2026-10-26.md`
+        // §2): a user attachment whose upload failed (part without `ref`, still pending), a
+        // voice memo, and a Reply-in-DM quote (`replyRef`).
+        at += 10_000;
+        messages.push(serde_json::from_value(serde_json::json!({
+            "id": "u-noref", "chatId": "g1", "role": "user", "sender": "user:gh_1", "senderName": "Affinity",
+            "status": "done", "createdAt": at, "completedAt": at, "pending": true,
+            "parts": [{ "id": "u-noref-a", "kind": "attachment", "attachment": { "name": "Screenshot.png", "mime": "image/png", "kind": "image" } }],
+        })).unwrap());
+        at += 10_000;
+        messages.push(serde_json::from_value(serde_json::json!({
+            "id": "u-memo", "chatId": "g1", "role": "user", "sender": "user:gh_1", "senderName": "Affinity",
+            "status": "done", "createdAt": at, "completedAt": at,
+            "parts": [{ "id": "u-memo-a", "kind": "attachment", "attachment": { "name": "memo.m4a", "mime": "audio/mp4", "ref": "blob-memo", "kind": "audio", "bytes": 48213 } }],
+        })).unwrap());
+        at += 10_000;
+        messages.push(serde_json::from_value(serde_json::json!({
+            "id": "u-ref", "chatId": "g1", "role": "user", "sender": "user:gh_1", "senderName": "Affinity",
+            "status": "done", "createdAt": at, "completedAt": at,
+            "replyRef": { "chatId": "other", "projectId": "", "messageId": "m-far", "chatTitle": "Design", "sender": "user:gh_2", "senderName": "Sam", "senderHandle": "sam", "text": "" },
+            "parts": [{ "id": "u-ref-t", "kind": "text", "text": "replying across chats" }],
+        })).unwrap());
+        state.update(cx, |s, cx| {
+            s.projects.push(Project {
+                id: "g1".into(),
+                name: "Arbonites".into(),
+                kind: SpaceKind::Group,
+                ..Project::default()
+            });
+            let chat: Chat = serde_json::from_value(serde_json::json!({
+                "id": "g1", "project_id": "g1", "title": "Arbonites", "is_pinned": true,
+                "is_system": false, "unread": false, "last_message_at": at, "kind": "group",
+            }))
+            .unwrap();
+            s.chats.insert("g1".into(), vec![chat]);
+            s.messages.insert("g1".into(), messages);
+            s.selected_project = Some("g1".into());
+            s.active_tab.insert("g1".into(), "g1".into());
+            cx.notify();
+        });
+        // The SVG bytes arrive as a thumbnail for both refs (what FetchThumbnail returns).
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1000"><circle cx="500" cy="500" r="400"/></svg>"#.to_vec();
+        state.update(cx, |s, cx| {
+            for key in ["blob-svg-1", "blob-svg-2"] {
+                s.apply(
+                    SyncEvent::Thumbnail {
+                        key: key.into(),
+                        bytes: std::sync::Arc::new(svg.clone()),
+                    },
+                    cx,
+                );
+            }
+        });
+        // Real link icons for the sites in the texts (what the relay would answer).
+        let png = {
+            let img = image::RgbaImage::from_pixel(64, 64, image::Rgba([200, 30, 30, 255]));
+            let mut out = std::io::Cursor::new(Vec::new());
+            img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+            out.into_inner()
+        };
+        state.update(cx, |s, cx| {
+            for host in ["austin.eater.com", "affine.io", "nypost.com"] {
+                s.apply(
+                    SyncEvent::LinkIcon {
+                        host: host.into(),
+                        png: Some(std::sync::Arc::new(png.clone())),
+                    },
+                    cx,
+                );
+            }
+        });
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        transcript.update(cx, |t, cx| t.sync(cx));
+        let (_view, vcx) = cx.add_window_view(|_, _| Host {
+            transcript: transcript.clone(),
+        });
+        vcx.run_until_parked();
+        // Local actions: scroll through the whole list, sweep the pointer over every 24 pt
+        // band, click every link and the bubbles, open the hover rail — at each scroll stop.
+        let column = vcx.debug_bounds("chat-column").expect("column");
+        for stop in 0..12 {
+            transcript.update(vcx, |t, cx| {
+                t.list.scroll_to(gpui::ListOffset {
+                    item_ix: stop * 3,
+                    offset_in_item: px(0.0),
+                });
+                cx.notify();
+            });
+            vcx.run_until_parked();
+            let mut y = column.top() + px(8.0);
+            while y < column.bottom() {
+                for x in [
+                    column.left() + px(60.0),
+                    column.left() + px(200.0),
+                    column.left() + px(420.0),
+                    column.right() - px(40.0),
+                ] {
+                    vcx.simulate_mouse_move(point(x, y), None, Modifiers::default());
+                    vcx.run_until_parked();
+                    vcx.simulate_click(point(x, y), Modifiers::default());
+                    vcx.run_until_parked();
+                }
+                y += px(24.0);
+            }
+        }
+        assert!(vcx.debug_bounds("chat-column").is_some());
+        drop(rt);
     }
 }
