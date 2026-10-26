@@ -992,9 +992,6 @@ struct RowView: View, Equatable {
     /// Shared mention table from ChatView (built once per directory sync).
     let mentions: MentionTable
 
-    /// Which reaction chip is expanded to show who used that emoji under the bubble.
-    @State private var selectedReactionEmoji: String? = nil
-
     /// Trailing column width for swipe-revealed times (fits "12:59 PM").
     static let timeRevealWidth: CGFloat = 56
 
@@ -1047,10 +1044,6 @@ struct RowView: View, Equatable {
             bubble
             if !row.reactions.isEmpty {
                 reactionChips
-                if let emoji = selectedReactionEmoji,
-                   let reaction = row.reactions.first(where: { $0.emoji == emoji }) {
-                    reactionSenders(reaction)
-                }
             }
         }
         // Quote tap landed here: a soft accent wash that fades out (Mac parity).
@@ -1313,63 +1306,139 @@ struct RowView: View, Equatable {
         }
     }
 
-    /// Compact chips under the bubble (iMessage-style). Tap shows who used that
-    /// emoji below the message; add/remove stays on the long-press capsule.
+    /// Compact chips under the bubble (Telegram-style). Tap toggles your own
+    /// reaction with that emoji; each chip shows the emoji plus a small profile
+    /// picture for everyone who used it. Long-press the bubble for the capsule.
     private var reactionChips: some View {
         let mine = model.myUserId
         return HStack(spacing: 4) {
             if row.role == .user { Spacer(minLength: 0) }
             ForEach(row.reactions, id: \.emoji) { reaction in
                 let mineOn = mine.map { reaction.senders.contains($0) } ?? false
-                let selected = selectedReactionEmoji == reaction.emoji
+                let fill = mineOn ? theme.accent.opacity(0.22) : theme.card
+                let names = reaction.senders.map(reactionSenderLabel).joined(separator: ", ")
                 Button {
-                    selectedReactionEmoji = selected ? nil : reaction.emoji
+                    model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: reaction.emoji)
                 } label: {
-                    HStack(spacing: 3) {
+                    HStack(spacing: 4) {
                         Text(reaction.emoji).font(theme.font(14))
-                        if reaction.senders.count > 1 {
-                            Text("\(reaction.senders.count)")
-                                .font(theme.font(12, weight: .medium))
-                                .foregroundStyle(theme.muted)
-                        }
+                        reactionAvatars(reaction.senders, ring: fill)
                     }
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
-                    .background(
-                        Capsule(style: .continuous)
-                            .fill((mineOn || selected) ? theme.accent.opacity(0.22) : theme.card)
-                    )
+                    .background(Capsule(style: .continuous).fill(fill))
                     .overlay(
                         Capsule(style: .continuous)
                             .strokeBorder(
-                                (mineOn || selected) ? theme.accent.opacity(0.55) : theme.separator,
+                                mineOn ? theme.accent.opacity(0.55) : theme.separator,
                                 lineWidth: 1
                             )
                     )
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("\(reaction.emoji) reaction, \(reaction.senders.count)")
-                .accessibilityHint("Shows who used this emoji")
+                .accessibilityLabel("\(reaction.emoji) from \(names)")
+                .accessibilityHint(mineOn ? "Removes your reaction" : "Adds your reaction")
             }
             if row.role != .user { Spacer(minLength: 0) }
         }
         .padding(.leading, reactionLeading)
     }
 
-    /// Names of everyone who used `reaction`'s emoji, under the chips.
-    private func reactionSenders(_ reaction: MessageReaction) -> some View {
-        let names = reaction.senders.map(reactionSenderLabel).joined(separator: ", ")
-        return HStack(spacing: 0) {
-            if row.role == .user { Spacer(minLength: 0) }
-            Text(names)
-                .font(theme.font(12))
-                .foregroundStyle(theme.muted)
-                .multilineTextAlignment(row.role == .user ? .trailing : .leading)
-                .fixedSize(horizontal: false, vertical: true)
-            if row.role != .user { Spacer(minLength: 0) }
+    /// Diameter of the small reactor pictures inside a chip (Telegram glance size).
+    private static let reactionAvatarSize: CGFloat = 16
+    /// How many faces fit in a chip before a "+N" count.
+    private static let reactionAvatarMax = 3
+
+    /// Overlapping profile pictures for the people (and agents) on one emoji.
+    @ViewBuilder
+    private func reactionAvatars(_ senders: [String], ring: Color) -> some View {
+        let shown = Array(senders.prefix(Self.reactionAvatarMax))
+        let extra = senders.count - shown.count
+        HStack(spacing: -Self.reactionAvatarSize * 0.35) {
+            ForEach(shown, id: \.self) { sender in
+                reactionSenderAvatar(sender)
+                    .overlay(Circle().strokeBorder(ring, lineWidth: 1))
+            }
+            if extra > 0 {
+                Text("+\(extra)")
+                    .font(theme.font(10, weight: .semibold))
+                    .foregroundStyle(theme.muted)
+                    .padding(.leading, 2)
+            }
         }
-        .padding(.leading, reactionLeading)
-        .accessibilityLabel("\(reaction.emoji) from \(names)")
+    }
+
+    /// One reactor's disc: person picture / agent leaf, resolved like bubble avatars.
+    @ViewBuilder
+    private func reactionSenderAvatar(_ sender: String) -> some View {
+        let size = Self.reactionAvatarSize
+        if sender == model.myUserId,
+           let me = model.user {
+            PersonAvatar(
+                url: me.avatarUrl,
+                handle: me.login,
+                size: size,
+                name: me.name,
+                id: me.id,
+                colorIndex: me.avatarColorIndexEffective
+            )
+        } else if let member = model.peopleChat(chatId)?.members.first(where: { $0.member == sender }) {
+            if member.isAgent {
+                AgentAvatar(
+                    project: model.agent(member: member, chatId: chatId),
+                    theme: theme,
+                    size: size,
+                    still: true
+                )
+            } else {
+                PersonAvatar(
+                    url: member.avatarUrl,
+                    handle: member.handle,
+                    size: size,
+                    name: member.name,
+                    id: member.id,
+                    colorIndex: member.avatarColorIndex
+                )
+            }
+        } else if sender.hasPrefix("agent:"),
+                  let id = sender.split(separator: ":", maxSplits: 1).last.map(String.init) {
+            if let project = model.project(id) ?? model.foreignAgent(id) {
+                AgentAvatar(
+                    project: model.agent(id: id, name: project.name, chatId: chatId),
+                    theme: theme,
+                    size: size,
+                    still: true
+                )
+            } else {
+                InitialsAvatar(name: id, handle: id, id: id, size: size)
+            }
+        } else if sender.hasPrefix("user:"),
+                  let id = sender.split(separator: ":", maxSplits: 1).last.map(String.init) {
+            if let me = model.user, me.id == id {
+                PersonAvatar(
+                    url: me.avatarUrl,
+                    handle: me.login,
+                    size: size,
+                    name: me.name,
+                    id: me.id,
+                    colorIndex: me.avatarColorIndexEffective
+                )
+            } else if let person = model.directory.first(where: { $0.id == id }) {
+                PersonAvatar(
+                    url: person.avatarUrl,
+                    handle: person.handle,
+                    size: size,
+                    name: person.name,
+                    id: person.id,
+                    colorIndex: person.avatarColorIndex
+                )
+            } else {
+                InitialsAvatar(name: nil, handle: id, id: id, size: size)
+            }
+        } else {
+            let bare = sender.split(separator: ":", maxSplits: 1).last.map(String.init) ?? sender
+            InitialsAvatar(name: nil, handle: bare, id: bare, size: size)
+        }
     }
 
     /// Display name for a reaction sender id (`user:…` / `agent:…`).
