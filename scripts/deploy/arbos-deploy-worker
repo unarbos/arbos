@@ -1100,19 +1100,20 @@ relay_hotfix_marker() {
   # carries the marker — the `[hotfix]` sits on the branch commit (#1966; 17:54–18:09 Oct 27 the P0 authz fix
   # #2093 was held 20 min to coalesce). Merges of gate-pinned items are named by the loop in $PRIORITY_MERGES
   # ("<merge-sha> <item> <when>" per line) and count as markers too.
-  {
-    git -C "$REPO" log --format='%H%x09%s%x09%b' "$deployed..origin/main" 2>/dev/null \
-      | { grep -iE $'\t(revert|hotfix)\b|\[hotfix\]' || true; }
-    if [[ -f "$PRIORITY_MERGES" ]]; then
-      local psha _rest
-      while read -r psha _rest; do
-        [[ "$psha" =~ ^[0-9a-f]{7,40}$ ]] || continue
-        if git -C "$REPO" merge-base --is-ancestor "$psha" origin/main 2>/dev/null && ! git -C "$REPO" merge-base --is-ancestor "$psha" "$deployed" 2>/dev/null; then
-          git -C "$REPO" rev-parse "$psha" 2>/dev/null
-        fi
-      done < "$PRIORITY_MERGES"
-    fi
-  } | head -1 | cut -f1
+  # No `| head -1` on the producers: with two marker lines the producer gets SIGPIPE (141) and under set -e that
+  # killed the whole tick (20:36–20:41 Oct 27, nothing deployed). Collect, then take the first line.
+  local found
+  found="$(git -C "$REPO" log --format='%H%x09%s%x09%b' "$deployed..origin/main" 2>/dev/null | { grep -iE $'\t(revert|hotfix)\b|\[hotfix\]' || true; })"
+  if [[ -z "$found" && -f "$PRIORITY_MERGES" ]]; then
+    local psha _rest
+    while read -r psha _rest; do
+      [[ "$psha" =~ ^[0-9a-f]{7,40}$ ]] || continue
+      if git -C "$REPO" merge-base --is-ancestor "$psha" origin/main 2>/dev/null && ! git -C "$REPO" merge-base --is-ancestor "$psha" "$deployed" 2>/dev/null; then
+        found="$(git -C "$REPO" rev-parse "$psha" 2>/dev/null)"; break
+      fi
+    done < "$PRIORITY_MERGES"
+  fi
+  printf '%s\n' "${found%%$'\n'*}" | cut -f1
 }
 
 # Four relay deploys in 95 minutes caused the 2026-10-22 "Reconnecting..." outage. Hold a relay
