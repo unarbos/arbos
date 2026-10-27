@@ -109,8 +109,24 @@ struct Theme: Equatable {
     /// Screen width minus 76 pt: 16 pt own margin (the composer's `+` column
     /// starts 15 pt further in) + 60 pt on the other side. Grok dark, 420 pt
     /// screen, refs 01–03 at 3 px/pt: the assistant block runs x 16 → 360 in
-    /// every shot ([feedback agent-bubble-inset-2026-10-22]; was 71).
+    /// every shot ([feedback agent-bubble-inset-2026-10-22]; was 71). Agent
+    /// 1:1 chats only; people chats use `peopleBubbleInset`.
     static let bubbleInset: CGFloat = 76
+    /// People chats — DM, group, channel — use more of the screen on both
+    /// sides (Jacob, 2026-10-26, [feedback chat-density-ios-2026-10-26]: "use
+    /// more of the screen both ways, left and right per chat bubble"): the
+    /// 16 pt own margin stays, the far side keeps `bubbleOppositeMargin`
+    /// instead of 60, so on a 402 pt screen my bubble may reach 354 pt
+    /// (left edge ≥ 32) and an incoming one 300 pt after the lane (right
+    /// edge ≤ 370; was 253 → 342). The far-side margin is what keeps a bubble
+    /// reading as mine / theirs. Grok's 76 stays the agent-chat number — Grok
+    /// has no group chats to measure.
+    static let bubbleOppositeMargin: CGFloat = 32
+    static let peopleBubbleInset: CGFloat = 16 + bubbleOppositeMargin
+    /// The inset a transcript row subtracts from the screen for its bubble cap.
+    static func bubbleInset(people: Bool) -> CGFloat {
+        people ? peopleBubbleInset : bubbleInset
+    }
     static let body: CGFloat = 17
     /// Inline code sits a point under body so SF Mono matches the prose cap height.
     static let code: CGFloat = 16
@@ -168,15 +184,24 @@ struct Theme: Equatable {
     static let avatar: CGFloat = 28
     /// The avatar column (Mac `SENDER_DISC = PLUS_BUTTON`, Jacob [feedback
     /// AAvkkHYz3TOlou0Hu7u71Sc]): every round picture beside a people-chat bubble is
-    /// centred on the composer's `+`. The disc stayed 42 pt when the `+` grew to Grok's
-    /// 48 ([feedback iphone-composer-grok-parity-2026-10-25]: the ask covered the composer
-    /// and the status row, not the bubbles). The `+` moves with the keyboard (31 → 18 pt
-    /// inset), so the column follows it via `avatarColumnInset(composerInset:)` (keyboard
-    /// up: avatar 21–63, centre 42 = 18 + 48 / 2; down: 34–76, centre 55). The bubble
-    /// body follows after `memberAvatarGap`. Shared with
+    /// centred on the composer's `+`. The `+` moves with the keyboard (31 → 18 pt
+    /// inset), so the column follows it via `avatarColumnInset(composerInset:)`. The
+    /// bubble body follows after `memberAvatarGap`. Shared with
     /// feedback/sender-name-in-bubble-2026-10-23. Agent chats keep #1374's no-avatar rule.
-    static let memberAvatar: CGFloat = 42
-    static let memberAvatarGap: CGFloat = 13
+    ///
+    /// Size: Discord standard (Jacob, 2026-10-26, [feedback chat-density-ios-2026-10-26]:
+    /// "the pfp chat bubble takes up too much space — go for Discord standard size").
+    /// Discord draws its message avatar 40 pt in a 72 pt gutter on desktop (cozy) and
+    /// 32 pt on mobile; **36** is the pick between the two — it reads as Discord's size
+    /// beside our 17 pt text, keeps a face readable at 3x, and, centred on the 48 pt `+`,
+    /// its left edge lands 6 pt inside the `+` — the same edge as the status row's
+    /// picture (`presenceAvatarOffset`), so every picture in the chat shares one left
+    /// edge (keyboard up 24–60, down 37–73). Was 42 (the `+` before Grok's 48).
+    /// The gap to the bubble is the control family's `Controls.gap` (was 13), so the
+    /// body starts 54 pt after the transcript edge with the keyboard up (was 60; 70 from
+    /// the screen, was 76) and 67 with it down (was 73; 83 from the screen, was 89).
+    static let memberAvatar: CGFloat = 36
+    static let memberAvatarGap: CGFloat = Controls.gap
     /// Transcript edge → the avatar's left edge, for the composer's current side inset.
     static func avatarColumnInset(composerInset: CGFloat) -> CGFloat {
         composerInset + plusButton / 2 - memberAvatar / 2 - 16
