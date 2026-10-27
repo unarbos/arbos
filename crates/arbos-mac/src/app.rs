@@ -74,6 +74,22 @@ pub enum ProfilePage {
     Channel { server_id: Id, channel_id: Id },
 }
 
+impl ProfilePage {
+    /// True when both pages show the same person, agent, group, server or
+    /// channel. A person's page is the same person whichever chat it was
+    /// opened from (`space_id` only says where the Message pill goes), so a
+    /// click on their sender name, their @mention chip or the DM header pill
+    /// all count as "that profile is showing" ([feedback profile-pane-toggle-mac-2026-10-26]).
+    pub fn same_subject(&self, other: &ProfilePage) -> bool {
+        match (self, other) {
+            (ProfilePage::User { handle: a, .. }, ProfilePage::User { handle: b, .. }) => {
+                a.eq_ignore_ascii_case(b)
+            }
+            _ => self == other,
+        }
+    }
+}
+
 /// Who the Add members picker adds to — a group or a server (D88) — and who is in already.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AddTarget {
@@ -6328,14 +6344,29 @@ impl AppState {
 
     // ----- profile pages ------------------------------------------------------
 
-    /// Open `page` in the right pane, or close it when that page is already open
-    /// (header pill / Me avatar: click again to fold away).
+    /// The one action behind every click on a person or an agent in the chat —
+    /// a sender name, the disc beside a bubble, an @mention chip, the header
+    /// pill, a status-row picture — and the header pill of a group or channel
+    /// ([feedback profile-pane-toggle-mac-2026-10-26], Jacob: "clicking the
+    /// agent or user in the chat should open their user profile right bar.
+    /// Clicking it again should close it"):
+    ///
+    /// - nothing open → `page` opens in the right pane;
+    /// - that same person / agent showing (whichever target opened it,
+    ///   [`ProfilePage::same_subject`]) → the pane closes;
+    /// - someone else showing → `page` replaces it in place (no back stack).
     pub fn toggle_profile(&mut self, page: ProfilePage, cx: &mut Context<Self>) {
-        if self.profile.as_ref() == Some(&page) {
+        if self.profile_shows(&page) {
             self.close_profile(cx);
         } else {
             self.open_profile(page, cx);
         }
+    }
+
+    /// True while the pane's top page is `page`'s subject (so a second click
+    /// on any target for it closes the pane).
+    pub fn profile_shows(&self, page: &ProfilePage) -> bool {
+        self.profile.as_ref().is_some_and(|p| p.same_subject(page))
     }
 
     /// Fill the pane with `page`, forgetting whatever was under it.
