@@ -86,6 +86,7 @@ fn base(chat: &str, id: String, role: Role, status: MessageStatus, at: u64) -> M
         subagent_id: None,
         subagent_name: None,
         handoff_messages: None,
+        notice: None,
         worker: false,
         job: None,
         hidden: false,

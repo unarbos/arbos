@@ -385,11 +385,16 @@ struct OptimisticNotice: Equatable {
     var id: Id
     var text: String
     var createdAt: Int64
+    /// The same facts the relay's row will carry (actor = me, subjects by id), so this copy
+    /// is worded from the live roster like that row and is matched to it by facts, not by
+    /// words a stale local `/me` name could get wrong ("Const added Aureum", 2026-10-26).
+    var notice: MembershipNotice? = nil
 
-    init(text: String, now: Int64) {
+    init(text: String, now: Int64, notice: MembershipNotice? = nil) {
         id = Self.idPrefix + newId()
         self.text = text
         createdAt = now
+        self.notice = notice
     }
 
     /// "A", "A and B", "A, B and C" — the relay's `notices::join_names`, so the local line
@@ -415,17 +420,20 @@ struct OptimisticNotice: Equatable {
             status: .done, turn: nil, decision: nil, subagentId: nil, subagentName: nil,
             inReplyTo: nil, usage: [:], model: nil,
             createdAt: createdAt, completedAt: createdAt, pending: false,
-            parts: [.text(id: "\(id)-t", text: text)], hiddenCount: 0
+            parts: [.text(id: "\(id)-t", text: text)], hiddenCount: 0,
+            notice: notice
         )
     }
 
-    /// The relay's row for this notice: a system line with the same words, written no earlier
-    /// than the local one (minus clock skew).
+    /// The relay's row for this notice: a system line with the same facts (or, for a relay
+    /// that writes none, the same words), written no earlier than the local one (minus
+    /// clock skew).
     func isConfirmed(by m: Message) -> Bool {
-        m.role == .system
-            && !m.id.hasPrefix(Self.idPrefix)
-            && m.createdAt + Self.skewMs >= createdAt
-            && m.plainText.trimmingCharacters(in: .whitespacesAndNewlines) == text
+        guard m.role == .system, !m.id.hasPrefix(Self.idPrefix), m.createdAt + Self.skewMs >= createdAt else {
+            return false
+        }
+        if let mine = notice, let theirs = m.notice { return mine == theirs }
+        return m.plainText.trimmingCharacters(in: .whitespacesAndNewlines) == text
     }
 
     /// Fold a chat's local notices into a fresh snapshot from the relay: a notice the snapshot
