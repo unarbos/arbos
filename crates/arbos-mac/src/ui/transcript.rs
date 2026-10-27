@@ -32,6 +32,7 @@ use crate::ui::math;
 use crate::ui::mention::{self, Mentions};
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
+use crate::ui::profile_target;
 use crate::ui::select::{BubbleAt, BubbleSelectable, LinkIcons, Selectable, Span, TextSelection};
 use crate::ui::theme::{
     Theme, BUBBLE_PAD_X, BUBBLE_PAD_Y, BUBBLE_RADIUS, CHAT_BODY, CHAT_LINE_HEIGHT, COLUMN_MARGIN,
@@ -1925,6 +1926,7 @@ impl Transcript {
     ) -> Stateful<Div> {
         div()
             .id(SharedString::from(format!("{row_id}#who")))
+            .debug_selector(|| format!("who#{row_id}"))
             .flex()
             .items_center()
             .gap(px(6.0))
@@ -1998,22 +2000,22 @@ impl Transcript {
             .map(|a| avatars::agent_accent(&a.seed, a.color_index, a.leaf.0, a.leaf.1, theme));
         // Group / channel: the agent's name inside its first bubble, in its
         // colour, with the `agent` tag; the time only appears in the hover rail.
+        // The name and the disc are profile targets: one click opens the
+        // agent's pane, a second closes it (`ui::profile_target`).
         let name_el = match (&identity, agent_accent) {
             (Some(a), Some(color)) if named => {
-                let open_state = self.state.clone();
                 let pid = a.project_id.clone();
+                let name = a.name.clone();
                 Some(
                     self.sender_name_label(row_id, a.name.clone(), color, true)
                         .when_some(pid, |el, pid| {
-                            el.cursor_pointer().on_click(move |_, _, cx| {
-                                let pid = pid.clone();
-                                open_state.update(cx, |s, cx| {
-                                    s.push_profile(
-                                        crate::app::ProfilePage::Agent { project_id: pid },
-                                        cx,
-                                    )
-                                });
-                            })
+                            profile_target::attach(
+                                el,
+                                &self.state,
+                                crate::app::ProfilePage::Agent { project_id: pid },
+                                &name,
+                                cx,
+                            )
                         })
                         .into_any_element(),
                 )
@@ -2088,23 +2090,21 @@ impl Transcript {
         // the last block; earlier blocks keep the lane free (mocks a/f).
         let disc = lane.as_deref().map(|seed| {
             if last {
-                // The disc opens the agent's profile, pushed over the group's pane.
-                let (_, _, _, agent_pid) = self.agent_identity(seed, "Agent", cx);
-                let open_state = self.state.clone();
+                // The disc is the same profile target as the name.
+                let (agent_name, _, _, agent_pid) = self.agent_identity(seed, "Agent", cx);
                 div()
                     .id(SharedString::from(format!("{row_id}#disc")))
+                    .debug_selector(|| format!("disc#{row_id}"))
                     .flex_shrink_0()
                     .child(self.agent_disc(seed, cx))
                     .when_some(agent_pid, |el, pid| {
-                        el.cursor_pointer().on_click(move |_, _, cx| {
-                            let pid = pid.clone();
-                            open_state.update(cx, |s, cx| {
-                                s.push_profile(
-                                    crate::app::ProfilePage::Agent { project_id: pid },
-                                    cx,
-                                )
-                            });
-                        })
+                        profile_target::attach(
+                            el,
+                            &self.state,
+                            crate::app::ProfilePage::Agent { project_id: pid },
+                            &agent_name,
+                            cx,
+                        )
                     })
                     .into_any_element()
             } else {
@@ -2219,33 +2219,29 @@ impl Transcript {
                     }
                     None => (None, None),
                 };
-                let open_person = |this: &Self, person: &Person, cx: &Context<Self>| {
-                    let open_state = this.state.clone();
-                    let handle = person.handle.clone();
+                // The name and the disc are one profile target (`ui::profile_target`):
+                // a click opens the person's pane, a second one closes it.
+                let person_page = |this: &Self, person: &Person, cx: &Context<Self>| {
                     let sid = this.chat_id.as_ref().and_then(|c| {
                         this.state.read(cx).chats.iter().find_map(|(pid, tabs)| {
                             tabs.iter().any(|t| &t.id == c).then(|| pid.clone())
                         })
                     });
-                    move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
-                        let (handle, sid) = (handle.clone(), sid.clone());
-                        open_state.update(cx, |s, cx| {
-                            s.push_profile(
-                                crate::app::ProfilePage::User {
-                                    handle,
-                                    space_id: sid,
-                                },
-                                cx,
-                            )
-                        });
+                    crate::app::ProfilePage::User {
+                        handle: person.handle.clone(),
+                        space_id: sid,
                     }
                 };
                 let name_el = match (&from, color) {
                     (Some(person), Some(color)) if named => Some(
-                        self.sender_name_label(&row.id, person.display_name(), color, false)
-                            .cursor_pointer()
-                            .on_click(open_person(self, person, cx))
-                            .into_any_element(),
+                        profile_target::attach(
+                            self.sender_name_label(&row.id, person.display_name(), color, false),
+                            &self.state,
+                            person_page(self, person, cx),
+                            &person.display_name(),
+                            cx,
+                        )
+                        .into_any_element(),
                     ),
                     _ => None,
                 };
@@ -2293,13 +2289,23 @@ impl Transcript {
                                 .pl(px(AVATAR_COLUMN_INSET))
                                 .gap(px(SENDER_DISC_GAP))
                                 .child(
-                                    // The disc opens the same profile as the name.
-                                    div()
-                                        .id(SharedString::from(format!("{}#disc", row.id)))
-                                        .flex_shrink_0()
-                                        .cursor_pointer()
-                                        .child(people::avatar(image, &person, SENDER_DISC, &theme))
-                                        .on_click(open_person(self, &person, cx)),
+                                    // The disc is the same profile target as the name.
+                                    profile_target::attach(
+                                        div()
+                                            .id(SharedString::from(format!("{}#disc", row.id)))
+                                            .debug_selector(|| format!("disc#{}", row.id))
+                                            .flex_shrink_0()
+                                            .child(people::avatar(
+                                                image,
+                                                &person,
+                                                SENDER_DISC,
+                                                &theme,
+                                            )),
+                                        &self.state,
+                                        person_page(self, &person, cx),
+                                        &person.display_name(),
+                                        cx,
+                                    ),
                                 )
                                 .child(
                                     div()
@@ -5712,6 +5718,7 @@ mod layout_tests {
                         .size(px(presence::AVATAR))
                         .rounded_full()
                         .into_any_element(),
+                    page: None,
                 })
                 .collect();
             let presence = presence::Presence {
@@ -5719,7 +5726,7 @@ mod layout_tests {
                 detail: None,
                 queued: false,
             };
-            let row_over_pill = presence::row(presence, &theme, cx).into_any_element();
+            let row_over_pill = presence::row(presence, None, &theme, cx).into_any_element();
             // A question / approval card, framed by the real `card_row`: in an agent chat (no
             // lane) and in a people chat (lane) — a card that wants more than any pane has.
             let card = |sel: &'static str| {
