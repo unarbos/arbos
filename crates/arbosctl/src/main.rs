@@ -565,6 +565,29 @@ enum AdminCmd {
         action: String,
         user: Option<String>,
     },
+    /// Agent-hosted sites (#2060): `list`; `takedown <user> <app> [--reason …]` (410 at the edge,
+    /// owner cannot republish); `restore <user> <app>`; `purge <user> <app>`; `events [--since <ms>]`;
+    /// `quota <user> [--max-sites N] [--max-bytes N] [--block|--unblock]`; `move <user> <new-prefix>`
+    /// (old address 301s for 30 days).
+    Sites {
+        #[arg(value_parser = ["list", "takedown", "restore", "purge", "events", "quota", "move"])]
+        action: String,
+        user: Option<String>,
+        /// App name (takedown/restore/purge) or the new prefix (move).
+        arg: Option<String>,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long)]
+        since: Option<i64>,
+        #[arg(long)]
+        max_sites: Option<i64>,
+        #[arg(long)]
+        max_bytes: Option<i64>,
+        #[arg(long)]
+        block: bool,
+        #[arg(long)]
+        unblock: bool,
+    },
 }
 
 #[tokio::main]
@@ -1096,6 +1119,82 @@ async fn main() -> Result<()> {
                                 .await?
                         }
                         _ => admin.get("/admin/fleet").await?,
+                    };
+                    println!("{}", serde_json::to_string_pretty(&v)?);
+                }
+                AdminCmd::Sites {
+                    action,
+                    user,
+                    arg,
+                    reason,
+                    since,
+                    max_sites,
+                    max_bytes,
+                    block,
+                    unblock,
+                } => {
+                    let need_user = || {
+                        user.clone()
+                            .ok_or_else(|| anyhow::anyhow!("{action} needs a user id"))
+                    };
+                    let need_arg = |what: &str| {
+                        arg.clone()
+                            .ok_or_else(|| anyhow::anyhow!("{action} needs {what}"))
+                    };
+                    let v = match action.as_str() {
+                        "takedown" => {
+                            let (u, a) = (need_user()?, need_arg("an app name")?);
+                            admin
+                                .post(
+                                    &format!("/admin/sites/{u}/{a}/takedown"),
+                                    &serde_json::json!({ "reason": reason }),
+                                )
+                                .await?
+                        }
+                        "restore" => {
+                            let (u, a) = (need_user()?, need_arg("an app name")?);
+                            admin
+                                .post(
+                                    &format!("/admin/sites/{u}/{a}/restore"),
+                                    &serde_json::json!({}),
+                                )
+                                .await?
+                        }
+                        "purge" => {
+                            let (u, a) = (need_user()?, need_arg("an app name")?);
+                            admin.delete(&format!("/admin/sites/{u}/{a}")).await?
+                        }
+                        "events" => {
+                            admin
+                                .get(&format!("/admin/sites/events?since={}", since.unwrap_or(0)))
+                                .await?
+                        }
+                        "quota" => {
+                            let u = need_user()?;
+                            let blocked = if block {
+                                Some(true)
+                            } else if unblock {
+                                Some(false)
+                            } else {
+                                None
+                            };
+                            admin
+                                .put(
+                                    &format!("/admin/sites/quota/{u}"),
+                                    &serde_json::json!({ "max_sites": max_sites, "max_bytes": max_bytes, "publish_blocked": blocked }),
+                                )
+                                .await?
+                        }
+                        "move" => {
+                            let (u, p) = (need_user()?, need_arg("the new prefix")?);
+                            admin
+                                .post(
+                                    &format!("/admin/sites/move/{u}"),
+                                    &serde_json::json!({ "prefix": p }),
+                                )
+                                .await?
+                        }
+                        _ => admin.get("/admin/sites").await?,
                     };
                     println!("{}", serde_json::to_string_pretty(&v)?);
                 }
