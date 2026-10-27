@@ -27,7 +27,9 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::app::{decode_image, AppState, ComposerMode};
 use crate::model::{AttachmentKind, CallKind, Message, Part, Role};
+use crate::search;
 use crate::ui::callview;
+use crate::ui::error_note;
 use crate::ui::frost::{frosted, PANEL_BLUR};
 use crate::ui::glass;
 use crate::ui::icons::icon;
@@ -225,11 +227,12 @@ pub struct ComposerInput {
     /// Runs deferred, after this entity's update ends, so the owner may read
     /// and update the input freely.
     pub on_submit: Option<SubmitHandler>,
-    /// Tab / Down while the `@` mention menu is open: move the highlight down.
+    /// Down while the `@` mention menu is open: move the highlight down.
     pub on_mention_next: Option<MentionKeyHandler>,
-    /// Shift+Tab / Up while the `@` mention menu is open: move the highlight up.
+    /// Up / Shift+Tab while the `@` mention menu is open: move the highlight up.
     pub on_mention_prev: Option<MentionKeyHandler>,
-    /// Enter while the `@` mention menu is open: accept the highlighted row.
+    /// Tab or Enter while the `@` mention menu is open: accept the highlighted
+    /// (or hovered) row.
     pub on_mention_accept: Option<MentionKeyHandler>,
     /// Esc while the `@` mention menu is open: close it for this token.
     pub on_mention_escape: Option<MentionKeyHandler>,
@@ -630,7 +633,10 @@ impl ComposerInput {
     }
 
     fn accept_mention(&mut self, _: &AcceptMention, window: &mut Window, cx: &mut Context<Self>) {
-        self.defer_mention_key(self.on_mention_next.clone(), window, cx);
+        // Tab completes the highlighted / hovered row (same as Enter). Arrows
+        // and Shift+Tab still move the highlight ([feedback
+        // app-01M5WKBR85JVW1KKJH96FWZVK5]).
+        self.defer_mention_key(self.on_mention_accept.clone(), window, cx);
     }
 
     fn prev_mention(&mut self, _: &PrevMention, window: &mut Window, cx: &mut Context<Self>) {
@@ -2226,7 +2232,8 @@ pub struct Composer {
     /// S8 shake when the user hits Cmd+W on the pinned tab; also reused for
     /// the empty-send nudge.
     pub nudge_at: Option<u64>,
-    /// Highlighted row in the `@` mention menu (Tab / arrows move it).
+    /// Highlighted row in the `@` mention menu (arrows / hover move it;
+    /// Tab and Enter insert it).
     mention_selected: usize,
     /// Last `@token` query; when it changes, selection resets to the first row.
     mention_query_seen: Option<String>,
@@ -2591,10 +2598,12 @@ impl Composer {
     /// agents of the current space, plus `@here` (everyone in this chat) and
     /// `@agents` (all agents here) for any member of a group or people chat
     /// (Jacob, 2026-10-24); a server channel keeps the owner-only collective
-    /// pings (the client has no member list for a server yet). Case-insensitive prefix on
-    /// the handle or on any word of the display name; handle matches first,
-    /// then name matches, alphabetical by handle; at most six rows. A handle
-    /// an agent and a person both carry (#1538) tags each of those two rows.
+    /// pings (the client has no member list for a server yet). The shared
+    /// matcher on the @handle and the display name (`arbos_core::search`,
+    /// [feedback shared-search-matcher-mac-2026-10-26]): exact > prefix >
+    /// word-start, name before handle, then alphabetical by handle; at most
+    /// six rows. A handle an agent and a person both carry (#1538) tags each
+    /// of those two rows.
     fn mention_candidates(&self, cx: &App) -> Vec<MentionCandidate> {
         let Some(query) = self.mention_query(cx) else {
             return Vec::new();
@@ -2641,9 +2650,9 @@ impl Composer {
             return Vec::new();
         }
         collectives(&mut out);
-        let mut members: Vec<(MentionCandidate, bool)> = Vec::new();
+        let mut members: Vec<(MentionCandidate, search::Match)> = Vec::new();
         for a in &space.agents {
-            let Some(by_handle) = mention_match(&query, &a.handle, &a.name) else {
+            let Some(matched) = mention_match(&query, &a.handle, &a.name) else {
                 continue;
             };
             members.push((
@@ -2656,14 +2665,14 @@ impl Composer {
                     tag: None,
                     description: None,
                 },
-                by_handle,
+                matched,
             ));
         }
         for p in &space.people {
             if p.handle.eq_ignore_ascii_case(&me_handle) {
                 continue;
             }
-            let Some(by_handle) = mention_match(&query, &p.handle, &p.display_name()) else {
+            let Some(matched) = mention_match(&query, &p.handle, &p.display_name()) else {
                 continue;
             };
             members.push((
@@ -2676,12 +2685,14 @@ impl Composer {
                     tag: None,
                     description: None,
                 },
-                by_handle,
+                matched,
             ));
         }
-        members.sort_by(|(a, a_handle), (b, b_handle)| {
-            b_handle
-                .cmp(a_handle)
+        // The shared matcher's order (exact > prefix > word-start, name before
+        // handle), then alphabetical by handle, agents first on a tie.
+        members.sort_by(|(a, a_match), (b, b_match)| {
+            a_match
+                .cmp(b_match)
                 .then_with(|| a.handle.to_lowercase().cmp(&b.handle.to_lowercase()))
                 .then_with(|| b.is_agent.cmp(&a.is_agent))
         });
@@ -2727,7 +2738,7 @@ impl Composer {
         }
     }
 
-    /// Tab / ↓ or Shift+Tab / ↑ through the `@` list. Returns true when the menu
+    /// ↓ or ↑ / Shift+Tab through the `@` list. Returns true when the menu
     /// was open and handled the key.
     fn mention_move(&mut self, delta: i32, cx: &mut Context<Self>) -> bool {
         let query = self.mention_query(cx);
@@ -2824,6 +2835,14 @@ impl Composer {
                 .cursor_pointer()
                 .when(i == selected, |el| el.bg(theme.surface_2))
                 .hover(|s| s.bg(theme.surface_2))
+                // Hover owns the highlight so Tab / Enter insert that row
+                // ([feedback app-01M5WKBR85JVW1KKJH96FWZVK5]).
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    if *hovered && this.mention_selected != i {
+                        this.mention_selected = i;
+                        cx.notify();
+                    }
+                }))
                 .child(mention_picture(&c.picture, MENTION_ROW_PICTURE, &theme))
                 .child(
                     div()
@@ -2906,23 +2925,18 @@ const MENTION_MENU_FOOTER: f32 = 20.0;
 const MENTION_MENU_GAP: f32 = 8.0;
 const MENTION_ROWS_MAX: usize = 6;
 
-/// Does `query` (lower-case) match this entity? `Some(true)` on the handle,
-/// `Some(false)` on a word of the display name, `None` otherwise. An empty
-/// query matches everyone (by handle).
-fn mention_match(query: &str, handle: &str, name: &str) -> Option<bool> {
-    if query.is_empty() || handle.to_lowercase().starts_with(query) {
-        return Some(true);
-    }
-    let name = name.to_lowercase();
-    name.split(|c: char| !c.is_alphanumeric())
-        .any(|w| !w.is_empty() && w.starts_with(query))
-        .then_some(false)
+/// Does the typed `@query` match this entity? The shared matcher's verdict on
+/// the @handle and the display name (`arbos_core::search`: exact > prefix >
+/// word-start, name before handle, diacritics folded), `None` when neither
+/// matches. An empty query matches everyone.
+fn mention_match(query: &str, handle: &str, name: &str) -> Option<search::Match> {
+    search::match_entity(name, handle, None, &search::normalize_query(query))
 }
 
 /// A picker row's picture as an element: photo, D79 initials, D92 leaf or the neutral disc.
 fn mention_picture(picture: &mention::Picture, size: f32, theme: &Theme) -> gpui::AnyElement {
     match picture {
-        mention::Picture::Image(image) => img(image.clone())
+        mention::Picture::Image(image) => img(crate::ui::picture_fit::fit(image, size))
             .size(px(size))
             .flex_shrink_0()
             .rounded_full()
@@ -3008,11 +3022,12 @@ impl Render for Composer {
                 v.notice_for(active_chat.as_deref()).map(str::to_owned),
             )
         };
-        // Per-room push refusal (`not_available`): keep the link live, show one muted line.
-        let delivery_notice = state
+        // The composer's note: the last send / attachment / recording failure in this chat
+        // (the shared error element, directly above the field — Jacob 2026-10-26). A push
+        // refusal is chat-level and lives in the slot under the header, not here.
+        let send_error = state
             .active_chat_id()
-            .filter(|id| state.push_refused.contains(id))
-            .map(|_| "Messages in this chat are not being delivered".to_string());
+            .and_then(|id| state.send_error(&id).cloned().map(|slot| (id, slot)));
         let in_livekit = state.my_call.is_some();
         let has_text = !self.input.read(cx).text().trim().is_empty();
         // In a job tab (`jobtabs`) typing steers that job.
@@ -3263,6 +3278,7 @@ impl Render for Composer {
         // (`shell::file_drop_target`), not this field alone.
         let field_base = div()
             .id("composer-field")
+            .debug_selector(|| "composer-field".into())
             .flex_1()
             .min_w_0()
             .rounded(px(field_radius))
@@ -3382,13 +3398,32 @@ impl Render for Composer {
         // One muted line about the voice path while it is doing something (or
         // when it had to fall back: no microphone, mock relay). The link has
         // no line here: the header's connection pill is its one place
-        // ([feedback connection-pill]). A push-refusal notice for this chat
-        // can show here too. Overlay just above the field so the pill does
+        // ([feedback connection-pill]). Overlay just above the field so the pill does
         // not jump when the note appears (a flow child above or below would
         // shift the bottom-pinned composer).
-        let note = voice_notice
-            .filter(|_| recording || transcribing || voice_mode)
-            .or(delivery_notice);
+        let note = voice_notice.filter(|_| recording || transcribing || voice_mode);
+        if let Some((chat, slot)) = send_error {
+            let chat_for_retry = chat.clone();
+            column = column.child(error_note::render(
+                "composer-error",
+                &slot.error,
+                slot.details_open,
+                error_note::Style::Inline,
+                &theme,
+                error_note::Handlers::new()
+                    .try_again(cx.listener(move |this, _, _, cx| {
+                        let chat = chat_for_retry.clone();
+                        this.state.update(cx, |s, cx| s.retry_send_error(chat, cx));
+                    }))
+                    .toggle_details(cx.listener(move |this, _, _, cx| {
+                        let chat = chat.clone();
+                        this.state.update(cx, |s, cx| {
+                            s.toggle_send_error_details(&chat);
+                            cx.notify();
+                        });
+                    })),
+            ));
+        }
         let mut field_wrap = div().relative().w_full();
         if let Some(note) = note {
             field_wrap = field_wrap.child(
@@ -4072,6 +4107,22 @@ mod enter_tests {
         );
     }
 
+    #[gpui::test]
+    fn tab_with_an_open_mention_completes_the_highlighted_row(cx: &mut TestAppContext) {
+        // Tab inserts the highlighted handle ([feedback
+        // app-01M5WKBR85JVW1KKJH96FWZVK5]); it must not only move the highlight.
+        let (input, cx, submitted) = input_with_owner_callbacks(cx);
+        cx.simulate_input("hi @sa");
+        cx.dispatch_action(AcceptMention);
+        cx.run_until_parked();
+        assert_eq!(submitted.get(), 0, "Tab on an open @mention does not send");
+        let text = cx.update(|_, cx| input.read(cx).text().to_string());
+        assert!(
+            text.starts_with("hi @sam"),
+            "Tab completed the highlighted mention: {text:?}"
+        );
+    }
+
     /// Paste with an owner hook, as the chat composer has: text at the caret,
     /// files and images to the hook ([feedback desktop-paste-2026-10-23]).
     type PastedMedia = Rc<std::cell::RefCell<Vec<(Vec<PathBuf>, Vec<gpui::Image>)>>>;
@@ -4637,11 +4688,34 @@ mod mention_token_tests {
 
     #[test]
     fn candidates_match_the_handle_or_a_word_of_the_name() {
-        assert_eq!(mention_match("", "sam", "Sam Rivera"), Some(true));
-        assert_eq!(mention_match("sa", "sam", "Sam Rivera"), Some(true));
-        assert_eq!(mention_match("riv", "sam", "Sam Rivera"), Some(false));
-        assert_eq!(mention_match("k", "mira-k", "Mira Kaplan"), Some(false));
+        use arbos_core::search::{Match, MatchField, MatchKind};
+        let m = |kind, field| Some(Match { kind, field });
+        assert_eq!(
+            mention_match("", "sam", "Sam Rivera"),
+            Some(Match::EVERYTHING)
+        );
+        assert_eq!(
+            mention_match("sa", "sam", "Sam Rivera"),
+            m(MatchKind::Prefix, MatchField::Name)
+        );
+        assert_eq!(
+            mention_match("sam", "sam", "Sam Rivera"),
+            m(MatchKind::Exact, MatchField::Handle)
+        );
+        assert_eq!(
+            mention_match("riv", "sam", "Sam Rivera"),
+            m(MatchKind::WordStart, MatchField::Name)
+        );
+        assert_eq!(
+            mention_match("k", "mira-k", "Mira Kaplan"),
+            m(MatchKind::WordStart, MatchField::Name)
+        );
+        assert_eq!(
+            mention_match("Zoë", "zoe-m", "Zoe Martin"),
+            m(MatchKind::Prefix, MatchField::Name)
+        );
         assert_eq!(mention_match("x", "sam", "Sam Rivera"), None);
+        assert_eq!(mention_match("ivera", "sam", "Sam Rivera"), None);
         assert_eq!(mention_match("am", "sam", "Sam Rivera"), None);
     }
 }

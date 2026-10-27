@@ -140,6 +140,49 @@ final class AgentAvatarFlipTests: XCTestCase {
         XCTAssertFalse(url!.contains("token="))
     }
 
+    /// Jacob, 2026-10-26 (relaunch): the cold launch restores the record from the registry
+    /// cache and the roster copies from the people cache — two snapshots written at different
+    /// times, and agents whose avatar predates #1813 carry stamp 0 on both. A roster copy that
+    /// lost its picture must not win the tie; every surface (header record, status row, the
+    /// unattributed activity row, bubble, members list, the Secrets picker's `model.projects`)
+    /// resolves to the picture, and every URL is the public versioned route.
+    func testColdLaunchOverThePersistedStoreResolvesThePictureOnEverySurface() throws {
+        // What the two caches hold after a relaunch: the record (Codable, with its stamp and
+        // URL) and a roster copy whose picture did not survive.
+        var record = project(id: "01DOUG", name: "Doug agent", imageKey: "avatar-gen-1.jpg", version: 0)
+        record.imageURL = "https://relay.example/blob/01DOUG/avatar-gen-1.jpg?token=OLD" // a pre-#1813 cache
+        let data = try JSONEncoder().encode([record])
+        let restored = try JSONDecoder().decode([Project].self, from: data)
+        var lossy = project(id: "01DOUG", name: "Doug agent", imageKey: nil, version: 0)
+        lossy.imageURL = nil
+
+        let model = AppModel()
+        model.isFixture = true
+        model.projects = restored
+        model.peopleChats = [group([rosterCopy(lossy)])]
+        model.reconcileAgentAvatars()
+
+        let header = model.project("01DOUG")!
+        let status = model.agent(id: "01DOUG", name: "Doug agent")
+        let activity = model.agent(sender: "agent", handle: nil, name: nil, chatId: "chat_group")
+        let bubble = model.agent(sender: "agent:01DOUG", handle: "doug-agent", name: "Doug agent", chatId: "chat_group")
+        let member = model.agent(member: model.peopleChats[0].agents[0], chatId: "chat_group")
+        for (name, p) in [("header", header), ("status row", status), ("activity row", activity), ("bubble", bubble), ("members list", member)] {
+            XCTAssertEqual(p.imageKey, "avatar-gen-1.jpg", name)
+            XCTAssertEqual(p.id, "01DOUG", name)
+        }
+        // The Secrets picker draws `model.projects` records: the same key, and the URL is the
+        // public route (the fixture has no relay, so the URL itself is nil there) — never the
+        // blob URL the old cache held.
+        XCTAssertEqual(model.projects[0].imageKey, "avatar-gen-1.jpg")
+        XCTAssertFalse(model.projects[0].imageURL?.contains("/blob/") ?? false, "the old blob URL is gone")
+        XCTAssertEqual(model.peopleChats[0].agents[0].project?.imageKey, "avatar-gen-1.jpg", "the lossy roster copy was repaired")
+        // With several agents on the roster an unattributed row stays unknown (no guess).
+        let other = project(id: "01OTHER", name: "Other", imageKey: nil, version: 0)
+        model.peopleChats = [group([rosterCopy(record), rosterCopy(other)])]
+        XCTAssertNotEqual(model.agent(sender: "agent", handle: nil, name: nil, chatId: "chat_group").id, "01DOUG")
+    }
+
     /// The resolver itself (shared with the Mac through the FFI) draws the newest copy whatever
     /// order a surface hands the cards in.
     func testTheSharedResolverDrawsTheNewestCopy() {

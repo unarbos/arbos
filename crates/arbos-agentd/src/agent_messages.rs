@@ -622,14 +622,7 @@ impl Agent {
 }
 
 fn clip(s: &str, max: usize) -> String {
-    let s = s.trim();
-    if s.chars().count() <= max {
-        s.to_owned()
-    } else {
-        let mut out: String = s.chars().take(max).collect();
-        out.push('…');
-        out
-    }
+    crate::truncate::clip_marked(s.trim(), max, "", None)
 }
 
 /// `@Handle words` meant as an address to another agent (the antipattern from
@@ -665,7 +658,7 @@ mod tests {
     #[test]
     fn clip_keeps_short_text_and_marks_long() {
         assert_eq!(clip("  hello ", 10), "hello");
-        assert_eq!(clip("abcdef", 3), "abc…");
+        assert!(clip("abcdef", 3).starts_with("abc\n… [truncated: showing 3 of 6 chars]"));
     }
 
     #[test]

@@ -19,6 +19,13 @@ enum Block: Equatable, Hashable {
     /// GitHub-style pipe table: header cells, then body rows (each padded or cut to the
     /// header's width by the renderer).
     case table(header: [String], rows: [[String]])
+    /// Display math on its own line(s): `$$ … $$` or `\[ … \]`; `source` is the LaTeX between
+    /// the delimiters ([feedback math-render-ios-2026-10-26]).
+    case math(source: String)
+    /// A chart bubble's card ([feedback chart-bubble-ios-2026-10-26]): not markdown, but one
+    /// block of the agent's bubble like a code card. `spec` is the `chart` part's JSON, `table`
+    /// its markdown table (what a copy carries).
+    case chart(partId: String, spec: String, table: String)
 }
 
 /// Grok Bot's quote header inside a reply bubble: speech-bubble glyph, then the replied-to
@@ -82,11 +89,11 @@ struct Quote: Equatable, Hashable {
             case .bullets(let items), .numbered(let items): pieces = items
             case .code(_, let code): pieces = [code]
             case .table(let header, let rows): pieces = header + rows.flatMap { $0 }
+            case .math(let source): pieces = [MathText.plain(source)]
+            case .chart(_, _, let table): pieces = [table]
             }
             for piece in pieces {
-                let plain = (try? AttributedString(markdown: piece, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
-                    .map { String($0.characters) } ?? piece
-                words.append(contentsOf: plain.split(whereSeparator: \.isWhitespace))
+                words.append(contentsOf: Markdown.plain(piece).split(whereSeparator: \.isWhitespace))
             }
         }
         return words.joined(separator: " ")
@@ -141,7 +148,11 @@ enum RowKind: Equatable {
     /// `lane`: in a people chat the card sits after the sender's avatar lane, like the bubble it
     /// belongs to (#1440 follow-up: the card must share the bubble's left edge and cap width).
     /// `shellCard`: a destructive-shell card with standing options (#1544).
-    case question(questionId: String?, text: String, options: [ChoiceOption], multi: Bool, picked: [String], open: Bool, lane: Bool, shellCard: Bool = false)
+    case question(questionId: String?, text: String, options: [ChoiceOption], multi: Bool, picked: [String], open: Bool, lane: Bool, shellCard: Bool = false, offer: SecretOffer? = nil)
+    /// Secret hand-off: the message's value moved into the vault — "Secret saved as NAME"
+    /// in the sender's slot (mine right, another member's left under their name). Nothing
+    /// here is the value; nothing to copy or search.
+    case secretGhost(name: String, mine: Bool, handle: String, avatar: String?, named: Bool)
     /// A file card; tap opens the media viewer on it (Open → Quick Look).
     /// `caption` is an optional description bar under a video when the sender typed
     /// one with the attachment — not a separate text bubble.
@@ -234,6 +245,13 @@ enum Transcript {
                 var hasImage = false
                 var hasAttachment = false
                 let mine = !people || me == nil || message.sender == me || message.sender == "user"
+                // Secret hand-off: a redacted row is the ghost bubble and nothing else.
+                if let ghostName = message.parts.lazy.compactMap(\.secretRedactedName).first {
+                    chunk.append(Row(id: "\(message.id)#ghost", messageId: message.id, role: mine ? .user : .project,
+                                     kind: .secretGhost(name: ghostName, mine: mine, handle: message.senderHandle ?? "someone",
+                                                        avatar: message.senderAvatar, named: named)))
+                    break
+                }
                 // Collect picture / video attachments first so a typed description can sit
                 // as a caption bar on the last one instead of a second bubble.
                 var mediaParts: [(id: String, a: Attachment)] = []
@@ -364,7 +382,8 @@ enum Transcript {
                         chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
                                          kind: .question(questionId: q.questionId, text: q.question, options: q.options,
                                                          multi: q.multi, picked: q.answer, open: q.open,
-                                                         lane: people && message.senderHandle != nil, shellCard: q.shellCard)))
+                                                         lane: people && message.senderHandle != nil, shellCard: q.shellCard,
+                                                         offer: q.secretOffer)))
                     case .status(let id, .handoff, let text):
                         // Legacy status line; the turn-based row above already covers it.
                         if handoffName == nil {
@@ -374,15 +393,35 @@ enum Transcript {
                     case .status(let id, .stopped, _):
                         chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .system,
                                          kind: .system(icon: "stop.circle", text: "Stopped", avatarProject: nil)))
+                    case .attachment(_, let a) where a.chartPart.map(message.hasChartPart) == true:
+                        // The chart's fallback picture: an older app shows it, this one draws
+                        // the chart instead ([feedback chart-bubble-ios-2026-10-26]).
+                        break
                     case .attachment(let id, let a):
                         // People-chat agent media keeps the sender lane free, like the bubble
                         // and the question card (Mac Attachment.lane / #1509).
                         chunk.append(attachmentRow(id: "\(message.id)#\(id)", message: message, a: a,
                                                    projectId: projectId, fromUser: false, agentNames: agentNames,
                                                    lane: people && message.senderHandle != nil))
+                    case .chart(let id, _, let spec, let table, _):
+                        // A chart bubble's card: one block of the bubble, like a code card. It
+                        // joins the caption's bubble when that is the row just before it.
+                        let block: Block = .chart(partId: id, spec: spec, table: table)
+                        if let last = chunk.indices.last, chunk[last].messageId == message.id,
+                           let joined = Self.appending(block, to: chunk[last].kind) {
+                            chunk[last].kind = joined
+                        } else if people, let h = message.senderHandle {
+                            chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
+                                             kind: .member(blocks: [block], live: false, handle: h, name: message.senderName,
+                                                           avatar: message.senderAvatar, named: named && firstTextPart == nil,
+                                                           agentId: agentId, quote: nil)))
+                        } else {
+                            chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
+                                             kind: .assistant(blocks: [block], live: false, caption: nil, quote: nil)))
+                        }
                     case .error(let id, let code, let text):
                         errors.append((id: id, code: code, text: text))
-                    case .status, .tool, .subagentResult, .reasoning, .unknown:
+                    case .status, .tool, .subagentResult, .reasoning, .secretRedacted, .unknown:
                         break
                     }
                 }
@@ -398,7 +437,7 @@ enum Transcript {
                 let onlyEmpty = message.parts.allSatisfy { part in
                     switch part {
                     case .text, .status, .error: return true
-                    case .tool, .attachment, .question, .subagentResult, .reasoning, .unknown: return false
+                    case .tool, .attachment, .question, .subagentResult, .reasoning, .secretRedacted, .unknown, .chart: return false
                     }
                 }
                 let failed = !errors.isEmpty || message.status == .error
@@ -417,7 +456,7 @@ enum Transcript {
                             && (!other.plainText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                                 || other.parts.contains { part in
                                     switch part {
-                                    case .question, .attachment: return true
+                                    case .question, .attachment, .chart: return true
                                     default: return false
                                     }
                                 })
@@ -631,6 +670,20 @@ enum Transcript {
         return "\(total) messages with \(joined)"
     }
 
+    /// A chart block joins the bubble row just before it (the caption's), so the card sits
+    /// under the prose like a code card; `nil` when that row is not a bubble of blocks.
+    static func appending(_ block: Block, to kind: RowKind) -> RowKind? {
+        switch kind {
+        case .assistant(let blocks, let live, let caption, let quote):
+            return .assistant(blocks: blocks + [block], live: live, caption: caption, quote: quote)
+        case .member(let blocks, let live, let handle, let name, let avatar, let named, let agentId, let quote):
+            return .member(blocks: blocks + [block], live: live, handle: handle, name: name, avatar: avatar,
+                           named: named, agentId: agentId, quote: quote)
+        default:
+            return nil
+        }
+    }
+
     private static func attachmentRow(id: String, message: Message, a: Attachment, projectId: Id, fromUser: Bool,
                                       agentNames: [String: String], caption: String? = nil,
                                       lane: Bool = false) -> Row {
@@ -819,6 +872,11 @@ enum Markdown {
         var table: [String] = []
         var code: [String]? = nil
         var lang = ""
+        // Inside a `$$` / `\[` display-math block: its lines so far, the closer that ends
+        // it, and the raw lines (prose as typed if it never closes).
+        var math: [String]? = nil
+        var mathCloser = ""
+        var mathRaw: [String] = []
 
         func flush() {
             if !paragraph.isEmpty { out.append(.paragraph(paragraph.joined(separator: " "))); paragraph = [] }
@@ -843,6 +901,37 @@ enum Markdown {
                 flush()
                 lang = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
                 code = []
+                continue
+            }
+            if var m = math {
+                if trimmed.isEmpty { continue }
+                mathRaw.append(trimmed)
+                if trimmed.hasSuffix(mathCloser) {
+                    let inner = String(trimmed.dropLast(mathCloser.count)).trimmingCharacters(in: .whitespaces)
+                    if !inner.isEmpty { m.append(inner) }
+                    out.append(.math(source: m.joined(separator: "\n")))
+                    math = nil
+                } else {
+                    m.append(trimmed)
+                    math = m
+                }
+                continue
+            }
+            if let (opener, closer) = MathText.displayDelimiters(trimmed) {
+                let rest = String(trimmed.dropFirst(opener.count))
+                if rest.hasSuffix(closer) {
+                    let inner = String(rest.dropLast(closer.count)).trimmingCharacters(in: .whitespaces)
+                    if !inner.isEmpty {
+                        flush()
+                        out.append(.math(source: inner))
+                        continue
+                    }
+                }
+                flush()
+                let first = rest.trimmingCharacters(in: .whitespaces)
+                math = first.isEmpty ? [] : [first]
+                mathCloser = closer
+                mathRaw = [trimmed]
                 continue
             }
             if trimmed.isEmpty { flush(); continue }
@@ -872,6 +961,7 @@ enum Markdown {
             paragraph.append(trimmed)
         }
         if let c = code { out.append(.code(lang: lang, code: c.joined(separator: "\n"))) }
+        if math != nil { paragraph.append(contentsOf: mathRaw) }
         flush()
         return out
     }
@@ -923,11 +1013,43 @@ enum Markdown {
         return (try? JSONSerialization.jsonObject(with: data)) != nil
     }
 
-    /// The text inline markdown renders to, markers removed (`[Name](url)` → `Name`).
+    /// The text inline markdown renders to, markers removed (`[Name](url)` → `Name`,
+    /// `$O(n^2)$` → `O(n²)`).
     static func plain(_ text: String) -> String {
-        (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
-            .map { String($0.characters) } ?? text
+        MathText.pieces(text).map { piece in
+            switch piece {
+            case .prose(let p):
+                return (try? AttributedString(markdown: p, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+                    .map { String($0.characters) } ?? p
+            case .math(let src):
+                return MathText.plain(src)
+            }
+        }.joined()
     }
+
+    /// Typeset TeX as attributed text: variables italic in the serif face, digits and
+    /// operators upright, `\mathbf` bold — KaTeX's look in Grok Bot, at `size` points.
+    static func math(_ source: String, color: Color, size: CGFloat) -> AttributedString {
+        var out = AttributedString()
+        for run in MathText.typeset(source) {
+            var piece = AttributedString(run.text)
+            piece.swiftUI.foregroundColor = color
+            piece.swiftUI.font = mathFont(size, run.style)
+            out.append(piece)
+        }
+        return out
+    }
+
+    static func mathFont(_ size: CGFloat, _ style: MathText.Style) -> Font {
+        switch style {
+        case .italic: return .system(size: size, design: .serif).italic()
+        case .upright: return .system(size: size, design: .serif)
+        case .bold: return .system(size: size, weight: .bold, design: .serif)
+        }
+    }
+
+    /// Display math is this much larger than body text.
+    static let displayMathScale: CGFloat = 1.15
 
     /// Inline markdown with Mac-parity link paint and Grok-style code chips:
     /// accent + underline on links; monospaced (a point under body) on a soft
@@ -955,6 +1077,23 @@ enum Markdown {
     }()
 
     private static func inlineUncached(_ text: String, color: Color, link: Color, codeChip: Color) -> AttributedString {
+        // Math is cut out before the markdown parse (`_` and `*` mean something else in TeX)
+        // and typeset in its place.
+        let pieces = MathText.pieces(text)
+        if pieces.count == 1, case .prose(let prose) = pieces[0] {
+            return inlineProse(prose, color: color, link: link, codeChip: codeChip)
+        }
+        var attr = AttributedString()
+        for piece in pieces {
+            switch piece {
+            case .prose(let prose): attr.append(inlineProse(prose, color: color, link: link, codeChip: codeChip))
+            case .math(let source): attr.append(math(source, color: color, size: Theme.body))
+            }
+        }
+        return attr
+    }
+
+    private static func inlineProse(_ text: String, color: Color, link: Color, codeChip: Color) -> AttributedString {
         var attr = (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
             ?? AttributedString(text)
         linkBareURLs(&attr)
@@ -1017,11 +1156,20 @@ struct RowView: View, Equatable {
     var onQuoteTap: ((Quote) -> Void)? = nil
     /// Briefly tinted after a quote tap landed on this row's message.
     var highlighted: Bool = false
+    /// Swipe right on this bubble → reply (the long-press Reply item's twin; `BubbleSwipe`).
+    /// Nil on system / channel / non-message rows.
+    var onReply: (() -> Void)? = nil
     /// Shared mention table from ChatView (built once per directory sync).
     let mentions: MentionTable
 
     /// Which reaction chip is expanded to show who used that emoji under the bubble.
     @State private var selectedReactionEmoji: String? = nil
+    /// Reply swipe: how far the bubble has followed the finger to the right.
+    @State private var replyDrag: CGFloat = 0
+    /// Reply swipe: what the current drag was decided to be (once, at 12 pt).
+    @State private var replyLock: BubbleSwipe.Lock = .undecided
+    /// Reply swipe: the threshold haptic fired for this drag.
+    @State private var replyArmed = false
 
     /// Trailing column width for swipe-revealed times (fits "12:59 PM").
     static let timeRevealWidth: CGFloat = 56
@@ -1053,7 +1201,7 @@ struct RowView: View, Equatable {
     /// Bubbles get a swipe time; centred system / card / error rows do not.
     private var showsSwipeTime: Bool {
         switch row.kind {
-        case .system, .question, .error, .forwardHint:
+        case .system, .question, .error, .forwardHint, .secretGhost:
             return false
         case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
             return true
@@ -1088,8 +1236,8 @@ struct RowView: View, Equatable {
                 .padding(-4)
         )
         .animation(.easeInOut(duration: 0.35), value: highlighted)
-        // iMessage: drag left → times. Reply is long-press only (swipe fought vertical scroll).
-        .offset(x: -timeReveal)
+        // iMessage: drag left → times; drag right → reply. Exclusive by direction.
+        .offset(x: replyDrag - timeReveal)
         .overlay(alignment: .trailing) {
             if let time = swipeTimeLabel, timeReveal > 0.5 {
                 Text(time)
@@ -1102,6 +1250,58 @@ struct RowView: View, Equatable {
                     .accessibilityHidden(timeReveal < 12)
             }
         }
+        .overlay(alignment: .leading) {
+            // The reply arrow slides out from behind the bubble's leading edge.
+            if onReply != nil, replyDrag > 0.5 {
+                Image(systemName: "arrowshape.turn.up.left")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(replyArmed ? theme.accent : theme.muted)
+                    .frame(width: BubbleSwipe.revealWidth, alignment: .leading)
+                    .offset(x: replyDrag - BubbleSwipe.revealWidth)
+                    .opacity(Double(min(1, replyDrag / (BubbleSwipe.revealWidth * 0.55))))
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
+        }
+        .simultaneousGesture(replySwipeGesture, including: onReply == nil ? .subviews : .all)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(onReply == nil ? "row:\(row.id)" : "bubble:\(row.messageId)")
+    }
+
+    /// Swipe right on a message → reply (`BubbleSwipe`). Decides once at 12 pt: a
+    /// horizontal-right pan outside the edge zone follows the finger, taps at the
+    /// threshold and replies on release; anything else is left to the scroll view, the
+    /// time reveal or the system edge pop. The start point is read in the screen's space
+    /// (`BackSwipe.space`) so the edge zone is the screen's, not the bubble's.
+    private var replySwipeGesture: some Gesture {
+        DragGesture(minimumDistance: BubbleSwipe.lockDistance, coordinateSpace: .named(BackSwipe.space))
+            .onChanged { value in
+                guard onReply != nil else { return }
+                if replyLock == .undecided {
+                    replyLock = BubbleSwipe.lock(translation: value.translation, startX: value.startLocation.x)
+                    if replyLock == .reply { BackSwipe.bubbleSwipeActive = true }
+                }
+                guard replyLock == .reply else { return }
+                let reveal = BubbleSwipe.reveal(for: value.translation.width)
+                let armed = BubbleSwipe.triggers(reveal: reveal)
+                if armed != replyArmed {
+                    replyArmed = armed
+                    if armed { Haptics.pick() }
+                }
+                var t = Transaction()
+                t.disablesAnimations = true
+                withTransaction(t) { replyDrag = reveal }
+            }
+            .onEnded { _ in
+                let fire = replyLock == .reply && replyArmed
+                replyLock = .undecided
+                replyArmed = false
+                withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) { replyDrag = 0 }
+                if fire { onReply?() }
+                // The screen's full-screen back swipe sees the same drag end; let it read
+                // the flag first.
+                DispatchQueue.main.async { BackSwipe.bubbleSwipeActive = false }
+            }
     }
 
     @ViewBuilder
@@ -1151,24 +1351,31 @@ struct RowView: View, Equatable {
                 .accessibilityIdentifier("own-bubble-\(delivery)")
             }
         case .other(let text, let handle, let avatar, let named, let quote):
-            let openPerson = { model.openPersonProfile(handle: handle, avatarUrl: avatar, chatId: chatId) }
+            // The avatar and the name are one profile target (`ProfileToggle`): a tap
+            // opens the person's sheet, a tap on either while it is up dismisses it.
+            let personTarget = model.personTarget(handle: handle, avatarUrl: avatar, chatId: chatId)
+            let personName = model.personName(handle: handle) ?? "@\(handle)"
+            let personLabel = ProfileToggle.label(name: personName, showing: model.profileShows(personTarget))
+            let openPerson = { model.toggleProfile(personTarget) }
             HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
                 Button(action: openPerson) {
                     PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
                 }
                 .buttonStyle(.plain)
                 .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
-                .accessibilityLabel("@\(handle), profile")
+                .accessibilityLabel(personLabel)
+                .accessibilityIdentifier("sender-avatar")
                 // Group / channel: the name inside the bubble, in the sender's colour,
                 // then the reply quote, then the text. No time in the bubble (drag to reveal).
                 VStack(alignment: .leading, spacing: 0) {
                     if named {
                         Button(action: openPerson) {
-                            LiveSenderName(name: model.personName(handle: handle) ?? "@\(handle)",
+                            LiveSenderName(name: personName,
                                            url: avatar, seed: model.personId(handle: handle) ?? handle, agent: false)
                         }
                         .buttonStyle(.plain)
                         .padding(.bottom, Self.nameToTextGap)
+                        .accessibilityLabel(personLabel)
                         .accessibilityIdentifier("bubble-name")
                     }
                     if let quote {
@@ -1190,18 +1397,21 @@ struct RowView: View, Equatable {
             }
             .task(id: avatar) { SenderAccents.shared.load(url: avatar) }
         case .member(let blocks, let live, let handle, let name, let avatar, let named, let agentId, let quote):
-            let openMember = {
-                if let agentId { model.showProfile(.agent(projectId: agentId)) }
-                else { model.openPersonProfile(handle: handle, avatarUrl: avatar, chatId: chatId) }
-            }
             // One identity for the disc, the caption and the bar (#1592): the same resolver
             // the presence row asks, with the same row fields.
             let agent = model.agent(sender: agentId ?? "", handle: handle, name: name, chatId: chatId)
+            // The disc and the name are one profile target (`ProfileToggle`): a tap opens
+            // the agent's sheet, a tap on either while it is up dismisses it.
+            let memberTarget: ProfileTarget = agentId.map { ProfileTarget.agent(projectId: $0) }
+                ?? model.personTarget(handle: handle, avatarUrl: avatar, chatId: chatId)
+            let memberLabel = ProfileToggle.label(name: agent.name, showing: model.profileShows(memberTarget))
+            let openMember = { model.toggleProfile(memberTarget) }
             HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
                 Button(action: openMember) { memberAvatar(agent) }
                     .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
                     .buttonStyle(.plain)
-                    .accessibilityLabel("@\(handle), profile")
+                    .accessibilityLabel(memberLabel)
+                    .accessibilityIdentifier("sender-avatar")
                 memberBubble(
                     agent,
                     content: VStack(alignment: .leading, spacing: 0) {
@@ -1211,6 +1421,7 @@ struct RowView: View, Equatable {
                             }
                             .buttonStyle(.plain)
                             .padding(.bottom, Self.nameToTextGap)
+                            .accessibilityLabel(memberLabel)
                             .accessibilityIdentifier("bubble-name")
                         }
                         if let quote {
@@ -1272,13 +1483,45 @@ struct RowView: View, Equatable {
             .foregroundStyle(theme.muted)
             .frame(maxWidth: .infinity)
             .multilineTextAlignment(.center)
-        case .question(let questionId, let text, let options, let multi, let picked, let open, let lane, let shellCard):
+        case .secretGhost(let name, let mine, let handle, let avatar, let named):
+            // The ghost: surface fill with a hairline, muted ink, the key glyph; the name is
+            // the only thing in text ink. Mine sits right like my bubble, another member's
+            // left under their name with their avatar — never a value, never selectable.
+            let lead = mine ? "Secret saved as " : "\(model.personName(handle: handle) ?? "@\(handle)") saved a secret as "
+            let ghost = HStack(spacing: 7) {
+                Image(systemName: "key")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(theme.muted)
+                (Text(lead).foregroundColor(theme.muted) + Text(name).foregroundColor(theme.text).fontWeight(.medium))
+                    .font(theme.font(Theme.body))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, Theme.bubbleHPad)
+            .padding(.vertical, Theme.bubbleVPad)
+            .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.card))
+            .overlay(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).strokeBorder(theme.separator, lineWidth: 1))
+            .accessibilityLabel("\(lead)\(name)")
+            .accessibilityIdentifier("secret-ghost")
+            if mine {
+                HStack(spacing: 8) {
+                    Spacer(minLength: 0)
+                    ghost.frame(maxWidth: maxBubble, alignment: .trailing)
+                }
+            } else {
+                HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
+                    PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
+                        .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
+                    ghost.frame(maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset), alignment: .leading)
+                    Spacer(minLength: 0)
+                }
+            }
+        case .question(let questionId, let text, let options, let multi, let picked, let open, let lane, let shellCard, let offer):
             // The card is a transcript row like a bubble: the same left edge (after the avatar
             // lane in a people chat) and the same cap width as an incoming bubble.
             HStack(spacing: 0) {
                 if lane { Color.clear.frame(width: Theme.memberLane(composerInset: composerInset), height: 1) }
                 QuestionCard(rowId: row.id, chatId: chatId, questionId: questionId, title: text, options: options,
-                             multi: multi, picked: picked, open: open, shellCard: shellCard)
+                             multi: multi, picked: picked, open: open, shellCard: shellCard, offer: offer)
                     .frame(maxWidth: lane ? maxBubble - Theme.memberLane(composerInset: composerInset) : maxBubble, alignment: .leading)
                 Spacer(minLength: 0)
             }
@@ -1433,7 +1676,8 @@ struct RowView: View, Equatable {
     private var reactionLeading: CGFloat {
         switch row.kind {
         case .other, .member: return Theme.memberLane(composerInset: composerInset)
-        case .question(_, _, _, _, _, _, let lane, _): return lane ? Theme.memberLane(composerInset: composerInset) : 0
+        case .question(_, _, _, _, _, _, let lane, _, _): return lane ? Theme.memberLane(composerInset: composerInset) : 0
+        case .secretGhost(_, let mine, _, _, _): return mine ? 0 : Theme.memberLane(composerInset: composerInset)
         case .image(_, _, _, let lane): return lane ? Theme.memberLane(composerInset: composerInset) : 0
         default: return 0
         }
@@ -1649,6 +1893,16 @@ struct BlockView: View {
             TableBlock(header: header, rows: rows, mentions: mentions)
         case .code(let lang, let code):
             CodeCard(lang: lang, code: code)
+        case .chart(let partId, let spec, _):
+            ChartCard(partId: partId, spec: spec)
+        case .math(let source):
+            // Display math: typeset, a size up, centred on its own line (KaTeX's display
+            // mode in Grok Bot).
+            Text(Markdown.math(source, color: theme.text, size: Theme.body * Markdown.displayMathScale))
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.vertical, 4)
+                .accessibilityIdentifier("display-math")
         }
     }
 }
@@ -1826,68 +2080,84 @@ struct TableBlock: View {
     }
 }
 
-/// A fenced ``` block: the language and a Copy pill in the header (the Mac's
-/// code card), the mono body under it. Copy puts the block on the pasteboard,
-/// tints while pressed and reads "Copied" for 1.5 s (Jacob 2026-10-24: the
-/// Mac pill showed no click effect; the iPhone card had no Copy at all).
+/// A fenced ``` block as Grok Bot's code card ([feedback
+/// code-highlighting-ios-2026-10-26]): no header row, a copy icon floating
+/// top-right, the mono body coloured by the shared highlighter (keywords,
+/// function names, strings, numbers, comments in italic), 1 pt indent guides,
+/// and long lines scrolling sideways inside the card. Copy puts the block on the
+/// pasteboard, tints while pressed and shows a check for 1.5 s.
 struct CodeCard: View {
     @Environment(\.theme) private var theme
     let lang: String
     let code: String
     /// Screenshot rig (`ARBOS_RIG_CODE_COPY=pressed|copied`): the simulator
-    /// cannot hold a touch through a capture, and "Copied" lasts 1.5 s.
+    /// cannot hold a touch through a capture, and the check lasts 1.5 s.
     private static let rig = ProcessInfo.processInfo.environment["ARBOS_RIG_CODE_COPY"]
     @State private var copied = CodeCard.rig == "copied"
 
     static let copiedFor: Duration = .seconds(1.5)
+    static let radius: CGFloat = 12
+
+    /// The button's action: the block, verbatim, on the general pasteboard.
+    static func copyToPasteboard(_ code: String) {
+        UIPasteboard.general.string = code
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text(lang.isEmpty ? "code" : lang)
-                    .font(theme.font(Theme.tiny))
-                    .foregroundStyle(theme.muted)
-                Spacer(minLength: 8)
-                Button {
-                    UIPasteboard.general.string = code
-                    Haptics.pick()
-                    copied = true
-                    Task { @MainActor in
-                        try? await Task.sleep(for: Self.copiedFor)
-                        copied = false
-                    }
-                } label: {
-                    HStack(spacing: 3) {
-                        if copied {
-                            Image(systemName: "checkmark").font(theme.font(11, weight: .semibold))
-                        }
-                        Text(copied ? "Copied" : "Copy")
-                            .font(theme.font(Theme.tiny, weight: .medium))
-                    }
-                    .foregroundStyle(copied ? theme.online : theme.muted)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(copied ? theme.online.opacity(0.14) : .clear)
-                    )
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(CopyPillPress(tint: theme.accent, forced: CodeCard.rig == "pressed"))
-                .accessibilityLabel(copied ? "Copied" : "Copy code")
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .overlay(alignment: .bottom) { Rectangle().fill(theme.separator).frame(height: 0.5) }
+        let size = CodeHighlight.fontSize * theme.textScale
+        let advance = CodeHighlight.glyphAdvance(size: size)
+        let lineHeight = CodeHighlight.lineHeight(size: size)
+        let font = theme.font(CodeHighlight.fontSize, design: .monospaced)
+        let text = CodeHighlight.attributed(lang: lang, code: code, palette: theme.codePalette, font: font, plain: theme.text)
+        let guides = CodeHighlight.indentGuides(code, advance: advance)
+        ZStack(alignment: .topTrailing) {
             ScrollView(.horizontal, showsIndicators: false) {
-                Text(code)
-                    .font(theme.font(14, design: .monospaced))
-                    .foregroundStyle(theme.text)
-                    .padding(10)
+                Text(text)
+                    .lineSpacing(0)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .overlay(alignment: .topLeading) {
+                        ForEach(Array(guides.enumerated()), id: \.offset) { _, guide in
+                            Rectangle()
+                                .fill(theme.codePalette.guide)
+                                .frame(width: 1, height: lineHeight)
+                                .offset(x: guide.x, y: CGFloat(guide.line) * lineHeight)
+                        }
+                    }
+                    .padding(.leading, CodeHighlight.padX)
+                    .padding(.trailing, CodeHighlight.padRight)
+                    .padding(.vertical, CodeHighlight.padY)
+                    .accessibilityIdentifier("code-body")
             }
+            Button {
+                Self.copyToPasteboard(code)
+                Haptics.pick()
+                copied = true
+                Task { @MainActor in
+                    try? await Task.sleep(for: Self.copiedFor)
+                    copied = false
+                }
+            } label: {
+                Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(copied ? theme.online : theme.muted)
+                    .frame(width: CodeHighlight.copySize, height: CodeHighlight.copySize)
+                    .background(
+                        // The card's own colour, so the square covers the code under it.
+                        ZStack { theme.bubbleAssistant; theme.bg.opacity(0.6) }
+                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    )
+                    .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(theme.separator, lineWidth: 0.5))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(CopyPillPress(tint: theme.accent, forced: CodeCard.rig == "pressed"))
+            .accessibilityLabel(copied ? "Copied" : "Copy code")
+            .accessibilityIdentifier(copied ? "code-copy-check" : "code-copy")
+            .padding(CodeHighlight.copyInset)
         }
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.bg.opacity(0.6)))
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(RoundedRectangle(cornerRadius: Self.radius, style: .continuous).fill(theme.bg.opacity(0.6)))
+        .overlay(RoundedRectangle(cornerRadius: Self.radius, style: .continuous).stroke(theme.separator, lineWidth: 0.5))
+        .clipShape(RoundedRectangle(cornerRadius: Self.radius, style: .continuous))
+        .accessibilityIdentifier("code-card")
     }
 }
 
@@ -2109,7 +2379,17 @@ final class AvatarImageCache {
         Task { _ = await load(url) }
     }
 
-    /// Shared download per URL; waiters resume together when the picture lands.
+    /// Waits between attempts. A cold launch asks for pictures before the network is up (a
+    /// phone that just woke, the relay mid-restart); one failed attempt used to leave the leaf
+    /// placeholder on every surface until the view was rebuilt (Jacob, 2026-10-26, Mac and
+    /// iPhone alike).
+    nonisolated static let retrySeconds: [UInt64] = [2, 5, 10, 20, 40]
+
+    /// Shared download per URL; waiters resume together when the picture lands. Picture URLs
+    /// name their version (`…/avatar.jpg?v=<stamp>`, `/avatars/<user>.jpg?v=…`), so the disk
+    /// cache is asked first: a relaunch paints the picture with no network at all, and a
+    /// changed picture is a new URL. Failures retry with backoff before giving up; a 404 ("no
+    /// picture") does not retry.
     func load(_ url: String) async -> UIImage? {
         if let img = images[url] { return img }
         if requested.contains(url) {
@@ -2119,10 +2399,24 @@ final class AvatarImageCache {
         }
         guard url.contains("://"), let u = AvatarImageCache.sizedURL(url, width: AvatarImageCache.maxPixelSize) else { return nil }
         requested.insert(url)
-        let img: UIImage? = await Task.detached(priority: .userInitiated) {
-            guard let (data, _) = try? await URLSession.shared.data(from: u) else { return nil }
-            return AvatarImageCache.decode(data)
-        }.value
+        var img: UIImage?
+        var attempt = 0
+        while true {
+            let (data, status) = await Task.detached(priority: .userInitiated) { () -> (Data?, Int) in
+                var req = URLRequest(url: u)
+                req.cachePolicy = .returnCacheDataElseLoad
+                guard let (data, resp) = try? await URLSession.shared.data(for: req) else { return (nil, 0) }
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? 200
+                return (code / 100 == 2 ? data : nil, code)
+            }.value
+            if let data, let decoded = AvatarImageCache.decode(data) {
+                img = decoded
+                break
+            }
+            if status == 404 || attempt >= AvatarImageCache.retrySeconds.count { break }
+            try? await Task.sleep(nanoseconds: AvatarImageCache.retrySeconds[attempt] * 1_000_000_000)
+            attempt += 1
+        }
         if let img {
             images[url] = img
         } else {

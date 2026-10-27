@@ -126,6 +126,8 @@ const ICONS: &[(&str, &str)] = &[
         "<path d=\"M4 14v5a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-5\"/><path d=\"M4 14h4l1.5 2h5l1.5-2h4\"/><path d=\"M12 11V4M9 7l3-3 3 3\"/>"
     ),
     icon!("lock", "<rect x=\"5\" y=\"11\" width=\"14\" height=\"10\" rx=\"2\"/><path d=\"M8 11V8a4 4 0 0 1 8 0v3\"/>"),
+    // The Blocked state ([feedback blocked-state-mac-2026-10-26]): a circle with a slash.
+    icon!("nosign", "<circle cx=\"12\" cy=\"12\" r=\"8.5\"/><path d=\"M6 6l12 12\"/>"),
     // A secret whose real value is in the agent's environment (D83 decision 2).
     icon!("terminal", "<rect x=\"3\" y=\"5\" width=\"18\" height=\"14\" rx=\"2\"/><path d=\"M7 9l3 3-3 3M12 15h5\"/>"),
     // Profile pages (Telegram-style action rows).
@@ -156,6 +158,12 @@ const ICONS: &[(&str, &str)] = &[
     icon!("crown", "<path d=\"M4 17h16l1-9-5 3.5L12 5l-4 6.5L3 8z\" fill=\"#000\"/>"),
     icon!("photo", "<rect x=\"3\" y=\"5\" width=\"18\" height=\"14\" rx=\"2\"/><circle cx=\"9\" cy=\"10\" r=\"1.5\" fill=\"#000\"/><path d=\"M21 16l-5-5-8 8\"/>"),
     icon!("arrow-down", "<path d=\"M12 5v14M5 12l7 7 7-7\" stroke-width=\"2.6\"/>"),
+    // Chart cards: Save PNG (arrow into a tray) and Expand (arrows out of the corners).
+    icon!(
+        "download",
+        "<path d=\"M12 4v11M7.5 10.5L12 15l4.5-4.5\"/><path d=\"M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2\"/>"
+    ),
+    icon!("expand", "<path d=\"M14 4h6v6M10 20H4v-6M20 4l-7 7M4 20l7-7\"/>"),
     // Grok Bot's update disc glyph (SF `icloud.and.arrow.down`): a cloud open
     // at the bottom — 8 pt dome, 3 pt lobes, straight sides — with the arrow
     // coming out of it. Traced pixel for pixel from the 72 px disc in Jacob's
