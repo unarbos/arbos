@@ -331,7 +331,7 @@ dependencies = [
 
 [[package]]
 name = "arbos-agentd"
-version = "0.6.285"
+version = "0.6.288"
 dependencies = [
  "anyhow",
  "arbos-core",
@@ -365,7 +365,7 @@ dependencies = [
 
 [[package]]
 name = "arbos-client"
-version = "0.6.285"
+version = "0.6.288"
 dependencies = [
  "arbos-core",
  "serde",
@@ -374,7 +374,7 @@ dependencies = [
 
 [[package]]
 name = "arbos-core"
-version = "0.6.285"
+version = "0.6.288"
 dependencies = [
  "anyhow",
  "bytes",
@@ -396,7 +396,7 @@ dependencies = [
 
 [[package]]
 name = "arbos-ffi"
-version = "0.6.285"
+version = "0.6.288"
 dependencies = [
  "arbos-client",
  "arbos-core",
@@ -410,7 +410,7 @@ dependencies = [
 
 [[package]]
 name = "arbos-local"
-version = "0.6.285"
+version = "0.6.288"
 dependencies = [
  "anyhow",
  "arbos-core",
@@ -429,7 +429,7 @@ dependencies = [
 
 [[package]]
 name = "arbos-mac"
-version = "0.6.285"
+version = "0.6.288"
 dependencies = [
  "anyhow",
  "arbos-client",
@@ -478,7 +478,7 @@ dependencies = [
 
 [[package]]
 name = "arbos-matrix"
-version = "0.6.285"
+version = "0.6.288"
 dependencies = [
  "anyhow",
  "futures",
@@ -493,7 +493,7 @@ dependencies = [
 
 [[package]]
 name = "arbos-relay"
-version = "0.6.285"
+version = "0.6.288"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -528,7 +528,7 @@ dependencies = [
 
 [[package]]
 name = "arbos-update"
-version = "0.6.285"
+version = "0.6.288"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -550,7 +550,7 @@ dependencies = [
 
 [[package]]
 name = "arbosctl"
-version = "0.6.285"
+version = "0.6.288"
 dependencies = [
  "anyhow",
  "arbos-core",
