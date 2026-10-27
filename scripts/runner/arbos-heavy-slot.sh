@@ -34,6 +34,15 @@ RIG_LEASE_MAX_S="${ARBOS_HEAVY_RIG_LEASE_MAX_S:-3600}"
 # its test run was killed; the slot outlived the holder by an hour with the simulator already Shutdown).
 SIM_IDLE_RECLAIM_S="${ARBOS_HEAVY_SIM_IDLE_RECLAIM_S:-300}"
 GATE_QUEUE="$SLOTS_DIR/.gate-waiting"
+# Fair share for rigs (08:4x Oct 27, bc-f1a62f3e / bc-1c63254c: with gate halves queued back to back, rigs
+# waited 45 min, fell through "uncapped" with no slot, and the xcrun boot guard then refused the boot). After
+# RIG_FAIR_AFTER_GATES consecutive gate grants, the next grant goes to a waiting rig even while a gate half
+# is queued — a short lease: RIG_FAIR_LEASE_S (15 min) instead of the 60-min cap. The grant counter lives in
+# $SLOTS_DIR/.gate-grants. And a waiter that exhausts WAIT_MAX_S gets a REAL slot (name uncapped-*, not counted
+# against the cap) instead of "none", so the boot guard and the reclaim rules still see it.
+RIG_FAIR_AFTER_GATES="${ARBOS_HEAVY_RIG_FAIR_AFTER_GATES:-2}"
+RIG_FAIR_LEASE_S="${ARBOS_HEAVY_RIG_FAIR_LEASE_S:-900}"
+GATE_GRANTS="$SLOTS_DIR/.gate-grants"
 POLL_S=10
 
 ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
@@ -63,8 +72,10 @@ live_slots() {
     name=$(cat "$d/name" 2>/dev/null || echo "")
     since=$(cat "$d/since" 2>/dev/null || echo "")
     age=$(( $(date -u +%s) - ${since:-$(date -u +%s)} ))
-    if ! is_exempt_name "$name" && (( age > RIG_LEASE_MAX_S )); then
-      rm -rf "$d" 2>/dev/null && echo "$(ts) heavy-slot: reclaimed rig lease $(basename "$d") held ${age}s (> ${RIG_LEASE_MAX_S}s; pid $pid still runs uncapped — rule #1957: a slot is for the burst, not the session)" >&2
+    local cap=$RIG_LEASE_MAX_S
+    [[ -f "$d/lease" ]] && cap=$(cat "$d/lease" 2>/dev/null || echo "$RIG_LEASE_MAX_S")
+    if ! is_exempt_name "$name" && (( age > cap )); then
+      rm -rf "$d" 2>/dev/null && echo "$(ts) heavy-slot: reclaimed rig lease $(basename "$d") held ${age}s (> ${cap}s; pid $pid still runs uncapped — rule #1957: a slot is for the burst, not the session)" >&2
       logger -t arbos-heavy-slot "reclaimed rig lease $name (pid $pid) after ${age}s" 2>/dev/null || true
       continue
     fi
@@ -86,6 +97,7 @@ live_slots() {
         rm -f "$d/shutdown-since" 2>/dev/null || true
       fi
     fi
+    [[ "$name" == uncapped-* ]] && continue   # over the cap by decision after WAIT_MAX_S; not counted against waiters
     n=$((n + 1))
   done
   echo "$n"
@@ -142,9 +154,14 @@ acquire() {
     mkdir -p "$GATE_QUEUE" 2>/dev/null; chmod 1777 "$GATE_QUEUE" 2>/dev/null || true
     mark="$GATE_QUEUE/$$"; echo "$owner" > "$mark" 2>/dev/null || mark=""
   fi
+  local fair=0
   while :; do
     n=$(live_slots)
-    if (( n < limit )) && { is_gate_name "$name" || ! gate_waiting; }; then
+    # Rig fair share: a rig may take the slot ahead of a queued gate half once RIG_FAIR_AFTER_GATES gate halves
+    # were granted in a row (short lease). Gate halves yield to a rig whose fair turn it is.
+    fair=0
+    if ! is_gate_name "$name" && ! is_exempt_name "$name" && (( $(cat "$GATE_GRANTS" 2>/dev/null || echo 0) >= RIG_FAIR_AFTER_GATES )); then fair=1; fi
+    if (( n < limit )) && { is_gate_name "$name" || ! gate_waiting || (( fair )); }; then
       slot="$SLOTS_DIR/$(date +%s)-$$-${name//\//_}.slot"
       if mkdir "$slot" 2>/dev/null; then
         echo "$owner" > "$slot/pid"; echo "$name" > "$slot/name"; date -u +%s > "$slot/since"
@@ -155,14 +172,23 @@ acquire() {
         else
           (( waited_note )) && echo "$(ts) heavy-slot: $name got a slot after $(( $(date +%s) - t0 )) s" >&2
           [[ -n "$mark" ]] && rm -f "$mark" 2>/dev/null
+          if is_gate_name "$name"; then
+            echo $(( $(cat "$GATE_GRANTS" 2>/dev/null || echo 0) + 1 )) > "$GATE_GRANTS" 2>/dev/null || true
+          elif ! is_exempt_name "$name"; then
+            echo 0 > "$GATE_GRANTS" 2>/dev/null || true
+            if (( fair )); then echo "$RIG_FAIR_LEASE_S" > "$slot/lease"; echo "$(ts) heavy-slot: $name took its fair-share turn (lease ${RIG_FAIR_LEASE_S}s) ahead of a queued gate half" >&2; fi
+          fi
           echo "$slot"; return 0
         fi
       fi
     fi
     if (( $(date +%s) - t0 >= WAIT_MAX_S )); then
-      echo "$(ts) heavy-slot: $name waited ${WAIT_MAX_S}s for a slot ($n busy); proceeding uncapped" >&2
+      # A real slot over the cap, so the boot guard and the reclaim rules still see this job.
+      slot="$SLOTS_DIR/$(date +%s)-$$-uncapped-${name//\//_}.slot"
+      if mkdir "$slot" 2>/dev/null; then echo "$owner" > "$slot/pid"; echo "uncapped-$name" > "$slot/name"; date -u +%s > "$slot/since"; else slot=none; fi
+      echo "$(ts) heavy-slot: $name waited ${WAIT_MAX_S}s for a slot ($n busy); proceeding uncapped (slot $(basename "$slot"))" >&2
       [[ -n "$mark" ]] && rm -f "$mark" 2>/dev/null
-      echo "none"; return 0
+      echo "$slot"; return 0
     fi
     if (( ! waited_note )) || (( ( $(date +%s) - t0 ) % 60 < POLL_S )); then
       local why=""; ! is_gate_name "$name" && gate_waiting && why=" — a gate half is queued, rigs yield"
