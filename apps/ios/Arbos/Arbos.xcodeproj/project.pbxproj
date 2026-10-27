@@ -46,6 +46,7 @@
 		A15EC9000000000000000002 /* AgentPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15EC9000000000000000001 /* AgentPicker.swift */; };
 		A11B0000000000000000A004 /* LibraryListTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11B0000000000000000A003 /* LibraryListTests.swift */; };
 		A15EC9000000000000000004 /* AgentPickerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15EC9000000000000000003 /* AgentPickerTests.swift */; };
+		A15EC9000000000000000104 /* SecretHandoffTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15EC9000000000000000103 /* SecretHandoffTests.swift */; };
 		A1A9D0000000000000000004 /* AgentIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A9D0000000000000000003 /* AgentIdentityTests.swift */; };
 		A1AF11000000000000000002 /* AgentAvatarFlipTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1AF11000000000000000001 /* AgentAvatarFlipTests.swift */; };
 		A10A6AAB1A89692C252B33E4 /* FeedbackSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A19A848187E4B392C3266926 /* FeedbackSheet.swift */; };
@@ -234,6 +235,7 @@
 		A15EC9000000000000000001 /* AgentPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentPicker.swift; sourceTree = "<group>"; };
 		A11B0000000000000000A003 /* LibraryListTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryListTests.swift; sourceTree = "<group>"; };
 		A15EC9000000000000000003 /* AgentPickerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentPickerTests.swift; sourceTree = "<group>"; };
+		A15EC9000000000000000103 /* SecretHandoffTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecretHandoffTests.swift; sourceTree = "<group>"; };
 		A1A9D0000000000000000003 /* AgentIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentIdentityTests.swift; sourceTree = "<group>"; };
 		A1AF11000000000000000001 /* AgentAvatarFlipTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentAvatarFlipTests.swift; sourceTree = "<group>"; };
 		A19A848187E4B392C3266926 /* FeedbackSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedbackSheet.swift; sourceTree = "<group>"; };
@@ -583,6 +585,7 @@
 				A1A9D0000000000000000003 /* AgentIdentityTests.swift */,
 				A1AF11000000000000000001 /* AgentAvatarFlipTests.swift */,
 				A15EC9000000000000000003 /* AgentPickerTests.swift */,
+				A15EC9000000000000000103 /* SecretHandoffTests.swift */,
 				A1C5440000000000000003 /* ShellApprovalCardTests.swift */,
 				A1BB00000000000000000003 /* BackSwipeTests.swift */,
 			);
@@ -909,6 +912,7 @@
 				A1A9D0000000000000000004 /* AgentIdentityTests.swift in Sources */,
 				A1AF11000000000000000002 /* AgentAvatarFlipTests.swift in Sources */,
 				A15EC9000000000000000004 /* AgentPickerTests.swift in Sources */,
+				A15EC9000000000000000104 /* SecretHandoffTests.swift in Sources */,
 				A1C5440000000000000004 /* ShellApprovalCardTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
