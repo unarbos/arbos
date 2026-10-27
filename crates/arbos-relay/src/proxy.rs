@@ -377,20 +377,8 @@ async fn forward(
     let project_id = project_of(&state, &principal, &headers)
         .or(project_override)
         .unwrap_or_else(|| "relay-admin".to_owned());
-    if let Ok(Some(p)) = state.db.project(&project_id) {
-        let today = state
-            .db
-            .usage_since(&project_id, start_of_utc_day_ms())
-            .map(|u| u.usd)
-            .unwrap_or(0.0);
-        if today >= p.spend_cap_daily {
-            let _ = state.db.enqueue_push(
-                &project_id,
-                "spend_cap",
-                &json!({ "spend_today": today, "cap": p.spend_cap_daily }),
-            );
-            return (StatusCode::PAYMENT_REQUIRED, json!({ "error": { "type": "spend_cap", "message": format!("daily spend cap ${:.2} reached", p.spend_cap_daily) } }).to_string()).into_response();
-        }
+    if let Some(r) = crate::credits::project_cap_refusal(&state, &project_id) {
+        return r;
     }
     if let Err(r) = crate::credits::check_call(&state, &principal, &project_id) {
         return crate::credits::refused_response(&r);
@@ -828,19 +816,7 @@ fn audio_spend_cap(state: &AppState, principal: &Principal, project_id: &str) ->
     if let Err(r) = crate::credits::check_call(state, principal, project_id) {
         return Some(crate::credits::refused_response(&r));
     }
-    let p = state.db.project(project_id).ok().flatten()?;
-    let today = state
-        .db
-        .usage_since(project_id, start_of_utc_day_ms())
-        .map(|u| u.usd)
-        .unwrap_or(0.0);
-    (today >= p.spend_cap_daily).then(|| {
-        (
-            StatusCode::PAYMENT_REQUIRED,
-            json!({ "error": { "type": "spend_cap", "message": format!("daily spend cap ${:.2} reached", p.spend_cap_daily) } }).to_string(),
-        )
-            .into_response()
-    })
+    crate::credits::project_cap_refusal(state, project_id)
 }
 
 fn audio_key(state: &AppState) -> Option<String> {

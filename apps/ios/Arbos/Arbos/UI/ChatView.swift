@@ -1364,22 +1364,13 @@ struct ChatSession: View {
 
     // MARK: Header (floating glass)
 
-    /// Strip the messages scroll under (ref-02): frosted on Glass, solid fade on Matte.
+    /// Strip the messages scroll under (ref-02): the shared `ListTopFade` from the physical
+    /// top edge — frosted on Glass, solid on Matte — plus whatever the header stacks
+    /// (member chips, the Search-in-chat bar, call strips).
     private var headerBlur: some View {
-        ZStack {
-            if theme.isGlass {
-                Rectangle().fill(.ultraThinMaterial)
-            }
-            theme.bg.opacity(theme.isGlass ? 0.78 : 1)
-        }
-        .frame(height: (showsMemberChips ? 156 : 118) + (Controls.diameter - 42) + headerExtra)
-        .mask(LinearGradient(colors: [.black, .black, .clear], startPoint: .top, endPoint: .bottom))
-        .ignoresSafeArea(edges: .top)
-        .allowsHitTesting(false)
+        ListTopFade(screen: .chat, extra: (showsMemberChips ? 38 : 0) + headerExtra)
     }
 
-    /// Which kind of chat this header fronts — the spec is the same for all four
-    /// ([feedback ios-header-glass-2026-10-25]).
     private var headerKind: ChatHeaderKind {
         if channel != nil { return .channel }
         if let people { return people.isGroup ? .group : .dm }
