@@ -24,3 +24,4 @@ iana-time-zone.workspace = true
 regex-lite.workspace = true
 # The shared search matcher folds diacritics (NFD, combining marks dropped).
 unicode-normalization = "0.1"
+syntect.workspace = true
