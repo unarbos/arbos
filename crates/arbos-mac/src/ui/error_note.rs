@@ -505,6 +505,7 @@ mod error_ui_lint {
             ("update-error", "ui/profiles/me.rs"),
             ("routine-error", "ui/routines.rs"),
             ("question-card-error", "ui/widgets.rs"),
+            ("secret-offer-", "ui/secret_card.rs"),
             ("connector-error-", "ui/connectors.rs"),
         ];
         let all = sources();
