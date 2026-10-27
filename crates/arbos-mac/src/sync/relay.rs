@@ -1511,6 +1511,7 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
             | PushEventDto::SecretRequest(_)
             | PushEventDto::SecretsPaused(_)
             | PushEventDto::SecretExpiring(_)
+            | PushEventDto::MessageRedacted(_)
             | PushEventDto::CallMissed(_) => {}
         }
     }
