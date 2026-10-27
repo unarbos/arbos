@@ -273,13 +273,22 @@ reference, so Matte (no window vibrancy) is not an excuse for a flat fill.
 default) and he saw the solid `bubble_assistant` pill on his AffineTeam group
 (v0.6.268). Recipe (`glass::header_surface` + `glass::header_frost`,
 `Theme::header_glass*`): the list blurred through the control's rounded
-bounds, a see-through fill (dark `#3b3f45` @ 56 %, light white @ 60 % — the
-same on both surfaces; the backdrop blur composites ≈ 20 % darker than its
-source on Metal and wgpu alike, so over flat `#fcfcfc` the light pill lands
-near the `#ededed` of the solid pill it replaces), a 1 pt rim (white 18 % /
-black 10 %), a top highlight (white 30 % / 90 %) and a 1 pt lift. Sizes and
-placements are untouched; the rest of the glass restyle stays paused. Pinned
-by `header::glass_tests` (every kind × surface × appearance).
+bounds at a **light** blur (`glass::HEADER_BLUR` 5 pt — a line of transcript
+passing under the pill stays legible; the menus' 16 pt turned it to mush), a
+see-through fill (dark `#3b3f45` @ **30 %**, light white @ 60 % — the same on
+both surfaces; the backdrop blur composites ≈ 20 % darker than its source on
+Metal and wgpu alike, so over flat `#fcfcfc` the light pill lands near the
+`#ededed` of the solid pill it replaces), a 1 pt rim (white **30 %** / black
+10 %), a top highlight (white **45 %** / 90 %) and a 1 pt lift. The dark pill
+is read as glass the way Grok Bot's is over its black page: ≈ +12/255 above
+the page, its shape carried by the rim, the transcript visible through it —
+not as a plate. (v0.6.275 shipped 56 % / 18 % / 30 % / 16 pt and Jacob's
+14:15 CR shot still read "opaque dark gray"; [feedback
+mac-header-pill-see-through-2026-10-26].) White text on it keeps ≥ 4.5:1
+because the pill always lies over the chat column — the page on Matte, the
+85 % page wash on Glass. Sizes and placements are untouched; the rest of the
+glass restyle stays paused. Pinned by `header::glass_tests` (every kind ×
+surface × appearance; `the_dark_pill_is_see_through_and_its_text_still_reads`).
 
 ## Message timestamps (Jacob 2026-10-24, [feedback timestamps-hover-only-2026-10-24])
 
@@ -800,6 +809,59 @@ blocked person's, back once unblocked). Rig: `ARBOS_OPEN_PROFILE=user`
 (the DM peer's pane), `user:message` (the pill pressed), `group:member`
 (a member with no DM yet).
 
+### Profile targets toggle the pane (Jacob 2026-10-26, [feedback profile-pane-toggle-mac-2026-10-26])
+
+**Every picture or name of a person or an agent in the chat is one profile
+target: a click opens their page in the right pane; a click on that target —
+or on any other target for the same person or agent — while their page shows
+closes the pane; a click on someone else swaps the page in place, with no
+back stack.** Jacob (2026-10-26, Allan's bubble with the @Affine chip):
+"clicking the agent or user in the chat should open their user profile right
+bar. Clicking it again should close it. Same if you click the user profile
+picture to open the side bar clicking it again should close it." Same in
+agent chats, DMs, groups, server channels and job tabs; the iPhone's sheet
+follows the same single action ([feedback profile-pane-toggle-ios-2026-10-26]).
+
+| Target | Before | Now |
+|---|---|---|
+| Sender name in a person's bubble (group / channel) | pushed the person's page over whatever was open; a second click did nothing | toggle |
+| Sender name in an agent's bubble | pushed the agent's page; second click nothing | toggle |
+| Disc beside a person's / an agent's bubble | as the name (push, no close) | toggle, the same target as the name |
+| @mention chip, people and agents (bubble text and the composer) | opened and swapped, never closed; a person's chip page carried no `space_id`, so the DM pill did not see it as "open" | toggle; a person is the same person whichever chat the page came from |
+| Chat header pill — agent chat / job tab | toggled (after the 250 ms double-click window on an owned agent) | unchanged, now labelled |
+| Chat header pill — DM | toggled, but only against a page with its own `space_id` | toggles against the person, from any target |
+| Status-row pictures (typing people, working agents) | nothing: no click, arrow cursor | toggle; a face no card can name (`AgentIdentity::known` false) stays inert |
+| Sidebar footer / rail: my picture | toggled `Me` | unchanged |
+| Pane rows (members, "Run by …" owner link) | push, `‹` returns | unchanged — a page's own rows still stack |
+
+One action: `AppState::toggle_profile(page)` — close when
+`profile_shows(&page)` (`ProfilePage::same_subject`: a person by handle,
+case-insensitive, whatever the `space_id`; everything else by id), else
+`open_profile` (the stack clears). `ui::profile_target::attach` gives a
+target the pointing hand, the `Button` role, the accessible label — **"Open
+<name>'s profile"** / **"Close profile"**, from the pane's state at draw
+time — and the click; `profile_target::mark` is the same without the click
+for the header pill, whose listener keeps the rename double-click. The
+status-row pictures carry `Participant.page` (person by handle, agent by
+project) and `presence::row(.., Some(&state), ..)` attaches them. The DM
+pill's ring (`header::render` `pane_open`) and `pane::is_open` read
+`profile_shows` too. Pictures come from the shared resolver as before
+(`people::avatar`, `avatars::agent_picture` / `agent_identity`).
+
+Pinned by `profile_target::tests` (label; same-subject; a source scan that
+`transcript.rs`, `presence.rs`, `mention.rs` and `header.rs` call no
+`open_profile` / `push_profile` of their own) and the headless
+`profile_target::render_tests` on the real shell — Allan and Affine in a
+group, Allan typing, his bubble with the @Affine chip, a DM with Allan:
+`every_target_opens_and_a_second_click_closes` (name, disc, chip, status-row
+face, for a person and an agent), `any_target_for_the_same_profile_closes_it`,
+`a_different_person_swaps_the_page_in_place` (no ‹, empty stack),
+`the_header_pill_toggles_the_same_person_as_the_bubbles`,
+`the_label_tracks_whose_page_is_showing`. The test platform exposes neither
+the cursor nor the AccessKit tree, so hand and label are pinned by
+construction (every target goes through `attach` / `mark`; the scan guards
+the road).
+
 ## Pane animations (Jacob 2026-10-24, [feedback right-pane-slide-2026-10-24], [feedback sidebar-slide-2026-10-24])
 
 **The right info pane and the left chat sidebar slide; they never pop.**
@@ -862,6 +924,37 @@ nothing picked → no picture sent), `avatar_picker::tests::the_draft_offers_upl
 `avatar::tests::neutral_pick_is_accepted_and_the_rest_still_validates`.
 Rig: `ARBOS_OPEN_NEW_AGENT=1` / `ARBOS_OPEN_CREATE=group|server` with
 `ARBOS_NEW_AGENT_NAME=…` and `ARBOS_CREATE_PICTURE=upload|generate[:<prompt>]`.
+
+## Error messages: one element, one place per surface (Jacob 2026-10-26, [feedback error-messages-mac-2026-10-26]; iPhone [feedback error-messages-ios-2026-10-26])
+
+**Every failure the user sees is one shared element — `ui::error_note` on the Mac, `ErrorNote`
+on the iPhone — drawn in one fixed place per surface, with one plain sentence; the raw words
+live behind Details / Copy and never in the sentence.** Jacob's ask ("fix and universalize nice
+error messages everywhere so that they look professional and are always in the same place")
+after a raw `POST …/avatar/generate: error sending request … operation timed out` ran across
+the avatar picker's footer over Cancel / Set avatar (his shot:
+`media/feedback/error-messages/jacob-before-mac-avatar-generate-timeout-raw-error-over-buttons.png`;
+the approved mocks: `media/feedback/error-messages/mock-errors-*.png`).
+
+| Part | Rule |
+|---|---|
+| The element | a `danger_soft` block (radius 10, padding 10 / 12), a 15 pt `danger` disc with a white "!" — **the only red** — the sentence `TEXT_SMALL` 13 / 17 in `text`, then the actions: **Try again** (a 24 pt `surface_2` capsule, 12.5 semibold; **Sign in** on 401 / 403) and **Details** (12.5 `text_muted` + chevron) at the end of the sentence's line when they fit, else right-aligned on a row under it. Details unfolds a `code_bg` mono block (11 / 15 `text_muted`): *what · call · where / when / build*, ids shortened in the middle, with a 20 pt **Copy** capsule (the full raw error for a feedback report). A toast adds `shadow_md` and a × |
+| The words | `sync::user_error::UserError` — a **verb** (what the user tried: "generate the image", "send your message", "save the secret") and a **class**: Timeout "The server took too long." · Offline "You're offline." / "Arbos can't reach the server right now." · Refused (4xx) the relay's own sentence, else "That wasn't accepted." · NotFound "It isn't there any more." · Server (5xx) "The server had a problem." · RateLimited (429) "Too many requests — wait a moment." · ContentRefused "That prompt was refused — try different words." · Upload "The file couldn't be read." / "That file is too large (25 MB max)." / "That file type isn't supported." · AuthExpired "You were signed out." · Unknown "Something went wrong." Sentence = "Couldn't <verb>. <why>". Try again only where a retry can help (not on content refused, 404, size / type, a 4xx with the relay's reason); Sign in replaces it on 401 / 403 |
+| Where (takes space, never absolute over controls) | **Sheets** (avatar picker, Create sheets, New Message / group / Add members, server sheets, feedback): the top of the body under the bar / tab pill, before the first control; the sheet grows by the note. **Pane pages** (Secrets, Devices, Updates, connectors, routines): under the pane header, before the first card / field. **Composer** failures (send refused, offline, attachment, recording): directly above the composer, the composer's width; the failed bubble keeps its red mark (the word "Retry" moved into the note). **Chat-level** ("Messages in this chat aren't being delivered right now.", "Can't reach your machine."): the slot under the header where the machine banner lives, the column's width. **Toasts** (download / save / forward / connect failures with no surface up): the notice stack top-right under the header, 380 wide, 10 s (info notices 6 s), the pointer holds it, × dismisses, Try again re-issues the command. **Sign-in**: under the button row and the hint, 420 wide. Field validation ("Pick someone…", "Give the routine a name.") is the same element with the words as a refusal |
+| Never | raw URLs, HTTP verbs, status numbers, ids, Rust / Swift error chains or `localizedDescription` in a sentence; red body text; a failure as a plain notice card; a failure drawn at a sheet's footer or over buttons |
+
+Code: `sync/user_error.rs` (`UserError::classify / from_relay / from_status / from_text / of`,
+`Fault`), `Shared::fail` / `fail_with` in `sync/relay.rs` (every relay-side failure; `notice` is
+for things that worked), `SyncEvent::Failure { error, retry }`, `AppState::push_failure`,
+`send_errors` (the composer slot), `failure_claim` (a pane form up takes its verbs' failures),
+`ui/error_note.rs` (`render`, `Slot`, `Handlers`, `Style`). Pinned by
+`error_note::error_ui_lint` (source scan: no `notice(format!("…{err}"))`, no
+`.text_color(theme.danger)` outside the element without `// error-ui: exception <case>`, every
+surface's note present through `error_note::render` with its id) and the headless
+`avatar_picker::me_picker_tests` (`a_timed_out_generation_shows_the_shared_note_above_the_body`,
+`a_failure_event_is_an_error_toast_with_details_try_again_and_close`). Rig:
+`ARBOS_RIG_FAILURE=toast|composer|delivery|machine|secrets|people`; a Generate prompt containing
+"timeout" fails after 2 s.
 
 ## Delete is immediate — no confirm (Jacob 2026-10-24, [feedback remove-delete-confirms-2026-10-24])
 

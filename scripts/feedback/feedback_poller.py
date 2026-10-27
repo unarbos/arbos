@@ -3786,6 +3786,38 @@ class Loop:
         self.store.event(fid, "tracked", issue=number, owner=owner)
         return st
 
+    DEPLOY_RESTART_BEFORE_S = 240  # a relay comes up ~10 s before its "deployed" event; the build+swap window before it
+    DEPLOY_RESTART_AFTER_S = 60
+
+    def relay_deploy_near(self, started_iso: str) -> str | None:
+        """The sha of a CD relay deploy whose `deployed` event (deploy-events.jsonl, written by the deploy worker)
+        sits within [-DEPLOY_RESTART_BEFORE_S, +DEPLOY_RESTART_AFTER_S] of a relay start time; None = no deploy
+        explains that restart. Reads the tail of the file only."""
+        path = self.cfg.state_dir / "deploy-events.jsonl"
+        try:
+            with open(path, "rb") as f:
+                f.seek(0, 2)
+                f.seek(max(0, f.tell() - 65536))
+                tail = f.read().decode(errors="replace")
+        except OSError:
+            return None
+        started = parse_iso(started_iso)
+        for line in reversed(tail.splitlines()):
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if ev.get("deploy") != "relay" or ev.get("event") != "deployed":
+                continue
+            try:
+                at = parse_iso(ev["at"])
+            except (KeyError, ValueError):
+                continue
+            delta = (at - started).total_seconds()
+            if -self.DEPLOY_RESTART_AFTER_S <= delta <= self.DEPLOY_RESTART_BEFORE_S:
+                return str(ev.get("sha") or "deploy")
+        return None
+
     def watch_relay_restarts(self) -> None:
         """Every relay restart drops every client's websocket; a burst of them leaves the apps on
         "Reconnecting…" for minutes (2026-10-22 18:5x: four restarts in 95 min — three CD relay deploys and an
@@ -3808,8 +3840,17 @@ class Loop:
         last = watch.get("last_uptime")
         if last is not None and uptime < last:
             started = (now - dt.timedelta(seconds=int(uptime))).strftime("%Y-%m-%dT%H:%M:%SZ")
-            watch["restarts"].append(started)
-            log(f"relay-restarts: the relay restarted at {started} (uptime {uptime}s)")
+            deploy = self.relay_deploy_near(started)
+            if deploy:
+                # A CD relay deploy restarts the relay on purpose (one per coalescing window, hotfixes aside);
+                # it is in the deploy log, so it is not a crash and does not count (#1964: three deploys in an
+                # hour — 19:57, 20:33, 20:40 Oct 26, two of them P0 hotfixes — filed as "relay restarted 3×").
+                watch.setdefault("deploy_restarts", []).append(started)
+                watch["deploy_restarts"] = watch["deploy_restarts"][-20:]
+                log(f"relay-restarts: the relay restarted at {started} for the CD deploy of {deploy[:8]} (not counted)")
+            else:
+                watch["restarts"].append(started)
+                log(f"relay-restarts: the relay restarted at {started} (uptime {uptime}s) — no deploy near it: counted as a crash")
         watch["last_uptime"] = uptime
         cutoff = (now - dt.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
         recent = [t for t in watch["restarts"] if t >= cutoff]
@@ -3818,7 +3859,7 @@ class Loop:
             self.gh.ensure_label("relay-restarts", "D93F0B", "The relay restarted repeatedly; every restart drops every client's websocket")
             body = ("The relay restarted **" + str(len(recent)) + " times in the last hour** (healthz `uptime_s` resets): " + ", ".join(recent) +
                     ".\n\nEvery restart closes every client's websocket; the apps show \"Reconnecting…\" and their backoff grows with each "
-                    "drop. Sources: CD relay deploys (`deploy-events.jsonl`) and, before the hot snapshot switch, image rolls. "
+                    "drop. Restarts that match a CD relay deploy in `deploy-events.jsonl` are not counted — these are crashes or restarts nothing in the deploy log explains. "
                     "This issue closes itself after a quiet hour. Runbook: docs/feedback-loop.md → relay restarts.")
             issue = self.gh.create_issue(f"relay restarted {len(recent)}× in the last hour — clients reconnecting", body, ["relay-restarts"])
             watch["issue"] = issue["number"]
