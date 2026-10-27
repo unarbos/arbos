@@ -1,0 +1,28 @@
+{
+ "id": "m11-two-reminders-cancel-one",
+ "lane": "c",
+ "category": "managing",
+ "title": "Two reminders set in one message; cancel one by its subject; the other must still fire",
+ "turns": [
+  {
+   "prompt": "Set two reminders for me: in 3 minutes append 'WATER PLANTS' to {D}/remind.log, and in 4 minutes append 'CALL BANK' to {D}/remind.log. Confirm both with their times.",
+   "seed": "mkdir -p {D}",
+   "timeout_s": 180,
+   "routine": {
+    "count": 2
+   }
+  },
+  {
+   "prompt": "Scrap the plants one — the bank one stays.",
+   "pre_wait_s": 5,
+   "timeout_s": 120,
+   "reply_regex": "(?i)(cancel|dropp|remov|delet|scrapp)",
+   "routine": {
+    "count": 1
+   },
+   "after_s": 250,
+   "verify": "f={D}/remind.log; p=0; b=0; if [ -f $f ]; then p=$(grep -c 'WATER PLANTS' $f); b=$(grep -c 'CALL BANK' $f); fi; echo \"SHOW plants=$p bank=$b\"; if [ \"$p\" -eq 0 ] && [ \"$b\" -ge 1 ]; then echo PASS; else echo FAIL: plants=$p bank=$b; fi"
+  }
+ ],
+ "cleanup_routines": true
+}
