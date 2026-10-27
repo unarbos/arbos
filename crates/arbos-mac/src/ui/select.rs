@@ -515,6 +515,21 @@ pub struct Selectable {
     /// Site pictures for the named links, and the placeholder's colour.
     link_icons: Rc<LinkIcons>,
     icon_placeholder: Hsla,
+    /// Search-in-chat marks for this bubble's words, while the bar is up.
+    marks: Option<Rc<SearchMarks>>,
+}
+
+/// What ⌘F Search-in-chat paints on a hit's words ([feedback
+/// search-in-chat-mac-2026-10-26]): every hit's words on the accent wash,
+/// the revealed hit's in Find's yellow with dark text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SearchMarks {
+    /// Folded keyword (`chat_search::hit_ranges`); empty = sender-only query, no word marks.
+    pub needle: String,
+    pub current: bool,
+    pub wash: Hsla,
+    pub current_wash: Hsla,
+    pub current_text: Hsla,
 }
 
 impl Selectable {
@@ -529,7 +544,15 @@ impl Selectable {
             chip_accent: Hsla::default(),
             link_icons: LinkIcons::empty(),
             icon_placeholder: Hsla::default(),
+            marks: None,
         }
+    }
+
+    /// The words a Search-in-chat query hits are marked in every text of
+    /// the bubbles built from this.
+    pub fn with_marks(mut self, marks: Option<SearchMarks>) -> Self {
+        self.marks = marks.map(Rc::new);
+        self
     }
 
     /// Named links draw their site's picture (or `placeholder`, a neutral
@@ -595,6 +618,7 @@ impl Selectable {
             chip_accent: self.chip_accent,
             link_icons: self.link_icons.clone(),
             icon_placeholder: self.icon_placeholder,
+            marks: self.marks.clone(),
         }
     }
 }
@@ -611,6 +635,7 @@ pub struct BubbleSelectable {
     chip_accent: Hsla,
     link_icons: Rc<LinkIcons>,
     icon_placeholder: Hsla,
+    marks: Option<Rc<SearchMarks>>,
 }
 
 /// One mention chip inside a [`SelectableText`]: the `@Name` run (element-local
@@ -674,6 +699,21 @@ impl BubbleSelectable {
                 accent,
             });
         }
+        // Search-in-chat: the hit words on the wash, the revealed hit's in
+        // Find's yellow; the selection highlight then splits them like any run.
+        let runs = match self.marks.as_deref() {
+            Some(marks) if !marks.needle.is_empty() => {
+                let (bg, fg) = if marks.current {
+                    (marks.current_wash, Some(marks.current_text))
+                } else {
+                    (marks.wash, None)
+                };
+                crate::chat_search::hit_ranges(&text, &marks.needle)
+                    .into_iter()
+                    .fold(runs, |runs, range| mark(runs, range, bg, fg))
+            }
+            _ => runs,
+        };
         let runs = match &self.range {
             Some(range) => highlight(runs, local_range(range, at, text.len()), self.color),
             None => runs,
@@ -784,6 +824,18 @@ pub fn paragraph_range(text: &str, index: usize) -> Range<usize> {
 
 /// Split `runs` at the selection edges and paint the inside with `color`.
 pub fn highlight(runs: Vec<TextRun>, range: Range<usize>, color: Hsla) -> Vec<TextRun> {
+    mark(runs, range, color, None)
+}
+
+/// Split `runs` at `range` and paint the inside: `background` behind it and,
+/// when given, `color` on its glyphs (a search hit's words; the selection
+/// highlight keeps the glyph colour).
+pub fn mark(
+    runs: Vec<TextRun>,
+    range: Range<usize>,
+    background: Hsla,
+    color: Option<Hsla>,
+) -> Vec<TextRun> {
     if range.is_empty() {
         return runs;
     }
@@ -800,9 +852,13 @@ pub fn highlight(runs: Vec<TextRun>, range: Range<usize>, color: Hsla) -> Vec<Te
             out.push(TextRun {
                 len: cut - cursor,
                 background_color: if inside {
-                    Some(color)
+                    Some(background)
                 } else {
                     run.background_color
+                },
+                color: match color {
+                    Some(c) if inside => c,
+                    _ => run.color,
                 },
                 ..run.clone()
             });
