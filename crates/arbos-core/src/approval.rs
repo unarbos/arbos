@@ -148,6 +148,12 @@ pub const NOT_RISKY_TOOLS: &[&str] = &[
     // `tool-send` pattern (`post_`) and raised a card on the first live use
     // ([feedback chart-post-not-gated-2026-10-27]).
     "post_chart",
+    // Agent-hosted sites (#2060): publishing the user's own static site to their own address
+    // is the thing they asked for, like `deliver_file`; `publish_` matches the `tool-send`
+    // pattern and raised a card on the first live use (the box's MCP client then timed out).
+    "publish_site",
+    "unpublish_site",
+    "list_sites",
     "routines_list",
     "routines_create",
     "routines_update",
@@ -1157,6 +1163,8 @@ mod tests {
                 "post_chart",
                 json!({ "chart": { "kind": "line", "series": [] }, "caption": "x" }),
             ),
+            ("publish_site", json!({ "app": "pura-vida-surf" })),
+            ("unpublish_site", json!({ "app": "pura-vida-surf" })),
         ] {
             assert_eq!(
                 classify_tool(tool, &args),
