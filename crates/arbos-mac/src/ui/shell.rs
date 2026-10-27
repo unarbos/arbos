@@ -13,7 +13,7 @@ use gpui::{
 };
 
 use crate::app::SignInMode;
-use crate::app::{AppState, DetailsTarget, ProfilePage, ServerSheet};
+use crate::app::{AppEvent, AppState, DetailsTarget, ProfilePage, ServerSheet};
 use crate::image_picker;
 use crate::model::{now_ms, CallKind, MachineState};
 use crate::sign_in;
@@ -23,6 +23,7 @@ use crate::ui::avatar_picker;
 use crate::ui::avatars::{self, leaf, LeafPick};
 use crate::ui::callview;
 use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
+use crate::ui::chat_search;
 use crate::ui::composer::{self, Composer, ComposerEvent, ComposerInput};
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
 use crate::ui::create_entity::{self, Kind as CreateKind};
@@ -225,6 +226,13 @@ pub struct Shell {
     /// The command palette's search field (⌘⇧F / ⌘K / the sidebar's Search
     /// disc; [feedback search-palette-2026-10-24]).
     pub(crate) search_input: Entity<ComposerInput>,
+    /// ⌘F Search-in-chat's field ([feedback search-in-chat-mac-2026-10-26]);
+    /// its text drives `AppState::chat_search`.
+    pub(crate) chat_search_input: Entity<ComposerInput>,
+    /// Rig: `ARBOS_CHAT_SEARCH=<text>` opens the Search-in-chat bar with that
+    /// query once the first chat with rows is on screen (synthetic key events
+    /// do not reach the GPUI field on the shared display). Consumed on use.
+    chat_search_rig: Option<String>,
     /// The palette: open/closed, highlighted row, rows drawn last frame.
     pub(crate) palette: palette::PaletteState,
     /// The palette's result list scroll (keeps the highlight in view).
@@ -702,6 +710,33 @@ impl Shell {
                 }));
             });
         }
+        let chat_search_input = cx.new(ComposerInput::new);
+        chat_search_input.update(cx, |input, _| {
+            input.set_placeholder("Search in chat");
+            input.set_font_size(chat_search::metrics::FIELD_FONT);
+        });
+        // Every keystroke re-runs the search; Enter / ⇧Enter / ⇥ / Esc are
+        // actions in the bar's "ChatSearch" context.
+        cx.observe(&chat_search_input, |this, input, cx| {
+            let typed = input.read(cx).text().to_string();
+            this.state
+                .update(cx, |s, cx| s.chat_search_set_text(typed, cx));
+            cx.notify();
+        })
+        .detach();
+        // Rows of the searched chat changed (a message, a channel page): the
+        // hits follow, after the state's own update has finished.
+        cx.subscribe(&state, |_, state, event: &AppEvent, cx| {
+            if let AppEvent::TranscriptText { chat_id, .. }
+            | AppEvent::TranscriptChanged { chat_id } = event
+            {
+                let chat_id = chat_id.clone();
+                cx.defer(move |cx| {
+                    state.update(cx, |s, cx| s.chat_search_refresh(&chat_id, cx));
+                });
+            }
+        })
+        .detach();
         let viewer_search = cx.new(ComposerInput::new);
         viewer_search.update(cx, |input, _| {
             input.set_placeholder("Search");
@@ -989,6 +1024,10 @@ impl Shell {
             avatar_picker: None,
             avatar_prompt_input,
             search_input,
+            chat_search_input,
+            chat_search_rig: std::env::var("ARBOS_CHAT_SEARCH")
+                .ok()
+                .filter(|q| !q.trim().is_empty()),
             palette,
             palette_scroll: ScrollHandle::new(),
             viewer_search,
@@ -1210,6 +1249,7 @@ impl Shell {
             || focused(&self.pairing_input)
             || focused(&self.project_input)
             || focused(&self.search_input)
+            || focused(&self.chat_search_input)
             || focused(&self.viewer_search)
             || focused(&self.people_input)
             || focused(&self.server_input)
@@ -2375,6 +2415,98 @@ impl Shell {
         cx.notify();
     }
 
+    // ----- ⌘F Search-in-chat ([feedback search-in-chat-mac-2026-10-26]) ---------
+
+    /// ⌘F: the bar drops under the header pill of the open chat and takes
+    /// the keyboard; pressed again while it is up, the cursor goes back to
+    /// its field (Find's convention — the key never closes the bar).
+    fn open_chat_search_action(
+        &mut self,
+        _: &chat_search::Open,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_chat_search(window, cx);
+    }
+
+    pub(crate) fn open_chat_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu_open = false;
+        self.close_popovers(cx);
+        if self.palette.open {
+            self.close_palette(window, cx);
+        }
+        let was_open = self.state.read(cx).chat_search_open();
+        let opened = self.state.update(cx, |s, cx| s.open_chat_search(cx));
+        if !opened {
+            return;
+        }
+        if !was_open {
+            self.chat_search_input.update(cx, |i, cx| i.clear(cx));
+        }
+        let handle = self.chat_search_input.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    /// Esc / ✕: the bar goes, its marks with it; the composer types again.
+    pub(crate) fn close_chat_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| s.close_chat_search(cx));
+        self.chat_search_input.update(cx, |i, cx| i.clear(cx));
+        Composer::focus(&self.composer, window, cx);
+        cx.notify();
+    }
+
+    fn chat_search_close_action(
+        &mut self,
+        _: &chat_search::Close,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.state.read(cx).chat_search_open() {
+            self.close_chat_search(window, cx);
+        }
+    }
+
+    /// Enter / › / ⌘G.
+    fn chat_search_next(&mut self, _: &chat_search::Next, _: &mut Window, cx: &mut Context<Self>) {
+        if self.state.read(cx).chat_search_open() {
+            self.state.update(cx, |s, cx| s.chat_search_step(1, cx));
+        }
+    }
+
+    /// ⇧Enter / ‹ / ⇧⌘G.
+    fn chat_search_prev(&mut self, _: &chat_search::Prev, _: &mut Window, cx: &mut Context<Self>) {
+        if self.state.read(cx).chat_search_open() {
+            self.state.update(cx, |s, cx| s.chat_search_step(-1, cx));
+        }
+    }
+
+    /// ⇥ in the field: pin the sender the typed name offers.
+    fn chat_search_pin_action(
+        &mut self,
+        _: &chat_search::PinSender,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(sender) = self.state.read(cx).chat_search_offer() {
+            self.pin_chat_search_sender(sender, window, cx);
+        }
+    }
+
+    pub(crate) fn pin_chat_search_sender(
+        &mut self,
+        sender: crate::chat_search::Sender,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state
+            .update(cx, |s, cx| s.chat_search_pin_sender(sender, cx));
+        self.chat_search_input.update(cx, |i, cx| i.clear(cx));
+        let handle = self.chat_search_input.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
     /// ↑ / ↓ in the palette field (`ComposerInput::on_arrow`).
     pub(crate) fn palette_step(&mut self, delta: i32, cx: &mut Context<Self>) {
         if !self.palette.open {
@@ -2453,6 +2585,10 @@ impl Shell {
                     Composer::focus(&self.composer, window, cx);
                 }
             }
+            return;
+        }
+        if self.state.read(cx).chat_search_open() {
+            self.close_chat_search(window, cx);
             return;
         }
         if self.voice.update(cx, |v, cx| v.escape(cx)) {
@@ -3142,11 +3278,15 @@ impl Shell {
                     show_sidebar_toggle,
                     cx,
                 ));
-            let pre: Vec<AnyElement> = self
-                .render_banner(cx)
+            // The Search-in-chat bar first, under the header; then the banner.
+            let pre: Vec<AnyElement> = chat_search::bar(self, cx)
                 .into_iter()
-                .chain(self.render_delivery_note(cx))
-                .map(IntoElement::into_any_element)
+                .chain(
+                    self.render_banner(cx)
+                        .into_iter()
+                        .chain(self.render_delivery_note(cx))
+                        .map(IntoElement::into_any_element),
+                )
                 .collect();
             let bottom = div()
                 .w_full()
@@ -3231,6 +3371,10 @@ impl Shell {
             .child(header::render(self, &space, show_sidebar_toggle, cx));
         let floating_header = dropped;
         let mut pre: Vec<AnyElement> = Vec::new();
+        // ⌘F: the Search-in-chat bar is the first thing under the header.
+        if let Some(bar) = chat_search::bar(self, cx) {
+            pre.push(bar);
+        }
         let mut header_bar = Some(header_bar);
         if !floating_header {
             column = column.child(header_bar.take().expect("the header is built once"));
@@ -4346,6 +4490,11 @@ impl Render for Shell {
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::toggle_rail))
             .on_action(cx.listener(Self::open_palette_action))
+            .on_action(cx.listener(Self::open_chat_search_action))
+            .on_action(cx.listener(Self::chat_search_next))
+            .on_action(cx.listener(Self::chat_search_prev))
+            .on_action(cx.listener(Self::chat_search_close_action))
+            .on_action(cx.listener(Self::chat_search_pin_action))
             .on_action(cx.listener(Self::escape))
             .on_action(cx.listener(Self::send_feedback))
             .on_action(cx.listener(Self::paste_into_chat))
@@ -4837,6 +4986,26 @@ impl Render for Shell {
             root = root.child(overlay);
         }
         self.enforce_modal_focus(window, cx);
+        // Rig: the Search-in-chat bar with its query, once a chat with rows is up.
+        if self.chat_search_rig.is_some() {
+            // With `ARBOS_OPEN_SPACE` the bar waits for that space's chat, not
+            // the first chat that happens to have rows.
+            let wanted = std::env::var("ARBOS_OPEN_SPACE").ok();
+            let state = self.state.read(cx);
+            let ready = state.active_chat_id().is_some_and(|id| {
+                !state.messages_of(&id).is_empty()
+                    && wanted
+                        .as_ref()
+                        .is_none_or(|space| state.space_of_chat(&id) == *space)
+            });
+            if ready {
+                if let Some(query) = self.chat_search_rig.take() {
+                    self.open_chat_search(window, cx);
+                    self.chat_search_input
+                        .update(cx, |i, cx| i.set_text(query, cx));
+                }
+            }
+        }
         // Collapsed video call: the camera keeps showing in a draggable tile.
         let collapsed_video = self
             .state
