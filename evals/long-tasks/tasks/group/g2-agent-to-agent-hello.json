@@ -1,40 +1,40 @@
 {
-  "id": "g2-agent-to-agent-hello",
-  "lane": "a",
-  "category": "group",
-  "title": "From a 1:1: 'send lane-b a hello' → send_message, quiet confirm, reply relayed (no group post)",
-  "turns": [
-    {
-      "prompt": "Send lane-b a hello from me — just say hi and ask how its day is going.",
-      "reply_regex": "(?i)sent|messaged|delivered|told lane-b|lane-b says|lane-b replied",
-      "reply_regex_not": "(?i)group|which chat|another chat|can't send|cannot send|couldn't send|only works",
-      "rubric": {
-        "criteria": "The agent messaged lane-b directly with its messaging tool from this 1:1 chat and told the user in one plain line that it was sent (for example 'Sent to lane-b.'). It did not ask which chat to use, did not propose posting in a group, and did not say it could not send. If lane-b's answer had already come back, relaying it in a line is fine.",
-        "min": 3
-      },
-      "timeout_s": 180
-    },
-    {
-      "prompt": "What did lane-b say back?",
-      "wait_before_s": 60,
-      "reply_regex": "(?i)lane-b",
-      "reply_regex_not": "(?i)I can't check|no way to|not able to see",
-      "rubric": {
-        "criteria": "The agent relays lane-b's reply in one to three sentences (lane-b's own words or a faithful paraphrase), or says plainly that lane-b has not answered yet. It does not invent an answer and does not say it cannot know.",
-        "min": 4
-      },
-      "timeout_s": 180
-    }
-  ],
-  "peer_lane_checks": {
-    "note": "For the runner (bc-dcc557ae): also dump lane-b's pinned chat. Expect one `role: project` row whose `sender` is `project:<lane-a id>` with `agentMessage.fromProjectId` = lane-a and `senderName` starting 'lane-a'; the assistant row answering it (inReplyTo = that row) carries `agentReplyTo` = lane-a's name. No new chat was created in either lane and no people-chat membership changed.",
-    "lane": "b",
-    "expect_project_row_from": "lane-a",
-    "expect_reply_field": "agentReplyTo"
+ "id": "g2-agent-to-agent-hello",
+ "lane": "a",
+ "category": "group",
+ "title": "From a 1:1: 'send lane-b a hello' → send_message, quiet confirm, reply relayed (no group post)",
+ "turns": [
+  {
+   "prompt": "Send lane-b a hello from me — just say hi and ask how its day is going.",
+   "reply_regex": "(?i)sent|messaged|delivered|told lane-b|lane-b says|lane-b replied",
+   "reply_regex_not": "(?i)group|which chat|another chat|can't send|cannot send|couldn't send|only works",
+   "rubric": {
+    "criteria": "The agent messaged lane-b directly with its messaging tool from this 1:1 chat and told the user in one plain line that it was sent (for example 'Sent to lane-b.'). It did not ask which chat to use, did not propose posting in a group, and did not say it could not send. If lane-b's answer had already come back, relaying it in a line is fine.",
+    "min": 3
+   },
+   "timeout_s": 180
   },
-  "doc_checks": {
-    "no_truncated_reply": true,
-    "forbid_text_regex": "only works inside a group|group-send|which chat|another chat|Projects ⇄"
-  },
-  "regression": "agent-to-agent messaging (docs/agent-to-agent-messaging.md): hjkb → Doug hello from a 1:1, Oct 23"
+  {
+   "prompt": "What did lane-b say back?",
+   "wait_before_s": 60,
+   "reply_regex": "(?i)lane-b",
+   "reply_regex_not": "(?i)I can't check|no way to|not able to see",
+   "rubric": {
+    "criteria": "The agent relays lane-b's reply in one to three sentences (lane-b's own words or a faithful paraphrase), or says plainly that lane-b has not answered yet. It does not invent an answer and does not say it cannot know.",
+    "min": 4
+   },
+   "timeout_s": 180
+  }
+ ],
+ "peer_lane_checks": {
+  "note": "For the runner (bc-dcc557ae): also dump lane-b's pinned chat. Expect one `role: project` row whose `sender` is `project:<lane-a id>` with `agentMessage.fromProjectId` = lane-a and `senderName` starting 'lane-a'; the assistant row answering it (inReplyTo = that row) carries `agentReplyTo` = lane-a's name. No new chat was created in either lane and no people-chat membership changed.",
+  "lane": "b",
+  "expect_project_row_from": "lane-a",
+  "expect_reply_field": "agentReplyTo"
+ },
+ "doc_checks": {
+  "no_truncated_reply": true,
+  "forbid_text_regex": "only works inside a group|group-send|which chat|another chat|Projects ⇄"
+ },
+ "regression": "agent-to-agent messaging (docs/agent-to-agent-messaging.md): hjkb → Doug hello from a 1:1, Oct 23; #1780 (one answer per question: check the relay inbox before saying nothing came back)"
 }

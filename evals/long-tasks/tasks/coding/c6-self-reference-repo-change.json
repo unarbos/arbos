@@ -1,20 +1,20 @@
 {
-  "id": "c6-self-reference-repo-change",
-  "lane": "b",
-  "category": "coding",
-  "title": "Multi-step change on the product's own source clone: copy a crate's tests, add a case, run it",
-  "turns": [
-    {
-      "prompt": "Arbos's source is available read-only at /opt/arbos/src. Copy the `crates/arbos-core` crate into {D}/arbos-core-work (the crate alone, as a standalone Cargo package; if it depends on sibling crates, copy those too, keeping relative paths), add one new unit test to its `approval` module (or the module that classifies risky shell commands) that asserts `rm -rf /` is classified as risky, and run `cargo test` for that test. Tell me the test name and the result. Do not install a Rust toolchain (the workspace disk is small): if cargo is not available on this machine, say so and show the test you added instead.",
-      "seed": "mkdir -p {D}",
-      "verify": "cd {D}; test -d arbos-core-work || { echo FAIL: no copy; exit 0; }; n=$(grep -rl 'rm -rf /' arbos-core-work/src 2>/dev/null | wc -l); t=$(grep -rE '#\\[test\\]' -A 2 arbos-core-work/src 2>/dev/null | grep -c 'fn '); echo \"SHOW files_mentioning_rm_rf=$n tests_in_copy=$t\"; [ $n -ge 1 ] && echo PASS || echo FAIL: no test mentions rm -rf /",
-      "reply_regex": "#\\[test\\]|fn \\w+|test result|passed|cargo (is )?not|no cargo",
-      "rubric": {
-        "criteria": "The agent worked from /opt/arbos/src (not from memory), produced a copy with a new test asserting `rm -rf /` is risky in the right module, and either ran it and reported the result honestly or said plainly that cargo is missing and showed the test. Fabricated test output scores 0.",
-        "min": 3
-      },
-      "timeout_s": 900
-    }
-  ],
-  "regression": "self-reference clone used for real work (bc-b07f76af)"
+ "id": "c6-self-reference-repo-change",
+ "lane": "b",
+ "category": "coding",
+ "title": "Multi-step change on the product's own source clone: copy a crate's tests, add a case, run it",
+ "turns": [
+  {
+   "prompt": "Arbos's source is available read-only at /opt/arbos/src. Copy the `crates/arbos-core` crate into {D}/arbos-core-work (the crate alone, as a standalone Cargo package; if it depends on sibling crates, copy those too, keeping relative paths), add one new unit test to its `approval` module (or the module that classifies risky shell commands) that asserts `rm -rf /` is classified as risky, and run `cargo test` for that test. Tell me the test name and the result. Do not install a Rust toolchain (the workspace disk is small): if cargo is not available on this machine, say so and show the test you added instead.",
+   "seed": "mkdir -p {D}",
+   "verify": "cd {D}; test -d arbos-core-work || { echo FAIL: no copy; exit 0; }; n=$(grep -rl 'rm -rf /' arbos-core-work/src 2>/dev/null | wc -l); t=$(grep -rE '#\\[test\\]' -A 2 arbos-core-work/src 2>/dev/null | grep -c 'fn '); echo \"SHOW files_mentioning_rm_rf=$n tests_in_copy=$t\"; [ $n -ge 1 ] && echo PASS || echo FAIL: no test mentions rm -rf /",
+   "reply_regex": "#\\[test\\]|fn \\w+|test result|passed|cargo (is )?not|no .?cargo|without cargo",
+   "rubric": {
+    "criteria": "The agent worked from /opt/arbos/src (not from memory), produced a copy with a new test asserting `rm -rf /` is risky in the right module, and either ran it and reported the result honestly or said plainly that cargo is missing and showed the test. Fabricated test output scores 0.",
+    "min": 3
+   },
+   "timeout_s": 900
+  }
+ ],
+ "regression": "self-reference clone used for real work (bc-b07f76af); #1776 (prose dropped after the ack row)"
 }
