@@ -3666,7 +3666,14 @@ pub fn build_rows_hiding(
                 // Doug", #1349): one centred muted line, never a bubble. Like a
                 // date stamp it breaks the sender run — the next bubble names its
                 // sender again (Telegram / Grok Bot).
-                let text = message.plain_text();
+                // A membership line is worded from its `notice` facts and the live
+                // roster, so the actor reads by their current name; the stored words
+                // are the fallback when someone named is no longer known here.
+                let text = message
+                    .notice
+                    .as_ref()
+                    .and_then(|n| n.text(|kind, id| mentions.name_of(kind, id)))
+                    .unwrap_or_else(|| message.plain_text());
                 let line = text.lines().next().unwrap_or_default().trim().to_string();
                 if !line.is_empty() {
                     rows.push(Row {
