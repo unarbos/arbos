@@ -3857,6 +3857,13 @@ final class AppModel: ObservableObject {
     /// A message the next ChatView should scroll to and tint (a search result opened
     /// from the bottom bar, [feedback iphone-bottom-search-bar-2026-10-25]).
     @Published var pendingReveal: MessageReveal?
+    /// The Settings page the next Settings sheet lands on (a Settings row opened
+    /// from search, [feedback search-settings-ios-2026-10-26]): Home presents the
+    /// sheet when this is set and clears it when the sheet closes.
+    @Published var pendingSettingsLanding: String?
+    /// The agent pane's settings row to drop open once the pane shows (a search
+    /// result for "voice" / "model" / "reasoning").
+    @Published var pendingAgentSetting: GlobalSearch.AgentSetting?
     /// App-wide search: message text, attachments and links per loaded chat, kept
     /// current lazily against `messagesVersion` (`GlobalSearch`).
     var searchIndex = SearchIndex()
@@ -4144,23 +4151,31 @@ final class AppModel: ObservableObject {
             switch p.event {
             case .peopleMessage(let payload):
                 let cid = payload.chat_id
-                // Agent (or person) reached out in a chat we have not listed yet —
+                // Since 2026-10-26 the relay queues this for an agent's reply too (people chats
+                // and, with `project_id`, the agent's own project chats); before, only a
+                // person's row did, so an @agent answer never showed a banner here.
+                let projectId = payload.project_id ?? peopleSlot
+                let inPeople = payload.project_id == nil
+                // Agent (or person) reached out in a people chat we have not listed yet —
                 // refresh so open-from-notification can dial the room.
-                if peopleChat(cid) == nil { needChats = true }
+                if inPeople, peopleChat(cid) == nil { needChats = true }
                 if !isWatching(cid) {
-                    peopleUnread.insert(cid)
-                    unarchiveOnActivity(chatId: cid)
+                    if inPeople {
+                        peopleUnread.insert(cid)
+                        unarchiveOnActivity(chatId: cid)
+                    }
                     // Muted group: keep the unread flag, skip the local banner.
-                    if !isPeopleChatMuted(cid) {
+                    if !inPeople || !isPeopleChatMuted(cid) {
                         let sender = payload.sender
                         let from = sender.handle.isEmpty ? (payload.from_handle.isEmpty ? "someone" : payload.from_handle) : sender.handle
                         // §7c sender{} first; the chat's member list fills any gap.
                         let member = peopleChat(cid)?.members.first { $0.handle == from }
                         let agent = member?.isAgent == true ? member?.project : nil
                         let kind = sender.kind.isEmpty ? (agent != nil ? "agent" : "user") : sender.kind
+                        let body = (payload.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                         let info = MessagePush.userInfo(
-                            chatId: cid, projectId: peopleSlot, title: sender.name.isEmpty ? (member?.displayName ?? "@\(from)") : sender.name,
-                            body: "New message",
+                            chatId: cid, projectId: projectId, title: sender.name.isEmpty ? (member?.displayName ?? "@\(from)") : sender.name,
+                            body: body.isEmpty ? "New message" : body,
                             senderKind: kind, senderId: sender.id.isEmpty ? (member?.id ?? from) : sender.id,
                             senderName: sender.name.isEmpty ? (member?.displayName ?? from) : sender.name, senderHandle: from,
                             avatar: sender.avatar,
@@ -4251,6 +4266,9 @@ final class AppModel: ObservableObject {
                 }
             case .spaceArchived(let payload):
                 applyRemoteArchive(spaceId: payload.space_id, kind: payload.kind, archived: payload.archived_at != nil)
+            case .channelMessage:
+                // Server channel banner: push-server-channels-ios-2026-10-26 (next item).
+                break
             case .peopleChatDeleted, .peopleInviteAccepted, .machineReady:
                 break
             case .notificationsCleared(let payload):

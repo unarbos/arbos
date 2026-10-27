@@ -229,7 +229,7 @@ pub struct AppState {
     /// as a replay, so concurrent refreshers from one device converge on one rotation.
     pub refresh_grace: Arc<Mutex<HashMap<String, (i64, serde_json::Value)>>>,
     /// Message notifications transport (APNs, a capture list in tests, or off).
-    pub push: Arc<crate::apns::Pusher>,
+    pub push: Arc<crate::push::Push>,
     /// device_id → the chat its presence says is on screen (suppresses that chat's pushes).
     pub focus: crate::notify::Focus,
     /// (chat_id, sender user) → when the row-level fallback last notified for it.
@@ -563,7 +563,7 @@ pub(crate) mod test_support {
                 .collect(),
         };
         AppState {
-            db,
+            db: db.clone(),
             cfg: Arc::new(cfg),
             http: reqwest::Client::new(),
             daytona: None,
@@ -582,7 +582,7 @@ pub(crate) mod test_support {
             stale_bounces: Arc::new(Mutex::new(HashMap::new())),
             local_conns: Arc::new(Mutex::new(HashMap::new())),
             refresh_grace: Arc::new(Mutex::new(HashMap::new())),
-            push: Arc::new(crate::apns::Pusher::Capture(Mutex::new(Vec::new()))),
+            push: Arc::new(crate::push::Push::capture(db.clone())),
             focus: Arc::new(Mutex::new(HashMap::new())),
             fallback_sent: Arc::new(Mutex::new(HashMap::new())),
             livekit: None,
