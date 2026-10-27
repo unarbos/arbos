@@ -66,8 +66,9 @@ struct GlobalSearchResults: View {
 
     var body: some View {
         let groups = self.groups
+        ScrollViewReader { proxy in
         List {
-            Color.clear.frame(height: 66)
+            Color.clear.frame(height: HomeChrome.barOnlyListTop)
                 .listRowInsets(EdgeInsets())
                 .listRowSeparator(.hidden)
                 .listRowBackground(Color.clear)
@@ -122,6 +123,8 @@ struct GlobalSearchResults: View {
             try? await Task.sleep(nanoseconds: 1_200_000_000)
             let rows = GlobalSearch.flatten(self.groups)
             if rows.indices.contains(n - 1) { open(rows[n - 1]) }
+        }
+        .rigListScroll(proxy, ids: GlobalSearch.flatten(groups).map(\.id))
         }
         .fullScreenCover(item: $viewer) { v in
             MediaViewer(album: v.items, index: v.index, onClose: { viewer = nil })
@@ -220,6 +223,11 @@ struct GlobalSearchRow: View {
                 BlobImage(item: item)
             }
             .clipShape(RoundedRectangle(cornerRadius: LibraryList.thumbRadius, style: .continuous))
+        case .settingsTile(let name):
+            // The Settings list's own tile (PaneRow `.tile`), at the row's 36 pt.
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(theme.isDark ? Color(hex: "#5C5C60")! : Color(hex: "#6E6E73")!)
+                .overlay(Image(systemName: name).font(theme.font(17, weight: .semibold)).foregroundStyle(.white))
         case .none:
             glyphTile(glyph)
         }
@@ -237,6 +245,7 @@ struct GlobalSearchRow: View {
         case .media: return "photo"
         case .file: return "doc.fill"
         case .link: return "link"
+        case .setting: return "gearshape.fill"
         }
     }
 
