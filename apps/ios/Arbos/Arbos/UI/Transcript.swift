@@ -203,14 +203,16 @@ enum Transcript {
     /// messages in the doc (#1349); nothing is synthesised here.
     /// `agentNames`: agent project id → display name from the chat's member list, the
     /// fallback when a reply row carries no `senderName` (older boxes).
-    static func rows(_ messages: [Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false, agentNames: [String: String] = [:], multiParty: Bool = false) -> [Row] {
-        rows(messages, byId: index(messages), projectId: projectId, subagentNames: subagentNames, me: me, people: people, agentNames: agentNames, multiParty: multiParty)
+    static func rows(_ messages: [Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false, agentNames: [String: String] = [:], multiParty: Bool = false, memberNames: [String: String] = [:]) -> [Row] {
+        rows(messages, byId: index(messages), projectId: projectId, subagentNames: subagentNames, me: me, people: people, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames)
     }
 
     /// Same, with the caller's `index(messages)` (the chat keeps it for its own lookups).
     /// `multiParty`: the chat names its senders — a group or a server channel (people and
     /// agents alike); a 1:1 chat (me ↔ person, me ↔ agent) labels nobody (Jacob, 2026-10-23).
-    static func rows(_ messages: [Message], byId: [Id: Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false, agentNames: [String: String] = [:], multiParty: Bool = false) -> [Row] {
+    /// `memberNames`: the chat's people by user id → current display name (me included), so a
+    /// membership line names its actor as the roster does now, not as the row was written.
+    static func rows(_ messages: [Message], byId: [Id: Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false, agentNames: [String: String] = [:], multiParty: Bool = false, memberNames: [String: String] = [:]) -> [Row] {
         var rows: [Row] = []
         rows.reserveCapacity(messages.count + messages.count / 8)
         var lastAt: Int64 = 0
@@ -314,7 +316,13 @@ enum Transcript {
             case .system:
                 // Call lines and other system notes: one muted centred line.
                 // Admin deletion audits stay out of the chat (GroupActivity screen only).
-                let text = message.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
+                // A membership line is worded from its `notice` facts and the live roster;
+                // the stored words are the fallback when someone named is unknown here.
+                let live = message.notice?.text { kind, id in
+                    let n = (kind == "agent" ? agentNames[id] : memberNames[id])?.trimmingCharacters(in: .whitespaces)
+                    return (n?.isEmpty ?? true) ? nil : n
+                }
+                let text = (live ?? message.plainText).trimmingCharacters(in: .whitespacesAndNewlines)
                 if !text.isEmpty, !GroupActivity.isAuditLine(text) {
                     let icon = text.hasPrefix("Call ended") ? "phone.down.fill" : (text.contains(" call") ? "phone.fill" : nil)
                     chunk.append(Row(id: "\(message.id)#system", messageId: message.id, role: .system,
