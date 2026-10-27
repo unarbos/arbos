@@ -2572,7 +2572,10 @@ mod agent_avatar_version_tests {
             )
             .unwrap();
         let before = state.db.project(&project).unwrap().unwrap();
-        assert_eq!(before.avatar_version, 0, "fresh project is unstamped");
+        assert!(
+            before.avatar_version > 0,
+            "a fresh project is stamped at birth (its creation time), never 0"
+        );
 
         // Alice's phone picks a leaf.
         let r = patch_project(
@@ -2585,7 +2588,10 @@ mod agent_avatar_version_tests {
         .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
         let after = state.db.project(&project).unwrap().unwrap();
-        assert!(after.avatar_version > 0, "the change is stamped");
+        assert!(
+            after.avatar_version > before.avatar_version,
+            "the change is stamped above the birth stamp"
+        );
 
         // The project JSON and the roster copy carry the same stamp.
         let bytes = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
