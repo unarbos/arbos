@@ -91,6 +91,7 @@ import struct
 import sys
 import tempfile
 import time
+import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -107,6 +108,10 @@ CURSOR_API = "https://api.cursor.com/v1"
 GITHUB_API = "https://api.github.com"
 ASSET_RELEASE_TAG = "feedback-screenshots"
 RELAY_DEPLOYED_SHA_FILE = "/etc/arbos/relay.deployed-sha"  # written by scripts/deploy/relay-server.sh
+# Written by the deploy worker when an image has rolled to every real box it does not skip; the skip list names
+# the boxes left on their old image (box|reason|since). World-readable, root-owned.
+AGENTD_DEPLOYED_SHA_FILE = "/var/lib/arbos-deploy/agentd.deployed-sha"
+AGENTD_SKIP_FILE = "/var/lib/arbos-deploy/agentd.skip"
 INSTALL_SIGNAL_SINCE = "2026-10-19T22:00:00Z"  # relay records X-Arbos-Client versions since then (D85)
 DEPLOY_HOOK = "/usr/local/bin/arbos-deploy-hook"  # CD worker's hook: `<relay|agentd|voice> <sha>`, idempotent, debounced; called directly (no sudo)
 DEPLOY_QUEUE = os.environ.get("ARBOS_DEPLOY_QUEUE", "/var/lib/arbos-feedback/deploy-requests")  # the hook's queue: one file per kind
@@ -3499,17 +3504,86 @@ class Loop:
             return True
         return any(DEVICE_ONLY_FILES.search(f or "") for f in st.get("files") or [])
 
-    @staticmethod
-    def deploy_kinds(files: list[str]) -> list[str]:
-        """Every service outside the app builds that must be redeployed before this fix is live:
-        the voice pod (`voice/**`), the sandbox image (agentd), the relay."""
+    # Non-Rust inputs of each deployable, by path prefix. The Rust inputs are the workspace crates its binary is
+    # built from, read from the Cargo manifests (`deploy_crate_dirs`).
+    DEPLOY_PATH_PREFIXES = {"voice": ("voice/",), "agentd": ("image/", "harness/"), "relay": ()}
+    DEPLOY_ROOT_CRATES = {"agentd": "arbos-agentd", "relay": "arbos-relay"}
+    DEPLOY_GRAPH_TTL_MIN = 6 * 60
+
+    def manifest(self, path: str) -> dict:
+        blob = self.gh.repo_api("GET", f"/contents/{urllib.parse.quote(path)}?ref=main")
+        return tomllib.loads(base64.b64decode(blob["content"]).decode())
+
+    def read_workspace_graph(self) -> dict[str, list[str]]:
+        """kind → directory prefixes of the root crate and every workspace crate it depends on, transitively —
+        normal and build dependencies, not dev — the set `cargo metadata` resolves for that binary. Read from
+        main's manifests through the API: the relay host has no cargo and the poller has no checkout."""
+        root = self.manifest("Cargo.toml")
+        members = [m for m in (root.get("workspace") or {}).get("members") or [] if "*" not in m]
+        manifests = {m: self.manifest(f"{m}/Cargo.toml") for m in members}
+        dir_of = {(man.get("package") or {}).get("name"): m for m, man in manifests.items()}
+        dir_of.pop(None, None)
+        deps_of: dict[str, set[str]] = {}
+        for m, man in manifests.items():
+            name = (man.get("package") or {}).get("name")
+            if not name:
+                continue
+            tables = [man.get(s) or {} for s in ("dependencies", "build-dependencies")]
+            tables += [t.get(s) or {} for t in (man.get("target") or {}).values() for s in ("dependencies", "build-dependencies")]
+            found: set[str] = set()
+            for table in tables:
+                for dep, spec in table.items():
+                    crate = spec.get("package", dep) if isinstance(spec, dict) else dep  # `core = { package = "arbos-core" }`
+                    if crate in dir_of:
+                        found.add(crate)
+            deps_of[name] = found
+        out: dict[str, list[str]] = {}
+        for kind, root_crate in self.DEPLOY_ROOT_CRATES.items():
+            if root_crate not in dir_of:
+                raise RuntimeError(f"{root_crate} is not a workspace member")
+            seen, todo = {root_crate}, [root_crate]
+            while todo:
+                for d in deps_of.get(todo.pop(), ()):
+                    if d not in seen:
+                        seen.add(d)
+                        todo.append(d)
+            out[kind] = sorted(f"{dir_of[c]}/" for c in seen)
+        return out
+
+    def deploy_crate_dirs(self, refresh: bool = False) -> dict[str, list[str]]:
+        """The workspace graph, cached in the cursor for DEPLOY_GRAPH_TTL_MIN and re-read early when a landed
+        item touched a Cargo.toml. Until 2026-10-27 the agentd list was three fixed prefixes (`crates/arbos-agentd/
+        image/ harness/`), so a fix in arbos-core — compiled into agentd and the relay — was called shipped with no
+        image roll: 56 such items in the week before, 35 of them live on no box when their issue was closed (#2031).
+        Unreadable manifests keep the cached graph, or fall back to the root crates alone."""
+        cur = self.store.cursor()
+        cached = cur.get("deploy_graph") or {}
+        if not refresh and cached.get("dirs") and minutes_between(cached.get("at") or "", iso()) < self.DEPLOY_GRAPH_TTL_MIN:
+            return cached["dirs"]
+        try:
+            dirs = self.read_workspace_graph()
+        except Exception as e:  # noqa: BLE001
+            log(f"deploy graph: manifests unreadable ({str(e)[:160]}); " + ("keeping the cached graph" if cached.get("dirs") else "root crates only"))
+            return cached.get("dirs") or {k: [f"crates/{v}/"] for k, v in self.DEPLOY_ROOT_CRATES.items()}
+        if dirs != cached.get("dirs"):
+            self.store.event("_loop", "deploy_graph", dirs=dirs)
+            log("deploy graph: " + "; ".join(f"{k} ← {' '.join(v)}" for k, v in dirs.items()))
+        cur = self.store.cursor()
+        cur["deploy_graph"] = {"at": iso(), "dirs": dirs}
+        self.store.save_cursor(cur)
+        return dirs
+
+    def deploy_kinds(self, files: list[str]) -> list[str]:
+        """Every service outside the app builds that must be redeployed before this fix is live: the voice pod
+        (`voice/**`), the sandbox image (agentd: its crates, `image/`, `harness/`), the relay (its crates).
+        "Shipped" means the fix is in the running artifact, so a change to any crate a binary is built from
+        counts for that binary (coordinator, 2026-10-27 09:57)."""
+        dirs = self.deploy_crate_dirs(refresh=any(f.endswith("Cargo.toml") for f in files))
         kinds = []
-        if any(f.startswith("voice/") for f in files):
-            kinds.append("voice")
-        if any(f.startswith(("crates/arbos-agentd/", "image/", "harness/")) for f in files):
-            kinds.append("agentd")  # anything baked into the sandbox image rolls with it
-        if any(f.startswith("crates/arbos-relay/") for f in files):
-            kinds.append("relay")
+        for kind in ("voice", "agentd", "relay"):
+            prefixes = tuple(self.DEPLOY_PATH_PREFIXES.get(kind, ())) + tuple(dirs.get(kind) or ())
+            if prefixes and any(f.startswith(prefixes) for f in files):
+                kinds.append(kind)
         return kinds
 
     DEPLOY_WHERE = {"voice": "the voice pod (voice-calls worker deploys it)", "agentd": "the sandbox image (next image roll)",
@@ -4398,6 +4472,21 @@ class Loop:
         else:
             agentd_shas = sorted({b["sha"] for b in agentd.get("boxes") or [] if b.get("sha") and b.get("state", "awake") == "awake"}
                                  or set(agentd.get("shas") or []))
+        # The deploy worker's record wins when it exists: it is written once the image has rolled to every real
+        # box the worker does not skip. A skipped box (uncarryable through the relay, #1941 — Jacob's
+        # gh_268993031 since 2026-10-26 17:27) stays on its old image on purpose and must not hold every fix
+        # at landed-not-shipped (ten items sat there 06:48–10:xx Oct 27); it is named on the issue instead.
+        fleet_sha, skipped = "", []
+        with contextlib.suppress(OSError):
+            fleet_sha = Path(AGENTD_DEPLOYED_SHA_FILE).read_text().strip()
+        with contextlib.suppress(OSError):
+            skipped = [line.split("|") for line in Path(AGENTD_SKIP_FILE).read_text().splitlines() if line.strip()]
+        if fleet_sha:
+            agentd_shas = [fleet_sha]
+        skipped_note = ""
+        if skipped:
+            names = ", ".join(f"{s[0]} ({s[1].split(';')[0].strip()})" if len(s) > 1 else s[0] for s in skipped)
+            skipped_note = f" — except the box(es) the deploy worker skips, still on their old image until carried by hand: {names}"
         relay_sha = ""
         with contextlib.suppress(OSError):
             relay_sha = Path(RELAY_DEPLOYED_SHA_FILE).read_text().strip()
@@ -4420,11 +4509,13 @@ class Loop:
                 if shas and contained and all(contained):
                     real = agentd.get("real_min_sha") is not None
                     awake_boxes = [b for b in agentd.get("boxes") or [] if b.get("state", "awake") == "awake" and not (real and b.get("test"))]
-                    images = sorted({b.get("image", "?") for b in awake_boxes}) or ["?"]
+                    images = sorted({b.get("image", "?") for b in awake_boxes if not fleet_sha or b.get("sha") == fleet_sha}
+                                    or {b.get("image", "?") for b in awake_boxes}) or ["?"]
                     where = ("the voice pod" if kind == "voice" else "the relay" if kind == "relay"
                              else f"all {(agentd.get('real_awake') if real else agentd.get('awake')) or len(shas)} awake "
                                   f"{'real-user ' if real else ''}boxes (image {'/'.join(images)})")
-                    done_notes.append(f"{where} runs {shas[0][:8]}" + ("" if len(shas) == 1 else f" (+{len(shas) - 1} sha)"))
+                    done_notes.append(f"{where} runs {shas[0][:8]}" + ("" if len(shas) == 1 else f" (+{len(shas) - 1} sha)")
+                                      + (skipped_note if kind == "agentd" and fleet_sha else ""))
                 else:
                     still.append(kind)
             if still != kinds:
