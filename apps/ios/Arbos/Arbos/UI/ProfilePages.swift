@@ -65,9 +65,19 @@ struct ProfileTopBar<Trailing: View>: View {
     @Environment(\.dismiss) private var dismiss
     /// Override when `dismiss` is a no-op (Settings as a tab root). Sheets keep the default.
     var onBack: (() -> Void)? = nil
+    /// Which page this bar fronts — its `ListTopFade` runs from the physical top edge under
+    /// the bar ([feedback iphone-list-top-fade-2026-10-26]).
+    var screen: ListTopFade.Screen = .agentPage
     @ViewBuilder var trailing: () -> Trailing
 
     var body: some View {
+        ZStack(alignment: .top) {
+            ListTopFade(screen: screen)
+            bar
+        }
+    }
+
+    private var bar: some View {
         HStack {
             Button { (onBack ?? { dismiss() })() } label: {
                 GlassCircle { Image(systemName: "chevron.left").font(.system(size: 17, weight: .semibold)).foregroundStyle(theme.text) }
@@ -95,6 +105,8 @@ struct ProfileTopBar<Trailing: View>: View {
 /// * danger row: centred red label, same height;
 /// * tabs: one capsule pill, `field` fill on the selected tab.
 enum PaneKit {
+    /// A pane page's content starts this far under the safe-area top (the bar is 16 + 48).
+    static let pageTop: CGFloat = 80
     static let rowHeight: CGFloat = 48
     static let inset: CGFloat = 16
     /// Picture → name on a row: Grok Bot's sidebar / members rows measure 11–12 pt
@@ -857,7 +869,7 @@ struct UserProfileView: View {
             theme.bg.ignoresSafeArea()
             ScrollView {
                 VStack(spacing: 18) {
-                    Color.clear.frame(height: 80)
+                    Color.clear.frame(height: PaneKit.pageTop)
                     // The shared pane (D93): picture, name, @handle, the Message pill
                     // (Jacob 2026-10-25; not on my own pane, not once I blocked them);
                     // Links | Groups (the Mac's set); one Block user row. No last-seen,
@@ -882,7 +894,7 @@ struct UserProfileView: View {
                 }
             }
             .scrollIndicators(.visible)
-            ProfileTopBar { EmptyView() }
+            ProfileTopBar(screen: .personPage) { EmptyView() }
         }
         .confirmationDialog("Block @\(person.handle)?", isPresented: $confirmBlock, titleVisibility: .visible) {
             Button("Block", role: .destructive) {
@@ -1153,7 +1165,7 @@ struct GroupProfileView: View {
             theme.bg.ignoresSafeArea()
             ScrollView {
                 VStack(spacing: 18) {
-                    Color.clear.frame(height: 80)
+                    Color.clear.frame(height: PaneKit.pageTop)
                     // The shared pane (D93): picture (crayon when a people group — it
                     // opens the edit sheet), name, member count, Members | Library.
                     // Leave / Delete group chat in the footer (same rule as the chat
@@ -1172,7 +1184,7 @@ struct GroupProfileView: View {
                     Color.clear.frame(height: 40)
                 }
             }
-            ProfileTopBar { EmptyView() }
+            ProfileTopBar(screen: .groupPage) { EmptyView() }
         }
     }
 
@@ -2002,7 +2014,7 @@ struct ServerProfileView: View {
             theme.bg.ignoresSafeArea()
             ScrollView {
                 VStack(spacing: 18) {
-                    Color.clear.frame(height: 80)
+                    Color.clear.frame(height: PaneKit.pageTop)
                     if let server {
                         ProfilePane(
                             hero: hero(server),
@@ -2021,7 +2033,7 @@ struct ServerProfileView: View {
                     Color.clear.frame(height: 40)
                 }
             }
-            ProfileTopBar { EmptyView() }
+            ProfileTopBar(screen: .serverPage) { EmptyView() }
         }
     }
 
@@ -2851,7 +2863,7 @@ struct ChannelProfileView: View {
             theme.bg.ignoresSafeArea()
             ScrollView {
                 VStack(spacing: 18) {
-                    Color.clear.frame(height: 80)
+                    Color.clear.frame(height: PaneKit.pageTop)
                     if let channel, let server {
                         let restricted = model.channelRestricted(channel)
                         let count = max(server.memberCount, server.members.count)
@@ -2874,7 +2886,7 @@ struct ChannelProfileView: View {
                     Color.clear.frame(height: 40)
                 }
             }
-            ProfileTopBar { EmptyView() }
+            ProfileTopBar(screen: .channelPage) { EmptyView() }
         }
         .task {
             if let t = model.openServerHookTab { tab = t; model.openServerHookTab = nil }
