@@ -691,11 +691,20 @@ private struct SheetFrame<Content: View>: View {
     let canSave: Bool
     let busy: Bool
     let save: () -> Void
+    /// The sheet's failure (Jacob 2026-10-26): the shared note under the header, before the
+    /// first field; Try again runs `save` once more.
+    var error: UserError? = nil
     @ViewBuilder var content: () -> Content
+    @State private var errorDetailsOpen = false
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) { content() }
+            VStack(alignment: .leading, spacing: 18) {
+                if let error {
+                    ErrorNote(id: "secrets-sheet-error", error: error, detailsOpen: $errorDetailsOpen, onTryAgain: save)
+                }
+                content()
+            }
                 .padding(.horizontal, 24)
                 .padding(.top, 16)
                 .padding(.bottom, 32)
@@ -734,7 +743,7 @@ struct NewSecretSheet: View {
     @State private var picked: Set<Id> = []
     @State private var injectEnv = false
     @State private var busy = false
-    @State private var error: String?
+    @State private var error: UserError?
 
     private var env: String { SecretsText.envName(name) }
     private var canSave: Bool {
@@ -746,7 +755,7 @@ struct NewSecretSheet: View {
     }
 
     var body: some View {
-        SheetFrame(title: "New secret", action: "Save", canSave: canSave, busy: busy, save: { Task { await save() } }) {
+        SheetFrame(title: "New secret", action: "Save", canSave: canSave, busy: busy, save: { Task { await save() } }, error: error) {
             Picker("Kind", selection: $kind) {
                 Text("Key").tag("key")
                 Text("Login").tag("login")
@@ -793,9 +802,6 @@ struct NewSecretSheet: View {
                 }
                 .tint(theme.online)
             }
-            if let error {
-                Text(error).font(theme.font(Theme.small)).foregroundStyle(theme.danger)
-            }
         }
     }
 
@@ -823,10 +829,8 @@ struct NewSecretSheet: View {
             value = ""; password = ""
             await model.refreshSecrets()
             dismiss()
-        } catch let e as RelayError {
-            error = e.message
         } catch {
-            self.error = error.localizedDescription
+            self.error = UserError.classify("save the secret", error)
         }
     }
 }
@@ -841,10 +845,10 @@ struct EditSecretSheet: View {
     @State private var hosts = ""
     @State private var expires: Date?
     @State private var busy = false
-    @State private var error: String?
+    @State private var error: UserError?
 
     var body: some View {
-        SheetFrame(title: secret.env, action: "Save", canSave: SecretsText.validName(name), busy: busy, save: { Task { await save() } }) {
+        SheetFrame(title: secret.env, action: "Save", canSave: SecretsText.validName(name), busy: busy, save: { Task { await save() } }, error: error) {
             SecretField(label: "Name", hint: "Agents see it as $\(SecretsText.envName(name)).") {
                 SecretTextField(placeholder: "STRIPE_KEY", text: $name, mono: true, capitalization: .characters)
             }
@@ -869,7 +873,6 @@ struct EditSecretSheet: View {
                     Spacer()
                 }
             }
-            if let error { Text(error).font(theme.font(Theme.small)).foregroundStyle(theme.danger) }
         }
         .onAppear {
             name = secret.name
@@ -892,7 +895,7 @@ struct EditSecretSheet: View {
             _ = try await model.relay.patchSecret(secret.id, body)
             await model.refreshSecrets()
             dismiss()
-        } catch let e as RelayError { error = e.message } catch { self.error = error.localizedDescription }
+        } catch { self.error = UserError.classify("save the secret", error) }
     }
 }
 
@@ -906,12 +909,12 @@ struct ReplaceValueSheet: View {
     @State private var password = ""
     @State private var url = ""
     @State private var busy = false
-    @State private var error: String?
+    @State private var error: UserError?
 
     private var canSave: Bool { secret.kind == "login" ? !password.isEmpty : !value.isEmpty }
 
     var body: some View {
-        SheetFrame(title: "Replace value", action: "Replace", canSave: canSave, busy: busy, save: { Task { await save() } }) {
+        SheetFrame(title: "Replace value", action: "Replace", canSave: canSave, busy: busy, save: { Task { await save() } }, error: error) {
             Text("The old value keeps working for 24 hours while agents pick up the new one.")
                 .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
             if secret.kind == "login" {
@@ -925,7 +928,6 @@ struct ReplaceValueSheet: View {
                     SecretTextField(placeholder: secret.kind == "text" ? "Paste the new text" : "sk_live_…", text: $value, secure: secret.kind != "text", multiline: secret.kind == "text", mono: true)
                 }
             }
-            if let error { Text(error).font(theme.font(Theme.small)).foregroundStyle(theme.danger) }
         }
         .onAppear { username = secret.username ?? "" }
     }
@@ -941,7 +943,7 @@ struct ReplaceValueSheet: View {
             value = ""; password = ""
             await model.refreshSecrets()
             dismiss()
-        } catch let e as RelayError { error = e.message } catch { self.error = error.localizedDescription }
+        } catch { self.error = UserError.classify("replace the value", error) }
     }
 }
 
@@ -1008,6 +1010,7 @@ struct DirectorEditSheet: View {
             } label: {
                 Text("Remove from the list")
                     .font(theme.font(Theme.body, weight: .semibold))
+                    // error-ui: exception destructive-action
                     .foregroundStyle(theme.danger)
                     .frame(maxWidth: .infinity).frame(height: Controls.height)
                     .background(ControlSurface(shape: Capsule()))
@@ -1184,7 +1187,7 @@ struct AgentSecretsPage: View {
             SettingsGroup(footer: agentFooter) {
                 if let d = data, d.paused {
                     Text("Secrets are paused. Agents can't use any secret until you turn this off.")
-                        .font(theme.font(Theme.small)).foregroundStyle(theme.danger)
+                        .font(theme.font(Theme.small)).foregroundStyle(theme.danger) // error-ui: exception status-mark
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 16).padding(.vertical, 12)
                 }
@@ -1331,10 +1334,10 @@ struct ConnectVaultSheet: View {
     @State private var note = ""
     @State private var picked: Set<Id> = []
     @State private var busy = false
-    @State private var error: String?
+    @State private var error: UserError?
 
     var body: some View {
-        SheetFrame(title: "Connect 1Password", action: "Connect", canSave: token.trimmingCharacters(in: .whitespaces).count > 20, busy: busy, save: { Task { await connect() } }) {
+        SheetFrame(title: "Connect 1Password", action: "Connect", canSave: token.trimmingCharacters(in: .whitespaces).count > 20, busy: busy, save: { Task { await connect() } }, error: error) {
             step(1, "In 1Password, create a service account with read access to one vault, e.g. \"Arbos — Research\".") {
                 SwiftUI.Link("Open 1password.com", destination: URL(string: "https://my.1password.com/developer-tools/infrastructure-secrets/serviceaccount/")!)
                     .font(theme.font(Theme.small, weight: .medium)).foregroundStyle(Color(hex: "#1084FE")!)
@@ -1345,7 +1348,6 @@ struct ConnectVaultSheet: View {
             }
             SecretField(label: "Agents that may use this vault") { AgentPickerField(picked: $picked) }
             SecretField(label: "Note", hint: SecretsText.vaultNoteHint) { SecretTextField(placeholder: "read-only · confirm before charging", text: $note, capitalization: .sentences) }
-            if let error { Text(error).font(theme.font(Theme.small)).foregroundStyle(theme.danger) }
         }
     }
 
@@ -1372,12 +1374,12 @@ struct ConnectVaultSheet: View {
             dismiss()
         } catch let e as RelayError {
             switch e.type {
-            case "bad_token": error = "That token didn't work. Check it was copied whole."
-            case "no_vaults": error = "This token can read no vaults."
-            case "rate_limited": error = "1Password rate limit reached — try again later."
-            default: error = e.message
+            case "bad_token": error = UserError.refused("connect 1Password", "That token didn't work. Check it was copied whole.")
+            case "no_vaults": error = UserError.refused("connect 1Password", "This token can read no vaults.")
+            case "rate_limited": error = UserError.of("connect 1Password", .rateLimited, "HTTP \(e.status) rate_limited")
+            default: error = UserError.fromRelay("connect 1Password", e)
             }
-        } catch { self.error = error.localizedDescription }
+        } catch { self.error = UserError.classify("connect 1Password", error) }
     }
 }
 
@@ -1533,10 +1535,8 @@ struct VaultPage: View {
             do {
                 items = try await model.relay.setVaultItemEnv(vaultId, ref: ref, on: on)
                 await model.refreshSecrets()
-            } catch let e as RelayError {
-                model.notice = Notice(text: "Real value: \(e.message)")
             } catch {
-                model.notice = Notice(text: "Real value: \(error.localizedDescription)")
+                model.fail("change the item's real-value setting", error)
             }
         }
     }
