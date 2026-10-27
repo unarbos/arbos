@@ -343,6 +343,7 @@ mod tests {
                 bytes: Some(2048),
                 kind: None,
                 title: Some(title.into()),
+                chart_part: None,
             },
         });
         m
