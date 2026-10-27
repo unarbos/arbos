@@ -9,8 +9,11 @@
 // into a communication notification with the sender's avatar.
 
 import Foundation
+import os
 import UIKit
 import UserNotifications
+
+private let notifyLog = Logger(subsystem: "com.unarbos.arbos.ios", category: "notify")
 
 @MainActor
 final class PushManager: NSObject, ObservableObject, UNUserNotificationCenterDelegate {
@@ -122,12 +125,14 @@ final class PushManager: NSObject, ObservableObject, UNUserNotificationCenterDel
         UNUserNotificationCenter.current().setBadgeCount(max(0, count)) { _ in }
     }
 
-    /// Drop delivered notifications for a chat once it is read.
+    /// Drop delivered notifications for a chat once it is read — here, or on another device
+    /// of mine (`notifications_cleared`).
     func clearDelivered(chatId: String) {
         let center = UNUserNotificationCenter.current()
         center.getDeliveredNotifications { list in
             let ids = list.filter { ($0.request.content.userInfo["chat_id"] as? String) == chatId || $0.request.content.threadIdentifier == chatId }
                 .map(\.request.identifier)
+            notifyLog.notice("clear chat=\(chatId, privacy: .public) delivered=\(list.count) removed=\(ids.count)")
             if !ids.isEmpty { center.removeDeliveredNotifications(withIdentifiers: ids) }
         }
     }
