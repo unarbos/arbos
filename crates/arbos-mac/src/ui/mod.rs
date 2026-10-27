@@ -38,6 +38,7 @@ pub mod palette;
 pub mod people;
 pub mod picture_fit;
 pub mod presence;
+pub mod profile_target;
 pub mod profiles;
 pub mod rail;
 pub mod reactions;
