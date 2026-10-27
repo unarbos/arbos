@@ -28,6 +28,14 @@ pub enum Block {
     Math {
         source: String,
     },
+    /// A chart bubble's card ([feedback chart-bubble-mac-2026-10-26]): not markdown, but one
+    /// block of the agent's bubble like a code card. `spec` is the `chart` part's JSON (the
+    /// validated `arbos_core::chart::Chart`), `table` its markdown table (what a copy carries).
+    Chart {
+        part_id: String,
+        spec: String,
+        table: String,
+    },
 }
 
 pub fn split_blocks(source: &str) -> Vec<Block> {
@@ -325,7 +333,7 @@ pub fn link_hosts(text: &str) -> Vec<String> {
                 header.iter().for_each(|c| push(c));
                 rows.iter().flatten().for_each(|c| push(c));
             }
-            Block::Code { .. } | Block::Math { .. } => {}
+            Block::Code { .. } | Block::Math { .. } | Block::Chart { .. } => {}
         }
     }
     out
