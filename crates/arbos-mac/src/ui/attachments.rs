@@ -17,6 +17,7 @@ use gpui::{
 
 use crate::app::{AppState, FORWARDED_FROM_PREFIX};
 use crate::model::{Attachment, AttachmentKind};
+use crate::ui::highlight;
 use crate::ui::icons::icon;
 use crate::ui::theme::{Theme, BUBBLE_RADIUS};
 
@@ -106,6 +107,7 @@ fn download_disc(id: SharedString, muted: bool, theme: &Theme) -> gpui::Stateful
         .items_center()
         .justify_center()
         .cursor_pointer()
+        // hover-fill: exception overlay
         .hover(|s| s.bg(Theme::with_alpha(gpui::black(), 0.75)))
         .child(icon("arrow-down", 12.0, fg))
 }
@@ -347,10 +349,7 @@ fn file_card(
         );
     }
     if let Some(open) = open {
-        card = card
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
-            .on_click(move |_, _, cx| open(cx));
+        card = highlight::button(card.cursor_pointer(), theme).on_click(move |_, _, cx| open(cx));
     }
     card.into_any_element()
 }
