@@ -21,6 +21,7 @@ use crate::ui::blocked;
 use crate::ui::composer::Composer;
 use crate::ui::glass::{self, WindowDrag};
 use crate::ui::groups;
+use crate::ui::highlight;
 use crate::ui::icons::icon;
 use crate::ui::identity;
 use crate::ui::motion::PulseClock;
@@ -662,7 +663,7 @@ fn new_chat_plus(cx: &mut Context<Shell>) -> Stateful<Div> {
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
+        .map(|el| highlight::button(el, &theme))
         .child(icon("plus", 13.0, theme.text_muted))
         // Mouse-down stops the header's window-drag region; click creates the chat.
         .on_mouse_down(
@@ -692,7 +693,7 @@ fn name_part(picture: impl IntoElement, name: AnyElement, theme: &Theme) -> Stat
         .h_full()
         .cursor_pointer()
         .rounded_full()
-        .hover(|s| s.bg(theme.surface_2))
+        .map(|el| highlight::button(el, theme))
         .pr(px(4.0))
 }
 
@@ -730,16 +731,18 @@ fn tab_segment(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Optio
             .pl(px(9.0))
             .pr(px(7.0))
             .rounded_full()
-            .bg(if open {
-                theme.surface_2
-            } else {
-                theme.surface_1
-            })
             .text_size(px(TEXT_SMALL))
             .font_weight(FontWeight::MEDIUM)
             .text_color(theme.text)
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .map(|el| {
+                let base = if open {
+                    theme.surface_2
+                } else {
+                    theme.surface_1
+                };
+                highlight::washed(el, base, &theme)
+            })
             .child(
                 div()
                     .text_size(px(TEXT_SMALL))
@@ -842,16 +845,11 @@ fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl
             .h(px(36.0))
             .pl(px(10.0))
             .pr(px(8.0))
-            .rounded(px(9.0))
+            .rounded(px(glass::MENU_ROW_RADIUS))
             .text_size(px(TEXT_SMALL))
             .text_color(theme.text)
-            .bg(if is_active || menu_here {
-                theme.surface_2
-            } else {
-                gpui::transparent_black()
-            })
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .map(|el| highlight::row(el, is_active || menu_here, highlight::Shape::Own, &theme))
             .when(menu_here, |el| {
                 el.children(anchored_menu.take().map(|(_, menu)| menu))
             })
@@ -939,7 +937,7 @@ fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl
                     .group_hover(SharedString::from(format!("tab-row-{key}")), |s| {
                         s.opacity(1.0)
                     })
-                    .hover(|s| s.bg(theme.border_strong))
+                    .map(|el| highlight::button(el, &theme))
                     .child(icon("xmark", 9.0, theme.text_muted))
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -1028,15 +1026,14 @@ fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl
                     .h(px(36.0))
                     .pl(px(34.0))
                     .pr(px(12.0))
-                    .rounded(px(9.0))
+                    .rounded(px(glass::MENU_ROW_RADIUS))
                     .text_size(px(TEXT_SMALL))
                     .text_color(theme.text_muted)
                     .cursor_pointer()
+                    .map(|el| highlight::row(el, menu_here, highlight::Shape::Own, &theme))
                     .when(menu_here, |el| {
-                        el.bg(theme.surface_2)
-                            .children(anchored_menu.take().map(|(_, menu)| menu))
+                        el.children(anchored_menu.take().map(|(_, menu)| menu))
                     })
-                    .hover(|s| s.bg(theme.surface_2))
                     .on_mouse_down(
                         gpui::MouseButton::Right,
                         cx.listener(move |this, _, _, cx| {

@@ -207,7 +207,7 @@ pub(super) fn page(
                             &theme,
                         )
                         .cursor_pointer()
-                        .hover(|s| s.bg(theme.surface_2))
+                        .group(kit::HOT)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let pid = pid.clone();
                             this.state.update(cx, |s, cx| {
