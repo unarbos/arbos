@@ -1117,11 +1117,20 @@ struct RowView: View, Equatable {
     var onQuoteTap: ((Quote) -> Void)? = nil
     /// Briefly tinted after a quote tap landed on this row's message.
     var highlighted: Bool = false
+    /// Swipe right on this bubble → reply (the long-press Reply item's twin; `BubbleSwipe`).
+    /// Nil on system / channel / non-message rows.
+    var onReply: (() -> Void)? = nil
     /// Shared mention table from ChatView (built once per directory sync).
     let mentions: MentionTable
 
     /// Which reaction chip is expanded to show who used that emoji under the bubble.
     @State private var selectedReactionEmoji: String? = nil
+    /// Reply swipe: how far the bubble has followed the finger to the right.
+    @State private var replyDrag: CGFloat = 0
+    /// Reply swipe: what the current drag was decided to be (once, at 12 pt).
+    @State private var replyLock: BubbleSwipe.Lock = .undecided
+    /// Reply swipe: the threshold haptic fired for this drag.
+    @State private var replyArmed = false
 
     /// Trailing column width for swipe-revealed times (fits "12:59 PM").
     static let timeRevealWidth: CGFloat = 56
@@ -1188,8 +1197,8 @@ struct RowView: View, Equatable {
                 .padding(-4)
         )
         .animation(.easeInOut(duration: 0.35), value: highlighted)
-        // iMessage: drag left → times. Reply is long-press only (swipe fought vertical scroll).
-        .offset(x: -timeReveal)
+        // iMessage: drag left → times; drag right → reply. Exclusive by direction.
+        .offset(x: replyDrag - timeReveal)
         .overlay(alignment: .trailing) {
             if let time = swipeTimeLabel, timeReveal > 0.5 {
                 Text(time)
@@ -1202,6 +1211,58 @@ struct RowView: View, Equatable {
                     .accessibilityHidden(timeReveal < 12)
             }
         }
+        .overlay(alignment: .leading) {
+            // The reply arrow slides out from behind the bubble's leading edge.
+            if onReply != nil, replyDrag > 0.5 {
+                Image(systemName: "arrowshape.turn.up.left")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(replyArmed ? theme.accent : theme.muted)
+                    .frame(width: BubbleSwipe.revealWidth, alignment: .leading)
+                    .offset(x: replyDrag - BubbleSwipe.revealWidth)
+                    .opacity(Double(min(1, replyDrag / (BubbleSwipe.revealWidth * 0.55))))
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
+        }
+        .simultaneousGesture(replySwipeGesture, including: onReply == nil ? .subviews : .all)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(onReply == nil ? "row:\(row.id)" : "bubble:\(row.messageId)")
+    }
+
+    /// Swipe right on a message → reply (`BubbleSwipe`). Decides once at 12 pt: a
+    /// horizontal-right pan outside the edge zone follows the finger, taps at the
+    /// threshold and replies on release; anything else is left to the scroll view, the
+    /// time reveal or the system edge pop. The start point is read in the screen's space
+    /// (`BackSwipe.space`) so the edge zone is the screen's, not the bubble's.
+    private var replySwipeGesture: some Gesture {
+        DragGesture(minimumDistance: BubbleSwipe.lockDistance, coordinateSpace: .named(BackSwipe.space))
+            .onChanged { value in
+                guard onReply != nil else { return }
+                if replyLock == .undecided {
+                    replyLock = BubbleSwipe.lock(translation: value.translation, startX: value.startLocation.x)
+                    if replyLock == .reply { BackSwipe.bubbleSwipeActive = true }
+                }
+                guard replyLock == .reply else { return }
+                let reveal = BubbleSwipe.reveal(for: value.translation.width)
+                let armed = BubbleSwipe.triggers(reveal: reveal)
+                if armed != replyArmed {
+                    replyArmed = armed
+                    if armed { Haptics.pick() }
+                }
+                var t = Transaction()
+                t.disablesAnimations = true
+                withTransaction(t) { replyDrag = reveal }
+            }
+            .onEnded { _ in
+                let fire = replyLock == .reply && replyArmed
+                replyLock = .undecided
+                replyArmed = false
+                withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) { replyDrag = 0 }
+                if fire { onReply?() }
+                // The screen's full-screen back swipe sees the same drag end; let it read
+                // the flag first.
+                DispatchQueue.main.async { BackSwipe.bubbleSwipeActive = false }
+            }
     }
 
     @ViewBuilder
