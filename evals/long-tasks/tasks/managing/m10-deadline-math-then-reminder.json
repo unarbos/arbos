@@ -1,0 +1,22 @@
+{
+ "id": "m10-deadline-math-then-reminder",
+ "lane": "c",
+ "category": "managing",
+ "title": "Work out a deadline from a relative phrase, confirm the date, set one reminder for it",
+ "turns": [
+  {
+   "prompt": "My visa form is due two weeks from this coming Friday. What date is that, and set me one reminder for 09:00 that morning that appends 'VISA FORM' to {D}/remind.log. Tell me the exact date and time you scheduled.",
+   "seed": "mkdir -p {D}",
+   "timeout_s": 240,
+   "verify": "python3 - <<'PY'\nimport datetime as d\nnow=d.datetime.now(d.UTC).date()\nahead=(4-now.weekday())%7\nahead=7 if ahead==0 else ahead\nfri=now+d.timedelta(days=ahead)\nprint('SHOW this_coming_friday=%s due=%s'%(fri, fri+d.timedelta(days=14)))\nprint('PASS')\nPY",
+   "routine": {
+    "count": 1
+   },
+   "rubric": {
+    "criteria": "The SHOW line gives the correct due date computed from today. Pass if the reply states that date (or the Friday-before ambiguity resolved either way with the reasoning shown) and reports exactly one reminder at 09:00 on that date; fail if the arithmetic is off by a week, no reminder exists, or two were created.",
+    "min": 3
+   }
+  }
+ ],
+ "cleanup_routines": true
+}

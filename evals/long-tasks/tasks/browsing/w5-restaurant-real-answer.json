@@ -1,0 +1,30 @@
+{
+ "id": "w5-restaurant-real-answer",
+ "lane": "b",
+ "category": "browsing",
+ "title": "A multi-step web ask must end with a real answer in the chat, whichever path the model takes (act, new, job)",
+ "regression": "the delivered bubble names a restaurant and a source; an ack, a plan or a 'job started' note is not an answer (#1776 shape, job path incl.)",
+ "turns": [
+  {
+   "prompt": "Find me a good restaurant for dinner tonight in San José, Costa Rica — one recommendation, why it, and where you got that from.",
+   "seed": "mkdir -p {D}",
+   "background": true,
+   "latency_max_s": 10,
+   "timeout_s": 120
+  }
+ ],
+ "verify_wait": {
+  "wait_s": 480,
+  "settle_s": 10,
+  "text_regex": "https?://|\\b(tripadvisor|google|yelp|michelin|according to|source|from )\\b",
+  "text_regex_not": "(?i)\\b(job (has )?started|i'll (tell|let) you (know )?when|will report back)\\b[^\\n]*$",
+  "rubric": {
+   "criteria": "Judge the whole chat as the user sees it. Pass if a delivered bubble names ONE specific restaurant in San José, Costa Rica, gives a reason, and says where the recommendation comes from (a link or a named site/source). Fail if the last substantive bubble is only an acknowledgement, a plan, or a 'job started' note, if no restaurant is named, or if the source is missing or invented.",
+   "min": 3
+  }
+ },
+ "doc_checks": {
+  "no_truncated_reply": true,
+  "no_repeated_sentence": true
+ }
+}
