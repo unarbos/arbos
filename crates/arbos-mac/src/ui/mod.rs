@@ -8,6 +8,7 @@ pub mod avatars;
 pub mod callview;
 pub mod cards;
 pub mod channels;
+pub mod chat_search;
 pub mod composer;
 pub mod connectors;
 pub mod create_entity;
