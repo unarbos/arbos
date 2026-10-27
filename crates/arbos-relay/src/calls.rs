@@ -32,11 +32,11 @@ use arbos_core::api::{
 };
 use arbos_core::ids::{now_ms, ulid};
 
-use crate::apns::{Delivery, Outgoing};
 use crate::auth::Principal;
 use crate::db_calls::{CallRow, VoipToken};
 use crate::notify::{self, ChatRef, Sender};
 use crate::people;
+use crate::push::{Outgoing, SendOutcome};
 use crate::signin::api_error;
 use crate::state::AppState;
 
@@ -325,13 +325,13 @@ async fn deliver_voip(state: &AppState, t: &VoipToken, payload: Value) {
         collapse_id: None,
         payload,
     };
-    match state.push.send(out).await {
-        Delivery::Sent => {}
-        Delivery::TokenGone => {
+    match state.push.send_now(out).await {
+        SendOutcome::Accepted => {}
+        SendOutcome::TokenInvalid { .. } => {
             let _ = state.db.delete_voip_token_value(&t.token);
         }
-        Delivery::Failed(e) => {
-            tracing::warn!(device = %t.device_id, error = %e, "VoIP push failed")
+        outcome @ (SendOutcome::Permanent { .. } | SendOutcome::Transient { .. }) => {
+            tracing::warn!(device = %t.device_id, error = %outcome, "VoIP push failed")
         }
     }
 }
@@ -350,13 +350,13 @@ async fn deliver_alert(
         collapse_id: Some(collapse),
         payload,
     };
-    match state.push.send(out).await {
-        Delivery::Sent => {}
-        Delivery::TokenGone => {
+    match state.push.send_now(out).await {
+        SendOutcome::Accepted => {}
+        SendOutcome::TokenInvalid { .. } => {
             let _ = state.db.delete_push_token_value(&t.token);
         }
-        Delivery::Failed(e) => {
-            tracing::warn!(device = %t.device_id, error = %e, "call alert failed")
+        outcome @ (SendOutcome::Permanent { .. } | SendOutcome::Transient { .. }) => {
+            tracing::warn!(device = %t.device_id, error = %outcome, "call alert failed")
         }
     }
 }
@@ -2089,6 +2089,7 @@ mod tests {
             );
         }
         // The only APNs token belongs to Bob, who joined: a "started" alert went out, no "missed".
+        state.push.drain().await;
         let alerts = state.push.captured().await;
         assert!(alerts.iter().any(|o| o.payload["event"] == "started"));
         assert!(alerts.iter().all(|o| o.payload["event"] != "missed"));

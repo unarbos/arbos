@@ -41,16 +41,18 @@ enum GlobalSearch {
     /// What a row is; decides its picture and its section.
     enum Kind: Equatable {
         case agent, person, group, server, channel, message, media, file, link
+        /// A Settings page, sub-page or an agent's setting row.
+        case setting
     }
 
     /// The group a row is listed under. Order = list order.
     enum Section: Int, Comparable, CaseIterable {
-        case recent, people, chats, servers, messages, content
+        case recent, people, chats, servers, settings, messages, content
 
         static func < (lhs: Section, rhs: Section) -> Bool { lhs.rawValue < rhs.rawValue }
 
         /// The sections a typed query can fill, in list order.
-        static let withQuery: [Section] = [.people, .chats, .servers, .messages, .content]
+        static let withQuery: [Section] = [.people, .chats, .servers, .settings, .messages, .content]
 
         /// The Mac palette's headings.
         var label: String {
@@ -59,6 +61,7 @@ enum GlobalSearch {
             case .people: return "People & agents"
             case .chats: return "Chats"
             case .servers: return "Servers & channels"
+            case .settings: return "Settings"
             case .messages: return "Messages"
             case .content: return "Files, media & links"
             }
@@ -132,6 +135,142 @@ enum GlobalSearch {
         case item(chatId: Id, projectId: Id, itemId: String)
         /// Open a link in Safari.
         case link(URL)
+        /// Open Settings on a page, the feedback sheet, my Profile, or an agent's setting.
+        case setting(SettingsRoute)
+    }
+
+    /// A page Settings can land on; the raw value is the `ARBOS_SETTINGS_PAGE`
+    /// word `SettingsView(landing:)` already understands.
+    enum SettingsPageRoute: String, CaseIterable, Equatable {
+        case appearance, notifications, secrets, devices, machine, about, privacy, credits
+        case newSecret = "new-secret"
+        case connectOnePassword = "connect"
+        case textSize = "textsize"
+        case connectedApps = "connectors"
+        /// The Settings list itself (On this iPhone has no page of its own).
+        case root = "settings"
+    }
+
+    /// One of the agent pane's settings rows.
+    enum AgentSetting: Equatable {
+        case model, reasoning, voice
+    }
+
+    /// Where a Settings row lands.
+    enum SettingsRoute: Equatable {
+        case page(SettingsPageRoute)
+        case feedback
+        case profile
+        case agent(projectId: Id, setting: AgentSetting)
+    }
+
+    /// An owned agent as the Settings rows need it (the open chat's agent first).
+    struct AgentRow: Equatable {
+        var projectId: Id
+        var name: String
+        var model: String
+        var reasoning: String
+        var voice: String
+    }
+
+    /// Which of the iPhone's pages a shared index item is; nil for the Mac-only
+    /// Updates page and for the per-agent items (built with the agent id).
+    static func settingsRoute(for item: SettingsItem) -> SettingsRoute? {
+        switch item {
+        case .appearance, .appearanceOpacity: return .page(.appearance)
+        case .notifications: return .page(.notifications)
+        case .secrets: return .page(.secrets)
+        case .secretsNew: return .page(.newSecret)
+        case .secretsConnectOnePassword: return .page(.connectOnePassword)
+        case .devices: return .page(.devices)
+        case .onThisDevice: return .page(.root)
+        case .machine: return .page(.machine)
+        case .updates: return nil
+        case .sendFeedback: return .feedback
+        case .about: return .page(.about)
+        case .privacy: return .page(.privacy)
+        case .textSize: return .page(.textSize)
+        case .credits: return .page(.credits)
+        case .connectedApps: return .page(.connectedApps)
+        case .profile: return .profile
+        case .agentModel, .agentReasoning, .agentVoice: return nil
+        }
+    }
+
+    /// The SF Symbol a Settings row's tile carries — the Settings list's own.
+    static func settingsGlyph(_ route: SettingsRoute) -> String {
+        switch route {
+        case .page(let page):
+            switch page {
+            case .appearance: return "circle.lefthalf.filled"
+            case .notifications: return "bell.badge.fill"
+            case .secrets, .newSecret, .connectOnePassword: return "key.fill"
+            case .devices: return "laptopcomputer"
+            case .machine: return "desktopcomputer"
+            case .about: return "info.circle.fill"
+            case .privacy: return "hand.raised.fill"
+            case .credits: return "creditcard.fill"
+            case .textSize: return "textformat.size"
+            case .connectedApps: return "link"
+            case .root: return "iphone"
+            }
+        case .feedback: return "exclamationmark.bubble.fill"
+        case .profile: return "person.crop.circle"
+        case .agent(_, let setting):
+            switch setting {
+            case .model: return "cpu"
+            case .reasoning: return "sparkles"
+            case .voice: return "waveform"
+            }
+        }
+    }
+
+    /// "opacity" → "Opacity": the matched keyword as the subtitle's first word.
+    static func keywordLabel(_ keyword: String) -> String {
+        guard let first = keyword.first else { return "" }
+        return first.uppercased() + keyword.dropFirst()
+    }
+
+    /// The Settings rows for the typed query: one per matching page or
+    /// sub-page, one per owned agent for Model · Reasoning · Voice (`agents`
+    /// in list order). `when` carries that order so `arrange` keeps it.
+    static func settingsEntries(query: String, agents: [AgentRow]) -> [Entry] {
+        var out: [Entry] = []
+        for hit in settingsSearch(query: query) {
+            let rank = Rank.direct(kind: hit.kind, field: hit.keyword == nil ? .name : .title)
+            let lead = hit.keyword.map(keywordLabel)
+            let path = hit.entry.path
+            if hit.entry.perAgent {
+                let setting: AgentSetting
+                switch hit.entry.item {
+                case .agentModel: setting = .model
+                case .agentReasoning: setting = .reasoning
+                default: setting = .voice
+                }
+                for (i, agent) in agents.enumerated() {
+                    let value: String
+                    switch setting {
+                    case .model: value = agent.model
+                    case .reasoning: value = agent.reasoning
+                    case .voice: value = agent.voice
+                    }
+                    var subtitle = "\(agent.name) · \(path)"
+                    if !value.isEmpty { subtitle += " · \(value)" }
+                    if let lead { subtitle = "\(lead) · \(subtitle)" }
+                    out.append(Entry(kind: .setting, title: hit.entry.title, subtitle: subtitle,
+                                     when: Int64.max - Int64(i), rank: rank,
+                                     target: .setting(.agent(projectId: agent.projectId, setting: setting)),
+                                     picture: .project(agent.projectId)))
+                }
+                continue
+            }
+            guard let route = settingsRoute(for: hit.entry.item) else { continue }
+            let subtitle = lead.map { "\($0) · \(path)" } ?? path
+            out.append(Entry(kind: .setting, title: hit.entry.title, subtitle: subtitle,
+                             when: Int64.max - Int64(out.count), rank: rank,
+                             target: .setting(route), picture: .settingsTile(settingsGlyph(route))))
+        }
+        return out
     }
 
     /// One result row.
@@ -168,7 +307,16 @@ enum GlobalSearch {
                 return .messages
             case .media, .file, .link:
                 return .content
+            case .setting:
+                return .settings
             }
+        }
+
+        /// A Settings row whose title or keyword *is* the query: the section
+        /// moves to the top of the list.
+        var isExactSetting: Bool {
+            guard kind == .setting, case .direct(let kind, _) = rank else { return false }
+            return kind == .exact
         }
     }
 
@@ -180,6 +328,8 @@ enum GlobalSearch {
         case server(Id)
         case person(url: String?, handle: String, name: String?, id: String?, colorIndex: Int?)
         case thumbnail(MediaItem)
+        /// The Settings list's grey tile with this SF Symbol.
+        case settingsTile(String)
     }
 
     /// Rows per section with a query (the list scrolls, but a long tail of
@@ -214,6 +364,9 @@ enum GlobalSearch {
             }
             if rows.count > sectionCap { rows.removeLast(rows.count - sectionCap) }
             out.append(Group(section: section, rows: rows))
+        }
+        if let i = out.firstIndex(where: { group in group.section == .settings && group.rows.contains { row in row.isExactSetting } }) {
+            out.insert(out.remove(at: i), at: 0)
         }
         return out
     }
