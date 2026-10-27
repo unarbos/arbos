@@ -1125,6 +1125,7 @@ mod render_tests {
                 bytes: Some(212_000),
                 kind: Some(kind),
                 title: None,
+                chart_part: None,
             },
         }
     }
