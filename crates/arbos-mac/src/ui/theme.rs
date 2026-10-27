@@ -543,6 +543,16 @@ pub struct Theme {
     pub danger: Hsla,
     pub danger_soft: Hsla,
     pub code_bg: Hsla,
+    /// Code-card token palette — Grok Bot's six code colours, sampled from
+    /// Jacob's 2026-10-26 reference ([`code_color`]; `docs/mac-design-rules.md`
+    /// § Code cards). `code_guide` is the indent guide, `code_plain` the text.
+    pub code_plain: Hsla,
+    pub code_keyword: Hsla,
+    pub code_function: Hsla,
+    pub code_string: Hsla,
+    pub code_number: Hsla,
+    pub code_comment: Hsla,
+    pub code_guide: Hsla,
     pub font_sans: &'static str,
     pub font_mono: &'static str,
     /// The serif face typeset math is painted in (KaTeX's look in Grok Bot).
@@ -596,6 +606,13 @@ impl Theme {
             danger: hex(0xff453a),
             danger_soft: hex_a(0xff453a, 0.14),
             code_bg: hex_a(0x000000, 0.28),
+            code_plain: hex(0xd6d6dd),
+            code_keyword: hex(0x95d0cd),
+            code_function: hex(0xe6b387),
+            code_string: hex(0xd898d8),
+            code_number: hex(0xf1c972),
+            code_comment: hex(0x626262),
+            code_guide: hex_a(0xffffff, 0.07),
             font_sans: Self::sans_family(),
             font_mono: Self::mono_family(),
             font_math: Self::math_family(),
@@ -645,6 +662,13 @@ impl Theme {
             danger: hex(0xd7332a),
             danger_soft: hex_a(0xd7332a, 0.10),
             code_bg: hex_a(0x000000, 0.06),
+            code_plain: hex(0x1f1f23),
+            code_keyword: hex(0x1f7f7a),
+            code_function: hex(0xb8641a),
+            code_string: hex(0xa63fa4),
+            code_number: hex(0x9a6f00),
+            code_comment: hex(0x8c8c8c),
+            code_guide: hex_a(0x000000, 0.09),
             font_sans: Self::sans_family(),
             font_mono: Self::mono_family(),
             font_math: Self::math_family(),
@@ -898,6 +922,19 @@ impl Theme {
 
     pub fn plate_highlight(&self) -> Hsla {
         self.header_glass_highlight()
+    }
+
+    /// The colour a code token paints in (`code_comment` is also italic).
+    pub fn code_color(&self, kind: arbos_core::highlight::TokenKind) -> Hsla {
+        use arbos_core::highlight::TokenKind;
+        match kind {
+            TokenKind::Plain => self.code_plain,
+            TokenKind::Keyword => self.code_keyword,
+            TokenKind::Function => self.code_function,
+            TokenKind::String => self.code_string,
+            TokenKind::Number => self.code_number,
+            TokenKind::Comment => self.code_comment,
+        }
     }
 
     pub fn with_alpha(mut c: Hsla, a: f32) -> Hsla {
