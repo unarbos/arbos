@@ -661,19 +661,6 @@ pub fn project_leaf(p: &Project) -> LeafPick {
     leaf_pick(&p.id, p.avatar_leaf, p.avatar_leaf_color)
 }
 
-/// An agent shared into a people chat.
-pub fn agent_member(a: &AgentMember, size: f32, theme: &Theme) -> Div {
-    agent(
-        &a.project_id,
-        &a.name,
-        a.avatar_color_index,
-        a.avatar_leaf,
-        a.avatar_leaf_color,
-        size,
-        theme,
-    )
-}
-
 // ----- One identity for every surface (#1592) --------------------------------------
 
 pub use arbos_core::avatar::identity::{AgentCard, AgentIdentity, AgentQuery};
@@ -785,6 +772,19 @@ pub fn member_identity(
         Some(&a.handle),
         Some(&a.name),
     )
+}
+
+/// A roster member's picture through the resolver (identity → newest copy → decoded image).
+pub fn member_picture(
+    state: &AppState,
+    chat: Option<&Project>,
+    a: &AgentMember,
+    size: f32,
+    theme: &Theme,
+) -> Div {
+    let id = member_identity(chat, &state.projects, a);
+    let image = id.image_key.as_deref().and_then(|u| state.avatar(u));
+    agent_picture(&id, image, size, theme)
 }
 
 /// The picture for an identity: the uploaded / generated image when the loader has it,

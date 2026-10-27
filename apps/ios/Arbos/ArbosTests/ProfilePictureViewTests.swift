@@ -7,12 +7,15 @@ import XCTest
 /// `crates/arbos-mac/src/ui/avatar_picker.rs` `me_picker_tests`.
 @MainActor
 final class ProfilePictureViewTests: XCTestCase {
-    private func project(id: String, imageURL: String?) -> Project {
+    private func project(id: String, imageKey: String?) -> Project {
         var p = Project(
             id: id, name: "Affine", icon: "A", color: "#8b7cf6", state: .awake, stateSince: nil, stateDetail: nil,
             model: "", effort: .low, spendTodayUsd: 0, spendCapUsd: 0, avatar: nil, avatarColor: nil
         )
-        p.imageURL = imageURL
+        // The picture is a fact (`imageKey` + stamp); its URL is the resolver's, never a copy
+        // a surface holds (ARB-394, one avatar resolver).
+        p.imageKey = imageKey
+        p.avatarVersion = imageKey == nil ? 0 : 1_700_000_000_000
         return p
     }
 
@@ -30,12 +33,15 @@ final class ProfilePictureViewTests: XCTestCase {
     func testThePickerOffersViewOnlyWhenThereIsAPicture() {
         let model = AppModel()
         model.projects = [
-            project(id: "01PIC", imageURL: "https://relay.test/blob/01PIC/avatar-gen-1.jpg?token=t"),
-            project(id: "01LEAF", imageURL: nil),
+            project(id: "01PIC", imageKey: "avatar-gen-1.jpg"),
+            project(id: "01LEAF", imageKey: nil),
         ]
         let pic = AvatarPickerSheet.viewablePicture(target: .agent("01PIC"), model: model)
         XCTAssertEqual(pic?.name, "Affine")
-        XCTAssertEqual(pic?.url, "https://relay.test/blob/01PIC/avatar-gen-1.jpg?token=t")
+        // The public versioned picture route — the one URL every surface fetches — not the
+        // owner-only blob slot.
+        XCTAssertEqual(pic?.url, "\(model.relayHttpUrl)/projects/01PIC/avatar.jpg?v=1700000000000")
+        XCTAssertFalse(pic?.url.contains("/blob/") ?? true)
         XCTAssertNil(AvatarPickerSheet.viewablePicture(target: .agent("01LEAF"), model: model), "a leaf has nothing to view")
         XCTAssertNil(AvatarPickerSheet.viewablePicture(target: .me, model: model), "no account, no picture")
         XCTAssertEqual(AvatarPickerSheet.tabs(for: .me), [.generate, .upload], "View lives in the bar, not as a tab")
