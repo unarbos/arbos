@@ -166,7 +166,7 @@ fn server_row(
         theme,
     )
     .cursor_pointer()
-    .hover(|s| s.bg(theme.surface_2))
+    .group(kit::HOT)
     .on_click(cx.listener(move |this, _, _, cx| {
         this.push_profile(page.clone(), cx);
     }))
@@ -237,7 +237,7 @@ fn profile_tab(
             theme,
         )
         .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
+        .group(kit::HOT)
         .on_click(cx.listener(move |this, _, _, cx| {
             // The server's Members tab, pushed so ‹ comes back here.
             this.push_profile(members_page.clone(), cx);
@@ -316,7 +316,7 @@ fn settings_tab(
     if can_admin {
         name_row = name_row
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .group(kit::HOT)
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.start_rename_channel(cid.clone(), cname.clone(), window, cx);
             }));
@@ -375,7 +375,7 @@ fn settings_tab(
         if can_admin {
             topic_row = topic_row
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
+                .group(kit::HOT)
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.start_edit_channel_topic(cid.clone(), ctopic.clone(), window, cx);
                 }));
@@ -491,7 +491,7 @@ fn danger_footer(
         theme,
     )
     .cursor_pointer()
-    .hover(|s| s.bg(theme.surface_2))
+    .group(kit::HOT)
     .on_click(cx.listener(move |this, _, _, cx| {
         let (sid, cid) = (sid.clone(), cid.clone());
         this.state

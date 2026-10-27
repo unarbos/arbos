@@ -33,6 +33,7 @@ use crate::app::AppState;
 use crate::model::{Id, Job, JobState};
 use crate::ui::cards;
 use crate::ui::glass;
+use crate::ui::highlight;
 use crate::ui::icons::icon;
 use crate::ui::mention::{self, ChipPointer};
 use crate::ui::presence::{self, Presence};
@@ -413,7 +414,7 @@ fn job_row(
         .items_center()
         .gap(px(10.0))
         .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
+        .map(|el| highlight::row(el, false, highlight::Shape::Own, theme))
         .debug_selector(move || format!("tasks-row-{ix}"))
         .on_click(cx.listener(move |this, _, window, cx| {
             cx.stop_propagation();
@@ -470,7 +471,6 @@ fn text_button(
         .px(px(BUTTON_PAD_X))
         .flex_shrink_0()
         .rounded_full()
-        .bg(theme.surface_2)
         .flex()
         .items_center()
         .justify_center()
@@ -479,8 +479,7 @@ fn text_button(
         .text_color(color)
         .whitespace_nowrap()
         .cursor_pointer()
-        .hover(|s| s.bg(Theme::with_alpha(theme.text, 0.14)))
-        .active(|s| s.bg(Theme::with_alpha(theme.text, 0.22)))
+        .map(|el| highlight::washed(el, theme.surface_2, theme))
         .child(label.to_string())
 }
 
