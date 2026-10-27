@@ -934,7 +934,13 @@ pub(crate) mod tests {
     }
 
     pub(crate) async fn test_agent() -> (Arc<Agent>, std::path::PathBuf) {
+        test_agent_with(axum::Router::new()).await
+    }
+
+    /// Same, with extra mock-relay routes merged in (`/box/secrets/…` for the hand-off tests).
+    pub(crate) async fn test_agent_with(extra: axum::Router) -> (Arc<Agent>, std::path::PathBuf) {
         let app = axum::Router::new()
+            .merge(extra)
             .route(
                 "/proxy/v1/chat/completions",
                 axum::routing::post(mock_quick),
