@@ -29,7 +29,7 @@ pub fn picture(space: &Project, state: &AppState, size: f32, theme: &Theme) -> D
                     .rounded_full()
                     .object_fit(gpui::ObjectFit::Cover),
             ),
-        None => crate::ui::avatars::project(space, size, theme),
+        None => crate::ui::avatars::project(space, size, theme), // avatar-lint: allow (group picture)
     }
 }
 
@@ -59,7 +59,12 @@ pub fn sender_color(seed: &str, theme: &Theme) -> Hsla {
 }
 
 /// Group tab: the participants' glyphs stacked, host first. The "Projects ⇄" tab shows `⇄`.
-pub fn tab_glyphs(chat: &Chat, projects: &[Project], theme: &Theme) -> Option<Div> {
+pub fn tab_glyphs(
+    chat: &Chat,
+    projects: &[Project],
+    images: &std::collections::HashMap<String, std::sync::Arc<gpui::RenderImage>>,
+    theme: &Theme,
+) -> Option<Div> {
     match chat.kind {
         ChatKind::Group => {
             // Overlapping heads: laid out absolutely inside a row of a known
@@ -81,7 +86,12 @@ pub fn tab_glyphs(chat: &Chat, projects: &[Project], theme: &Theme) -> Option<Di
                 .h(px(GLYPH));
             for (i, id) in chat.participants.iter().take(MAX_GLYPHS).enumerate() {
                 let head = match projects.iter().find(|p| &p.id == id) {
-                    Some(p) => crate::ui::avatars::project(p, GLYPH, theme),
+                    Some(p) => crate::ui::avatars::project_with(
+                        images.get(&p.id).cloned(),
+                        p,
+                        GLYPH,
+                        theme,
+                    ),
                     None => crate::ui::avatars::element(id, id, None, GLYPH, theme),
                 };
                 row = row.child(head.absolute().left(px(step * i as f32)).top(px(0.0)));
