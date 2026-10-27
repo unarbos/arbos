@@ -19,6 +19,7 @@ use crate::app::AppState;
 use crate::chat_search::Sender;
 use crate::ui::avatars;
 use crate::ui::glass;
+use crate::ui::highlight;
 use crate::ui::icons::icon;
 use crate::ui::select::SearchMarks;
 use crate::ui::shell::Shell;
@@ -205,12 +206,11 @@ pub fn bar(shell: &Shell, cx: &mut Context<Shell>) -> Option<AnyElement> {
                 .size(px(metrics::CLOSE))
                 .ml(px(6.0))
                 .rounded_full()
-                .bg(theme.text_muted)
                 .flex()
                 .items_center()
                 .justify_center()
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.text))
+                .map(|el| highlight::washed(el, theme.text_muted, &theme))
                 .debug_selector(|| "chat-search-close".into())
                 .child(icon("xmark", 9.0, theme.bg))
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -245,10 +245,7 @@ fn nav(id: &'static str, glyph: &str, on: bool, theme: &Theme) -> Stateful<gpui:
         .flex()
         .items_center()
         .justify_center()
-        .when(on, |el| {
-            el.cursor_pointer()
-                .hover(|s| s.bg(Theme::with_alpha(theme.text, 0.10)))
-        })
+        .when(on, |el| highlight::button(el.cursor_pointer(), theme))
         .debug_selector(move || id.into())
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(icon(
