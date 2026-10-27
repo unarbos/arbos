@@ -14,9 +14,10 @@ use gpui::{div, prelude::*, px, Context, Div, Focusable as _};
 use crate::app::{AppState, ServerSheet};
 use crate::ui::error_note;
 use crate::ui::glass;
+use crate::ui::highlight::{self, Shape};
 use crate::ui::profiles::kit;
 use crate::ui::shell::Shell;
-use crate::ui::theme::{Theme, TEXT_SMALL, TEXT_TINY};
+use crate::ui::theme::{Theme, PANEL_RADIUS, TEXT_SMALL, TEXT_TINY};
 
 /// The open sheet, over everything; a click on the dimmed area cancels it.
 pub fn sheet(shell: &Shell, sheet: &ServerSheet, cx: &mut Context<Shell>) -> Div {
@@ -83,7 +84,7 @@ pub fn sheet(shell: &Shell, sheet: &ServerSheet, cx: &mut Context<Shell>) -> Div
                 .px(px(14.0))
                 .py(px(10.0))
                 .cursor_pointer()
-                .hover(|st| st.bg(theme.surface_2))
+                .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), &theme))
                 .child(
                     div()
                         .flex()
