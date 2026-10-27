@@ -25,6 +25,7 @@ use crate::ui::avatars;
 use crate::ui::cards;
 use crate::ui::chat_search;
 use crate::ui::frost::edge_faded;
+use crate::ui::highlight;
 use crate::ui::icons::icon;
 use crate::ui::markdown::{
     self, has_fenced_code, inline_plain, inline_spans, polish_assistant_prose, split_blocks, Block,
@@ -1803,7 +1804,7 @@ impl Transcript {
                 .rounded_full()
                 .cursor_pointer()
                 .opacity(opacity)
-                .hover(|s| s.bg(theme.surface_2))
+                .map(|el| highlight::button(el, theme))
                 .child(icon(glyph, RAIL_GLYPH, color))
         };
         div()
@@ -3180,12 +3181,11 @@ impl Render for Transcript {
                                 .items_center()
                                 .justify_center()
                                 .rounded_full()
-                                .bg(theme.card())
                                 .border_1()
                                 .border_color(theme.border_strong)
                                 .shadow_md()
                                 .cursor_pointer()
-                                .hover(|s| s.bg(theme.surface_2))
+                                .map(|el| highlight::washed(el, theme.card(), &theme))
                                 .child(icon("arrow-down", 15.0, theme.text))
                                 .on_click(cx.listener(|this, _, _, cx| this.jump_to_latest(cx)))
                                 .with_animation(
@@ -5625,7 +5625,9 @@ fn copy_pill(row_id: &str, code: &str, theme: &Theme, copy: &CodeCopy) -> AnyEle
         .bg(base)
         .text_color(fg)
         .when(!copied, |el| {
+            // hover-fill: exception code-card
             el.hover(move |s| s.bg(hover_bg).text_color(hover_fg))
+                // hover-fill: exception code-card
                 .active(move |s| s.bg(down_bg).text_color(down_fg))
         })
         .child(if copied {
