@@ -124,6 +124,10 @@ pub struct Project {
     /// owner allowed to message this agent. Empty unless I own it.
     #[serde(default)]
     pub message_grants: Vec<MessageGrant>,
+    /// Members I blocked, as `user:<id>` — the relay's `blockedSenders` hint on a people
+    /// chat ([feedback blocked-state-mac-2026-10-26]): their rows are hidden for me alone.
+    #[serde(default)]
+    pub blocked_senders: Vec<String>,
 }
 
 /// One row of an agent's "Who may message X" card (`message_grants` on the project).
