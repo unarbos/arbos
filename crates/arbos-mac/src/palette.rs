@@ -17,9 +17,24 @@
 //! chat and server by activity — and the first nine rows carry ⌘1–⌘9, like
 //! Grok's. App-wide whatever chat is open ([feedback
 //! search-palette-app-wide-2026-10-24]).
+//!
+//! **Settings** ([feedback search-settings-mac-2026-10-26], Jacob): every
+//! page of my pane's Settings list, its sub-pages and the words people type
+//! for them (`arbos_core::settings_search`, the index both apps share) are
+//! rows too — a section after Servers & channels and before Messages, and
+//! first of all when the query *is* a page's title or keyword ("opacity",
+//! "voice"). A title hit says where the page lives, a keyword hit names the
+//! keyword; Model · Reasoning · Voice come once per owned agent, the open
+//! chat's agent first. Picking one opens my pane on that page
+//! (`Shell::open_setting`).
 
+use arbos_core::search::{MatchField, MatchKind};
+use arbos_core::settings_search::{self, Platform, SettingsItem, SettingsMatched};
+
+use crate::app::AgentPick;
 use crate::model::{Id, Project};
 use crate::search::{HitKind, Match, SearchHit};
+use crate::ui::shell::SettingsPage;
 
 /// What a row is; decides its glyph and its section.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -34,6 +49,8 @@ pub enum Kind {
     Media,
     File,
     Link,
+    /// A Settings page, sub-page or an agent's setting row.
+    Setting,
 }
 
 /// The group a row is listed under.
@@ -43,15 +60,17 @@ pub enum Section {
     People,
     Chats,
     Servers,
+    Settings,
     Messages,
     Content,
 }
 
 impl Section {
-    pub const WITH_QUERY: [Section; 5] = [
+    pub const WITH_QUERY: [Section; 6] = [
         Section::People,
         Section::Chats,
         Section::Servers,
+        Section::Settings,
         Section::Messages,
         Section::Content,
     ];
@@ -62,6 +81,7 @@ impl Section {
             Section::People => "People & agents",
             Section::Chats => "Chats",
             Section::Servers => "Servers & channels",
+            Section::Settings => "Settings",
             Section::Messages => "Messages",
             Section::Content => "Files, media & links",
         }
@@ -128,6 +148,25 @@ pub enum Target {
     },
     /// Open a link in the browser.
     Link(String),
+    /// Open my pane on a Settings page (or an agent's pane on a setting row).
+    Setting(SettingTarget),
+}
+
+/// Where a Settings row lands ([feedback search-settings-mac-2026-10-26]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SettingTarget {
+    /// My pane › Settings › `page` (`Shell::open_settings_page`).
+    Page(SettingsPage),
+    /// Settings › Secrets with the New secret form open.
+    SecretsNew,
+    /// Settings › Secrets with the Connect 1Password form open.
+    SecretsConnect,
+    /// The Send feedback sheet (⌘⌥F).
+    Feedback,
+    /// My pane › Profile.
+    Profile,
+    /// An owned agent's pane on Details with one settings row dropped down.
+    Agent { project_id: Id, pick: AgentPick },
 }
 
 /// One palette row.
@@ -154,8 +193,175 @@ impl Entry {
             (Kind::Server | Kind::Channel, _) => Section::Servers,
             (Kind::Message, _) => Section::Messages,
             (Kind::Media | Kind::File | Kind::Link, _) => Section::Content,
+            (Kind::Setting, _) => Section::Settings,
         }
     }
+
+    /// A Settings row whose title or keyword *is* the query: the section
+    /// moves to the top of the list.
+    fn is_exact_setting(&self) -> bool {
+        self.kind == Kind::Setting
+            && matches!(
+                self.rank,
+                Rank::Direct(Match {
+                    kind: MatchKind::Exact,
+                    ..
+                })
+            )
+    }
+}
+
+/// An owned agent as the Settings rows need it: name, picture id, the
+/// current value of each row, and its activity for the order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentRow {
+    pub project_id: Id,
+    pub name: String,
+    pub model: String,
+    pub reasoning: String,
+    pub voice: String,
+}
+
+/// Which of the Mac's pages a shared index item is; `None` for the items the
+/// Mac does not list (the iPhone's Privacy, Text Size, Credits, Connected apps).
+pub fn setting_target(item: SettingsItem) -> Option<SettingTarget> {
+    Some(match item {
+        SettingsItem::Appearance | SettingsItem::AppearanceOpacity => {
+            SettingTarget::Page(SettingsPage::Appearance)
+        }
+        SettingsItem::Notifications => SettingTarget::Page(SettingsPage::Notifications),
+        SettingsItem::Secrets => SettingTarget::Page(SettingsPage::Secrets),
+        SettingsItem::SecretsNew => SettingTarget::SecretsNew,
+        SettingsItem::SecretsConnectOnePassword => SettingTarget::SecretsConnect,
+        SettingsItem::Devices => SettingTarget::Page(SettingsPage::Devices),
+        SettingsItem::OnThisDevice => SettingTarget::Page(SettingsPage::ThisMac),
+        SettingsItem::Machine => SettingTarget::Page(SettingsPage::Machine),
+        SettingsItem::Updates => SettingTarget::Page(SettingsPage::Updates),
+        SettingsItem::SendFeedback => SettingTarget::Feedback,
+        SettingsItem::About => SettingTarget::Page(SettingsPage::About),
+        SettingsItem::Profile => SettingTarget::Profile,
+        SettingsItem::Privacy
+        | SettingsItem::TextSize
+        | SettingsItem::Credits
+        | SettingsItem::ConnectedApps => return None,
+        // Per-agent rows are built by `settings_entries` with the agent id.
+        SettingsItem::AgentModel | SettingsItem::AgentReasoning | SettingsItem::AgentVoice => {
+            return None
+        }
+    })
+}
+
+/// The glyph for a built row (its target says which item it was).
+pub fn target_glyph(target: &SettingTarget) -> &'static str {
+    match target {
+        SettingTarget::Page(SettingsPage::Appearance) => "circle-half",
+        SettingTarget::Page(SettingsPage::Notifications) => "bell",
+        SettingTarget::Page(SettingsPage::Secrets)
+        | SettingTarget::SecretsNew
+        | SettingTarget::SecretsConnect => "key",
+        SettingTarget::Page(SettingsPage::Devices) => "laptop",
+        SettingTarget::Page(SettingsPage::ThisMac) => "window",
+        SettingTarget::Page(SettingsPage::Machine) => "desktop",
+        SettingTarget::Page(SettingsPage::Updates) => "arrow-down",
+        SettingTarget::Page(SettingsPage::About) => "info",
+        SettingTarget::Page(SettingsPage::Credits) => "creditcard",
+        SettingTarget::Page(SettingsPage::Connectors) => "link",
+        SettingTarget::Page(
+            SettingsPage::Root
+            | SettingsPage::Routines
+            | SettingsPage::Channels
+            | SettingsPage::Skills,
+        ) => "gear",
+        SettingTarget::Feedback => "square-pencil",
+        SettingTarget::Profile => "person",
+        SettingTarget::Agent { pick, .. } => match pick {
+            AgentPick::Model => "cpu",
+            AgentPick::Reasoning => "sparkles",
+            AgentPick::Voice => "waveform",
+        },
+    }
+}
+
+/// "opacity" → "Opacity": the matched keyword as the subtitle's first word.
+fn keyword_label(keyword: &str) -> String {
+    let mut chars = keyword.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// The Settings rows for the normalized `query`: one per matching page or
+/// sub-page, and one per owned agent for Model · Reasoning · Voice (`agents`
+/// in the order they should list: the open chat's agent first, then by
+/// activity). `when` carries that order so `arrange` keeps it inside a rank.
+pub fn settings_entries(query: &str, agents: &[AgentRow]) -> Vec<Entry> {
+    let hits = settings_search::search(query, Platform::Mac);
+    let mut out = Vec::new();
+    for hit in hits {
+        let rank = Rank::Direct(Match {
+            kind: hit.kind,
+            field: match hit.matched {
+                SettingsMatched::Title => MatchField::Name,
+                SettingsMatched::Keyword(_) => MatchField::Title,
+            },
+        });
+        let title = hit.entry.title_for(Platform::Mac).to_string();
+        let path = hit.entry.path;
+        let lead = match hit.matched {
+            SettingsMatched::Title => None,
+            SettingsMatched::Keyword(kw) => Some(keyword_label(kw)),
+        };
+        if hit.entry.per_agent {
+            let pick = match hit.entry.item {
+                SettingsItem::AgentModel => AgentPick::Model,
+                SettingsItem::AgentReasoning => AgentPick::Reasoning,
+                _ => AgentPick::Voice,
+            };
+            for (i, agent) in agents.iter().enumerate() {
+                let value = match pick {
+                    AgentPick::Model => &agent.model,
+                    AgentPick::Reasoning => &agent.reasoning,
+                    AgentPick::Voice => &agent.voice,
+                };
+                let mut subtitle = format!("{} · {path}", agent.name);
+                if !value.is_empty() {
+                    subtitle.push_str(&format!(" · {value}"));
+                }
+                if let Some(lead) = &lead {
+                    subtitle = format!("{lead} · {subtitle}");
+                }
+                out.push(Entry {
+                    kind: Kind::Setting,
+                    title: title.clone(),
+                    subtitle,
+                    when: u64::MAX - i as u64,
+                    rank,
+                    target: Target::Setting(SettingTarget::Agent {
+                        project_id: agent.project_id.clone(),
+                        pick,
+                    }),
+                });
+            }
+            continue;
+        }
+        let Some(target) = setting_target(hit.entry.item) else {
+            continue;
+        };
+        let subtitle = match &lead {
+            Some(lead) => format!("{lead} · {path}"),
+            None => path.to_string(),
+        };
+        out.push(Entry {
+            kind: Kind::Setting,
+            title,
+            subtitle,
+            when: u64::MAX - out.len() as u64,
+            rank,
+            target: Target::Setting(target),
+        });
+    }
+    out
 }
 
 /// A chat row from the #1477 matcher's verdict: a DM reads as the person
@@ -224,8 +430,9 @@ pub const RECENT_CAP: usize = 24;
 pub const SHORTCUTS: usize = 9;
 
 /// Group and order `entries` for the list. Empty `query`: one **Recent**
-/// section by activity. Otherwise the four sections in order, each with its
-/// direct (name) hits first, newest first, capped at [`SECTION_CAP`].
+/// section by activity. Otherwise the sections in order, each with its
+/// direct (name) hits first, newest first, capped at [`SECTION_CAP`] —
+/// **Settings** first of all when a page's title or keyword is exactly the query.
 pub fn arrange(mut entries: Vec<Entry>, query_is_empty: bool) -> Vec<(Section, Vec<Entry>)> {
     if query_is_empty {
         entries.retain(|e| {
@@ -255,6 +462,13 @@ pub fn arrange(mut entries: Vec<Entry>, query_is_empty: bool) -> Vec<(Section, V
         rows.sort_by_key(|e| (e.rank, std::cmp::Reverse(e.when)));
         rows.truncate(SECTION_CAP);
         out.push((section, rows));
+    }
+    if let Some(i) = out
+        .iter()
+        .position(|(s, rows)| *s == Section::Settings && rows.iter().any(Entry::is_exact_setting))
+    {
+        let settings = out.remove(i);
+        out.insert(0, settings);
     }
     out
 }
@@ -642,5 +856,205 @@ mod tests {
             "github.com"
         );
         assert_eq!(link_host("http://relay.arbos.life"), "relay.arbos.life");
+    }
+
+    // ----- Settings rows ([feedback search-settings-mac-2026-10-26]) ---------
+
+    fn agents() -> Vec<AgentRow> {
+        let row = |id: &str, name: &str, voice: &str| AgentRow {
+            project_id: id.into(),
+            name: name.into(),
+            model: "gpt-6.1-sol".into(),
+            reasoning: "High".into(),
+            voice: voice.into(),
+        };
+        vec![
+            row("p-arbos", "Arbos", "Default"),
+            row("p-comms", "Comms", "Rex"),
+            row("p-affine", "Affine", "Ara"),
+        ]
+    }
+
+    fn section_titles(arranged: &[(Section, Vec<Entry>)], s: Section) -> Vec<String> {
+        arranged
+            .iter()
+            .find(|(sec, _)| *sec == s)
+            .map(|(_, rows)| rows.iter().map(|r| r.title.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// "dev": Devin (a name hit) stays first; Devices follows in its own
+    /// section, after Servers & channels and before Messages.
+    #[test]
+    fn a_settings_prefix_hit_lists_after_people_chats_and_servers() {
+        let q = crate::search::normalize_query("dev");
+        let mut rows = vec![
+            Entry {
+                rank: Rank::of("Devin", &q),
+                ..entry(Kind::Person, "Devin", 10, false)
+            },
+            Entry {
+                target: Target::Server("s1".into()),
+                rank: Rank::of_entity("Dev Crew", "", None, &q),
+                ..entry(Kind::Server, "Dev Crew", 5, false)
+            },
+            Entry {
+                target: Target::Message {
+                    space_id: "a".into(),
+                    chat_id: "c".into(),
+                    message_id: "m".into(),
+                },
+                ..entry(Kind::Message, "Arbos", 99, false)
+            },
+        ];
+        rows.extend(settings_entries(&q, &agents()));
+        let arranged = arrange(rows, false);
+        let sections: Vec<Section> = arranged.iter().map(|(s, _)| *s).collect();
+        assert_eq!(
+            sections,
+            [
+                Section::People,
+                Section::Servers,
+                Section::Settings,
+                Section::Messages
+            ]
+        );
+        assert_eq!(section_titles(&arranged, Section::Settings), ["Devices"]);
+        let devices = &arranged[2].1[0];
+        assert_eq!(devices.subtitle, "Settings");
+        assert_eq!(
+            devices.target,
+            Target::Setting(SettingTarget::Page(SettingsPage::Devices))
+        );
+    }
+
+    /// "opacity": no page is called that; Appearance's keyword is an exact
+    /// hit, so Settings jumps first and the keyword leads the subtitle.
+    #[test]
+    fn an_exact_keyword_puts_settings_first_and_names_the_keyword() {
+        let q = crate::search::normalize_query("Opacity");
+        let mut rows = vec![Entry {
+            target: Target::Message {
+                space_id: "a".into(),
+                chat_id: "c".into(),
+                message_id: "m".into(),
+            },
+            ..entry(Kind::Message, "Affine", 99, false)
+        }];
+        rows.extend(settings_entries(&q, &agents()));
+        let arranged = arrange(rows, false);
+        assert_eq!(arranged[0].0, Section::Settings);
+        assert_eq!(arranged[1].0, Section::Messages);
+        let appearance = &arranged[0].1[0];
+        assert_eq!(appearance.title, "Appearance");
+        assert_eq!(appearance.subtitle, "Opacity · Settings");
+        assert_eq!(
+            appearance.target,
+            Target::Setting(SettingTarget::Page(SettingsPage::Appearance))
+        );
+        assert_eq!(
+            target_glyph(&SettingTarget::Page(SettingsPage::Appearance)),
+            "circle-half"
+        );
+    }
+
+    /// "voice": one row per owned agent in the order given (open chat's agent
+    /// first), each with its current value; the title is exact, so first.
+    #[test]
+    fn agent_settings_come_once_per_owned_agent() {
+        let q = crate::search::normalize_query("voice");
+        let rows = settings_entries(&q, &agents());
+        let arranged = arrange(rows, false);
+        assert_eq!(arranged[0].0, Section::Settings);
+        let voice = &arranged[0].1;
+        assert_eq!(voice.len(), 3);
+        assert!(voice.iter().all(|r| r.title == "Voice"));
+        assert_eq!(voice[0].subtitle, "Arbos · Settings · Default");
+        assert_eq!(voice[1].subtitle, "Comms · Settings · Rex");
+        assert_eq!(voice[2].subtitle, "Affine · Settings · Ara");
+        assert_eq!(
+            voice[0].target,
+            Target::Setting(SettingTarget::Agent {
+                project_id: "p-arbos".into(),
+                pick: AgentPick::Voice,
+            })
+        );
+        // "model" through its keyword set, "reasoning" by title; no agents → no rows.
+        let model = settings_entries(&crate::search::normalize_query("gpt"), &agents());
+        assert_eq!(model[0].subtitle, "Gpt · Arbos · Settings · gpt-6.1-sol");
+        assert!(matches!(
+            model[0].target,
+            Target::Setting(SettingTarget::Agent {
+                pick: AgentPick::Model,
+                ..
+            })
+        ));
+        assert!(settings_entries(&crate::search::normalize_query("voice"), &[]).is_empty());
+    }
+
+    /// Every page my pane's Settings list shows is reachable from search with
+    /// its own target, and so are the sub-pages, the feedback sheet and Profile.
+    #[test]
+    fn every_listed_settings_page_is_indexed_with_a_target() {
+        for page in SettingsPage::LISTED {
+            let q = crate::search::normalize_query(page.title());
+            let q = if page == SettingsPage::ThisMac {
+                "on this mac".to_string()
+            } else {
+                q
+            };
+            let rows = settings_entries(&q, &[]);
+            assert!(
+                rows.iter()
+                    .any(|r| r.target == Target::Setting(SettingTarget::Page(page))),
+                "{page:?} is not found by its title ({q:?}): {:?}",
+                rows.iter().map(|r| &r.title).collect::<Vec<_>>()
+            );
+        }
+        let find = |typed: &str| {
+            settings_entries(&crate::search::normalize_query(typed), &[])
+                .into_iter()
+                .map(|r| r.target)
+                .collect::<Vec<_>>()
+        };
+        assert!(find("new secret").contains(&Target::Setting(SettingTarget::SecretsNew)));
+        assert!(find("1password").contains(&Target::Setting(SettingTarget::SecretsConnect)));
+        assert!(find("feedback").contains(&Target::Setting(SettingTarget::Feedback)));
+        assert!(find("profile").contains(&Target::Setting(SettingTarget::Profile)));
+        // Jacob's examples: theme → Appearance, token → Secrets.
+        assert_eq!(
+            find("theme")[0],
+            Target::Setting(SettingTarget::Page(SettingsPage::Appearance))
+        );
+        assert_eq!(
+            find("token")[0],
+            Target::Setting(SettingTarget::Page(SettingsPage::Secrets))
+        );
+        // Every Mac entry of the shared index maps to a Mac target (per-agent
+        // rows map through the agent); nothing the Mac does not list leaks in.
+        for e in settings_search::index(Platform::Mac) {
+            if e.per_agent {
+                continue;
+            }
+            assert!(
+                setting_target(e.item).is_some(),
+                "{:?} has no Mac target",
+                e.item
+            );
+        }
+        for item in [
+            SettingsItem::Privacy,
+            SettingsItem::TextSize,
+            SettingsItem::Credits,
+            SettingsItem::ConnectedApps,
+        ] {
+            assert!(setting_target(item).is_none());
+            assert!(settings_search::index(Platform::Mac).all(|e| e.item != item));
+        }
+        // Not indexed on purpose: Sign out, Pause all secrets.
+        assert!(find("sign out").is_empty());
+        assert!(find("pause").is_empty());
+        // No query, no Settings rows (Recent stays chats and servers).
+        assert!(settings_entries("", &agents()).is_empty());
     }
 }

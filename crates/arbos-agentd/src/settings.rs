@@ -472,29 +472,18 @@ impl Agent {
         self.refresh_session_prompt("renamed").await;
     }
 
-    /// Rewrite the system prompt file and make the live pi session read it: at once when no turn
-    /// runs, else as soon as the running turn ends (supervisor loop, `prompt_refresh_pending`).
+    /// Rewrite the system prompt file and have the live pi session read it: the supervisor loop
+    /// restarts the session at the next turn boundary once the change has settled
+    /// (`schedule_prompt_refresh`, #2007) — never under a running or starting turn.
     pub async fn refresh_session_prompt(self: &Arc<Self>, why: &str) {
         if let Err(e) = self.write_system_prompt() {
             tracing::warn!(error = %e, why, "system prompt rewrite");
             return;
         }
-        if self.turn_running.load(std::sync::atomic::Ordering::SeqCst)
-            || !self.pi_ready.load(std::sync::atomic::Ordering::SeqCst)
-        {
-            self.prompt_refresh_pending
-                .store(true, std::sync::atomic::Ordering::SeqCst);
-            tracing::info!(why, "system prompt refresh deferred to the end of the turn");
-            return;
-        }
-        match self.respawn_pi_current().await {
-            Ok(()) => tracing::info!(why, "pi session restarted on the refreshed system prompt"),
-            Err(e) => {
-                tracing::warn!(error = %e, why, "pi respawn for the prompt refresh failed");
-                self.prompt_refresh_pending
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
-            }
-        }
+        // The prompt file is current now; the session re-reads it when the supervisor
+        // restarts it — at the next turn boundary, after a quiet window (#2007). A turn that
+        // starts first runs on the previous prompt, which the stable-prefix model tolerates.
+        self.schedule_prompt_refresh(why);
     }
 
     /// Switch the live pi session's model / thinking level and remember the new slots.
