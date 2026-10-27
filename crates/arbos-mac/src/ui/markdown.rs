@@ -4,7 +4,6 @@
 //! replies; swap for pulldown-cmark when more is needed.
 
 use super::math;
-use super::urlwrap;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Block {
@@ -414,8 +413,6 @@ fn inline_styled(text: &str) -> Vec<Styled> {
                         let icon = (!label_is_url(&label)).then(|| link_host(&href)).flatten();
                         let text = match &icon {
                             Some(_) => format!("{LINK_ICON_CELL}{label}"),
-                            // An address as the label wraps like a bare URL.
-                            None if label_is_url(&label) => urlwrap::breakable(&label),
                             None => label,
                         };
                         spans.push((
@@ -443,9 +440,8 @@ fn inline_styled(text: &str) -> Vec<Styled> {
             }
             push(&mut current, style, &mut spans);
             let url: String = chars[i..url_end].iter().collect();
-            // The text carries the wrap hints; the target is the address itself.
             spans.push((
-                urlwrap::breakable(&url),
+                url.clone(),
                 InlineStyle {
                     link: true,
                     ..style

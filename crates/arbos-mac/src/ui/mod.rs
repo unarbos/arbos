@@ -60,7 +60,6 @@ pub mod tasks;
 pub mod theme;
 pub mod tones;
 pub mod transcript;
-pub mod urlwrap;
 pub mod veil;
 pub mod vibrancy;
 pub mod voice;
