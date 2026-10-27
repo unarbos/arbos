@@ -1,41 +1,41 @@
 {
-  "id": "i1-rename-identity",
-  "lane": "a",
-  "category": "identity",
-  "title": "Renamed mid-task: the agent answers with its new name, never the old one",
-  "turns": [
-    {
-      "prompt": "Quick one: what is your name?",
-      "reply_regex": "lane-a|Lane-a",
-      "timeout_s": 120
-    },
-    {
-      "prompt": "I just renamed you. What is your name now, and what were you called a moment ago?",
-      "driver_action": {
-        "kind": "rename_project",
-        "name": "Quill",
-        "settle_s": 10
-      },
-      "reply_regex": "Quill",
-      "reply_regex_not": "I['’]m {OLD_NAME}|I am {OLD_NAME}|my name is {OLD_NAME}|call me {OLD_NAME}",
-      "timeout_s": 120
-    },
-    {
-      "prompt": "Hi — who am I talking to? Please introduce yourself by name.",
-      "new_chat": true,
-      "reply_regex": "Quill",
-      "reply_regex_not": "I['’]m {OLD_NAME}|I am {OLD_NAME}|my name is {OLD_NAME}|{OLD_NAME} here",
-      "timeout_s": 120
-    }
-  ],
-  "cleanup_actions": [
-    {
-      "kind": "restore_name"
-    }
-  ],
-  "regression": "agent identity drift after rename (bc-eca4dc4f)",
-  "doc_checks": {
-    "no_truncated_reply": true,
-    "no_wrong_self_identity": true
+ "id": "i1-rename-identity",
+ "lane": "a",
+ "category": "identity",
+ "title": "Renamed mid-task: the agent answers with its new name, never the old one",
+ "turns": [
+  {
+   "prompt": "Quick one: what is your name?",
+   "reply_regex": "lane-a|Lane-a",
+   "timeout_s": 120
+  },
+  {
+   "prompt": "I just renamed you. What is your name now, and what were you called a moment ago?",
+   "driver_action": {
+    "kind": "rename_project",
+    "name": "Quill",
+    "settle_s": 10
+   },
+   "reply_regex": "Quill",
+   "reply_regex_not": "I['’]m {OLD_NAME}|I am {OLD_NAME}|my name is {OLD_NAME}|call me {OLD_NAME}",
+   "timeout_s": 120
+  },
+  {
+   "prompt": "Hi — who am I talking to? Please introduce yourself by name.",
+   "new_chat": true,
+   "reply_regex": "Quill",
+   "reply_regex_not": "I['’]m {OLD_NAME}|I am {OLD_NAME}|my name is {OLD_NAME}|{OLD_NAME} here",
+   "timeout_s": 120
   }
+ ],
+ "cleanup_actions": [
+  {
+   "kind": "restore_name"
+  }
+ ],
+ "regression": "agent identity drift after rename (bc-eca4dc4f); #2007 (an owner rename must not kill a turn on another lane: 'child pi-main timed out')",
+ "doc_checks": {
+  "no_truncated_reply": true,
+  "no_wrong_self_identity": true
+ }
 }
