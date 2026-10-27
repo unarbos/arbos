@@ -45,6 +45,8 @@
 		A11B0000000000000000A002 /* LibraryList.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11B0000000000000000A001 /* LibraryList.swift */; };
 		A15EC9000000000000000002 /* AgentPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15EC9000000000000000001 /* AgentPicker.swift */; };
 		A11B0000000000000000A004 /* LibraryListTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11B0000000000000000A003 /* LibraryListTests.swift */; };
+		A1AC0E00000000000000A002 /* MachineMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1AC0E00000000000000A001 /* MachineMetrics.swift */; };
+		A1AC0E00000000000000A004 /* MachineMetricsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1AC0E00000000000000A003 /* MachineMetricsTests.swift */; };
 		A15EC9000000000000000004 /* AgentPickerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15EC9000000000000000003 /* AgentPickerTests.swift */; };
 		A15EC9000000000000000104 /* SecretHandoffTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15EC9000000000000000103 /* SecretHandoffTests.swift */; };
 		A1A9D0000000000000000004 /* AgentIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A9D0000000000000000003 /* AgentIdentityTests.swift */; };
@@ -234,6 +236,8 @@
 		A11B0000000000000000A001 /* LibraryList.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryList.swift; sourceTree = "<group>"; };
 		A15EC9000000000000000001 /* AgentPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentPicker.swift; sourceTree = "<group>"; };
 		A11B0000000000000000A003 /* LibraryListTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryListTests.swift; sourceTree = "<group>"; };
+		A1AC0E00000000000000A001 /* MachineMetrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MachineMetrics.swift; sourceTree = "<group>"; };
+		A1AC0E00000000000000A003 /* MachineMetricsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MachineMetricsTests.swift; sourceTree = "<group>"; };
 		A15EC9000000000000000003 /* AgentPickerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentPickerTests.swift; sourceTree = "<group>"; };
 		A15EC9000000000000000103 /* SecretHandoffTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecretHandoffTests.swift; sourceTree = "<group>"; };
 		A1A9D0000000000000000003 /* AgentIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentIdentityTests.swift; sourceTree = "<group>"; };
@@ -438,6 +442,7 @@
 				A1B5EA00000000000000A001 /* GlobalSearch.swift */,
 				A1A9D0000000000000000001 /* AgentIdentity.swift */,
 				A1A9E0000000000000000001 /* AgentPane.swift */,
+				A1AC0E00000000000000A001 /* MachineMetrics.swift */,
 				A1F7A0000000000000000001 /* ProfileToggle.swift */,
 			);
 			path = Model;
@@ -552,6 +557,7 @@
 				A1670000000000000000A050 /* ControlTokenLintTests.swift */,
 				A1670000000000000000A040 /* ControlMetricsTests.swift */,
 				A11B0000000000000000A003 /* LibraryListTests.swift */,
+				A1AC0E00000000000000A003 /* MachineMetricsTests.swift */,
 				A15A00000000000000000012 /* ReactionToggleTests.swift */,
 				A15C0000000000000000000A /* SessionRoomTests.swift */,
 				A1C1E00000000000000000B1 /* PresenceRowTests.swift */,
@@ -789,6 +795,7 @@
 				A1F7A0000000000000000002 /* ProfileToggle.swift in Sources */,
 				A1BB00000000000000000002 /* BackSwipe.swift in Sources */,
 				A11B0000000000000000A002 /* LibraryList.swift in Sources */,
+				A1AC0E00000000000000A002 /* MachineMetrics.swift in Sources */,
 				A15EC9000000000000000002 /* AgentPicker.swift in Sources */,
 				A1B5EA00000000000000A008 /* GlobalSearchView.swift in Sources */,
 				A1F3867FABDB2908FFF6F2F0 /* Secrets.swift in Sources */,
@@ -879,6 +886,7 @@
 				A1670000000000000000A051 /* ControlTokenLintTests.swift in Sources */,
 				A1670000000000000000A041 /* ControlMetricsTests.swift in Sources */,
 				A11B0000000000000000A004 /* LibraryListTests.swift in Sources */,
+				A1AC0E00000000000000A004 /* MachineMetricsTests.swift in Sources */,
 				A15C0000000000000000000B /* SessionRoomTests.swift in Sources */,
 				A1C1E00000000000000000B2 /* PresenceRowTests.swift in Sources */,
 				A1D8800000000000000000B8 /* AvatarPickerTabsTests.swift in Sources */,
