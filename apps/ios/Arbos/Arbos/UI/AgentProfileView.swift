@@ -254,7 +254,7 @@ struct AgentProfileView: View {
                 ScrollView {
                     if let project {
                         VStack(spacing: 18) {
-                            Color.clear.frame(height: 80)
+                            Color.clear.frame(height: PaneKit.pageTop)
                             ProfilePane(
                                 hero: hero(project),
                                 tabs: PaneKinds.agent,
@@ -277,7 +277,7 @@ struct AgentProfileView: View {
                     }
                 }
             }
-            ProfileTopBar {
+            ProfileTopBar(screen: .agentPage) {
                 if editingLabel {
                     Button("Done") { commitLabel() }
                         .font(theme.font(Theme.body, weight: .semibold))
@@ -322,6 +322,18 @@ struct AgentProfileView: View {
             if let t = DebugHooks.panelTab, PaneKinds.agent.contains(t) { tab = t }
             if isMine, DebugHooks.show == "agentvoice" {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { showVoice = true }
+            }
+            // A search result for the agent's Model / Reasoning / Voice row
+            // ([feedback search-settings-ios-2026-10-26]): the pane opens with that picker up.
+            if isMine, let setting = model.pendingAgentSetting {
+                model.pendingAgentSetting = nil
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                    switch setting {
+                    case .model: showModel = true
+                    case .reasoning: showReasoning = true
+                    case .voice: showVoice = true
+                    }
+                }
             }
             if isMine, DebugHooks.show == "agentlabel" {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { startLabelEdit() }

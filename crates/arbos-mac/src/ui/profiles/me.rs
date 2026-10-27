@@ -20,7 +20,7 @@ use crate::ui::glass;
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::profiles::pane::{self, Hero, Picture, ProfilePane, Section};
-use crate::ui::profiles::{self, kit};
+use crate::ui::profiles::{self, kit, machine};
 use crate::ui::shell::{fmt_uptime, human_bytes, SettingsPage, Shell};
 use crate::ui::sidebar;
 use crate::ui::theme::{
@@ -102,6 +102,25 @@ impl Shell {
         };
         let machine = state.machine.clone();
         let shown = machine.shown_state();
+        // Settings › Machine: the box report and the breakdown's pictures, built while
+        // `state` is borrowed (the pulse clock below needs `cx`).
+        let box_report = state.box_report.clone();
+        let machine_pictures: Vec<(crate::model::Id, gpui::AnyElement)> = box_report
+            .as_ref()
+            .map(|r| {
+                r.usage_rows()
+                    .into_iter()
+                    .map(|ws| {
+                        let el = match state.project(&ws.project_id) {
+                            Some(p) => crate::ui::avatars::project_in(state, p, 28.0, &theme),
+                            None => crate::ui::avatars::neutral_element(&ws.name, 28.0, &theme),
+                        }
+                        .into_any_element();
+                        (ws.project_id.clone(), el)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         if shown == MachineState::Waking {
             PulseClock::request(cx);
         }
@@ -114,15 +133,19 @@ impl Shell {
                 .text_color(theme.text_muted)
                 .child(text)
         };
+        let link_button_text =
+            |id: &'static str, label: SharedString, danger: bool, theme: &Theme| {
+                div()
+                    .id(id)
+                    .flex_shrink_0()
+                    .text_size(px(TEXT_BODY))
+                    .text_color(if danger { theme.danger } else { theme.accent })
+                    .cursor_pointer()
+                    .hover(|s| s.opacity(0.8))
+                    .child(label)
+            };
         let link_button = |id: &'static str, label: &'static str, danger: bool, theme: &Theme| {
-            div()
-                .id(id)
-                .flex_shrink_0()
-                .text_size(px(TEXT_BODY))
-                .text_color(if danger { theme.danger } else { theme.accent })
-                .cursor_pointer()
-                .hover(|s| s.opacity(0.8))
-                .child(label)
+            link_button_text(id, label.into(), danger, theme)
         };
         let footnote = |text: String, theme: &Theme| {
             kit::footnote(text, theme)
@@ -213,158 +236,372 @@ impl Shell {
 
         // ----- Machine page body -------------------------------------------------
         let machine_body = {
+            // Settings › Machine ([feedback machine-page-mac-2026-10-26]): the plan is pure
+            // (`machine::plan`); every row below is one of its entries.
+            let report = box_report;
+            let mut machine_pictures = machine_pictures;
+            let breakdown_open = self.machine_breakdown_open;
+            let plan = machine::plan(&machine, report.as_ref(), breakdown_open);
+            let live = report.as_ref().filter(|r| r.reachable);
             let dot = sidebar::machine_dot(shown, &theme);
             let uptime = machine
                 .since
                 .filter(|_| shown == MachineState::Awake)
-                .map(|since| fmt_uptime(now_ms().saturating_sub(since)))
-                .unwrap_or_else(|| "—".into());
-            let mut group = settings_group(&theme)
-                .child(
-                    glass::row("Where it runs", &theme)
-                        .child(value(machine.where_it_runs().to_string(), &theme)),
-                )
-                .when_some(machine.waitlist_position, |el, n| {
-                    el.child(
-                        glass::row("In line", &theme)
-                            .child(value(format!("Number {n} · we'll let you know"), &theme)),
-                    )
-                })
-                .child(
-                    glass::row("State", &theme).child(
+                .map(|since| fmt_uptime(now_ms().saturating_sub(since)));
+            let two_line = |title: &str, sub: String, theme: &Theme| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .px(px(kit::INSET))
+                    .py(px(10.0))
+                    .relative()
+                    .child(kit::hairline_below(theme))
+                    .child(
                         div()
-                            .flex()
-                            .items_center()
-                            .gap(px(7.0))
-                            .child(div().size(px(8.0)).rounded_full().bg(Theme::with_alpha(
-                                dot,
-                                if shown == MachineState::Waking {
-                                    0.4 + 0.6 * PulseClock::phase(cx, 1100)
-                                } else {
-                                    1.0
-                                },
-                            )))
-                            .child(value(shown.label().to_string(), &theme)),
-                    ),
-                )
-                .child(glass::row("Since", &theme).child(value(uptime, &theme)))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.0))
-                        .px(px(16.0))
-                        .py(px(10.0))
-                        .relative()
-                        .child(kit::hairline_below(&theme))
-                        .child(
-                            div()
-                                .text_size(px(TEXT_BODY))
-                                .text_color(theme.text)
-                                .child("Spec"),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(TEXT_SMALL))
-                                .text_color(theme.text_muted)
-                                .child(format!(
-                                    "{}{}",
-                                    machine
-                                        .spec
-                                        .clone()
-                                        .unwrap_or_else(|| "spec unknown".into()),
-                                    machine
-                                        .class
-                                        .as_deref()
-                                        .map(|c| format!(" · {c}"))
-                                        .unwrap_or_default()
-                                )),
-                        ),
-                )
-                .child(
-                    glass::row(
-                        if machine.always_on {
-                            "Machine time today"
-                        } else {
-                            "Spend today"
-                        },
-                        &theme,
+                            .text_size(px(TEXT_BODY))
+                            .text_color(theme.text)
+                            .child(title.to_string()),
                     )
                     .child(
                         div()
-                            .flex()
-                            .flex_col()
-                            .items_end()
-                            .child(value(
-                                if machine.always_on {
-                                    format!("${:.2}", machine.spend_today_usd)
-                                } else {
-                                    format!(
-                                        "${:.2} of ${:.0}",
-                                        machine.spend_today_usd, machine.spend_cap_usd
-                                    )
-                                },
-                                &theme,
-                            ))
-                            .when(machine.always_on, |el| {
-                                el.child(
-                                    div()
-                                        .text_size(px(TEXT_TINY))
-                                        .text_color(theme.text_muted)
-                                        .child("Not taken from credits"),
+                            .text_size(px(TEXT_SMALL))
+                            .text_color(theme.text_muted)
+                            .child(sub),
+                    )
+            };
+            let action_row = |action: Stateful<Div>| {
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .min_h(px(kit::ROW_MIN_H))
+                    .px(px(kit::INSET))
+                    .py(px(6.0))
+                    .child(action)
+                    .into_any_element()
+            };
+            let mut body = div().flex().flex_col().gap(px(22.0));
+
+            // Warning card first, when a limit is near.
+            if let (Some(r), false) = (live, plan.warning.is_empty()) {
+                if let Some(w) = machine::warning(r) {
+                    let mut rows: Vec<gpui::AnyElement> = Vec::new();
+                    for row in &plan.warning {
+                        match row {
+                            machine::Row::Warning => {
+                                rows.push(machine::warning_row(&w, &theme).into_any_element())
+                            }
+                            machine::Row::AskToFreeSpace => {
+                                if let Some(ws) = machine::biggest_disk_user(r) {
+                                    let pid = ws.project_id.clone();
+                                    let label: SharedString =
+                                        format!("Ask {} to free space", ws.name).into();
+                                    rows.push(action_row(
+                                        link_button_text(
+                                            "machine-free-space",
+                                            label,
+                                            false,
+                                            &theme,
+                                        )
+                                        .on_click(
+                                            cx.listener(move |this, _, window, cx| {
+                                                this.ask_agent_to_free_space(
+                                                    pid.clone(),
+                                                    window,
+                                                    cx,
+                                                );
+                                            }),
+                                        ),
+                                    ));
+                                }
+                            }
+                            machine::Row::RequestBiggerMachineInWarning => rows.push(action_row(
+                                link_button(
+                                    "machine-bigger-warning",
+                                    "Request a bigger machine",
+                                    false,
+                                    &theme,
                                 )
-                            }),
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.request_bigger_machine(window, cx);
+                                    },
+                                )),
+                            )),
+                            _ => {}
+                        }
+                    }
+                    body = body.child(kit::section(rows, &theme).mx(px(0.0)).mb(px(0.0)));
+                }
+            }
+
+            // Machine card.
+            let mut group = settings_group(&theme);
+            for row in &plan.machine {
+                group = match row {
+                    machine::Row::WhereItRuns => group.child(
+                        glass::row("Where it runs", &theme)
+                            .child(value(machine.where_it_runs().to_string(), &theme)),
                     ),
-                );
+                    machine::Row::InLine => {
+                        group.child(glass::row("In line", &theme).child(value(
+                            format!(
+                                "Number {} · we'll let you know",
+                                machine.waitlist_position.unwrap_or_default()
+                            ),
+                            &theme,
+                        )))
+                    }
+                    machine::Row::State => group.child(
+                        glass::row("State", &theme).child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(7.0))
+                                .child(div().size(px(8.0)).rounded_full().bg(Theme::with_alpha(
+                                    dot,
+                                    if shown == MachineState::Waking {
+                                        0.4 + 0.6 * PulseClock::phase(cx, 1100)
+                                    } else {
+                                        1.0
+                                    },
+                                )))
+                                .child(value(
+                                    match &uptime {
+                                        Some(up) => format!("{} · {up}", shown.label()),
+                                        None => shown.label().to_string(),
+                                    },
+                                    &theme,
+                                )),
+                        ),
+                    ),
+                    machine::Row::Spec => group.child(two_line(
+                        "Spec",
+                        format!(
+                            "{}{}",
+                            machine
+                                .spec
+                                .clone()
+                                .unwrap_or_else(|| "spec unknown".into()),
+                            machine
+                                .class
+                                .as_deref()
+                                .map(|c| format!(" · {c}"))
+                                .unwrap_or_default()
+                        ),
+                        &theme,
+                    )),
+                    machine::Row::MachineTime => group.child(
+                        glass::row(
+                            if machine.always_on {
+                                "Machine time today"
+                            } else {
+                                "Spend today"
+                            },
+                            &theme,
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .items_end()
+                                .child(value(
+                                    if machine.always_on {
+                                        format!("${:.2}", machine.spend_today_usd)
+                                    } else {
+                                        format!(
+                                            "${:.2} of ${:.0}",
+                                            machine.spend_today_usd, machine.spend_cap_usd
+                                        )
+                                    },
+                                    &theme,
+                                ))
+                                .when(machine.always_on, |el| {
+                                    el.child(
+                                        div()
+                                            .text_size(px(TEXT_TINY))
+                                            .text_color(theme.text_muted)
+                                            .child("Not taken from credits"),
+                                    )
+                                }),
+                        ),
+                    ),
+                    _ => group,
+                };
+            }
             if let Some(detail) = machine.detail.clone() {
                 group = group.child(footnote(detail, &theme).pb(px(8.0)));
             }
-            let mut body = div().flex().flex_col().gap(px(22.0)).child(group);
-            // One action row in its own card: a plain row through kit::section,
-            // which places separators only between rows (none here).
-            let action = if machine.always_on {
-                link_button("machine-restart", "Restart machine", false, &theme).on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.state.update(cx, |s, cx| s.machine_restart(cx));
-                    }),
-                )
-            } else if machine.state.is_down() {
-                link_button("machine-start", "Start machine", false, &theme).on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.state.update(cx, |s, cx| s.machine_start(cx));
+            body = body.child(group);
+
+            // Resources card (only what the box reports).
+            if !plan.resources.is_empty() {
+                let mut card = settings_group(&theme);
+                for row in &plan.resources {
+                    card = match (row, live) {
+                        (machine::Row::Disk, Some(r)) => match machine::disk_gauge(r) {
+                            Some(g) => card.child(machine::gauge_row("Disk", &g, &theme)),
+                            None => card,
+                        },
+                        (machine::Row::Memory, Some(r)) => match machine::mem_gauge(r) {
+                            Some(g) => card.child(machine::gauge_row("Memory", &g, &theme)),
+                            None => card,
+                        },
+                        (machine::Row::Cpu, Some(r)) => match machine::cpu_gauge(r) {
+                            Some(g) => card.child(machine::gauge_row("CPU", &g, &theme)),
+                            None => card,
+                        },
+                        (machine::Row::Network, Some(r)) => match machine::net_value(r) {
+                            Some((v, today)) => card.child(
+                                glass::row("Network", &theme).child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .items_end()
+                                        .child(value(v, &theme))
+                                        .when_some(today, |el, t| {
+                                            el.child(
+                                                div()
+                                                    .text_size(px(TEXT_TINY))
+                                                    .text_color(theme.text_muted)
+                                                    .child(t),
+                                            )
+                                        }),
+                                ),
+                            ),
+                            None => card,
+                        },
+                        (machine::Row::NotAnswering, _) => card.child(two_line(
+                            "The machine did not answer",
+                            report
+                                .as_ref()
+                                .and_then(|r| r.unreachable_reason.clone())
+                                .unwrap_or_else(|| "Trying again in a few seconds".into()),
+                            &theme,
+                        )),
+                        _ => card,
+                    };
+                }
+                body = body.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(kit::section_title("Resources", &theme))
+                        .child(card),
+                );
+            }
+
+            // Agents card: running now, jobs, the breakdown.
+            if let (Some(r), false) = (live, plan.agents.is_empty()) {
+                let mut card = settings_group(&theme);
+                let usage = r.usage_rows();
+                let mut agent_ix = 0usize;
+                for row in &plan.agents {
+                    card = match row {
+                        machine::Row::RunningNow => card.child(
+                            glass::row("Running now", &theme)
+                                .child(value(machine::running_now(r), &theme)),
+                        ),
+                        machine::Row::Jobs => {
+                            card.child(glass::row("Background jobs", &theme).child(value(
+                                machine::jobs_value(r.jobs_running().unwrap_or(0)),
+                                &theme,
+                            )))
+                        }
+                        machine::Row::Breakdown => card.child(
+                            glass::row("Per-agent usage", &theme)
+                                .id("machine-breakdown")
+                                .cursor_pointer()
+                                .hover(|s| s.bg(theme.surface_2))
+                                .child(crate::ui::icons::icon(
+                                    if breakdown_open {
+                                        "chevron-up"
+                                    } else {
+                                        "chevron-right"
+                                    },
+                                    13.0,
+                                    theme.text_faint,
+                                ))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.toggle_machine_breakdown(cx);
+                                })),
+                        ),
+                        machine::Row::Agent => {
+                            let Some(ws) = usage.get(agent_ix) else {
+                                continue;
+                            };
+                            agent_ix += 1;
+                            let picture = machine_pictures
+                                .iter()
+                                .position(|(id, _)| *id == ws.project_id)
+                                .map(|ix| machine_pictures.remove(ix).1)
+                                .unwrap_or_else(|| {
+                                    crate::ui::avatars::neutral_element(&ws.name, 28.0, &theme)
+                                        .into_any_element()
+                                });
+                            card.child(machine::agent_row(picture, ws, &theme))
+                        }
+                        _ => card,
+                    };
+                }
+                body = body.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(kit::section_title("Agents", &theme))
+                        .child(card),
+                );
+            }
+
+            // Actions: plain rows through kit::section (separators only between rows).
+            let mut actions: Vec<gpui::AnyElement> = Vec::new();
+            for row in &plan.actions {
+                match row {
+                    machine::Row::RequestBiggerMachine => actions.push(action_row(
+                        link_button("machine-bigger", "Request a bigger machine", false, &theme)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.request_bigger_machine(window, cx);
+                            })),
+                    )),
+                    machine::Row::Restart => actions.push(action_row(
+                        link_button("machine-restart", "Restart machine", false, &theme).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.state.update(cx, |s, cx| s.machine_restart(cx));
+                            }),
+                        ),
+                    )),
+                    machine::Row::Start => actions.push(action_row(
+                        link_button("machine-start", "Start machine", false, &theme).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.state.update(cx, |s, cx| s.machine_start(cx));
+                            }),
+                        ),
+                    )),
+                    machine::Row::Stop => actions.push(action_row(
+                        link_button("machine-stop", "Stop machine", true, &theme).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.state.update(cx, |s, cx| s.machine_stop(cx));
+                            }),
+                        ),
+                    )),
+                    _ => {}
+                }
+            }
+            body = body
+                .child(kit::section(actions, &theme).mx(px(0.0)).mb(px(0.0)))
+                .child(footnote(
+                    if machine.always_on {
+                        "Your one cloud computer, always on. Agents are workspaces on it. Machine time \
+                         is billed separately from your credits."
+                            .into()
+                    } else {
+                        "Your one cloud computer. Agents are workspaces on it; a message to any agent \
+                         wakes it."
+                            .into()
                     },
-                ))
-            } else {
-                link_button("machine-stop", "Stop machine", true, &theme).on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.state.update(cx, |s, cx| s.machine_stop(cx));
-                    },
-                ))
-            };
-            let action_row = div()
-                .flex()
-                .items_center()
-                .justify_end()
-                .min_h(px(kit::ROW_MIN_H))
-                .px(px(kit::INSET))
-                .py(px(6.0))
-                .child(action)
-                .into_any_element();
-            let actions = kit::section(vec![action_row], &theme)
-                .mx(px(0.0))
-                .mb(px(0.0));
-            body = body.child(actions).child(footnote(
-                if machine.always_on {
-                    "Your one cloud computer, always on. Agents are workspaces on it. Machine time \
-                     is billed separately from your credits."
-                        .into()
-                } else {
-                    "Your one cloud computer. Agents are workspaces on it; a message to any agent \
-                     wakes it."
-                        .into()
-                },
-                &theme,
-            ));
+                    &theme,
+                ));
             body
         };
 
