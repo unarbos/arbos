@@ -73,6 +73,37 @@ final class BackSwipeTests: XCTestCase {
         XCTAssertTrue(BackSwipe.isBackSwipe(translation: long, velocity: fast, start: CGPoint(x: 200, y: 759), composerTop: 760, bubbleSwipeActive: false))
     }
 
+    /// The UIKit edge recognizer (iphone-scroll-perf) decides at 6 pt, before the scroll view's
+    /// own ~10 pt pan: a start that is at least as rightward as it is vertical claims the touch
+    /// (the shape `edgePops` asks for at the end, so the pop never loses to the transcript);
+    /// a leftward or clearly vertical start fails at once (a scroll from the edge zone stays the
+    /// transcript's, as under #1985); anything between waits for the next point.
+    func testAnEdgeDragClaimsEarlyAndFailsFastOnVerticalMotion() {
+        XCTAssertEqual(BackSwipe.edgeLockDistance, 6)
+        XCTAssertEqual(BackSwipe.edgeLock(translation: CGSize(width: 6, height: 0)), .claimed)
+        XCTAssertEqual(BackSwipe.edgeLock(translation: CGSize(width: 5, height: 5)), .claimed, "as much right as down: the pop's")
+        XCTAssertEqual(BackSwipe.edgeLock(translation: CGSize(width: 4, height: 6)), .undecided, "more down than right, not yet clearly a scroll")
+        XCTAssertEqual(BackSwipe.edgeLock(translation: CGSize(width: 2, height: 8)), .declined, "twice as much down as right: a scroll")
+        XCTAssertEqual(BackSwipe.edgeLock(translation: CGSize(width: 0, height: -9)), .declined, "straight up")
+        XCTAssertEqual(BackSwipe.edgeLock(translation: CGSize(width: -6, height: 0)), .declined, "left")
+        XCTAssertEqual(BackSwipe.edgeLock(translation: CGSize(width: 3, height: 5)), .undecided, "not yet clear")
+    }
+
+    /// The one transcript recognizer finds the row under the finger by its reported frame and
+    /// only replies on rows that can be replied to.
+    func testTheRowUnderTheFingerIsFoundByFrame() {
+        let index = RowFrameIndex()
+        index.set("a", frame: CGRect(x: 0, y: 0, width: 300, height: 40), canReply: true)
+        index.set("sys", frame: CGRect(x: 0, y: 40, width: 300, height: 20), canReply: false)
+        index.set("b", frame: CGRect(x: 0, y: 60, width: 300, height: 40), canReply: true)
+        XCTAssertEqual(index.replyableRow(at: CGPoint(x: 10, y: 10)), "a")
+        XCTAssertNil(index.replyableRow(at: CGPoint(x: 10, y: 50)), "a system line never replies")
+        XCTAssertEqual(index.replyableRow(at: CGPoint(x: 299, y: 99)), "b")
+        XCTAssertNil(index.replyableRow(at: CGPoint(x: 10, y: 200)), "between / below the rows")
+        index.remove("b")
+        XCTAssertNil(index.replyableRow(at: CGPoint(x: 10, y: 70)), "a row that left the window")
+    }
+
     func testTheEdgeZoneBelongsToTheEdgePopAlone() {
         // A bubble never starts a reply from the edge zone; one point outside it does.
         XCTAssertEqual(BubbleSwipe.lock(translation: CGSize(width: 40, height: 2), startX: 10), .declined)
