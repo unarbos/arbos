@@ -486,6 +486,16 @@ pub struct AvatarGenerated {
     pub error: Option<UserError>,
 }
 
+/// Where a secret hand-off card's save stands on this device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HandoffState {
+    Saving,
+    /// Saved; the vault name.
+    Saved(String),
+    /// The shared error note's slot (sentence + Try again + Details) on the card.
+    Failed(crate::ui::error_note::Slot),
+}
+
 pub struct AppState {
     pub source_name: &'static str,
     pub pairing: Option<Pairing>,
@@ -663,6 +673,8 @@ pub struct AppState {
     pub project_secrets: std::collections::HashMap<Id, ProjectSecrets>,
     /// Standing shell approvals per agent (#1544), loaded when the agent pane opens.
     pub shell_grants: std::collections::HashMap<Id, Vec<crate::model::ShellGrant>>,
+    /// Secret hand-off request cards: approval id → saving / saved (env) / the error sentence.
+    pub handoff: std::collections::HashMap<String, HandoffState>,
     /// Settings → Routines, per project (F3).
     pub routines: HashMap<Id, Vec<Routine>>,
     /// The box as `GET /machine/debug` last reported it — the agent pane's
@@ -1109,6 +1121,7 @@ impl AppState {
             devices: DevicesView::default(),
             project_secrets: std::collections::HashMap::new(),
             shell_grants: std::collections::HashMap::new(),
+            handoff: std::collections::HashMap::new(),
             routines: HashMap::new(),
             box_report: None,
             jobs: HashMap::new(),
@@ -1856,6 +1869,19 @@ impl AppState {
                         viewer.busy = None;
                     }
                 }
+                cx.notify();
+            }
+            SyncEvent::SecretHandoff {
+                approval_id,
+                result,
+            } => {
+                self.handoff.insert(
+                    approval_id,
+                    match result {
+                        Ok(env) => HandoffState::Saved(env),
+                        Err(e) => HandoffState::Failed(crate::ui::error_note::Slot::new(e)),
+                    },
+                );
                 cx.notify();
             }
             SyncEvent::Notice(text) => {
@@ -6029,6 +6055,31 @@ impl AppState {
                 grant,
             });
         }
+        cx.notify();
+    }
+
+    /// Secret hand-off request card → Save: the value leaves this device once, to the vault.
+    #[allow(clippy::too_many_arguments)] // one call site, the card; the fields mirror the command
+    pub fn secret_handoff_save(
+        &mut self,
+        chat_id: Id,
+        approval_id: String,
+        project_id: Id,
+        name: String,
+        value: String,
+        purpose: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.handoff
+            .insert(approval_id.clone(), HandoffState::Saving);
+        self.command(ClientCommand::SecretHandoffSave {
+            chat_id,
+            approval_id,
+            project_id,
+            name,
+            value,
+            purpose,
+        });
         cx.notify();
     }
 

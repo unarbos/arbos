@@ -174,6 +174,11 @@ pub enum SyncEvent {
         request_id: String,
         expires_at: Option<i64>,
     },
+    /// Secret hand-off: the card's save finished — `Ok(env)` or the error for the shared note.
+    SecretHandoff {
+        approval_id: String,
+        result: Result<String, super::sync::user_error::UserError>,
+    },
     /// `GET /voices`: the call voices an agent can use, and the default's id.
     Voices {
         default: Option<String>,
@@ -953,6 +958,17 @@ pub enum ClientCommand {
     ShellGrantRevoke {
         project_id: Id,
         grant_id: String,
+    },
+    /// Secret hand-off request card: the value goes from this device to `POST /secrets`
+    /// (source `chat`, the agent granted), then the card is answered with the saved secret's
+    /// name and id — never the value — so the agent learns only the name.
+    SecretHandoffSave {
+        chat_id: Id,
+        approval_id: String,
+        project_id: Id,
+        name: String,
+        value: String,
+        purpose: String,
     },
     /// Add a secret; the value goes to the relay once.
     SecretAdd {
