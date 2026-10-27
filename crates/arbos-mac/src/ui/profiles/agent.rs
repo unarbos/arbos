@@ -79,7 +79,7 @@ fn project_from_member(state: &crate::app::AppState, project_id: &str) -> Option
             avatar_leaf_color: a.avatar_leaf_color,
             // The owner's picture travels with the roster copy; without it the hero drew the
             // automatic leaf for every foreign agent (Jacob, 2026-10-25: "Hezbola").
-            image_url: a.image_url.clone(),
+            image_url: a.image_url.clone(), // avatar-lint: allow (data copy, not a draw)
             avatar_version: a.avatar_version,
             description: a.description.clone(),
             owner_person: a.owner.clone(),
@@ -148,10 +148,9 @@ pub(super) fn page(
 
     // D92 amendment: the uploaded / generated picture wins over the leaf (read while `state`
     // is borrowed) — from the newest copy the store holds, like every other surface.
-    let hero_image = crate::sync::agent_avatar::newest(&state.projects, &project.id)
-        .and_then(|f| f.image_url)
-        .or_else(|| project.image_url.clone())
-        .and_then(|url| state.avatar(&url));
+    let hero_image = avatars::project_image(state, &project);
+    let newest_picture_url =
+        crate::sync::agent_avatar::newest(&state.projects, &project.id).and_then(|f| f.image_url); // avatar-lint: allow (resolver)
     if avatar_state != AvatarState::Idle || streaming {
         PulseClock::request(cx);
     }
@@ -188,16 +187,13 @@ pub(super) fn page(
         Box::new(f) as HeroClick
     });
     // Someone else's agent: its picture opens full-size in the media viewer (a leaf opens nothing).
-    let view_click = (!mine)
-        .then(|| project.image_url.clone())
-        .flatten()
-        .map(|url| {
-            let name = project.name.clone();
-            let f = cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
-                this.view_picture(&name, &url, cx);
-            });
-            Box::new(f) as HeroClick
+    let view_click = (!mine).then_some(newest_picture_url).flatten().map(|url| {
+        let name = project.name.clone();
+        let f = cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+            this.view_picture(&name, &url, cx);
         });
+        Box::new(f) as HeroClick
+    });
     let avatar = hero_picture("profile-avatar", picture, pic_click, view_click).into_any_element();
     let p_rename = pid.clone();
     let name_click = mine.then(|| {
