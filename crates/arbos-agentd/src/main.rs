@@ -37,6 +37,7 @@ mod rpc_child;
 mod selfref;
 mod settings;
 mod silence;
+mod sites;
 mod skills;
 mod status;
 mod store;
