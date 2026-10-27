@@ -15,6 +15,7 @@ use crate::app::{ActiveCall, AppState, CallParticipant, CallStatus};
 use crate::model::{self, now_ms, Call, CallKind, Project, Sender};
 use crate::ui::avatars;
 use crate::ui::glass::{self, WindowDrag};
+use crate::ui::highlight;
 use crate::ui::icons::icon;
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
@@ -426,7 +427,7 @@ pub fn screen(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Di
                         .items_center()
                         .justify_center()
                         .cursor_pointer()
-                        .hover(|s| s.bg(theme.surface_2))
+                        .map(|el| highlight::button(el, &theme))
                         .child(icon("chevron-down", 16.0, theme.text_muted))
                         .on_mouse_down(
                             gpui::MouseButton::Left,
@@ -708,15 +709,15 @@ pub fn bar(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> State
                 }),
             ),
         )
-        .child(
+        .child(highlight::button(
             round(
                 "bar-expand",
                 "chevron-up",
                 gpui::transparent_black(),
                 theme.text_muted,
-            )
-            .hover(|s| s.bg(Theme::with_alpha(theme.text, 0.08))),
-        )
+            ),
+            &theme,
+        ))
 }
 
 /// Picture-in-picture while a video call is collapsed: the remote camera (else

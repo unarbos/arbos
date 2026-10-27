@@ -23,6 +23,7 @@ use gpui::{div, prelude::*, px, Context, Div, FontWeight, Hsla, MouseButton};
 use crate::ui::avatar_picker::{self, Picker, Tab};
 use crate::ui::avatars;
 use crate::ui::frost::{frosted, PANEL_BLUR};
+use crate::ui::highlight;
 use crate::ui::icons::icon;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Appearance, Theme};
@@ -219,7 +220,7 @@ pub fn sheet(shell: &Shell, kind: Kind, cx: &mut Context<Shell>) -> Div {
                 .justify_center()
                 .rounded_full()
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
+                .map(|el| highlight::button(el, &theme))
                 .child(icon("xmark", 10.0, hex(0xD2D2D2)))
                 .on_click(
                     cx.listener(move |this, _, window, cx| this.cancel_create(kind, window, cx)),
