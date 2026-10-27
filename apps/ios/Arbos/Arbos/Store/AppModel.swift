@@ -3324,7 +3324,8 @@ final class AppModel: ObservableObject {
     }
 
     func addAgent(chatId: String, projectId: Id) {
-        showMembershipNotice(chatId: chatId, names: projects.filter { $0.id == projectId }.map(\.name))
+        showMembershipNotice(chatId: chatId, names: projects.filter { $0.id == projectId }.map(\.name),
+                             subjects: [MembershipNotice.Subject(kind: "agent", id: projectId)])
         Task {
             do {
                 let chat = try await api.addAgent(chatId: chatId, projectId: projectId)
@@ -3349,11 +3350,19 @@ final class AppModel: ObservableObject {
     /// The adding phone's own "<me> added <names>" line, on screen the moment Add is tapped
     /// (ARB-393). The relay writes the row of record; `foldOptimisticNotices` swaps this copy
     /// out when that row lands.
-    func showMembershipNotice(chatId: Id, names: [String]) {
+    ///
+    /// `subjects`: who was added, by id, when every one of them is known — then the line is
+    /// worded from the live roster and matched to the relay's row by facts; nil (someone is
+    /// known by handle only) keeps the words-only line.
+    func showMembershipNotice(chatId: Id, names: [String], subjects: [MembershipNotice.Subject]? = nil) {
         let name = user?.name?.trimmingCharacters(in: .whitespaces) ?? ""
         let who = name.isEmpty ? (user?.login ?? "") : name
         guard !who.isEmpty, let text = OptimisticNotice.addedLine(who: who, names: names) else { return }
-        let n = OptimisticNotice(text: text, now: nowMs())
+        var facts: MembershipNotice? = nil
+        if let me = user?.id, let subjects, !subjects.isEmpty {
+            facts = MembershipNotice(kind: "added", actor: me, subjects: subjects)
+        }
+        let n = OptimisticNotice(text: text, now: nowMs(), notice: facts)
         optimisticNotices[chatId, default: []].append(n)
         var next = messages
         next[chatId, default: []].append(n.message(chatId: chatId))
@@ -3385,6 +3394,18 @@ final class AppModel: ObservableObject {
         }
         let agents: [String] = agentIds.compactMap { (id: Id) -> String? in projects.first { $0.id == id }?.name }
         return people + agents
+    }
+
+    /// The added members by id, or nil when a handle is not known here (then the line cannot
+    /// carry facts and stays words-only).
+    private func membershipSubjects(handles: [String], agentIds: [Id]) -> [MembershipNotice.Subject]? {
+        var out: [MembershipNotice.Subject] = []
+        for h in handles {
+            guard let id = personId(handle: h) else { return nil }
+            out.append(MembershipNotice.Subject(kind: "user", id: id))
+        }
+        out += agentIds.map { MembershipNotice.Subject(kind: "agent", id: $0) }
+        return out
     }
 
     func addPerson(chatId: String, handle: String) {
@@ -3453,7 +3474,8 @@ final class AppModel: ObservableObject {
     /// `POST /chats/{id}/members`, agents by `POST /chats/{id}/agents`. All are
     /// tried; the first failure is reported once and the call returns false.
     func addMembers(chatId: String, handles: [String], agentIds: [Id]) async -> Bool {
-        showMembershipNotice(chatId: chatId, names: membershipNames(handles: handles, agentIds: agentIds))
+        showMembershipNotice(chatId: chatId, names: membershipNames(handles: handles, agentIds: agentIds),
+                             subjects: membershipSubjects(handles: handles, agentIds: agentIds))
         // One call for the batch (#1349): the relay adds everyone and writes one
         // "<me> added A, B and C" line. A relay that only knows `{handle}` answers 4xx;
         // then every add is tried on its own as before.
@@ -3872,6 +3894,13 @@ final class AppModel: ObservableObject {
     /// A message the next ChatView should scroll to and tint (a search result opened
     /// from the bottom bar, [feedback iphone-bottom-search-bar-2026-10-25]).
     @Published var pendingReveal: MessageReveal?
+    /// The Settings page the next Settings sheet lands on (a Settings row opened
+    /// from search, [feedback search-settings-ios-2026-10-26]): Home presents the
+    /// sheet when this is set and clears it when the sheet closes.
+    @Published var pendingSettingsLanding: String?
+    /// The agent pane's settings row to drop open once the pane shows (a search
+    /// result for "voice" / "model" / "reasoning").
+    @Published var pendingAgentSetting: GlobalSearch.AgentSetting?
     /// App-wide search: message text, attachments and links per loaded chat, kept
     /// current lazily against `messagesVersion` (`GlobalSearch`).
     var searchIndex = SearchIndex()
@@ -4159,23 +4188,31 @@ final class AppModel: ObservableObject {
             switch p.event {
             case .peopleMessage(let payload):
                 let cid = payload.chat_id
-                // Agent (or person) reached out in a chat we have not listed yet —
+                // Since 2026-10-26 the relay queues this for an agent's reply too (people chats
+                // and, with `project_id`, the agent's own project chats); before, only a
+                // person's row did, so an @agent answer never showed a banner here.
+                let projectId = payload.project_id ?? peopleSlot
+                let inPeople = payload.project_id == nil
+                // Agent (or person) reached out in a people chat we have not listed yet —
                 // refresh so open-from-notification can dial the room.
-                if peopleChat(cid) == nil { needChats = true }
+                if inPeople, peopleChat(cid) == nil { needChats = true }
                 if !isWatching(cid) {
-                    peopleUnread.insert(cid)
-                    unarchiveOnActivity(chatId: cid)
+                    if inPeople {
+                        peopleUnread.insert(cid)
+                        unarchiveOnActivity(chatId: cid)
+                    }
                     // Muted group: keep the unread flag, skip the local banner.
-                    if !isPeopleChatMuted(cid) {
+                    if !inPeople || !isPeopleChatMuted(cid) {
                         let sender = payload.sender
                         let from = sender.handle.isEmpty ? (payload.from_handle.isEmpty ? "someone" : payload.from_handle) : sender.handle
                         // §7c sender{} first; the chat's member list fills any gap.
                         let member = peopleChat(cid)?.members.first { $0.handle == from }
                         let agent = member?.isAgent == true ? member?.project : nil
                         let kind = sender.kind.isEmpty ? (agent != nil ? "agent" : "user") : sender.kind
+                        let body = (payload.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                         let info = MessagePush.userInfo(
-                            chatId: cid, projectId: peopleSlot, title: sender.name.isEmpty ? (member?.displayName ?? "@\(from)") : sender.name,
-                            body: "New message",
+                            chatId: cid, projectId: projectId, title: sender.name.isEmpty ? (member?.displayName ?? "@\(from)") : sender.name,
+                            body: body.isEmpty ? "New message" : body,
                             senderKind: kind, senderId: sender.id.isEmpty ? (member?.id ?? from) : sender.id,
                             senderName: sender.name.isEmpty ? (member?.displayName ?? from) : sender.name, senderHandle: from,
                             avatar: sender.avatar,
@@ -4266,6 +4303,9 @@ final class AppModel: ObservableObject {
                 }
             case .spaceArchived(let payload):
                 applyRemoteArchive(spaceId: payload.space_id, kind: payload.kind, archived: payload.archived_at != nil)
+            case .channelMessage:
+                // Server channel banner: push-server-channels-ios-2026-10-26 (next item).
+                break
             case .peopleChatDeleted, .peopleInviteAccepted, .machineReady:
                 break
             case .notificationsCleared(let payload):

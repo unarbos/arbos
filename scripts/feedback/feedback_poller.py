@@ -68,6 +68,7 @@ CLI:  feedback_poller.py [run] | status | testers | set-cursor <ISO-8601>
       | leadtime [since-ISO] | memtree-cost [YYYY-MM-DD]   (audit numbers; memtree-cost asks GET /admin/usage/memory-tree, else relay.db as root)
       | gate-tree <sha-or-branch> <fid>…   (gate a hand-prepared integration tree as one run and land it whole)
       | gate-abort   (drop the active gate run without verdicts; every ready branch re-batches at its current head)
+      | park <id> <note…>   (hand a gating item back to its owner at the head the red run judged; a newer push re-gates by itself)
       | gate-next <fid>… [--then <fid>…] [--abort]   (pin: these items gate next and alone; while a pinned item is with its owner nothing else merges)
       | gate-unpin <fid>…   | unfail <fid>…   (a failed item whose fix is on main goes back to pushed)
 """
@@ -3081,6 +3082,13 @@ class Loop:
         log(f"Rust gate {active['id']} red with {len(order)} branches: bisecting into {len(first)} + {len(rest)}")
         for fid in order:
             self.store.event(fid, "rust_gate_bisect", run=active["id"], members=len(order))
+            # The head this red run judged, per member: a park (operator) must point gated_head at THIS head, not at
+            # whatever the branch shows when the park lands — a push in between is otherwise swallowed (#1995
+            # 08:32 push / 08:35 park; #1962/#1963 09:01 push / 09:55 park, 2026-10-27).
+            st = self.store.state(fid)
+            if st.get("branch_head") == members[fid] or st.get("status") == "gating":
+                st["last_red"] = {"head": members[fid], "run": active["id"], "at": iso()}
+                self.store.save_state(fid, st)
 
     def ios_gate(self, branch: str, head: str) -> tuple[bool, str]:
         """ssh to the gate Mac and run ios-gate.sh <branch> <sha>; (ok, output)."""
@@ -4325,7 +4333,10 @@ class Loop:
                 self.store.save_state(fid, st)
                 self.store.event(fid, "confirmation_hold_over")
             head = refs.get(f"feedback/{fid}")
-            if head and head != st.get("gated_head"):
+            # A parked item compares against the head the gate judged (`parked_head`, set by the park from
+            # `last_red`), not against the head the park happened to see: a push recorded before the park is a new
+            # head too and re-registers (2026-10-27: #1995, #1962/#1963 sat handed_off with their fix pushed).
+            if head and head != (st.get("parked_head") or st.get("gated_head")):
                 cmp = self.gh.compare("main", head)
                 tagged = any(f"[feedback {fid}]" in c["commit"]["message"] for c in cmp.get("commits", []))
                 if cmp.get("status") in ("ahead", "diverged") and tagged:
@@ -4338,6 +4349,7 @@ class Loop:
                                     if f["filename"] not in seen:
                                         seen.append(f["filename"])
                         files = seen
+                    st.pop("parked_head", None)
                     st.update(status="gating", branch=f"feedback/{fid}", branch_head=head, files=files,
                               expects_ios=touches_ios(files),
                               expects_rust=bool(self.rust_crates(files)),
@@ -4511,8 +4523,9 @@ class Loop:
                     awake_boxes = [b for b in agentd.get("boxes") or [] if b.get("state", "awake") == "awake" and not (real and b.get("test"))]
                     images = sorted({b.get("image", "?") for b in awake_boxes if not fleet_sha or b.get("sha") == fleet_sha}
                                     or {b.get("image", "?") for b in awake_boxes}) or ["?"]
+                    on_fleet = sum(1 for b in awake_boxes if b.get("sha") == fleet_sha) if fleet_sha else 0
                     where = ("the voice pod" if kind == "voice" else "the relay" if kind == "relay"
-                             else f"all {(agentd.get('real_awake') if real else agentd.get('awake')) or len(shas)} awake "
+                             else f"all {on_fleet or (agentd.get('real_awake') if real else agentd.get('awake')) or len(shas)} awake "
                                   f"{'real-user ' if real else ''}boxes (image {'/'.join(images)})")
                     done_notes.append(f"{where} runs {shas[0][:8]}" + ("" if len(shas) == 1 else f" (+{len(shas) - 1} sha)")
                                       + (skipped_note if kind == "agentd" and fleet_sha else ""))
@@ -5160,6 +5173,28 @@ def main(argv: list[str]) -> int:
                     loop.gh.comment(st["issue"], f"Not a failure after all: the fix `{st['commit'][:8]}` is on `main`; the build that carries it was still in the runner queue ({why.rstrip('.')}). Back to tracking the builds.")
                     loop.gh.set_labels(st["issue"], [], ["needs-human"])
             print(f"{fid}: back to pushed")
+        return 0
+    if cmd == "park":
+        # `park <id> <note…>`: hand a gating item back to its owner after a red the gate pinned on it. gated_head and
+        # parked_head are the head the RED run judged (`last_red`, or the item's own failing verdict) — never the
+        # live head: a push recorded between the red and the park stayed invisible when the park copied branch_head
+        # (#1995 08:32/08:35, #1962/#1963 09:01/09:55, 2026-10-27). The follower re-registers any other head, so a
+        # push already made re-gates on the next tick; a pin is released.
+        if len(argv) < 4:
+            print("park <id> <note…>")
+            return 2
+        fid, note = argv[2], " ".join(argv[3:])
+        st = loop.store.state(fid)
+        if not st or st.get("status") != "gating":
+            print(f"{fid}: not gating ({(st or {}).get('status')})")
+            return 2
+        rg = st.get("rust_gate") or {}
+        red = (st.get("last_red") or {}).get("head") or (rg.get("head") if rg.get("verdict") in ("fail", "conflict") else None) or st.get("branch_head")
+        st.update(status="handed_off", gated_head=red, parked_head=red, gate_pinned=False)
+        loop.store.save_state(fid, st)
+        loop.store.event(fid, "parked_by_operator", head=red, live_head=st.get("branch_head"), note=note[:400])
+        later = st.get("branch_head") != red
+        print(f"{fid}: parked at the red head {red[:9]}" + (f"; live head {st['branch_head'][:9]} is newer and re-registers on the next tick" if later else ""))
         return 0
     if cmd == "approval-gate":
         # Standing rule: the gate is always on. `approval-gate on [--allow a,b]` widens the allow list;

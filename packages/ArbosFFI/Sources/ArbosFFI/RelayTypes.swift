@@ -332,6 +332,33 @@ public struct ChannelBindingDto: Codable {
 	}
 }
 
+/// `channel_message` payload: a message in a server channel (Matrix room), fanned out by the
+/// relay's push gateway (`POST /_matrix/push/v1/notify`) to every member device the homeserver's
+/// push rules name — never the sender's own, never a server the recipient archived. Clients post
+/// a local banner "<sender> in #channel" unless that channel is on screen; a tap opens it.
+public struct ChannelMessagePayloadDto: Codable {
+	public let server_id: String
+	public let server_name: String
+	public let channel_id: String
+	public let channel_name: String
+	public let room_id: String
+	public let event_id: String
+	public let sender: SenderDto
+	/// First line of the message, when it has text.
+	public let text: String?
+
+	public init(server_id: String, server_name: String, channel_id: String, channel_name: String, room_id: String, event_id: String, sender: SenderDto, text: String?) {
+		self.server_id = server_id
+		self.server_name = server_name
+		self.channel_id = channel_id
+		self.channel_name = channel_name
+		self.room_id = room_id
+		self.event_id = event_id
+		self.sender = sender
+		self.text = text
+	}
+}
+
 /// Active pairing code on `GET /channels` / `POST /channels/pair/new` (`pair_json`).
 public struct ChannelPairingDto: Codable {
 	public let code: String
@@ -2694,6 +2721,7 @@ public struct VoipRegisterResponseDto: Codable {
 /// boxing breaks the typeshare / Swift shape and the wire JSON is unchanged either way.
 public enum PushEventDto: Codable {
 	case peopleMessage(PeopleMessagePayloadDto)
+	case channelMessage(ChannelMessagePayloadDto)
 	case peopleChatUpdated(PeopleChatUpdatedPayloadDto)
 	case peopleMemberAdded(PeopleMemberAddedPayloadDto)
 	case peopleMemberRemoved(PeopleMemberRemovedPayloadDto)
@@ -2726,6 +2754,7 @@ public enum PushEventDto: Codable {
 
 	enum CodingKeys: String, CodingKey, Codable {
 		case peopleMessage = "people_message",
+			channelMessage = "channel_message",
 			peopleChatUpdated = "people_chat_updated",
 			peopleMemberAdded = "people_member_added",
 			peopleMemberRemoved = "people_member_removed",
@@ -2768,6 +2797,11 @@ public enum PushEventDto: Codable {
 			case .peopleMessage:
 				if let content = try? container.decode(PeopleMessagePayloadDto.self, forKey: .payload) {
 					self = .peopleMessage(content)
+					return
+				}
+			case .channelMessage:
+				if let content = try? container.decode(ChannelMessagePayloadDto.self, forKey: .payload) {
+					self = .channelMessage(content)
 					return
 				}
 			case .peopleChatUpdated:
@@ -2925,6 +2959,9 @@ public enum PushEventDto: Codable {
 		switch self {
 		case .peopleMessage(let content):
 			try container.encode(CodingKeys.peopleMessage, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .channelMessage(let content):
+			try container.encode(CodingKeys.channelMessage, forKey: .kind)
 			try container.encode(content, forKey: .payload)
 		case .peopleChatUpdated(let content):
 			try container.encode(CodingKeys.peopleChatUpdated, forKey: .kind)

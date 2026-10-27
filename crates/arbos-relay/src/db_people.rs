@@ -746,6 +746,37 @@ impl Db {
         })
     }
 
+    /// Queue a notification for ONE device (the push gateway names devices one by one).
+    /// `coalesce_key` keeps at most one undelivered push of this kind per key per device.
+    pub fn push_device(
+        &self,
+        user_id: &str,
+        device_id: &str,
+        kind: &str,
+        payload: &Value,
+        coalesce_key: Option<&str>,
+    ) -> Result<()> {
+        let now = now_ms();
+        let body = payload.to_string();
+        self.with(|c| {
+            if let Some(key) = coalesce_key {
+                let pending: i64 = c.query_row(
+                    "SELECT COUNT(*) FROM user_pushes WHERE device_id = ?1 AND kind = ?2 AND chat_id = ?3 AND delivered_at IS NULL",
+                    params![device_id, kind, key],
+                    |r| r.get(0),
+                )?;
+                if pending > 0 {
+                    return Ok(());
+                }
+            }
+            c.execute(
+                "INSERT INTO user_pushes(user_id, device_id, kind, payload, chat_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![user_id, device_id, kind, body, coalesce_key, now],
+            )?;
+            Ok(())
+        })
+    }
+
     /// Queue a notification for every live device of a user except `except_device` (the one
     /// that caused it already knows).
     pub fn push_user_except(

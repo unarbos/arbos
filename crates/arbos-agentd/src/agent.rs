@@ -1537,6 +1537,11 @@ pub struct Agent {
     /// Running subagents → (chat id, progress message id), so a file a subagent delivers lands
     /// on its own card (F10 `deliver_file`).
     pub subagent_msgs: Mutex<HashMap<String, (String, String)>>,
+    /// Per chat: the message ids of files / charts that were written and READ BACK from the doc
+    /// (`media::deliver`, `chart::post`), newest last. The only ground a "posted" sentence may
+    /// stand on (#1900, #2025: a timed-out gated call was upgraded to "the chat service
+    /// confirmed it" 66 s later).
+    pub posted_ledger: Mutex<HashMap<String, Vec<(String, i64)>>>,
     /// Group-chat bookkeeping (chat kinds from the registry, this box's "Projects ⇄" tab).
     pub groups: crate::groups::GroupState,
     pub people: crate::people::PeopleState,
@@ -1549,9 +1554,20 @@ pub struct Agent {
     /// Live name / handle / rename history from the relay's project record (#1431); the system
     /// prompt, the per-turn notes and the group preludes read this, never `cfg.project_name`.
     pub identity: crate::identity::IdentityState,
-    /// A rename (or instructions change) landed while a turn was running: the pi session must
-    /// re-read the system prompt before the next turn (the supervisor loop does it).
+    /// The system prompt changed (rename, instructions, owner profile): the pi session must
+    /// re-read it. The supervisor loop restarts the session at the next turn boundary, never
+    /// mid-turn, and not before `prompt_refresh_due_ms` — several changes close together
+    /// (a rename and its undo, #2007) cost one restart.
     pub(crate) prompt_refresh_pending: AtomicBool,
+    pub(crate) prompt_refresh_due_ms: std::sync::atomic::AtomicU64,
+    /// Held by a turn from its session switch to its end, and by the supervisor's restarts,
+    /// so a restart never lands under a turn that is starting (#2007: a `switch_session`
+    /// died with "child pi-main timed out on sw-1" when the owner's rename restarted the
+    /// session between the turn's claim and `turn_running`).
+    pub(crate) pi_lease: Mutex<()>,
+    /// A respawn is replacing the child right now: the supervisor must not spawn a second one
+    /// because `pi` is momentarily empty.
+    pub(crate) pi_respawning: AtomicBool,
     /// D91 soft-compaction hysteresis per chat: `None` right after a compaction (the floor is
     /// not known yet), then the window observed on the first turn after it.
     compaction_floor: std::sync::Mutex<HashMap<String, Option<i64>>>,
@@ -1646,6 +1662,7 @@ impl Agent {
             skills: SkillsIndex::new(),
             approvals: crate::approval::Approvals::default(),
             subagent_msgs: Mutex::new(HashMap::new()),
+            posted_ledger: Mutex::new(HashMap::new()),
             groups: crate::groups::GroupState::default(),
             people: crate::people::PeopleState::default(),
             turn_images: std::sync::Mutex::new(Vec::new()),
@@ -1653,6 +1670,9 @@ impl Agent {
             prompt_memory: std::sync::Mutex::new(None),
             identity: crate::identity::IdentityState::load(&cfg_for_settings),
             prompt_refresh_pending: AtomicBool::new(false),
+            prompt_refresh_due_ms: std::sync::atomic::AtomicU64::new(0),
+            pi_lease: Mutex::new(()),
+            pi_respawning: AtomicBool::new(false),
             compaction_floor: std::sync::Mutex::new(HashMap::new()),
             pending_sends: std::sync::atomic::AtomicUsize::new(0),
             side_notes: std::sync::Mutex::new(HashMap::new()),
@@ -1926,6 +1946,9 @@ impl Agent {
                 if me.shutting_down.load(Ordering::SeqCst) {
                     return;
                 }
+                if me.pi_respawning.load(Ordering::SeqCst) {
+                    continue;
+                }
                 if !alive && !me.turn_running.load(Ordering::SeqCst) {
                     me.pi_ready.store(false, Ordering::SeqCst);
                     let chat = me.current_chat.lock().await.clone().unwrap_or_default();
@@ -1934,16 +1957,22 @@ impl Agent {
                         tracing::error!(error = %e, "pi respawn failed");
                         tokio::time::sleep(Duration::from_secs(5)).await;
                     }
-                } else if alive
-                    && me.prompt_refresh_pending.load(Ordering::SeqCst)
-                    && !me.turn_running.load(Ordering::SeqCst)
-                {
-                    // A rename landed mid-turn (#1431): pi reads the system prompt at spawn, so
-                    // the session restarts now that the turn is over.
+                } else if alive && me.prompt_refresh_ready() {
+                    // The system prompt changed (#1431, #1908): pi reads it at spawn, so the
+                    // session restarts — at a turn boundary only (the lease is free), once the
+                    // change has settled (#2007).
+                    let Ok(_lease) = me.pi_lease.try_lock() else {
+                        continue;
+                    };
                     me.prompt_refresh_pending.store(false, Ordering::SeqCst);
-                    if let Err(e) = me.respawn_pi_current().await {
-                        tracing::warn!(error = %e, "pi respawn for the identity refresh failed");
-                        me.prompt_refresh_pending.store(true, Ordering::SeqCst);
+                    match me.respawn_pi_current().await {
+                        Ok(()) => {
+                            tracing::info!("pi session restarted on the refreshed system prompt")
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "pi respawn for the prompt refresh failed");
+                            me.prompt_refresh_pending.store(true, Ordering::SeqCst);
+                        }
                     }
                 }
             }
@@ -1959,7 +1988,38 @@ impl Agent {
         self.respawn_pi(&chat).await
     }
 
+    /// How long a prompt change settles before the session restarts on it: a rename and its
+    /// undo, or a profile that moves twice in a row, cost one restart (#2007).
+    pub(crate) const PROMPT_REFRESH_QUIET_MS: u64 = 5_000;
+
+    /// Ask for the session to restart on the rewritten system prompt at the next turn
+    /// boundary, no sooner than [`Self::PROMPT_REFRESH_QUIET_MS`] from now. Never restarts here.
+    pub(crate) fn schedule_prompt_refresh(&self, why: &str) {
+        let due = arbos_core::ids::now_ms() as u64 + Self::PROMPT_REFRESH_QUIET_MS;
+        self.prompt_refresh_due_ms.store(due, Ordering::SeqCst);
+        self.prompt_refresh_pending.store(true, Ordering::SeqCst);
+        tracing::info!(
+            why,
+            "system prompt refresh scheduled for the next turn boundary"
+        );
+    }
+
+    /// A scheduled refresh whose quiet window has passed, with no turn running.
+    fn prompt_refresh_ready(&self) -> bool {
+        self.prompt_refresh_pending.load(Ordering::SeqCst)
+            && !self.turn_running.load(Ordering::SeqCst)
+            && arbos_core::ids::now_ms() as u64 >= self.prompt_refresh_due_ms.load(Ordering::SeqCst)
+    }
+
     async fn respawn_pi(self: &Arc<Self>, chat_id: &str) -> Result<()> {
+        struct Respawning<'a>(&'a AtomicBool);
+        impl Drop for Respawning<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
+            }
+        }
+        self.pi_respawning.store(true, Ordering::SeqCst);
+        let _respawning = Respawning(&self.pi_respawning);
         if let Some(old) = self.pi.lock().await.take() {
             old.shutdown().await;
         }
@@ -2291,11 +2351,8 @@ impl Agent {
                             h.doc
                                 .start_assistant_message(&id, user_msg, &self.cfg.device_id);
                             h.doc.add_status_part(&id, "failed", "Failed");
-                            h.doc.add_error_part(
-                                &id,
-                                "send_failed",
-                                &crate::disk::friendly(&e.to_string(), &self.work_root()),
-                            );
+                            h.doc
+                                .add_error_part(&id, "send_failed", &self.user_error_line(e));
                             h.doc.finish_message(&id, MessageStatus::Error);
                         }
                     }
@@ -3747,6 +3804,17 @@ impl Agent {
     }
 
     /// `/work`: the parent of this workspace's folder (box-level state lives in `/work/.arbos`).
+    /// The error line a person reads on a failed turn: a full disk as the disk module words
+    /// it, a pi child that died or restarted under the turn as one plain sentence (never
+    /// `child pi-main timed out on sw-1`, #2007), anything else as is.
+    pub(crate) fn user_error_line(&self, e: &anyhow::Error) -> String {
+        let text = e.to_string();
+        if is_child_error(&text) {
+            return CHILD_ERROR_LINE.to_owned();
+        }
+        crate::disk::friendly(&text, &self.work_root())
+    }
+
     pub fn work_root(&self) -> PathBuf {
         self.cfg
             .work_dir
@@ -3945,15 +4013,14 @@ impl Agent {
         };
         let prompt_text = prompt_text.as_str();
 
+        // The session is this turn's until it ends: no prompt-refresh restart lands under it.
+        let _pi_lease = self.pi_lease.lock().await;
         if let Err(e) = self.ensure_chat_session(chat_id).await {
             {
                 let h = host.lock().await;
                 h.doc.add_status_part(&assistant_msg_id, "failed", "Failed");
-                h.doc.add_error_part(
-                    &assistant_msg_id,
-                    "session",
-                    &crate::disk::friendly(&e.to_string(), &work_root),
-                );
+                h.doc
+                    .add_error_part(&assistant_msg_id, "session", &self.user_error_line(&e));
                 h.doc
                     .finish_message(&assistant_msg_id, MessageStatus::Error);
             }
@@ -6053,6 +6120,29 @@ impl Agent {
         if text.is_empty() && activity.is_none() {
             return Err("nothing to send".into());
         }
+        // #2025: a sentence that says a file / chart / picture is posted or confirmed is sent
+        // only when a read-back row exists for this chat since the turn's ask. A timed-out or
+        // gated call never becomes "confirmed" later.
+        if claims_posted(text) {
+            let (chat_id, since) = {
+                let tl = self.turn.lock().await;
+                match tl.as_ref() {
+                    Some(t) => (
+                        t.chat_id.clone(),
+                        arbos_core::ids::now_ms() - t.started.elapsed().as_millis() as i64 - 60_000,
+                    ),
+                    None => return Err("no turn is running".into()),
+                }
+            };
+            if !self.posted_since(&chat_id, since).await {
+                tracing::warn!(chat_id = %chat_id, "send_message claimed a post with no read-back row; refused");
+                self.append_audit(
+                    "posted_claim_refused",
+                    json!({ "chat_id": chat_id, "text": text.chars().take(200).collect::<String>() }),
+                );
+                return Err(POSTED_CLAIM_REFUSAL.into());
+            }
+        }
         let mut tl = self.turn.lock().await;
         let Some(t) = tl.as_mut() else {
             return Err("no turn is running".into());
@@ -6218,6 +6308,26 @@ impl Agent {
     /// `route.reply`? The ack is not the answer: on 0.1.131 an act ack promoted to a bubble
     /// counted as "posted", the fallback stayed quiet, and the user kept only "Reading the
     /// README … now." (#1776, six eval failures; the same shape as #1355 / #1699).
+    /// Record a read-back attachment row for `chat_id` (called by `media::deliver` and
+    /// `chart::post` after the row was read back, never before).
+    pub async fn note_posted(&self, chat_id: &str, msg_id: &str) {
+        let mut l = self.posted_ledger.lock().await;
+        let v = l.entry(chat_id.to_owned()).or_default();
+        v.push((msg_id.to_owned(), arbos_core::ids::now_ms()));
+        if v.len() > 32 {
+            v.drain(..v.len() - 32);
+        }
+    }
+
+    /// Something was posted and read back in `chat_id` at or after `since_ms`.
+    pub async fn posted_since(&self, chat_id: &str, since_ms: i64) -> bool {
+        self.posted_ledger
+            .lock()
+            .await
+            .get(chat_id)
+            .is_some_and(|v| v.iter().any(|(_, at)| *at >= since_ms))
+    }
+
     fn posted_result(t: &TurnState) -> bool {
         !t.streamed_text.trim().is_empty()
             || t.progress_texts.iter().any(|p| !p.trim().is_empty())
@@ -8439,6 +8549,21 @@ const RECAP_ROW_CHARS: usize = 500;
 /// This chat's recent turns as a short labelled block for a retry on a fresh pi session (#1722).
 /// Rows before `current_user_msg_id` only (the question itself follows), newest last; empty when
 /// the chat has no earlier words.
+/// What a person reads when the agent's model process died or restarted under their turn.
+pub(crate) const CHILD_ERROR_LINE: &str =
+    "The agent restarted while it was working on this. Send the message again.";
+
+/// An error from the pi child's plumbing (`RpcChild`): a call that timed out, a child that
+/// exited before answering, closed stdin, or no child at all.
+pub(crate) fn is_child_error(text: &str) -> bool {
+    text.starts_with("child ")
+        && (text.contains(" timed out on ")
+            || text.contains(" exited before answering ")
+            || text.contains(" dropped response ")
+            || text.contains(" stdin closed"))
+        || text.contains("pi main agent not running")
+}
+
 pub(crate) fn chat_recap(
     rows: &[arbos_core::doc::MessageView],
     current_user_msg_id: &str,
@@ -8954,6 +9079,88 @@ pub(crate) fn is_abort_text(detail: &str) -> bool {
             && (l.contains("signal") || l.contains("cancel") || l.ends_with("aborted"))
 }
 
+/// What the model is told when it claims a post nothing backs (#2025).
+pub(crate) const POSTED_CLAIM_REFUSAL: &str = "Not sent: this message says a file, picture or chart is posted / attached / confirmed, but no deliver_file or post_chart call returned `posted: true` in this chat for this ask — a timed-out, pending or failed call did NOT post anything, and nothing confirms later. Either call deliver_file / post_chart now and wait for `posted: true`, or tell the user plainly that it is not posted yet (and what you will do). Never say \"posted\", \"attached\" or \"confirmed\" otherwise.";
+
+/// Does this bubble claim that a file / picture / chart is in the chat? Matches the shapes seen
+/// (#1900 "I've posted the logo … as an image card", #2025 "the chart is posted … the chat
+/// service then confirmed it", "attached it above", "now appears inline"); a plain future tense
+/// ("I will post", "posting … now") or a negation ("not posted", "did not confirm") is not a
+/// claim.
+pub(crate) fn claims_posted(text: &str) -> bool {
+    let t = text.to_ascii_lowercase();
+    if t.contains("not posted")
+        || t.contains("not been posted")
+        || t.contains("didn't post")
+        || t.contains("did not post")
+        || t.contains("haven't posted")
+        || t.contains("have not posted")
+        || t.contains("did not confirm")
+        || t.contains("didn't confirm")
+        || t.contains("could not post")
+        || t.contains("couldn't post")
+        || t.contains("not confirmed")
+    {
+        return false;
+    }
+    let object = [
+        "chart",
+        "image",
+        "picture",
+        "png",
+        "file",
+        "logo",
+        "photo",
+        "pdf",
+        "card",
+        "attachment",
+        "screenshot",
+        "diagram",
+        "plot",
+        "graph",
+    ];
+    let has_object = object.iter().any(|o| t.contains(o));
+    if !has_object {
+        return false;
+    }
+    let claims = [
+        "is posted",
+        "are posted",
+        "was posted",
+        "i've posted",
+        "i have posted",
+        "i posted",
+        "posted above",
+        "posted below",
+        "posted in the chat",
+        "posted it",
+        "posted the",
+        "is attached",
+        "i've attached",
+        "i have attached",
+        "attached above",
+        "attached it",
+        "attached the",
+        "now appears",
+        "appears above",
+        "appears inline",
+        "shows above",
+        "is in the chat",
+        "is in this chat",
+        "already in this chat",
+        "already in the chat",
+        "service confirmed",
+        "confirmed it",
+        "was confirmed",
+        "is confirmed",
+        "landed in the chat",
+        "delivered as an image",
+        "delivered as a card",
+        "sent it as an image",
+    ];
+    claims.iter().any(|c| t.contains(c))
+}
+
 /// The prompt of a `TurnKind::JobFallback` turn: the job is gone, do the ask here and now.
 pub(crate) fn job_fallback_prompt(
     job: &JobSpec,
@@ -9178,6 +9385,22 @@ impl Agent {
 mod tests {
     use super::*;
 
+    #[test]
+    fn child_plumbing_errors_read_as_one_plain_line() {
+        for raw in [
+            "child pi-main timed out on sw-1",
+            "child pi-main exited before answering sw-1",
+            "child pi-main dropped response p-3",
+            "child pi-main stdin closed",
+            "pi main agent not running",
+        ] {
+            assert!(is_child_error(raw), "{raw}");
+        }
+        assert!(!is_child_error("workspace disk full (2 MB free)"));
+        assert!(!is_child_error("provider refused: context too long"));
+        assert!(!CHILD_ERROR_LINE.contains("pi-main"));
+    }
+
     /// 2026-10-25 (Jacob's San José ask): a worker that settles with no words, no tool call and
     /// no error did no work — a failure that gets a fresh worker, never an empty "done". A
     /// cancel and the 60-minute cap are not retried; a `blocked` return contract is the
@@ -9254,6 +9477,38 @@ mod tests {
         let r = ModelError::from_message(&refused).unwrap();
         assert!(r.refusal);
         assert!(r.chat_line_after_ack("Jacob").contains("declined"));
+    }
+
+    /// #2025 (chart proof, 0.1.159): after a gated post_chart timed out the agent wrote
+    /// "Correction: the chart is posted … the chat service then confirmed it" with no read-back
+    /// row. A posted/attached/confirmed sentence is a claim; negations and futures are not.
+    #[test]
+    fn posted_claims_are_recognised() {
+        assert!(claims_posted("Correction: the chart is posted. The first call timed out, but the chat service then confirmed it."));
+        assert!(claims_posted(
+            "I've posted the logo directly into the chat as an image card."
+        ));
+        assert!(claims_posted("The chart is already in this chat."));
+        assert!(claims_posted(
+            "Posy, the black-background logo (1500x1500) is posted in the chat again as a picture."
+        ));
+        assert!(claims_posted("Attached the PDF above."));
+        assert!(!claims_posted(
+            "The chart did not confirm as posted. Should I post it again?"
+        ));
+        assert!(!claims_posted(
+            "Posting the logo image directly in chat now."
+        ));
+        assert!(!claims_posted(
+            "I could not post the file: it does not exist."
+        ));
+        assert!(!claims_posted("London is 7 hours ahead of you right now."));
+        assert!(!claims_posted(
+            "The report is ready; I will post it once you approve the card."
+        ));
+        assert!(!claims_posted(
+            "It is not posted yet; the card above needs your approval."
+        ));
     }
 
     /// Proof run 1 (2026-10-26 01:0x UTC): "Here are seven well-rated San Jose restaurants,
