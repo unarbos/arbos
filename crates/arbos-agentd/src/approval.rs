@@ -211,6 +211,13 @@ impl Agent {
             .ok_or_else(|| anyhow!("approval: chat {chat_id} has no doc"))?;
         let approval_id = ulid();
         let expires_at = now_ms() + APPROVAL_TTL_MS;
+        // An optional card (the secret hand-off's "that looks like a key" offer) asks nothing
+        // of the turn: no waiting status, no composer lock, no "Waiting for approval" line.
+        let optional = req
+            .payload
+            .get("optional")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         // Attach to the running turn's message when the card belongs to it; otherwise the card
         // gets a message of its own (`turn.kind = "approval"`).
         let turn_msg = {
@@ -247,10 +254,12 @@ impl Agent {
             };
             h.doc
                 .add_approval_part(&msg_id, &approval_id, &req, expires_at);
-            h.doc
-                .add_status_part(&msg_id, "waiting_approval", &req.title);
-            h.doc
-                .set_message_fields(&msg_id, &[("waitingApproval", json!(true))]);
+            if !optional {
+                h.doc
+                    .add_status_part(&msg_id, "waiting_approval", &req.title);
+                h.doc
+                    .set_message_fields(&msg_id, &[("waitingApproval", json!(true))]);
+            }
             if own {
                 h.doc.finish_message(&msg_id, MessageStatus::Done);
             }
@@ -297,7 +306,9 @@ impl Agent {
         );
         // Working line / quick-reply status: "Waiting for approval", not the gated tool's
         // label ("Removing files") — nothing has run yet.
-        self.set_approval_wait_activity(chat_id, true).await;
+        if !optional {
+            self.set_approval_wait_activity(chat_id, true).await;
+        }
         Ok(approval_id)
     }
 
@@ -365,6 +376,20 @@ impl Agent {
         decided_by: &str,
         payload: &Value,
     ) -> Result<()> {
+        // Secret hand-off: the request card's answer names the saved secret (ids and names,
+        // never a value) for the tool waiting on it; the offer card's Save runs the save.
+        crate::handoff::note_card_answer(approval_id, payload);
+        let detected = self
+            .store
+            .approval(approval_id)
+            .ok()
+            .flatten()
+            .filter(|row| {
+                row.state == ApprovalState::Pending.as_str()
+                    && row.payload.get("kind").and_then(Value::as_str)
+                        == Some(crate::handoff::DETECTED_KIND)
+            })
+            .map(|row| row.payload.clone());
         let grant = payload
             .get(GRANT_FIELD)
             .and_then(Value::as_str)
@@ -397,7 +422,16 @@ impl Agent {
                 }
             }
         }
-        self.decide_approval(approval_id, outcome, decided_by).await
+        let approved = outcome.is_approved();
+        self.decide_approval(approval_id, outcome, decided_by)
+            .await?;
+        if let Some(card) = detected {
+            let agent = self.clone();
+            tokio::spawn(async move {
+                crate::handoff::on_detected_decided(&agent, &card, approved).await;
+            });
+        }
+        Ok(())
     }
 
     /// Apply a decision: store (first decision wins), doc part, audit, then whoever is waiting.
