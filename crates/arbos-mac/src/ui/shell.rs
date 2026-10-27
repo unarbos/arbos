@@ -23,6 +23,7 @@ use crate::ui::avatar_picker;
 use crate::ui::avatars::{self, leaf, LeafPick};
 use crate::ui::callview;
 use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
+use crate::ui::chart_viewer;
 use crate::ui::chat_search;
 use crate::ui::composer::{self, Composer, ComposerEvent, ComposerInput};
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
@@ -246,6 +247,8 @@ pub struct Shell {
     forward_message_focused_for: Option<crate::model::Id>,
     /// `AppState::media_viewer_generation` the viewer was last focused for.
     viewer_focused_generation: u64,
+    /// `AppState::chart_viewer_generation` the chart overlay was last focused for.
+    chart_viewer_focused_generation: u64,
     pub(crate) connectors: Entity<ConnectorsPanel>,
     pub(crate) skills: Entity<SkillsPanel>,
     pub(crate) local: Entity<LocalPanel>,
@@ -1033,6 +1036,7 @@ impl Shell {
             viewer_search,
             viewer_focus: cx.focus_handle(),
             viewer_focused_generation: 0,
+            chart_viewer_focused_generation: 0,
             forward_message_focused_for: None,
             connectors,
             skills,
@@ -1286,6 +1290,9 @@ impl Shell {
             } else {
                 self.viewer_focus.clone()
             });
+        }
+        if state.chart_viewer.is_some() {
+            return Some(self.viewer_focus.clone());
         }
         None
     }
@@ -2569,6 +2576,11 @@ impl Shell {
         }
         if self.state.read(cx).forward_message.is_some() {
             self.state.update(cx, |s, cx| s.close_forward_message(cx));
+            Composer::focus(&self.composer, window, cx);
+            return;
+        }
+        if self.state.read(cx).chart_viewer.is_some() {
+            self.state.update(cx, |s, cx| s.close_chart_viewer(cx));
             Composer::focus(&self.composer, window, cx);
             return;
         }
@@ -4471,6 +4483,8 @@ impl Render for Shell {
         let sidebar_width = state.sidebar_width;
         let details = state.details_open.clone();
         let viewer_open = state.media_viewer.is_some();
+        let chart_viewer_open = state.chart_viewer.is_some();
+        let chart_viewer_generation = state.chart_viewer_generation;
         let viewer_forward_open = state.media_viewer.as_ref().is_some_and(|v| v.forward_open);
         let viewer_generation = state.media_viewer_generation;
         let forward_message_open = state.forward_message.as_ref().map(|f| f.message_id.clone());
@@ -4968,6 +4982,13 @@ impl Render for Shell {
                 window.focus(&self.viewer_focus, cx);
             }
             root = root.child(media_viewer::overlay(self, &self.viewer_focus, cx));
+        } else if chart_viewer_open {
+            // Esc closes; focus moves into the overlay once per opening.
+            if self.chart_viewer_focused_generation != chart_viewer_generation {
+                self.chart_viewer_focused_generation = chart_viewer_generation;
+                window.focus(&self.viewer_focus, cx);
+            }
+            root = root.child(chart_viewer::overlay(self, &self.viewer_focus, cx));
         } else if self.state.read(cx).forward_message.is_none()
             && (self.viewer_focus.is_focused(window)
                 || self
