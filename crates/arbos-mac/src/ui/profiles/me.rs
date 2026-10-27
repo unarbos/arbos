@@ -510,10 +510,7 @@ impl Shell {
                             )))
                         }
                         machine::Row::Breakdown => card.child(
-                            glass::row("Per-agent usage", &theme)
-                                .id("machine-breakdown")
-                                .cursor_pointer()
-                                .hover(|s| s.bg(theme.surface_2))
+                            glass::hot_row("machine-breakdown", "Per-agent usage", &theme)
                                 .child(crate::ui::icons::icon(
                                     if breakdown_open {
                                         "chevron-up"
@@ -1364,14 +1361,14 @@ impl Shell {
             let rows: Vec<gpui::AnyElement> = vec![
                 kit::value_row("me-name-row", "Name", display_name.clone(), &theme)
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme.surface_2))
+                    .group(kit::HOT)
                     .on_click(
                         cx.listener(|this, _, window, cx| this.start_profile_edit(window, cx)),
                     )
                     .into_any_element(),
                 kit::value_row("me-handle-row", "Handle", who.clone(), &theme)
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme.surface_2))
+                    .group(kit::HOT)
                     .on_click(
                         cx.listener(|this, _, window, cx| this.start_profile_edit(window, cx)),
                     )

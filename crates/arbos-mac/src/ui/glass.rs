@@ -9,6 +9,7 @@ use gpui::{
 };
 
 use crate::ui::frost::{frosted, frosted_always, MENU_BLUR, PANEL_BLUR};
+use crate::ui::highlight;
 use crate::ui::icons::icon;
 use crate::ui::profiles::kit;
 use crate::ui::theme::{Theme, CONTROL, PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
@@ -120,8 +121,7 @@ pub fn control_disc(
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .bg(theme.surface_2)
-        .hover(|s| s.bg(Theme::with_alpha(theme.text, 0.14)))
+        .map(|el| highlight::washed(el, theme.surface_2, theme))
         .child(icon(glyph, glyph_size, theme.text))
 }
 
@@ -201,14 +201,13 @@ pub fn circle(id: impl Into<ElementId>, size: f32, theme: &Theme) -> Stateful<Di
         .size(px(size))
         .flex_shrink_0()
         .rounded_full()
-        .bg(theme.glass_fill())
         .border_1()
         .border_color(theme.field_border)
         .flex()
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
+        .map(|el| highlight::washed(el, theme.glass_fill(), theme))
 }
 
 /// Filled primary button (white on dark): the iPhone CTA.
@@ -237,7 +236,6 @@ pub fn quiet_button(id: impl Into<ElementId>, label: &str, theme: &Theme) -> Sta
         .h(px(38.0))
         .px(px(18.0))
         .rounded_full()
-        .bg(theme.field)
         .border_1()
         .border_color(theme.field_border)
         .flex()
@@ -247,7 +245,7 @@ pub fn quiet_button(id: impl Into<ElementId>, label: &str, theme: &Theme) -> Sta
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme.text)
         .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
+        .map(|el| highlight::washed(el, theme.field, theme))
         .child(label.to_string())
 }
 
@@ -293,6 +291,30 @@ pub fn group(theme: &Theme) -> Div {
 
 /// One row in a grouped card: label left, value right. Not interactive.
 pub fn row(label: impl Into<SharedString>, theme: &Theme) -> Div {
+    row_frame(theme)
+        .child(div().flex_1().min_w_0().child(label.into()))
+        .child(kit::hairline_below(theme))
+}
+
+/// [`row`] that reacts: the highlight pill under it (`ui::highlight`, inset
+/// 4, concentric with the [`group`] card), pointer cursor, and the row is its
+/// pill's group — the Machine page's breakdown row, a secret's switch row.
+pub fn hot_row(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    theme: &Theme,
+) -> Stateful<Div> {
+    highlight::row(
+        row_frame(theme).id(id).cursor_pointer(),
+        false,
+        highlight::Shape::Nested(PANEL_RADIUS),
+        theme,
+    )
+    .child(div().flex_1().min_w_0().child(label.into()))
+    .child(kit::hairline_below(theme))
+}
+
+fn row_frame(theme: &Theme) -> Div {
     // The pane kit's metrics (profiles::kit): 48 pt rows, 16 pt inset. The
     // hairline is the kit's one divider, hung 1 pt below the row: between
     // rows it lands on the next row's first pixel, under the last row the
@@ -308,8 +330,6 @@ pub fn row(label: impl Into<SharedString>, theme: &Theme) -> Div {
         .py(px(6.0))
         .text_size(px(TEXT_BODY))
         .text_color(theme.text)
-        .child(div().flex_1().min_w_0().child(label.into()))
-        .child(kit::hairline_below(theme))
 }
 
 /// Apple-style icon tile for settings rows: 30 px rounded square, muted
@@ -374,6 +394,10 @@ pub fn segment(id: impl Into<ElementId>, label: &str, on: bool, theme: &Theme) -
 pub const MENU_ROW_HEIGHT: f32 = 36.0;
 pub const MENU_GAP: f32 = 1.0;
 pub const MENU_CARD_PADDING: f32 = 6.0;
+/// The row is its own highlight pill inside the plate's padding: concentric
+/// with the plate ([`PANEL_RADIUS`] − `MENU_CARD_PADDING`), as every row's
+/// highlight is with its card (`ui::highlight`).
+pub const MENU_ROW_RADIUS: f32 = PANEL_RADIUS - MENU_CARD_PADDING;
 pub const MENU_CARD_BORDER: f32 = 1.0;
 pub const MENU_DIVIDER_HEIGHT: f32 = 9.0;
 
@@ -393,11 +417,11 @@ pub fn menu_row(
         .gap(px(10.0))
         .h(px(MENU_ROW_HEIGHT))
         .px(px(12.0))
-        .rounded(px(9.0))
+        .rounded(px(MENU_ROW_RADIUS))
         .text_size(px(TEXT_SMALL))
         .text_color(color)
         .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
+        .map(|el| highlight::row(el, false, highlight::Shape::Own, theme))
         .child(icon(glyph, 15.0, color))
         .child(div().flex_1().min_w_0().truncate().child(label.into()))
 }
@@ -564,7 +588,6 @@ pub fn sheet_button(id: impl Into<ElementId>, label: &str, theme: &Theme) -> Sta
         .h(px(34.0))
         .px(px(14.0))
         .rounded_full()
-        .bg(theme.glass_fill())
         .border_1()
         .border_color(theme.field_border)
         .flex()
@@ -573,7 +596,7 @@ pub fn sheet_button(id: impl Into<ElementId>, label: &str, theme: &Theme) -> Sta
         .font_weight(FontWeight::MEDIUM)
         .text_color(theme.text)
         .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
+        .map(|el| highlight::washed(el, theme.glass_fill(), theme))
         .child(label.to_string())
 }
 
