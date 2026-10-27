@@ -3171,6 +3171,14 @@ fn emit_box_report(shared: &Shared) {
                 || streaming
                     .iter()
                     .any(|c| chats.iter().any(|ch| &ch.id == c && ch.project_id == p.id));
+            // Settings › Machine's per-agent breakdown: a share per workspace, the busy ones
+            // biggest ([feedback machine-page-mac-2026-10-26]).
+            let (cpu, mem, disk) = match (running, i) {
+                (true, 0) => (61.0, 1_900, 2_300),
+                (true, _) => (9.0, 1_100, 900),
+                (false, 1) => (0.0, 300, 1_600),
+                (false, _) => (0.0, 200 + 50 * i as u64, 100 + 150 * i as u64),
+            };
             BoxWorkspace {
                 project_id: p.id.clone(),
                 name: p.name.clone(),
@@ -3178,9 +3186,22 @@ fn emit_box_report(shared: &Shared) {
                 running,
                 elapsed_ms: running.then_some(42_000),
                 tool_calls: running.then_some(7),
+                jobs_running: Some(if running && i == 0 { 1 } else { 0 }),
+                cpu_pct: Some(cpu),
+                mem_mb: Some(mem),
+                pids: Some(if running { 40 } else { 12 }),
+                disk_mb: Some(disk),
             }
         })
         .collect();
+    // `ARBOS_FIXTURE_MACHINE=near-limit`: disk 92 % and memory 88 % used, CPU 71 % — the
+    // warning state of the Machine page on the rig.
+    let near_limit = std::env::var("ARBOS_FIXTURE_MACHINE").is_ok_and(|v| v == "near-limit");
+    let (disk_avail, mem_avail, cpu_pct, rx, tx) = if near_limit {
+        (819, 983, 71.0, 4_800_000.0, 300_000.0)
+    } else {
+        (6_900, 5_300, 23.0, 1_200_000.0, 80_000.0)
+    };
     let report = BoxReport {
         fetched_at: now_ms(),
         state: state.into(),
@@ -3193,10 +3214,23 @@ fn emit_box_report(shared: &Shared) {
         unreachable_reason: (!reachable).then(|| "box has no url yet (asleep or starting)".into()),
         uptime_s: reachable.then_some(5 * 3600 + 12 * 60),
         load_1m: reachable.then_some(0.42),
+        load_is_host: true,
         mem_total_mb: reachable.then_some(8 * 1024),
-        mem_available_mb: reachable.then_some(5_300),
+        mem_available_mb: reachable.then_some(mem_avail),
         disk_total_mb: reachable.then_some(10 * 1024),
-        disk_available_mb: reachable.then_some(6_900),
+        disk_available_mb: reachable.then_some(disk_avail),
+        cpu_cores: reachable.then_some(4.0),
+        cpu_pct: reachable.then_some(cpu_pct),
+        inodes_total: reachable.then_some(131_072),
+        inodes_avail: reachable.then_some(if near_limit { 1_200 } else { 93_000 }),
+        net_rx_bps: reachable.then_some(rx),
+        net_tx_bps: reachable.then_some(tx),
+        net_rx_today: reachable.then_some(if near_limit {
+            6_100_000_000
+        } else {
+            2_000_000_000
+        }),
+        net_tx_today: reachable.then_some(if near_limit { 300_000_000 } else { 100_000_000 }),
         workspaces: if reachable { workspaces } else { Vec::new() },
     };
     let _ = shared.events.send(SyncEvent::BoxReport(report));

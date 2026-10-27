@@ -116,6 +116,51 @@ pub async fn set_credits(
 }
 
 #[derive(Deserialize)]
+pub struct ProjectCapBody {
+    /// Daily cap in USD; present-and-null means no project cap.
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub daily_cap_usd: Option<Option<f64>>,
+}
+
+/// `PUT /admin/projects/{id}/spend-cap {daily_cap_usd: number|null}`: the per-project daily cap
+/// (`projects.spend_cap_daily`), `null` = unlimited. Before this the only lever was an UPDATE on
+/// the relay DB (Jacob's 11 projects, 2026-10-26 22:15 UTC).
+pub async fn set_project_cap(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Json(b): Json<ProjectCapBody>,
+) -> Response {
+    if let Err(r) = admin_only(&principal) {
+        return *r;
+    }
+    let Some(cap) = b.daily_cap_usd else {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "daily_cap_usd (number or null) is required",
+        );
+    };
+    let stored = match cap {
+        Some(v) if v.is_finite() && v >= 0.0 => v,
+        Some(_) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                "daily_cap_usd must be a non-negative number or null",
+            )
+        }
+        None => crate::credits::PROJECT_CAP_UNLIMITED,
+    };
+    match state.db.set_project_spend_cap(&id, stored) {
+        Ok(true) => Json(json!({ "id": id, "daily_cap_usd": cap, "unlimited": cap.is_none() }))
+            .into_response(),
+        Ok(false) => api_error(StatusCode::NOT_FOUND, "not_found", "no such project"),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
 pub struct TestUserBody {
     pub handle: String,
     #[serde(default)]
@@ -379,6 +424,7 @@ pub async fn push_status(State(state): State<AppState>, principal: Principal) ->
     };
     Json(json!({
         "push": state.push.is_on(),
+        "pipeline": state.push.status(),
         "tokens": tokens.iter().map(|t| json!({
             "device_id": t.device_id, "user_id": t.user_id, "platform": t.platform,
             "environment": t.environment, "bundle_id": t.bundle_id, "app_version": t.app_version,
@@ -387,6 +433,16 @@ pub async fn push_status(State(state): State<AppState>, principal: Principal) ->
         })).collect::<Vec<_>>(),
     }))
     .into_response()
+}
+
+/// `POST /admin/push/drain`: work the outbox now (what the worker does on its own); answers
+/// how many rows were handled and the pipeline status after.
+pub async fn push_drain(State(state): State<AppState>, principal: Principal) -> Response {
+    if let Err(r) = admin_only(&principal) {
+        return *r;
+    }
+    let handled = state.push.drain().await;
+    Json(json!({ "handled": handled, "pipeline": state.push.status() })).into_response()
 }
 
 #[derive(Deserialize)]
@@ -442,7 +498,7 @@ pub async fn push_test(
         .unwrap_or_else(|| format!("Test notification from the relay at {}", now_ms()));
     let mut results = Vec::with_capacity(tokens.len());
     for t in tokens {
-        let out = crate::apns::Outgoing {
+        let out = crate::push::Outgoing {
             device_token: t.token.clone(),
             environment: t.environment.clone(),
             push_type: "alert",
@@ -453,16 +509,16 @@ pub async fn push_test(
                 "test": true,
             }),
         };
-        let delivery = state.push.send(out).await;
-        if delivery == crate::apns::Delivery::TokenGone {
+        let outcome = state.push.send_now(out).await;
+        if matches!(outcome, crate::push::SendOutcome::TokenInvalid { .. }) {
             let _ = state.db.delete_push_token_value(&t.token);
         }
         results.push(json!({
             "device_id": t.device_id, "environment": t.environment,
-            "result": match delivery {
-                crate::apns::Delivery::Sent => "sent".to_owned(),
-                crate::apns::Delivery::TokenGone => "token gone (forgotten)".to_owned(),
-                crate::apns::Delivery::Failed(e) => format!("failed: {e}"),
+            "result": match &outcome {
+                crate::push::SendOutcome::Accepted => "sent".to_owned(),
+                crate::push::SendOutcome::TokenInvalid { reason } => format!("token gone (forgotten): {reason}"),
+                crate::push::SendOutcome::Permanent { .. } | crate::push::SendOutcome::Transient { .. } => format!("failed: {outcome}"),
             },
         }));
     }

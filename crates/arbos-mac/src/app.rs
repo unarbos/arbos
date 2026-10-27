@@ -3650,6 +3650,9 @@ impl AppState {
                 target: Target::Link(hit.url),
             });
         }
+        if !query.is_empty() {
+            out.extend(palette::settings_entries(query, &self.palette_agent_rows()));
+        }
         out
     }
 
@@ -3760,7 +3763,40 @@ impl AppState {
                 part_id,
             } => self.open_media_in_chat(&chat_id, &message_id, &part_id, cx),
             Target::Link(url) => cx.open_url(&url),
+            // The shell opens Settings rows itself (`Shell::open_setting`): the
+            // pages live on the shell, not here.
+            Target::Setting(_) => {}
         }
+    }
+
+    /// My owned agents as the palette's Settings rows need them: the open
+    /// chat's agent first, then by activity ([feedback search-settings-mac-2026-10-26]).
+    fn palette_agent_rows(&self) -> Vec<palette::AgentRow> {
+        let mut agents: Vec<&Project> = self
+            .projects
+            .iter()
+            .filter(|p| !p.is_people() && !p.is_guest() && p.archived_at.is_none())
+            .collect();
+        agents.sort_by_key(|p| {
+            (
+                self.selected_project.as_deref() != Some(p.id.as_str()),
+                std::cmp::Reverse(crate::ui::sidebar::last_activity(self, p)),
+            )
+        });
+        agents
+            .into_iter()
+            .map(|p| palette::AgentRow {
+                project_id: p.id.clone(),
+                name: p.name.clone(),
+                model: if p.model.is_empty() {
+                    "default".to_string()
+                } else {
+                    p.model.clone()
+                },
+                reasoning: p.effort.label().to_string(),
+                voice: crate::ui::voicepicker::current_label(p, &self.voices),
+            })
+            .collect()
     }
 
     /// Open `chat_id` under `project_id` scrolled to `message_id` (a palette
