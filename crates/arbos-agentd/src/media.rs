@@ -432,7 +432,9 @@ pub async fn deliver(
                 .set_message_fields(&msg_id, &[("replyTo", json!(ask))]);
         }
         if let Some(c) = caption {
-            h.doc.append_text(&msg_id, &text_part, c);
+            // D19 backstop: the caption bypasses write_text, so redact here (#1974 review).
+            h.doc
+                .append_text(&msg_id, &text_part, &crate::store::redact(c));
         }
         if h.doc.add_attachment_part(&msg_id, &attachment).is_none() {
             anyhow::bail!("message {msg_id} not found in chat {}", target.chat_id);
