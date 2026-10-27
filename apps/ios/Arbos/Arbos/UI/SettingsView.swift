@@ -32,21 +32,46 @@ struct SettingsView: View {
     @State private var showAvatarPicker: AvatarPickerTab?
     @State private var showProfileEdit = false
     /// Profile | Settings — the same pill as the person and group panes.
-    /// Settings is the landing tab; `ARBOS_SETTINGS_PAGE=profile` lands on Profile.
-    @State private var tab = DebugHooks.settingsPage == "profile" ? "Profile" : "Settings"
-    /// `ARBOS_SETTINGS_PAGE=appearance` lands on that page (screenshot rig).
-    @State private var showAppearancePage = DebugHooks.settingsPage == "appearance"
-    @State private var showTextSizePage = DebugHooks.settingsPage == "textsize"
-    @State private var showConnectorsPage = DebugHooks.settingsPage == "connectors"
-    // Rig: ARBOS_SETTINGS_PAGE=machine | credits | notifications | about | relay (Debug only).
-    @State private var showMachinePage = DebugHooks.settingsPage == "machine" || DebugHooks.settingsPage == "machine-expanded"
-    @State private var showCreditsPage = DebugHooks.settingsPage == "credits"
-    @State private var showNotificationsPage = DebugHooks.settingsPage == "notifications"
-    @State private var showPrivacyPage = DebugHooks.settingsPage == "privacy"
-    @State private var showAboutPage = DebugHooks.settingsPage == "about"
-    @State private var showDevicesPage = DebugHooks.settingsPage == "devices"
-    @State private var showRelayPage = DebugHooks.settingsPage == "relay"
-    @State private var showSecretsPage = ["secrets", "vault", "connect", "new-secret"].contains(DebugHooks.settingsPage ?? "") || DebugHooks.settingsPage?.hasPrefix("secret:") == true
+    /// Settings is the landing tab; a `landing` of `profile` lands on Profile.
+    @State private var tab: String
+    /// The page the sheet lands on: a search result's page ([feedback
+    /// search-settings-ios-2026-10-26]) or the rig's `ARBOS_SETTINGS_PAGE`
+    /// (appearance · textsize · connectors · machine | machine-expanded · credits · notifications ·
+    /// privacy · about · devices · relay · secrets | vault | connect | new-secret | secret:<ENV>).
+    private let landing: String?
+    @State private var showAppearancePage: Bool
+    @State private var showTextSizePage: Bool
+    @State private var showConnectorsPage: Bool
+    @State private var showMachinePage: Bool
+    @State private var showCreditsPage: Bool
+    @State private var showNotificationsPage: Bool
+    @State private var showPrivacyPage: Bool
+    @State private var showAboutPage: Bool
+    @State private var showDevicesPage: Bool
+    @State private var showRelayPage: Bool
+    @State private var showSecretsPage: Bool
+
+    /// The pages the Settings list shows (`settingsSections`), as search routes;
+    /// the structure test checks the shared index finds each of them.
+    static let listedPages: [GlobalSearch.SettingsPageRoute] = [
+        .credits, .connectedApps, .secrets, .devices, .machine, .notifications, .privacy, .appearance, .textSize, .about,
+    ]
+
+    init(landing: String? = DebugHooks.settingsPage) {
+        self.landing = landing
+        _tab = State(initialValue: landing == "profile" ? "Profile" : "Settings")
+        _showAppearancePage = State(initialValue: landing == "appearance")
+        _showTextSizePage = State(initialValue: landing == "textsize")
+        _showConnectorsPage = State(initialValue: landing == "connectors")
+        _showMachinePage = State(initialValue: landing == "machine" || landing == "machine-expanded")
+        _showCreditsPage = State(initialValue: landing == "credits")
+        _showNotificationsPage = State(initialValue: landing == "notifications")
+        _showPrivacyPage = State(initialValue: landing == "privacy")
+        _showAboutPage = State(initialValue: landing == "about")
+        _showDevicesPage = State(initialValue: landing == "devices")
+        _showRelayPage = State(initialValue: landing == "relay")
+        _showSecretsPage = State(initialValue: ["secrets", "vault", "connect", "new-secret"].contains(landing ?? "") || landing?.hasPrefix("secret:") == true)
+    }
 
     var body: some View {
         NavigationStack {
@@ -57,7 +82,7 @@ struct SettingsView: View {
                 theme.bg.ignoresSafeArea()
                 ScrollView {
                     VStack(spacing: 18) {
-                        Color.clear.frame(height: 80)
+                        Color.clear.frame(height: PaneKit.pageTop)
                         ProfilePane(
                             hero: PaneHero(
                                 picture: .image(AnyView(profilePicture)),
@@ -74,7 +99,7 @@ struct SettingsView: View {
                 }
                 .scrollIndicators(.visible)
                 // Settings is a sheet (from Home's account circle): back closes it.
-                ProfileTopBar(onBack: { dismiss() }) { EmptyView() }
+                ProfileTopBar(onBack: { dismiss() }, screen: .ownProfile) { EmptyView() }
             }
             .toolbar(.hidden, for: .navigationBar)
             .navigationBarBackButtonHidden(true)
@@ -92,7 +117,7 @@ struct SettingsView: View {
                 Task { await model.refreshSecrets() }
                 Task { await model.refreshDevices() }
                 Task { await model.refreshGoals() }
-                if let page = DebugHooks.settingsPage, page.hasPrefix("avatar") {
+                if let page = landing, page.hasPrefix("avatar") {
                     tab = "Profile"
                     let initial: AvatarPickerTab = page.hasSuffix("upload") ? .upload : .generate
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { showAvatarPicker = initial }
@@ -144,7 +169,7 @@ struct SettingsView: View {
                 EmptyView()
                 #endif
             }
-            .navigationDestination(isPresented: $showSecretsPage) { SecretsPage() }
+            .navigationDestination(isPresented: $showSecretsPage) { SecretsPage(landing: landing) }
             .sheet(isPresented: $showProfileEdit) {
                 NavigationStack {
                     ProfileEditView()
