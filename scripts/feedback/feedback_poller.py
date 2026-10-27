@@ -2371,15 +2371,18 @@ class Loop:
         # for POOL_STARVED_MIN, pool-first arms itself; and while it is set the full pool batch runs AHEAD of
         # bisect / plan halves too (pins stay ahead of everything). It clears when a pool batch settles green.
         pool_has_items = any(not st.get("gate_pinned") and not st.get("solo_next") for _, st in ready)
+        # The starvation clock is the last SETTLED pool batch (green or red). Solo slots alone starve the pool as
+        # well (08:02–09:19 Oct 27: five solo slots and a deferred batch back to back, no plan half in between),
+        # so the arm no longer waits for a plan half to exist.
         last_pool = cur.get("last_pool_batch_at") or cur.get("pool_first_armed_from") or ""
-        if not pool_first and pool_has_items and not members and plan:
+        if not pool_first and pool_has_items and not members:
             if not last_pool:
                 cur["pool_first_armed_from"] = iso()
             elif minutes_between(last_pool, iso()) >= self.POOL_STARVED_MIN:
                 cur["pool_first"] = iso()
                 pool_first = True
                 self.store.event("_loop", "pool_first_on", by="scheduler", starved_min=int(minutes_between(last_pool, iso())))
-                log(f"Gate: pool-first armed by the scheduler — no pool batch since {last_pool[:16]}; the pool runs ahead of {len(plan)} plan half(ves)")
+                log(f"Gate: pool-first armed by the scheduler — no pool batch settled since {last_pool[:16]}; the pool runs ahead of solo slots, deferred-fairness and {len(plan)} plan half(ves)")
         if not members and not pool_first:
             solo = sorted(((f, st) for f, st in ready if st.get("solo_next")), key=lambda fs: fs[1].get("created") or "")
             if solo:
@@ -3054,14 +3057,19 @@ class Loop:
         # item of the other again. Keyed by the half's members; cleared when a half settles.
         bisects = cur.setdefault("rust_gate_bisects", {})
         bisects[active["id"]] = {"halves": [sorted(first), sorted(rest)], "green": [], "at": iso()}
-        if cur.get("pool_first"):
-            # #2014 regression (03:04–03:35 Oct 27): pool-first re-assembled the full pool every tick and the
-            # halves it had just planned never ran (five identical red runs). A red pool batch hands over to
-            # its own bisect: pool-first is cleared here; it re-arms by itself if the pool starves again.
-            cur.pop("pool_first", None)
+        if active.get("pool_batch"):
+            # A settled pool batch, red or green, restarts the starvation clock. Only a POOL batch does: at 08:02
+            # Oct 27 a red plan half (20261027T073846-12, the pool's own bisect that pool-first had stood aside
+            # for) cleared the arm and reset the clock here, so solo slots and a deferred batch took every run
+            # until 09:19 and the pool waited 3.5 h for a turn it had been promised after 2 h.
             cur["last_pool_batch_at"] = iso()
-            self.store.event("_loop", "pool_first_cleared", run=active["id"], members=len(order), reason="red; bisecting")
-            log(f"Gate: pool-first cleared — pool batch {active['id']} was red; its bisect halves run next")
+            if cur.get("pool_first"):
+                # #2014 regression (03:04–03:35 Oct 27): pool-first re-assembled the full pool every tick and the
+                # halves it had just planned never ran (five identical red runs). A red pool batch hands over to
+                # its own bisect: pool-first is cleared here; it re-arms by itself if the pool starves again.
+                cur.pop("pool_first", None)
+                self.store.event("_loop", "pool_first_cleared", run=active["id"], members=len(order), reason="red; bisecting")
+                log(f"Gate: pool-first cleared — pool batch {active['id']} was red; its bisect halves run next")
         for old_id in [k for k, v in bisects.items() if minutes_between(v.get("at") or iso(), iso()) > 24 * 60]:
             bisects.pop(old_id, None)
         self.store.save_cursor(cur)
