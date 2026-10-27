@@ -17,6 +17,8 @@ use serde_json::Value;
 uniffi::setup_scaffolding!();
 
 pub mod avatar;
+pub mod chart;
+pub mod highlight;
 pub mod matrix;
 pub mod search;
 

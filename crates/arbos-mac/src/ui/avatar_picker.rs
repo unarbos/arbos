@@ -38,8 +38,10 @@ use gpui::{
 
 use crate::app::AppState;
 use crate::model::Project;
+use crate::sync::user_error::UserError;
 use crate::ui::avatars::{self, leaf, LeafPick};
 use crate::ui::create_entity::{hex, palette, Palette};
+use crate::ui::error_note;
 use crate::ui::frost::{frosted, PANEL_BLUR};
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Appearance, Theme};
@@ -61,7 +63,8 @@ const SWATCH_PITCH: f32 = 36.0;
 const SWATCH: f32 = 21.0;
 const SWATCH_RING: f32 = 29.0;
 const FOOTER_H: f32 = 56.5;
-const FOOTER_TOP: f32 = HEIGHT - FOOTER_H;
+/// The body box between the bar and the footer (the tab bodies' absolute slots live in it).
+const BODY_H: f32 = HEIGHT - BAR_H - FOOTER_H;
 const PILL_H: f32 = 28.0;
 const PILL_GAP: f32 = 8.0;
 const PREVIEW: f32 = 114.0;
@@ -121,11 +124,9 @@ pub struct Picker {
     pub generating: bool,
     /// When the running generation started (the status line counts the seconds).
     pub started_at: Option<std::time::Instant>,
-    /// The failure as one short sentence (the relay's, or the client's for a transport error).
-    pub error: Option<String>,
-    /// The raw words behind it, shown only behind the Details disclosure.
-    pub error_detail: Option<String>,
-    pub details_open: bool,
+    /// The last failure, drawn by the shared error element at the top of the body (Jacob,
+    /// 2026-10-26, [feedback error-messages-mac-2026-10-26]): one sentence, Try again, Details.
+    pub error: Option<error_note::Slot>,
 }
 
 impl Picker {
@@ -142,9 +143,12 @@ impl Picker {
             generating: false,
             started_at: None,
             error: None,
-            error_detail: None,
-            details_open: false,
         }
+    }
+
+    /// The generation failed: the note goes up, folded.
+    pub fn fail(&mut self, error: UserError) {
+        self.error = Some(error_note::Slot::new(error));
     }
 
     /// Seconds since Generate was pressed, while it runs.
@@ -448,8 +452,6 @@ pub(crate) fn generate_body(
                 })
                 .child(if picker.generating {
                     "Generating…"
-                } else if picker.error.is_some() {
-                    "Try again"
                 } else if picker.generated.is_some() {
                     "Generate again"
                 } else {
@@ -460,38 +462,10 @@ pub(crate) fn generate_body(
             d.on_click(cx.listener(|this, _, _, cx| this.generate_avatar(cx)))
         });
     body.push(go.into_any_element());
-    // The preview slot: the picture (dimmed under a spinner while painting), or — after a
-    // failure with Details open — the raw words, clamped to the slot so nothing reaches the
-    // footer (Jacob, 2026-10-26: a raw transport error had run over Cancel / Set avatar).
+    // The preview slot: the picture, dimmed under a spinner while painting. A failure is the
+    // shared note at the top of the body (`error_slot`), never anything near the footer.
     let slot_top = pill_top + PILL_H + 16.0;
-    let detail_open = picker.details_open && picker.error.is_some();
-    if detail_open {
-        let detail: SharedString = picker
-            .error_detail
-            .clone()
-            .unwrap_or_else(|| "No further detail.".into())
-            .into();
-        body.push(
-            div()
-                .id("avatar-generate-detail")
-                .debug_selector(|| "avatar-generate-detail".into())
-                .absolute()
-                .left(px(FIELD_INSET))
-                .right(px(FIELD_INSET))
-                .top(px(slot_top))
-                .h(px(PREVIEW))
-                .rounded(px(8.0))
-                .bg(p.cancel_bg)
-                .px(px(10.0))
-                .py(px(8.0))
-                .overflow_hidden()
-                .text_size(px(11.0))
-                .line_height(px(15.0))
-                .text_color(label_muted_for(theme))
-                .child(detail)
-                .into_any_element(),
-        );
-    } else if let Some(preview) = preview {
+    if let Some(preview) = preview {
         let painting = picker.generating;
         body.push(
             div()
@@ -538,75 +512,70 @@ pub(crate) fn generate_body(
         // The seconds tick while it paints.
         crate::ui::motion::PulseClock::request(cx);
     }
-    let status: SharedString = if let Some(e) = &picker.error {
-        e.clone().into()
-    } else if let Some(s) = picker.generating_for_s() {
+    // The status line never carries a failure (that is the note): progress, the keep hint, or
+    // the prompt hint. One line, 30 pt over the footer.
+    let status: SharedString = if let Some(s) = picker.generating_for_s() {
         format!("Painting a picture — {s} s").into()
     } else if picker.generated.is_some() {
         keeps.into()
     } else {
         "A few words about the picture you want.".into()
     };
-    // One line, never more: the status slot sits 30 pt over the footer. An error gets a
-    // Details toggle beside the sentence; the raw words open in the preview slot above.
-    let mut line = div()
-        .id("avatar-generate-status")
-        .debug_selector(|| "avatar-generate-status".into())
-        .absolute()
-        .left(px(FIELD_INSET))
-        .right(px(FIELD_INSET))
-        .top(px(status_top))
-        .h(px(16.0))
-        .overflow_hidden()
-        .flex()
-        .items_center()
-        .justify_center()
-        .gap(px(8.0))
-        .text_size(px(12.0))
-        .line_height(px(16.0))
-        .text_color(if picker.error.is_some() {
-            theme.danger
-        } else {
-            p.placeholder
-        })
-        .child(
-            div()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .child(status),
-        );
-    if picker.error.is_some() {
-        line = line.child(
-            div()
-                .id("avatar-generate-details")
-                .debug_selector(|| "avatar-generate-details".into())
-                .flex_shrink_0()
-                .text_color(label_muted_for(theme))
-                .cursor_pointer()
-                .hover(|s| s.opacity(0.8))
-                .child(if detail_open {
-                    "Hide details"
-                } else {
-                    "Details"
-                })
-                .on_click(cx.listener(|this, _, _, cx| {
-                    if let Some(pk) = this.pending_picker_mut() {
-                        pk.details_open = !pk.details_open;
-                    }
-                    cx.notify();
-                })),
-        );
-    }
-    body.push(line.into_any_element());
+    body.push(
+        div()
+            .id("avatar-generate-status")
+            .debug_selector(|| "avatar-generate-status".into())
+            .absolute()
+            .left(px(FIELD_INSET))
+            .right(px(FIELD_INSET))
+            .top(px(status_top))
+            .h(px(16.0))
+            .overflow_hidden()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(px(12.0))
+            .line_height(px(16.0))
+            .text_color(p.placeholder)
+            .child(
+                div()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(status),
+            )
+            .into_any_element(),
+    );
     body
 }
 
-fn label_muted_for(theme: &Theme) -> Hsla {
-    match theme.appearance {
-        Appearance::Dark => hex(0x9A9A9A),
-        Appearance::Light => theme.text_muted,
-    }
+/// The picker's note (the shared error element) for the top of a sheet's body: inset like the
+/// field, `GAP` above and below. Try again re-sends the prompt; Details unfolds in place. The
+/// sheet grows by it — the body's absolute slots are unchanged, so nothing can meet the footer.
+pub(crate) fn error_slot(picker: &Picker, theme: &Theme, cx: &mut Context<Shell>) -> Option<Div> {
+    let slot = picker.error.as_ref()?;
+    let note = error_note::render(
+        "avatar-generate-error",
+        &slot.error,
+        slot.details_open,
+        error_note::Style::Inline,
+        theme,
+        error_note::Handlers::new()
+            .try_again(cx.listener(|this, _, _, cx| this.generate_avatar(cx)))
+            .toggle_details(cx.listener(|this, _, _, cx| {
+                if let Some(slot) = this.pending_picker_mut().and_then(|pk| pk.error.as_mut()) {
+                    slot.toggle_details();
+                }
+                cx.notify();
+            })),
+    );
+    Some(
+        div()
+            .px(px(FIELD_INSET))
+            .pt(px(error_note::GAP))
+            .flex_none()
+            .child(note),
+    )
 }
 
 /// The Upload tab's body: `preview` (when given) at `slots.top` with the "Choose a photo…" pill
@@ -834,16 +803,17 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
             .on_click(cx.listener(move |this, _, _, cx| this.view_picture(&name, &url, cx)))
     });
     let bar = div()
-        .absolute()
-        .left_0()
-        .right_0()
-        .top_0()
+        .relative()
+        .flex_none()
+        .w_full()
         .h(px(BAR_H))
         .border_b_1()
         .border_color(p.line)
         .child(tabs)
         .children(view)
         .child(reset);
+    // The note (a failed generation) sits between the bar and the body; the card grows by it.
+    let note = error_slot(picker, &theme, cx);
 
     // ----- body ---------------------------------------------------------------------------------
     let mut body: Vec<gpui::AnyElement> = Vec::new();
@@ -856,7 +826,7 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
                     .absolute()
                     .left_0()
                     .right_0()
-                    .top(px(top - LEAF_RING / 2.0))
+                    .top(px(top - BAR_H - LEAF_RING / 2.0))
                     .flex()
                     .justify_center();
                 for index in leaves {
@@ -892,7 +862,7 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
                     .absolute()
                     .left_0()
                     .right_0()
-                    .top(px(top - SWATCH_RING / 2.0))
+                    .top(px(top - BAR_H - SWATCH_RING / 2.0))
                     .flex()
                     .justify_center();
                 for j in 0..5u8 {
@@ -926,8 +896,8 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
                 shell,
                 picker,
                 Slots {
-                    top: BAR_H + 16.0,
-                    status_top: FOOTER_TOP - 30.0,
+                    top: 16.0,
+                    status_top: BODY_H - 30.0,
                 },
                 Some(tab_preview),
                 &p,
@@ -939,8 +909,8 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
             body.extend(upload_body(
                 picker,
                 Slots {
-                    top: BAR_H + 24.0,
-                    status_top: FOOTER_TOP - 30.0,
+                    top: 24.0,
+                    status_top: BODY_H - 30.0,
                 },
                 Some(tab_preview),
                 &p,
@@ -975,10 +945,9 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
         Appearance::Light => (theme.primary, theme.on_primary),
     };
     let footer = div()
-        .absolute()
-        .left_0()
-        .right_0()
-        .top(px(FOOTER_TOP))
+        .relative()
+        .flex_none()
+        .w_full()
         .h(px(FOOTER_H))
         .border_t_1()
         .border_color(p.line)
@@ -999,12 +968,17 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
             pill("avatar-set", "Set avatar", p.create_bg, p.create_text).right(px(BAR_INSET))
         });
 
+    // A column: bar · note (when a generation failed) · the body's fixed box · footer. Without
+    // a note the card is exactly `HEIGHT`; with one it grows by the note, never the other way.
     let card = div()
+        .id("avatar-card")
+        .debug_selector(|| "avatar-card".into())
         .relative()
         .w(px(WIDTH))
-        .h(px(HEIGHT))
         .max_w_full()
         .max_h_full()
+        .flex()
+        .flex_col()
         .rounded(px(RADIUS))
         .bg(p.bg)
         .border_1()
@@ -1012,7 +986,17 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
         .shadow_lg()
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(bar)
-        .children(body)
+        .children(note)
+        .child(
+            div()
+                .id("avatar-body")
+                .debug_selector(|| "avatar-body".into())
+                .relative()
+                .flex_none()
+                .w_full()
+                .h(px(BODY_H))
+                .children(body),
+        )
         .child(footer);
     div()
         .absolute()
@@ -1126,6 +1110,14 @@ mod me_picker_tests {
     use crate::sync::{ClientCommand, SyncEvent, SyncSource};
     use crate::ui::motion::PulseClock;
 
+    /// Element ids built at run time, for `debug_bounds` (which wants `'static`).
+    fn leak(s: String) -> &'static str {
+        Box::leak(s.into_boxed_str())
+    }
+
+    /// The notice stack hangs `HEADER_HEIGHT + 12` under the window's top.
+    const HEADER_HEIGHT_FOR_TEST: f32 = crate::ui::theme::HEADER_HEIGHT;
+
     struct Idle;
 
     impl SyncSource for Idle {
@@ -1206,6 +1198,126 @@ mod me_picker_tests {
         settle(shell, vcx);
     }
 
+    /// [feedback error-messages-mac-2026-10-26]: a `Failure` event with nobody to claim it is an
+    /// error toast — the shared element top-right under the header: the sentence, Try again
+    /// (when the event carries a command), Details that unfold the mono block + Copy, a × that
+    /// dismisses — never a plain card with the raw words. An info `Notice` stays the plain card.
+    #[gpui::test]
+    fn a_failure_event_is_an_error_toast_with_details_try_again_and_close(cx: &mut TestAppContext) {
+        let (_rt, state, shell, vcx) = mount(cx, "");
+        let mut commands = state.update(vcx, |s, _| s.take_command_channel());
+        settle(&shell, vcx);
+        let raw = anyhow::anyhow!(
+            "error sending request for url (https://relay.arbos.life/blobs/x): operation timed out"
+        )
+        .context("GET /blobs/01M5N1WSR91G8CJKNYXKJESK7X/report-q3.pdf");
+        let error = UserError::classify("download report-q3.pdf", &raw);
+        state.update(vcx, |s, cx| {
+            s.apply(SyncEvent::Notice("Forwarded to Studio".into()), cx);
+            s.apply(
+                SyncEvent::Failure {
+                    error,
+                    retry: Some(Box::new(ClientCommand::DevicesRefresh)),
+                },
+                cx,
+            );
+        });
+        settle(&shell, vcx);
+        let at = state.read_with(&*vcx, |s, _| {
+            s.live_notices()
+                .iter()
+                .find(|n| n.error.is_some())
+                .map(|n| n.at)
+                .expect("the error toast is live")
+        });
+        let id: &'static str = leak(format!("notice-{at}"));
+        let toast = vcx
+            .debug_bounds(id)
+            .expect("the toast is the shared element");
+        let sentence = vcx
+            .debug_bounds(leak(format!("{id}-sentence")))
+            .expect("sentence");
+        assert!(
+            toast.top() >= px(HEADER_HEIGHT_FOR_TEST),
+            "under the header: {toast:?}"
+        );
+        assert!(
+            (f32::from(toast.size.width) - error_note::TOAST_WIDTH).abs() < 1.0,
+            "toast width {toast:?}"
+        );
+        let _ = sentence;
+        assert!(
+            vcx.debug_bounds(leak(format!("{id}-try-again"))).is_some(),
+            "Try again"
+        );
+        assert!(
+            vcx.debug_bounds(leak(format!("{id}-close"))).is_some(),
+            "a ×"
+        );
+        assert!(vcx
+            .debug_bounds(leak(format!("{id}-details-block")))
+            .is_none());
+
+        // Details unfolds the mono block with Copy; the toast is held while open.
+        let details = leak(format!("{id}-details"));
+        click(vcx, &shell, details);
+        assert!(vcx
+            .debug_bounds(leak(format!("{id}-details-block")))
+            .is_some());
+        assert!(
+            vcx.debug_bounds(leak(format!("{id}-copy"))).is_some(),
+            "Copy"
+        );
+        assert!(state.read_with(&*vcx, |s, _| s
+            .live_notices()
+            .iter()
+            .any(|n| n.at == at && n.held && n.details_open)));
+
+        // Try again re-issues the command and drops the toast.
+        let try_again = leak(format!("{id}-try-again"));
+        click(vcx, &shell, try_again);
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ClientCommand::DevicesRefresh)
+        ));
+        assert!(vcx.debug_bounds(id).is_none(), "the toast is gone");
+
+        // The info notice is still the plain card and never a red block.
+        assert!(state.read_with(&*vcx, |s, _| s
+            .live_notices()
+            .iter()
+            .all(|n| n.error.is_none() && n.text == "Forwarded to Studio")));
+
+        // × on a fresh error toast dismisses it.
+        state.update(vcx, |s, cx| {
+            s.apply(
+                SyncEvent::Failure {
+                    error: UserError::from_text("save the secret", "HTTP 502"),
+                    retry: None,
+                },
+                cx,
+            );
+        });
+        settle(&shell, vcx);
+        let at2 = state.read_with(&*vcx, |s, _| {
+            s.live_notices()
+                .iter()
+                .find(|n| n.error.is_some())
+                .map(|n| n.at)
+                .expect("second toast")
+        });
+        // No command to re-issue → no Try again (the action's own button is the retry).
+        assert!(vcx
+            .debug_bounds(leak(format!("notice-{at2}-try-again")))
+            .is_none());
+        assert!(vcx
+            .debug_bounds(leak(format!("notice-{at2}-details")))
+            .is_some());
+        let close = leak(format!("notice-{at2}-close"));
+        click(vcx, &shell, close);
+        assert!(vcx.debug_bounds(leak(format!("notice-{at2}"))).is_none());
+    }
+
     #[gpui::test]
     fn my_picture_opens_the_picker_and_generate_then_set_sends_the_key(cx: &mut TestAppContext) {
         let (_rt, state, shell, vcx) = mount(cx, "");
@@ -1260,7 +1372,6 @@ mod me_picker_tests {
                     image_key: Some("avatar-gen-01.jpg".into()),
                     url: Some("https://relay.test/blob/users:gh_1/avatar-gen-01.jpg".into()),
                     error: None,
-                    detail: None,
                 },
                 cx,
             )
@@ -1484,13 +1595,12 @@ mod me_picker_tests {
     }
 
     /// Jacob, 2026-10-26 ("nuke vampire"): a generation that times out must end in a clean
-    /// state — one short sentence inline above the footer, the raw words only behind Details,
-    /// the pill reading Try again and re-sending — and while it runs the sheet shows progress
-    /// (spinner over the preview, "Painting a picture — N s"). Nothing may reach the footer.
+    /// state — the shared note at the top of the body (one sentence, Try again, Details with
+    /// the raw words behind it), the sheet grown by the note, the field, preview and footer
+    /// below it untouched — and while it runs the sheet shows progress (spinner over the
+    /// preview, "Painting a picture — N s"). Nothing may reach the footer.
     #[gpui::test]
-    fn a_timed_out_generation_shows_a_clean_error_with_details_and_try_again(
-        cx: &mut TestAppContext,
-    ) {
+    fn a_timed_out_generation_shows_the_shared_note_above_the_body(cx: &mut TestAppContext) {
         let (_rt, state, shell, vcx) = mount(cx, "");
         let mut commands = state.update(vcx, |s, _| s.take_command_channel());
         settle(&shell, vcx);
@@ -1499,6 +1609,7 @@ mod me_picker_tests {
             sh.avatar_prompt_input
                 .update(cx, |input, cx| input.set_text("nuke vampire".into(), cx));
         });
+        let card_before = vcx.debug_bounds("avatar-card").expect("card");
         click(vcx, &shell, "avatar-generate-go");
         assert!(matches!(
             commands.try_recv(),
@@ -1515,7 +1626,7 @@ mod me_picker_tests {
             .unwrap();
         assert!(picker.generating && picker.started_at.is_some());
         assert_eq!(picker.generating_for_s(), Some(0));
-        assert!(vcx.debug_bounds("avatar-generate-details").is_none());
+        assert!(vcx.debug_bounds("avatar-generate-error").is_none());
 
         // The relay's clean 504 (or the client's own timeout) arrives.
         let raw = "HTTP 504 avatar_timeout — gpt-image-1-mini: operation timed out after 40 s (attempt 2 of 2); relay budget 75 s";
@@ -1525,8 +1636,11 @@ mod me_picker_tests {
                     target: Target::Me("gh_1".into()),
                     image_key: None,
                     url: None,
-                    error: Some("Couldn't generate the image. The server took too long.".into()),
-                    detail: Some(raw.into()),
+                    error: Some(UserError::of(
+                        "generate the image",
+                        crate::sync::user_error::ErrorClass::Timeout,
+                        raw,
+                    )),
                 },
                 cx,
             )
@@ -1536,51 +1650,81 @@ mod me_picker_tests {
             .read_with(&*vcx, |sh, _| sh.avatar_picker.clone())
             .unwrap();
         assert!(!picker.generating);
+        let slot = picker.error.as_ref().expect("the note is up");
         assert_eq!(
-            picker.error.as_deref(),
-            Some("Couldn't generate the image. The server took too long.")
+            slot.error.sentence(),
+            "Couldn't generate the image. The server took too long."
         );
-        assert_eq!(picker.error_detail.as_deref(), Some(raw));
-        assert!(!picker.details_open, "details start closed");
+        assert!(!slot.details_open, "details start closed");
         assert!(vcx.debug_bounds("avatar-generate-spinner").is_none());
-        assert!(vcx.debug_bounds("avatar-generate-detail").is_none());
-        // The status line stays above the footer: one line, inside the card, over the pills.
+        assert!(vcx
+            .debug_bounds("avatar-generate-error-details-block")
+            .is_none());
+
+        // Geometry: bar · note · body · footer. The note sits under the bar and above the
+        // field; the card grew by exactly the note (+ its gap); the footer is still last.
+        let note = vcx.debug_bounds("avatar-generate-error").expect("the note");
+        let body = vcx.debug_bounds("avatar-body").expect("body box");
+        let cancel = vcx.debug_bounds("avatar-cancel").expect("Cancel");
+        let set = vcx.debug_bounds("avatar-set").expect("Set avatar");
+        let card = vcx.debug_bounds("avatar-card").expect("card");
         let status = vcx
             .debug_bounds("avatar-generate-status")
             .expect("status line");
-        let cancel = vcx.debug_bounds("avatar-cancel").expect("Cancel");
-        let set = vcx.debug_bounds("avatar-set").expect("Set avatar");
+        assert!(
+            note.top() >= card.top() + px(BAR_H) && note.bottom() <= body.top(),
+            "note {note:?} between the bar and the body {body:?}"
+        );
+        assert!(
+            f32::from(note.left() - card.left()) > FIELD_INSET - 1.0,
+            "note inset like the field: {note:?} in {card:?}"
+        );
+        let grew = f32::from(card.size.height - card_before.size.height);
+        let expected = f32::from(note.size.height) + error_note::GAP;
+        assert!(
+            (grew - expected).abs() < 1.5,
+            "the card grew by the note: {grew} vs {expected}"
+        );
         assert!(
             status.bottom() <= cancel.top() && status.bottom() <= set.top(),
-            "the error sits above the footer: status {status:?} cancel {cancel:?}"
+            "nothing reaches the footer: status {status:?} cancel {cancel:?}"
         );
         assert!(
-            f32::from(status.size.height) <= 16.5,
-            "one line: {status:?}"
+            note.bottom() <= cancel.top(),
+            "the note is far from the footer: {note:?} {cancel:?}"
         );
         assert!(
-            vcx.debug_bounds("avatar-generate-details").is_some(),
-            "a Details toggle"
+            vcx.debug_bounds("avatar-generate-error-try-again")
+                .is_some(),
+            "Try again on a timeout"
         );
 
-        // Details: the raw words open in the preview slot, still above the footer; then close.
-        click(vcx, &shell, "avatar-generate-details");
-        let detail = vcx
-            .debug_bounds("avatar-generate-detail")
-            .expect("the detail box");
+        // Details: the mono block unfolds inside the note; the card grows again; then folds.
+        click(vcx, &shell, "avatar-generate-error-details");
+        let block = vcx
+            .debug_bounds("avatar-generate-error-details-block")
+            .expect("the details block");
+        let note_open = vcx.debug_bounds("avatar-generate-error").expect("note");
         assert!(
-            detail.bottom() <= status.top(),
-            "detail {detail:?} above status {status:?}"
+            block.top() >= note_open.top() && block.bottom() <= note_open.bottom(),
+            "block {block:?} inside the note {note_open:?}"
         );
         assert!(shell.read_with(&*vcx, |sh, _| sh
             .avatar_picker
             .as_ref()
-            .is_some_and(|pk| pk.details_open)));
-        click(vcx, &shell, "avatar-generate-details");
-        assert!(vcx.debug_bounds("avatar-generate-detail").is_none());
+            .and_then(|pk| pk.error.as_ref())
+            .is_some_and(|slot| slot.details_open)));
+        assert!(
+            vcx.debug_bounds("avatar-generate-error-copy").is_some(),
+            "Copy"
+        );
+        click(vcx, &shell, "avatar-generate-error-details");
+        assert!(vcx
+            .debug_bounds("avatar-generate-error-details-block")
+            .is_none());
 
-        // Try again re-sends the same prompt and clears the error.
-        click(vcx, &shell, "avatar-generate-go");
+        // Try again re-sends the same prompt and clears the note.
+        click(vcx, &shell, "avatar-generate-error-try-again");
         match commands.try_recv() {
             Ok(ClientCommand::GenerateImage { prompt, .. }) => assert_eq!(prompt, "nuke vampire"),
             other => panic!("expected GenerateImage, got {other:?}"),
@@ -1588,8 +1732,14 @@ mod me_picker_tests {
         let picker = shell
             .read_with(&*vcx, |sh, _| sh.avatar_picker.clone())
             .unwrap();
-        assert!(picker.generating && picker.error.is_none() && picker.error_detail.is_none());
+        assert!(picker.generating && picker.error.is_none());
+        assert!(vcx.debug_bounds("avatar-generate-error").is_none());
         assert!(vcx.debug_bounds("avatar-generate-spinner").is_some());
+        let card_after = vcx.debug_bounds("avatar-card").expect("card");
+        assert!(
+            (f32::from(card_after.size.height - card_before.size.height)).abs() < 1.0,
+            "back to the plain height"
+        );
         // Set avatar stays disabled through all of it (nothing to set).
         assert!(!picker.dirty());
     }

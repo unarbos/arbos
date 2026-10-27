@@ -5,6 +5,8 @@
 //! Every attempt gets a number so a callback from an attempt the user already
 //! cancelled or retried cannot touch the current one.
 
+use crate::sync::user_error::UserError;
+
 /// The soft timeout: after this long with no answer the pill offers Retry /
 /// Open in browser. The system sheet (if it did open) stays alive — a slow
 /// GitHub login (password + 2FA) is not cut off; its callback still lands.
@@ -41,7 +43,7 @@ pub struct Flow {
     pub attempt: u64,
     /// `now_ms` when the current attempt started.
     pub started_at: u64,
-    pub error: Option<String>,
+    pub error: Option<UserError>,
 }
 
 impl Default for Flow {
@@ -99,7 +101,7 @@ impl Flow {
     }
 
     /// The attempt failed (relay error, GitHub denied, exchange failed).
-    pub fn failed(&mut self, attempt: u64, error: String) {
+    pub fn failed(&mut self, attempt: u64, error: UserError) {
         if attempt != self.attempt {
             return;
         }
@@ -256,7 +258,7 @@ mod tests {
         assert_eq!(f.step, Step::Opening);
         // Stale attempt: cancelled / failed / grant / opened all no-ops.
         f.cancelled(a1);
-        f.failed(a1, "old".into());
+        f.failed(a1, UserError::from_text("sign in", "old"));
         f.opened(a1, true);
         assert!(!f.grant(a1));
         assert_eq!(f.step, Step::Opening);
@@ -281,9 +283,12 @@ mod tests {
     fn failure_returns_to_idle_with_the_message() {
         let mut f = Flow::default();
         let a = f.start(0).unwrap();
-        f.failed(a, "relay answered 503".into());
+        f.failed(a, UserError::from_text("sign in", "relay answered 503"));
         assert_eq!(f.step, Step::Idle);
-        assert_eq!(f.error.as_deref(), Some("relay answered 503"));
+        assert_eq!(
+            f.error.as_ref().map(|e| e.raw.as_str()),
+            Some("relay answered 503")
+        );
         // A new click clears it.
         f.start(1).unwrap();
         assert!(f.error.is_none());

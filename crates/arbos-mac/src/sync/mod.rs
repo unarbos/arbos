@@ -16,6 +16,7 @@ pub mod dto;
 pub mod fixture;
 pub mod relay;
 pub mod store;
+pub mod user_error;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -24,6 +25,8 @@ use std::sync::Arc;
 use arbos_matrix::{MessageRow, Snapshot};
 use futures::future::BoxFuture;
 use tokio::sync::mpsc;
+
+use crate::sync::user_error::UserError;
 
 use crate::model::{
     AccountView, Call, CallEnded, CallKind, CallMissed, Person, Reachable, Sender, ServerInfo,
@@ -88,11 +91,10 @@ pub enum SyncEvent {
         /// A short human sentence for the sheet ("Couldn't generate the image. The server took
         /// too long."); the raw provider / transport words ride in `detail` for a Details
         /// disclosure (Jacob, 2026-10-26: a raw reqwest error had spilled over the footer).
-        error: Option<String>,
-        detail: Option<String>,
+        error: Option<UserError>,
     },
     /// Error from a people-chat action (search, DM, members), shown inline.
-    PeopleError(String),
+    PeopleError(UserError),
     /// The people I block (`GET /blocks`), sent on every registry refresh and after each
     /// block / unblock. The person pane derives its Block user / Unblock row from this list.
     Blocked(Vec<Person>),
@@ -125,10 +127,10 @@ pub enum SyncEvent {
         chat_id: Id,
         call_id: String,
     },
-    /// A call request failed; shown as a notice and the call UI resets.
+    /// A call request failed; shown as an error toast and the call UI resets.
     CallError {
         chat_id: Id,
-        message: String,
+        error: UserError,
     },
     /// Cold launch from the on-device store (#929): reopen what was on
     /// screen when the app last ran. Sent once, after the stored `Projects`.
@@ -147,6 +149,13 @@ pub enum SyncEvent {
     ChatArchived {
         chat_id: Id,
         archived_at: Option<u64>,
+    },
+    /// `notifications_cleared` push: I read `chat_id` on another device. This Mac drops the
+    /// chat's delivered banners, stops showing it unread and re-badges; `badge` is the relay's
+    /// unread total after that read.
+    NotificationsCleared {
+        chat_id: Id,
+        badge: u64,
     },
     /// `space_archived` push: another device archived / unarchived a sidebar
     /// space (an agent or a server) for me.
@@ -184,7 +193,7 @@ pub enum SyncEvent {
     Paired {
         device_id: String,
     },
-    PairingFailed(String),
+    PairingFailed(UserError),
     /// Registry: the full project list, rail order.
     Projects(Vec<Project>),
     /// Model ids the relay proxy can serve (picker contents).
@@ -278,8 +287,16 @@ pub enum SyncEvent {
     /// What the relay's HTTP side says about reachability (the registry poll):
     /// `Offline` / `RelayDown` while it fails, `Live` as soon as a call succeeds.
     RelayLink(LinkState),
-    /// Short user-facing notice (errors from HTTP calls, etc.).
+    /// Short user-facing notice — something that worked or a plain status ("Forwarded to
+    /// Studio"). Never a failure: those are [`SyncEvent::Failure`].
     Notice(String),
+    /// Something the user asked for did not happen. Drawn by `ui::error_note` as an error
+    /// toast (or caught by the surface that owns the action); `retry` re-issues the command
+    /// behind Try again.
+    Failure {
+        error: UserError,
+        retry: Option<Box<ClientCommand>>,
+    },
     /// A room's pushes were refused (`not_available`) or an ACK cleared that refusal.
     /// `refused: true` → show one notice and keep a per-room flag; `false` → clear both.
     PushRefused {
@@ -296,7 +313,7 @@ pub enum SyncEvent {
     /// Settings → Secrets: secrets, accesses, requests, activity (never values; D83).
     Secrets(SecretsView),
     /// Settings → Devices: this account's signed-in devices, or why they could not be read.
-    Devices(Result<Vec<DeviceView>, String>),
+    Devices(Result<Vec<DeviceView>, UserError>),
     /// One agent's secrets page (`GET /projects/{id}/secrets`).
     ProjectSecrets {
         project_id: Id,
@@ -362,14 +379,20 @@ pub enum SyncEvent {
     ServerDetail(ServerInfo),
     /// D88: a server was just created or joined: select it and land on `#general`.
     ServerOpened(ServerInfo),
-    /// D88: a server/channel write failed; shown inline in the open sheet and as a notice.
-    ServerError(String),
+    /// D88: a server/channel write failed; shown inline in the open sheet (or as an error
+    /// toast when no sheet is up).
+    ServerError(UserError),
     /// D88: the room list of servers and channels changed.
     MatrixRooms(Snapshot),
     /// D88: rows of a channel after it was opened, and the whole list after every new row.
     MatrixTimeline {
         room_id: String,
         rows: Vec<MessageRow>,
+    },
+    /// D88: a `ChannelLoadOlder` found nothing above — the room's history is
+    /// whole on this Mac (the Search-in-chat bar stops paging and wraps).
+    ChannelHistoryEnd {
+        room_id: String,
     },
     /// D88: homeserver connection state.
     MatrixConnection {
@@ -380,13 +403,13 @@ pub enum SyncEvent {
     ChannelSendFailed {
         room_id: String,
         local_id: String,
-        error: String,
+        error: UserError,
     },
     /// A chat send never reached the doc (no room yet, or NewChat failed); mark it failed.
     MessageSendFailed {
         chat_id: Id,
         message_id: Id,
-        error: String,
+        error: UserError,
     },
 }
 

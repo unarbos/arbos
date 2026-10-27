@@ -2,7 +2,7 @@
 //! Tools: history_search, history_read, read_thread, chat_messages, chat_read, chat_search,
 //! memory_search, memory_read, peek, sub_llm, remember, recall, projects_list, ask_user,
 //! spawn_subagent, wake_subagent, connectors_list, connector_call, local_devices,
-//! local_run, local_read, local_list, deliver_file, generate_image, send_message, vault_list,
+//! local_run, local_read, local_list, deliver_file, generate_image, post_chart, send_message, vault_list,
 //! vault_request, egress, browser_fill, routines_list, routines_create, routines_update,
 //! routines_delete, goals_list, goals_create, goals_update, goals_log, goals_delete,
 //! web_search, web_fetch, submit_feedback.
@@ -80,6 +80,7 @@ fn tools() -> Value {
         a.extend(crate::connectors::tool_specs());
         a.extend(crate::local::tool_specs());
         a.extend(crate::media::tool_specs());
+        a.extend(crate::chart::tool_specs());
         a.extend(crate::vault::tool_specs());
         a.extend(crate::routines::tool_specs());
         a.extend(crate::goals::tool_specs());
@@ -167,6 +168,8 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
             | "local_list"
             | "vault_request"
             | "secrets_request"
+            | "request_secret"
+            | "secrets_save_from_message"
             | "browser_fill"
     ) {
         if let Err(refusal) = a.gate_tool(name, args, &chat_for_scratch).await {
@@ -795,12 +798,17 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
             crate::local::local_call(a, name, args, &chat_for_scratch).await
         }
         "deliver_file" => crate::media::deliver_file(a, args).await,
+        "post_chart" => crate::chart::post_chart(a, args).await,
         "generate_image" => crate::media::generate_image(a, args).await,
         "vault_list" | "secrets_list" => crate::vault::secrets_list(a).await,
         "vault_request" | "secrets_request" => {
             crate::vault::secrets_request(a, args, &chat_for_scratch).await
         }
         "egress" => crate::vault::egress(a, args, &chat_for_scratch).await,
+        "request_secret" => crate::handoff::request_secret(a, args, &chat_for_scratch).await,
+        "secrets_save_from_message" => {
+            crate::handoff::secrets_save_from_message(a, args, &chat_for_scratch).await
+        }
         "web_search" => crate::web::web_search(a, args, &chat_for_scratch).await,
         "web_fetch" => crate::web::web_fetch(a, args, &chat_for_scratch).await,
         "submit_feedback" => crate::feedback::submit_feedback(a, args, &chat_for_scratch).await,

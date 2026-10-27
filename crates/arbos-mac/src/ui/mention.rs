@@ -500,11 +500,14 @@ impl Mentions {
                 },
             );
         }
+        // A chip is a profile target like the sender name beside it: open,
+        // close on the second click, swap for someone else
+        // ([feedback profile-pane-toggle-mac-2026-10-26]).
         let state = state.clone();
         Rc::new(
             table.finish(Some(Rc::new(move |page: &ProfilePage, cx: &mut App| {
                 let page = page.clone();
-                state.update(cx, |s, cx| s.open_profile(page, cx));
+                state.update(cx, |s, cx| s.toggle_profile(page, cx));
             }))),
         )
     }

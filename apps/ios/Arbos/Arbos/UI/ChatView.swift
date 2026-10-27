@@ -317,19 +317,74 @@ struct ChatSession: View {
     /// Header tap: DM → the other person; group / shared project → the group page; own agent → its page;
     /// server channel → the channel's page (#1317; the server's page is the channel list's header).
     private func openHeaderProfile() {
+        model.toggleProfile(headerTarget)
+    }
+
+    /// What the header pill opens — and, tapped again while that page is up,
+    /// closes (`ProfileToggle`, [feedback profile-pane-toggle-ios-2026-10-26]).
+    private var headerTarget: ProfileTarget {
         if let channel {
-            model.showProfile(.channel(channelId: channel.id))
+            return .channel(channelId: channel.id)
         } else if let people {
             if !people.isGroup, let other = counterpart {
-                model.showProfile(.user(ProfilePerson(other)))
-            } else {
-                model.showProfile(.group(chatId: chatId, projectId: nil))
+                return .user(ProfilePerson(other))
             }
+            return .group(chatId: chatId, projectId: nil)
         } else if project?.shared == true {
-            model.showProfile(.group(chatId: chatId, projectId: projectId))
-        } else {
-            model.showProfile(.agent(projectId: projectId))
+            return .group(chatId: chatId, projectId: projectId)
         }
+        return .agent(projectId: projectId)
+    }
+
+    /// The header pill's accessible label: "Open <name>'s profile" / "Close profile".
+    private var headerLabel: String {
+        let who: String
+        switch headerTarget {
+        case .user(let p): who = p.displayName
+        case .group: who = people?.title.isEmpty == false ? (people?.title ?? name) : name
+        case .agent: who = name
+        case .channel: who = channel?.name ?? name
+        case .server: who = name
+        }
+        return ProfileToggle.label(name: who, showing: model.profileShows(headerTarget))
+    }
+
+    /// Hardware ⌘F ([feedback iphone-chat-search-cmd-f-2026-10-26]): open the bar, or
+    /// put the cursor back in it when it is already up. Never closes it.
+    private func openSearchFromKeyboard() {
+        let effect = ChatSearchShortcut.apply(open: showSearch)
+        if effect.animate {
+            withAnimation(.easeOut(duration: 0.18)) { showSearch = effect.open }
+        } else {
+            showSearch = effect.open
+        }
+        if effect.focus {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { searchFocused = true }
+        }
+    }
+
+    /// Esc or the ✕: the bar goes, the filter with it.
+    private func closeSearch() {
+        showSearch = false
+        searchText = ""
+        searchFocused = false
+    }
+
+    /// Hardware-keyboard keys for the bar ([feedback iphone-chat-search-cmd-f-2026-10-26]).
+    /// Zero-size buttons carry the shortcuts: the header's disc toggles on tap, but the
+    /// Find key must only ever open or refocus the bar, and Esc closes it like the Mac's.
+    private var searchKeyboardShortcuts: some View {
+        ZStack {
+            Button(action: openSearchFromKeyboard) { EmptyView() }
+                .keyboardShortcut(ChatSearchShortcut.key, modifiers: ChatSearchShortcut.modifiers)
+            if showSearch {
+                Button(action: closeSearch) { EmptyView() }
+                    .keyboardShortcut(.cancelAction)
+            }
+        }
+        .frame(width: 0, height: 0)
+        .opacity(0)
+        .accessibilityHidden(true)
     }
 
     /// Profile "search" tile: raise the in-chat search bar once for this chat.
@@ -456,7 +511,8 @@ struct ChatSession: View {
                 name: m?.name.flatMap { $0.isEmpty ? nil : $0 } ?? "@\(handle)",
                 activity: .typing,
                 picture: AnyView(PersonAvatar(url: m?.avatarUrl, handle: handle, size: PresenceRow.avatar,
-                                              name: m?.name, id: m?.id, colorIndex: m?.avatarColorIndex))
+                                              name: m?.name, id: m?.id, colorIndex: m?.avatarColorIndex)),
+                target: model.personTarget(handle: handle, avatarUrl: m?.avatarUrl, chatId: chatId)
             ))
         }
         guard streaming else { return out }
@@ -471,14 +527,16 @@ struct ChatSession: View {
                 guard seen.insert(p.id).inserted else { continue }
                 out.append(PresenceParticipant(
                     id: "working:\(p.id)", name: p.name, activity: .working,
-                    picture: AnyView(AgentAvatar(project: p, theme: theme, size: PresenceRow.avatar, working: true))
+                    picture: AnyView(AgentAvatar(project: p, theme: theme, size: PresenceRow.avatar, working: true)),
+                    target: .agent(projectId: p.id)
                 ))
             }
         } else if let project {
             let p = model.agent(id: project.id, name: project.name)
             out.append(PresenceParticipant(
                 id: "working:\(p.id)", name: p.name, activity: .working,
-                picture: AnyView(AgentAvatar(project: p, theme: theme, size: PresenceRow.avatar, working: true))
+                picture: AnyView(AgentAvatar(project: p, theme: theme, size: PresenceRow.avatar, working: true)),
+                target: .agent(projectId: project.id)
             ))
         }
         return out
@@ -692,7 +750,9 @@ struct ChatSession: View {
                     // opens that entity's page; every other link goes to the system.
                     .environment(\.openURL, OpenURLAction { url in
                         guard let target = MentionTable.target(from: url, model: model) else { return .systemAction }
-                        model.showProfile(target)
+                        // A chip is a profile target like the sender name beside it: open,
+                        // dismiss on the same subject, swap for someone else (`ProfileToggle`).
+                        model.toggleProfile(target)
                         return .handled
                     })
             }
@@ -712,7 +772,7 @@ struct ChatSession: View {
                             .font(theme.font(Theme.body)).foregroundStyle(theme.text)
                             .focused($searchFocused)
                             .autocorrectionDisabled()
-                        Button { showSearch = false; searchText = "" } label: {
+                        Button { closeSearch() } label: {
                             Image(systemName: "xmark.circle.fill").foregroundStyle(theme.muted)
                         }
                         .buttonStyle(.plain)
@@ -1363,6 +1423,7 @@ struct ChatSession: View {
                         .contentShape(Rectangle())
                         .onTapGesture { openHeaderProfile() }
                         .accessibilityAddTraits(.isButton)
+                        .accessibilityLabel(headerLabel)
                         .accessibilityHint("Opens the channel details")
                     } else if let people {
                         // One pill for every chat (2026-10-20): avatar + name,
@@ -1407,6 +1468,7 @@ struct ChatSession: View {
                         .contentShape(Rectangle())
                         .onTapGesture { openHeaderProfile() }
                         .accessibilityAddTraits(.isButton)
+                        .accessibilityLabel(headerLabel)
                         .accessibilityHint(people.isGroup ? "Opens group info" : "Opens the profile")
                     } else {
                         HStack(spacing: Theme.headerPillGap) {
@@ -1421,6 +1483,7 @@ struct ChatSession: View {
                         .contentShape(Rectangle())
                         .onTapGesture { openHeaderProfile() }
                         .accessibilityAddTraits(.isButton)
+                        .accessibilityLabel(headerLabel)
                         .accessibilityHint("Opens the agent profile")
                     }
                 }
@@ -1435,9 +1498,7 @@ struct ChatSession: View {
             // duplicated it in groups (#1625).
             Button {
                 if showSearch {
-                    showSearch = false
-                    searchText = ""
-                    searchFocused = false
+                    closeSearch()
                 } else {
                     withAnimation(.easeOut(duration: 0.18)) { showSearch = true }
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { searchFocused = true }
@@ -1452,6 +1513,7 @@ struct ChatSession: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Search in chat")
             .accessibilityIdentifier("chat-search-button")
+            .background { searchKeyboardShortcuts }
         }
         .controlBar()
     }
@@ -1948,7 +2010,9 @@ struct ChatSession: View {
     private func isMessageRow(_ row: Row) -> Bool {
         if isChannel { return false }
         switch row.kind {
-        case .system, .question, .error, .forwardHint:
+        // A secret ghost row has nothing to copy, forward or quote; Delete stays off too —
+        // the row is the record that a value went to the vault.
+        case .system, .question, .error, .forwardHint, .secretGhost:
             return false
         case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
             return messageById[row.messageId] != nil
@@ -2256,7 +2320,9 @@ struct ChatSession: View {
                             queued: false,
                             taskCount: jobs.count,
                             onTasks: openTasks,
-                            onWords: openNewest)
+                            onWords: openNewest,
+                            onPicture: { model.toggleProfile($0) },
+                            pictureShowing: { model.profileShows($0) })
                     .padding(.horizontal, 16)
                     // Grok: 68 px from the picture's bottom to the composer's top.
                     .padding(.bottom, Theme.presenceBottomGap)

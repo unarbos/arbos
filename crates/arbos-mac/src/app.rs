@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 
 use crate::auth;
 use crate::calls::{self, CallCmd, CallEvent};
+use crate::chat_search;
 use crate::model::SpaceKind;
 use crate::model::{
     add_members_plan, added_line, call_ended_line, created_group, reachable_line,
@@ -31,7 +32,9 @@ use crate::palette;
 use crate::search;
 use crate::search_index::{self, SearchIndex};
 use crate::sign_in;
+use crate::sync::user_error::{ErrorClass, UserError};
 use crate::sync::{ClientCommand, SyncEvent, SyncSource};
+use crate::ui::error_note;
 use crate::ui::notify::{self, Gate, Notifier, NotifyEvent, NotifyKind};
 use crate::ui::tones::{SamplePlayer, Tone, TonePlayer};
 
@@ -70,6 +73,22 @@ pub enum ProfilePage {
     Server { server_id: Id },
     /// A channel of a server (D88, #1317): what the `# general` header pill opens.
     Channel { server_id: Id, channel_id: Id },
+}
+
+impl ProfilePage {
+    /// True when both pages show the same person, agent, group, server or
+    /// channel. A person's page is the same person whichever chat it was
+    /// opened from (`space_id` only says where the Message pill goes), so a
+    /// click on their sender name, their @mention chip or the DM header pill
+    /// all count as "that profile is showing" ([feedback profile-pane-toggle-mac-2026-10-26]).
+    pub fn same_subject(&self, other: &ProfilePage) -> bool {
+        match (self, other) {
+            (ProfilePage::User { handle: a, .. }, ProfilePage::User { handle: b, .. }) => {
+                a.eq_ignore_ascii_case(b)
+            }
+            _ => self == other,
+        }
+    }
 }
 
 /// Who the Add members picker adds to — a group or a server (D88) — and who is in already.
@@ -225,7 +244,9 @@ pub struct Pairing {
     /// Pairing-code mode: the code is being exchanged.
     pub busy: bool,
     /// Pairing-code mode: the last failure.
-    pub error: Option<String>,
+    pub error: Option<UserError>,
+    /// The sign-in note's Details disclosure (either mode).
+    pub error_details_open: bool,
     /// GitHub mode: the pill's state machine (copy, Cancel / Retry, timeout).
     pub flow: sign_in::Flow,
 }
@@ -238,14 +259,50 @@ pub struct BlobView {
     pub saved_to: Option<PathBuf>,
 }
 
-/// Transient bottom-right message.
+/// A local refusal (the form is not complete): the shared element with the words as the why.
+pub fn refused(verb: &str, why: &str) -> error_note::Slot {
+    error_note::Slot::new(UserError::of(
+        verb,
+        ErrorClass::Refused {
+            message: Some(why.to_owned()),
+        },
+        "",
+    ))
+}
+
+/// Which surface owns which failures while it is up (see `AppState::failure_claim`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FailureClaim {
+    pub surface: &'static str,
+    pub verbs: &'static [&'static str],
+}
+
+/// A toast in the top-right stack: an info notice (`error` none: "Forwarded to Studio") or a
+/// failure drawn by `ui::error_note` (Jacob, 2026-10-26). Info notices live 6 s, errors 10 s;
+/// the pointer on a toast holds it (`held`), a click on × or an info toast dismisses it.
 #[derive(Clone, Debug)]
 pub struct Notice {
     pub text: String,
     pub at: u64,
+    pub error: Option<UserError>,
+    pub details_open: bool,
+    pub held: bool,
+    /// Try again re-issues this command.
+    pub retry: Option<Box<ClientCommand>>,
+}
+
+impl Notice {
+    pub fn ttl_ms(&self) -> u64 {
+        if self.error.is_some() {
+            ERROR_NOTICE_TTL_MS
+        } else {
+            NOTICE_TTL_MS
+        }
+    }
 }
 
 pub const NOTICE_TTL_MS: u64 = 6_000;
+pub const ERROR_NOTICE_TTL_MS: u64 = 10_000;
 
 #[derive(Clone, Debug)]
 pub enum AppEvent {
@@ -299,6 +356,7 @@ impl ViewerItem {
                 bytes: None,
                 kind: Some(AttachmentKind::Image),
                 title: None,
+                chart_part: None,
             },
             by: name.to_owned(),
             when: 0,
@@ -425,8 +483,7 @@ pub struct AvatarGenerated {
     pub target: crate::sync::PictureTarget,
     pub image_key: Option<String>,
     pub url: Option<String>,
-    pub error: Option<String>,
-    pub detail: Option<String>,
+    pub error: Option<UserError>,
 }
 
 pub struct AppState {
@@ -451,7 +508,11 @@ pub struct AppState {
     /// The person pane's Block user / Unblock row derives from this, never from a local flag.
     pub blocked: Vec<Person>,
     pub people_busy: bool,
-    pub people_error: Option<String>,
+    /// The New Message / New group / Add members sheets' note (the shared error element).
+    pub people_error: Option<error_note::Slot>,
+    /// Per chat: the last send / attachment / recording failure, drawn above the composer
+    /// until Try again, a successful send, or the user dismisses it.
+    pub send_errors: HashMap<Id, error_note::Slot>,
     /// Everyone on Arbos (`GET /users`), fetched once the account is known and
     /// on every sheet open: the New Message sheet paints it on its first frame
     /// instead of "Searching…" that the list then replaces.
@@ -559,6 +620,9 @@ pub struct AppState {
     pub reveal_nonce: u64,
     /// Brief highlight on the message a home-search hit or a quote click opened.
     pub highlight_message: Option<Id>,
+    /// ⌘F Search-in-chat ([feedback search-in-chat-mac-2026-10-26]): the open
+    /// bar's query, hits and cursor for the chat it was opened in.
+    pub chat_search: Option<ChatSearch>,
     pub link: Link,
     /// Each room's socket state (keyed like the docs: chat id, or the project
     /// id for the project doc) and when it last changed, for the header's
@@ -577,6 +641,9 @@ pub struct AppState {
     /// The media viewer (feedback media-viewer-2026-10-23): a chat's media as
     /// an album, opened from an attachment card or the Library grid.
     pub media_viewer: Option<MediaViewer>,
+    /// The expanded chart overlay ([feedback chart-bubble-mac-2026-10-26]).
+    pub chart_viewer: Option<crate::ui::chart_viewer::ChartViewer>,
+    pub chart_viewer_generation: u64,
     /// Bumped on every open so the shell focuses the viewer once per opening.
     pub media_viewer_generation: u64,
     /// Bubble menu → Forward: the message the "Forward to" picker is open for.
@@ -762,7 +829,11 @@ pub struct AppState {
     pub server_sheet: Option<ServerSheet>,
     /// D88: a server write is in flight (sheet buttons dim) and its last failure.
     pub server_busy: bool,
-    pub server_error: Option<String>,
+    pub server_error: Option<error_note::Slot>,
+    /// A surface that is up and owns some verbs' failures (Settings → Secrets with a form
+    /// open): a `Failure` for one of them is kept here for that surface instead of a toast.
+    pub failure_claim: Option<FailureClaim>,
+    pub claimed_failure: Option<error_note::Slot>,
     /// D88: a channel waiting for its room (`room_id` null right after creation).
     channel_pending_room: Option<(Id, Id)>,
     commands: mpsc::UnboundedSender<ClientCommand>,
@@ -970,6 +1041,7 @@ impl AppState {
             blocked: Vec::new(),
             people_busy: false,
             people_error: None,
+            send_errors: HashMap::new(),
             people_directory: Vec::new(),
             typing: HashMap::new(),
             avatars: HashMap::new(),
@@ -1016,6 +1088,7 @@ impl AppState {
             reveal_message: None,
             reveal_nonce: 0,
             highlight_message: None,
+            chat_search: None,
             link: Link::Connecting,
             room_links: HashMap::new(),
             relay_link: (LinkState::Live, 0),
@@ -1025,6 +1098,8 @@ impl AppState {
             details_open: None,
             media_viewer: None,
             media_viewer_generation: 0,
+            chart_viewer: None,
+            chart_viewer_generation: 0,
             forward_message: None,
             new_project_open: false,
             show_details: false,
@@ -1110,6 +1185,8 @@ impl AppState {
             server_sheet: None,
             server_busy: false,
             server_error: None,
+            failure_claim: None,
+            claimed_failure: None,
             channel_pending_room: None,
             _pump: pump,
             _notify_tick: notify_tick,
@@ -1450,6 +1527,7 @@ impl AppState {
                     mode,
                     busy: false,
                     error: None,
+                    error_details_open: false,
                     flow: sign_in::Flow::default(),
                 });
                 self.device_id = None;
@@ -1556,7 +1634,7 @@ impl AppState {
                     self.command(ClientCommand::FetchCall { call_id });
                 }
             }
-            SyncEvent::CallError { chat_id, message } => {
+            SyncEvent::CallError { chat_id, error } => {
                 let _ = chat_id;
                 if matches!(
                     self.my_call.as_ref().map(|c| &c.status),
@@ -1566,7 +1644,7 @@ impl AppState {
                         drop_active_call_images(active, cx);
                     }
                 }
-                self.push_notice(message);
+                self.push_failure(error, None);
                 cx.notify();
             }
             SyncEvent::Blocked(people) => {
@@ -1582,13 +1660,13 @@ impl AppState {
             SyncEvent::PeopleError(err) => {
                 self.people_busy = false;
                 self.withdraw_optimistic_notices(cx);
-                // The New Message sheet shows the error inline; a DM started
+                // The New Message sheet shows the note inline; a DM started
                 // from a person's pane (its Message pill) has no sheet, so the
-                // relay's words ("this person is not available") go to a notice.
+                // relay's words ("this person is not available") go to a toast.
                 if !self.new_chat_open && self.awaiting_dm.is_some() {
-                    self.push_notice(err.clone());
+                    self.push_failure(err.clone(), None);
                 }
-                self.people_error = Some(err);
+                self.people_error = Some(error_note::Slot::new(err));
                 self.awaiting_dm = None;
                 self.awaiting_group = None;
                 cx.notify();
@@ -1634,7 +1712,6 @@ impl AppState {
                 image_key,
                 url,
                 error,
-                detail,
             } => {
                 if let Some(u) = url.clone() {
                     self.want_avatar(u);
@@ -1644,7 +1721,6 @@ impl AppState {
                     image_key,
                     url,
                     error,
-                    detail,
                 });
                 cx.notify();
             }
@@ -1783,11 +1859,23 @@ impl AppState {
                 cx.notify();
             }
             SyncEvent::Notice(text) => {
-                // Create/fork failed: stop waiting for a project that will not arrive.
-                if text.starts_with("New project failed") {
+                self.push_notice(text);
+                cx.notify();
+            }
+            SyncEvent::Failure { error, retry } => {
+                // Create failed: stop waiting for a project that will not arrive.
+                if error.verb == "create the agent" {
                     self.awaiting_new_project = false;
                 }
-                self.push_notice(text);
+                let claimed = self
+                    .failure_claim
+                    .as_ref()
+                    .is_some_and(|c| c.verbs.iter().any(|v| error.verb.starts_with(v)));
+                if claimed {
+                    self.claimed_failure = Some(error_note::Slot::new(error));
+                } else {
+                    self.push_failure(error, retry);
+                }
                 cx.notify();
             }
             SyncEvent::PushRefused { chat_id, refused } => {
@@ -2401,6 +2489,29 @@ impl AppState {
                 }
                 cx.notify();
             }
+            SyncEvent::NotificationsCleared { chat_id, badge } => {
+                // I read it on another device: its banners go, the dot clears, the Dock
+                // badge follows. The relay's total is the truth for what this Mac cannot
+                // see yet (`/me/unread` confirms on the next refresh).
+                notify::withdraw_chat(&chat_id);
+                if let Some(c) = self
+                    .chats
+                    .values_mut()
+                    .flat_map(|v| v.iter_mut())
+                    .find(|c| c.id == chat_id)
+                {
+                    c.unread = false;
+                    c.unread_count = 0;
+                }
+                let local: usize = self
+                    .chats
+                    .values()
+                    .flat_map(|v| v.iter())
+                    .map(Chat::missed_count)
+                    .sum();
+                notify::set_badge(local.min(badge as usize));
+                cx.notify();
+            }
             SyncEvent::ChatSnapshot {
                 chat_id,
                 mut messages,
@@ -2711,15 +2822,20 @@ impl AppState {
             SyncEvent::Servers(list) => self.on_servers(list, cx),
             SyncEvent::ServerDetail(server) => self.on_server_detail(server, cx),
             SyncEvent::ServerOpened(server) => self.on_server_opened(server, cx),
-            SyncEvent::ServerError(text) => {
+            SyncEvent::ServerError(err) => {
                 self.server_busy = false;
-                self.server_error = Some(text);
+                // Inline in the open sheet; a toast when no sheet is up to hold it.
+                if self.server_sheet.is_none() {
+                    self.push_failure(err.clone(), None);
+                }
+                self.server_error = Some(error_note::Slot::new(err));
                 cx.notify();
             }
             SyncEvent::MatrixRooms(snapshot) => self.on_matrix_rooms(snapshot, cx),
             SyncEvent::MatrixTimeline { room_id, rows } => {
                 self.on_matrix_timeline(room_id, rows, cx)
             }
+            SyncEvent::ChannelHistoryEnd { room_id } => self.chat_search_history_end(&room_id, cx),
             SyncEvent::MatrixConnection { connected, error } => {
                 if let (false, Some(err)) = (connected, &error) {
                     log::warn!("servers: homeserver connection: {err}");
@@ -2734,7 +2850,10 @@ impl AppState {
                 local_id,
                 error,
             } => {
-                log::warn!("servers: send to {room_id} failed: {error}");
+                log::warn!("servers: send to {room_id} failed: {}", error.raw);
+                // A channel's chat id is its room id (`active_chat_id`).
+                self.send_errors
+                    .insert(room_id.clone(), error_note::Slot::new(error));
                 self.on_channel_send_failed(room_id, local_id, cx)
             }
             SyncEvent::MessageSendFailed {
@@ -2742,13 +2861,15 @@ impl AppState {
                 message_id,
                 error,
             } => {
-                log::warn!("send to {chat_id} failed: {error}");
+                log::warn!("send to {chat_id} failed: {}", error.raw);
                 if let Some(list) = self.messages.get_mut(&chat_id) {
                     if let Some(m) = list.iter_mut().find(|m| m.id == message_id) {
                         m.pending = false;
                         m.status = MessageStatus::Error;
                     }
                 }
+                self.send_errors
+                    .insert(chat_id.clone(), error_note::Slot::new(error));
                 cx.emit(AppEvent::TranscriptChanged { chat_id });
                 cx.notify();
             }
@@ -3163,6 +3284,8 @@ impl AppState {
         }
         self.reveal_message = None;
         self.highlight_message = None;
+        // The Search-in-chat bar belongs to the chat it was opened in.
+        self.chat_search = None;
         if self
             .renaming_project
             .as_ref()
@@ -3668,6 +3791,8 @@ impl AppState {
             chat.unread_count = 0;
         }
         self.sync_badge();
+        // Reading it here clears its banners here too (the relay tells the other devices).
+        notify::withdraw_chat(&chat_id);
         // A job tab is client-side (`jobtabs`): nothing for the relay to open or mark.
         if !crate::jobtabs::is_job_chat(&chat_id) {
             self.command(ClientCommand::MarkRead {
@@ -4028,6 +4153,8 @@ impl AppState {
         let Some(chat_id) = self.active_chat_id() else {
             return;
         };
+        // A new send clears the composer's note (the next failure brings its own).
+        self.send_errors.remove(&chat_id);
         if crate::jobtabs::is_job_chat(&chat_id) {
             self.steer_from_job_tab(&chat_id, text, cx);
             return;
@@ -4085,6 +4212,7 @@ impl AppState {
                     bytes: Some(data.len() as u64),
                     kind: None,
                     title: None,
+                    chart_part: None,
                 };
                 if probe.is_image() {
                     if let Some((image, trimmed)) = decode_image_pair(&data) {
@@ -4110,6 +4238,7 @@ impl AppState {
                     bytes,
                     kind: None,
                     title: None,
+                    chart_part: None,
                 },
             });
         }
@@ -4123,6 +4252,7 @@ impl AppState {
                     bytes: None,
                     kind: Some(AttachmentKind::Audio),
                     title: None,
+                    chart_part: None,
                 },
             });
         }
@@ -4359,6 +4489,7 @@ impl AppState {
         self.search_chat = None;
         self.reveal_message = None;
         self.highlight_message = None;
+        self.chat_search = None;
         self.renaming_project = None;
         self.selected_project = None;
         self.sidebar_overlay = false;
@@ -6256,14 +6387,29 @@ impl AppState {
 
     // ----- profile pages ------------------------------------------------------
 
-    /// Open `page` in the right pane, or close it when that page is already open
-    /// (header pill / Me avatar: click again to fold away).
+    /// The one action behind every click on a person or an agent in the chat —
+    /// a sender name, the disc beside a bubble, an @mention chip, the header
+    /// pill, a status-row picture — and the header pill of a group or channel
+    /// ([feedback profile-pane-toggle-mac-2026-10-26], Jacob: "clicking the
+    /// agent or user in the chat should open their user profile right bar.
+    /// Clicking it again should close it"):
+    ///
+    /// - nothing open → `page` opens in the right pane;
+    /// - that same person / agent showing (whichever target opened it,
+    ///   [`ProfilePage::same_subject`]) → the pane closes;
+    /// - someone else showing → `page` replaces it in place (no back stack).
     pub fn toggle_profile(&mut self, page: ProfilePage, cx: &mut Context<Self>) {
-        if self.profile.as_ref() == Some(&page) {
+        if self.profile_shows(&page) {
             self.close_profile(cx);
         } else {
             self.open_profile(page, cx);
         }
+    }
+
+    /// True while the pane's top page is `page`'s subject (so a second click
+    /// on any target for it closes the pane).
+    pub fn profile_shows(&self, page: &ProfilePage) -> bool {
+        self.profile.as_ref().is_some_and(|p| p.same_subject(page))
     }
 
     /// Fill the pane with `page`, forgetting whatever was under it.
@@ -7584,6 +7730,16 @@ impl AppState {
 
     fn notify_tick(&mut self, cx: &mut Context<Self>) {
         self.tick_calls(cx);
+        if self.account.is_some() {
+            // The explainer, once the OS has answered the start-up status query.
+            let before = self.notify_prompt;
+            self.maybe_prompt_notifications();
+            if self.notify_prompt != before {
+                cx.notify();
+            }
+        }
+        // Keep Settings → Notifications truthful (System Settings can change it any time).
+        notify::refresh_permission();
         let gates: HashMap<Id, Gate> = self
             .projects
             .iter()
@@ -7634,19 +7790,33 @@ impl AppState {
         notify::set_badge(total);
     }
 
-    /// First launch after sign-in: show the explainer once, if the platform
-    /// will ask for permission at all.
+    /// Signed in and macOS has not decided yet: show the explainer (once per
+    /// launch; "Not now" snoozes it for a day, then it comes back because the
+    /// system is still undecided). Allowed or denied in the system → nothing
+    /// to show; Settings → Notifications says which and opens System Settings
+    /// for a denial.
     fn maybe_prompt_notifications(&mut self) {
         if self.notify_prompt || self.notify_prompt_answered || !notify::needs_permission() {
             return;
         }
-        if !notify::permission_asked(&crate::sync::credentials::config_dir()) {
-            self.notify_prompt = true;
+        match notify::permission() {
+            notify::Permission::NotDetermined => {
+                if notify::prompt_snoozed(&crate::sync::credentials::config_dir()) {
+                    self.notify_prompt_answered = true;
+                } else {
+                    self.notify_prompt = true;
+                }
+            }
+            // The OS has not answered yet; `notify_tick` asks again.
+            notify::Permission::Unknown => {}
+            notify::Permission::Denied | notify::Permission::Allowed => {
+                self.notify_prompt_answered = true;
+            }
         }
     }
 
     pub fn allow_notifications(&mut self, cx: &mut Context<Self>) {
-        notify::mark_permission_asked(&crate::sync::credentials::config_dir());
+        notify::snooze_prompt(&crate::sync::credentials::config_dir());
         notify::request_permission();
         self.notify_prompt = false;
         self.notify_prompt_answered = true;
@@ -7654,10 +7824,20 @@ impl AppState {
     }
 
     pub fn dismiss_notify_prompt(&mut self, cx: &mut Context<Self>) {
-        notify::mark_permission_asked(&crate::sync::credentials::config_dir());
+        notify::permission_dismissed(&crate::sync::credentials::config_dir());
         self.notify_prompt = false;
         self.notify_prompt_answered = true;
         cx.notify();
+    }
+
+    /// Settings → Notifications: the system's answer, refreshed every tick so
+    /// a change made in System Settings shows up without a relaunch.
+    pub fn notification_permission(&self) -> notify::Permission {
+        notify::permission()
+    }
+
+    pub fn open_notification_settings(&mut self) {
+        notify::open_system_settings();
     }
 
     pub fn set_window_active(&mut self, active: bool, cx: &mut Context<Self>) {
@@ -7715,28 +7895,142 @@ impl AppState {
         cx.notify();
     }
 
+    /// An info toast: something that worked or a plain status. Never a failure — that is
+    /// [`Self::push_failure`] (`error_ui_lint` keeps raw error strings out of here).
     pub fn push_notice(&mut self, text: impl Into<String>) {
-        let now = now_ms();
-        self.notices
-            .retain(|n| now.saturating_sub(n.at) < NOTICE_TTL_MS);
+        let now = self.next_notice_at();
         self.notices.push(Notice {
             text: text.into(),
             at: now,
+            error: None,
+            details_open: false,
+            held: false,
+            retry: None,
         });
     }
 
-    /// Click on a notice bubble removes it (download status / errors must not sit forever).
+    /// An error toast (the shared error element, 10 s, hover holds, Details + Copy, Try again
+    /// re-issues `retry`). The surface that owns the action catches most failures first
+    /// (sheets, pane pages, the composer); this is for the rest.
+    pub fn push_failure(&mut self, error: UserError, retry: Option<Box<ClientCommand>>) {
+        let now = self.next_notice_at();
+        self.notices.push(Notice {
+            text: error.sentence(),
+            at: now,
+            error: Some(error),
+            details_open: false,
+            held: false,
+            retry,
+        });
+    }
+
+    /// Drops the expired toasts and returns a unique `at` for the next one (`at` is its id:
+    /// two toasts pushed in the same millisecond must not share it).
+    fn next_notice_at(&mut self) -> u64 {
+        let now = now_ms();
+        self.notices
+            .retain(|n| n.held || now.saturating_sub(n.at) < n.ttl_ms());
+        let last = self.notices.iter().map(|n| n.at).max().unwrap_or(0);
+        now.max(last + 1)
+    }
+
+    /// Click on × (or an info toast) removes it (download status / errors must not sit forever).
     pub fn dismiss_notice(&mut self, at: u64) {
         self.notices.retain(|n| n.at != at);
+    }
+
+    /// The pointer on a toast holds it; leaving restarts its clock.
+    pub fn hold_notice(&mut self, at: u64, held: bool) {
+        if let Some(n) = self.notices.iter_mut().find(|n| n.at == at) {
+            n.held = held;
+            if !held {
+                n.at = now_ms();
+            }
+        }
+    }
+
+    /// A surface with a form up takes its verbs' failures (drawn inline at its top); `None`
+    /// releases them. Changing the claim drops a note the old surface held.
+    pub fn set_failure_claim(&mut self, claim: Option<FailureClaim>) {
+        if self.failure_claim != claim {
+            self.failure_claim = claim;
+            self.claimed_failure = None;
+        }
+    }
+
+    pub fn clear_claimed_failure(&mut self) {
+        self.claimed_failure = None;
+    }
+
+    pub fn toggle_claimed_failure_details(&mut self) {
+        if let Some(slot) = self.claimed_failure.as_mut() {
+            slot.toggle_details();
+        }
+    }
+
+    pub fn toggle_sign_in_details(&mut self) {
+        if let Some(p) = &mut self.pairing {
+            p.error_details_open = !p.error_details_open;
+        }
+    }
+
+    pub fn toggle_notice_details(&mut self, at: u64) {
+        if let Some(n) = self.notices.iter_mut().find(|n| n.at == at) {
+            n.details_open = !n.details_open;
+            n.held = true;
+        }
+    }
+
+    /// Try again on an error toast: re-issue its command and drop the toast.
+    pub fn retry_notice(&mut self, at: u64) {
+        let retry = self
+            .notices
+            .iter()
+            .find(|n| n.at == at)
+            .and_then(|n| n.retry.clone());
+        self.dismiss_notice(at);
+        if let Some(cmd) = retry {
+            self.command(*cmd);
+        }
     }
 
     pub fn live_notices(&self) -> Vec<Notice> {
         let now = now_ms();
         self.notices
             .iter()
-            .filter(|n| now.saturating_sub(n.at) < NOTICE_TTL_MS)
+            .filter(|n| n.held || now.saturating_sub(n.at) < n.ttl_ms())
             .cloned()
             .collect()
+    }
+
+    /// The composer's note for `chat`, if a send / attachment / recording failed there.
+    pub fn send_error(&self, chat: &Id) -> Option<&error_note::Slot> {
+        self.send_errors.get(chat)
+    }
+
+    pub fn set_send_error(&mut self, chat: Id, error: UserError) {
+        self.send_errors.insert(chat, error_note::Slot::new(error));
+    }
+
+    pub fn toggle_send_error_details(&mut self, chat: &Id) {
+        if let Some(slot) = self.send_errors.get_mut(chat) {
+            slot.toggle_details();
+        }
+    }
+
+    /// Try again on the composer's note: re-send the newest failed message in that chat (the
+    /// note clears either way; an attachment / recording failure has nothing to re-send).
+    pub fn retry_send_error(&mut self, chat: Id, cx: &mut Context<Self>) {
+        self.send_errors.remove(&chat);
+        let failed = self
+            .messages
+            .get(&chat)
+            .and_then(|list| list.iter().rev().find(|m| m.status == MessageStatus::Error))
+            .map(|m| m.id.clone());
+        if let Some(message_id) = failed {
+            self.resend_failed(chat, message_id, cx);
+        }
+        cx.notify();
     }
 
     pub fn pair(&mut self, code: String, cx: &mut Context<Self>) {
@@ -7788,7 +8082,9 @@ impl AppState {
                 }
             }
             auth::Event::Finished(Ok(auth::SignIn::Cancelled)) => p.flow.cancelled(attempt),
-            auth::Event::Finished(Err(err)) => p.flow.failed(attempt, format!("{err:#}")),
+            auth::Event::Finished(Err(err)) => {
+                p.flow.failed(attempt, UserError::classify("sign in", &err))
+            }
         }
     }
 
@@ -7833,7 +8129,8 @@ impl AppState {
         auth::cancel();
         let url = auth::start_url(&p.relay_url, &device_name());
         if let Err(err) = auth::open_in_browser(&url) {
-            p.flow.failed(attempt, format!("{err:#}"));
+            p.flow
+                .failed(attempt, UserError::classify("open the browser", &err));
         } else {
             self.arm_sign_in_timeout(attempt, cx);
         }
@@ -7856,7 +8153,7 @@ impl AppState {
                     self.command(ClientCommand::SignIn { grant_code });
                 }
             }
-            Err(err) => p.flow.failed(attempt, format!("{err:#}")),
+            Err(err) => p.flow.failed(attempt, UserError::classify("sign in", &err)),
         }
         cx.notify();
     }
@@ -8134,7 +8431,10 @@ impl AppState {
             &self.new_group_agents,
         );
         if plan.handles.is_empty() && plan.agent_ids.is_empty() {
-            self.people_error = Some("Pick someone who is not in the group yet".into());
+            self.people_error = Some(refused(
+                "add members",
+                "Pick someone who is not in the group yet",
+            ));
             cx.notify();
             return false;
         }
@@ -8193,7 +8493,10 @@ impl AppState {
             .cloned()
             .collect();
         if new.is_empty() {
-            self.people_error = Some("Pick someone who is not on the list yet".into());
+            self.people_error = Some(refused(
+                "add them",
+                "Pick someone who is not on the list yet",
+            ));
             cx.notify();
             return false;
         }
@@ -8234,7 +8537,10 @@ impl AppState {
             .cloned()
             .collect();
         if new.is_empty() {
-            self.people_error = Some("Pick someone who is not in the server yet".into());
+            self.people_error = Some(refused(
+                "add members",
+                "Pick someone who is not in the server yet",
+            ));
             cx.notify();
             return false;
         }
@@ -8330,7 +8636,10 @@ impl AppState {
             .collect();
         let agent_ids = self.new_group_agents.clone();
         if handles.is_empty() && agent_ids.is_empty() {
-            self.people_error = Some("Pick at least one person or agent".into());
+            self.people_error = Some(refused(
+                "create the group",
+                "Pick at least one person or agent",
+            ));
             cx.notify();
             return;
         }
@@ -11167,6 +11476,354 @@ mod forward_filter_tests {
 impl search_index::SenderName for AppState {
     fn sender_name(&self, _chat_id: &str, message: &Message) -> String {
         self.viewer_sender_name(message)
+    }
+}
+
+// ----- ⌘F Search-in-chat ([feedback search-in-chat-mac-2026-10-26]) ----------------
+
+/// The open Search-in-chat bar: its chat, what was typed, the pinned sender,
+/// the hits over the loaded rows and the cursor. The pure rules live in
+/// `crate::chat_search`; the view in `ui::chat_search`.
+#[derive(Clone, Debug, Default)]
+pub struct ChatSearch {
+    pub chat_id: Id,
+    /// The field's text as typed.
+    pub typed: String,
+    pub query: chat_search::Query,
+    /// Message ids the query hits, transcript order (oldest first).
+    pub hits: Vec<Id>,
+    /// Index into `hits` of the revealed message.
+    pub current: Option<usize>,
+    /// ‹ on the oldest loaded hit asked the relay for older rows; cleared
+    /// when they land (or when the room has none).
+    pub searching_older: bool,
+    /// The room answered "no older rows": ‹ wraps from now on.
+    pub exhausted: bool,
+    /// How many rows the chat had at the last recompute (a page that brings
+    /// none ends the search upward).
+    pub rows_seen: usize,
+}
+
+/// What the transcript draws for one message while a search is up.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchMarks {
+    /// The folded keyword to mark in the text (empty with a sender-only query).
+    pub needle: String,
+    /// This message is the revealed hit (Find's yellow on its words).
+    pub current: bool,
+}
+
+impl AppState {
+    /// The bar is up for the chat the centre shows.
+    pub fn chat_search_open(&self) -> bool {
+        self.chat_search
+            .as_ref()
+            .is_some_and(|s| Some(&s.chat_id) == self.active_chat_id().as_ref())
+    }
+
+    /// ⌘F: open the bar for the active chat (a bar left on another chat is
+    /// replaced). Returns false with no chat open.
+    pub fn open_chat_search(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(chat_id) = self.active_chat_id() else {
+            return false;
+        };
+        if !self.chat_search_open() {
+            self.chat_search = Some(ChatSearch {
+                chat_id,
+                ..Default::default()
+            });
+        }
+        cx.notify();
+        true
+    }
+
+    /// Esc / ✕: the bar goes, the marks and the revealed row with it.
+    pub fn close_chat_search(&mut self, cx: &mut Context<Self>) {
+        if let Some(search) = self.chat_search.take() {
+            if let Some(cur) = search.current.and_then(|i| search.hits.get(i)) {
+                if self.highlight_message.as_ref() == Some(cur) {
+                    self.highlight_message = None;
+                }
+            }
+            cx.notify();
+        }
+    }
+
+    /// The field changed: new keyword, hits recomputed, cursor on the newest hit.
+    pub fn chat_search_set_text(&mut self, typed: String, cx: &mut Context<Self>) {
+        let Some(search) = self.chat_search.as_mut() else {
+            return;
+        };
+        if search.typed == typed {
+            return;
+        }
+        search.typed = typed;
+        search.exhausted = false;
+        self.chat_search_recompute(true, cx);
+    }
+
+    /// ⇥ or a click on the offered chip: pin that sender, clear the text.
+    pub fn chat_search_pin_sender(&mut self, sender: chat_search::Sender, cx: &mut Context<Self>) {
+        let Some(search) = self.chat_search.as_mut() else {
+            return;
+        };
+        search.query.sender = Some(sender);
+        search.typed.clear();
+        search.exhausted = false;
+        self.chat_search_recompute(true, cx);
+    }
+
+    /// The chip's ✕ (or ⌫ on an empty field): the sender filter goes.
+    pub fn chat_search_unpin_sender(&mut self, cx: &mut Context<Self>) {
+        let Some(search) = self.chat_search.as_mut() else {
+            return;
+        };
+        if search.query.sender.take().is_none() {
+            return;
+        }
+        self.chat_search_recompute(true, cx);
+    }
+
+    /// The sender the typed text names, offered as a chip while none is pinned.
+    pub fn chat_search_offer(&self) -> Option<chat_search::Sender> {
+        let search = self.chat_search.as_ref()?;
+        if search.query.sender.is_some() {
+            return None;
+        }
+        let senders = chat_search::senders(&self.chat_search_rows(&search.chat_id));
+        chat_search::offer_sender(&search.typed, &senders).cloned()
+    }
+
+    /// Enter / › (+1), ⇧Enter / ‹ (−1), ⌘G / ⇧⌘G: move the cursor, reveal the
+    /// hit; ‹ on the oldest loaded hit of a channel pages older rows first.
+    pub fn chat_search_step(&mut self, delta: i32, cx: &mut Context<Self>) {
+        let Some(search) = self.chat_search.as_ref() else {
+            return;
+        };
+        let (chat_id, current, len, exhausted) = (
+            search.chat_id.clone(),
+            search.current,
+            search.hits.len(),
+            search.exhausted,
+        );
+        let may_have_older = !exhausted && self.chat_search_pages(&chat_id);
+        match chat_search::step(current, len, delta, may_have_older) {
+            chat_search::Step::To(i) => {
+                if let Some(search) = self.chat_search.as_mut() {
+                    search.current = Some(i);
+                }
+                self.chat_search_reveal(cx);
+            }
+            chat_search::Step::PageOlder => {
+                if let Some(search) = self.chat_search.as_mut() {
+                    search.searching_older = true;
+                }
+                self.command(ClientCommand::ChannelLoadOlder { room_id: chat_id });
+                cx.notify();
+            }
+            chat_search::Step::Nothing => {}
+        }
+    }
+
+    /// Rows changed in the search's chat (a new message, a channel page):
+    /// hits recomputed, the cursor kept on its message; a page that was asked
+    /// for by ‹ moves on to the next older hit.
+    pub fn chat_search_refresh(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        let Some(search) = self.chat_search.as_ref() else {
+            return;
+        };
+        if search.chat_id != chat_id {
+            return;
+        }
+        let was_paging = search.searching_older;
+        let oldest_before = search.hits.first().cloned();
+        let rows_before = search.rows_seen;
+        self.chat_search_recompute(false, cx);
+        if !was_paging {
+            return;
+        }
+        let Some(search) = self.chat_search.as_mut() else {
+            return;
+        };
+        let rows_now = search.rows_seen;
+        search.searching_older = false;
+        let older_hit = match &oldest_before {
+            Some(id) => search
+                .hits
+                .iter()
+                .position(|h| h == id)
+                .filter(|p| *p > 0)
+                .map(|p| p - 1),
+            // No hit before the page: the newest of the ones it brought.
+            None => chat_search::initial_cursor(search.hits.len()),
+        };
+        if let Some(i) = older_hit {
+            search.current = Some(i);
+            self.chat_search_reveal(cx);
+        } else if rows_now == rows_before {
+            // The page brought nothing: the room's history is exhausted upward.
+            search.exhausted = true;
+            cx.notify();
+        } else {
+            // Rows came but none hit: keep paging.
+            self.chat_search_step(-1, cx);
+        }
+    }
+
+    /// The room has no older rows: ‹ wraps from now on.
+    pub fn chat_search_history_end(&mut self, room_id: &str, cx: &mut Context<Self>) {
+        if let Some(search) = self.chat_search.as_mut() {
+            if search.chat_id == room_id && search.searching_older {
+                search.searching_older = false;
+                search.exhausted = true;
+                cx.notify();
+            }
+        }
+    }
+
+    /// What the transcript marks on `message_id` while the bar is up.
+    pub fn chat_search_marks(&self, message_id: &str) -> Option<SearchMarks> {
+        let search = self.chat_search.as_ref()?;
+        if !self.chat_search_open() {
+            return None;
+        }
+        let at = search.hits.iter().position(|h| h == message_id)?;
+        Some(SearchMarks {
+            needle: search.query.keyword.clone(),
+            current: search.current == Some(at),
+        })
+    }
+
+    /// "2 of 4" / "No matches" / "" for the bar.
+    pub fn chat_search_count(&self) -> String {
+        self.chat_search
+            .as_ref()
+            .map(|s| chat_search::count_label(&s.query, s.current, s.hits.len()))
+            .unwrap_or_default()
+    }
+
+    /// Can the chat page older rows at all: only server channels fetch
+    /// history from the relay; a chat doc is whole on this Mac.
+    fn chat_search_pages(&self, chat_id: &str) -> bool {
+        self.channel_rows.contains_key(chat_id)
+    }
+
+    fn chat_search_recompute(&mut self, reset_cursor: bool, cx: &mut Context<Self>) {
+        let Some(search) = self.chat_search.as_ref() else {
+            return;
+        };
+        let rows = self.chat_search_rows(&search.chat_id);
+        let query = chat_search::Query::new(&search.typed, search.query.sender.clone());
+        let hits = chat_search::hits(&rows, &query);
+        let was_on = search.current.and_then(|i| search.hits.get(i)).cloned();
+        let current = if reset_cursor {
+            chat_search::initial_cursor(hits.len())
+        } else {
+            chat_search::keep_cursor(&hits, was_on.as_ref())
+        };
+        let moved = current.and_then(|i| hits.get(i)) != was_on.as_ref();
+        let rows_seen = rows.len();
+        if let Some(search) = self.chat_search.as_mut() {
+            search.query = query;
+            search.hits = hits;
+            search.current = current;
+            search.rows_seen = rows_seen;
+        }
+        if moved {
+            self.chat_search_reveal(cx);
+        }
+        cx.notify();
+    }
+
+    /// Scroll to and highlight the current hit through the palette's reveal
+    /// path (`reveal_search_message` → `highlight_message` + `reveal_message`
+    /// → `Transcript::reveal_hit`): one reveal mechanism, not a second.
+    fn chat_search_reveal(&mut self, cx: &mut Context<Self>) {
+        let Some(search) = self.chat_search.as_ref() else {
+            return;
+        };
+        let Some(id) = search.current.and_then(|i| search.hits.get(i)).cloned() else {
+            self.highlight_message = None;
+            cx.notify();
+            return;
+        };
+        self.highlight_message = Some(id.clone());
+        self.reveal_message = Some((search.chat_id.clone(), id));
+        self.reveal_nonce += 1;
+        cx.notify();
+    }
+
+    /// The loaded messages of `chat_id` as the search sees them (system rows
+    /// and wordless job rows left out, like the palette's index).
+    fn chat_search_rows(&self, chat_id: &str) -> Vec<chat_search::Row> {
+        self.messages_of(chat_id)
+            .iter()
+            .filter(|m| m.role != Role::System && !m.hidden)
+            .filter_map(|m| {
+                let text = crate::ui::sidebar::plain(&m.plain_text());
+                let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                if text.is_empty() {
+                    return None;
+                }
+                Some(chat_search::Row {
+                    id: m.id.clone(),
+                    text,
+                    sender: self.sender_identity(chat_id, m),
+                })
+            })
+            .collect()
+    }
+
+    /// Who sent `m`, for the sender chip: display name, handle, picture. An
+    /// agent's reply in its own chat (no handle, `sender` without an agent id)
+    /// is the chat's agent.
+    pub fn sender_identity(&self, chat_id: &str, m: &Message) -> chat_search::Sender {
+        let name = self.viewer_sender_name(m);
+        if self.is_mine(m) {
+            return chat_search::Sender {
+                key: format!("user:{}", self.me_id()),
+                name: self.me_name(),
+                handle: self.me_handle(),
+                avatar_url: None,
+            };
+        }
+        if let Some(h) = m.sender_handle.as_deref().filter(|h| !h.is_empty()) {
+            let person = self.person_by_handle(h);
+            return chat_search::Sender {
+                key: format!("@{h}"),
+                name,
+                handle: h.to_owned(),
+                avatar_url: person
+                    .map(|p| p.avatar_url)
+                    .filter(|u| !u.is_empty())
+                    .or_else(|| m.sender_avatar.clone()),
+            };
+        }
+        let agent = m
+            .sender
+            .strip_prefix("agent:")
+            .or_else(|| m.sender.strip_prefix("project:"))
+            .and_then(|pid| self.project(pid))
+            .or_else(|| {
+                (m.role == Role::Assistant)
+                    .then(|| self.project(&self.space_of_chat(chat_id)))
+                    .flatten()
+                    .filter(|p| !p.is_people())
+            });
+        match agent {
+            Some(p) => chat_search::Sender {
+                key: format!("agent:{}", p.id),
+                name: p.name.clone(),
+                handle: Project::mention_slug(&p.name),
+                avatar_url: m.sender_avatar.clone(),
+            },
+            None => chat_search::Sender {
+                key: m.sender.clone(),
+                name,
+                handle: String::new(),
+                avatar_url: m.sender_avatar.clone(),
+            },
+        }
     }
 }
 

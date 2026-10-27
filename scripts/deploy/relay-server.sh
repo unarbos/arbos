@@ -167,6 +167,41 @@ if command -v op >/dev/null 2>&1 && [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; th
   : "${LIVEKIT_API_KEY:=$(opread 'op://Arbos/ypyfs6fm7dtkzphirv6ep7lfjq/LIVEKIT_API_KEY')}"
   : "${LIVEKIT_API_SECRET:=$(opread 'op://Arbos/ypyfs6fm7dtkzphirv6ep7lfjq/LIVEKIT_API_SECRET')}"
 fi
+# Push notifications (APNs, crates/arbos-relay/src/apns.rs): ONE vault item titled "Arbos APNs auth key"
+# (ARB-56) — the APNs .p8 from developer.apple.com → Keys attached as a file (AuthKey_<KEYID>.p8; or its
+# PEM text in a field APNS_KEY_P8), the 10-character Key ID in a field APNS_KEY_ID (taken from the file
+# name when the field is missing) and optionally APNS_TEAM_ID / APNS_TOPIC. The PEM goes to
+# $APNS_KEY_FILE (root:arbos 0640 — the relay runs as `arbos`) and the env file points at it. Until the
+# item exists the relay says "push notifications are off" once at start and keeps every registration.
+APNS_KEY_FILE=/etc/arbos/apns-key.p8
+APNS_ITEM="Arbos APNs auth key"
+apns_from_vault() {
+  local json pem="" file=""
+  json=$(HOME=/root XDG_CONFIG_HOME=/root/.config op item get "$APNS_ITEM" --vault Arbos --format json 2>/dev/null </dev/null) || return 0
+  [[ -n "$json" ]] || return 0
+  apns_field() { jq -r --arg l "$1" '[.fields[]? | select((.label // "") == $l) | .value // empty][0] // empty' <<<"$json"; }
+  : "${APNS_KEY_ID:=$(apns_field APNS_KEY_ID | tr -d '[:space:]')}"
+  : "${APNS_TEAM_ID:=$(apns_field APNS_TEAM_ID | tr -d '[:space:]')}"
+  : "${APNS_TOPIC:=$(apns_field APNS_TOPIC | tr -d '[:space:]')}"
+  pem=$(apns_field APNS_KEY_P8)
+  if [[ "$pem" != *"-----BEGIN"* ]]; then
+    file=$(jq -r '[.files[]? | select((.name // "") | endswith(".p8"))][0].name // empty' <<<"$json")
+    [[ -z "$file" ]] || pem=$(opread "op://Arbos/$APNS_ITEM/$file")
+    if [[ -z "${APNS_KEY_ID:-}" && "$file" =~ AuthKey_([A-Za-z0-9]{10})\.p8 ]]; then APNS_KEY_ID=${BASH_REMATCH[1]}; fi
+  fi
+  if [[ "$pem" == *"-----BEGIN"* ]]; then
+    (umask 077; printf '%s\n' "$pem" > "$APNS_KEY_FILE")
+    chown root:arbos "$APNS_KEY_FILE"; chmod 0640 "$APNS_KEY_FILE"
+    APNS_KEY_P8="$APNS_KEY_FILE"
+    echo "APNs key from the vault item \"$APNS_ITEM\" → $APNS_KEY_FILE (key id ${APNS_KEY_ID:-?})"
+  else
+    echo "WARNING: vault item \"$APNS_ITEM\" has no .p8 file and no APNS_KEY_P8 field; push stays off"
+  fi
+}
+if command -v op >/dev/null 2>&1 && [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
+  apns_from_vault
+fi
+APNS_KEYS=(APNS_KEY_P8 APNS_KEY_ID APNS_TEAM_ID APNS_TOPIC)
 # Chats on Matrix (D88, scripts/deploy/matrix): the homeserver next to the relay and the three
 # appservice token pairs. ARBOS_MATRIX itself (off|dual|on) is an operator switch, never read from
 # the vault: it is kept from the env file and defaults to off.
@@ -192,7 +227,16 @@ fi
 # keep values already in the env file when nothing new was supplied
 if [[ -f "$ENV_FILE" ]]; then
   keep() { local k=$1; [[ -n "${!k:-}" ]] || printf -v "$k" '%s' "$(sed -n "s/^$k=//p" "$ENV_FILE" | head -1)"; }
-  for k in OPENROUTER_API_KEY OPENAI_API_KEY DAYTONA_API_KEY ARBOS_RELAY_ADMIN_TOKEN ARBOS_RELAY_KEY ARBOS_JWT_KEY ARBOS_GITHUB_CLIENT_ID ARBOS_GITHUB_CLIENT_SECRET ARBOS_DAYTONA_SNAPSHOT LIVEKIT_URL LIVEKIT_API_KEY LIVEKIT_API_SECRET ARBOS_AUTH_REDIRECTS "${MATRIX_KEYS[@]}" "${FLEET_KEYS[@]}" "${FEATURE_KEYS[@]}" "${UPGRADE_KEYS[@]}"; do keep "$k"; done
+  for k in OPENROUTER_API_KEY OPENAI_API_KEY DAYTONA_API_KEY ARBOS_RELAY_ADMIN_TOKEN ARBOS_RELAY_KEY ARBOS_JWT_KEY ARBOS_GITHUB_CLIENT_ID ARBOS_GITHUB_CLIENT_SECRET ARBOS_DAYTONA_SNAPSHOT LIVEKIT_URL LIVEKIT_API_KEY LIVEKIT_API_SECRET ARBOS_AUTH_REDIRECTS "${MATRIX_KEYS[@]}" "${FLEET_KEYS[@]}" "${FEATURE_KEYS[@]}" "${UPGRADE_KEYS[@]}" "${APNS_KEYS[@]}"; do keep "$k"; done
+fi
+# A kept APNS_KEY_P8 path whose file is gone is no key at all; the relay would log an error and run with push off.
+if [[ -n "${APNS_KEY_P8:-}" && "$APNS_KEY_P8" != *"-----BEGIN"* && ! -r "$APNS_KEY_P8" ]]; then
+  echo "WARNING: APNS_KEY_P8=$APNS_KEY_P8 is not readable; dropping it (push stays off)"
+  APNS_KEY_P8=""
+fi
+if [[ -n "${APNS_KEY_P8:-}" ]]; then
+  : "${APNS_TEAM_ID:=25SCF3Q2AK}"
+  [[ -n "${APNS_KEY_ID:-}" ]] || echo "WARNING: APNS_KEY_ID is empty — set it in the vault item \"$APNS_ITEM\"; push stays off"
 fi
 # Where /auth/github/start may send the browser besides the apps' arbos:// scheme, loopback and the
 # relay's own origin (comma-separated prefixes). The site's "Sign in with GitHub" lands on
@@ -248,6 +292,10 @@ for k in "${FEATURE_KEYS[@]}"; do
 done
 # Box upgrade carry knobs: only the keys that have a value; unset means the relay default.
 for k in "${UPGRADE_KEYS[@]}"; do
+  [[ -z "${!k:-}" ]] || printf '%s=%s\n' "$k" "${!k}" >> "$ENV_FILE"
+done
+# APNs: only when the key exists (all three required by the relay; APNS_TOPIC optional).
+for k in "${APNS_KEYS[@]}"; do
   [[ -z "${!k:-}" ]] || printf '%s=%s\n' "$k" "${!k}" >> "$ENV_FILE"
 done
 chmod 0600 "$ENV_FILE"; chown root:root "$ENV_FILE"
