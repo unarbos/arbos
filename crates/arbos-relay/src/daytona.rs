@@ -460,22 +460,88 @@ impl Daytona {
         format!("{}/{id}", url.trim_end_matches('/'))
     }
 
+    /// A handle on one sandbox's toolbox with the proxy base resolved once — for runs of many calls
+    /// (the box upgrade's part-wise carry) that would otherwise ask for the proxy URL every time.
+    pub async fn toolbox(&self, id: &str) -> Toolbox<'_> {
+        Toolbox {
+            dt: self,
+            base: self.toolbox_base(id).await,
+        }
+    }
+
     /// `POST {proxy}/{sandboxId}/files/upload?path=` — write one file into a started sandbox (parent
     /// directories are created). Used to hand the box the current relay URL at every wake.
     pub async fn toolbox_upload(&self, id: &str, path: &str, bytes: Vec<u8>) -> Result<()> {
+        self.toolbox(id)
+            .await
+            .upload(path, bytes, Duration::from_secs(30))
+            .await
+    }
+
+    /// `GET {proxy}/{sandboxId}/files/download?path=` — read one file out of a started sandbox.
+    pub async fn toolbox_download(&self, id: &str, path: &str) -> Result<Vec<u8>> {
+        self.toolbox(id)
+            .await
+            .download(path, Duration::from_secs(600))
+            .await
+    }
+
+    /// `POST {proxy}/{sandboxId}/process/execute`.
+    pub async fn toolbox_exec(&self, id: &str, command: &str, timeout_s: u64) -> Result<Value> {
+        self.toolbox(id).await.exec(command, timeout_s).await
+    }
+
+    fn toolbox_auth(&self, r: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let r = r.bearer_auth(&self.key);
+        match &self.org {
+            Some(org) => r.header("X-Daytona-Organization-ID", org),
+            None => r,
+        }
+    }
+
+    /// `POST /toolbox/{sandboxId}/toolbox/process/session` then `.../session/{sessionId}/exec` with `runAsync`.
+    pub async fn toolbox_session_exec_async(
+        &self,
+        id: &str,
+        session: &str,
+        command: &str,
+    ) -> Result<Value> {
+        let base = self.toolbox_base(id).await;
+        let _ = self
+            .toolbox_auth(self.http.post(format!("{base}/process/session")))
+            .json(&json!({ "sessionId": session }))
+            .send()
+            .await;
+        self.send(
+            self.toolbox_auth(
+                self.http
+                    .post(format!("{base}/process/session/{session}/exec")),
+            )
+            .json(&json!({ "command": command, "runAsync": true })),
+            "toolbox session exec",
+        )
+        .await
+    }
+}
+
+/// One sandbox's toolbox, proxy base already resolved. Every call takes its own deadline: the
+/// client default (120 s) is far too short for a part of `/work` and far too long for a `df`.
+pub struct Toolbox<'a> {
+    dt: &'a Daytona,
+    base: String,
+}
+
+impl Toolbox<'_> {
+    /// `POST .../files/upload?path=` with `deadline` for the whole request.
+    pub async fn upload(&self, path: &str, bytes: Vec<u8>, deadline: Duration) -> Result<()> {
         let part = reqwest::multipart::Part::bytes(bytes).file_name("file");
         let form = reqwest::multipart::Form::new().part("file", part);
-        let base = self.toolbox_base(id).await;
-        let mut r = self
-            .http
-            .post(format!("{base}/files/upload"))
-            .bearer_auth(&self.key)
+        let r = self
+            .dt
+            .toolbox_auth(self.dt.http.post(format!("{}/files/upload", self.base)))
             .query(&[("path", path)])
             .multipart(form)
-            .timeout(Duration::from_secs(30));
-        if let Some(org) = &self.org {
-            r = r.header("X-Daytona-Organization-ID", org);
-        }
+            .timeout(deadline);
         let resp = r.send().await.context("toolbox upload")?;
         if !resp.status().is_success() {
             return Err(anyhow!(
@@ -487,18 +553,13 @@ impl Daytona {
         Ok(())
     }
 
-    /// `GET {proxy}/{sandboxId}/files/download?path=` — read one file out of a started sandbox.
-    pub async fn toolbox_download(&self, id: &str, path: &str) -> Result<Vec<u8>> {
-        let base = self.toolbox_base(id).await;
-        let mut r = self
-            .http
-            .get(format!("{base}/files/download"))
-            .bearer_auth(&self.key)
+    /// `GET .../files/download?path=` with `deadline` for the whole request.
+    pub async fn download(&self, path: &str, deadline: Duration) -> Result<Vec<u8>> {
+        let r = self
+            .dt
+            .toolbox_auth(self.dt.http.get(format!("{}/files/download", self.base)))
             .query(&[("path", path)])
-            .timeout(Duration::from_secs(600));
-        if let Some(org) = &self.org {
-            r = r.header("X-Daytona-Organization-ID", org);
-        }
+            .timeout(deadline);
         let resp = r.send().await.context("toolbox download")?;
         if !resp.status().is_success() {
             return Err(anyhow!(
@@ -507,51 +568,20 @@ impl Daytona {
                 resp.text().await.unwrap_or_default()
             ));
         }
-        Ok(resp.bytes().await?.to_vec())
+        Ok(resp
+            .bytes()
+            .await
+            .context("toolbox download body")?
+            .to_vec())
     }
 
-    /// `POST {proxy}/{sandboxId}/process/execute`.
-    pub async fn toolbox_exec(&self, id: &str, command: &str, timeout_s: u64) -> Result<Value> {
-        let base = self.toolbox_base(id).await;
-        let mut r = self
-            .http
-            .post(format!("{base}/process/execute"))
-            .bearer_auth(&self.key)
+    /// `POST .../process/execute` — `timeout_s` is the box-side limit; the request gets 30 s more.
+    pub async fn exec(&self, command: &str, timeout_s: u64) -> Result<Value> {
+        let r = self
+            .dt
+            .toolbox_auth(self.dt.http.post(format!("{}/process/execute", self.base)))
             .json(&json!({ "command": command, "timeout": timeout_s }))
             .timeout(Duration::from_secs(timeout_s + 30));
-        if let Some(org) = &self.org {
-            r = r.header("X-Daytona-Organization-ID", org);
-        }
-        self.send(r, "toolbox exec").await
-    }
-
-    /// `POST /toolbox/{sandboxId}/toolbox/process/session` then `.../session/{sessionId}/exec` with `runAsync`.
-    pub async fn toolbox_session_exec_async(
-        &self,
-        id: &str,
-        session: &str,
-        command: &str,
-    ) -> Result<Value> {
-        let base = self.toolbox_base(id).await;
-        let auth = |r: reqwest::RequestBuilder| {
-            let r = r.bearer_auth(&self.key);
-            match &self.org {
-                Some(org) => r.header("X-Daytona-Organization-ID", org),
-                None => r,
-            }
-        };
-        let _ = auth(self.http.post(format!("{base}/process/session")))
-            .json(&json!({ "sessionId": session }))
-            .send()
-            .await;
-        self.send(
-            auth(
-                self.http
-                    .post(format!("{base}/process/session/{session}/exec")),
-            )
-            .json(&json!({ "command": command, "runAsync": true })),
-            "toolbox session exec",
-        )
-        .await
+        self.dt.send(r, "toolbox exec").await
     }
 }

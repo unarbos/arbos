@@ -13,6 +13,7 @@ mod channel;
 mod group;
 pub(crate) mod kit;
 pub(crate) mod library;
+pub(crate) mod machine;
 mod me;
 pub(crate) mod pane;
 mod server;
@@ -601,7 +602,11 @@ pub(super) fn collect(state: &AppState, chats: &[&Chat]) -> Content {
         links: Vec::new(),
     };
     for chat in chats {
-        for m in state.messages_of(&chat.id) {
+        for m in state
+            .messages_of(&chat.id)
+            .iter()
+            .filter(|m| !state.hides_message(&chat.id, m))
+        {
             let by = sender_label(state, m);
             let sender = Sender::of(state, m, &chat.project_id);
             for part in &m.parts {
@@ -765,7 +770,7 @@ pub(super) fn link_list(
                 .overflow_hidden()
                 .bg(theme.surface_2)
                 .child(
-                    gpui::img(img)
+                    gpui::img(crate::ui::picture_fit::fit(&img, kit::AVATAR))
                         .size(px(kit::AVATAR))
                         .rounded(px(10.0))
                         .object_fit(gpui::ObjectFit::Cover),

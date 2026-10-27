@@ -206,7 +206,7 @@ impl Memory {
         text: &str,
         proposals: &[Value],
     ) -> Result<()> {
-        let text: String = text.chars().take(12_000).collect();
+        let text = crate::truncate::clip_marked(text, 12_000, "", None);
         if text.trim().len() < 20 && proposals.is_empty() {
             return Ok(());
         }

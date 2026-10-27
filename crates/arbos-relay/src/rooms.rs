@@ -217,7 +217,10 @@ fn error_frame(code: &str, message: &str) -> Message {
     )
 }
 
-/// People-push refusal: always carries `batchId`; `rate_limited` also carries `retryS`.
+/// People-push refusal: always carries `batchId`; `rate_limited` also carries `retryS`;
+/// `not_available` carries `reason` (`blocked_by` / `blocks_member` / `silenced` /
+/// `chat_unavailable`) and, on a block, `byHandle` (+ `byName`). The code set never grows:
+/// fielded clients only keep a room Live for these two codes.
 fn push_refused_frame(refused: &people::PushRefused, batch_id: &str) -> Message {
     let mut header = json!({
         "code": refused.code(),
@@ -226,6 +229,15 @@ fn push_refused_frame(refused: &people::PushRefused, batch_id: &str) -> Message 
     });
     if let Some(retry_s) = refused.retry_s() {
         header["retryS"] = json!(retry_s);
+    }
+    if let Some(reason) = refused.reason() {
+        header["reason"] = json!(reason);
+    }
+    if let Some((by_handle, by_name)) = refused.other_party() {
+        header["byHandle"] = json!(by_handle);
+        if let Some(name) = by_name {
+            header["byName"] = json!(name);
+        }
     }
     frame(FrameType::Error, header, Bytes::new())
 }

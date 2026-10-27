@@ -92,6 +92,13 @@ struct BoxWorkspace: Equatable {
     /// How long the current turn has run (`turn.current.elapsed_ms`).
     var elapsedMs: Int64?
     var toolCalls: Int64?
+    /// Background jobs (sub-agents) running for this agent (`jobs_running`, agentd ≥ 0.6.277).
+    var jobsRunning: Int64?
+    /// Its share of the box (`usage`: the workspace cgroup and a cached `du`).
+    var cpuPct: Double?
+    var memMb: Int64?
+    var pids: Int64?
+    var diskMb: Int64?
 }
 
 /// The box as `GET /machine/debug` reports it — the relay's view plus the box's own
@@ -108,12 +115,25 @@ struct BoxReport: Equatable {
     var reachable: Bool
     var unreachableReason: String?
     var uptimeS: Int64?
-    /// 1-minute load average.
+    /// 1-minute load average. Inside a Daytona sandbox it is the **host's** (`load_scope` =
+    /// `host`, agentd ≥ 0.6.277): then it says nothing about the box and is not drawn.
     var load1m: Double?
+    var loadIsHost = false
     var memTotalMb: Int64?
     var memAvailableMb: Int64?
     var diskTotalMb: Int64?
     var diskAvailableMb: Int64?
+    /// `resources.cpu` (agentd ≥ 0.6.277): cores the box may use and the share busy over the last 5 s.
+    var cpuCores: Double?
+    var cpuPct: Double?
+    /// `resources.disk.inodes_*`: file slots (#1857 — a box can be "full" with bytes free).
+    var inodesTotal: Int64?
+    var inodesAvail: Int64?
+    /// `resources.net`: bytes per second over the last 5 s and bytes since the UTC day began.
+    var netRxBps: Double?
+    var netTxBps: Double?
+    var netRxToday: Int64?
+    var netTxToday: Int64?
     var workspaces: [BoxWorkspace]
 
     /// `GET /machine/debug` → the report. Lenient: every field is optional on the wire
@@ -133,24 +153,68 @@ struct BoxReport: Equatable {
         guard reachable else { return }
         uptimeS = (st["uptime_s"] as? NSNumber)?.int64Value
         load1m = ((st["load"] as? [Any])?.first as? NSNumber)?.doubleValue
+        loadIsHost = (st["load_scope"] as? String) == "host"
+        // `memory_mb` carries the cgroup cap on agentd ≥ 0.6.277 (the host's figures before);
+        // `resources.memory` is the same view with `used` instead of `available`.
+        let res = st["resources"] as? [String: Any] ?? [:]
+        let resMem = res["memory"] as? [String: Any] ?? [:]
         let mem = st["memory_mb"] as? [String: Any] ?? [:]
-        memTotalMb = (mem["total"] as? NSNumber)?.int64Value
-        memAvailableMb = (mem["available"] as? NSNumber)?.int64Value
+        memTotalMb = (resMem["total_mb"] as? NSNumber)?.int64Value ?? (mem["total"] as? NSNumber)?.int64Value
+        if let t = (resMem["total_mb"] as? NSNumber)?.int64Value, let u = (resMem["used_mb"] as? NSNumber)?.int64Value {
+            memAvailableMb = max(0, t - u)
+        } else {
+            memAvailableMb = (mem["available"] as? NSNumber)?.int64Value
+        }
         let disk = st["disk"] as? [String: Any] ?? [:]
         diskTotalMb = (disk["total_mb"] as? NSNumber)?.int64Value
         diskAvailableMb = (disk["available_mb"] as? NSNumber)?.int64Value
+        let cpu = res["cpu"] as? [String: Any] ?? [:]
+        cpuCores = (cpu["cores"] as? NSNumber)?.doubleValue
+        cpuPct = (cpu["pct"] as? NSNumber)?.doubleValue
+        let resDisk = res["disk"] as? [String: Any] ?? [:]
+        inodesTotal = (resDisk["inodes_total"] as? NSNumber)?.int64Value
+        inodesAvail = (resDisk["inodes_avail"] as? NSNumber)?.int64Value
+        let net = res["net"] as? [String: Any] ?? [:]
+        netRxBps = (net["rx_bps"] as? NSNumber)?.doubleValue
+        netTxBps = (net["tx_bps"] as? NSNumber)?.doubleValue
+        netRxToday = (net["rx_bytes_today"] as? NSNumber)?.int64Value
+        netTxToday = (net["tx_bytes_today"] as? NSNumber)?.int64Value
         workspaces = (st["workspaces"] as? [[String: Any]] ?? []).map { w in
             let turn = w["turn"] as? [String: Any] ?? [:]
             let current = turn["current"] as? [String: Any] ?? [:]
+            let usage = w["usage"] as? [String: Any] ?? [:]
             return BoxWorkspace(
                 projectId: w["project_id"] as? String ?? "",
                 name: w["name"] as? String ?? "",
                 healthy: w["healthy"] as? Bool ?? false,
                 running: turn["running"] as? Bool ?? false,
                 elapsedMs: (current["elapsed_ms"] as? NSNumber)?.int64Value,
-                toolCalls: (current["tool_calls"] as? NSNumber)?.int64Value
+                toolCalls: (current["tool_calls"] as? NSNumber)?.int64Value,
+                jobsRunning: (w["jobs_running"] as? NSNumber)?.int64Value,
+                cpuPct: (usage["cpu_pct"] as? NSNumber)?.doubleValue,
+                memMb: (usage["mem_mb"] as? NSNumber)?.int64Value,
+                pids: (usage["pids"] as? NSNumber)?.int64Value,
+                diskMb: (usage["disk_mb"] as? NSNumber)?.int64Value
             )
         }
+    }
+
+    /// Workspaces whose box share the sampler reported (agentd ≥ 0.6.277), the busy ones
+    /// first, then the biggest memory — the per-agent breakdown.
+    var usageRows: [BoxWorkspace] {
+        workspaces
+            .filter { $0.cpuPct != nil || $0.memMb != nil || $0.diskMb != nil }
+            .sorted { a, b in
+                if a.running != b.running { return a.running && !b.running }
+                if (a.memMb ?? 0) != (b.memMb ?? 0) { return (a.memMb ?? 0) > (b.memMb ?? 0) }
+                return a.name < b.name
+            }
+    }
+
+    /// Background jobs running across every workspace, when any workspace reports the count.
+    var jobsRunning: Int64? {
+        let counts = workspaces.compactMap(\.jobsRunning)
+        return counts.isEmpty ? nil : counts.reduce(0, +)
     }
 
     /// The workspace of one agent, if the box lists it.

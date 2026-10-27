@@ -501,7 +501,9 @@ impl Db {
         }
         let c = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
         c.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;",
+            // secure_delete: rows a shallow checkpoint replaces (secret hand-off) leave no old
+            // bytes behind in the file.
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON;",
         )?;
         c.execute_batch(SCHEMA)?;
         // Forward-only, additive migrations (D50).
@@ -531,6 +533,16 @@ impl Db {
         let _ = c.execute("ALTER TABLE projects ADD COLUMN image_key TEXT", []);
         let _ = c.execute(
             "ALTER TABLE projects ADD COLUMN avatar_version INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        // Every row carries a stamp (ARB-394, 2026-10-26): agents whose avatar predates the
+        // stamps sat at 0, so a client could hold two differing copies of one agent (the
+        // old picture, a later reset) that tied — and had to guess. A row at 0 takes its
+        // creation time: below any change the stamping clock can produce, above the 0 a
+        // stale client copy carries, so the copy fetched after this start always wins.
+        // Idempotent: only rows at 0; `stamp_avatar_version` moves them from here on.
+        let _ = c.execute(
+            "UPDATE projects SET avatar_version = MAX(created_at, 1) WHERE avatar_version = 0",
             [],
         );
         // One box per user: devices and projects belong to a user; legacy sandboxes record where
@@ -573,6 +585,8 @@ impl Db {
         c.execute_batch(crate::db_people::PEOPLE_SCHEMA)?;
         Self::migrate_mono_avatar_defaults(&c)?;
         c.execute_batch(crate::db_push::PUSH_SCHEMA)?;
+        c.execute_batch(crate::push::store::OUTBOX_SCHEMA)?;
+        c.execute_batch(crate::push::eligibility::LEVEL_SCHEMA)?;
         c.execute_batch(crate::db_calls::CALLS_SCHEMA)?;
         crate::db_calls::migrate_calls(&c);
         c.execute_batch(crate::db_voice::VOICE_SCHEMA)?;
@@ -850,12 +864,25 @@ impl Db {
 
     // ---- projects and chats -------------------------------------------------------------------
 
+    /// Admin: a project's daily cap in USD, or the unlimited sentinel.
+    pub fn set_project_spend_cap(&self, id: &str, cap: f64) -> Result<bool> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE projects SET spend_cap_daily = ?2 WHERE id = ?1",
+                params![id, cap],
+            )
+            .map(|n| n > 0)
+        })
+    }
+
     pub fn insert_project(&self, p: &Project) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO projects(id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state, avatar, avatar_color, description, primary_chat_id, avatar_color_index, avatar_leaf, avatar_leaf_color, image_key)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
-                params![p.id, p.name, p.icon, p.instructions, p.models.to_string(), p.state, p.created_at, p.last_active_at, p.spend_cap_daily, p.color, p.user_id, p.workspace_state, p.avatar, p.avatar_color, p.description, p.primary_chat_id, p.avatar_color_index, p.avatar_leaf, p.avatar_leaf_color, p.image_key],
+                "INSERT INTO projects(id, name, icon, instructions, models, state, created_at, last_active_at, spend_cap_daily, color, user_id, workspace_state, avatar, avatar_color, description, primary_chat_id, avatar_color_index, avatar_leaf, avatar_leaf_color, image_key, avatar_version)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+                params![p.id, p.name, p.icon, p.instructions, p.models.to_string(), p.state, p.created_at, p.last_active_at, p.spend_cap_daily, p.color, p.user_id, p.workspace_state, p.avatar, p.avatar_color, p.description, p.primary_chat_id, p.avatar_color_index, p.avatar_leaf, p.avatar_leaf_color, p.image_key,
+                        // A new row is stamped at birth (its creation time), never 0.
+                        if p.avatar_version > 0 { p.avatar_version } else { p.created_at.max(1) }],
             )
             .map(|_| ())
         })
@@ -1389,6 +1416,29 @@ impl Db {
         })
     }
 
+    /// Per-user box provider override (`users.box_provider`), `None` = the relay default.
+    pub fn user_provider(&self, user_id: &str) -> Result<Option<String>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT box_provider FROM users WHERE id = ?1",
+                params![user_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map(|o| o.flatten())
+        })
+    }
+
+    pub fn set_user_provider(&self, user_id: &str, provider: Option<&str>) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE users SET box_provider = ?2 WHERE id = ?1",
+                params![user_id, provider],
+            )
+            .map(|_| ())
+        })
+    }
+
     pub fn user_spend_cap(&self, user_id: &str) -> Result<f64> {
         self.with(|c| {
             c.query_row(
@@ -1621,6 +1671,15 @@ impl Db {
                 Ok(Row { seq: r.get(0)?, device: r.get(1)?, batch_id: r.get(2)?, bytes: r.get(3)? })
             })?;
             rows.collect()
+        })
+    }
+
+    /// After rows were replaced for a redaction: fold the WAL into the main file and truncate
+    /// it, so the pages that held the old bytes are gone from disk as well.
+    pub fn flush_after_scrub(&self) -> Result<()> {
+        self.with(|c| {
+            c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+            Ok(())
         })
     }
 
@@ -3549,6 +3608,104 @@ mod avatar_migration_tests {
                 .avatar_color
                 .as_deref(),
             Some("mono")
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// ARB-394: no two states of one agent's avatar ever share a stamp. A legacy row at 0 is
+    /// stamped with its creation time at start-up; a new row is stamped at birth; every avatar
+    /// write moves the stamp strictly forward, even inside one millisecond; and a client copy
+    /// from before the backfill (stamp 0) loses to anything fetched after it.
+    #[test]
+    fn avatar_version_backfill_leaves_no_zero_and_no_shared_stamps() {
+        let dir = std::env::temp_dir().join(format!(
+            "arbos-avatar-stamp-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = dir.join("relay.db");
+        let created = 1_792_802_625_013; // Hezbola's creation time, a real pre-stamp row
+        {
+            let db = Db::open(&path).expect("db");
+            let mut legacy = project("p_legacy", None);
+            legacy.created_at = created;
+            legacy.image_key = Some("avatar-old.jpg".into());
+            db.insert_project(&legacy).unwrap();
+            // Force the pre-backfill shape: the row at 0, as every pre-#1813 avatar was.
+            db.with(|c| {
+                c.execute(
+                    "UPDATE projects SET avatar_version = 0 WHERE id = 'p_legacy'",
+                    [],
+                )
+            })
+            .unwrap();
+            assert_eq!(db.project("p_legacy").unwrap().unwrap().avatar_version, 0);
+        }
+        let db = Db::open(&path).expect("reopen runs the backfill");
+        let legacy = db.project("p_legacy").unwrap().unwrap();
+        assert_eq!(
+            legacy.avatar_version, created,
+            "a 0 row takes its creation time"
+        );
+        assert!(
+            legacy.avatar_version > 0,
+            "a stale client copy at 0 loses to this row"
+        );
+
+        // A new row is born stamped (never 0), and a pre-stamp client copy always loses.
+        let mut fresh = project("p_fresh", None);
+        fresh.created_at = created + 5;
+        db.insert_project(&fresh).unwrap();
+        assert_eq!(
+            db.project("p_fresh").unwrap().unwrap().avatar_version,
+            created + 5
+        );
+
+        // Every change moves the stamp strictly forward — picture, reset to the leaf, picture
+        // again — so the states never share a stamp, even inside one millisecond.
+        let mut seen = vec![legacy.avatar_version];
+        db.set_project_image_key("p_legacy", Some("avatar-new.jpg"))
+            .unwrap();
+        seen.push(db.project("p_legacy").unwrap().unwrap().avatar_version);
+        db.set_project_image_key("p_legacy", None).unwrap();
+        seen.push(db.project("p_legacy").unwrap().unwrap().avatar_version);
+        db.update_project(
+            "p_legacy",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Some(2)),
+            Some(Some(3)),
+        )
+        .unwrap();
+        seen.push(db.project("p_legacy").unwrap().unwrap().avatar_version);
+        db.set_project_image_key("p_legacy", Some("avatar-new.jpg"))
+            .unwrap();
+        seen.push(db.project("p_legacy").unwrap().unwrap().avatar_version);
+        for w in seen.windows(2) {
+            assert!(w[1] > w[0], "stamps must strictly increase: {seen:?}");
+        }
+        assert!(
+            seen[1] >= now_ms() - 60_000,
+            "a change stamps the clock, not the creation time: {seen:?}"
+        );
+
+        // The backfill is idempotent: a second start changes nothing.
+        let before = db.project("p_legacy").unwrap().unwrap().avatar_version;
+        drop(db);
+        let db = Db::open(&path).expect("reopen again");
+        assert_eq!(
+            db.project("p_legacy").unwrap().unwrap().avatar_version,
+            before
         );
         let _ = std::fs::remove_dir_all(dir);
     }

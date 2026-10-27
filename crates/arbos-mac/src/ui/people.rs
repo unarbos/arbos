@@ -13,6 +13,7 @@ use crate::app::AppState;
 use crate::model::{AgentMember, Person, Project};
 use crate::ui::avatars;
 use crate::ui::composer::ComposerInput;
+use crate::ui::error_note;
 use crate::ui::frost::{frosted, MENU_BLUR};
 use crate::ui::glass;
 use crate::ui::groups::project_color;
@@ -51,7 +52,7 @@ pub fn avatar(image: Option<Arc<RenderImage>>, person: &Person, size: f32, theme
         .justify_center();
     match image {
         Some(image) => base.child(
-            gpui::img(image)
+            gpui::img(crate::ui::picture_fit::fit(&image, size))
                 .size(px(size))
                 .rounded_full()
                 .object_fit(gpui::ObjectFit::Cover),
@@ -151,6 +152,25 @@ pub fn new_chat_sheet(
         .pb(px(18.0))
         .min_h_0()
         .overflow_y_scroll();
+    // A refusal (no such user, nobody picked, the relay said no) is the shared error note at
+    // the top of the body, before the search field — one place for every people sheet.
+    if let Some(slot) = error.as_ref() {
+        body = body.child(div().mx(px(CARD_INSET)).child(error_note::render(
+            "people-sheet-error",
+            &slot.error,
+            slot.details_open,
+            error_note::Style::Inline,
+            &theme,
+            error_note::Handlers::new().toggle_details(cx.listener(|this, _, _, cx| {
+                this.state.update(cx, |s, cx| {
+                    if let Some(slot) = s.people_error.as_mut() {
+                        slot.toggle_details();
+                    }
+                    cx.notify();
+                });
+            })),
+        )));
+    }
 
     if group_mode {
         body = new_group_body(
@@ -164,7 +184,6 @@ pub fn new_chat_sheet(
             &results,
             &typed,
             busy,
-            error,
             add_to.as_ref(),
             &me_handle,
             state,
@@ -319,17 +338,6 @@ pub fn new_chat_sheet(
         // People.
         let mut list = glass::group(&theme).mx(px(CARD_INSET));
         let mut any = false;
-        if let Some(err) = error {
-            any = true;
-            list = list.child(
-                div()
-                    .px(px(14.0))
-                    .py(px(10.0))
-                    .text_size(px(TEXT_SMALL))
-                    .text_color(theme.danger)
-                    .child(err),
-            );
-        }
         if results.is_empty() && !typed.is_empty() && !busy {
             any = true;
             list = list.child(
@@ -572,7 +580,6 @@ fn new_group_body(
     results: &[(Person, Option<Arc<RenderImage>>)],
     typed: &str,
     busy: bool,
-    error: Option<String>,
     add_to: Option<&crate::app::AddTarget>,
     _me_handle: &str,
     state: &Entity<AppState>,
@@ -632,16 +639,6 @@ fn new_group_body(
         body = body.child(chips);
     }
     body = body.child(search);
-    if let Some(err) = error {
-        body = body.child(
-            div()
-                .px(px(30.0))
-                .text_size(px(TEXT_SMALL))
-                .text_color(theme.danger)
-                .text_center()
-                .child(err),
-        );
-    }
 
     if !my_agents.is_empty() {
         let count = my_agents.len();
@@ -1377,6 +1374,7 @@ pub fn project_members_popover(
                             .py(px(2.0))
                             .rounded(px(5.0))
                             .text_size(px(11.0))
+                            // error-ui: exception destructive-action (Remove, not a message)
                             .text_color(theme.danger)
                             .cursor_pointer()
                             .hover(|st| st.bg(theme.surface_2))
