@@ -1,0 +1,49 @@
+{
+ "id": "h4-mention-as-object-stays-quiet",
+ "lane": "a",
+ "category": "group",
+ "title": "People chat with two agents: an @mention as the object of a request to the other agent wakes no turn; a direct ask is answered; multi-mention answers only the addressed (#1926 m01–m04 + silence guard)",
+ "regression": "#1926 (mention_role: object/referenced → no turn; silence is never a message) — m01/m02 object quiet, m03 asked replies, m04 multi-mention only the addressed; the guard: no 'staying silent' bubble ever; #1926 m01–m04 (lane-a half verified on 0.1.155); run 9 re-graded PASS on all four turns from the full replay (#2069 artefact)",
+ "turns": [
+  {
+   "prompt": "Can you communicate directly with @lane-a?",
+   "chat": "dm",
+   "expect_no_reply_s": 30,
+   "timeout_s": 45,
+   "note": "m01: nobody is addressed (lane-a is the object, lane-b not mentioned) — lane-a must stay quiet; whether lane-b answers is the Jev decision, not asserted"
+  },
+  {
+   "prompt": "@lane-b can you communicate directly with @lane-a?",
+   "chat": "dm",
+   "expect_no_reply_s": 30,
+   "expect_other_agent_reply": "lane-b",
+   "timeout_s": 45
+  },
+  {
+   "prompt": "@lane-a what is 9 × 9? Just the number.",
+   "chat": "dm",
+   "reply_regex": "\\b81\\b",
+   "timeout_s": 180
+  },
+  {
+   "prompt": "@lane-a and @lane-b are both here — @lane-b, what is 7 × 6? Just the number.",
+   "chat": "dm",
+   "expect_no_reply_s": 30,
+   "expect_other_agent_reply": "lane-b",
+   "timeout_s": 45
+  }
+ ],
+ "setup_actions": [
+  {
+   "kind": "people_dm",
+   "peer_handle": "lt-peer",
+   "also_agents": [
+    "lane-b"
+   ]
+  }
+ ],
+ "doc_checks": {
+  "forbid_text_regex": "(?i)(staying (silent|quiet)|that (question|one) is for|nothing to add from me|i'?ll let \\w+ take this)"
+ },
+ "notes": "Run 8 (0.1.155): lane-b was never added (harness key bug: 'lane-b' vs 'b'), so only the lane-a half was measured — quiet on m01/m02/m04 and 81 on m03, no silence bubble. Fixed; the 'addressed agent answered' half is first measured in run 9. Run 9 (0.1.163): lane-b added; m02 and m04 → lane-b answered, lane-a quiet; m03 → 81; m01 → both quiet (nobody addressed)."
+}
