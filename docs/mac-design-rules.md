@@ -46,7 +46,7 @@ window's top edge.
 | Disc | **36** (`STRIP_BUTTON` = `theme::CONTROL`), fill `surface_2`, glyph in `text` |
 | Glyphs | `CONTROL_GLYPH` 19 for search and + (visible marks 14.3 / 12.7 at a 1.6 stroke); `CONTROL_GLYPH_WIDE` 17 for the collapse rect (visible box 14.2) |
 | Gap / right inset | **8** (`STRIP_GAP` = `CONTROL_GAP`) / 12 (`STRIP_INSET`: the discs end 4 past the rows' card edge, as Grok's) |
-| Search | a round disc only; click, **⌘⇧F** or **⌘K** open the command palette (below). No inline field or capsule any more. **⌘F** is unbound — reserved for in-chat search (not built yet) |
+| Search | a round disc only; click, **⌘⇧F** or **⌘K** open the command palette (below). No inline field or capsule any more. **⌘F** is in-chat search — the Search-in-chat bar under the header pill (below), never the sidebar field |
 | Inside a server | no search (spacer); "+" only for owner/admin; collapse always |
 | Folded sidebar | collapses to the **icon rail** (section below), never away; in a plain window the chat header shows the same round disc beside the lights (`header::sidebar_toggle`), in full screen the rail's top-left slot holds it |
 
@@ -204,6 +204,34 @@ with the query, then one that contains it, then indirect hits; newest first;
 files or messages — with the ⌘ badges. Rig hooks: `ARBOS_SEARCH=<text>`,
 `ARBOS_PALETTE=1`, `ARBOS_PALETTE_SELECT=<n>`, `ARBOS_PALETTE_OPEN=1` (open
 the highlighted row once the rows are there).
+
+## Search in chat — ⌘F (Jacob 2026-10-26, [feedback search-in-chat-mac-2026-10-26]; approved mock 14:18 CR)
+
+"Bring back command F to find things in a chat by key word, user name etc."
+The Mac never had it (⌘F opened the sidebar field in v0.6.197 and was unbound
+in v0.6.212 for this); the iPhone's bar is #1829. **⌘F opens the
+Search-in-chat bar for the open chat** — the palette (⌘⇧F / ⌘K) stays
+app-wide, the bar is this chat only. Code: `crate::chat_search` (rules),
+`ui::chat_search` (bar), `AppState::chat_search` (state).
+
+| Item | Rule |
+|---|---|
+| Place | the first thing under the header: top **56** = `PILL_TOP` 12 + `PILL_HEIGHT` 36 + **8** (the iPhone's spacing); the pill does not move; the first row starts **12** under the bar — the transcript moves down **44** (`metrics::PUSH`) |
+| Size | **36** tall (`CONTROL`, the button family), radius **12** (the iPhone bar's / `BUBBLE_RADIUS`), **820** wide (`COMPOSER_WIDTH`), centred — bar, rows and composer share their edges; narrower panes shrink it with the composer |
+| Material | the header's (`glass::header_surface` + `header_frost`): frosted on Glass and Matte alike, 1 pt rim, top highlight, the rows blurred through — the pill's own spec, so the bar follows whatever the pill does |
+| Inside, left → right | inset 12; magnifier 15 muted; pinned sender chip (24 tall, picture 18, "From Name" 12.5 medium, accent 18 %, ✕ unpins); the field at `TEXT_BODY` 15, placeholder "Search in chat"; an offered chip while a name matches (⇥ pins); right: "searching older…" while a page is in flight, the count 13 pt muted, ‹ › 24 pt hit targets (faint with nothing to step to), ✕ 16 |
+| Matching | keyword = folded substring over the chat's loaded rows (`arbos_core::search::fold`, the palette index's text); sender = the shared matcher of #1918 (`match_entity` on display name / @handle of everyone who posted: exact > prefix > word-start, name before handle); **chip AND keyword**; a pinned chip with no text = all of that sender's rows. A hit is a **message**, not a word occurrence |
+| Count | "n of m" over the loaded rows, 1 = the oldest loaded (Find's order); the cursor starts on the newest hit; "No matches"; nothing while nothing is typed |
+| Marks | every hit's words on the accent at 30 %; the revealed hit's words in Find's yellow `#ffd60a` with dark text; the revealed message's row washed and scrolled to through **the palette's reveal path** (`highlight_message` + `reveal_message` → `Transcript::reveal_hit`) — one reveal mechanism |
+| Keys | ⌘F open / refocus (never closes); Enter / › / ⌘G next (newer); ⇧Enter / ‹ / ⇧⌘G previous (older); both wrap; ⇥ pins the offered sender; Esc / ✕ close — marks go, the composer types again. Inside the field the "ChatSearch" context overrides the composer's Send / Newline / AcceptMention |
+| Beyond the loaded rows | ‹ on the oldest loaded hit of a **server channel** asks the relay for a page (`ChannelLoadOlder`), shows "searching older…", moves on to the page's older hit when it lands, keeps paging while rows come without a hit, and wraps once the room says there is nothing above (`SyncEvent::ChannelHistoryEnd`). A chat doc (agent, DM, group) is whole on this Mac, so ‹ wraps at once |
+| Not | no second field in the header, no dropdown of senders, no match counter in the pill, no sidebar field |
+
+Pinned by `chat_search::tests` (hits, AND, offer, wrap, paging step, count,
+byte ranges), `ui::chat_search::tests` (⌘F opens the bar at 56 / 36 / the
+composer's width and focuses the field, Esc closes; typing counts, steps,
+wraps, pins; a channel pages older rows then wraps) and `keymap_tests`
+(⌘F / ⌘G / ⇧⌘G; Enter / ⇧Enter / ⇥ inside the bar).
 
 ### iPhone: one bottom search bar, nothing else (Jacob 2026-10-25, [feedback iphone-bottom-search-bar-2026-10-25])
 
@@ -1008,3 +1036,51 @@ is gone). Rig: `ARBOS_OPEN_SETTINGS=secrets-add` (the New secret form) or
 `secrets-connect`, with `ARBOS_RIG_AGENT_PICKED=<name>,<name>` (these agents start
 as chips) and `ARBOS_RIG_AGENT_PICKER=<query>` (the dropdown starts open with that
 query typed; empty = open).
+
+## Code cards: Grok's six colours, icon-only copy, indent guides (Jacob 2026-10-26, approved mock; [feedback code-highlighting-mac-2026-10-26], iPhone [feedback code-highlighting-ios-2026-10-26])
+
+Fenced ``` blocks in a reply are Grok Bot's code card. One highlighter for both
+apps: `arbos_core::highlight` (syntect + fancy-regex, the default Sublime pack —
+one 360 KB dump loaded on first use, `warm()` off the main thread at launch;
+Swift through `arbos-ffi`'s `highlight_code`), so a block is coloured the same on
+the Mac and the iPhone. Languages: Python, JavaScript (+ TypeScript on the JS
+grammar), Swift (table lexer), Rust, Go, shell, JSON, SQL, C, C++, YAML, HTML,
+CSS, Markdown. Language = fence tag → alias map (`py`, `ts`, `sh`, `yml`, `c++` …)
+→ shebang / `<!DOCTYPE` → keyword score (two clues and a one-point lead) → plain.
+Blocks over 64 KB stay plain.
+
+| Token | Dark (sampled from Grok's card) | Light (derived, ≥ 4.5:1 on the light card) | Mac `Theme` / iPhone `CodePalette` |
+|---|---|---|---|
+| plain — identifiers, operators, brackets, and `in` / `and` / `or` / `is` / `as` | `#D6D6DD` (the body colour) | `#1F1F23` | `code_plain` / `plain` |
+| keyword, storage type, `true` / `false` / `None` / `nil` | `#95D0CD` | `#1F7F7A` | `code_keyword` / `keyword` |
+| function & macro name (definition and call), type name, tag attribute, YAML key | `#E6B387` | `#B8641A` | `code_function` / `function` |
+| string (quotes and escapes included) | `#D898D8` | `#A63FA4` | `code_string` / `string` |
+| number | `#F1C972` | `#9A6F00` | `code_number` / `number` |
+| comment — **italic** | `#626262` | `#8C8C8C` | `code_comment` / `comment` |
+| indent guide | white 7 % | black 9 % | `code_guide` / `guide` |
+
+Card rules (both platforms):
+
+- **No header row** — no language label, no "Copy" pill. The tag only drives the grammar.
+- **Copy** is a 24 pt square with a 6 pt radius and the card's hairline (`border` /
+  `separator`), the `copy` glyph 13 pt in `text_muted`, inset 8 pt from the card's
+  top-right corner, floating over the code (the body keeps a 40 pt right inset so no
+  text hides under it). Hover `surface_2`, pressed the chips' accent tint, and after a
+  click a **check in `online`** for 1.5 s (`#copy-check`; the Mac's `CodeCopy`, the
+  iPhone's `copied` state). Copies the block verbatim.
+- **Indent guides**: 1 pt lines, one per completed indent step on every non-blank
+  line, at column *k·step + 0.65·step* (Grok: col 2.6 of a 4-space step); the step is
+  the block's smallest indent (tabs = 4), at least 2. None on blank lines.
+- **Long lines scroll sideways** inside the card (`sideways_scroll` /
+  `ScrollView(.horizontal)`); no wrapping.
+- Mono 12.5 pt / 18 pt lines on the Mac (`CODE_TEXT`, `CODE_LINE_HEIGHT`, glyph
+  advance 7.5 → `CODE_GLYPH_ADVANCE`); 14 pt SF Mono on the iPhone (`CodeHighlight.fontSize`,
+  advance measured). Radius 10 (Mac) / 12 (iPhone), `code_bg` fill, `border` hairline.
+
+Pinned by `arbos_core::highlight::tests` (Jacob's bubble-sort card token by token,
+landmarks in all 15 languages, aliases and fallbacks), the Mac's
+`the_code_card_paints_grok_colours_and_indent_guides`,
+`a_code_card_with_long_lines_scrolls_sideways` and the copy-button tests, and the
+iPhone's `CodeHighlightTests`. Rig: `ARBOS_FIXTURE_REPLY=math` (Mac) /
+`ARBOS_SHOW=math` (iPhone) is Jacob's bubble-sort turn; `ARBOS_RIG_CODE_COPY=hover|pressed|copied`
+paints the copy square in that state for a capture (the check needs `copied`).
