@@ -176,14 +176,22 @@ pub fn header_surface<E: Styled>(el: E, theme: &Theme) -> E {
             .spread_radius(px(1.0))
             .inset(),
         BoxShadow::new(px(0.0), px(1.0), style.highlight).inset(),
-        BoxShadow::new(px(0.0), px(1.0), gpui::hsla(0.0, 0.0, 0.0, 0.18)).blur_radius(px(2.0)),
+        BoxShadow::new(px(0.0), px(1.0), gpui::hsla(0.0, 0.0, 0.0, 0.28)).blur_radius(px(3.0)),
     ])
 }
+
+/// The blur under a header control ([feedback
+/// mac-header-pill-see-through-2026-10-26]): light enough that a line of
+/// transcript scrolling under the pill stays legible through it — Grok Bot's
+/// pill softens the text behind, it does not erase it. The menus' 16 pt
+/// (`MENU_BLUR`) turned it to mush, and with nothing behind it the pill then
+/// read as a solid chip (Jacob's 14:15 CR shot of v0.6.275).
+pub const HEADER_BLUR: f32 = 5.0;
 
 /// Blur the list under a header control (its rounded bounds), whatever the
 /// surface.
 pub fn header_frost(radius: f32, el: impl IntoElement) -> AnyElement {
-    frosted_always(radius, MENU_BLUR, el).into_any_element()
+    frosted_always(radius, HEADER_BLUR, el).into_any_element()
 }
 
 /// A glass circle: field fill at 85 %, hairline rim. Content centred.
@@ -307,10 +315,16 @@ pub fn row(label: impl Into<SharedString>, theme: &Theme) -> Div {
 /// Apple-style icon tile for settings rows: 30 px rounded square, muted
 /// monochrome fill, white glyph (D80).
 pub fn icon_tile(glyph: &str, theme: &Theme) -> Div {
+    icon_tile_sized(glyph, 30.0, theme)
+}
+
+/// The settings tile at another size (the palette's 24 pt row picture);
+/// radius and glyph scale with it.
+pub fn icon_tile_sized(glyph: &str, size: f32, theme: &Theme) -> Div {
     div()
-        .size(px(30.0))
+        .size(px(size))
         .flex_shrink_0()
-        .rounded(px(7.5))
+        .rounded(px(size * 0.25))
         .bg(match theme.appearance {
             crate::ui::theme::Appearance::Dark => gpui::Hsla::from(gpui::rgb(0x5c5c60)),
             crate::ui::theme::Appearance::Light => gpui::Hsla::from(gpui::rgb(0x6e6e73)),
@@ -318,7 +332,7 @@ pub fn icon_tile(glyph: &str, theme: &Theme) -> Div {
         .flex()
         .items_center()
         .justify_center()
-        .child(icon(glyph, 15.0, gpui::white()))
+        .child(icon(glyph, size * 0.5, gpui::white()))
 }
 
 /// Segmented choice inside a row: `[Dark] Light`.

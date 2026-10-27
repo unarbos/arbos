@@ -336,7 +336,18 @@ pub async fn create_project(
         state: "hibernated_light".into(),
         created_at: now,
         last_active_at: now,
-        spend_cap_daily: 25.0,
+        // An owner without a user cap gets no project caps either (Jacob, 2026-10-26).
+        spend_cap_daily: if state
+            .db
+            .user(&owner)
+            .ok()
+            .flatten()
+            .is_some_and(|u| u.daily_cap_usd.is_none())
+        {
+            crate::credits::PROJECT_CAP_UNLIMITED
+        } else {
+            25.0
+        },
         color: b.color.clone().unwrap_or_else(|| "#8b7cf6".into()),
         user_id: owner,
         workspace_state: "stopped".into(),
@@ -582,8 +593,9 @@ pub struct PatchProjectBody {
     /// Merged slot by slot: `{ "talking_model": { "id": "...", "effort": "low" } }` leaves the other slots alone.
     #[serde(default)]
     pub models: Option<Value>,
-    #[serde(default)]
-    pub spend_cap_daily: Option<f64>,
+    /// Daily cap in USD; present-and-null means no project cap (stored as the sentinel).
+    #[serde(default, deserialize_with = "deserialize_double_option_f64")]
+    pub spend_cap_daily: Option<Option<f64>>,
     /// Tree avatar slug; `null` resets to the deterministic default.
     #[serde(default, deserialize_with = "deserialize_double_option")]
     pub avatar: Option<Option<String>>,
@@ -619,6 +631,13 @@ where
     D: serde::Deserializer<'de>,
 {
     Option::<String>::deserialize(d).map(Some)
+}
+
+fn deserialize_double_option_f64<'de, D>(d: D) -> Result<Option<Option<f64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<f64>::deserialize(d).map(Some)
 }
 
 pub(crate) fn deserialize_double_option_i64<'de, D>(d: D) -> Result<Option<Option<i64>>, D::Error>
@@ -784,7 +803,8 @@ pub async fn patch_project(
             b.color.as_deref(),
             b.instructions.as_deref(),
             models.as_ref(),
-            b.spend_cap_daily,
+            b.spend_cap_daily
+                .map(|c| c.unwrap_or(crate::credits::PROJECT_CAP_UNLIMITED)),
             avatar_patch.as_ref().map(|a| a.as_deref()),
             color_patch.as_ref().map(|a| a.as_deref()),
             description.as_deref(),
@@ -2572,7 +2592,10 @@ mod agent_avatar_version_tests {
             )
             .unwrap();
         let before = state.db.project(&project).unwrap().unwrap();
-        assert_eq!(before.avatar_version, 0, "fresh project is unstamped");
+        assert!(
+            before.avatar_version > 0,
+            "a fresh project is stamped at birth (its creation time), never 0"
+        );
 
         // Alice's phone picks a leaf.
         let r = patch_project(
@@ -2585,7 +2608,10 @@ mod agent_avatar_version_tests {
         .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
         let after = state.db.project(&project).unwrap().unwrap();
-        assert!(after.avatar_version > 0, "the change is stamped");
+        assert!(
+            after.avatar_version > before.avatar_version,
+            "the change is stamped above the birth stamp"
+        );
 
         // The project JSON and the roster copy carry the same stamp.
         let bytes = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();

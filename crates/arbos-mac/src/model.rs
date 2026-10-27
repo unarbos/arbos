@@ -124,6 +124,10 @@ pub struct Project {
     /// owner allowed to message this agent. Empty unless I own it.
     #[serde(default)]
     pub message_grants: Vec<MessageGrant>,
+    /// Members I blocked, as `user:<id>` — the relay's `blockedSenders` hint on a people
+    /// chat ([feedback blocked-state-mac-2026-10-26]): their rows are hidden for me alone.
+    #[serde(default)]
+    pub blocked_senders: Vec<String>,
 }
 
 /// One row of an agent's "Who may message X" card (`message_grants` on the project).
@@ -1285,6 +1289,11 @@ pub struct Attachment {
     /// Caption for the card; the file name when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// The fallback picture of a chart bubble: names the `chart` part of the same message.
+    /// A client that draws the chart hides this attachment; an older one shows the picture
+    /// ([feedback chart-bubble-mac-2026-10-26]).
+    #[serde(default, rename = "chartPart", skip_serializing_if = "Option::is_none")]
+    pub chart_part: Option<String>,
 }
 
 impl Attachment {
@@ -1463,6 +1472,37 @@ pub enum Part {
         /// #1544: the standing choice made on a destructive-shell card (a path class).
         #[serde(default)]
         grant: Option<String>,
+    },
+    /// The row a message becomes when its value moved into the vault (secret hand-off):
+    /// "Secret saved as NAME". Names only — there is no value field.
+    SecretRedacted {
+        id: Id,
+        #[serde(default)]
+        name: String,
+        #[serde(default)]
+        env: String,
+        #[serde(default)]
+        secret_id: String,
+        /// `user:<id>` whose message held the value.
+        #[serde(default)]
+        saved_by: String,
+        /// Project id of the agent that saved it.
+        #[serde(default)]
+        agent: Option<String>,
+    },
+    /// Chart bubble ([feedback chart-bubble-mac-2026-10-26]): the structured chart
+    /// `post_chart` posted. `chart` is the validated `arbos_core::chart::Chart` as JSON,
+    /// `table` its markdown table, `fallback` the PNG attachment part this client hides.
+    Chart {
+        id: Id,
+        #[serde(default)]
+        spec_version: u32,
+        #[serde(default)]
+        chart: serde_json::Value,
+        #[serde(default)]
+        table: String,
+        #[serde(default)]
+        fallback: Option<String>,
     },
     #[serde(other)]
     Unknown,
@@ -2168,6 +2208,14 @@ impl Message {
             })
     }
 
+    /// Does this message carry the `chart` part `part_id`? (Its fallback picture is
+    /// hidden only when the chart it stands in for is really here.)
+    pub fn has_chart_part(&self, part_id: &str) -> bool {
+        self.parts
+            .iter()
+            .any(|p| matches!(p, Part::Chart { id, .. } if id == part_id))
+    }
+
     /// Open `question` parts of this message, newest last.
     pub fn open_questions(&self) -> impl DoubleEndedIterator<Item = &Part> {
         self.parts.iter().filter(|p| {
@@ -2487,9 +2535,42 @@ pub struct Secret {
     /// `refuse | card`: what a non-listed person's ask does (spec §7.7).
     #[serde(default)]
     pub others_ask: String,
+    /// Where it came from: `settings`, or `chat` + the agent it was handed to (secret hand-off).
+    #[serde(default)]
+    pub source: Option<SecretSource>,
+}
+
+/// Where a secret came from (`secret.source`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SecretSource {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub project_name: Option<String>,
+    #[serde(default)]
+    pub chat_id: Option<String>,
 }
 
 impl Secret {
+    /// "given in chat" for a hand-off secret, else nothing (list subtitle).
+    pub fn source_label(&self) -> Option<&'static str> {
+        self.source
+            .as_ref()
+            .filter(|s| s.kind == "chat")
+            .map(|_| "given in chat")
+    }
+
+    /// "In chat with Arbos" — the Secret page's Added row, when it came from a chat.
+    pub fn added_label(&self) -> Option<String> {
+        let s = self.source.as_ref().filter(|s| s.kind == "chat")?;
+        Some(match s.project_name.as_deref().filter(|n| !n.is_empty()) {
+            Some(n) => format!("In chat with {n}"),
+            None => "In chat".to_owned(),
+        })
+    }
+
     pub fn kind_label(&self) -> &'static str {
         match self.kind.as_str() {
             "login" => "Login",
@@ -3227,12 +3308,26 @@ pub struct BoxReport {
     pub reachable: bool,
     pub unreachable_reason: Option<String>,
     pub uptime_s: Option<u64>,
-    /// 1-minute load average.
+    /// 1-minute load average. Inside a Daytona sandbox this is the **host's** (`load_scope`
+    /// = `host`, agentd ≥ 0.6.277): then it says nothing about the box and is not drawn.
     pub load_1m: Option<f64>,
+    pub load_is_host: bool,
     pub mem_total_mb: Option<u64>,
     pub mem_available_mb: Option<u64>,
     pub disk_total_mb: Option<u64>,
     pub disk_available_mb: Option<u64>,
+    /// `resources.cpu` (agentd ≥ 0.6.277): cores the box may use and the share busy over
+    /// the last 5 s.
+    pub cpu_cores: Option<f64>,
+    pub cpu_pct: Option<f64>,
+    /// `resources.disk.inodes_*`: file slots (#1857 — a box can be "full" with bytes free).
+    pub inodes_total: Option<u64>,
+    pub inodes_avail: Option<u64>,
+    /// `resources.net`: bytes per second over the last 5 s and bytes since the UTC day began.
+    pub net_rx_bps: Option<f64>,
+    pub net_tx_bps: Option<f64>,
+    pub net_rx_today: Option<u64>,
+    pub net_tx_today: Option<u64>,
     pub workspaces: Vec<BoxWorkspace>,
 }
 
@@ -3247,6 +3342,13 @@ pub struct BoxWorkspace {
     /// How long the current turn has run (`turn.current.elapsed_ms`).
     pub elapsed_ms: Option<u64>,
     pub tool_calls: Option<u64>,
+    /// Background jobs (sub-agents) running for this agent (`jobs_running`, agentd ≥ 0.6.277).
+    pub jobs_running: Option<u64>,
+    /// Its share of the box (`usage`, from the workspace cgroup and a cached `du`).
+    pub cpu_pct: Option<f64>,
+    pub mem_mb: Option<u64>,
+    pub pids: Option<u64>,
+    pub disk_mb: Option<u64>,
 }
 
 impl BoxReport {
@@ -3273,10 +3375,30 @@ impl BoxReport {
         }
         out.uptime_s = st["uptime_s"].as_u64();
         out.load_1m = st["load"].get(0).and_then(|l| l.as_f64());
-        out.mem_total_mb = st["memory_mb"]["total"].as_u64();
-        out.mem_available_mb = st["memory_mb"]["available"].as_u64();
+        out.load_is_host = st["load_scope"].as_str() == Some("host");
+        // `memory_mb` carries the cgroup cap on agentd ≥ 0.6.277 (the host's figures before);
+        // `resources.memory` is the same view with `used` instead of `available`.
+        let res = &st["resources"];
+        out.mem_total_mb = res["memory"]["total_mb"]
+            .as_u64()
+            .or_else(|| st["memory_mb"]["total"].as_u64());
+        out.mem_available_mb = match (
+            res["memory"]["total_mb"].as_u64(),
+            res["memory"]["used_mb"].as_u64(),
+        ) {
+            (Some(t), Some(u)) => Some(t.saturating_sub(u)),
+            _ => st["memory_mb"]["available"].as_u64(),
+        };
         out.disk_total_mb = st["disk"]["total_mb"].as_u64();
         out.disk_available_mb = st["disk"]["available_mb"].as_u64();
+        out.cpu_cores = res["cpu"]["cores"].as_f64();
+        out.cpu_pct = res["cpu"]["pct"].as_f64();
+        out.inodes_total = res["disk"]["inodes_total"].as_u64();
+        out.inodes_avail = res["disk"]["inodes_avail"].as_u64();
+        out.net_rx_bps = res["net"]["rx_bps"].as_f64();
+        out.net_tx_bps = res["net"]["tx_bps"].as_f64();
+        out.net_rx_today = res["net"]["rx_bytes_today"].as_u64();
+        out.net_tx_today = res["net"]["tx_bytes_today"].as_u64();
         out.workspaces = st["workspaces"]
             .as_array()
             .map(|ws| {
@@ -3288,11 +3410,43 @@ impl BoxReport {
                         running: w["turn"]["running"].as_bool().unwrap_or(false),
                         elapsed_ms: w["turn"]["current"]["elapsed_ms"].as_u64(),
                         tool_calls: w["turn"]["current"]["tool_calls"].as_u64(),
+                        jobs_running: w["jobs_running"].as_u64(),
+                        cpu_pct: w["usage"]["cpu_pct"].as_f64(),
+                        mem_mb: w["usage"]["mem_mb"].as_u64(),
+                        pids: w["usage"]["pids"].as_u64(),
+                        disk_mb: w["usage"]["disk_mb"].as_u64(),
                     })
                     .collect()
             })
             .unwrap_or_default();
         out
+    }
+
+    /// Workspaces whose box share the sampler reported (agentd ≥ 0.6.277), biggest memory
+    /// first — the per-agent breakdown.
+    pub fn usage_rows(&self) -> Vec<&BoxWorkspace> {
+        let mut rows: Vec<&BoxWorkspace> = self
+            .workspaces
+            .iter()
+            .filter(|w| w.cpu_pct.is_some() || w.mem_mb.is_some() || w.disk_mb.is_some())
+            .collect();
+        rows.sort_by(|a, b| {
+            b.running
+                .cmp(&a.running)
+                .then(b.mem_mb.unwrap_or(0).cmp(&a.mem_mb.unwrap_or(0)))
+                .then(a.name.cmp(&b.name))
+        });
+        rows
+    }
+
+    /// Background jobs running across every workspace, when any workspace reports the count.
+    pub fn jobs_running(&self) -> Option<u64> {
+        let counts: Vec<u64> = self
+            .workspaces
+            .iter()
+            .filter_map(|w| w.jobs_running)
+            .collect();
+        (!counts.is_empty()).then(|| counts.iter().sum())
     }
 
     /// The workspace of one agent, if the box lists it.
