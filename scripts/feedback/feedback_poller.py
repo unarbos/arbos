@@ -4711,7 +4711,7 @@ class Loop:
                               expects_ios=touches_ios(files),
                               expects_rust=bool(self.rust_crates(files)),
                               expects_ci=any(not f.startswith("apps/ios/") for f in files),
-                              agent_summary=f"handed-off fix by {st.get('handed_off_to')}")
+                              agent_summary=f"handed-off fix by {st.get('handed_off_to') or st.get('agent_id') or 'owner'}")
                     self.store.save_state(fid, st)
                     self.store.event(fid, "branch_pushed", branch=st["branch"], head=head, files=files, by=st.get("handed_off_to"))
                     continue
@@ -5543,7 +5543,10 @@ def main(argv: list[str]) -> int:
         # parked_head are the head the RED run judged (`last_red`, or the item's own failing verdict) — never the
         # live head: a push recorded between the red and the park stayed invisible when the park copied branch_head
         # (#1995 08:32/08:35, #1962/#1963 09:01/09:55, 2026-10-27). The follower re-registers any other head, so a
-        # push already made re-gates on the next tick; a pin is released.
+        # push already made re-gates on the next tick; a pin is released. The follower only walks items with
+        # `track_commit`: a parked loop-agent item (app-…, owner = `agent_id`, never handed off) has none, so its
+        # owner's push went unseen (#2049: fix pushed 21:27, found by hand 23:36, 2026-10-27). `handed_off_to` stays
+        # unset on purpose — that is what keeps the Cursor follow-up channel to the agent on a conflict.
         if len(argv) < 4:
             print("park <id> <note…>")
             return 2
@@ -5554,7 +5557,7 @@ def main(argv: list[str]) -> int:
             return 2
         rg = st.get("rust_gate") or {}
         red = (st.get("last_red") or {}).get("head") or (rg.get("head") if rg.get("verdict") in ("fail", "conflict") else None) or st.get("branch_head")
-        st.update(status="handed_off", gated_head=red, parked_head=red, gate_pinned=False)
+        st.update(status="handed_off", gated_head=red, parked_head=red, gate_pinned=False, track_commit=True)
         loop.store.save_state(fid, st)
         loop.store.event(fid, "parked_by_operator", head=red, live_head=st.get("branch_head"), note=note[:400])
         later = st.get("branch_head") != red
