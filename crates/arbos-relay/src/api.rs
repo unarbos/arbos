@@ -1324,7 +1324,7 @@ pub async fn machine_start(State(state): State<AppState>, principal: Principal) 
         tracing::info!(user = %user_id, "machine start: secrets pause set by stop_machine lifted");
     }
     if state.db.user_box(&user_id).map_err(internal)?.is_none() {
-        let provider = boxes::default_provider(&state);
+        let provider = boxes::provider_for_user(&state, &user_id);
         match boxes::ensure_user_box(&state, &user_id, provider).await {
             Ok(_) => {}
             Err(e) if e.to_string() == crate::fleet::WAITLISTED => {
@@ -1530,28 +1530,56 @@ pub struct MigrateQuery {
     pub force: bool,
 }
 
-#[derive(Deserialize)]
-pub struct UserBoxBody {
-    /// Daytona snapshot name (fixes vCPU/RAM/disk); null clears the override.
-    pub snapshot: Option<String>,
-}
-
-/// `PUT /admin/users/{id}/box`: per-user box class. Applies to the next box create (stop and
-/// delete the current sandbox to re-create at the new class).
+/// `PUT /admin/users/{id}/box {"snapshot"?: name|null, "provider"?: daytona|process|docker|gvisor|null}`:
+/// per-user box class and/or provider. Both apply to the NEXT box create (stop and delete the
+/// current sandbox to re-create); a key that is absent is left as it is, `null` clears it.
 pub async fn admin_set_user_box(
     State(state): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
-    Json(b): Json<UserBoxBody>,
+    Json(b): Json<Value>,
 ) -> ApiResult {
     if !matches!(principal, Principal::Admin) {
         return Err((StatusCode::FORBIDDEN, "admin only".into()));
     }
-    state
-        .db
-        .set_user_snapshot(&id, b.snapshot.as_deref())
-        .map_err(internal)?;
-    Ok(Json(json!({ "user_id": id, "snapshot": b.snapshot })).into_response())
+    let mut out = json!({ "user_id": id });
+    let mut touched = false;
+    if let Some(snapshot) = b.get("snapshot") {
+        state
+            .db
+            .set_user_snapshot(&id, snapshot.as_str())
+            .map_err(internal)?;
+        out["snapshot"] = snapshot.clone();
+        touched = true;
+    }
+    if let Some(provider) = b.get("provider") {
+        let p = match provider {
+            Value::Null => None,
+            Value::String(s) => Some(Provider::parse(s).ok_or((
+                StatusCode::BAD_REQUEST,
+                "provider must be daytona|process|docker|gvisor or null".to_owned(),
+            ))?),
+            _ => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "provider must be a string or null".into(),
+                ))
+            }
+        };
+        state
+            .db
+            .set_user_provider(&id, p.map(Provider::as_str))
+            .map_err(internal)?;
+        out["provider"] = provider.clone();
+        touched = true;
+    }
+    if !touched {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "body needs \"snapshot\" and/or \"provider\"".into(),
+        ));
+    }
+    Ok(Json(out).into_response())
 }
 
 #[derive(Deserialize)]
@@ -2544,7 +2572,10 @@ mod agent_avatar_version_tests {
             )
             .unwrap();
         let before = state.db.project(&project).unwrap().unwrap();
-        assert_eq!(before.avatar_version, 0, "fresh project is unstamped");
+        assert!(
+            before.avatar_version > 0,
+            "a fresh project is stamped at birth (its creation time), never 0"
+        );
 
         // Alice's phone picks a leaf.
         let r = patch_project(
@@ -2557,7 +2588,10 @@ mod agent_avatar_version_tests {
         .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
         let after = state.db.project(&project).unwrap().unwrap();
-        assert!(after.avatar_version > 0, "the change is stamped");
+        assert!(
+            after.avatar_version > before.avatar_version,
+            "the change is stamped above the birth stamp"
+        );
 
         // The project JSON and the roster copy carry the same stamp.
         let bytes = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();

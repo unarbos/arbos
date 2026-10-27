@@ -769,6 +769,8 @@ fn push_fixture_events() -> Vec<(&'static str, PushEventDto)> {
                 from_handle: "user201".into(),
                 seq: 42,
                 sender: sender.clone(),
+                project_id: None,
+                text: None,
             }),
         ),
         (
