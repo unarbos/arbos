@@ -28,7 +28,9 @@ use crate::model::{
 
 use super::doc::ChatDoc;
 use super::user_error::{ErrorClass, UserError};
-use super::{ClientCommand, DraftPicture, PictureSource, PictureTarget, SyncEvent, SyncSource};
+use super::{
+    ClientCommand, DraftPicture, PictureSource, PictureTarget, PushRefusal, SyncEvent, SyncSource,
+};
 use crate::model::{
     new_id, now_ms, ApprovalRisk, ApprovalState, Attachment, AttachmentKind, BoxReport, BoxState,
     BoxWorkspace, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelPlatformState,
@@ -235,6 +237,7 @@ impl SyncSource for FixtureSource {
             emit_servers_hook(&shared);
             let _ = events.send(SyncEvent::Link(Link::Live));
             emit_link_hook(&shared);
+            emit_blocked_hook(&shared);
             emit_failure_hook(&shared);
             emit_typing_hook(&shared);
             emit_working_hook(&shared);
@@ -456,6 +459,24 @@ fn emit_failure_hook(shared: &Arc<Shared>) {
                     let _ = shared.events.send(SyncEvent::PushRefused {
                         chat_id,
                         refused: true,
+                        why: PushRefusal::code("not_available"),
+                    });
+                }
+            }
+            // Rig ([feedback blocked-state-mac-2026-10-26]): the relay refused the push
+            // because of a block — `blocked-by` (Sam blocked me) / `blocks-member` (I
+            // blocked Sam, a DM) — in every chat, so the open one shows the sentence.
+            "blocked-by" | "blocks-member" => {
+                for (chat_id, _) in targets {
+                    let _ = shared.events.send(SyncEvent::PushRefused {
+                        chat_id,
+                        refused: true,
+                        why: PushRefusal {
+                            code: "not_available".into(),
+                            reason: Some(spec.replace('-', "_")),
+                            by_handle: Some("sam".into()),
+                            by_name: Some("Sam Rivera".into()),
+                        },
                     });
                 }
             }
@@ -1874,6 +1895,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 image_url: image_url.clone(),
                 avatar_version: 0,
                 message_grants: Vec::new(),
+                blocked_senders: Vec::new(),
             });
             if let Some(url) = &image_url {
                 emit_avatar(shared, url);
@@ -3436,6 +3458,52 @@ fn emit_projects(shared: &Shared) {
     let _ = shared.events.send(SyncEvent::Projects(projects));
 }
 
+/// `ARBOS_FIXTURE_BLOCKED=<handle>[,<handle>…]` (screenshot rig, [feedback
+/// blocked-state-mac-2026-10-26]): those people are on my block list from launch, as the
+/// relay's `GET /blocks` would list them — the Blocked chip / tag, the Unblock confirm and the
+/// DM's "You blocked X" bar can be shot without a second account.
+fn emit_blocked_hook(shared: &Arc<Shared>) {
+    let Ok(spec) = std::env::var("ARBOS_FIXTURE_BLOCKED") else {
+        return;
+    };
+    let handles: Vec<String> = spec
+        .split(',')
+        .map(|h| h.trim().trim_start_matches('@').to_lowercase())
+        .filter(|h| !h.is_empty())
+        .collect();
+    if handles.is_empty() {
+        return;
+    }
+    let people: Vec<Person> = shared
+        .projects
+        .lock()
+        .unwrap()
+        .iter()
+        .flat_map(|p| p.people.iter().cloned())
+        .filter(|p| handles.contains(&p.handle.to_lowercase()))
+        .fold(Vec::new(), |mut acc: Vec<Person>, p| {
+            if !acc.iter().any(|q| q.handle == p.handle) {
+                acc.push(p);
+            }
+            acc
+        });
+    *shared.blocked.lock().unwrap() = people.clone();
+    // The relay's `blockedSenders` hint on every people group that holds them.
+    {
+        let ids: Vec<String> = people.iter().map(|p| format!("user:{}", p.id)).collect();
+        let mut projects = shared.projects.lock().unwrap();
+        for p in projects.iter_mut().filter(|p| p.is_people_group()) {
+            p.blocked_senders = ids
+                .iter()
+                .filter(|id| p.people.iter().any(|m| format!("user:{}", m.id) == **id))
+                .cloned()
+                .collect();
+        }
+    }
+    emit_projects(shared);
+    emit_blocked(shared);
+}
+
 fn emit_blocked(shared: &Shared) {
     let blocked = shared.blocked.lock().unwrap().clone();
     let _ = shared.events.send(SyncEvent::Blocked(blocked));
@@ -4938,6 +5006,7 @@ fn seed_projects() -> Vec<Project> {
             image_url: None,
             avatar_version: 0,
             message_grants: Vec::new(),
+            blocked_senders: Vec::new(),
         },
         Project {
             id: PROJECT_COMMS.into(),
@@ -4974,6 +5043,7 @@ fn seed_projects() -> Vec<Project> {
             image_url: None,
             avatar_version: 0,
             message_grants: Vec::new(),
+            blocked_senders: Vec::new(),
         },
         Project {
             id: PROJECT_ARBOS.into(),
@@ -5010,6 +5080,7 @@ fn seed_projects() -> Vec<Project> {
             image_url: None,
             avatar_version: 0,
             message_grants: Vec::new(),
+            blocked_senders: Vec::new(),
         },
     ]
 }
@@ -6302,6 +6373,7 @@ fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
         image_url: None,
         avatar_version: 0,
         message_grants: Vec::new(),
+        blocked_senders: Vec::new(),
     }
 }
 
@@ -6411,6 +6483,7 @@ fn seed_people_projects() -> Vec<Project> {
             image_url: None,
             avatar_version: 0,
             message_grants: Vec::new(),
+            blocked_senders: Vec::new(),
         },
     ]
 }
