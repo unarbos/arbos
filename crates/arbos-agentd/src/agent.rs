@@ -2912,6 +2912,14 @@ impl Agent {
                 user_text = rendered.clone();
             }
         }
+        // Secret hand-off: a pasted key with "save this" goes into the vault before the model
+        // ever sees it; a key without those words gets the offer card and the turn goes on.
+        match crate::handoff::on_user_message(self, chat_id, &user_msg_id, &user_text).await {
+            crate::handoff::Handled::Nothing => {}
+            crate::handoff::Handled::Saved(t) | crate::handoff::Handled::Offered(t) => {
+                user_text = t;
+            }
+        }
         // Memory tree (D77): the walk starts as soon as the words are known and runs beside the
         // rest of the setup; `drive_turn` joins it before the prompt goes to pi.
         let mut memory = if user_text.trim().is_empty() {
@@ -6038,7 +6046,8 @@ impl Agent {
         activity: Option<&str>,
         reply_to: Option<&str>,
     ) -> Result<(), String> {
-        let text = ProseFilter::clean_prose(text.trim());
+        // Output redaction backstop (D19, secret hand-off) before anything else sees it.
+        let text = crate::store::redact(&ProseFilter::clean_prose(text.trim()));
         let text = text.trim();
         if text.is_empty() && activity.is_none() {
             return Err("nothing to send".into());
@@ -6300,9 +6309,12 @@ impl Agent {
             }
             t.text_part_dirty = false;
         }
+        // Output redaction backstop (D19, secret hand-off): a vault value or a known key
+        // shape in the model's prose never reaches the room doc.
+        let delta = crate::store::redact(delta);
         h.doc
-            .append_text(&t.assistant_msg_id, &t.text_part_id, delta);
-        t.streamed_text.push_str(delta);
+            .append_text(&t.assistant_msg_id, &t.text_part_id, &delta);
+        t.streamed_text.push_str(&delta);
     }
 
     // ---- hooks called by arbos-pi-ext ---------------------------------------------------------
