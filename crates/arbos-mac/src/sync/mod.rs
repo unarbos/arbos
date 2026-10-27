@@ -382,6 +382,11 @@ pub enum SyncEvent {
         room_id: String,
         rows: Vec<MessageRow>,
     },
+    /// D88: a `ChannelLoadOlder` found nothing above — the room's history is
+    /// whole on this Mac (the Search-in-chat bar stops paging and wraps).
+    ChannelHistoryEnd {
+        room_id: String,
+    },
     /// D88: homeserver connection state.
     MatrixConnection {
         connected: bool,
