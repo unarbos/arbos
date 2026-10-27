@@ -2562,20 +2562,40 @@ impl AppState {
                 // agent's reply) arrive as a new snapshot, not an upsert: tell
                 // the notifier about the ones we have not seen. A chat's first
                 // snapshot is history, except what was written just now.
-                let seen: HashSet<Id> = self
-                    .messages
-                    .get(&chat_id)
-                    .map(|l| l.iter().map(|m| m.id.clone()).collect())
-                    .unwrap_or_default();
+                //
+                // Append-only catch-up snapshots (#1405 /
+                // feedback app-01M5Z3QPDA5BRE84SAPADXX05V): when the previous
+                // list is a prefix of the new one, skip building a HashSet of
+                // every id — the new suffix is exactly what arrived.
                 let first_load = !self.messages.contains_key(&chat_id);
                 let fresh_after = now_ms().saturating_sub(SNAPSHOT_FRESH_MS);
-                let arrived: Vec<Message> = messages
-                    .iter()
-                    .filter(|m| !seen.contains(&m.id))
-                    .filter(|m| !first_load || m.created_at >= fresh_after)
-                    .filter(|m| !m.is_streaming())
-                    .cloned()
-                    .collect();
+                let arrived: Vec<Message> = {
+                    let prev = self.messages.get(&chat_id);
+                    let append_only = prev.is_some_and(|old| {
+                        messages.len() >= old.len()
+                            && old.iter().zip(messages.iter()).all(|(a, b)| a.id == b.id)
+                    });
+                    if append_only {
+                        let old_len = prev.map(|p| p.len()).unwrap_or(0);
+                        messages[old_len..]
+                            .iter()
+                            .filter(|m| !first_load || m.created_at >= fresh_after)
+                            .filter(|m| !m.is_streaming())
+                            .cloned()
+                            .collect()
+                    } else {
+                        let seen: HashSet<Id> = prev
+                            .map(|l| l.iter().map(|m| m.id.clone()).collect())
+                            .unwrap_or_default();
+                        messages
+                            .iter()
+                            .filter(|m| !seen.contains(&m.id))
+                            .filter(|m| !first_load || m.created_at >= fresh_after)
+                            .filter(|m| !m.is_streaming())
+                            .cloned()
+                            .collect()
+                    }
+                };
                 self.messages.insert(chat_id.clone(), messages);
                 self.index_chat(&chat_id);
                 // Message counts decide an agent's primary chat (single-chat mode).

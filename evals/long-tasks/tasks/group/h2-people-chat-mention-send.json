@@ -1,33 +1,33 @@
 {
-  "id": "h2-people-chat-mention-send",
-  "lane": "a",
-  "category": "group",
-  "title": "In a people group, a message addressing the agent by @handle is answered; one not addressed to it stays unanswered (arbosctl has no mention-chip flag, so @text is the addressing used)",
-  "turns": [
-    {
-      "prompt": "@lane-a what is 12 × 12? Answer with just the number.",
-      "chat": "dm",
-      "reply_regex": "144",
-      "timeout_s": 180
-    },
-    {
-      "prompt": "Priya — see you at the 3 pm sync, bring the Q4 numbers.",
-      "chat": "dm",
-      "expect_no_reply_s": 25,
-      "timeout_s": 40
-    },
-    {
-      "prompt": "@lane-a and what is 13 × 13?",
-      "chat": "dm",
-      "reply_regex": "169",
-      "timeout_s": 180
-    }
-  ],
-  "setup_actions": [
-    {
-      "kind": "people_dm",
-      "peer_handle": "lt-peer"
-    }
-  ],
-  "regression": "people.rs mention-to-reply with a mentions[] chip (not only @text)"
+ "id": "h2-people-chat-mention-send",
+ "lane": "a",
+ "category": "group",
+ "title": "In a people group, a message addressing the agent by @handle is answered; one not addressed to it stays unanswered (arbosctl has no mention-chip flag, so @text is the addressing used)",
+ "turns": [
+  {
+   "prompt": "@lane-a what is 12 × 12? Answer with just the number.",
+   "chat": "dm",
+   "reply_regex": "144",
+   "timeout_s": 180
+  },
+  {
+   "prompt": "Priya — see you at the 3 pm sync, bring the Q4 numbers.",
+   "chat": "dm",
+   "expect_no_reply_s": 25,
+   "timeout_s": 40
+  },
+  {
+   "prompt": "@lane-a and what is 13 × 13?",
+   "chat": "dm",
+   "reply_regex": "169",
+   "timeout_s": 180
+  }
+ ],
+ "setup_actions": [
+  {
+   "kind": "people_dm",
+   "peer_handle": "lt-peer"
+  }
+ ],
+ "regression": "people.rs mention-to-reply with a mentions[] chip (not only @text); #1779 (no 'I'm staying quiet' bubble for a line not addressed to the agent); #1580 aside"
 }
