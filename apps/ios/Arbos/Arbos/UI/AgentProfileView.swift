@@ -572,7 +572,13 @@ struct AgentProfileView: View {
                 var rows: [AnyView] = []
                 if let disk = AgentPane.freeOf(available: r.diskAvailableMb, total: r.diskTotalMb) { rows.append(AnyView(PaneRow(title: "Disk", value: disk))) }
                 if let mem = AgentPane.freeOf(available: r.memAvailableMb, total: r.memTotalMb) { rows.append(AnyView(PaneRow(title: "Memory", value: mem))) }
-                if let load = r.load1m { rows.append(AnyView(PaneRow(title: "Load", value: String(format: "%.2f", load)))) }
+                // CPU share from the box's cgroup (agentd ≥ 0.6.277); the load average is the host's
+                // inside Daytona (`loadIsHost`), drawn only when it is really the box's and no CPU exists.
+                if let cpu = r.cpuPct {
+                    rows.append(AnyView(PaneRow(title: "CPU", value: "\(Int(cpu.rounded())) %")))
+                } else if let load = r.load1m, !r.loadIsHost {
+                    rows.append(AnyView(PaneRow(title: "Load", value: String(format: "%.2f", load))))
+                }
                 if let up = r.uptimeS { rows.append(AnyView(PaneRow(title: "Up for", value: AgentPane.durationS(up)))) }
                 out.append(.card(rows))
             case .running:

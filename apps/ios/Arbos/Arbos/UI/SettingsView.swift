@@ -39,7 +39,7 @@ struct SettingsView: View {
     @State private var showTextSizePage = DebugHooks.settingsPage == "textsize"
     @State private var showConnectorsPage = DebugHooks.settingsPage == "connectors"
     // Rig: ARBOS_SETTINGS_PAGE=machine | credits | notifications | about | relay (Debug only).
-    @State private var showMachinePage = DebugHooks.settingsPage == "machine"
+    @State private var showMachinePage = DebugHooks.settingsPage == "machine" || DebugHooks.settingsPage == "machine-expanded"
     @State private var showCreditsPage = DebugHooks.settingsPage == "credits"
     @State private var showNotificationsPage = DebugHooks.settingsPage == "notifications"
     @State private var showPrivacyPage = DebugHooks.settingsPage == "privacy"
@@ -130,7 +130,7 @@ struct SettingsView: View {
             .navigationDestination(isPresented: $showAppearancePage) { AppearancePage() }
             .navigationDestination(isPresented: $showTextSizePage) { TextSizePage() }
             .navigationDestination(isPresented: $showConnectorsPage) { ConnectorsPage(connectorError: $connectorError) }
-            .navigationDestination(isPresented: $showMachinePage) { MachinePage() }
+            .navigationDestination(isPresented: $showMachinePage) { MachinePage(openAgent: openAgentFromSettings) }
             .navigationDestination(isPresented: $showCreditsPage) { CreditsPage() }
             .navigationDestination(isPresented: $showNotificationsPage) { NotificationsPage() }
             .navigationDestination(isPresented: $showPrivacyPage) { PrivacyPage() }
@@ -197,7 +197,7 @@ struct SettingsView: View {
         }
         out.append(.card(account, separatorInset: inset))
         out.append(.card([
-            AnyView(NavigationLink { MachinePage() } label: {
+            AnyView(NavigationLink { MachinePage(openAgent: openAgentFromSettings) } label: {
                 SettingsRow(icon: "desktopcomputer", title: "Machine", value: machineSummary, dot: machineDotColor(model.machine.state, theme: theme))
             }),
         ], separatorInset: inset))
@@ -240,6 +240,13 @@ struct SettingsView: View {
     }
 
     /// Pinned under Settings: Sign out.
+    /// Settings › Machine › "Ask X to free space": close the sheet, then land in that
+    /// agent's chat (the Send-feedback row's timing).
+    private func openAgentFromSettings(_ project: Project) {
+        dismiss()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { model.open(project: project) }
+    }
+
     private var settingsFooter: [PaneSection] {
         [.card([AnyView(PaneDangerRow(title: model.tokens != nil ? "Sign out" : "Sign out this device") { confirmUnpair = true })])]
     }
@@ -605,70 +612,315 @@ struct CreditsPage: View {
     }
 }
 
+/// Settings › Machine ([feedback machine-page-ios-2026-10-26]): the plan is pure
+/// (`MachineMetrics.plan`, the Mac's `machine::plan`); every row here is one of its entries. The
+/// box report is polled every `MachineMetrics.pollSeconds` through `.task`, which SwiftUI cancels
+/// the moment the page leaves the screen — the poll's whole lifecycle (`MachineMetrics.pollSeconds`).
 struct MachinePage: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
+    /// Settings passes this to close the sheet and land in the agent's chat ("Ask X to free space").
+    var openAgent: ((Project) -> Void)? = nil
+    /// Rig: `ARBOS_SETTINGS_PAGE=machine-expanded` lands with the breakdown unfolded.
+    @State private var breakdownOpen = DebugHooks.settingsPage == "machine-expanded"
+    @State private var showBiggerMachineFeedback = false
+
+    private var report: BoxReport? { model.boxReport }
+    private var live: BoxReport? { report.flatMap { $0.reachable ? $0 : nil } }
 
     var body: some View {
+        let m = model.machine
+        let plan = MachineMetrics.plan(machine: m, waitlisted: model.waitlistPosition != nil, report: report, breakdownOpen: breakdownOpen)
         SettingsPage(title: "Machine") {
-            SettingsGroup {
-                SettingsValueRow("Where it runs", value: model.machine.whereItRuns)
-                if let n = model.waitlistPosition {
-                    SettingsValueRow("In line", value: "Number \(n) · we'll let you know")
-                }
-                SettingsValueRow("State") {
-                    HStack(spacing: 7) {
-                        if model.machine.alwaysOn, !model.machine.held, model.machineBusy {
-                            ProgressView().controlSize(.mini).tint(theme.muted)
-                            Text("Restarting…")
-                        } else {
-                            Circle().fill(machineDotColor(model.machine.state, theme: theme)).frame(width: 8, height: 8)
-                            Text(model.machine.label)
-                        }
-                    }
-                }
-                if let since = model.machine.since, since > 0 {
-                    SettingsValueRow("Since", value: SettingsView.relative(since))
-                }
-                SettingsValueRow("Spec", value: model.machine.spec.isEmpty ? (model.machineError ?? "Not reported yet") : model.machine.spec)
-                if model.machine.reported {
-                    if model.machine.alwaysOn {
-                        SettingsValueRow("Machine time today") {
-                            VStack(alignment: .trailing, spacing: 2) {
-                                Text(String(format: "$%.2f", model.machine.machineTodayUsd))
-                                Text("Not taken from credits").font(theme.font(Theme.tiny))
+            if let r = live, let w = MachineMetrics.warning(r), !plan.warning.isEmpty {
+                SettingsGroup {
+                    ForEach(Array(plan.warning.enumerated()), id: \.offset) { _, row in
+                        switch row {
+                        case .warning:
+                            MachineWarningRow(warning: w)
+                        case .askToFreeSpace:
+                            if let ws = MachineMetrics.biggestDiskUser(r), let project = model.project(ws.projectId) {
+                                SettingsActionRow(title: "Ask \(ws.name) to free space") { askToFreeSpace(project) }
                             }
-                        }
-                    } else {
-                        SettingsValueRow("Spend today", value: String(format: "$%.2f of $%.0f", model.machine.spendTodayUsd, model.machine.spendCapUsd))
-                    }
-                    SettingsValueRow("Workspaces", value: "\(model.machine.workspaces.values.filter { $0 == .active }.count) running · \(model.machine.workspaces.count) total")
-                    if let id = model.machine.sandboxId, !id.isEmpty {
-                        SettingsValueRow("Sandbox") {
-                            Text(id).font(theme.font(12, design: .monospaced)).lineLimit(1).truncationMode(.middle)
+                        case .requestBiggerMachineInWarning:
+                            SettingsActionRow(title: "Request a bigger machine") { requestBiggerMachine() }
+                        default:
+                            EmptyView()
                         }
                     }
                 }
             }
-            SettingsGroup(footer: model.machine.alwaysOn
+            SettingsGroup {
+                ForEach(Array(plan.machine.enumerated()), id: \.offset) { _, row in
+                    switch row {
+                    case .whereItRuns:
+                        SettingsValueRow("Where it runs", value: m.whereItRuns)
+                    case .inLine:
+                        SettingsValueRow("In line", value: "Number \(model.waitlistPosition ?? 0) · we'll let you know")
+                    case .state:
+                        SettingsValueRow("State") {
+                            HStack(spacing: 7) {
+                                if m.alwaysOn, !m.held, model.machineBusy {
+                                    ProgressView().controlSize(.mini).tint(theme.muted)
+                                    Text("Restarting…")
+                                } else {
+                                    Circle().fill(machineDotColor(m.state, theme: theme)).frame(width: 8, height: 8)
+                                    Text(stateText(m))
+                                }
+                            }
+                        }
+                    case .spec:
+                        SettingsValueRow("Spec", value: m.spec.isEmpty ? (model.machineError ?? "Not reported yet") : m.spec)
+                    case .machineTime:
+                        if m.alwaysOn {
+                            SettingsValueRow("Machine time today") {
+                                VStack(alignment: .trailing, spacing: 2) {
+                                    Text(String(format: "$%.2f", m.machineTodayUsd))
+                                    Text("Not taken from credits").font(theme.font(Theme.tiny))
+                                }
+                            }
+                        } else {
+                            SettingsValueRow("Spend today", value: String(format: "$%.2f of $%.0f", m.spendTodayUsd, m.spendCapUsd))
+                        }
+                    case .workspaces:
+                        SettingsValueRow("Workspaces", value: "\(m.workspaces.values.filter { $0 == .active }.count) running · \(m.workspaces.count) total")
+                    case .sandbox:
+                        SettingsValueRow("Sandbox") {
+                            Text(m.sandboxId ?? "").font(theme.font(12, design: .monospaced)).lineLimit(1).truncationMode(.middle)
+                        }
+                    default:
+                        EmptyView()
+                    }
+                }
+            }
+            if !plan.resources.isEmpty {
+                SettingsGroup(header: "Resources") {
+                    ForEach(Array(plan.resources.enumerated()), id: \.offset) { _, row in
+                        switch row {
+                        case .disk:
+                            if let r = live, let g = MachineMetrics.diskGauge(r) { MachineGaugeRow(title: "Disk", gauge: g) }
+                        case .memory:
+                            if let r = live, let g = MachineMetrics.memGauge(r) { MachineGaugeRow(title: "Memory", gauge: g) }
+                        case .cpu:
+                            if let r = live, let g = MachineMetrics.cpuGauge(r) { MachineGaugeRow(title: "CPU", gauge: g) }
+                        case .network:
+                            if let r = live, let net = MachineMetrics.netValue(r) {
+                                SettingsValueRow("Network") {
+                                    VStack(alignment: .trailing, spacing: 2) {
+                                        Text(net.0)
+                                        if let today = net.1 { Text(today).font(theme.font(Theme.tiny)) }
+                                    }
+                                }
+                            }
+                        case .notAnswering:
+                            PaneRow(title: "The machine did not answer",
+                                    subtitle: report?.unreachableReason ?? "Trying again in a few seconds",
+                                    titleTint: theme.muted)
+                        default:
+                            EmptyView()
+                        }
+                    }
+                }
+            }
+            if let r = live, !plan.agents.isEmpty {
+                // `ARBOS_SETTINGS_SCROLL=agents` lands here (rig).
+                SettingsGroup(header: "Agents") {
+                    ForEach(Array(plan.agents.enumerated()), id: \.offset) { _, row in
+                        switch row {
+                        case .runningNow:
+                            SettingsValueRow("Running now", value: MachineMetrics.runningNow(r))
+                        case .jobs:
+                            SettingsValueRow("Background jobs", value: MachineMetrics.jobsValue(r.jobsRunning ?? 0))
+                        case .breakdown:
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.2)) { breakdownOpen.toggle() }
+                            } label: {
+                                HStack(spacing: 12) {
+                                    Text("Per-agent usage").font(theme.font(Theme.body)).foregroundStyle(theme.text)
+                                    Spacer(minLength: 8)
+                                    Image(systemName: breakdownOpen ? "chevron.up" : "chevron.right")
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundStyle(theme.placeholder)
+                                }
+                                .padding(.horizontal, 16)
+                                .frame(minHeight: SettingsRow.height)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("machine-breakdown")
+                        case .agent(let id):
+                            if let ws = r.workspaces.first(where: { $0.projectId == id }) {
+                                MachineAgentRow(workspace: ws, project: model.project(id))
+                            }
+                        default:
+                            EmptyView()
+                        }
+                    }
+                }
+                .id("agents")
+            }
+            SettingsGroup(footer: m.alwaysOn
                           ? "Your one cloud computer, always on. Agents are workspaces on it. Machine time is billed separately from your credits."
                           : "Your one cloud computer. Agents are workspaces on it; a message to any agent wakes it.") {
-                if model.machine.alwaysOn {
-                    if model.machine.held {
-                        SettingsActionRow(title: "Start machine", disabled: model.machineBusy) { model.startMachine() }
-                    } else {
+                ForEach(Array(plan.actions.enumerated()), id: \.offset) { _, row in
+                    switch row {
+                    case .requestBiggerMachine:
+                        SettingsActionRow(title: "Request a bigger machine") { requestBiggerMachine() }
+                    case .restart:
                         SettingsActionRow(title: "Restart machine", disabled: model.machineBusy) { model.restartMachine() }
-                    }
-                } else {
-                    switch model.machine.state {
-                    case .awake, .waking:
-                        SettingsActionRow(title: "Stop machine", destructive: true, disabled: model.machineBusy) { model.stopMachine() }
-                    case .hibernatedLight, .hibernatedDeep, .stoppedByUser, .error:
+                    case .start:
                         SettingsActionRow(title: "Start machine", disabled: model.machineBusy) { model.startMachine() }
+                    case .stop:
+                        SettingsActionRow(title: "Stop machine", destructive: true, disabled: model.machineBusy) { model.stopMachine() }
+                    default:
+                        EmptyView()
                     }
                 }
             }
         }
+        .task {
+            // The poll: fetch now, then every `pollSeconds` until the page leaves the screen
+            // (SwiftUI cancels this task on disappear).
+            while !Task.isCancelled {
+                await model.refreshBoxReport()
+                await model.refreshMachine()
+                try? await Task.sleep(nanoseconds: UInt64(MachineMetrics.pollSeconds * 1_000_000_000))
+            }
+        }
+        .sheet(isPresented: $showBiggerMachineFeedback) {
+            FeedbackSheet()
+                .environmentObject(model)
+                .environment(\.theme, theme)
+        }
+    }
+
+    /// "Awake · 42 m": the uptime folded into the state (Jacob 2026-10-26), as a duration
+    /// (the Computer tab's), not "1 hr. ago".
+    private func stateText(_ m: Machine) -> String {
+        if m.state == .awake, let since = m.since, since > 0 {
+            return "\(m.label) · \(AgentPane.durationS(max(0, (nowMs() - since) / 1000)))"
+        }
+        return m.label
+    }
+
+    /// A request to Jacob through the feedback sheet, as the Credits page's top-up (a Daytona
+    /// snapshot carries a fixed spec; the resize is manual).
+    private func requestBiggerMachine() {
+        FeedbackCenter.shared.context = FeedbackCenter.Context(screen: "machine")
+        FeedbackCenter.shared.screenshot = FeedbackCenter.captureScreen()
+        showBiggerMachineFeedback = true
+    }
+
+    /// That agent's chat with the ask drafted in the composer (agentd's disk gate answers
+    /// "free space" itself, #1641).
+    private func askToFreeSpace(_ project: Project) {
+        if let chat = model.singleChat(of: project.id), model.composerDraft(for: chat.id).isEmpty {
+            model.setComposerDraft(MachineMetrics.freeSpaceAsk, for: chat.id)
+        }
+        if let openAgent { openAgent(project) } else { model.open(project: project) }
+    }
+}
+
+/// Title left, value right (coloured past the thresholds), a 3 pt bar under both, an optional
+/// muted line under the bar — the Mac's `machine::gauge_row`.
+struct MachineGaugeRow: View {
+    @Environment(\.theme) private var theme
+    let title: String
+    let gauge: MachineMetrics.Gauge
+
+    static let barHeight: CGFloat = 3
+
+    private var color: Color {
+        switch gauge.level {
+        case .ok: return theme.placeholder
+        case .warn: return theme.warn
+        case .crit: return theme.danger
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text(title).font(theme.font(Theme.body)).foregroundStyle(theme.text)
+                Spacer(minLength: 8)
+                Text(gauge.value).font(theme.font(Theme.body)).foregroundStyle(gauge.level == .ok ? theme.muted : color)
+            }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(theme.text.opacity(0.09))
+                    Capsule().fill(color).frame(width: max(0, geo.size.width * CGFloat(gauge.pct) / 100))
+                }
+            }
+            .frame(height: Self.barHeight)
+            if let sub = gauge.sub {
+                Text(sub).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(1)
+                    .padding(.top, -3)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 11)
+        .frame(minHeight: SettingsRow.height)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(title) \(gauge.value)")
+    }
+}
+
+/// The warning row at the top of the page: amber glyph, bold title, one plain sentence.
+struct MachineWarningRow: View {
+    @Environment(\.theme) private var theme
+    let warning: MachineMetrics.Warning
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 22, weight: .regular))
+                .foregroundStyle(theme.warn)
+                .padding(.top, 1)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(warning.title).font(theme.font(Theme.body, weight: .semibold)).foregroundStyle(theme.text)
+                Text(warning.body).font(theme.font(Theme.small)).foregroundStyle(theme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+    }
+}
+
+/// One workspace in the breakdown: picture, name over its status, CPU over memory · disk.
+struct MachineAgentRow: View {
+    @Environment(\.theme) private var theme
+    let workspace: BoxWorkspace
+    let project: Project?
+
+    var body: some View {
+        HStack(spacing: PaneKit.gap) {
+            if let project {
+                AgentAvatar(project: project, theme: theme, size: PaneKit.avatar, still: true)
+            } else {
+                NeutralAvatar(name: workspace.name, size: PaneKit.avatar)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(workspace.name).font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)
+                Text(MachineMetrics.agentStatus(workspace)).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            // The numbers never wrap; the name column gives way (truncates) instead.
+            VStack(alignment: .trailing, spacing: 2) {
+                if let cpu = MachineMetrics.agentCpu(workspace) {
+                    Text(cpu).font(theme.font(Theme.small)).foregroundStyle(theme.muted)
+                }
+                if let md = MachineMetrics.agentMemDisk(workspace) {
+                    Text(md).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                }
+            }
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+        }
+        .padding(.horizontal, PaneKit.inset)
+        .padding(.vertical, 8)
+        .frame(minHeight: SettingsRow.height)
     }
 }
 
