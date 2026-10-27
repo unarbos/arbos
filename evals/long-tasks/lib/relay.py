@@ -281,6 +281,32 @@ def people_dm_with_agent(peer_handle, project):
     return chat_id, {"access_token": tok["access_token"], "device_id": tok.get("device_id", "")}
 
 
+def people_group_with_agents(peer_handle, projects, title):
+    """A people GROUP (the Arbonites shape) between the eval user and a scratch peer, with these
+    projects' agents added. Returns (chat_id, peer access token) like `people_dm_with_agent`, so
+    the `chat: "dm"` turn kinds (peer rows, quiet checks) work on it."""
+    st, users = admin("GET", "/admin/users")
+    users = users if isinstance(users, list) else (users or {}).get("users") or []
+    peer = next((u for u in users if u.get("login") == peer_handle), None)
+    if peer is None:
+        st, v = admin("POST", "/admin/users/test", {"handle": peer_handle, "name": "Long-task eval peer"})
+        if st != 201:
+            raise RuntimeError(f"create peer: {st} {v}")
+        peer_id = v["user"]["id"]
+    else:
+        peer_id = peer["id"]
+    st, tok = admin("POST", f"/admin/users/{peer_id}/devices", {"name": "lt eval driver"})
+    if st not in (200, 201):
+        raise RuntimeError(f"peer device: {st} {tok}")
+    st, chat = relay("POST", "/chats", {"kind": "group", "members": [peer_handle], "agent_ids": list(projects), "title": title})
+    if st not in (200, 201):
+        raise RuntimeError(f"group create: {st} {chat}")
+    chat_id = (chat.get("chat") or chat).get("id") if isinstance(chat, dict) else None
+    if not chat_id:
+        raise RuntimeError(f"group create: no id in {chat}")
+    return chat_id, {"access_token": tok["access_token"], "device_id": tok.get("device_id", "")}
+
+
 def people_send_as(peer, chat_id, text):
     """One human row from the peer into the DM, written through the peer's own arbosctl config
     (device id included, so the row carries the peer's identity rather than `dev:anon`)."""
