@@ -890,6 +890,35 @@ the cursor nor the AccessKit tree, so hand and label are pinned by
 construction (every target goes through `attach` / `mark`; the scan guards
 the road).
 
+### Blocked state (Jacob 2026-10-26, [feedback blocked-state-mac-2026-10-26])
+
+**Once I block a person, every place that shows them says so, every Unblock
+asks first, and a DM with them has no input.** Jacob: "Today you can't tell in
+the app that you've blocked someone." The block list is the relay's
+(`AppState::blocked`, `GET /blocks`); no surface keeps a local flag. The iPhone
+has the same surfaces ([feedback blocked-state-ios-2026-10-26]).
+
+| Surface | Rule | Where |
+|---|---|---|
+| Person pane | a **Blocked** chip (`nosign` glyph + word, `danger` on `danger_soft`, 22 pt) under the @handle; the hero's one action is **Unblock** (the Message pill is gone); the footer row reads **Unblock** (accent) | `profiles/user.rs`, `ui/blocked.rs` `chip` |
+| Unblock confirm | the row (pane) or the bar (DM composer) becomes "Unblock @x?" · "They'll be able to message you and see you in groups again." · Cancel · **Unblock** (the kit's confirm buttons); Unblock sends `DELETE /blocks/{id}`; nothing changes until the relay's list comes back without them | `Shell::{arm_unblock, cancel_unblock, confirm_unblock}`, `blocked::confirm` |
+| DM header pill | a **Blocked** tag (16 pt capsule, 10.5 semibold) after the name | `header.rs`, `blocked::tag` |
+| Member lists (group / shared project) | the same tag on the member's row, before the owner's remove × | `profiles/group.rs` |
+| DM composer | "You blocked X · Unblock" — a `COMPOSER_HEIGHT` bar on `surface_2`, the composer's radius, in the composer's place (transcript and empty-state layouts alike) | `Shell::blocked_composer`, `blocked::composer_bar` |
+| Refused push (chat-level note) — **DMs** | the shared `error_note` with `PushRefusal::sentence()`: "<name> has blocked you in this chat." · "Couldn't post: you've blocked <name>, who is in this chat. Unblock to post." (+ an **Unblock** capsule → the confirm) · the mute line · else the generic delivery line. The relay's code stays `not_available`; the words come from its `reason` | `Shell::render_delivery_note`, `sync/mod.rs` |
+| Groups: hidden for the blocker alone (Jacob 2026-10-26 17:28 CR) | a group block never refuses the room. The blocked person's rows fold, per run, into one muted stamp-style line "**N messages hidden because you blocked <name> · Unblock**" (`nosign` glyph; Unblock opens their pane on the confirm) — for the blocker only; everyone else sees the messages. The blocker's sidebar preview, unread dot, notifications, search hits and Library skip those rows. Senders come from the relay's `blockedSenders` hint on the chat plus my block list (`AppState::hidden_senders_in`, `hides_message`) | `transcript::build_rows_hiding`, `RowKind::Hidden`, `blocked::hidden_row`, `sidebar::preview`, `AppState` arrivals / search, `profiles::collect` |
+
+Pinned by `blocked::hidden_tests` (runs fold into Hidden rows; the real shell: only the
+others' bubbles, the preview skips the blocked sender, Unblock on the fold opens the pane
+on the confirm, unblock reveals every row; a hidden arrival leaves the dot dark while a
+third member's lights it) and `blocked::render_tests` (the real shell: pane chip / pill / row and
+the confirm's Cancel and Unblock with the one command; the DM pill's tag and
+the bar, the confirm in its place, the field back once unblocked; the member
+list's tag on the blocked member only; the note's sentences and its Unblock
+capsule) and `sync::push_refusal_tests` (the sentences). Rig:
+`ARBOS_RIG_FAILURE=blocks-member|blocked-by` (the note, every chat) with the
+fixture's `ARBOS_FIXTURE_BLOCKED=<handle>` (my block list + the groups' `blockedSenders`).
+
 ## Pane animations (Jacob 2026-10-24, [feedback right-pane-slide-2026-10-24], [feedback sidebar-slide-2026-10-24])
 
 **The right info pane and the left chat sidebar slide; they never pop.**

@@ -703,6 +703,7 @@ pub(crate) fn project_from_dto(
         image_url: None,
         avatar_version: p.avatar_version.unwrap_or(0),
         message_grants: p.message_grants.iter().map(message_grant_from).collect(),
+        blocked_senders: Vec::new(),
     }
 }
 
@@ -1026,6 +1027,7 @@ pub(crate) fn people_space_from(
             .map(|k| format!("{http_url}/blob/people:{id}/{k}?token={token}")),
         avatar_version: 0,
         message_grants: Vec::new(),
+        blocked_senders: dto.blocked_senders.clone(),
     };
     let chat = Chat {
         id: id.clone(),
