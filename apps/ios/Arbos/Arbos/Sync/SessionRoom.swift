@@ -47,6 +47,10 @@ final class SessionRoom {
     var onUnavailable: (() -> Void)?
     /// A push was refused with `not_available` on this connection; stay connected.
     var onPushRefused: (() -> Void)?
+    /// Why the last push was refused ([feedback blocked-state-ios-2026-10-26]): the relay's
+    /// `reason` (`blocked_by` / `blocks_member` / `silenced` / `chat_unavailable`) and, on a
+    /// block, the other party. Read by `onPushRefused`; nil from a relay that predates it.
+    private(set) var lastRefusal: PushRefusalWhy?
     var presenceUser: () -> (id: String, handle: String)? = { nil }
     /// Read receipt (Mac `presence_header` `seen`): the newest message id of this people chat,
     /// sent while it is focused so peers can lift their own bubbles to full opacity.
@@ -430,8 +434,9 @@ final class SessionRoom {
                 return
             }
             NSLog("relay room \(roomChat): error \(code): \(message)")
-        case .pushRefused:
-            lastError = "\(roomChat): not_available"
+        case .pushRefused(_, let code, let reason, let byHandle, let byName):
+            lastError = "\(roomChat): \(code)" + (reason.map { " (\($0))" } ?? "")
+            lastRefusal = PushRefusalWhy(code: code, reason: reason, byHandle: byHandle, byName: byName)
             onPushRefused?()
         case .presence(_, _, let typing, _, let mine, let headerJson):
             guard !mine else { return }
@@ -661,4 +666,17 @@ private final class URLSessionRoomSocket: RoomSocket {
     func cancel() {
         task.cancel(with: .goingAway, reason: nil)
     }
+}
+
+
+/// The relay's reason for a refused push, carried on the `not_available` error frame since
+/// [feedback blocked-state-relay-2026-10-26]; the code itself never changes.
+struct PushRefusalWhy: Equatable {
+    var code: String
+    var reason: String?
+    var byHandle: String?
+    var byName: String?
+
+    /// The plain sentence the chat shows.
+    var sentence: String { BlockedState.refusalSentence(reason: reason, name: byName, handle: byHandle) }
 }
