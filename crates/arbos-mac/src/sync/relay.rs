@@ -213,6 +213,11 @@ struct Shared {
     people: Mutex<HashSet<Id>>,
     /// Highest relay seq seen per room key (read marks, D61).
     room_seq: Mutex<HashMap<Id, i64>>,
+    /// Rooms that have finished catch-up (`ROWS_DONE` / `LinkLive`) on the
+    /// current socket. Cleared when the room goes back to Syncing. While a
+    /// room is absent here, `forward_changes` coalesces `list_changed`
+    /// snapshots (#1405 / feedback app-01M5Z3QPDA5BRE84SAPADXX05V).
+    caught_up: Mutex<HashSet<Id>>,
     /// When this device last sent `PUT /chats/{id}/read` (ms). Used so a
     /// registry refresh does not resurrect unread before the relay catches up.
     local_read_at: Mutex<HashMap<Id, i64>>,
@@ -786,6 +791,7 @@ impl SyncSource for RelaySource {
                 refresh_lock: tokio::sync::Mutex::new(()),
                 people: Mutex::new(HashSet::new()),
                 room_seq: Mutex::new(HashMap::new()),
+                caught_up: Mutex::new(HashSet::new()),
                 local_read_at: Mutex::new(HashMap::new()),
                 local_changed_at: Mutex::new(HashMap::new()),
                 pending_new_chats: Mutex::new(HashMap::new()),
@@ -2827,6 +2833,93 @@ fn emit_snapshot(shared: &Shared, chat_id: &str) {
     });
 }
 
+/// While a room catches up, coalesce `list_changed` into at most one snapshot
+/// per this window (plus the `LinkLive` emit when catch-up ends). Live rooms
+/// still emit on every `list_changed` (#1405).
+const CATCH_UP_SNAPSHOT_WINDOW_MS: u64 = 80;
+
+/// Pure helper: trailing-edge emit times for `list_changed` events during
+/// catch-up. Events that fall inside an open window are absorbed; the window
+/// fires at `open + window_ms`, then a new window opens on the next event.
+///
+/// `events_ms = [0, 10, 50, 120], window_ms = 80` → `[80, 200]` (two snapshots).
+#[cfg(test)]
+fn catch_up_snapshot_times(events_ms: &[u64], window_ms: u64) -> Vec<u64> {
+    let mut emits = Vec::new();
+    let mut window_open_at: Option<u64> = None;
+    for &t in events_ms {
+        match window_open_at {
+            Some(start) if t < start.saturating_add(window_ms) => {}
+            Some(start) => {
+                emits.push(start.saturating_add(window_ms));
+                window_open_at = Some(t);
+            }
+            None => {
+                window_open_at = Some(t);
+            }
+        }
+    }
+    if let Some(start) = window_open_at {
+        emits.push(start.saturating_add(window_ms));
+    }
+    emits
+}
+
+/// Pure helper for mixed catch-up / live sequences. Each event is
+/// `(time_ms, catching_up)`. While catching up, windows coalesce as in
+/// [`catch_up_snapshot_times`]; the first `catching_up = false` flushes a
+/// pending window (the LinkLive paint) and is not itself a live
+/// `list_changed`; later live events emit immediately.
+#[cfg(test)]
+fn snapshot_emit_times(events: &[(u64, bool)], window_ms: u64) -> Vec<u64> {
+    let mut emits = Vec::new();
+    let mut window_open_at: Option<u64> = None;
+    // Seed from the first event so an all-live sequence does not look like a
+    // catch-up → live transition on event 0.
+    let mut was_catching_up = events.first().map(|(_, c)| *c).unwrap_or(true);
+    for &(t, catching_up) in events {
+        if was_catching_up && !catching_up {
+            if window_open_at.take().is_some() {
+                emits.push(t);
+            }
+            was_catching_up = false;
+            continue;
+        }
+        if catching_up {
+            match window_open_at {
+                Some(start) if t < start.saturating_add(window_ms) => {}
+                Some(start) => {
+                    emits.push(start.saturating_add(window_ms));
+                    window_open_at = Some(t);
+                }
+                None => {
+                    window_open_at = Some(t);
+                }
+            }
+        } else {
+            emits.push(t);
+        }
+        was_catching_up = catching_up;
+    }
+    if let Some(start) = window_open_at {
+        emits.push(start.saturating_add(window_ms));
+    }
+    emits
+}
+
+fn room_caught_up(shared: &Shared, key: &str) -> bool {
+    shared.caught_up.lock().unwrap().contains(key)
+}
+
+fn set_room_caught_up(shared: &Shared, key: &str, up: bool) {
+    let mut g = shared.caught_up.lock().unwrap();
+    if up {
+        g.insert(key.to_string());
+    } else {
+        g.remove(key);
+    }
+}
+
 fn emit_project_doc(shared: &Shared, project_id: &str) {
     let docs = shared.docs.lock().unwrap();
     let Some(doc) = docs.get(&project_doc_key(project_id)) else {
@@ -2967,27 +3060,56 @@ async fn forward_changes(
     is_project_doc: bool,
     mut rx: mpsc::UnboundedReceiver<super::doc::Touched>,
 ) {
-    while let Some(touched) = rx.recv().await {
-        shared.mark_dirty(&key);
-        if is_project_doc {
-            emit_project_doc(&shared, &project_id);
-            apply_project_doc_status(&shared, &project_id);
-            continue;
-        }
-        if touched.list_changed {
-            emit_snapshot(&shared, &key);
-            mark_activity(&shared, &key);
-            continue;
-        }
-        let docs = shared.docs.lock().unwrap();
-        let Some(doc) = docs.get(&key) else { continue };
-        for ix in touched.messages {
-            if let Some(mut message) = doc.read_message(ix) {
-                apply_pending(&shared, &mut message);
-                let _ = shared.events.send(SyncEvent::MessageUpsert {
-                    chat_id: key.clone(),
-                    message: Box::new(message),
-                });
+    // Catch-up: at most one ChatSnapshot per CATCH_UP_SNAPSHOT_WINDOW_MS.
+    // Live: emit on every list_changed (unchanged). Message upserts always
+    // pass through immediately (#1405).
+    let window = Duration::from_millis(CATCH_UP_SNAPSHOT_WINDOW_MS);
+    let mut pending_deadline: Option<tokio::time::Instant> = None;
+    loop {
+        let wait_pending = pending_deadline;
+        tokio::select! {
+            _ = async {
+                if let Some(deadline) = wait_pending {
+                    tokio::time::sleep_until(deadline).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            }, if pending_deadline.is_some() => {
+                pending_deadline = None;
+                // LinkLive may have painted already; skip a duplicate.
+                if !room_caught_up(&shared, &key) {
+                    emit_snapshot(&shared, &key);
+                }
+            }
+            touched = rx.recv() => {
+                let Some(touched) = touched else { break };
+                shared.mark_dirty(&key);
+                if is_project_doc {
+                    emit_project_doc(&shared, &project_id);
+                    apply_project_doc_status(&shared, &project_id);
+                    continue;
+                }
+                if touched.list_changed {
+                    if room_caught_up(&shared, &key) {
+                        pending_deadline = None;
+                        emit_snapshot(&shared, &key);
+                    } else if pending_deadline.is_none() {
+                        pending_deadline = Some(tokio::time::Instant::now() + window);
+                    }
+                    mark_activity(&shared, &key);
+                    continue;
+                }
+                let docs = shared.docs.lock().unwrap();
+                let Some(doc) = docs.get(&key) else { continue };
+                for ix in touched.messages {
+                    if let Some(mut message) = doc.read_message(ix) {
+                        apply_pending(&shared, &mut message);
+                        let _ = shared.events.send(SyncEvent::MessageUpsert {
+                            chat_id: key.clone(),
+                            message: Box::new(message),
+                        });
+                    }
+                }
             }
         }
     }
@@ -3236,6 +3358,7 @@ async fn room_loop(
     let mut session = RoomSession::new(shared.device_id(), room, saved_cursor, saved_pending);
     // The first dial: the chat is about to catch up, so the pill (after its
     // grace) says "Syncing…", not "Reconnecting…".
+    set_room_caught_up(&shared, &key, false);
     let _ = shared.events.send(SyncEvent::RoomLink {
         key: key.clone(),
         state: LinkState::Syncing,
@@ -3364,6 +3487,7 @@ async fn run_session(
     let (mut tx, mut rx) = ws.split();
 
     // Socket up: catching up until RowsDone (`RoomAction::LinkLive`).
+    set_room_caught_up(shared, key, false);
     let _ = shared.events.send(SyncEvent::RoomLink {
         key: key.to_string(),
         state: LinkState::Syncing,
@@ -3639,6 +3763,10 @@ async fn perform_room_actions(
                     }
                 }
                 RoomAction::LinkLive => {
+                    // Catch-up done: mark live so forward_changes stops
+                    // coalescing, then paint once (the "plus one when catch-up
+                    // ends" snapshot). A pending coalesce timer is skipped.
+                    set_room_caught_up(shared, key, true);
                     let _ = shared.events.send(SyncEvent::Link(Link::Live));
                     let _ = shared.events.send(SyncEvent::RoomLink {
                         key: key.to_string(),
@@ -8387,6 +8515,60 @@ mod generate_failure_tests {
             draft.sentence(),
             "Couldn't generate the image. Generate is not on this relay yet; upload a picture instead."
         );
+    }
+}
+
+#[cfg(test)]
+mod snapshot_coalesce_tests {
+    use super::{catch_up_snapshot_times, snapshot_emit_times, CATCH_UP_SNAPSHOT_WINDOW_MS};
+
+    #[test]
+    fn catch_up_events_at_0_10_50_120_produce_two_snapshots() {
+        assert_eq!(
+            catch_up_snapshot_times(&[0, 10, 50, 120], CATCH_UP_SNAPSHOT_WINDOW_MS),
+            vec![80, 200]
+        );
+    }
+
+    #[test]
+    fn after_live_each_list_changed_emits_at_once() {
+        let events = [(0, false), (10, false), (50, false), (120, false)];
+        assert_eq!(
+            snapshot_emit_times(&events, CATCH_UP_SNAPSHOT_WINDOW_MS),
+            vec![0, 10, 50, 120]
+        );
+    }
+
+    #[test]
+    fn catch_up_end_flushes_pending_then_live_emits_at_once() {
+        // Catch-up burst, then live: pending window flushes at the live
+        // transition, then each live event is its own snapshot.
+        let events = [
+            (0, true),
+            (10, true),
+            (50, true),
+            (100, false),
+            (110, false),
+        ];
+        assert_eq!(
+            snapshot_emit_times(&events, CATCH_UP_SNAPSHOT_WINDOW_MS),
+            vec![100, 110]
+        );
+    }
+
+    /// Perf-rig style: 2 000 backfilled rows must not produce 2 000 snapshots.
+    #[test]
+    fn two_thousand_backfilled_rows_produce_well_under_two_thousand_snapshots() {
+        let events: Vec<u64> = (0..2_000).collect();
+        let emits = catch_up_snapshot_times(&events, CATCH_UP_SNAPSHOT_WINDOW_MS);
+        assert!(
+            emits.len() < 50,
+            "expected well under 2 000 snapshots, got {}",
+            emits.len()
+        );
+        assert!(!emits.is_empty());
+        // Trailing edge of the first window, then every window_ms thereafter.
+        assert_eq!(emits.first().copied(), Some(CATCH_UP_SNAPSHOT_WINDOW_MS));
     }
 }
 
