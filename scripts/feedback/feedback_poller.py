@@ -2060,6 +2060,18 @@ class Loop:
                 names.append(m.group(1))
         return names
 
+    def note_priority_merge(self, fid: str, st: dict, merge_sha: str) -> None:
+        """A gate-pinned item's merge is a hotfix for the deploy worker: it skips the relay coalescing window. The
+        worker's marker scan reads this file (deploy-requests/priority-merges) besides [hotfix] in the merged range
+        (#1966: the first-parent scan never saw a branch commit's marker; #2093 was held 20 min on 2026-10-27)."""
+        if not st.get("gate_pinned"):
+            return
+        with contextlib.suppress(OSError):
+            Path(DEPLOY_QUEUE).mkdir(parents=True, exist_ok=True)
+            with Path(DEPLOY_QUEUE, "priority-merges").open("a") as f:
+                f.write(f"{merge_sha} {fid} {iso()}\n")
+            self.store.event(fid, "priority_merge_noted", merge=merge_sha)
+
     def gate(self, fid: str, st: dict) -> None:
         """`gating`: a Rust-touching branch is built on the Mac (merged with current main: cargo fmt --check,
         clippy --all-targets -D warnings, test, and the release build of arbos-mac when it is touched); an
@@ -2972,6 +2984,7 @@ class Loop:
                 log(f"[{fid}] not in the integration tree or not landable ({st.get('status')}); untouched")
                 continue
             files = [f["filename"] for f in self.gh.commit(fix["sha"]).get("files", [])]
+            self.note_priority_merge(fid, st, merged["sha"])
             st.update(status="pushed", commit=fix["sha"], commit_url=fix["html_url"], commit_message=fix["commit"]["message"].splitlines()[0],
                       pushed_at=iso(), merge_sha=merged["sha"], merge_url=merged["html_url"], commit_date=merged["commit"]["committer"]["date"],
                       files=files, expects_ios=touches_ios(files), expects_ci=any(not f.startswith("apps/ios/") for f in files),
@@ -3244,6 +3257,7 @@ class Loop:
         tagged = [c for c in self.gh.compare(base, head).get("commits", []) if f"[feedback {fid}]" in c["commit"]["message"]]
         fix = tagged[-1] if tagged else {"sha": head, "html_url": f"https://github.com/{self.cfg.github_repo}/commit/{head}",
                                          "commit": {"message": st.get("agent_summary") or ""}}
+        self.note_priority_merge(fid, st, merged["sha"])
         st.update(status="pushed", commit=fix["sha"], commit_url=fix["html_url"],
                   commit_message=fix["commit"]["message"].splitlines()[0], pushed_at=iso(), merge_sha=merged["sha"],
                   merge_url=merged["html_url"], commit_date=merged["commit"]["committer"]["date"])
