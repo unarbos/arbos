@@ -13,6 +13,7 @@ mod eval;
 mod feedback;
 mod goals;
 mod groups;
+mod handoff;
 mod harness;
 mod hooks;
 mod http;
