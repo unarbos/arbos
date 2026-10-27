@@ -67,6 +67,7 @@ struct BlockedTag: View {
     var body: some View {
         Text(BlockedState.label)
             .font(theme.font(11, weight: .semibold))
+            // error-ui: exception status-badge
             .foregroundStyle(theme.danger)
             .padding(.horizontal, 7)
             .frame(height: Self.height)
@@ -87,6 +88,7 @@ struct BlockedChip: View {
             Image(systemName: "nosign").font(.system(size: 12, weight: .semibold))
             Text(BlockedState.label).font(theme.font(Theme.tiny, weight: .semibold))
         }
+        // error-ui: exception status-badge
         .foregroundStyle(theme.danger)
         .padding(.leading, 9)
         .padding(.trailing, 11)

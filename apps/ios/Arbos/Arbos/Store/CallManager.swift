@@ -102,7 +102,10 @@ final class CallManager: NSObject, ObservableObject {
     @Published private(set) var incoming: (call: Call, from: CallPerson?)?
     @Published private(set) var tiles: [CallTile] = []
     @Published private(set) var connectedAt: Date?
-    @Published private(set) var error: String?
+    /// The last failure (the shared element draws it under the call header).
+    @Published private(set) var error: UserError?
+    /// The words alone, for the idle headline.
+    var errorText: String? { error?.sentence }
     @Published private(set) var muted = false
     @Published private(set) var cameraOn = false
     /// Publishing a screen-share track (system picker chooses what to share on iOS 27+).
@@ -223,7 +226,7 @@ final class CallManager: NSObject, ObservableObject {
     /// `ring` — optional member ids to notify (selective group call). Nil / empty = everyone.
     func start(chatId: String, projectId: String?, kind: CallKind, title: String, ring: [String]? = nil) async {
         guard !isActive else { isPresented = true; return }
-        guard await CallManager.micGranted() else { error = "Microphone access is off in Settings."; return }
+        guard await CallManager.micGranted() else { error = UserError.refused("start the call", "Microphone access is off in Settings."); return }
         if kind == .video { _ = await CallManager.cameraGranted() }
         guard let api else { return }
         error = nil
@@ -245,7 +248,7 @@ final class CallManager: NSObject, ObservableObject {
             try await connect(started, video: kind == .video)
         } catch {
             log.error("start failed: \(error.localizedDescription, privacy: .public)")
-            self.error = CallManager.describe(error)
+            self.error = CallManager.describe("start the call", error)
             await teardown(leave: false)
         }
     }
@@ -253,7 +256,7 @@ final class CallManager: NSObject, ObservableObject {
     /// From the "On a call · Join" bar.
     func join(_ existing: Call, title: String) async {
         guard !isActive, let api else { isPresented = true; return }
-        guard await CallManager.micGranted() else { error = "Microphone access is off in Settings."; return }
+        guard await CallManager.micGranted() else { error = UserError.refused("start the call", "Microphone access is off in Settings."); return }
         error = nil
         phase = .connecting
         isPresented = true
@@ -266,7 +269,7 @@ final class CallManager: NSObject, ObservableObject {
             reportOutgoing(title: title, video: fresh.kind == .video)
             try await connect(fresh, video: fresh.kind == .video)
         } catch {
-            self.error = CallManager.describe(error)
+            self.error = CallManager.describe("join the call", error)
             await teardown(leave: false)
             // 410 / call_ended left the Join bar up; re-check the chat.
             await syncActiveBar(chatId: existing.chatId, projectId: existing.isPeople ? nil : existing.projectId)
@@ -464,7 +467,7 @@ final class CallManager: NSObject, ObservableObject {
         switch answerPlan(hasIncoming: incoming != nil, micDenied: micDenied) {
         case .fail:
             if incoming != nil, micDenied {
-                error = "Microphone access is off in Settings."
+                error = UserError.refused("answer the call", "Microphone access is off in Settings.")
                 endIncoming(reason: .failed)
             }
             return
@@ -495,7 +498,7 @@ final class CallManager: NSObject, ObservableObject {
     /// Async half of answering: mic/camera if needed, then join and connect.
     private func joinAccept(_ inc: (call: Call, from: CallPerson?)) async {
         guard await CallManager.micGranted() else {
-            error = "Microphone access is off in Settings."
+            error = UserError.refused("answer the call", "Microphone access is off in Settings.")
             await teardown(leave: false, reason: .failed)
             return
         }
@@ -509,7 +512,7 @@ final class CallManager: NSObject, ObservableObject {
             call = fresh
             try await connect(fresh, video: fresh.kind == .video)
         } catch {
-            self.error = CallManager.describe(error)
+            self.error = CallManager.describe("join the call", error)
             await teardown(leave: false)
             await syncActiveBar(chatId: inc.call.chatId, projectId: inc.call.isPeople ? nil : inc.call.projectId)
         }
@@ -603,7 +606,7 @@ final class CallManager: NSObject, ObservableObject {
         phase = .connecting
         isPresented = true
         reportOutgoing(title: "Dev call", video: kind == .video)
-        do { try await connect(c, video: kind == .video) } catch { self.error = CallManager.describe(error); await teardown(leave: false) }
+        do { try await connect(c, video: kind == .video) } catch { self.error = CallManager.describe("start the call", error); await teardown(leave: false) }
     }
     #endif
 
@@ -779,7 +782,7 @@ final class CallManager: NSObject, ObservableObject {
             let fresh = try await api.inviteSpeaker(callId: c.callId, userId: userId)
             applySpeakState(fresh)
         } catch {
-            self.error = CallManager.describe(error)
+            self.error = CallManager.describe("invite the speaker", error)
         }
     }
 
@@ -790,7 +793,7 @@ final class CallManager: NSObject, ObservableObject {
             let fresh = try await api.revokeSpeaker(callId: c.callId, userId: userId)
             applySpeakState(fresh)
         } catch {
-            self.error = CallManager.describe(error)
+            self.error = CallManager.describe("change the speaker", error)
         }
     }
 
@@ -819,7 +822,7 @@ final class CallManager: NSObject, ObservableObject {
     }
 
     func toggleCamera() async {
-        if !cameraOn, !(await CallManager.cameraGranted()) { error = "Camera access is off in Settings."; return }
+        if !cameraOn, !(await CallManager.cameraGranted()) { error = UserError.refused("turn the camera on", "Camera access is off in Settings."); return }
         let turningOn = !cameraOn
         if !turningOn {
             // Off means off at once: the indicator drops now, and the camera track is
@@ -837,7 +840,7 @@ final class CallManager: NSObject, ObservableObject {
             }
             cameraOn = turningOn
         } catch {
-            self.error = CallManager.describe(error)
+            self.error = CallManager.describe("turn the camera on", error)
         }
         objectWillChange.send()
     }
@@ -864,7 +867,7 @@ final class CallManager: NSObject, ObservableObject {
             screenShareOn = room.localParticipant.isScreenShareEnabled()
             // User dismissed the content picker — not an error to show on the call screen.
             if let lk = error as? LiveKitError, lk.type == .cancelled { /* no-op */ }
-            else { self.error = CallManager.describe(error) }
+            else { self.error = CallManager.describe("share the screen", error) }
         }
         objectWillChange.send()
     }
@@ -1219,18 +1222,26 @@ final class CallManager: NSObject, ObservableObject {
 
     func forgetVoipRegistration() { registeredVoipToken = nil }
 
-    static func describe(_ error: Error) -> String {
+    /// The call's failure as the shared `UserError`: the relay's call states keep their own
+    /// sentences as refusals; everything else goes through the classifier.
+    static func describe(_ verb: String, _ error: Error) -> UserError {
         if let e = error as? RelayError {
-            switch (e.status, e.type ?? "") {
-            case (503, _), (_, "calls_off"): return "Calls are not switched on for this relay yet."
-            case (410, _), (_, "call_ended"): return "That call has ended."
-            case (409, _), (_, "call_full"): return "The call is full."
-            case (404, _), (405, _): return "Calls are not on this relay yet."
-            case (403, _): return "You are not a member of this chat."
-            default: break
+            let said: String? = switch (e.status, e.type ?? "") {
+            case (503, _), (_, "calls_off"): "Calls are not switched on for this relay yet."
+            case (410, _), (_, "call_ended"): "That call has ended."
+            case (409, _), (_, "call_full"): "The call is full."
+            case (404, _), (405, _): "Calls are not on this relay yet."
+            case (403, _): "You are not a member of this chat."
+            default: nil
             }
+            if let said { return UserError.refused(verb, said) }
         }
-        return error.localizedDescription
+        return UserError.classify(verb, error)
+    }
+
+    /// The sentence alone (older callers).
+    static func describe(_ error: Error) -> String {
+        describe("start the call", error).sentence
     }
 
     /// An ARBOS_CALL alert (tap or foreground): `event` started → ring, ended → stop.
@@ -1289,7 +1300,7 @@ extension CallManager: RoomDelegate {
                 // .disconnected while a connect is still in flight.
                 if (oldConnectionState == .connected || oldConnectionState == .reconnecting),
                    self.phase == .connected || self.phase == .reconnecting {
-                    self.error = self.error ?? "Connection lost."
+                    self.error = self.error ?? UserError.of("stay on the call", .offline(deviceOffline: false), "Connection lost.")
                     await self.teardown(leave: true, reason: .failed)
                 }
             default: break
@@ -1384,7 +1395,7 @@ extension CallManager: CXProviderDelegate {
             switch answerPlan(hasIncoming: self.incoming != nil, micDenied: micDenied) {
             case .fail:
                 if self.incoming != nil {
-                    self.error = "Microphone access is off in Settings."
+                    self.error = UserError.refused("start the call", "Microphone access is off in Settings.")
                     self.endIncoming(reason: .failed)
                 }
                 action.fail()
