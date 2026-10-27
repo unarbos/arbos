@@ -15,12 +15,13 @@ use gpui::{
 use crate::app::SignInMode;
 use crate::app::{AppEvent, AppState, DetailsTarget, ProfilePage, ServerSheet};
 use crate::image_picker;
-use crate::model::{now_ms, CallKind, MachineState};
+use crate::model::{now_ms, CallKind, MachineState, Person};
 use crate::sign_in;
 use crate::sync::user_error::{ErrorClass, UserError};
 use crate::sync::PictureSource;
 use crate::ui::avatar_picker;
 use crate::ui::avatars::{self, leaf, LeafPick};
+use crate::ui::blocked;
 use crate::ui::callview;
 use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
 use crate::ui::chart_viewer;
@@ -55,8 +56,9 @@ use crate::ui::skills::{self, SkillsPanel};
 use crate::ui::slide::{self, ChatSlide, PaneSlides};
 use crate::ui::theme::{
     reapply_window_background, AppearancePref, GlassOpacity, Surface, Theme, COLUMN_MARGIN,
-    COMPOSER_BOTTOM, COMPOSER_WIDTH, DRAWER_WIDTH, GLASS_OPACITY_MAX, GLASS_OPACITY_MIN,
-    HEADER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS, TAB_BAR_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
+    COMPOSER_BOTTOM, COMPOSER_HEIGHT, COMPOSER_WIDTH, DRAWER_WIDTH, GLASS_OPACITY_MAX,
+    GLASS_OPACITY_MIN, HEADER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS, TAB_BAR_HEIGHT, TEXT_BODY,
+    TEXT_SMALL, TEXT_TINY,
 };
 use crate::ui::transcript::COLUMN_MAX_WIDTH;
 use crate::ui::transcript::{column_row, Transcript, TranscriptEvent};
@@ -364,6 +366,11 @@ pub struct Shell {
     /// Group pane › Members: the row whose ✕ was clicked (`user:<id>` or
     /// `agent:<project>`); it shows "Remove … ?" with Cancel / Remove.
     pub(crate) member_remove_armed: Option<String>,
+    /// The person an Unblock is being confirmed for ([feedback blocked-state-mac-2026-10-26]):
+    /// the pane's footer row, the DM composer bar and the chat note draw the confirm in their
+    /// place while this names their person; `confirm_unblock` lifts the block, `cancel_unblock`
+    /// puts the row / bar back.
+    pub(crate) unblock_armed: Option<Person>,
     /// Settings → Devices: the device whose Sign out is asking (Oct 23).
     pub(crate) device_revoke_armed: Option<String>,
     /// Settings → Devices: the load-failure note's Details disclosure.
@@ -491,6 +498,16 @@ impl Shell {
                         s.set_reply_to(chat_id.clone(), message_id.clone(), cx)
                     });
                     cx.notify();
+                }
+                TranscriptEvent::Unblock { person } => {
+                    // A group: the confirm needs a place — the person's pane, opened over
+                    // the chat with the confirm already armed on its Unblock row.
+                    let page = ProfilePage::User {
+                        handle: person.handle.clone(),
+                        space_id: this.state.read(cx).selected_project.clone(),
+                    };
+                    this.state.update(cx, |s, cx| s.open_profile(page, cx));
+                    this.arm_unblock(person.clone(), cx);
                 }
             },
         )
@@ -1063,6 +1080,7 @@ impl Shell {
             channel_delete_armed: false,
             run_by_chip: Default::default(),
             member_remove_armed: None,
+            unblock_armed: None,
             device_revoke_armed: None,
             devices_error_details_open: false,
             update_error_details_open: false,
@@ -2166,6 +2184,66 @@ impl Shell {
     /// it and occludes it — so its × / Esc / backdrop close only the viewer and the picker is
     /// back as it was (Jacob, 2026-10-26: the first cut dropped the picker here, so the X
     /// seemed to close both).
+    /// Unblock asked for: the surface that holds `person` shows the confirm.
+    pub(crate) fn arm_unblock(&mut self, person: Person, cx: &mut Context<Self>) {
+        self.unblock_armed = Some(person);
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_unblock(&mut self, cx: &mut Context<Self>) {
+        if self.unblock_armed.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// The confirm's Unblock: `DELETE /blocks/{id}` through the state; the surfaces follow the
+    /// relay's block list back to their plain state.
+    pub(crate) fn confirm_unblock(&mut self, cx: &mut Context<Self>) {
+        let Some(person) = self.unblock_armed.take() else {
+            return;
+        };
+        self.state.update(cx, |s, cx| s.unblock_user(&person, cx));
+        cx.notify();
+    }
+
+    /// The composer's stand-in for a DM with someone I blocked: the "You blocked X · Unblock"
+    /// bar, or the confirm in its place while Unblock is being asked.
+    fn blocked_composer(
+        &self,
+        person: &Person,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if self.unblock_armed_for(person) {
+            let (cancel, go) = blocked::confirm_buttons("composer-unblock", theme);
+            return div()
+                .w_full()
+                .rounded(px(COMPOSER_HEIGHT / 2.0))
+                .bg(theme.surface_2)
+                .child(blocked::confirm(
+                    "composer-unblock",
+                    &person.handle,
+                    cancel.on_click(cx.listener(|this, _, _, cx| this.cancel_unblock(cx))),
+                    go.on_click(cx.listener(|this, _, _, cx| this.confirm_unblock(cx))),
+                    theme,
+                ))
+                .into_any_element();
+        }
+        let (bar, unblock) = blocked::composer_bar(person, theme);
+        let person = person.clone();
+        bar.child(unblock.on_click(cx.listener(move |this, _, _, cx| {
+            this.arm_unblock(person.clone(), cx);
+        })))
+        .into_any_element()
+    }
+
+    /// Is the confirm up for this person?
+    pub(crate) fn unblock_armed_for(&self, person: &Person) -> bool {
+        self.unblock_armed.as_ref().is_some_and(|p| {
+            (!p.id.is_empty() && p.id == person.id) || p.handle.eq_ignore_ascii_case(&person.handle)
+        })
+    }
+
     pub(crate) fn view_picture(&mut self, name: &str, url: &str, cx: &mut Context<Self>) {
         self.state
             .update(cx, |s, cx| s.open_picture_viewer(name, url, cx));
@@ -3050,42 +3128,41 @@ impl Shell {
             )
     }
 
-    /// The per-room push refusal (`not_available`): "Messages in this chat aren't being
-    /// delivered right now." in the same slot, while the relay refuses; it clears itself on
-    /// the room's next ACK (`SyncEvent::PushRefused { refused: false }`).
+    /// The per-room push refusal in the same slot, while the relay refuses; it clears itself
+    /// on the room's next ACK (`SyncEvent::PushRefused { refused: false }`). A refusal with a
+    /// `reason` says so in plain words ([feedback blocked-state-relay-2026-10-26]): "<name> has
+    /// blocked you in this chat." / "Couldn't post: you've blocked <name>, who is in this chat.
+    /// Unblock to post." / the mute line; anything else keeps "Messages in this chat aren't
+    /// being delivered right now."
     fn render_delivery_note(&self, cx: &mut Context<Self>) -> Option<Div> {
         let theme = Theme::of(cx).clone();
         let state = self.state.read(cx);
         let chat = state.active_chat_id()?;
-        if !state.push_refused.contains(&chat) {
-            return None;
+        let why = state.push_refused.get(&chat)?.clone();
+        let error = delivery_error(&why);
+        let mut handlers =
+            error_note::Handlers::new().toggle_details(cx.listener(|this, _, _, cx| {
+                this.delivery_error_details_open = !this.delivery_error_details_open;
+                cx.notify();
+            }));
+        // "Unblock to post": the capsule arms the confirm for the person named
+        // ([feedback blocked-state-mac-2026-10-26]); the DM's composer bar shows it.
+        if let Some(handle) = why.unblock_handle() {
+            let person = state.person_by_handle(handle).unwrap_or_else(|| Person {
+                handle: handle.to_owned(),
+                ..Person::default()
+            });
+            handlers = handlers.extra(
+                blocked::UNBLOCK_LABEL,
+                cx.listener(move |this, _, _, cx| this.arm_unblock(person.clone(), cx)),
+            );
         }
-        let error = UserError::of(
-            "",
-            ErrorClass::Offline {
-                device_offline: false,
-            },
-            "the relay refused the push: not_available",
-        );
-        let error = UserError {
-            verb: String::new(),
-            class: ErrorClass::Refused {
-                message: Some(
-                    "Messages in this chat aren't being delivered right now. We'll keep trying."
-                        .into(),
-                ),
-            },
-            ..error
-        };
         Some(self.chat_note(
             "delivery-error",
             &error,
             self.delivery_error_details_open,
             &theme,
-            error_note::Handlers::new().toggle_details(cx.listener(|this, _, _, cx| {
-                this.delivery_error_details_open = !this.delivery_error_details_open;
-                cx.notify();
-            })),
+            handlers,
         ))
     }
 
@@ -3235,6 +3312,13 @@ impl Shell {
         let channel = state
             .selected_channel_info()
             .map(|(server, ch)| (server.clone(), ch.clone(), state.channel_can_post()));
+        // A DM with someone I blocked has no input ([feedback blocked-state-mac-2026-10-26]):
+        // "You blocked X · Unblock" stands in the composer's place, the confirm in its turn.
+        let blocked_peer = project
+            .as_ref()
+            .filter(|p| p.is_people() && !p.is_people_group())
+            .and_then(|p| p.person().cloned())
+            .filter(|person| state.is_blocked(person));
         if animating || shake.is_some() || presence.is_some() {
             PulseClock::request(cx);
         }
@@ -3248,6 +3332,10 @@ impl Shell {
         // not moved.
         // Wheel over the input (sibling of the list) still scrolls the chat —
         // same as dragging over a bubble ([feedback app-01M5PDB3QYAPBPA4FJXZE1FFD0]).
+        let composer_slot: AnyElement = match &blocked_peer {
+            Some(person) => self.blocked_composer(person, &theme, cx),
+            None => self.composer.clone().into_any_element(),
+        };
         let composer_block = column_row(
             div()
                 .w_full()
@@ -3256,7 +3344,7 @@ impl Shell {
                     this.transcript
                         .update(cx, |t, cx| t.scroll_from_wheel(event, cx));
                 }))
-                .child(self.composer.clone())
+                .child(composer_slot)
                 .into_any_element(),
         );
 
@@ -3510,13 +3598,12 @@ impl Shell {
                             .child(hint),
                     )
                     .children(add_agent)
-                    .child(
-                        div()
-                            .w(px(COMPOSER_WIDTH))
-                            .max_w_full()
-                            .pt(px(12.0))
-                            .child(self.composer.clone()),
-                    ),
+                    .child(div().w(px(COMPOSER_WIDTH)).max_w_full().pt(px(12.0)).child(
+                        match &blocked_peer {
+                            Some(person) => self.blocked_composer(person, &theme, cx),
+                            None => self.composer.clone().into_any_element(),
+                        },
+                    )),
             );
         } else {
             // Transcript above, composer pinned at the bottom. On the first
@@ -5105,5 +5192,33 @@ pub(crate) fn human_bytes(bytes: i64) -> String {
         format!("{:.1} MB", b / 1_000_000.0)
     } else {
         format!("{:.2} GB", b / 1_000_000_000.0)
+    }
+}
+
+/// The chat-level note's error for a push refusal: the refusal's sentence as the relay's
+/// words (`ErrorClass::Refused`), the raw code / reason behind Details.
+pub(crate) fn delivery_error(why: &crate::sync::PushRefusal) -> UserError {
+    let raw = match (&why.reason, &why.by_handle) {
+        (Some(reason), Some(handle)) => {
+            format!(
+                "the relay refused the push: {} ({reason}, @{handle})",
+                why.code
+            )
+        }
+        _ => format!("the relay refused the push: {}", why.code),
+    };
+    let error = UserError::of(
+        "",
+        ErrorClass::Offline {
+            device_offline: false,
+        },
+        raw,
+    );
+    UserError {
+        verb: String::new(),
+        class: ErrorClass::Refused {
+            message: Some(why.sentence()),
+        },
+        ..error
     }
 }
