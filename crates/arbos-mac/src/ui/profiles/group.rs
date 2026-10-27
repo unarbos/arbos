@@ -77,6 +77,9 @@ pub(super) fn page(
     let state = shell.state.read(cx);
     let space = state.project(space_id)?.clone();
     let tab = state.profile_tab;
+    // Agent pictures through the resolver, read while `state` is borrowed (the rows below
+    // take `cx` mutably for their listeners).
+    let agent_images = avatars::project_images(state);
     let me_handle = state.me_handle();
     let people = members(state, &space);
     let images: Vec<Option<Arc<RenderImage>>> =
@@ -410,7 +413,13 @@ pub(super) fn page(
                 list.push(
                     list_row(
                         "profile-agent-self",
-                        avatars::project(&space, kit::AVATAR, &theme).into_any_element(),
+                        avatars::project_with(
+                            agent_images.get(&space.id).cloned(),
+                            &space,
+                            kit::AVATAR,
+                            &theme,
+                        )
+                        .into_any_element(),
                         space.name.clone(),
                         sub,
                         theme.text_muted,

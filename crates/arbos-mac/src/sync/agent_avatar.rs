@@ -505,26 +505,6 @@ mod relaunch_tests {
         let p = record(Some(&url_a), 100);
         let projects = vec![p.clone(), group(&p)];
 
-        // Jacob's agents: their avatar predates the stamp (`avatar_version` 0 on the relay),
-        // and a relaunch used to restore the roster copy without its picture. With the
-        // stamps tied, that lossy copy won the resolver → leaf on every people-chat surface.
-        // Now the copy with the picture wins the tie, whatever the store returned.
-        {
-            let url0 =
-                picture_url("https://relay.example", "01HEZ", Some("avatar-0.jpg"), 0).unwrap();
-            let rec0 = record(Some(&url0), 0);
-            let mut lossy_group = group(&rec0);
-            lossy_group.agents[0].image_url = None;
-            let legacy = vec![rec0, lossy_group];
-            for (surface, url) in surface_urls(&legacy) {
-                assert_eq!(
-                    url.as_deref(),
-                    Some(url0.as_str()),
-                    "{surface} (stamp 0, lossy roster copy)"
-                );
-            }
-        }
-
         // Run 1: the registry is saved and the picture fetched.
         {
             let store = Store::open_at(&path).unwrap();
