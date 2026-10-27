@@ -143,7 +143,11 @@ enum RowKind: Equatable {
     /// `lane`: in a people chat the card sits after the sender's avatar lane, like the bubble it
     /// belongs to (#1440 follow-up: the card must share the bubble's left edge and cap width).
     /// `shellCard`: a destructive-shell card with standing options (#1544).
-    case question(questionId: String?, text: String, options: [ChoiceOption], multi: Bool, picked: [String], open: Bool, lane: Bool, shellCard: Bool = false)
+    case question(questionId: String?, text: String, options: [ChoiceOption], multi: Bool, picked: [String], open: Bool, lane: Bool, shellCard: Bool = false, offer: SecretOffer? = nil)
+    /// Secret hand-off: the message's value moved into the vault — "Secret saved as NAME"
+    /// in the sender's slot (mine right, another member's left under their name). Nothing
+    /// here is the value; nothing to copy or search.
+    case secretGhost(name: String, mine: Bool, handle: String, avatar: String?, named: Bool)
     /// A file card; tap opens the media viewer on it (Open → Quick Look).
     /// `caption` is an optional description bar under a video when the sender typed
     /// one with the attachment — not a separate text bubble.
@@ -238,6 +242,13 @@ enum Transcript {
                 var hasImage = false
                 var hasAttachment = false
                 let mine = !people || me == nil || message.sender == me || message.sender == "user"
+                // Secret hand-off: a redacted row is the ghost bubble and nothing else.
+                if let ghostName = message.parts.lazy.compactMap(\.secretRedactedName).first {
+                    chunk.append(Row(id: "\(message.id)#ghost", messageId: message.id, role: mine ? .user : .project,
+                                     kind: .secretGhost(name: ghostName, mine: mine, handle: message.senderHandle ?? "someone",
+                                                        avatar: message.senderAvatar, named: named)))
+                    break
+                }
                 // Collect picture / video attachments first so a typed description can sit
                 // as a caption bar on the last one instead of a second bubble.
                 var mediaParts: [(id: String, a: Attachment)] = []
@@ -368,7 +379,8 @@ enum Transcript {
                         chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
                                          kind: .question(questionId: q.questionId, text: q.question, options: q.options,
                                                          multi: q.multi, picked: q.answer, open: q.open,
-                                                         lane: people && message.senderHandle != nil, shellCard: q.shellCard)))
+                                                         lane: people && message.senderHandle != nil, shellCard: q.shellCard,
+                                                         offer: q.secretOffer)))
                     case .status(let id, .handoff, let text):
                         // Legacy status line; the turn-based row above already covers it.
                         if handoffName == nil {
@@ -386,7 +398,7 @@ enum Transcript {
                                                    lane: people && message.senderHandle != nil))
                     case .error(let id, let code, let text):
                         errors.append((id: id, code: code, text: text))
-                    case .status, .tool, .subagentResult, .reasoning, .unknown:
+                    case .status, .tool, .subagentResult, .reasoning, .secretRedacted, .unknown:
                         break
                     }
                 }
@@ -402,7 +414,7 @@ enum Transcript {
                 let onlyEmpty = message.parts.allSatisfy { part in
                     switch part {
                     case .text, .status, .error: return true
-                    case .tool, .attachment, .question, .subagentResult, .reasoning, .unknown: return false
+                    case .tool, .attachment, .question, .subagentResult, .reasoning, .secretRedacted, .unknown: return false
                     }
                 }
                 let failed = !errors.isEmpty || message.status == .error
@@ -1155,7 +1167,7 @@ struct RowView: View, Equatable {
     /// Bubbles get a swipe time; centred system / card / error rows do not.
     private var showsSwipeTime: Bool {
         switch row.kind {
-        case .system, .question, .error, .forwardHint:
+        case .system, .question, .error, .forwardHint, .secretGhost:
             return false
         case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
             return true
@@ -1388,13 +1400,45 @@ struct RowView: View, Equatable {
             .foregroundStyle(theme.muted)
             .frame(maxWidth: .infinity)
             .multilineTextAlignment(.center)
-        case .question(let questionId, let text, let options, let multi, let picked, let open, let lane, let shellCard):
+        case .secretGhost(let name, let mine, let handle, let avatar, let named):
+            // The ghost: surface fill with a hairline, muted ink, the key glyph; the name is
+            // the only thing in text ink. Mine sits right like my bubble, another member's
+            // left under their name with their avatar — never a value, never selectable.
+            let lead = mine ? "Secret saved as " : "\(model.personName(handle: handle) ?? "@\(handle)") saved a secret as "
+            let ghost = HStack(spacing: 7) {
+                Image(systemName: "key")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(theme.muted)
+                (Text(lead).foregroundColor(theme.muted) + Text(name).foregroundColor(theme.text).fontWeight(.medium))
+                    .font(theme.font(Theme.body))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, Theme.bubbleHPad)
+            .padding(.vertical, Theme.bubbleVPad)
+            .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.card))
+            .overlay(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).strokeBorder(theme.separator, lineWidth: 1))
+            .accessibilityLabel("\(lead)\(name)")
+            .accessibilityIdentifier("secret-ghost")
+            if mine {
+                HStack(spacing: 8) {
+                    Spacer(minLength: 0)
+                    ghost.frame(maxWidth: maxBubble, alignment: .trailing)
+                }
+            } else {
+                HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
+                    PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
+                        .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
+                    ghost.frame(maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset), alignment: .leading)
+                    Spacer(minLength: 0)
+                }
+            }
+        case .question(let questionId, let text, let options, let multi, let picked, let open, let lane, let shellCard, let offer):
             // The card is a transcript row like a bubble: the same left edge (after the avatar
             // lane in a people chat) and the same cap width as an incoming bubble.
             HStack(spacing: 0) {
                 if lane { Color.clear.frame(width: Theme.memberLane(composerInset: composerInset), height: 1) }
                 QuestionCard(rowId: row.id, chatId: chatId, questionId: questionId, title: text, options: options,
-                             multi: multi, picked: picked, open: open, shellCard: shellCard)
+                             multi: multi, picked: picked, open: open, shellCard: shellCard, offer: offer)
                     .frame(maxWidth: lane ? maxBubble - Theme.memberLane(composerInset: composerInset) : maxBubble, alignment: .leading)
                 Spacer(minLength: 0)
             }
@@ -1578,7 +1622,8 @@ struct RowView: View, Equatable {
     private var reactionLeading: CGFloat {
         switch row.kind {
         case .other, .member: return Theme.memberLane(composerInset: composerInset)
-        case .question(_, _, _, _, _, _, let lane, _): return lane ? Theme.memberLane(composerInset: composerInset) : 0
+        case .question(_, _, _, _, _, _, let lane, _, _): return lane ? Theme.memberLane(composerInset: composerInset) : 0
+        case .secretGhost(_, let mine, _, _, _): return mine ? 0 : Theme.memberLane(composerInset: composerInset)
         case .image(_, _, _, let lane): return lane ? Theme.memberLane(composerInset: composerInset) : 0
         default: return 0
         }
