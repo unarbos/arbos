@@ -360,6 +360,19 @@ impl RoomSession {
         self.lock().is_closed()
     }
 
+    /// This connection stands refused (`not_available`); local commits queue until an ACK,
+    /// a reconnect or `retry_refused` clears it.
+    pub fn push_refused(&self) -> bool {
+        self.lock().push_refused()
+    }
+
+    /// The condition behind a refusal may have changed (a people-chat event for this room,
+    /// the user unblocked someone): resend every pending batch now with the same ids and
+    /// drop the refusal. True when a resend went out ([feedback 2005]).
+    pub fn retry_refused(&self, now_ms: u64) -> bool {
+        self.lock().retry_refused(now_ms)
+    }
+
     pub fn drain_actions(&self) -> Vec<RoomAction> {
         self.lock()
             .drain_actions()
