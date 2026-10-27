@@ -21,6 +21,9 @@ enum DebugHooks {
     /// With the agent pane open: scroll so the block with this id is in view (`permissions`,
     /// `profile`) — the Details blocks below the fold on the rig (#1544's Shell approvals).
     static var paneScroll: String? { value("ARBOS_PANE_SCROLL") }
+    /// Screenshot rig ([feedback iphone-list-top-fade-2026-10-26]): scroll a list (Home, search
+    /// results, server channels) so its row with this index sits at the top — rows under the bar.
+    static var listScroll: Int? { value("ARBOS_LIST_SCROLL").flatMap { Int($0) } }
     static var autoSend: String? { value("ARBOS_AUTO_SEND") }
     /// Rig (#1596): text put in the composer of the opened chat at appear, caret at the end —
     /// `@s` leaves the mention picker open, `@sam deck ready?` shows the resolved chip.
@@ -45,6 +48,9 @@ enum DebugHooks {
     static var fixtureLongReply: Bool { value("ARBOS_FIXTURE_LONG_REPLY") == "1" }
     /// Presence-row rig (typing-indicator-left-2026-10-23): n agents working in the fixture group.
     static var fixtureWorking: Int { value("ARBOS_FIXTURE_WORKING").flatMap { Int($0) } ?? 0 }
+    /// `ARBOS_FIXTURE_MACHINE=near-limit`: the box report says disk 92 % and memory 88 % used
+    /// (Settings › Machine's warning state on the rig).
+    static var fixtureMachineNearLimit: Bool { value("ARBOS_FIXTURE_MACHINE") == "near-limit" }
     /// Tasks-chip rig (duplex §2.4): the first n of three background jobs open in the opened
     /// agent chat — 1 running with a step, 2 running with no step yet, 3 queued behind a lock.
     static var fixtureJobs: Int { min(3, value("ARBOS_FIXTURE_JOBS").flatMap { Int($0) } ?? 0) }
@@ -87,6 +93,9 @@ enum DebugHooks {
     /// keyboard up first).
     /// `onboarding` shows the D82 first-login screen frozen on `ARBOS_ONBOARDING_STAGE` (1|2|3|fail).
     static var show: String? { value("ARBOS_SHOW") }
+    /// With the long-press overlay open: stroke every menu row's and capsule cell's hit rect
+    /// (iphone-bubble-menu-hit-area rig — the shot shows what a tap reaches).
+    static var hitRects: Bool { value("ARBOS_HIT_RECTS") == "1" }
     /// How long after the chat appears `ARBOS_SHOW` fires (ms, default 600): a loaded rig Mac
     /// needs more before a sheet can be presented.
     static var showDelayMs: Int { value("ARBOS_SHOW_DELAY_MS").flatMap(Int.init) ?? 600 }

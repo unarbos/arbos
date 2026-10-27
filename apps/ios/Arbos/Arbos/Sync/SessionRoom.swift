@@ -430,7 +430,7 @@ final class SessionRoom {
                 return
             }
             NSLog("relay room \(roomChat): error \(code): \(message)")
-        case .pushRefused(_):
+        case .pushRefused:
             lastError = "\(roomChat): not_available"
             onPushRefused?()
         case .presence(_, _, let typing, _, let mine, let headerJson):

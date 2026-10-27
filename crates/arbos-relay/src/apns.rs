@@ -5,11 +5,11 @@
 //! `APNS_TOPIC` defaults to the iOS bundle id. The provider token is re-signed every 50 minutes
 //! (Apple refuses tokens older than an hour and asks for no more than one per 20 minutes).
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use base64::Engine;
+use futures::future::BoxFuture;
 use ring::rand::SystemRandom;
 use ring::signature::{EcdsaKeyPair, ECDSA_P256_SHA256_FIXED_SIGNING};
 use serde_json::{json, Value};
@@ -17,67 +17,10 @@ use tokio::sync::Mutex;
 
 use arbos_core::ids::now_ms;
 
+use crate::push::provider::{Outgoing, Provider, SendOutcome};
+
 pub const DEFAULT_TOPIC: &str = "com.unarbos.arbos.ios";
 const TOKEN_LIFETIME_MS: i64 = 50 * 60 * 1000;
-
-/// One notification as handed to the transport.
-#[derive(Debug, Clone)]
-pub struct Outgoing {
-    pub device_token: String,
-    /// `development` → sandbox host, anything else → production.
-    pub environment: String,
-    /// `alert`, `background`, or `voip` (PushKit).
-    pub push_type: &'static str,
-    /// Overrides the client's topic: VoIP pushes go to `<bundle_id>.voip`.
-    pub topic: Option<String>,
-    /// APNs `apns-collapse-id`; later notifications with the same id replace earlier ones.
-    pub collapse_id: Option<String>,
-    pub payload: Value,
-}
-
-/// What APNs said about one send.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Delivery {
-    Sent,
-    /// The token is dead (`410 Unregistered`, `400 BadDeviceToken`/`DeviceTokenNotForTopic`): forget it.
-    TokenGone,
-    Failed(String),
-}
-
-/// The transport behind message notifications: real APNs, a capture list (tests), or nothing.
-pub enum Pusher {
-    Apns(Box<Apns>),
-    /// Tests: every notification lands here instead of at Apple.
-    #[allow(dead_code)]
-    Capture(Mutex<Vec<Outgoing>>),
-    Off,
-}
-
-impl Pusher {
-    pub fn is_on(&self) -> bool {
-        !matches!(self, Pusher::Off)
-    }
-
-    pub async fn send(&self, out: Outgoing) -> Delivery {
-        match self {
-            Pusher::Apns(a) => a.send(&out).await,
-            Pusher::Capture(list) => {
-                list.lock().await.push(out);
-                Delivery::Sent
-            }
-            Pusher::Off => Delivery::Failed("push is off".into()),
-        }
-    }
-
-    /// Everything sent so far (capture mode only; empty otherwise).
-    #[allow(dead_code)]
-    pub async fn captured(&self) -> Vec<Outgoing> {
-        match self {
-            Pusher::Capture(list) => list.lock().await.clone(),
-            Pusher::Apns(_) | Pusher::Off => Vec::new(),
-        }
-    }
-}
 
 pub struct Apns {
     key: EcdsaKeyPair,
@@ -90,7 +33,7 @@ pub struct Apns {
 }
 
 /// Build the client from the environment; `None` (with one log line) when the key is not set.
-pub fn from_env() -> Option<Arc<Pusher>> {
+pub fn from_env() -> Option<Apns> {
     let p8 = std::env::var("APNS_KEY_P8")
         .ok()
         .filter(|s| !s.trim().is_empty());
@@ -114,7 +57,7 @@ pub fn from_env() -> Option<Arc<Pusher>> {
     match Apns::new(&p8, key_id.trim(), team_id.trim(), &topic) {
         Ok(a) => {
             tracing::info!(key_id = %a.key_id, team_id = %a.team_id, topic = %a.topic, "APNs push on");
-            Some(Arc::new(Pusher::Apns(Box::new(a))))
+            Some(a)
         }
         Err(e) => {
             tracing::error!(error = %e, "APNS_KEY_P8 is not a usable P-256 key; push is off");
@@ -202,10 +145,10 @@ impl Apns {
         }
     }
 
-    pub async fn send(&self, out: &Outgoing) -> Delivery {
+    async fn send_once(&self, out: &Outgoing) -> SendOutcome {
         let token = match self.provider_token().await {
             Ok(t) => t,
-            Err(e) => return Delivery::Failed(e.to_string()),
+            Err(e) => return SendOutcome::transient(e.to_string()),
         };
         let url = format!(
             "{}/3/device/{}",
@@ -255,7 +198,7 @@ impl Apns {
                     push_type = out.push_type, collapse_id = %collapse_id, error = %e,
                     "apns send: transport error"
                 );
-                return Delivery::Failed(format!("apns transport: {e}"));
+                return SendOutcome::transient(format!("apns transport: {e}"));
             }
         };
         let status = resp.status();
@@ -271,7 +214,7 @@ impl Apns {
                 environment = %out.environment, topic = %topic, push_type = out.push_type,
                 collapse_id = %collapse_id, "apns send: accepted"
             );
-            return Delivery::Sent;
+            return SendOutcome::Accepted;
         }
         let body: Value = resp.json().await.unwrap_or(Value::Null);
         let reason = body["reason"].as_str().unwrap_or("").to_owned();
@@ -280,12 +223,41 @@ impl Apns {
             environment = %out.environment, topic = %topic, push_type = out.push_type,
             collapse_id = %collapse_id, "apns send: rejected"
         );
-        match (status.as_u16(), reason.as_str()) {
-            (410, _) | (400, "BadDeviceToken") | (400, "DeviceTokenNotForTopic") => {
-                Delivery::TokenGone
-            }
-            _ => Delivery::Failed(format!("apns {status}: {reason}")),
+        if status.as_u16() == 403 && reason == "ExpiredProviderToken" {
+            // Apple's clock disagrees with the cached token's age: sign a fresh one next time.
+            *self.token.lock().await = None;
         }
+        classify(status.as_u16(), &reason)
+    }
+}
+
+/// Apple's status + `reason` → what the outbox does about it (the full table is in Apple's
+/// "Handling notification responses from APNs").
+pub fn classify(status: u16, reason: &str) -> SendOutcome {
+    let detail = format!("apns {status}: {reason}");
+    match (status, reason) {
+        (410, _)
+        | (400, "BadDeviceToken")
+        | (400, "DeviceTokenNotForTopic")
+        | (400, "Unregistered") => SendOutcome::token_invalid(detail),
+        // Rate limit, Apple's own trouble, or the provider token: the same push can go later.
+        (429, _) | (500..=599, _) | (403, _) => SendOutcome::transient(detail),
+        // Bad request shapes, wrong topic, too large: sending it again changes nothing.
+        _ => SendOutcome::permanent(detail),
+    }
+}
+
+impl Provider for Apns {
+    fn name(&self) -> &'static str {
+        "apns"
+    }
+
+    fn is_on(&self) -> bool {
+        true
+    }
+
+    fn send<'a>(&'a self, out: &'a Outgoing) -> BoxFuture<'a, SendOutcome> {
+        Box::pin(self.send_once(out))
     }
 }
 

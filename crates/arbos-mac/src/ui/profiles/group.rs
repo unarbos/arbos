@@ -17,6 +17,7 @@ use gpui::{
 use crate::app::{AppState, ProfilePage};
 use crate::model::{Person, Project};
 use crate::ui::avatars;
+use crate::ui::blocked;
 use crate::ui::groups;
 use crate::ui::icons::icon;
 use crate::ui::people;
@@ -104,6 +105,11 @@ pub(super) fn page(
         !space.is_guest()
     };
     let armed = shell.member_remove_armed.clone();
+    let blocked_handles: Vec<String> = people
+        .iter()
+        .filter(|p| state.is_blocked(p))
+        .map(|p| p.handle.clone())
+        .collect();
     let content = collect(state, &chats_of(state, &space.id));
 
     // ----- hero: picture with the crayon, name as an inline field ----------------
@@ -259,6 +265,22 @@ pub(super) fn page(
                 let handle = p.handle.clone();
                 let sid = space.id.clone();
                 let removable = i_own_group && !is_me;
+                // Blocked ([feedback blocked-state-mac-2026-10-26]): the tag on the row.
+                let is_blocked = !is_me && blocked_handles.iter().any(|h| h == &p.handle);
+                let trailing: Option<gpui::AnyElement> = match (is_blocked, removable) {
+                    (true, true) => Some(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(blocked::tag(&theme))
+                            .child(remove_x(key.clone(), &theme, cx))
+                            .into_any_element(),
+                    ),
+                    (true, false) => Some(blocked::tag(&theme).into_any_element()),
+                    (false, true) => Some(remove_x(key.clone(), &theme, cx).into_any_element()),
+                    (false, false) => None,
+                };
                 list.push(
                     list_row(
                         ElementId::Name(SharedString::from(format!("profile-member-{}", p.handle))),
@@ -267,9 +289,10 @@ pub(super) fn page(
                         title,
                         format!("@{}", p.handle),
                         theme.text_muted,
-                        removable.then(|| remove_x(key.clone(), &theme, cx).into_any_element()),
+                        trailing,
                         &theme,
                     )
+                    .debug_selector(|| format!("profile-member-{}", p.handle))
                     // One group per row: `group_hover` looks a group up by name.
                     .group(SharedString::from(format!("member-row-{key}")))
                     .cursor_pointer()

@@ -634,16 +634,14 @@ this is the correctness of the existing surface):
 
 | Layer | Rule | Code |
 | --- | --- | --- |
-| Window material | A real AppKit semantic material with its tint intact, installed once under GPUI's content view; its `appearance` follows the theme (dark material under a dark theme, whatever macOS is set to), so an appearance switch re-tones it and never drops it. Default `Sidebar` (Finder's). GPUI's own background is `Transparent` on Glass so the two do not stack. | `ui::vibrancy` (`BackdropPlan`, `apply`), `Theme::window_background_for`, `GlassMaterial` (`ARBOS_GLASS_MATERIAL=…` for the rig) |
+| Window material | A real system material, installed once under GPUI's content view; its `appearance` follows the theme (dark material under a dark theme, whatever macOS is set to), so an appearance switch re-tones it and never drops it. **macOS 26: Liquid Glass (`NSGlassEffectView`), adaptive by design; before 26: AppKit's under-window material with its tint intact** (Jacob 2026-10-26 15:12, [feedback mac-glass-adaptive-2026-10-26]; #1922 had used `Sidebar`). GPUI's own background is `Transparent` on Glass so the two do not stack. | `ui::vibrancy` (`BackdropPlan`, `apply`, `liquid_available`), `GlassMaterial` (`ARBOS_GLASS_MATERIAL=liquid|sidebar|underwindow|…|none` for the rig) |
 | Opacity slider | Still 0 … 100 %, floor **0 %** (#1425). It sets the shell wash only; legibility never depends on it. | `GlassOpacity`, `Theme::shell()` |
-| Chat column | Page-colour wash at **0.85** on both appearances (dark `bg`, light white; light had it since 2026-10-21). Body text ≥ 4.5:1 and muted ≥ 3:1 over white / black / mid grey at every slider value, counting the app's paint alone. | `CHAT_WASH_ALPHA`, `Theme::chat_wash()` / `pane()` |
-| Sidebar | Tint **0.60** both appearances (dark was 0.35): names ≥ 4.5:1 over any desktop by the app's paint alone; previews lean on the material below the default Opacity. | `CHROME_TINT_ALPHA`, `Theme::chrome()` |
-| Floating cards | Menus, sheets, pickers at **0.85** (dark was 0.50, light 0.72) with the header's 1 pt rim and top highlight on Glass. | `FROST_TINT_ALPHA`, `Theme::card()`, `glass::plate` |
-| Untouched | Traffic lights native; sizes and placements; bubbles, discs and hairlines keep their colours (they sit on the washed surfaces above); Matte. | — |
+| Adaptive washes | Every Glass region — sidebar, chat column, right pane, floating cards — is washed with its own tint at the alpha **the text on it needs over the desktop that is actually there**: body ≥ 4.5:1, muted ≥ 3:1 (WCAG, sRGB compositing), never under the region's floor (chat / pane 0.25, sidebar 0.25, cards 0.55). A black desktop under a dark theme, or a white one under a light theme, gets the floor and the picture shows through; a white desktop under white text gets what it takes (≈ 0.8). The desktop is read by `ui::backdrop` — `CGWindowListCreateImage` of the screen region below the window (our own window excluded, nominal resolution), reduced to three band luminances (left quarter / middle half / right quarter), every 1.5 s and at once on a move or resize, repainting only on a change ≥ 0.02. A blank capture (no Screen Recording grant for other apps' windows) is not a sample. Without a sample the washes assume the worst desktop — #1922's fixed values. The window material is never credited: it can only add. | `Theme::adaptive_wash` / `wash_alpha` / `needed_alpha`, `Theme::backdrop`, `GlassRegion`, `CHAT_WASH_FLOOR` / `CHROME_WASH_FLOOR` / `CARD_WASH_FLOOR`, `ui::backdrop` |
+| Floating cards | Menus, sheets, pickers: the adaptive card wash with the header's 1 pt rim and top highlight on Glass. | `Theme::card()`, `glass::plate` |
+| Text on glass | Still GPUI's flat `text` / `text_muted`; the adaptive washes carry the contrast. Vibrant label colours (plusD / plusL over the sampled backdrop) are the next item, Jacob-tier, with a lint that every Glass container uses them. | — |
+| Untouched | Traffic lights native; sizes and placements; bubbles, discs and hairlines keep their colours (they sit on the washed surfaces above); Matte, except the header pill rule. | — |
 
-Pinned by `theme::glass_contrast_tests` (the matrix above with a WCAG model of
-the compositing) and `vibrancy::tests` (material on Glass, none on Matte,
-kept across dark → light → dark).
+Pinned by `theme::glass_contrast_tests` (white / black / photo × light / dark × 0 / 50 / 100 %, sampled and unsampled; the floors over the friendly desktop), `backdrop::tests` (throttle, change gate, bands, coverage) and `vibrancy::tests` (Liquid on 26, under-window before, none on Matte, kept across dark → light → dark).
 
 ## Full screen (Jacob 2026-10-24, [feedback fullscreen-traffic-lights-2026-10-24] → [feedback topbar-grok-parity-2026-10-24])
 
@@ -889,6 +887,35 @@ face, for a person and an agent), `any_target_for_the_same_profile_closes_it`,
 the cursor nor the AccessKit tree, so hand and label are pinned by
 construction (every target goes through `attach` / `mark`; the scan guards
 the road).
+
+### Blocked state (Jacob 2026-10-26, [feedback blocked-state-mac-2026-10-26])
+
+**Once I block a person, every place that shows them says so, every Unblock
+asks first, and a DM with them has no input.** Jacob: "Today you can't tell in
+the app that you've blocked someone." The block list is the relay's
+(`AppState::blocked`, `GET /blocks`); no surface keeps a local flag. The iPhone
+has the same surfaces ([feedback blocked-state-ios-2026-10-26]).
+
+| Surface | Rule | Where |
+|---|---|---|
+| Person pane | a **Blocked** chip (`nosign` glyph + word, `danger` on `danger_soft`, 22 pt) under the @handle; the hero's one action is **Unblock** (the Message pill is gone); the footer row reads **Unblock** (accent) | `profiles/user.rs`, `ui/blocked.rs` `chip` |
+| Unblock confirm | the row (pane) or the bar (DM composer) becomes "Unblock @x?" · "They'll be able to message you and see you in groups again." · Cancel · **Unblock** (the kit's confirm buttons); Unblock sends `DELETE /blocks/{id}`; nothing changes until the relay's list comes back without them | `Shell::{arm_unblock, cancel_unblock, confirm_unblock}`, `blocked::confirm` |
+| DM header pill | a **Blocked** tag (16 pt capsule, 10.5 semibold) after the name | `header.rs`, `blocked::tag` |
+| Member lists (group / shared project) | the same tag on the member's row, before the owner's remove × | `profiles/group.rs` |
+| DM composer | "You blocked X · Unblock" — a `COMPOSER_HEIGHT` bar on `surface_2`, the composer's radius, in the composer's place (transcript and empty-state layouts alike) | `Shell::blocked_composer`, `blocked::composer_bar` |
+| Refused push (chat-level note) — **DMs** | the shared `error_note` with `PushRefusal::sentence()`: "<name> has blocked you in this chat." · "Couldn't post: you've blocked <name>, who is in this chat. Unblock to post." (+ an **Unblock** capsule → the confirm) · the mute line · else the generic delivery line. The relay's code stays `not_available`; the words come from its `reason` | `Shell::render_delivery_note`, `sync/mod.rs` |
+| Groups: hidden for the blocker alone (Jacob 2026-10-26 17:28 CR) | a group block never refuses the room. The blocked person's rows fold, per run, into one muted stamp-style line "**N messages hidden because you blocked <name> · Unblock**" (`nosign` glyph; Unblock opens their pane on the confirm) — for the blocker only; everyone else sees the messages. The blocker's sidebar preview, unread dot, notifications, search hits and Library skip those rows. Senders come from the relay's `blockedSenders` hint on the chat plus my block list (`AppState::hidden_senders_in`, `hides_message`) | `transcript::build_rows_hiding`, `RowKind::Hidden`, `blocked::hidden_row`, `sidebar::preview`, `AppState` arrivals / search, `profiles::collect` |
+
+Pinned by `blocked::hidden_tests` (runs fold into Hidden rows; the real shell: only the
+others' bubbles, the preview skips the blocked sender, Unblock on the fold opens the pane
+on the confirm, unblock reveals every row; a hidden arrival leaves the dot dark while a
+third member's lights it) and `blocked::render_tests` (the real shell: pane chip / pill / row and
+the confirm's Cancel and Unblock with the one command; the DM pill's tag and
+the bar, the confirm in its place, the field back once unblocked; the member
+list's tag on the blocked member only; the note's sentences and its Unblock
+capsule) and `sync::push_refusal_tests` (the sentences). Rig:
+`ARBOS_RIG_FAILURE=blocks-member|blocked-by` (the note, every chat) with the
+fixture's `ARBOS_FIXTURE_BLOCKED=<handle>` (my block list + the groups' `blockedSenders`).
 
 ## Pane animations (Jacob 2026-10-24, [feedback right-pane-slide-2026-10-24], [feedback sidebar-slide-2026-10-24])
 

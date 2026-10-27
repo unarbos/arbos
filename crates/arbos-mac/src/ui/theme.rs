@@ -203,26 +203,17 @@ pub const GLASS_ALPHA: f32 = 0.80;
 /// the conversation stays a readable surface while the sidebar and pane show
 /// the glass (Finder's model: translucent chrome, opaque content).
 pub const GLASS_ALPHA_LIGHT: f32 = 0.80;
-/// The chat column's wash over the glass, both appearances ([feedback
-/// mac-glass-contrast-2026-10-26]; light only before it — dark glass had none,
-/// so at a low Opacity over a bright desktop timestamps, system lines and the
-/// composer sat on bright grey). Over the worst desktop (pure white under dark,
-/// pure black under light) body text keeps ≥ 4.5:1 and muted text ≥ 3:1 with
-/// the Opacity slider at 0 % (`glass_contrast_tests`).
-pub const CHAT_WASH_ALPHA: f32 = 0.85;
-pub const CHAT_WASH_ALPHA_LIGHT: f32 = CHAT_WASH_ALPHA;
-/// Floating cards (menus, sheets, pickers) over the glass: the same floor as
-/// the chat column — a menu is read, so it carries its own contrast. Was 0.50
-/// dark / 0.72 light, which left white menu text on mid grey over a bright
-/// desktop ([feedback mac-glass-contrast-2026-10-26]).
-pub const FROST_TINT_ALPHA: f32 = 0.85;
-pub const FROST_TINT_ALPHA_LIGHT: f32 = 0.85;
-/// The sidebar's own tint over the glass. Dark was 0.35 — at Opacity 0 % over
-/// a white desktop the chat names (white) sat on `#afafaf`, 1.9:1. At 0.60
-/// (light's value since 2026-10-21) they keep ≥ 4.5:1 over any desktop; the
-/// previews (muted) rely on the window material under it.
-pub const CHROME_TINT_ALPHA: f32 = 0.60;
-pub const CHROME_TINT_ALPHA_LIGHT: f32 = 0.60;
+/// The thinnest the chat column's / pane's wash gets over glass, however
+/// friendly the desktop ([feedback mac-glass-adaptive-2026-10-26]; the fixed
+/// 0.85 of [feedback mac-glass-contrast-2026-10-26] is what a white desktop
+/// under a dark theme still gets — see `Theme::adaptive_wash`). A quarter of
+/// the page colour keeps the conversation reading as a surface.
+pub const CHAT_WASH_FLOOR: f32 = 0.25;
+/// The sidebar's floor (its fixed value was 0.60 dark / 0.60 light).
+pub const CHROME_WASH_FLOOR: f32 = 0.25;
+/// Floating cards' floor (menus, sheets, pickers; fixed 0.85 before): a menu
+/// is read, so it stays a surface even over a friendly desktop.
+pub const CARD_WASH_FLOOR: f32 = 0.55;
 /// Glass shell tint: how opaque the window wash is over the blur (Settings →
 /// Appearance → Opacity). Default is [`GLASS_ALPHA`] / [`GLASS_ALPHA_LIGHT`].
 /// Floor 0 % (#1425; it was 0.30 before, which Jacob hit — the thumb stopped
@@ -294,23 +285,31 @@ impl Surface {
 }
 
 /// The macOS window material under the Glass surface ([feedback
-/// mac-glass-contrast-2026-10-26]): one of AppKit's semantic
-/// `NSVisualEffectView` materials, with its tint intact, so the desktop
-/// behind the window is blurred *and* toned the way the system tones its own
-/// translucent chrome — dark under a dark theme, light under a light one,
-/// legible over any wallpaper. GPUI's own `Blurred` background is an
-/// `UnderWindowBackground` view with every tint layer removed; that is
-/// [`Self::None`], today's colourless glass, kept for comparison.
+/// mac-glass-contrast-2026-10-26], [feedback mac-glass-adaptive-2026-10-26]).
 ///
-/// Rig: `ARBOS_GLASS_MATERIAL=sidebar|underwindow|hud|popover|menu|fullscreen|windowbg|none`
+/// On macOS 26 the real thing: `NSGlassEffectView`, Liquid Glass, which
+/// tones itself to what is behind it ([`Self::Liquid`], the default where
+/// the class exists). Before 26, AppKit's semantic `NSVisualEffectView`
+/// materials with their tint intact ([`Self::UnderWindowBackground`] is the
+/// fallback — the material AppKit documents for the area behind a window's
+/// own background). GPUI's own `Blurred` background is an
+/// `UnderWindowBackground` view with every tint layer removed; that is
+/// [`Self::None`], the colourless blur. Whatever the material, the adaptive
+/// washes ([`Theme::adaptive_wash`]) keep the text readable: they are
+/// computed as if there were no material at all, so a material can only
+/// add.
+///
+/// Rig: `ARBOS_GLASS_MATERIAL=liquid|sidebar|underwindow|hud|popover|menu|fullscreen|windowbg|none`
 /// picks one for a launch (one release, every candidate shot side by side).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GlassMaterial {
+    /// macOS 26 Liquid Glass (`NSGlassEffectView`): adaptive by design.
+    Liquid,
     /// Finder's and Mail's sidebar: the standard translucent chrome of the
-    /// system, legible over anything. The default.
+    /// system, legible over anything (#1922's default).
     Sidebar,
-    /// AppKit's "behind a window's own background" material: the lightest
-    /// system tint (GPUI's choice, but with the tint kept).
+    /// AppKit's "behind a window's own background" material (GPUI's choice,
+    /// but with the tint kept). The fallback before macOS 26.
     UnderWindowBackground,
     /// The HUD panel material: a heavy dark tone.
     HudWindow,
@@ -318,15 +317,20 @@ pub enum GlassMaterial {
     Menu,
     FullScreenUi,
     WindowBackground,
-    /// No system material: GPUI's colourless blur (the look before this item).
+    /// No system material: GPUI's colourless blur.
     None,
 }
 
 impl GlassMaterial {
-    pub const DEFAULT: Self = Self::Sidebar;
+    /// The default when nothing is asked for: Liquid Glass where macOS has
+    /// it, the under-window material elsewhere (`vibrancy::platform` decides
+    /// at install time, since only AppKit knows whether the class exists).
+    pub const DEFAULT: Self = Self::Liquid;
+    pub const FALLBACK: Self = Self::UnderWindowBackground;
 
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
+            "liquid" | "liquidglass" | "glasseffect" => Some(Self::Liquid),
             "sidebar" => Some(Self::Sidebar),
             "underwindow" | "underwindowbackground" => Some(Self::UnderWindowBackground),
             "hud" | "hudwindow" => Some(Self::HudWindow),
@@ -346,6 +350,56 @@ impl GlassMaterial {
             .and_then(|v| Self::parse(&v))
             .unwrap_or(Self::DEFAULT)
     }
+
+    /// What to install when the asked-for material is not available on this
+    /// macOS (`liquid_available` = the `NSGlassEffectView` class exists).
+    pub fn resolve(self, liquid_available: bool) -> Self {
+        match self {
+            Self::Liquid if !liquid_available => Self::FALLBACK,
+            other => other,
+        }
+    }
+}
+
+/// The desktop behind the window, as the app sees it ([feedback
+/// mac-glass-adaptive-2026-10-26]): the mean relative luminance (0 black …
+/// 1 white) of what lies under the sidebar, the chat column and the right
+/// pane — sampled by `ui::backdrop` (`CGWindowListCreateImage` of the screen
+/// region below the window, throttled) — so every Glass wash can be as thin
+/// as that backdrop allows and as thick as the text needs. `None` = not
+/// sampled (first frames, Linux, a failed capture): the washes then assume
+/// the worst desktop for the appearance.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Backdrop {
+    pub left: f32,
+    pub center: f32,
+    pub right: f32,
+}
+
+impl Backdrop {
+    /// The same luminance under every band (tests, rigs).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn uniform(l: f32) -> Self {
+        Self {
+            left: l,
+            center: l,
+            right: l,
+        }
+    }
+}
+
+/// Where a Glass wash is painted; each region reads its own band of the backdrop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GlassRegion {
+    /// The chat-list sidebar (`chrome()`).
+    Sidebar,
+    /// The conversation column (`chat_wash()`).
+    Chat,
+    /// The right info pane (`pane()`).
+    Pane,
+    /// Floating cards — menus, sheets, pickers (`card()`); they hang over the
+    /// chat column, so they read its band.
+    Card,
 }
 
 /// The user's glass opacity (0.00–1.00). Saved as a float string in
@@ -492,6 +546,9 @@ pub struct Theme {
     pub pref: AppearancePref,
     /// Shell tint alpha while Glass is on ([`GlassOpacity`]; default [`GLASS_ALPHA`]).
     pub glass_opacity: f32,
+    /// The sampled desktop behind the window ([`Backdrop`]); `None` until
+    /// `ui::backdrop` has measured it (and always off macOS).
+    pub backdrop: Option<Backdrop>,
     pub bg: Hsla,
     /// The chat-list column (a shade off the conversation, as on Grok Mac).
     pub sidebar: Hsla,
@@ -580,6 +637,7 @@ impl Theme {
             appearance: Appearance::Dark,
             pref: AppearancePref::Dark,
             glass_opacity: GLASS_ALPHA,
+            backdrop: None,
             bg: hex(0x141414),
             sidebar: hex(0x1a1a1a),
             pane_card: hex(0x232323),
@@ -625,6 +683,7 @@ impl Theme {
             appearance: Appearance::Light,
             pref: AppearancePref::Light,
             glass_opacity: GLASS_ALPHA_LIGHT,
+            backdrop: None,
             // Grok Mac light (ref 16/30): chat #FCFCFC, assistant bubble
             // #F2F2F2, white field with a hairline. Jacob (2026-10-22, "strict
             // Grok"): sidebar and right pane both Grok's #F6F6F6, chat #FCFCFC,
@@ -693,6 +752,9 @@ impl Theme {
         let mut theme = Self::with(pref.resolve(system), surface);
         theme.pref = pref;
         theme.glass_opacity = GlassOpacity::load(theme.appearance);
+        // Keep the sampled desktop across a theme change: a fresh theme with
+        // no sample would paint the worst-case washes until the next sample.
+        theme.backdrop = cx.try_global::<Theme>().and_then(|t| t.backdrop);
         theme
     }
 
@@ -757,16 +819,6 @@ impl Theme {
         self.appearance == Appearance::Light
     }
 
-    /// Per-appearance alpha for a translucent layer: light glass needs more
-    /// tint than dark to stay white over a dark desktop.
-    fn frost_alpha(&self, dark: f32, light: f32) -> f32 {
-        if self.is_light() {
-            light
-        } else {
-            dark
-        }
-    }
-
     /// The shell tint painted on the root (zeron-study §3.1 step 2). Light
     /// glass tints with pure white, not the off-white page colour: the blur
     /// underneath is already grey, and a grey-on-grey wash is what made Light
@@ -790,14 +842,12 @@ impl Theme {
     }
 
     /// Floating cards: translucent tint on frost, flat card on matte (§3.11).
+    /// On Glass the tint adapts to the desktop ([`Self::adaptive_wash`]).
     pub fn card(&self) -> Hsla {
-        let mut c = self.surface_1;
-        c.a = if self.is_frost() {
-            self.frost_alpha(FROST_TINT_ALPHA, FROST_TINT_ALPHA_LIGHT)
-        } else {
-            1.0
-        };
-        c
+        if !self.is_frost() {
+            return self.surface_1;
+        }
+        self.adaptive_wash(GlassRegion::Card)
     }
 
     /// The chat column over glass: a wash of the page colour — white in light,
@@ -805,35 +855,100 @@ impl Theme {
     /// timestamps and the composer stay legible while the sidebar and pane
     /// beside it show the blur (Finder's model: translucent chrome, opaque
     /// content). Light had it since 2026-10-21; dark since [feedback
-    /// mac-glass-contrast-2026-10-26]. Transparent on Matte — the column
-    /// inherits the shell.
+    /// mac-glass-contrast-2026-10-26]; as thin as the desktop allows since
+    /// [feedback mac-glass-adaptive-2026-10-26]. Transparent on Matte — the
+    /// column inherits the shell.
     pub fn chat_wash(&self) -> Hsla {
         if !self.is_frost() {
             return gpui::transparent_black();
         }
-        let mut c = self.shell_tint();
-        c.a = self.frost_alpha(CHAT_WASH_ALPHA, CHAT_WASH_ALPHA_LIGHT);
-        c
+        self.adaptive_wash(GlassRegion::Chat)
     }
 
     /// The right pane (three-pane rule) blends with the chat beside it —
     /// Grok Bot's pane is the window, not a lighter panel (Jacob, [feedback
     /// info-pane-chrome-2026-10-24]): the chat column's own wash (nothing on
-    /// matte and dark glass, the white wash on light glass), so both sides of
-    /// the join are one surface and no hairline is needed between them.
+    /// matte), so both sides of the join are one surface and no hairline is
+    /// needed between them — read against the pane's own band of the desktop.
     pub fn pane(&self) -> Hsla {
-        self.chat_wash()
+        if !self.is_frost() {
+            return gpui::transparent_black();
+        }
+        self.adaptive_wash(GlassRegion::Pane)
     }
 
     /// Chrome strips (sidebar, side panels) over frost: thinner than cards.
     pub fn chrome(&self) -> Hsla {
-        let mut c = self.sidebar;
-        c.a = if self.is_frost() {
-            self.frost_alpha(CHROME_TINT_ALPHA, CHROME_TINT_ALPHA_LIGHT)
-        } else {
-            1.0
-        };
+        if !self.is_frost() {
+            return self.sidebar;
+        }
+        self.adaptive_wash(GlassRegion::Sidebar)
+    }
+
+    /// What a region's wash is made of (opaque): the sidebar colour for the
+    /// sidebar, the card colour for cards, the page colour otherwise.
+    pub fn wash_tint(&self, region: GlassRegion) -> Hsla {
+        match region {
+            GlassRegion::Sidebar => self.sidebar,
+            GlassRegion::Card => self.surface_1,
+            GlassRegion::Chat | GlassRegion::Pane => self.shell_tint(),
+        }
+    }
+
+    /// The thinnest a region's wash may get, however friendly the desktop:
+    /// a surface still reads as a surface.
+    pub fn wash_floor(region: GlassRegion) -> f32 {
+        match region {
+            GlassRegion::Sidebar => CHROME_WASH_FLOOR,
+            GlassRegion::Chat | GlassRegion::Pane => CHAT_WASH_FLOOR,
+            GlassRegion::Card => CARD_WASH_FLOOR,
+        }
+    }
+
+    /// The sampled luminance under a region, or `None` before the first sample.
+    pub fn region_backdrop(&self, region: GlassRegion) -> Option<f32> {
+        let b = self.backdrop?;
+        Some(match region {
+            GlassRegion::Sidebar => b.left,
+            GlassRegion::Chat | GlassRegion::Card => b.center,
+            GlassRegion::Pane => b.right,
+        })
+    }
+
+    /// The adaptive wash of a Glass region ([feedback
+    /// mac-glass-adaptive-2026-10-26]): the region's tint at the alpha the
+    /// text on it needs over *this* desktop — body text ≥ 4.5:1 and muted
+    /// text ≥ 3:1 — and never thinner than the region's floor. The desktop
+    /// under the region is what the sampler saw, already washed by the shell
+    /// at the Opacity slider's value; a desktop that is dark under a dark
+    /// theme (or light under a light one) needs nothing beyond the floor, so
+    /// the picture shows; a white desktop under white text gets what it
+    /// takes. With no sample the worst desktop for the appearance is assumed
+    /// (white under dark, black under light), which is #1922's fixed wash.
+    /// The window material (`GlassMaterial`) is not credited: it can only
+    /// add contrast on top.
+    pub fn adaptive_wash(&self, region: GlassRegion) -> Hsla {
+        let mut c = self.wash_tint(region);
+        c.a = self.wash_alpha(region, self.region_backdrop(region));
         c
+    }
+
+    /// The alpha [`Self::adaptive_wash`] paints for a region over a backdrop
+    /// of the given luminance (`None` = unknown → the worst case).
+    pub fn wash_alpha(&self, region: GlassRegion, backdrop_lum: Option<f32>) -> f32 {
+        let worst = if self.is_light() { 0.0 } else { 1.0 };
+        let lum = backdrop_lum.unwrap_or(worst).clamp(0.0, 1.0);
+        // What the region sits on: the desktop under the shell wash.
+        let desktop = srgb_grey_from_luminance(lum);
+        let shell = self.shell_tint().to_rgb();
+        let s = GlassOpacity::clamp(self.glass_opacity);
+        let under = s * shell_grey(shell) + (1.0 - s) * desktop;
+        let tint = shell_grey(self.wash_tint(region).to_rgb());
+        let body = needed_alpha(tint, under, self.text, 4.5, self.is_light());
+        let muted = needed_alpha(tint, under, self.text_muted, 3.0, self.is_light());
+        body.max(muted)
+            .max(Self::wash_floor(region))
+            .clamp(0.0, 1.0)
     }
 
     /// The glass circle / pill fill of the iPhone header controls: the field
@@ -951,6 +1066,83 @@ impl Theme {
     }
 }
 
+/// sRGB channel (0–1) → linear light.
+fn linear_from_srgb(c: f32) -> f32 {
+    if c <= 0.039_28 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// Linear light → sRGB channel (0–1).
+fn srgb_from_linear(l: f32) -> f32 {
+    if l <= 0.003_130_8 {
+        12.92 * l
+    } else {
+        1.055 * l.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// Relative luminance (WCAG 2.x) of an opaque colour.
+pub fn luminance(c: Hsla) -> f32 {
+    let rgb = c.to_rgb();
+    0.2126 * linear_from_srgb(rgb.r)
+        + 0.7152 * linear_from_srgb(rgb.g)
+        + 0.0722 * linear_from_srgb(rgb.b)
+}
+
+/// WCAG contrast ratio between two opaque colours (1 … 21).
+#[cfg(test)]
+pub fn contrast_ratio(a: Hsla, b: Hsla) -> f32 {
+    let (la, lb) = (luminance(a), luminance(b));
+    let (hi, lo) = if la >= lb { (la, lb) } else { (lb, la) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+/// The sRGB grey (0–1) with the given relative luminance.
+pub fn srgb_grey_from_luminance(lum: f32) -> f32 {
+    srgb_from_linear(lum.clamp(0.0, 1.0))
+}
+
+/// A colour reduced to one sRGB grey value: the grey of its luminance.
+fn shell_grey(c: gpui::Rgba) -> f32 {
+    srgb_from_linear(
+        0.2126 * linear_from_srgb(c.r)
+            + 0.7152 * linear_from_srgb(c.g)
+            + 0.0722 * linear_from_srgb(c.b),
+    )
+}
+
+/// The smallest alpha at which `tint` (an sRGB grey) washed over `under` (an
+/// sRGB grey) leaves `text` at least `ratio`:1 against the result. GPUI
+/// composites in sRGB, so the wash is a straight mix of the two greys; the
+/// contrast is read in linear light. `light` says which way the text wants
+/// the surface: a light theme's dark text needs the surface *at least* as
+/// bright as the threshold, a dark theme's white text needs it *at most*.
+pub fn needed_alpha(tint: f32, under: f32, text: Hsla, ratio: f32, light: bool) -> f32 {
+    let lt = luminance(text);
+    // A hair over the ratio asked for, so 8-bit rounding never lands under it.
+    let ratio = ratio * 1.03;
+    // The surface luminance the ratio allows.
+    let limit = if light {
+        ratio * (lt + 0.05) - 0.05
+    } else {
+        (lt + 0.05) / ratio - 0.05
+    };
+    let v = srgb_from_linear(limit.clamp(0.0, 1.0));
+    // Mixing toward the tint: v(a) = a·tint + (1−a)·under.
+    let ok_already = if light { under >= v } else { under <= v };
+    if ok_already {
+        return 0.0;
+    }
+    let reach = if light { tint >= v } else { tint <= v };
+    if !reach || (tint - under).abs() < 1e-6 {
+        return 1.0;
+    }
+    ((v - under) / (tint - under)).clamp(0.0, 1.0)
+}
+
 /// GPUI's macOS backend drops the blur view when the appearance changes
 /// (zeron-study §3.1 step 4). Re-apply after every theme change, deferred:
 /// the window material (`ui::vibrancy` — installed once, its appearance
@@ -966,40 +1158,21 @@ pub fn reapply_window_background(cx: &mut App) {
     });
 }
 
-/// [feedback mac-glass-contrast-2026-10-26]: text stays readable on every
-/// Glass surface over white, black and a busy (mid-grey) desktop with the
-/// Opacity slider at 0, 50 and 100 % — body text ≥ 4.5:1, muted text ≥ 3:1
-/// — counting only what the app paints (no credit for the system material).
+/// [feedback mac-glass-contrast-2026-10-26] + [feedback
+/// mac-glass-adaptive-2026-10-26]: text stays readable on every Glass
+/// surface over pure white, pure black and a busy photo desktop (its mean
+/// luminance), light and dark, with the Opacity slider at 0, 50 and 100 % —
+/// body text ≥ 4.5:1, muted text ≥ 3:1 — counting only what the app paints
+/// (no credit for the window material); and the washes are adaptive: over a
+/// friendly desktop they sit at their floor, so no heavy fixed tint.
 #[cfg(test)]
 mod glass_contrast_tests {
     use super::*;
 
-    /// sRGB → relative luminance (WCAG 2.x), on a 0–1 channel.
-    fn channel_luminance(c: f32) -> f32 {
-        if c <= 0.039_28 {
-            c / 12.92
-        } else {
-            ((c + 0.055) / 1.055).powf(2.4)
-        }
-    }
+    const SLIDERS: [f32; 3] = [0.0, 0.5, 1.0];
 
-    /// Relative luminance of an opaque colour.
-    pub fn luminance(c: Hsla) -> f32 {
-        let rgb = c.to_rgb();
-        0.2126 * channel_luminance(rgb.r)
-            + 0.7152 * channel_luminance(rgb.g)
-            + 0.0722 * channel_luminance(rgb.b)
-    }
-
-    /// WCAG contrast ratio between two opaque colours (1 … 21).
-    pub fn contrast_ratio(a: Hsla, b: Hsla) -> f32 {
-        let (la, lb) = (luminance(a), luminance(b));
-        let (hi, lo) = if la >= lb { (la, lb) } else { (lb, la) };
-        (hi + 0.05) / (lo + 0.05)
-    }
-
-    /// `over` (with its alpha) composited onto the opaque `under`.
-    pub fn composite(over: Hsla, under: Hsla) -> Hsla {
+    /// `over` (with its alpha) composited onto the opaque `under`, as GPUI does (sRGB).
+    fn composite(over: Hsla, under: Hsla) -> Hsla {
         let (o, u) = (over.to_rgb(), under.to_rgb());
         let a = o.a.clamp(0.0, 1.0);
         gpui::Rgba {
@@ -1011,108 +1184,140 @@ mod glass_contrast_tests {
         .into()
     }
 
-    /// The Glass stack as the window composites it, for the tests and the design
-    /// doc: the blurred desktop (`backdrop`, taken as an opaque colour — the
-    /// system material under it is *not* counted, so these are floors), the
-    /// shell wash at the Opacity slider's value, then the surface's own tint.
-    /// Returns what a glyph on that surface is drawn over.
-    pub struct GlassStack;
-
-    impl GlassStack {
-        fn shell_over(theme: &Theme, slider: f32, backdrop: Hsla) -> Hsla {
-            let mut shell = theme.shell_tint();
-            shell.a = GlassOpacity::clamp(slider);
-            composite(shell, backdrop)
-        }
-
-        /// Under the transcript's timestamps, system lines and the composer.
-        pub fn chat_column(theme: &Theme, slider: f32, backdrop: Hsla) -> Hsla {
-            composite(theme.chat_wash(), Self::shell_over(theme, slider, backdrop))
-        }
-
-        /// Under the sidebar's chat names and previews (`chrome()` over the shell).
-        pub fn sidebar(theme: &Theme, slider: f32, backdrop: Hsla) -> Hsla {
-            composite(theme.chrome(), Self::shell_over(theme, slider, backdrop))
-        }
-
-        /// Under a floating card's rows (`card()` over the shell; menus hang over
-        /// the chat column or the sidebar, the shell alone is the worst case).
-        pub fn card(theme: &Theme, slider: f32, backdrop: Hsla) -> Hsla {
-            composite(theme.card(), Self::shell_over(theme, slider, backdrop))
-        }
+    /// The desktops of the matrix: pure white, pure black, and the busy photo
+    /// wallpaper of the rig (`wall-busy.jpg`, mean luminance ≈ 0.22 — a mix of
+    /// saturated blocks on dark grey; the lake backdrop measures ≈ 0.30).
+    fn desktops() -> [(&'static str, f32); 3] {
+        [("white", 1.0), ("black", 0.0), ("photo", 0.22)]
     }
 
-    const SLIDERS: [f32; 3] = [0.0, 0.5, 1.0];
-
-    fn backdrops() -> [(&'static str, Hsla); 3] {
-        [
-            ("white", grey(1.0)),
-            ("black", grey(0.0)),
-            ("busy", grey(0.5)),
-        ]
+    fn themed(appearance: Appearance, slider: f32, lum: Option<f32>) -> Theme {
+        let mut t = Theme::with(appearance, Surface::Glass);
+        t.glass_opacity = slider;
+        t.backdrop = lum.map(Backdrop::uniform);
+        t
     }
 
-    fn check(surface: &str, under: Hsla, theme: &Theme, at: &str) {
+    /// What a glyph on `region` is drawn over: desktop → shell wash at the
+    /// slider → the region's (adaptive) wash.
+    fn surface_under(theme: &Theme, region: GlassRegion, lum: f32) -> Hsla {
+        let g = srgb_grey_from_luminance(lum);
+        let desktop: Hsla = gpui::Rgba {
+            r: g,
+            g,
+            b: g,
+            a: 1.0,
+        }
+        .into();
+        let mut shell = theme.shell_tint();
+        shell.a = GlassOpacity::clamp(theme.glass_opacity);
+        let under = composite(shell, desktop);
+        let wash = match region {
+            GlassRegion::Sidebar => theme.chrome(),
+            GlassRegion::Chat => theme.chat_wash(),
+            GlassRegion::Pane => theme.pane(),
+            GlassRegion::Card => theme.card(),
+        };
+        composite(wash, under)
+    }
+
+    fn check(region: GlassRegion, theme: &Theme, lum: f32, at: &str) {
+        let under = surface_under(theme, region, lum);
         let body = contrast_ratio(theme.text, under);
         let muted = contrast_ratio(theme.text_muted, under);
         assert!(
             body >= 4.5,
-            "{surface} {at}: body text {body:.2}:1 over {:?}",
+            "{region:?} {at}: body text {body:.2}:1 over {:?}",
             under.to_rgb()
         );
         assert!(
             muted >= 3.0,
-            "{surface} {at}: muted text {muted:.2}:1 over {:?}",
+            "{region:?} {at}: muted text {muted:.2}:1 over {:?}",
             under.to_rgb()
         );
     }
 
+    const REGIONS: [GlassRegion; 4] = [
+        GlassRegion::Sidebar,
+        GlassRegion::Chat,
+        GlassRegion::Pane,
+        GlassRegion::Card,
+    ];
+
+    /// With the desktop sampled, every region reads over every desktop at
+    /// every slider value.
     #[test]
-    fn the_chat_column_reads_over_every_desktop_at_every_opacity() {
+    fn every_region_reads_over_white_black_and_the_photo_at_every_opacity() {
         for appearance in [Appearance::Dark, Appearance::Light] {
-            let theme = Theme::with(appearance, Surface::Glass);
-            for (wall, backdrop) in backdrops() {
+            for (wall, lum) in desktops() {
                 for slider in SLIDERS {
-                    let at = format!("{appearance:?} over {wall} at {slider:.0}");
-                    check(
-                        "chat column",
-                        GlassStack::chat_column(&theme, slider, backdrop),
-                        &theme,
-                        &at,
-                    );
-                    check(
-                        "floating card",
-                        GlassStack::card(&theme, slider, backdrop),
-                        &theme,
-                        &at,
-                    );
+                    let theme = themed(appearance, slider, Some(lum));
+                    for region in REGIONS {
+                        let at = format!("{appearance:?} over {wall} at {slider:.1}");
+                        check(region, &theme, lum, &at);
+                    }
                 }
             }
         }
     }
 
-    /// The sidebar's names (body text) hold 4.5:1 on the app's own tint alone;
-    /// its previews (muted) rely on the window material, so they are only
-    /// checked from the default Opacity up.
+    /// Before the first sample (and off macOS) the washes assume the worst
+    /// desktop, so they read over every desktop too.
     #[test]
-    fn the_sidebar_names_read_over_every_desktop_at_every_opacity() {
+    fn without_a_sample_the_washes_assume_the_worst_desktop() {
         for appearance in [Appearance::Dark, Appearance::Light] {
-            let theme = Theme::with(appearance, Surface::Glass);
-            for (wall, backdrop) in backdrops() {
+            for (wall, lum) in desktops() {
                 for slider in SLIDERS {
-                    let under = GlassStack::sidebar(&theme, slider, backdrop);
-                    let body = contrast_ratio(theme.text, under);
-                    assert!(
-                        body >= 4.5,
-                        "sidebar {appearance:?} over {wall} at {slider:.0}: names {body:.2}:1"
-                    );
+                    let theme = themed(appearance, slider, None);
+                    for region in REGIONS {
+                        let at = format!("{appearance:?} unsampled over {wall} at {slider:.1}");
+                        check(region, &theme, lum, &at);
+                    }
                 }
-                let default = GlassOpacity::default_for(appearance);
-                let under = GlassStack::sidebar(&theme, default, backdrop);
-                let muted = contrast_ratio(theme.text_muted, under);
+            }
+        }
+    }
+
+    /// The washes adapt: over the friendly desktop (black under dark, white
+    /// under light) every region sits at its floor at 0 %; over the hostile
+    /// one it is thick; the photo lands in between — no heavy fixed tint.
+    #[test]
+    fn the_washes_are_as_thin_as_the_desktop_allows() {
+        for appearance in [Appearance::Dark, Appearance::Light] {
+            let (friendly, hostile) = match appearance {
+                Appearance::Dark => (0.0, 1.0),
+                Appearance::Light => (1.0, 0.0),
+            };
+            for region in REGIONS {
+                let easy = themed(appearance, 0.0, Some(friendly))
+                    .adaptive_wash(region)
+                    .a;
+                let hard = themed(appearance, 0.0, Some(hostile))
+                    .adaptive_wash(region)
+                    .a;
+                let photo = themed(appearance, 0.0, Some(0.22)).adaptive_wash(region).a;
+                assert_eq!(
+                    easy,
+                    Theme::wash_floor(region),
+                    "{appearance:?} {region:?}: the floor over the friendly desktop"
+                );
                 assert!(
-                    muted >= 3.0,
-                    "sidebar {appearance:?} over {wall} at the default: previews {muted:.2}:1"
+                    hard >= 0.70,
+                    "{appearance:?} {region:?}: thick over the hostile desktop ({hard:.2})"
+                );
+                assert!(
+                    easy <= photo && photo <= hard,
+                    "{appearance:?} {region:?}: photo between ({easy:.2} ≤ {photo:.2} ≤ {hard:.2})"
+                );
+            }
+            // At 100 % the shell already is the page: nothing beyond the floor.
+            for region in REGIONS {
+                assert_eq!(
+                    themed(appearance, 1.0, Some(hostile))
+                        .adaptive_wash(region)
+                        .a,
+                    Theme::wash_floor(region),
+                    "{appearance:?} {region:?}: the floor at 100 %"
                 );
             }
         }
@@ -1124,8 +1329,9 @@ mod glass_contrast_tests {
         for appearance in [Appearance::Dark, Appearance::Light] {
             let theme = Theme::with(appearance, Surface::Matte);
             assert_eq!(theme.chat_wash().a, 0.0);
-            assert_eq!(theme.chrome().a, 1.0);
-            assert_eq!(theme.card().a, 1.0);
+            assert_eq!(theme.pane().a, 0.0);
+            assert_eq!(theme.chrome(), theme.sidebar);
+            assert_eq!(theme.card(), theme.surface_1);
             assert_eq!(theme.shell(), theme.bg);
             assert_eq!(
                 theme.window_background_for(GlassMaterial::DEFAULT),
@@ -1136,13 +1342,14 @@ mod glass_contrast_tests {
 
     /// The window's background: a system material means GPUI paints nothing
     /// behind the content (the material view does); no material keeps GPUI's
-    /// colourless blur.
+    /// colourless blur. Liquid Glass falls back to the under-window material
+    /// where macOS has no `NSGlassEffectView`.
     #[test]
     fn glass_hands_the_backdrop_to_the_system_material() {
         let theme = Theme::with(Appearance::Dark, Surface::Glass);
         if Theme::glass_available() {
             assert_eq!(
-                theme.window_background_for(GlassMaterial::Sidebar),
+                theme.window_background_for(GlassMaterial::Liquid),
                 WindowBackgroundAppearance::Transparent
             );
             assert_eq!(
@@ -1151,16 +1358,26 @@ mod glass_contrast_tests {
             );
         } else {
             assert_eq!(
-                theme.window_background_for(GlassMaterial::Sidebar),
+                theme.window_background_for(GlassMaterial::Liquid),
                 WindowBackgroundAppearance::Opaque
             );
         }
+        assert_eq!(GlassMaterial::parse("liquid"), Some(GlassMaterial::Liquid));
         assert_eq!(
             GlassMaterial::parse("sidebar"),
             Some(GlassMaterial::Sidebar)
         );
         assert_eq!(GlassMaterial::parse("NONE"), Some(GlassMaterial::None));
         assert_eq!(GlassMaterial::parse("marble"), None);
+        assert_eq!(GlassMaterial::Liquid.resolve(true), GlassMaterial::Liquid);
+        assert_eq!(
+            GlassMaterial::Liquid.resolve(false),
+            GlassMaterial::UnderWindowBackground
+        );
+        assert_eq!(
+            GlassMaterial::Sidebar.resolve(false),
+            GlassMaterial::Sidebar
+        );
     }
 
     #[test]
@@ -1169,6 +1386,25 @@ mod glass_contrast_tests {
         assert!((contrast_ratio(grey(0.5), grey(0.5)) - 1.0).abs() < 0.001);
         let half = composite(Theme::with_alpha(grey(0.0), 0.5), grey(1.0));
         assert!((half.to_rgb().r - 0.5).abs() < 0.01);
+        // Round trip of the grey ↔ luminance helpers.
+        for l in [0.0_f32, 0.05, 0.22, 0.5, 1.0] {
+            let g = srgb_grey_from_luminance(l);
+            let back = luminance(
+                gpui::Rgba {
+                    r: g,
+                    g,
+                    b: g,
+                    a: 1.0,
+                }
+                .into(),
+            );
+            assert!((back - l).abs() < 0.002, "{l} → {g} → {back}");
+        }
+        // needed_alpha: nothing when the surface already passes, everything
+        // when the tint itself cannot reach the threshold.
+        let white: Hsla = grey(1.0);
+        assert_eq!(needed_alpha(0.08, 0.0, white, 4.5, false), 0.0);
+        assert_eq!(needed_alpha(0.9, 1.0, white, 4.5, false), 1.0);
     }
 }
 

@@ -78,6 +78,10 @@ pub struct Handlers {
     pub sign_in: Option<Handler>,
     pub toggle_details: Option<Handler>,
     pub dismiss: Option<Handler>,
+    /// One surface-specific capsule before Details — the chat note's **Unblock** when the
+    /// relay refused a post because of my own block ([feedback blocked-state-mac-2026-10-26]).
+    /// Its id is `{id}-{label}` lower-cased.
+    pub extra: Option<(&'static str, Handler)>,
 }
 
 impl Handlers {
@@ -107,6 +111,15 @@ impl Handlers {
         self.dismiss = Some(Box::new(f));
         self
     }
+
+    pub fn extra(
+        mut self,
+        label: &'static str,
+        f: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.extra = Some((label, Box::new(f)));
+        self
+    }
 }
 
 struct HandlersWithFlags {
@@ -114,6 +127,7 @@ struct HandlersWithFlags {
     sign_in: Option<Handler>,
     toggle_details: Option<Handler>,
     dismiss: Option<Handler>,
+    extra: Option<(&'static str, Handler)>,
     toggle_details_present: bool,
 }
 
@@ -125,6 +139,7 @@ impl From<Handlers> for HandlersWithFlags {
             sign_in: h.sign_in,
             toggle_details: h.toggle_details,
             dismiss: h.dismiss,
+            extra: h.extra,
         }
     }
 }
@@ -181,6 +196,13 @@ pub fn render(
         }
         Action::None => {}
     }
+    let has_extra = handlers.extra.is_some();
+    if let Some((label, f)) = handlers.extra {
+        actions = actions.child(
+            capsule(label, format!("{id}-{}", label.to_ascii_lowercase()), theme)
+                .on_click(move |e, w, cx| f(e, w, cx)),
+        );
+    }
     if let Some(f) = handlers.toggle_details {
         let did = format!("{id}-details");
         let did2 = did.clone();
@@ -212,7 +234,8 @@ pub fn render(
     // The sentence row (disc + sentence, wrapping), then the actions right-aligned on their own
     // row under it — one deterministic shape at every width, so a 273 pt sheet and an 876 pt
     // column read the same.
-    let has_actions = !matches!(action, Action::None) || handlers.toggle_details_present;
+    let has_actions =
+        !matches!(action, Action::None) || handlers.toggle_details_present || has_extra;
     let row = div()
         .flex()
         .items_start()
@@ -505,6 +528,7 @@ mod error_ui_lint {
             ("update-error", "ui/profiles/me.rs"),
             ("routine-error", "ui/routines.rs"),
             ("question-card-error", "ui/widgets.rs"),
+            ("secret-offer-", "ui/secret_card.rs"),
             ("connector-error-", "ui/connectors.rs"),
         ];
         let all = sources();
