@@ -3992,14 +3992,41 @@ final class AppModel: ObservableObject {
         return directory.first { $0.handle.caseInsensitiveCompare(handle) == .orderedSame }?.name
     }
 
-    func openPersonProfile(handle: String, avatarUrl: String?, chatId: String) {
-        if let m = peopleChat(chatId)?.members.first(where: { $0.handle == handle && !$0.isAgent }) {
-            showProfile(.user(ProfilePerson(m)))
-        } else if let p = directory.first(where: { $0.handle == handle }) {
-            showProfile(.user(ProfilePerson(p)))
-        } else {
-            showProfile(.user(ProfilePerson(id: handle, handle: handle, name: nil, avatarUrl: avatarUrl)))
+    /// The one action behind every profile target in a chat — a sender name, the
+    /// avatar beside a bubble, an @mention chip, the header pill, a status-row
+    /// picture ([feedback profile-pane-toggle-ios-2026-10-26], `ProfileToggle`):
+    /// open the sheet on `target`; dismiss it when that same person or agent is
+    /// already up, whichever target opened it; swap it in place for someone else.
+    func toggleProfile(_ target: ProfileTarget) {
+        guard let next = ProfileToggle.next(showing: profilePath.last ?? profile, tapped: target) else {
+            profilePath = []
+            profile = nil
+            return
         }
+        profilePath = []
+        profile = next
+    }
+
+    /// True while the sheet's top page is `target`'s subject (the label then
+    /// says "Close profile").
+    func profileShows(_ target: ProfileTarget) -> Bool {
+        (profilePath.last ?? profile)?.sameSubject(as: target) ?? false
+    }
+
+    /// The page a sender's handle opens: the chat's member, else the directory
+    /// entry, else a bare person from the row's own fields.
+    func personTarget(handle: String, avatarUrl: String?, chatId: String) -> ProfileTarget {
+        if let m = peopleChat(chatId)?.members.first(where: { $0.handle == handle && !$0.isAgent }) {
+            return .user(ProfilePerson(m))
+        } else if let p = directory.first(where: { $0.handle == handle }) {
+            return .user(ProfilePerson(p))
+        } else {
+            return .user(ProfilePerson(id: handle, handle: handle, name: nil, avatarUrl: avatarUrl))
+        }
+    }
+
+    func openPersonProfile(handle: String, avatarUrl: String?, chatId: String) {
+        toggleProfile(personTarget(handle: handle, avatarUrl: avatarUrl, chatId: chatId))
     }
 
     /// An agent that is not in my project list: the project carried by a

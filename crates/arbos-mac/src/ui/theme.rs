@@ -823,29 +823,43 @@ impl Theme {
     /// The chat header's glass ([feedback mac-header-glass-2026-10-25], Jacob
     /// 2026-10-25; the iPhone's `HeaderGlassBackground`): what the name pill
     /// and the header disc are filled with — on Glass and on Matte alike
-    /// ([feedback mac-header-pill-glass-matte-2026-10-26]). Dark: white at
-    /// 12 % over a 50 % dark underlay (one composited colour: GPUI quads take
-    /// one fill); over the flat Matte `bg` that reads as a frosted plate two
-    /// steps lighter, like Grok Bot's pill over its black transcript. Light:
-    /// white at 60 % — over the bright beach backdrop of Jacob's shots white
-    /// text measures 6.6:1 on it (`docs/glass-surface-directions.md`, B), and
-    /// over the flat Matte `#fcfcfc` the blurred list under it (the backdrop
-    /// blur composites ≈ 20 % darker than its source, Metal and wgpu alike)
-    /// lands the pill near the `#ededed` of the solid pill it replaces.
+    /// ([feedback mac-header-pill-glass-matte-2026-10-26]).
+    ///
+    /// Dark: `#3b3f45` at **30 %** ([feedback
+    /// mac-header-pill-see-through-2026-10-26]; was 56 %). Jacob's 14:15 CR
+    /// shot of v0.6.275 still read as "opaque dark gray": a 56 % plate over
+    /// the flat `bg` is two steps lighter with nothing behind it, and a 16 pt
+    /// blur turned whatever scrolled under it to mush. Grok Bot's pill over
+    /// its black transcript (Jacob's reference) is only ≈ +12/255 lighter than
+    /// the page — the glass is read from its rim and from the text that
+    /// passes under it. At 30 % the pill sits ≈ +13 over `#141414`, and the
+    /// text behind stays legible through the lighter blur
+    /// (`glass::HEADER_BLUR`). White text keeps ≥ 4.5:1 on it: the pill always
+    /// lies over the chat column, which is the page colour on Matte and the
+    /// 85 % page wash on Glass ([feedback mac-glass-contrast-2026-10-26]), so
+    /// its backdrop is never brighter than ≈ `#373737`.
+    ///
+    /// Light: white at 60 % — over the bright beach backdrop of Jacob's shots
+    /// white text measures 6.6:1 on it (`docs/glass-surface-directions.md`,
+    /// B), and over the flat Matte `#fcfcfc` the blurred list under it (the
+    /// backdrop blur composites ≈ 20 % darker than its source, Metal and wgpu
+    /// alike) lands the pill near the `#ededed` of the solid pill it replaced.
+    /// Unchanged here: light-theme changes need Jacob's shots first.
     pub fn header_glass(&self) -> Hsla {
         if self.is_light() {
             hex_a(0xffffff, 0.60)
         } else {
-            hex_a(0x3b3f45, 0.56)
+            hex_a(0x3b3f45, 0.30)
         }
     }
 
-    /// The 1 pt light rim around a header control on Glass.
+    /// The 1 pt light rim around a header control on Glass. Dark went 18 % →
+    /// 30 % with the thinner fill: like Grok's, the pill's shape is its rim.
     pub fn header_glass_rim(&self) -> Hsla {
         if self.is_light() {
             hex_a(0x000000, 0.10)
         } else {
-            hex_a(0xffffff, 0.18)
+            hex_a(0xffffff, 0.30)
         }
     }
 
@@ -854,7 +868,7 @@ impl Theme {
         if self.is_light() {
             hex_a(0xffffff, 0.90)
         } else {
-            hex_a(0xffffff, 0.30)
+            hex_a(0xffffff, 0.45)
         }
     }
 
