@@ -3363,6 +3363,26 @@ struct AgentIdentity {
     project_id: Option<Id>,
 }
 
+/// The agent seed (`agent:<id>` / `project:<id>`) a hidden job row's card is drawn under.
+/// Agentd ≤ 0.1.150 wrote that row with a bare `agent` sender; the agent's own ack or
+/// result row answering the same ask names it, so the card takes that seed.
+fn hidden_row_agent_seed(message: &Message, messages: &[Message]) -> Option<String> {
+    let is_seed = |s: &str| s.starts_with("agent:") || s.starts_with("project:");
+    if is_seed(&message.sender) {
+        return Some(message.sender.clone());
+    }
+    let ask = message.in_reply_to.as_deref().filter(|id| !id.is_empty())?;
+    messages
+        .iter()
+        .find(|m| {
+            m.id != message.id
+                && matches!(m.role, Role::Assistant | Role::Project)
+                && m.in_reply_to.as_deref() == Some(ask)
+                && is_seed(&m.sender)
+        })
+        .map(|m| m.sender.clone())
+}
+
 fn hash_version<T: Hash>(value: &T, live: bool) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     value.hash(&mut h);
@@ -3931,35 +3951,59 @@ pub fn build_rows_hiding(
                 // is in the card above" over nothing) still shows as its card, so a
                 // posted file is never invisible on a box that has not upgraded.
                 if message.hidden || message.job.is_some() {
-                    for part in &message.parts {
-                        if let Part::Attachment { id, attachment } = part {
-                            let has_thumb = attachment
-                                .blob_ref
-                                .as_deref()
-                                .is_some_and(|k| thumb_keys.contains(k));
-                            rows.push(Row {
-                                version: hash_version(
-                                    &(
-                                        &attachment.name,
-                                        &attachment.title,
-                                        attachment.bytes,
-                                        &attachment.blob_ref,
-                                        has_thumb,
-                                    ),
-                                    false,
+                    // The card carries the agent's disc and name like its bubbles do
+                    // ([feedback forward-attachments-mac-2026-10-27]). A worker row
+                    // from an older box may say a bare `agent`; then the agent that
+                    // answered the same ask lends its seed.
+                    let seed = hidden_row_agent_seed(message, messages);
+                    let lane = seed.filter(|_| {
+                        names_senders
+                            || message.role == Role::Project
+                            || message.asked_by_handle.is_some()
+                    });
+                    let card_parts: Vec<(&Id, &Attachment)> = message
+                        .parts
+                        .iter()
+                        .filter_map(|p| match p {
+                            Part::Attachment { id, attachment } => Some((id, attachment)),
+                            _ => None,
+                        })
+                        .collect();
+                    let last = card_parts.len().saturating_sub(1);
+                    for (ix, (id, attachment)) in card_parts.into_iter().enumerate() {
+                        let has_thumb = attachment
+                            .blob_ref
+                            .as_deref()
+                            .is_some_and(|k| thumb_keys.contains(k));
+                        let card_named = names_senders && lane.is_some() && ix == 0;
+                        let disc = ix == last;
+                        rows.push(Row {
+                            version: hash_version(
+                                &(
+                                    &attachment.name,
+                                    &attachment.title,
+                                    attachment.bytes,
+                                    &attachment.blob_ref,
+                                    has_thumb,
+                                    &lane,
+                                    card_named,
+                                    disc,
                                 ),
-                                id: format!("{}#{}", message.id, id),
-                                message_id: message.id.clone(),
-                                kind: RowKind::Attachment {
-                                    attachment: attachment.clone(),
-                                    part_id: id.clone(),
-                                    mine: false,
-                                    lane: message.sender.starts_with("agent:")
-                                        || message.role == Role::Project,
-                                    forwarded_from: None,
-                                },
-                            });
-                        }
+                                false,
+                            ),
+                            id: format!("{}#{}", message.id, id),
+                            message_id: message.id.clone(),
+                            kind: RowKind::Attachment {
+                                attachment: attachment.clone(),
+                                part_id: id.clone(),
+                                mine: false,
+                                sender: lane.clone().map(|seed| AttachmentSender::Agent { seed }),
+                                named: card_named,
+                                disc,
+                                time: clock_label(message.created_at),
+                                forwarded_from: None,
+                            },
+                        });
                     }
                     continue;
                 }
@@ -8703,7 +8747,25 @@ mod system_line_tests {
     #[test]
     fn hidden_job_row_still_shows_its_attachment_card() {
         let t = 1_700_000_000_000u64;
+        let ask = message(
+            "user",
+            "user:gh_jacob",
+            "@doug-agent plot the subnet 120 price",
+            t,
+        );
+        // Doug's ack names the agent (`agent:<id>` + asked_by_handle, as every people-chat
+        // reply does); the worker row from the 0.1.150 box says a bare `agent`.
+        let mut ack = message(
+            "assistant",
+            "agent:01DOUG",
+            "Plotting the SN120 price now.",
+            t + 500,
+        );
+        ack.in_reply_to = Some(ask.id.clone());
+        ack.asked_by_handle = Some("jacob".into());
         let mut job_row = spawn_row("j1", "job", true, t + 1_000);
+        job_row.sender = "agent".into();
+        job_row.in_reply_to = Some(ask.id.clone());
         job_row.hidden = true;
         job_row.job = serde_json::from_value(serde_json::json!({
             "id": "01JOB", "title": "Running the program", "kind": "code", "touches": []
@@ -8717,10 +8779,7 @@ mod system_line_tests {
             }))
             .unwrap(),
         });
-        let messages = [
-            message("user", "user", "plot the subnet 120 price", t),
-            job_row,
-        ];
+        let messages = [ask, ack, job_row];
         let spoken = HashSet::new();
         let failed = HashMap::new();
         let speech = SpeechRows {
@@ -8736,14 +8795,32 @@ mod system_line_tests {
             "gh_me",
             &HashSet::new(),
             &Mentions::empty(),
-            false,
+            true,
         );
         let cards: Vec<&Row> = rows.iter().filter(|r| r.message_id == "j1").collect();
         assert_eq!(cards.len(), 1, "exactly the card, nothing else: {rows:?}");
-        assert!(matches!(
-            &cards[0].kind,
-            RowKind::Attachment { attachment, mine: false, .. } if attachment.name == "sn120_price.png"
-        ));
+        match &cards[0].kind {
+            RowKind::Attachment {
+                attachment,
+                mine,
+                sender,
+                named,
+                disc,
+                ..
+            } => {
+                assert_eq!(attachment.name, "sn120_price.png");
+                assert!(!mine);
+                assert!(
+                    matches!(sender, Some(AttachmentSender::Agent { seed }) if seed == "agent:01DOUG"),
+                    "the card sits in Doug's lane, seed borrowed from his ack: {sender:?}"
+                );
+                assert!(
+                    named && disc,
+                    "Doug's name above the card and his disc beside it"
+                );
+            }
+            other => panic!("an attachment card, not {other:?}"),
+        }
     }
 
     #[test]
