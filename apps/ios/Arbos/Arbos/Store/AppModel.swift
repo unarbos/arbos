@@ -862,6 +862,13 @@ final class AppModel: ObservableObject {
                 if category == PushManager.callCategory || event == "started" || event == "ended" || event == "missed" {
                     CallManager.shared.handleCallAlert(info)
                 }
+                // Silent clear-on-read push (`type: clear`, the APNs form of
+                // `notifications_cleared`): same effect as the /me/pushes row, but it also
+                // reaches a backgrounded phone.
+                if (info["type"] as? String) == "clear", let cid = info["chat_id"] as? String, !cid.isEmpty {
+                    let badge = (info["badge"] as? NSNumber)?.int64Value ?? -1
+                    self?.applyRemoteClear(chatId: cid, relayTotal: badge)
+                }
                 await self?.refreshPeople(); await self?.refreshUnread()
             }
         }
@@ -1114,21 +1121,39 @@ final class AppModel: ObservableObject {
     var unreadTotal: Int {
         // Hidden plain chats (D78: not the agent's one chat) never badge.
         if !unreadCounts.isEmpty {
-            var total = unreadCounts.reduce(0) { $0 + (isHiddenChat($1.key) ? 0 : $1.value) }
-            // Live Loro rows can mark unread before /me/unread has the event.
-            for id in peopleUnread where !isHiddenChat(id) && (unreadCounts[id] ?? 0) == 0 {
-                total += 1
-            }
-            for list in chats.values {
-                for c in list where c.unread && !isHiddenChat(c.id) && (unreadCounts[c.id] ?? 0) == 0 {
-                    total += 1
-                }
-            }
-            return total
+            let flagged = peopleUnread.union(chats.values.flatMap { $0 }.filter { $0.unread }.map(\.id))
+            return Self.badgeTotal(remote: unreadCounts, flagged: flagged, hidden: { self.isHiddenChat($0) })
         }
         let people = peopleChats.reduce(0) { $0 + unreadCount(for: $1) }
         let projects = chats.values.flatMap { $0 }.filter { $0.unread && !isHiddenChat($0.id) }.count
         return people + projects
+    }
+
+    /// The app badge from the relay's per-chat counts (`GET /me/unread`) plus one for every
+    /// chat a live row flagged before `/me/unread` caught up; hidden chats never count.
+    nonisolated static func badgeTotal(remote: [String: Int], flagged: Set<String>, hidden: (String) -> Bool) -> Int {
+        var total = remote.reduce(0) { $0 + (hidden($1.key) ? 0 : $1.value) }
+        for id in flagged where !hidden(id) && (remote[id] ?? 0) == 0 {
+            total += 1
+        }
+        return total
+    }
+
+    /// A clear from another device (`notifications_cleared`) applied to the local unread
+    /// picture: the chat's remote count and local flag go, every other chat keeps its count.
+    nonisolated static func clearingChat(_ chatId: String, remote: inout [String: Int], flagged: inout Set<String>) {
+        if remote[chatId] != nil { remote[chatId] = 0 }
+        flagged.remove(chatId)
+    }
+
+    /// The badge right after a clear: the smaller of the relay's total (every chat, the read
+    /// one at 0 — what its `/me/unread` would say) and the local sum. Each side can only be
+    /// too high: the local sum when a live row lit a flag `/me/unread` has not confirmed, the
+    /// relay's when this device read a chat moments ago and its throttled `PUT /read` is
+    /// still pending, or for hidden plain chats (D78) the relay counts and the badge never
+    /// shows. A total the relay did not send (negative) falls back to the local sum.
+    nonisolated static func badgeAfterClear(relayTotal: Int64, localTotal: Int) -> Int {
+        relayTotal >= 0 ? Int(min(relayTotal, Int64(max(0, localTotal)))) : max(0, localTotal)
     }
 
     /// Unread rows of one agent chat for its dot: none for a hidden plain chat.
@@ -3273,6 +3298,31 @@ final class AppModel: ObservableObject {
         )
     }
 
+    /// `notifications_cleared`: I read this chat on another device. The thread's delivered
+    /// notifications leave Notification Center, the chat stops being unread here (no `PUT
+    /// /read` — the relay already has the cursor), and the badge drops to the relay's total
+    /// (`/me/unread` re-syncs the per-chat counts on the next poll).
+    func applyRemoteClear(chatId: Id, relayTotal: Int64) {
+        PushManager.shared.clearDelivered(chatId: chatId)
+        var remote = unreadCounts
+        var flagged = peopleUnread
+        Self.clearingChat(chatId, remote: &remote, flagged: &flagged)
+        unreadCounts = remote
+        peopleUnread = flagged
+        if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+            peopleChats[i].unread = false
+            peopleChats[i].readSeq = max(peopleChats[i].readSeq, peopleChats[i].headSeq)
+        }
+        for (pid, list) in chats {
+            if let i = list.firstIndex(where: { $0.id == chatId }), list[i].unread {
+                var updated = list
+                updated[i].unread = false
+                chats[pid] = updated
+            }
+        }
+        PushManager.shared.setBadge(Self.badgeAfterClear(relayTotal: relayTotal, localTotal: unreadTotal))
+    }
+
     func addAgent(chatId: String, projectId: Id) {
         showMembershipNotice(chatId: chatId, names: projects.filter { $0.id == projectId }.map(\.name))
         Task {
@@ -4197,6 +4247,8 @@ final class AppModel: ObservableObject {
                 applyRemoteArchive(spaceId: payload.space_id, kind: payload.kind, archived: payload.archived_at != nil)
             case .peopleChatDeleted, .peopleInviteAccepted, .machineReady:
                 break
+            case .notificationsCleared(let payload):
+                applyRemoteClear(chatId: payload.chat_id, relayTotal: payload.badge)
             }
         }
         if needChats { await refreshPeople() }

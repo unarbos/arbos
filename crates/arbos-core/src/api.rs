@@ -1816,6 +1816,20 @@ pub struct AgentProfileUpdatedPayloadDto {
     pub image_key: Option<String>,
 }
 
+/// `notifications_cleared` payload: the user read `chat_id` on one of their devices
+/// (`PUT /chats/{id}/read`), so every other device drops the banners it still shows for that
+/// chat and sets its app badge to `badge` — the user's unread total across chats after the
+/// read (Fluxer-style clear-on-read, carried on `/me/pushes` today and as a silent push when
+/// APNs is live). `project_id` is `people` for DMs and groups, else the agent's project.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NotificationsClearedPayloadDto {
+    pub chat_id: String,
+    pub project_id: String,
+    #[typeshare(serialized_as = "I54")]
+    pub badge: i64,
+}
+
 /// One kind the relay queues on `/me/pushes` via `push_user` / `push_user_except` /
 /// `push_everyone`. Adjacent tagging matches the stored `{ kind, payload }` row.
 ///
@@ -1882,6 +1896,8 @@ pub enum PushEventDto {
     ProfileUpdated(ProfileUpdatedPayloadDto),
     #[serde(rename = "agent_profile_updated")]
     AgentProfileUpdated(AgentProfileUpdatedPayloadDto),
+    #[serde(rename = "notifications_cleared")]
+    NotificationsCleared(NotificationsClearedPayloadDto),
 }
 
 impl PushEventDto {
