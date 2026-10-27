@@ -594,6 +594,18 @@ impl Db {
         })
     }
 
+    /// Does `blocker` block `blocked`?
+    pub fn blocks(&self, blocker: &str, blocked: &str) -> Result<bool> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM blocks WHERE blocker = ?1 AND blocked = ?2",
+                params![blocker, blocked],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n > 0)
+        })
+    }
+
     /// Is either of the two blocking the other?
     pub fn blocked_either_way(&self, a: &str, b: &str) -> Result<bool> {
         self.with(|c| {
