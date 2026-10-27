@@ -11,6 +11,7 @@ use gpui::{
 use crate::app::AppState;
 use crate::model::{now_ms, LocalDevice, LocalView};
 use crate::ui::frost::{frosted, MENU_BLUR};
+use crate::ui::highlight;
 use crate::ui::profiles::kit;
 use crate::ui::theme::{Theme, PANEL_RADIUS, RAIL_WIDTH};
 
@@ -132,10 +133,12 @@ impl LocalPanel {
                     .font_weight(FontWeight::SEMIBOLD)
             })
             .when(!primary, |el| {
-                el.text_color(theme.text_muted)
-                    .border_1()
-                    .border_color(theme.border)
-                    .hover(|s| s.bg(theme.surface_2))
+                highlight::button(
+                    el.text_color(theme.text_muted)
+                        .border_1()
+                        .border_color(theme.border),
+                    theme,
+                )
             })
             .child(label.into())
     }
