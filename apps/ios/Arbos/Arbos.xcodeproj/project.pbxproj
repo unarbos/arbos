@@ -7,6 +7,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A1EE00000000000000000008 /* ErrorUILintTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EE00000000000000000007 /* ErrorUILintTests.swift */; };
+		A1EE00000000000000000006 /* UserErrorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EE00000000000000000005 /* UserErrorTests.swift */; };
+		A1EE00000000000000000004 /* ErrorNote.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EE00000000000000000003 /* ErrorNote.swift */; };
+		A1EE00000000000000000002 /* UserError.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EE00000000000000000001 /* UserError.swift */; };
 		A1BB87570AFC8FD22F77F310 /* ArbosApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EF7B8D4ACE5D286ED5271D /* ArbosApp.swift */; };
 		A1B8CC06713710E1DE0950B9 /* DebugHooks.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B4441E009E79A1090EF589 /* DebugHooks.swift */; };
 		A134D74DFA78D38A472BF229 /* Call.swift in Sources */ = {isa = PBXBuildFile; fileRef = A17AB0DF610F874C5BE921E3 /* Call.swift */; };
@@ -203,6 +207,10 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		A1EE00000000000000000007 /* ErrorUILintTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ErrorUILintTests.swift; sourceTree = "<group>"; };
+		A1EE00000000000000000005 /* UserErrorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserErrorTests.swift; sourceTree = "<group>"; };
+		A1EE00000000000000000003 /* ErrorNote.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ErrorNote.swift; sourceTree = "<group>"; };
+		A1EE00000000000000000001 /* UserError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserError.swift; sourceTree = "<group>"; };
 		A15AA920DF43B1E0D5ECD962 /* Arbos.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Arbos.entitlements; sourceTree = "<group>"; };
 		A1E59E8E49DC7AEE0EE9D0F3 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A1EF7B8D4ACE5D286ED5271D /* ArbosApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArbosApp.swift; sourceTree = "<group>"; };
@@ -496,6 +504,7 @@
 		A147AADF20080F5AA72B6504 /* Sync */ = {
 			isa = PBXGroup;
 			children = (
+				A1EE00000000000000000001 /* UserError.swift */,
 				A1B646F374BD7AE1F3BE7A4B,
 				A1A8BC5FCD045299B0D7D13D,
 				A1E592B43CC1234959AF2E63,
@@ -509,6 +518,7 @@
 		A1945BC1511DA16E83111311 /* UI */ = {
 			isa = PBXGroup;
 			children = (
+				A1EE00000000000000000003 /* ErrorNote.swift */,
 				A1BB00000000000000000001 /* BackSwipe.swift */,
 				A124D4FA40F4E5025A2B2C9D,
 				A1EE5A7A5FF12E4EF7FE7B27,
@@ -565,6 +575,8 @@
 		A15A00000000000000000011 /* ArbosTests */ = {
 			isa = PBXGroup;
 			children = (
+				A1EE00000000000000000007 /* ErrorUILintTests.swift */,
+				A1EE00000000000000000005 /* UserErrorTests.swift */,
 				A15A00000000000000000003 /* CoreFixturesTests.swift */,
 				A15A00000000000000000020 /* AddMembersPlanTests.swift */,
 				A15A00000000000000000040 /* MessageDeleteRuleTests.swift */,
@@ -805,6 +817,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A1EE00000000000000000004 /* ErrorNote.swift in Sources */,
+				A1EE00000000000000000002 /* UserError.swift in Sources */,
 				A1BB87570AFC8FD22F77F310 /* ArbosApp.swift in Sources */,
 				A1B8CC06713710E1DE0950B9 /* DebugHooks.swift in Sources */,
 				A134D74DFA78D38A472BF229 /* Call.swift in Sources */,
@@ -901,6 +915,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A1EE00000000000000000008 /* ErrorUILintTests.swift in Sources */,
+				A1EE00000000000000000006 /* UserErrorTests.swift in Sources */,
 				A15A00000000000000000004 /* CoreFixturesTests.swift in Sources */,
 				A15A00000000000000000013 /* ReactionToggleTests.swift in Sources */,
 				A15A00000000000000000021 /* AddMembersPlanTests.swift in Sources */,
