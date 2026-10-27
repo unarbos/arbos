@@ -1450,8 +1450,21 @@ class Loop:
         new commits touch the branch's files, re-gate (status gating; the pool batches it and a green run holds it
         again). A conflict goes to the agent / owner as a merge-main follow-up."""
         aw = st.get("awaiting") or {}
+        if aw.get("conflict"):
+            # "conflict — owner merging main": the owner's resolving push is the way out. Pick it up without waiting
+            # for main to move again, and re-gate it (the resolved tree is new) — still held for Jacob.
+            live = self.gh.branch_head(st["branch"])
+            if live and live != st.get("branch_head"):
+                st["branch_head"] = live
+                aw.update(conflict=False, ready=False, regate_due=True)
+                aw.pop("conflict_noted", None)
+                st["awaiting"] = aw
+                self.store.save_state(fid, st)
+                self.store.event(fid, "awaiting_conflict_resolved", head=live[:8])
+                log(f"[{fid}] held item: owner pushed {live[:8]} after the conflict; re-gates when idle, still awaiting Jacob")
         main_head = self.gh.branch_head("main") or ""
         if not main_head or main_head == aw.get("main_head"):
+            self.regate_awaiting_if_idle(fid, st)
             return
         cmp = self.gh.compare(aw.get("main_head") or main_head, main_head)
         moved_files = {f["filename"] for f in cmp.get("files", [])}
@@ -2199,6 +2212,33 @@ class Loop:
         retries = st.get("gate_retries", 0)
         st["main_conflicts"] = st.get("main_conflicts", 0) + 1
         self.arm_solo_slot(fid, st)
+        if st.get("awaiting") and st.get("status") in ("awaiting_jacob", "gating") and not st.get("approved_by_jacob"):
+            # A held item (release-approval gate) never fails for a conflict: Jacob's per-item yes is still pending and
+            # the branch is his to approve or decline. It stays `awaiting_jacob` as "conflict — owner merging main";
+            # the owner is told once (agent follow-up while retries remain, then the issue), and the next push on the
+            # branch re-gates. 13:37 Oct 27: #1551/#1853/#1888/#1948 fell to `failed` here minutes after being restored.
+            aw = st["awaiting"]
+            aw.update(conflict=True, ready=False)
+            st.update(status="awaiting_jacob", awaiting=aw)
+            self.store.save_state(fid, st)
+            if not aw.get("conflict_noted"):
+                aw["conflict_noted"] = iso()
+                self.store.save_state(fid, st)
+                self.store.event(fid, "awaiting_conflict_held", head=head[:8], retries=retries)
+                who = st.get("handed_off_to") or "owner"
+                self.gh.comment(st["issue"], f"Conflict — owner merging main. `{st['branch']}`@{head[:8]} no longer merges with `main`. {who}: merge "
+                                "`origin/main` into the branch (a merge, never a rebase), resolve, push; the loop re-gates. The branch is kept and "
+                                "the item stays held for Jacob's approval." + (f"\n\n```\n{detail[-2000:]}\n```" if detail else ""))
+                if st.get("agent_id") and not st.get("handed_off_to") and retries < 2:
+                    with contextlib.suppress(HttpError):
+                        self.cursor.followup(st["agent_id"], (
+                            f"Your branch `{st['branch']}` no longer merges cleanly into `main`. Run `git fetch origin main && "
+                            f"git merge origin/main` on the branch, resolve the conflicts with the smallest change, run the checks, "
+                            "and push the merge (no rebase, no force-push). End with the SUMMARY:/PUSHED: lines again."))
+                        st["gate_retries"] = retries + 1
+                        self.store.save_state(fid, st)
+            log(f"[{fid}] held item conflicts with main at {head[:8]}; stays awaiting_jacob (conflict — owner merging main)")
+            return
         if st.get("handed_off_to"):
             st["status"] = "handed_off"
             self.store.save_state(fid, st)
