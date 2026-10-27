@@ -501,7 +501,9 @@ impl Db {
         }
         let c = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
         c.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;",
+            // secure_delete: rows a shallow checkpoint replaces (secret hand-off) leave no old
+            // bytes behind in the file.
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON;",
         )?;
         c.execute_batch(SCHEMA)?;
         // Forward-only, additive migrations (D50).
@@ -1656,6 +1658,15 @@ impl Db {
                 Ok(Row { seq: r.get(0)?, device: r.get(1)?, batch_id: r.get(2)?, bytes: r.get(3)? })
             })?;
             rows.collect()
+        })
+    }
+
+    /// After rows were replaced for a redaction: fold the WAL into the main file and truncate
+    /// it, so the pages that held the old bytes are gone from disk as well.
+    pub fn flush_after_scrub(&self) -> Result<()> {
+        self.with(|c| {
+            c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+            Ok(())
         })
     }
 
