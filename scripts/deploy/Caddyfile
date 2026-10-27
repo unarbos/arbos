@@ -50,8 +50,15 @@
 }
 
 # ---- landing page --------------------------------------------------------------------------------
+# Since agent sites (#2060) the apex is proxied by Cloudflare (SSL mode Full (strict)), so the
+# TLS-ALPN challenge cannot reach this host for arbos.life: its certificate comes by DNS-01 through
+# the zone token in /etc/arbos/www.env (vault item "Cloudflare arbos.life DNS edit", written by
+# relay-server.sh into the arbos-www.service drop-in). The other vhosts stay DNS-only + ALPN.
 arbos.life {
-	import acme_alpn_only
+	tls {
+		dns cloudflare {env.CLOUDFLARE_DNS_API_TOKEN}
+		resolvers 1.1.1.1 1.0.0.1
+	}
 	root * @WWW_DIR@/site
 	encode zstd gzip
 	header {
