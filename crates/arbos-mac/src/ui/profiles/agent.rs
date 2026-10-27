@@ -609,7 +609,7 @@ fn details_sections(
                     theme,
                 )
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
+                .group(kit::HOT)
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.state
                         .update(cx, |s, cx| s.set_profile_tab(TAB_COMPUTER, cx));

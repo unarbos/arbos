@@ -32,6 +32,7 @@ use crate::ui::callview;
 use crate::ui::error_note;
 use crate::ui::frost::{frosted, PANEL_BLUR};
 use crate::ui::glass;
+use crate::ui::highlight;
 use crate::ui::icons::icon;
 use crate::ui::mention::{self, Mention, MentionToken, Mentions};
 use crate::ui::select::{self, word_range};
@@ -2833,8 +2834,7 @@ impl Composer {
                 .px(px(8.0))
                 .rounded(px(6.0))
                 .cursor_pointer()
-                .when(i == selected, |el| el.bg(theme.surface_2))
-                .hover(|s| s.bg(theme.surface_2))
+                .map(|el| highlight::row(el, i == selected, highlight::Shape::Own, &theme))
                 // Hover owns the highlight so Tab / Enter insert that row
                 // ([feedback app-01M5WKBR85JVW1KKJH96FWZVK5]).
                 .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
@@ -3201,12 +3201,11 @@ impl Render for Composer {
             .size(px(PLUS_BUTTON))
             .flex_shrink_0()
             .rounded_full()
-            .bg(theme.surface_2)
             .flex()
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .hover(|s| s.bg(theme.border_strong))
+            .map(|el| highlight::washed(el, theme.surface_2, &theme))
             .child(icon("plus", 16.0, theme.text_muted))
             .on_click(cx.listener(|this, _, _, cx| this.attach(cx)));
 
@@ -3221,7 +3220,7 @@ impl Render for Composer {
                 .justify_center()
                 .rounded_full()
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
+                .map(|el| highlight::button(el, &theme))
                 .child(icon("xmark", 11.0, theme.text_muted))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.voice.update(cx, |v, cx| v.cancel_memo(cx));
@@ -3385,7 +3384,7 @@ impl Render for Composer {
                     .justify_center()
                     .rounded_full()
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme.surface_2))
+                    .map(|el| highlight::button(el, &theme))
                     .child(icon("xmark", 10.0, theme.text_muted))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.state
