@@ -355,7 +355,8 @@ At the then 876 pt column the bubble was 560 = 64 % of it; since
 [feedback mac-sidebar-rail-2026-10-26] the column is Grok's 960 (`COMPOSER_WIDTH`
 904 + the two 28 pt circles), so the bubble is 58 % of the column as in Grok
 (matching the absolute width is what reads as "the same bubble" side by side). Question / approval cards share the slot and the cap
-(#1374 / #1440); my own bubbles keep their 72 % rule.
+(#1374 / #1440); my own bubbles keep their 72 % rule. Agent 1:1 chats only:
+people chats take 80 % of their side (§ "Chat density in people chats").
 
 Code: `transcript.rs` `ASSISTANT_MAX_WIDTH`, `assistant_cap()`, the inner
 `chat-bubble-cap` frame of `assistant_slot()`; `onboarding::bubble_target`
@@ -617,6 +618,67 @@ A new screen declares itself there.
 | `inlineChips` | ≤ 32 pt chips and segments inside cards | not controls of the family |
 | `primaryCTA` | 50 pt filled capsules (Sign in, Pair, Create) | primary buttons, `primary` fill, no rim |
 | `textAreas` | feedback note / description areas, 18 pt corners | free-form, grow |
+
+## Chat density in people chats: Discord-size pictures, wider bubbles (Jacob 2026-10-26, [feedback chat-density-ios-2026-10-26], Mac [feedback chat-density-mac-2026-10-26])
+
+Jacob (17:54 CR, iPhone Arbonites group): "In chats the pfp chat bubble takes
+up too much space. Go for Discord standard size and use more of the screen both
+ways, left and right per chat bubble. So reduce the empty space on the left and
+right." Discord's message avatar is **40 pt in a 72 pt gutter** (desktop, cozy:
+avatar at 16, content at 72, 48 free on the right) and **32 pt on mobile**.
+The rule covers **people chats** — DM, group, server channel, a project with
+people in it: every chat whose bubbles carry a sender disc. The 1:1 agent chat
+keeps its Grok-measured widths (screen − 76 on iPhone; the 560 pt ceiling and
+my 72 % on Mac): Grok has no group chats to measure, so people chats follow
+Discord's density instead.
+
+### iPhone (402 pt screen, 3 px/pt; the list pads 16 each side)
+
+| Item | Rule (pt) | Was | Code |
+| --- | --- | --- | --- |
+| Sender disc | **36** — Discord's size (between its 40 desktop and 32 mobile); centred on the composer's `+` as before, so its left edge sits **6 inside the `+`** = the status picture's edge (`presenceAvatarOffset`): one left edge for every picture in the chat | 42 | `Theme.memberAvatar` |
+| Disc → bubble | **10** (= `Controls.gap`, the `+` → field gap) | 13 | `Theme.memberAvatarGap` |
+| Disc / bubble body from the screen | keyboard up **24–60 / 70**; down **37–73 / 83** (the column follows the `+`, whose inset is Grok's 18 / 31) | 21–63 / 76; 34–76 / 89 | `Theme.avatarColumnInset`, `memberLane` |
+| Far-side margin | **32** on both sides: my bubble's left edge never passes 32 from the screen, an incoming bubble's right edge never passes 402 − 32 | 60 | `Theme.bubbleOppositeMargin`, `peopleBubbleInset` = 16 + 32 |
+| My bubble cap | **354** (right edge 16, as Grok) | 326 | `RowView.maxBubble(width:people:)` |
+| Incoming bubble cap | **300** keyboard up / **287** down (354 − lane); runs to 370 | 253 → 342 | same, minus `memberLane` |
+| Question cards, pictures with a lane | the incoming cap; a photo + caption bubble stays ≤ 280 (#1840) | — | `QuestionCard`, `ImageBubble` |
+| Status row, composer `+`, system notices ("Const added Aureum") | unchanged: the `+` is Grok's; the status picture (25⅓, 6 inside the `+`) now shares the disc's left edge; notices stay centred | — | `PresenceRow`, `.system` |
+
+Pinned by `ArbosTests/ChatDensityMetricsTests` (disc, gap, column, caps,
+far margin, agent-chat numbers untouched) and `PresenceRowTests`.
+
+Not moved, on purpose: the composer's side inset (Grok's 31 keyboard down /
+18 up, #1841) — it is the left gutter with the keyboard down; moving the disc
+off the `+` would break Jacob's avatar-column rule, moving the `+` would break
+Grok parity. If the keyboard-down gutter still reads wide, that inset is the
+lever, and it needs a Grok keyboard-down reference first.
+
+### Mac
+
+The Mac column is already denser than Discord's: a **28 pt disc** (= the `+`,
+Jacob's column rule) in a **50 pt gutter** (disc 8 inside the pill's edge, 14 to
+the body, the body on the composer's text start — `transcript::SENDER_LANE`)
+against Discord's 40 in 72. Disc, gap and the 16 pt column margin (Grok's
+composer edge, #1374) stay. The widths move:
+
+| Item | Rule | Was | Code |
+| --- | --- | --- | --- |
+| Incoming bubble in a people chat (a person's or an agent's), cards after a lane | **80 % of the slot** after the sender lane; 20 % stays free on the right | person 72 % of the slot; agent `min(slot − 84, 560)` | `transcript::PEOPLE_BUBBLE_FRACTION`, `people_cap`, `people_slot` |
+| My bubble in a people chat | **80 % of the column** from the right; 20 % free on the left | 72 % | `own_bubble_fraction(true)` |
+| Agent 1:1 chat | unchanged — agent `min(slot − 84, 560)`, mine 72 % | — | `assistant_cap`, `OWN_BUBBLE_FRACTION` |
+| Reference window (1180 wide, 296 sidebar → 852 column) | incoming 66 → 708 (641.6 wide, 160 free); mine 682 wide (170 free on the left) | incoming agent 560 (242 free), person 577; mine 613 (239 free) | — |
+| Grok's 960 column | incoming 728 wide (182 free), mine 768 (192 free) | agent 560 (350 free), person 655; mine 691 | — |
+
+One share at every width: below a 750 pt column an agent's group bubble is
+narrower than Grok's 560 agent-chat ceiling (517 at ref 57's 696 column); a
+person's beside it is wider than its old 72 % everywhere, and the two are now
+the same width. The hover rail lives in the free 20 %. Pinned by
+`transcript::layout_tests::people_chat_bubbles_take_four_fifths_of_their_side`,
+`cards_share_the_bubbles_left_edge_and_cap`, `bubbles_stay_inside_the_column_and_wrap_their_text`
+and the `people_chat` rule in `names_senders_follows_the_chat_kind`. Record:
+project store `internal/feedback-loop/chat-density-2026-10-26.md`, shots in
+`media/feedback/chat-density/`.
 
 ## Glass surface: readable content, translucent chrome (Jacob 2026-10-26, [feedback mac-glass-contrast-2026-10-26])
 
