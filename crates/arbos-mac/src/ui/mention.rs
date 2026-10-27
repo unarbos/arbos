@@ -500,6 +500,22 @@ impl Mentions {
                 },
             );
         }
+        // Me, by id only (never a chip for my own handle): membership lines name their
+        // actor by user id from the live roster, and I am the actor of my own adds.
+        let me_id = s.me_id();
+        if !me_id.is_empty() {
+            table
+                .by_id
+                .entry(format!("user:{me_id}"))
+                .or_insert_with(|| {
+                    Rc::new(Mention {
+                        page: None,
+                        name: s.me_name(),
+                        picture: initials(&me_id, &s.me_name(), None, theme),
+                        id: Some(format!("user:{me_id}")),
+                    })
+                });
+        }
         // A chip is a profile target like the sender name beside it: open,
         // close on the second click, swap for someone else
         // ([feedback profile-pane-toggle-mac-2026-10-26]).
@@ -520,6 +536,13 @@ impl Mentions {
     /// The entity behind a member id (`user:<id>` / `agent:<project-id>`).
     pub fn by_id(&self, id: &str) -> Option<&Rc<Mention>> {
         self.by_id.get(id)
+    }
+
+    /// The live display name of a `user` / `agent` by id, for a membership line.
+    pub fn name_of(&self, kind: &str, id: &str) -> Option<String> {
+        self.by_id(&format!("{kind}:{id}"))
+            .map(|m| m.name.trim().to_owned())
+            .filter(|n| !n.is_empty())
     }
 
     /// True when two different entities carry `handle` (#1538): a typed exact

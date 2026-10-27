@@ -1921,6 +1921,47 @@ impl JobRollout {
     }
 }
 
+/// One person or agent a membership line names: `user:<id>` / `agent:<project id>` split.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoticeSubject {
+    pub kind: String,
+    pub id: String,
+}
+
+/// The facts behind a membership system line (relay `notices::Notice`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MembershipNotice {
+    /// `added` | `removed` | `left` | `joined`.
+    pub kind: String,
+    /// User id of the person who acted.
+    pub actor: String,
+    #[serde(default)]
+    pub subjects: Vec<NoticeSubject>,
+}
+
+impl MembershipNotice {
+    /// The line worded from `name_of` — `name_of("user", id)` / `name_of("agent", id)` is the
+    /// live roster name. `None` when anyone named is unknown to the roster (a person who has
+    /// since left, a deleted agent): the caller then shows the stored words.
+    pub fn text(&self, name_of: impl Fn(&str, &str) -> Option<String>) -> Option<String> {
+        let actor = name_of("user", &self.actor)?;
+        let names = self
+            .subjects
+            .iter()
+            .map(|s| name_of(&s.kind, &s.id))
+            .collect::<Option<Vec<String>>>()?;
+        match self.kind.as_str() {
+            "added" if !names.is_empty() => Some(format!("{actor} added {}", join_names(&names))),
+            "removed" if !names.is_empty() => {
+                Some(format!("{actor} removed {}", join_names(&names)))
+            }
+            "left" => Some(format!("{actor} left")),
+            "joined" => Some(format!("{actor} joined")),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
@@ -1943,6 +1984,12 @@ pub struct Message {
     /// Messages exchanged with the subagent on a hand-off row (1 = brief sent, 2 = result back).
     #[serde(default)]
     pub handoff_messages: Option<u32>,
+    /// A membership line's facts (relay `notices::Notice`): the actor and subjects by id, so
+    /// the line is worded from the live roster and a rename applies to old lines too
+    /// ("Const added Aureum" → "Jacob added Aureum", 2026-10-26). `None` on rows older than
+    /// the field — those keep their stored words.
+    #[serde(default)]
+    pub notice: Option<MembershipNotice>,
     /// A background worker the user never named (agentd, Grok parity trait 15): the
     /// transcript hides this spawn row — Grok shows no "N messages with …" line for its own
     /// workers — while the working line still reads its `activity`. An agent-to-agent
@@ -3767,6 +3814,8 @@ pub struct OptimisticNotice {
     pub id: Id,
     pub text: String,
     pub created_at: u64,
+    /// The facts the relay's row will carry (see [`Self::new`]).
+    pub notice: Option<MembershipNotice>,
 }
 
 impl OptimisticNotice {
@@ -3778,11 +3827,15 @@ impl OptimisticNotice {
     /// still counts as the same notice.
     const SKEW_MS: u64 = 15_000;
 
-    pub fn new(text: String, now: u64) -> Self {
+    /// `notice`: the same facts the relay's row will carry (actor = me, subjects by id), so
+    /// this copy is worded from the live roster like that row and matched to it by facts,
+    /// not by words a stale local name could get wrong ("Const added Aureum", 2026-10-26).
+    pub fn new(text: String, now: u64, notice: Option<MembershipNotice>) -> Self {
         Self {
             id: format!("{}{}", Self::ID_PREFIX, new_id()),
             text,
             created_at: now,
+            notice,
         }
     }
 
@@ -3799,6 +3852,7 @@ impl OptimisticNotice {
             subagent_id: None,
             subagent_name: None,
             handoff_messages: None,
+            notice: self.notice.clone(),
             worker: false,
             job: None,
             hidden: false,
@@ -3837,13 +3891,20 @@ impl OptimisticNotice {
         }
     }
 
-    /// The relay's row for this notice: a system line with the same words, written no earlier
-    /// than the local one (minus clock skew).
+    /// The relay's row for this notice: a system line with the same facts (or, from a relay
+    /// that writes none, the same words), written no earlier than the local one (minus
+    /// clock skew).
     pub fn confirmed_by(&self, m: &Message) -> bool {
-        m.role == Role::System
-            && !m.id.starts_with(Self::ID_PREFIX)
-            && m.created_at + Self::SKEW_MS >= self.created_at
-            && m.plain_text().trim() == self.text
+        if m.role != Role::System
+            || m.id.starts_with(Self::ID_PREFIX)
+            || m.created_at + Self::SKEW_MS < self.created_at
+        {
+            return false;
+        }
+        match (&self.notice, &m.notice) {
+            (Some(mine), Some(theirs)) => mine == theirs,
+            _ => m.plain_text().trim() == self.text,
+        }
     }
 }
 
@@ -3928,7 +3989,7 @@ mod optimistic_notice_tests {
             Some("Jacob added Home, hjkb and Doug")
         );
         assert_eq!(added_line("Jacob", &[]), None);
-        let n = OptimisticNotice::new("Jacob added Affine".into(), 1_000);
+        let n = OptimisticNotice::new("Jacob added Affine".into(), 1_000, None);
         let m = n.message("c");
         assert_eq!(m.role, Role::System);
         assert_eq!(m.plain_text(), "Jacob added Affine");
@@ -3938,7 +3999,11 @@ mod optimistic_notice_tests {
     #[test]
     fn a_local_notice_survives_snapshots_until_the_relay_row_confirms_it() {
         let now = 100_000;
-        let mut notices = vec![OptimisticNotice::new("Jacob added Affine".into(), now)];
+        let mut notices = vec![OptimisticNotice::new(
+            "Jacob added Affine".into(),
+            now,
+            None,
+        )];
         // Snapshot 1: something unrelated arrived; the local line stays, in time order.
         let mut snap = vec![user_row("m1", now - 5_000), user_row("m2", now + 300)];
         let confirmed = reconcile_optimistic_notices(&mut snap, &mut notices, now + 400);
@@ -3973,7 +4038,11 @@ mod optimistic_notice_tests {
     #[test]
     fn other_notices_and_old_rows_do_not_confirm_and_a_stale_notice_expires() {
         let now = 100_000;
-        let mut notices = vec![OptimisticNotice::new("Jacob added Affine".into(), now)];
+        let mut notices = vec![OptimisticNotice::new(
+            "Jacob added Affine".into(),
+            now,
+            None,
+        )];
         let mut snap = vec![
             relay_row("old", "Jacob added Affine", now - 60_000),
             relay_row("other", "Jacob removed Affine", now + 10),
