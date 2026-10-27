@@ -572,8 +572,20 @@ struct Question: Equatable {
     var secretRequestId: String? = nil
     /// #1544: a destructive-shell card with standing options; its footer names Settings.
     var shellCard: Bool = false
+    /// Secret hand-off: the request card (`payload.kind = secret_offer`) — Name + masked
+    /// Value + Save, no answer rows. The payload carries names only.
+    var secretOffer: SecretOffer? = nil
 
     var hasChoices: Bool { !options.isEmpty }
+}
+
+/// What the secret request card needs from its payload (secret hand-off, 2026-10-26).
+struct SecretOffer: Equatable {
+    /// Suggested vault name, editable (`STRIPE_KEY`).
+    var name: String
+    var purpose: String
+    var agent: String
+    var projectId: String
 }
 
 /// One row of `messages[].parts` (crdt-sync §6.2). Unknown kinds decode to
@@ -587,14 +599,24 @@ enum Part: Equatable {
     case status(id: Id, code: StatusKind, message: String)
     case question(id: Id, question: Question)
     case subagentResult(id: Id)
+    /// Secret hand-off: the message's value moved into the vault; the row is the ghost
+    /// "Secret saved as NAME". Names only — there is no value field.
+    case secretRedacted(id: Id, name: String, savedBy: String, agent: String?)
     case unknown(id: Id)
 
     var id: Id {
         switch self {
         case .text(let id, _), .reasoning(let id), .tool(let id, _, _), .attachment(let id, _),
-             .error(let id, _, _), .status(let id, _, _), .question(let id, _), .subagentResult(let id), .unknown(let id):
+             .error(let id, _, _), .status(let id, _, _), .question(let id, _), .subagentResult(let id),
+             .secretRedacted(let id, _, _, _), .unknown(let id):
             return id
         }
+    }
+
+    /// The vault name when this is a `secret_redacted` ghost part.
+    var secretRedactedName: String? {
+        if case .secretRedacted(_, let name, _, _) = self { return name }
+        return nil
     }
 
     var questionValue: Question? {
@@ -1275,6 +1297,9 @@ enum DocJSON {
             return .question(id: id, question: approval(pm))
         case "subagent_result":
             return .subagentResult(id: id)
+        case "secret_redacted":
+            let name = str(pm["name"]).flatMap { $0.isEmpty ? nil : $0 } ?? str(pm["env"]) ?? ""
+            return .secretRedacted(id: id, name: name, savedBy: str(pm["savedBy"]) ?? "", agent: str(pm["agent"]))
         default:
             return .unknown(id: id)
         }
@@ -1365,8 +1390,16 @@ enum DocJSON {
         default:
             break
         }
+        // Secret hand-off request card: no answer rows; the card draws its own fields.
+        var offer: SecretOffer?
+        if str(payload?["kind"]) == "secret_offer" {
+            offer = SecretOffer(name: str(payload?["name"]) ?? "", purpose: str(payload?["purpose"]) ?? "",
+                                agent: str(payload?["agent"]) ?? "", projectId: str(payload?["projectId"]) ?? "")
+            options = []
+            if state == "approved" { picked = ["saved"] }
+        }
         var title = (str(pm["title"]) ?? "Approve this?").trimmingCharacters(in: .whitespaces)
-        if !title.hasSuffix("?") {
+        if offer == nil, !title.hasSuffix("?") {
             while title.hasSuffix(".") { title.removeLast() }
             title += "?"
         }
@@ -1380,7 +1413,8 @@ enum DocJSON {
             open: state == "pending",
             approvalId: approvalId,
             secretRequestId: str(payload?["secretRequestId"]),
-            shellCard: shellCard
+            shellCard: shellCard,
+            secretOffer: offer
         )
     }
 
