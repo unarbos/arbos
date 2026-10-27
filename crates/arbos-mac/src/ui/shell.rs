@@ -13,19 +13,22 @@ use gpui::{
 };
 
 use crate::app::SignInMode;
-use crate::app::{AppState, DetailsTarget, ProfilePage, ServerSheet};
+use crate::app::{AppEvent, AppState, DetailsTarget, ProfilePage, ServerSheet};
 use crate::image_picker;
 use crate::model::{now_ms, CallKind, MachineState};
 use crate::sign_in;
+use crate::sync::user_error::{ErrorClass, UserError};
 use crate::sync::PictureSource;
 use crate::ui::avatar_picker;
 use crate::ui::avatars::{self, leaf, LeafPick};
 use crate::ui::callview;
 use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
+use crate::ui::chat_search;
 use crate::ui::composer::{self, Composer, ComposerEvent, ComposerInput};
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
 use crate::ui::create_entity::{self, Kind as CreateKind};
 use crate::ui::dropzone;
+use crate::ui::error_note;
 use crate::ui::feedback::{FeedbackSheet, SendFeedback};
 use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
 use crate::ui::glass::{self, WindowDrag};
@@ -41,6 +44,7 @@ use crate::ui::onboarding;
 use crate::ui::palette;
 use crate::ui::people;
 use crate::ui::profiles;
+use crate::ui::rail;
 use crate::ui::reactions;
 use crate::ui::routines::{RoutinesEvent, RoutinesPanel};
 use crate::ui::secrets::{SecretsEvent, SecretsPanel};
@@ -53,6 +57,7 @@ use crate::ui::theme::{
     COMPOSER_BOTTOM, COMPOSER_WIDTH, DRAWER_WIDTH, GLASS_OPACITY_MAX, GLASS_OPACITY_MIN,
     HEADER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS, TAB_BAR_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
 };
+use crate::ui::transcript::COLUMN_MAX_WIDTH;
 use crate::ui::transcript::{column_row, Transcript, TranscriptEvent};
 use crate::ui::voice::Voice;
 use crate::ui::voicepicker;
@@ -221,6 +226,13 @@ pub struct Shell {
     /// The command palette's search field (⌘⇧F / ⌘K / the sidebar's Search
     /// disc; [feedback search-palette-2026-10-24]).
     pub(crate) search_input: Entity<ComposerInput>,
+    /// ⌘F Search-in-chat's field ([feedback search-in-chat-mac-2026-10-26]);
+    /// its text drives `AppState::chat_search`.
+    pub(crate) chat_search_input: Entity<ComposerInput>,
+    /// Rig: `ARBOS_CHAT_SEARCH=<text>` opens the Search-in-chat bar with that
+    /// query once the first chat with rows is on screen (synthetic key events
+    /// do not reach the GPUI field on the shared display). Consumed on use.
+    chat_search_rig: Option<String>,
     /// The palette: open/closed, highlighted row, rows drawn last frame.
     pub(crate) palette: palette::PaletteState,
     /// The palette's result list scroll (keeps the highlight in view).
@@ -294,8 +306,26 @@ pub struct Shell {
     /// click-outside still clear it so leftover true never sticks.
     pub(crate) menu_open: bool,
     /// Which segment of the chat list's All · Agents · People · Servers
-    /// filter is selected ([feedback sidebar-strip-filter-2026-10-24]).
+    /// filter is selected ([feedback sidebar-strip-filter-2026-10-24]);
+    /// persisted with the rail state ([feedback mac-sidebar-rail-2026-10-26]).
     pub(crate) list_filter: sidebar::ListFilter,
+    /// Where the expanded sidebar's discs, pictures and footer picture rest,
+    /// recorded every frame they are painted; the rail morph reads it.
+    pub(crate) morph: rail::Morph,
+    /// The rail picture under the pointer (its name tip is drawn at the root).
+    pub(crate) rail_hover: Option<crate::model::Id>,
+    /// The rail's picture list scroll (the tip and the morph follow it).
+    pub(crate) rail_scroll: ScrollHandle,
+    /// Rig: `ARBOS_RIG_FULLSCREEN=1` lays the chrome out as native full
+    /// screen (the rail's toggle at its top-left slot) where the platform
+    /// cannot report it (headless Linux renders).
+    rig_fullscreen: bool,
+    /// Rig: `ARBOS_RIG_RAIL_T=0.4` freezes the collapse morph at that
+    /// progress (0 expanded … 1 rail) for still frames of the transition.
+    rig_rail_t: Option<f32>,
+    /// The viewport width as of the last render (the rig's timed toggle needs
+    /// it without a `Window`).
+    last_viewport_width: f32,
     /// Sidebar: the "Hidden chats" list is showing instead of the chat list
     /// (Jacob 2026-10-23; the footer opens it, ‹ back returns).
     pub(crate) hidden_open: bool,
@@ -333,6 +363,13 @@ pub struct Shell {
     pub(crate) member_remove_armed: Option<String>,
     /// Settings → Devices: the device whose Sign out is asking (Oct 23).
     pub(crate) device_revoke_armed: Option<String>,
+    /// Settings → Devices: the load-failure note's Details disclosure.
+    pub(crate) devices_error_details_open: bool,
+    /// Settings → Updates: the failed-install note's Details disclosure.
+    pub(crate) update_error_details_open: bool,
+    /// The chat-level notes' Details disclosures (machine error, delivery refusal).
+    pub(crate) machine_error_details_open: bool,
+    pub(crate) delivery_error_details_open: bool,
     /// A member row's menu on the group pane (Shift-click / right-click): View
     /// profile, Remove from group → arms `member_remove_armed`.
     pub(crate) member_menu: Option<member_menu::MemberMenu>,
@@ -537,14 +574,14 @@ impl Shell {
                             (Some(key), Some(url)) => {
                                 pk.generated = Some((key, url));
                                 pk.error = None;
-                                pk.error_detail = None;
                             }
                             _ => {
-                                pk.error = done
-                                    .error
-                                    .or_else(|| Some("Couldn't generate the image.".into()));
-                                pk.error_detail = done.detail;
-                                pk.details_open = false;
+                                pk.fail(done.error.unwrap_or_else(|| {
+                                    UserError::from_text(
+                                        "generate the image",
+                                        "No picture came back",
+                                    )
+                                }));
                             }
                         }
                     }
@@ -671,6 +708,33 @@ impl Shell {
                 }));
             });
         }
+        let chat_search_input = cx.new(ComposerInput::new);
+        chat_search_input.update(cx, |input, _| {
+            input.set_placeholder("Search in chat");
+            input.set_font_size(chat_search::metrics::FIELD_FONT);
+        });
+        // Every keystroke re-runs the search; Enter / ⇧Enter / ⇥ / Esc are
+        // actions in the bar's "ChatSearch" context.
+        cx.observe(&chat_search_input, |this, input, cx| {
+            let typed = input.read(cx).text().to_string();
+            this.state
+                .update(cx, |s, cx| s.chat_search_set_text(typed, cx));
+            cx.notify();
+        })
+        .detach();
+        // Rows of the searched chat changed (a message, a channel page): the
+        // hits follow, after the state's own update has finished.
+        cx.subscribe(&state, |_, state, event: &AppEvent, cx| {
+            if let AppEvent::TranscriptText { chat_id, .. }
+            | AppEvent::TranscriptChanged { chat_id } = event
+            {
+                let chat_id = chat_id.clone();
+                cx.defer(move |cx| {
+                    state.update(cx, |s, cx| s.chat_search_refresh(&chat_id, cx));
+                });
+            }
+        })
+        .detach();
         let viewer_search = cx.new(ComposerInput::new);
         viewer_search.update(cx, |input, _| {
             input.set_placeholder("Search");
@@ -958,6 +1022,10 @@ impl Shell {
             avatar_picker: None,
             avatar_prompt_input,
             search_input,
+            chat_search_input,
+            chat_search_rig: std::env::var("ARBOS_CHAT_SEARCH")
+                .ok()
+                .filter(|q| !q.trim().is_empty()),
             palette,
             palette_scroll: ScrollHandle::new(),
             viewer_search,
@@ -992,6 +1060,10 @@ impl Shell {
             run_by_chip: Default::default(),
             member_remove_armed: None,
             device_revoke_armed: None,
+            devices_error_details_open: false,
+            update_error_details_open: false,
+            machine_error_details_open: false,
+            delivery_error_details_open: false,
             member_menu: None,
             library: Default::default(),
             chat_menu: None,
@@ -1026,11 +1098,18 @@ impl Shell {
             signing_in: false,
             fullscreen: false,
             menu_open: false,
-            // Rig: `ARBOS_SIDEBAR_FILTER=all|agents|people|servers` selects a segment at launch.
-            list_filter: std::env::var("ARBOS_SIDEBAR_FILTER")
+            // The saved segment; the rig's `ARBOS_SIDEBAR_FILTER=all|agents|people|servers`
+            // wins at launch.
+            list_filter: sidebar::ListFilter::load(),
+            morph: Default::default(),
+            rail_hover: None,
+            rail_scroll: ScrollHandle::new(),
+            rig_fullscreen: std::env::var("ARBOS_RIG_FULLSCREEN").is_ok_and(|v| v == "1"),
+            rig_rail_t: std::env::var("ARBOS_RIG_RAIL_T")
                 .ok()
-                .and_then(|v| sidebar::ListFilter::parse(&v))
-                .unwrap_or_default(),
+                .and_then(|v| v.trim().parse::<f32>().ok())
+                .map(|t| t.clamp(0.0, 1.0)),
+            last_viewport_width: crate::ui::theme::NARROW_WINDOW,
             hidden_open: false,
             server_input,
             channel_rename: None,
@@ -1070,6 +1149,26 @@ impl Shell {
             });
             if shell.settings_page == SettingsPage::Devices {
                 shell.state.update(cx, |s, cx| s.devices_refresh(cx));
+            }
+        }
+        // Rig: `ARBOS_RIG_TOGGLE_RAIL_MS=1500,3500` presses the sidebar toggle at those
+        // times after launch (a recording of the collapse / open where the display
+        // refuses synthetic clicks; the gate Mac, [feedback mac-sidebar-rail-2026-10-26]).
+        if let Ok(spec) = std::env::var("ARBOS_RIG_TOGGLE_RAIL_MS") {
+            for ms in spec.split(',').filter_map(|v| v.trim().parse::<u64>().ok()) {
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(ms))
+                        .await;
+                    let _ = this.update(cx, |this, cx| {
+                        let width = this.last_viewport_width;
+                        this.state.update(cx, |s, cx| {
+                            let narrow = s.window_is_narrow(width);
+                            s.toggle_rail(narrow, cx)
+                        });
+                    });
+                })
+                .detach();
             }
         }
         shell
@@ -1147,6 +1246,7 @@ impl Shell {
             || focused(&self.pairing_input)
             || focused(&self.project_input)
             || focused(&self.search_input)
+            || focused(&self.chat_search_input)
             || focused(&self.viewer_search)
             || focused(&self.people_input)
             || focused(&self.server_input)
@@ -1514,8 +1614,6 @@ impl Shell {
         pk.generating = true;
         pk.started_at = Some(std::time::Instant::now());
         pk.error = None;
-        pk.error_detail = None;
-        pk.details_open = false;
         pk.reset = false;
         self.state.update(cx, |s, cx| {
             s.generate_image(target, prompt, cx);
@@ -2314,6 +2412,98 @@ impl Shell {
         cx.notify();
     }
 
+    // ----- ⌘F Search-in-chat ([feedback search-in-chat-mac-2026-10-26]) ---------
+
+    /// ⌘F: the bar drops under the header pill of the open chat and takes
+    /// the keyboard; pressed again while it is up, the cursor goes back to
+    /// its field (Find's convention — the key never closes the bar).
+    fn open_chat_search_action(
+        &mut self,
+        _: &chat_search::Open,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_chat_search(window, cx);
+    }
+
+    pub(crate) fn open_chat_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu_open = false;
+        self.close_popovers(cx);
+        if self.palette.open {
+            self.close_palette(window, cx);
+        }
+        let was_open = self.state.read(cx).chat_search_open();
+        let opened = self.state.update(cx, |s, cx| s.open_chat_search(cx));
+        if !opened {
+            return;
+        }
+        if !was_open {
+            self.chat_search_input.update(cx, |i, cx| i.clear(cx));
+        }
+        let handle = self.chat_search_input.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    /// Esc / ✕: the bar goes, its marks with it; the composer types again.
+    pub(crate) fn close_chat_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| s.close_chat_search(cx));
+        self.chat_search_input.update(cx, |i, cx| i.clear(cx));
+        Composer::focus(&self.composer, window, cx);
+        cx.notify();
+    }
+
+    fn chat_search_close_action(
+        &mut self,
+        _: &chat_search::Close,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.state.read(cx).chat_search_open() {
+            self.close_chat_search(window, cx);
+        }
+    }
+
+    /// Enter / › / ⌘G.
+    fn chat_search_next(&mut self, _: &chat_search::Next, _: &mut Window, cx: &mut Context<Self>) {
+        if self.state.read(cx).chat_search_open() {
+            self.state.update(cx, |s, cx| s.chat_search_step(1, cx));
+        }
+    }
+
+    /// ⇧Enter / ‹ / ⇧⌘G.
+    fn chat_search_prev(&mut self, _: &chat_search::Prev, _: &mut Window, cx: &mut Context<Self>) {
+        if self.state.read(cx).chat_search_open() {
+            self.state.update(cx, |s, cx| s.chat_search_step(-1, cx));
+        }
+    }
+
+    /// ⇥ in the field: pin the sender the typed name offers.
+    fn chat_search_pin_action(
+        &mut self,
+        _: &chat_search::PinSender,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(sender) = self.state.read(cx).chat_search_offer() {
+            self.pin_chat_search_sender(sender, window, cx);
+        }
+    }
+
+    pub(crate) fn pin_chat_search_sender(
+        &mut self,
+        sender: crate::chat_search::Sender,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state
+            .update(cx, |s, cx| s.chat_search_pin_sender(sender, cx));
+        self.chat_search_input.update(cx, |i, cx| i.clear(cx));
+        let handle = self.chat_search_input.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
     /// ↑ / ↓ in the palette field (`ComposerInput::on_arrow`).
     pub(crate) fn palette_step(&mut self, delta: i32, cx: &mut Context<Self>) {
         if !self.palette.open {
@@ -2394,6 +2584,10 @@ impl Shell {
             }
             return;
         }
+        if self.state.read(cx).chat_search_open() {
+            self.close_chat_search(window, cx);
+            return;
+        }
         if self.voice.update(cx, |v, cx| v.escape(cx)) {
             Composer::focus(&self.composer, window, cx);
             return;
@@ -2438,6 +2632,10 @@ impl Shell {
             return;
         }
         if self.close_agent_pick(Some(window), cx) {
+            return;
+        }
+        // The Secrets forms' "Add agent" dropdown folds first; the form stays.
+        if self.secrets.update(cx, |p, cx| p.close_agent_picker(cx)) {
             return;
         }
         // A session row's context menu closes alone; the dropdown under it
@@ -2619,6 +2817,9 @@ impl Shell {
     /// Everything that floats closes on a click elsewhere.
     pub(crate) fn close_popovers(&mut self, cx: &mut Context<Self>) {
         self.close_agent_pick(None, cx);
+        self.secrets.update(cx, |p, cx| {
+            p.close_agent_picker(cx);
+        });
         self.state.update(cx, |s, cx| s.close_tasks(cx));
         if self.menu_open
             || self.members_open
@@ -2762,53 +2963,40 @@ impl Shell {
                     ),
                 )
             }
-            // Grok (refs 69/70): no red strip — a quiet block with a small
-            // monitor glyph, a short title, the reason in muted text and a
-            // capsule "Retry".
+            // The chat-level note (Jacob 2026-10-26): the shared error element in this slot
+            // under the header, the column's width. "Can't reach your machine" with Grok's
+            // reassurance as the sentence; Try again starts the machine; Details has the
+            // relay's words.
             MachineState::Error => {
-                let detail = machine.detail.clone().unwrap_or_else(|| {
-                    "Your agents are safe — their machine just can't be reached right now."
-                        .to_string()
-                });
-                Some(
-                    div()
-                        .w_full()
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.0))
-                        .px(px(COLUMN_MARGIN))
-                        .pt(px(12.0))
-                        .pb(px(8.0))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .text_size(px(TEXT_SMALL))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme.text)
-                                .child(icon("window", 13.0, theme.text_muted))
-                                .child("Can't reach your machine"),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(TEXT_TINY + 0.5))
-                                .text_color(theme.text_muted)
-                                .max_w(px(480.0))
-                                .child(detail),
-                        )
-                        .child(
-                            div().pt(px(4.0)).flex().child(
-                                glass::quiet_button("banner-retry", "Retry", &theme)
-                                    .h(px(30.0))
-                                    .px(px(14.0))
-                                    .bg(theme.surface_2)
-                                    .border_color(gpui::transparent_black())
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.state.update(cx, |s, cx| s.machine_start(cx));
-                                    })),
-                            ),
+                let detail = machine
+                    .detail
+                    .clone()
+                    .unwrap_or_else(|| "machine state: error".to_string());
+                let error = UserError::of(
+                    "",
+                    ErrorClass::Refused {
+                        message: Some(
+                            "Can't reach your machine. Your agents are safe — it just can't be reached right now."
+                                .into(),
                         ),
+                    },
+                    detail,
+                );
+                Some(
+                    self.chat_note(
+                        "machine-error",
+                        &error,
+                        self.machine_error_details_open,
+                        &theme,
+                        error_note::Handlers::new()
+                            .try_again(cx.listener(|this, _, _, cx| {
+                                this.state.update(cx, |s, cx| s.machine_start(cx));
+                            }))
+                            .toggle_details(cx.listener(|this, _, _, cx| {
+                                this.machine_error_details_open = !this.machine_error_details_open;
+                                cx.notify();
+                            })),
+                    ),
                 )
             }
             MachineState::Asleep
@@ -2816,6 +3004,77 @@ impl Shell {
             | MachineState::Stopped
             | MachineState::Unknown => None,
         }
+    }
+
+    /// A chat-level note in the slot under the header: the column's inset and width cap, 8 pt
+    /// under the bar, 8 over what follows.
+    fn chat_note(
+        &self,
+        id: &str,
+        error: &UserError,
+        details_open: bool,
+        theme: &Theme,
+        handlers: error_note::Handlers,
+    ) -> Div {
+        div()
+            .w_full()
+            .flex()
+            .justify_center()
+            .px(px(COLUMN_MARGIN))
+            .pt(px(8.0))
+            .pb(px(8.0))
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(COLUMN_MAX_WIDTH))
+                    .child(error_note::render(
+                        id,
+                        error,
+                        details_open,
+                        error_note::Style::Inline,
+                        theme,
+                        handlers,
+                    )),
+            )
+    }
+
+    /// The per-room push refusal (`not_available`): "Messages in this chat aren't being
+    /// delivered right now." in the same slot, while the relay refuses; it clears itself on
+    /// the room's next ACK (`SyncEvent::PushRefused { refused: false }`).
+    fn render_delivery_note(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let theme = Theme::of(cx).clone();
+        let state = self.state.read(cx);
+        let chat = state.active_chat_id()?;
+        if !state.push_refused.contains(&chat) {
+            return None;
+        }
+        let error = UserError::of(
+            "",
+            ErrorClass::Offline {
+                device_offline: false,
+            },
+            "the relay refused the push: not_available",
+        );
+        let error = UserError {
+            verb: String::new(),
+            class: ErrorClass::Refused {
+                message: Some(
+                    "Messages in this chat aren't being delivered right now. We'll keep trying."
+                        .into(),
+                ),
+            },
+            ..error
+        };
+        Some(self.chat_note(
+            "delivery-error",
+            &error,
+            self.delivery_error_details_open,
+            &theme,
+            error_note::Handlers::new().toggle_details(cx.listener(|this, _, _, cx| {
+                this.delivery_error_details_open = !this.delivery_error_details_open;
+                cx.notify();
+            })),
+        ))
     }
 
     // ----- sidebar overlay (narrow window) -------------------------------------
@@ -3013,10 +3272,15 @@ impl Shell {
                     show_sidebar_toggle,
                     cx,
                 ));
-            let pre: Vec<AnyElement> = self
-                .render_banner(cx)
+            // The Search-in-chat bar first, under the header; then the banner.
+            let pre: Vec<AnyElement> = chat_search::bar(self, cx)
                 .into_iter()
-                .map(IntoElement::into_any_element)
+                .chain(
+                    self.render_banner(cx)
+                        .into_iter()
+                        .chain(self.render_delivery_note(cx))
+                        .map(IntoElement::into_any_element),
+                )
                 .collect();
             let bottom = div()
                 .w_full()
@@ -3101,6 +3365,10 @@ impl Shell {
             .child(header::render(self, &space, show_sidebar_toggle, cx));
         let floating_header = dropped;
         let mut pre: Vec<AnyElement> = Vec::new();
+        // ⌘F: the Search-in-chat bar is the first thing under the header.
+        if let Some(bar) = chat_search::bar(self, cx) {
+            pre.push(bar);
+        }
         let mut header_bar = Some(header_bar);
         if !floating_header {
             column = column.child(header_bar.take().expect("the header is built once"));
@@ -3128,6 +3396,9 @@ impl Shell {
         }
         if let Some(banner) = self.render_banner(cx) {
             pre.push(banner.into_any_element());
+        }
+        if let Some(note) = self.render_delivery_note(cx) {
+            pre.push(note.into_any_element());
         }
         if screen_open {
             if let Some(active) = my_call.as_ref() {
@@ -3241,12 +3512,21 @@ impl Shell {
             // a relative `top` inset (GPUI has no transform).
             // The tasks chip and drawer ride on the row while the agent has
             // background jobs open in this chat (`ui::tasks`, duplex §2.4).
-            let presence_row = presence.map(|p| {
+            // The row floats over the transcript's bottom clearance instead of
+            // sitting under it ([feedback status-row-gap-mac-2026-10-26]): the
+            // last bubble keeps its 54 pt to the pill with or without the row
+            // (Grok Mac), and the list is not resized when the row comes or
+            // goes. Only while the list is pinned at its end — scrolled into
+            // history, bubbles pass through that band (and the ↓ button sits
+            // there), so the row steps aside.
+            let pinned = self.transcript.read(cx).is_pinned_to_bottom();
+            let presence_row = presence.filter(|_| pinned).map(|p| {
                 let row = match chat_id.clone() {
                     Some(id) => {
                         let (jobs, open) = crate::ui::tasks::for_chat(self.state.read(cx), &id);
                         crate::ui::tasks::presence_row(
                             p,
+                            &self.state,
                             id,
                             jobs,
                             open,
@@ -3256,9 +3536,20 @@ impl Shell {
                             cx,
                         )
                     }
-                    None => crate::ui::presence::row(p, &theme, cx),
+                    None => crate::ui::presence::row(p, Some(&self.state), &theme, cx),
                 };
-                column_row(row.into_any_element())
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom(px(crate::ui::presence::LIFT))
+                    .debug_selector(|| "presence-float".into())
+                    // Wheel over the row scrolls the chat, like over the pill.
+                    .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
+                        this.transcript
+                            .update(cx, |t, cx| t.scroll_from_wheel(event, cx));
+                    }))
+                    .child(column_row(row.into_any_element()))
             });
             let composer_row = div()
                 .w_full()
@@ -3267,7 +3558,9 @@ impl Shell {
                 .items_center()
                 .pb(px(COMPOSER_BOTTOM))
                 .pt(px(6.0))
-                .children(presence_row)
+                // A zero-height anchor at the composer block's top edge: the
+                // floating row hangs off it and adds nothing to the column.
+                .child(div().relative().w_full().h(px(0.0)).children(presence_row))
                 .child(composer_block);
             let composer_row = if animating {
                 composer_row
@@ -3837,13 +4130,26 @@ impl Shell {
                         )
                     })
                     .when_some(flow.error.clone(), |el, err| {
+                        // The sign-in note: under the button row and the hint, 420 wide —
+                        // the shared error element in its one spot on this screen.
                         el.child(
-                            div()
-                                .max_w(px(420.0))
-                                .text_center()
-                                .text_size(px(TEXT_SMALL))
-                                .text_color(theme.danger)
-                                .child(err),
+                            div().w(px(420.0)).max_w_full().child(error_note::render(
+                                "sign-in-error",
+                                &err,
+                                pairing.error_details_open,
+                                error_note::Style::Inline,
+                                &theme,
+                                error_note::Handlers::new()
+                                    .try_again(cx.listener(|this, _, _, cx| {
+                                        this.state.update(cx, |s, cx| s.sign_in(cx));
+                                    }))
+                                    .toggle_details(cx.listener(|this, _, _, cx| {
+                                        this.state.update(cx, |s, cx| {
+                                            s.toggle_sign_in_details();
+                                            cx.notify();
+                                        });
+                                    })),
+                            )),
                         )
                     })
             }
@@ -3858,11 +4164,7 @@ impl Shell {
                     .rounded_full()
                     .bg(theme.field)
                     .border_1()
-                    .border_color(if pairing.error.is_some() {
-                        theme.danger
-                    } else {
-                        theme.field_border
-                    })
+                    .border_color(theme.field_border)
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(self.pairing_input.clone())
                     .child(
@@ -3894,12 +4196,21 @@ impl Shell {
                             .child(frosted(22.0, PANEL_BLUR, input_row)),
                     )
                     .when_some(pairing.error.clone(), |el, err| {
-                        el.child(
-                            div()
-                                .text_size(px(TEXT_SMALL))
-                                .text_color(theme.danger)
-                                .child(err),
-                        )
+                        el.child(div().w(px(420.0)).max_w_full().child(error_note::render(
+                            "sign-in-error",
+                            &err,
+                            pairing.error_details_open,
+                            error_note::Style::Inline,
+                            &theme,
+                            error_note::Handlers::new()
+                                .try_again(cx.listener(|this, _, _, cx| this.submit_pairing(cx)))
+                                .toggle_details(cx.listener(|this, _, _, cx| {
+                                    this.state.update(cx, |s, cx| {
+                                        s.toggle_sign_in_details();
+                                        cx.notify();
+                                    });
+                                })),
+                        )))
                     })
             }
         }
@@ -3993,22 +4304,69 @@ impl Shell {
             return None;
         }
         PulseClock::request(cx);
-        // Top right, under the header: never over the composer's send / mic
-        // button or an error banner above it (the busy end of the column).
-        // Click dismisses — download status / HTTP errors must not stick around.
+        // Top right, under the header: never over the composer's send / mic button or a note
+        // above it (the busy end of the column). Info notices are the plain card (click
+        // dismisses); failures are the shared error element as a toast — ×, Details, Try
+        // again, 10 s, and the pointer on it holds it ([feedback error-messages-mac-2026-10-26]).
         let mut stack = div()
             .absolute()
             .right(px(16.0))
             .top(px(HEADER_HEIGHT + 12.0))
+            .w(px(error_note::TOAST_WIDTH))
             .flex()
             .flex_col()
             .gap(px(6.0));
         for n in notices {
             let at = n.at;
-            stack = stack.child(
-                div()
+            let element: gpui::AnyElement = match &n.error {
+                Some(error) => {
+                    let id = format!("notice-{at}");
+                    let mut handlers = error_note::Handlers::new()
+                        .toggle_details(cx.listener(move |this, _, _, cx| {
+                            this.state.update(cx, |s, cx| {
+                                s.toggle_notice_details(at);
+                                cx.notify();
+                            });
+                        }))
+                        .dismiss(cx.listener(move |this, _, _, cx| {
+                            this.state.update(cx, |s, cx| {
+                                s.dismiss_notice(at);
+                                cx.notify();
+                            });
+                        }));
+                    if n.retry.is_some() {
+                        handlers = handlers.try_again(cx.listener(move |this, _, _, cx| {
+                            this.state.update(cx, |s, cx| {
+                                s.retry_notice(at);
+                                cx.notify();
+                            });
+                        }));
+                    }
+                    if error.action() == crate::sync::user_error::Action::SignIn {
+                        handlers = handlers.sign_in(cx.listener(move |this, _, _, cx| {
+                            this.state.update(cx, |s, cx| {
+                                s.dismiss_notice(at);
+                                s.sign_in(cx);
+                            });
+                        }));
+                    }
+                    error_note::render(
+                        &id,
+                        error,
+                        n.details_open,
+                        error_note::Style::Toast,
+                        &theme,
+                        handlers,
+                    )
+                    .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
+                        let hovering = *hovering;
+                        this.state.update(cx, |s, _| s.hold_notice(at, hovering));
+                    }))
+                    .into_any_element()
+                }
+                None => div()
                     .id(SharedString::from(format!("notice-{at}")))
-                    .max_w(px(380.0))
+                    .w_full()
                     .px(px(14.0))
                     .py(px(10.0))
                     .rounded(px(PANEL_RADIUS))
@@ -4019,14 +4377,16 @@ impl Shell {
                     .text_size(px(TEXT_SMALL))
                     .text_color(theme.text)
                     .cursor_pointer()
-                    .child(n.text)
+                    .child(n.text.clone())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.state.update(cx, |s, cx| {
                             s.dismiss_notice(at);
                             cx.notify();
                         });
-                    })),
-            );
+                    }))
+                    .into_any_element(),
+            };
+            stack = stack.child(element);
         }
         Some(stack)
     }
@@ -4090,11 +4450,17 @@ impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let width: f32 = window.viewport_size().width.into();
-        self.fullscreen = window.is_fullscreen();
+        let height: f32 = window.viewport_size().height.into();
+        self.last_viewport_width = width;
+        self.fullscreen = window.is_fullscreen() || self.rig_fullscreen;
         crate::ui::picture_fit::note_scale_factor(window.scale_factor());
         let state = self.state.read(cx);
         let narrow = state.window_is_narrow(width);
-        let sidebar_hidden = state.rail_collapsed || narrow;
+        // The narrow band hides the sidebar (an overlay brings it back);
+        // otherwise the toggle collapses it to the icon rail, never away
+        // ([feedback mac-sidebar-rail-2026-10-26]).
+        let sidebar_hidden = narrow;
+        let rail = state.rail_collapsed && !narrow;
         let sidebar_overlay = sidebar_hidden && state.sidebar_overlay;
         let sidebar_width = state.sidebar_width;
         let details = state.details_open.clone();
@@ -4118,6 +4484,11 @@ impl Render for Shell {
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::toggle_rail))
             .on_action(cx.listener(Self::open_palette_action))
+            .on_action(cx.listener(Self::open_chat_search_action))
+            .on_action(cx.listener(Self::chat_search_next))
+            .on_action(cx.listener(Self::chat_search_prev))
+            .on_action(cx.listener(Self::chat_search_close_action))
+            .on_action(cx.listener(Self::chat_search_pin_action))
             .on_action(cx.listener(Self::escape))
             .on_action(cx.listener(Self::send_feedback))
             .on_action(cx.listener(Self::paste_into_chat))
@@ -4214,6 +4585,7 @@ impl Render for Shell {
                 viewport_width: width,
                 sidebar_shown: !sidebar_hidden,
                 sidebar_width,
+                sidebar_rail: rail,
                 narrow,
                 pane_shown: profile.is_some(),
                 pane_width,
@@ -4221,7 +4593,15 @@ impl Render for Shell {
             },
             std::time::Instant::now(),
         );
-        if frame.animating() {
+        let frame = match self.rig_rail_t {
+            Some(t) if !sidebar_hidden => slide::Frame {
+                sidebar_visible: sidebar_width - t * (sidebar_width - rail::metrics::WIDTH),
+                sidebar_sliding: true,
+                ..frame
+            },
+            _ => frame,
+        };
+        if frame.animating() && self.rig_rail_t.is_none() {
             window.request_animation_frame();
         }
         let live_center = width - frame.sidebar_visible - frame.pane_visible;
@@ -4230,20 +4610,62 @@ impl Render for Shell {
         // at rest that is 72 + the disc with the sidebar hidden, nothing with
         // it docked; mid-slide the disc holds its spot (72 + 12) from the
         // moment the sidebar's own disc has left until the sidebar is back.
+        // With the rail the header's toggle is only for a plain window at rest
+        // (full screen puts it in the rail's top-left slot; the morph's
+        // overlay carries it in between) — and for the narrow band's hidden
+        // sidebar, as before.
+        let rail_progress = frame.rail_progress(sidebar_width);
+        let show_sidebar_toggle = rail::header_toggle_shown(
+            sidebar_hidden,
+            frame.sidebar_visible,
+            rail,
+            frame.sidebar_sliding,
+            self.fullscreen,
+        );
         let geometry = CenterGeometry {
             header_inset: (TRAFFIC_LIGHTS_INSET - frame.sidebar_visible).max(0.0),
-            show_sidebar_toggle: frame.sidebar_visible <= TRAFFIC_LIGHTS_INSET,
+            show_sidebar_toggle,
             chat_slide: frame.chat.map(|c| (c, live_center)),
         };
 
-        if frame.sidebar_sliding {
-            root = root.child(slide::sidebar_clip(
-                frame.sidebar_visible,
-                sidebar_width,
-                frosted(0.0, PANEL_BLUR, sidebar::render(self, cx)),
-            ));
-        } else if !sidebar_hidden {
-            root = root.child(frosted(0.0, PANEL_BLUR, sidebar::render(self, cx)));
+        let mut morph_overlay = None;
+        match (frame.sidebar_sliding, rail_progress) {
+            // Collapsing to / opening from the rail: the column morphs and the
+            // moving pieces travel over the window.
+            (true, Some(t)) => {
+                root = root.child(frosted(
+                    0.0,
+                    PANEL_BLUR,
+                    rail::render_morph(self, t, frame.sidebar_visible, cx),
+                ));
+                morph_overlay = Some(rail::render_overlay(self, t, height, cx));
+            }
+            // Coming back from hidden (the window widened past the narrow
+            // band): the clip reveals whichever layout the state wants.
+            (true, None) if rail => {
+                root = root.child(slide::sidebar_clip(
+                    frame.sidebar_visible,
+                    rail::metrics::WIDTH,
+                    frosted(0.0, PANEL_BLUR, rail::render(self, cx)),
+                ));
+            }
+            (true, None) => {
+                root = root.child(slide::sidebar_clip(
+                    frame.sidebar_visible,
+                    sidebar_width,
+                    frosted(0.0, PANEL_BLUR, sidebar::render(self, cx)),
+                ));
+            }
+            (false, _) if sidebar_hidden => {}
+            (false, _) if rail => {
+                root = root.child(frosted(0.0, PANEL_BLUR, rail::render(self, cx)));
+            }
+            (false, _) => {
+                root = root.child(frosted(0.0, PANEL_BLUR, sidebar::render(self, cx)));
+            }
+        }
+        if !rail && self.rail_hover.is_some() {
+            self.rail_hover = None;
         }
         if !sidebar_hidden && self.state.read(cx).sidebar_overlay {
             // Widened back past the band with the overlay up: it has docked.
@@ -4320,6 +4742,16 @@ impl Render for Shell {
                     root = root.child(slide::pane_clip(frame.pane_visible, blank));
                 }
                 (None, false) => {}
+            }
+        }
+        // The rail morph's travelling pieces and the hovered picture's name
+        // tip sit over the panes, under the floating menus.
+        if let Some(overlay) = morph_overlay {
+            root = root.child(overlay);
+        }
+        if rail && !frame.sidebar_sliding {
+            if let Some(tip) = rail::render_tip(self, cx) {
+                root = root.child(tip);
             }
         }
         if let Some(menu) = sidebar::row_menu(self, cx) {
@@ -4548,6 +4980,26 @@ impl Render for Shell {
             root = root.child(overlay);
         }
         self.enforce_modal_focus(window, cx);
+        // Rig: the Search-in-chat bar with its query, once a chat with rows is up.
+        if self.chat_search_rig.is_some() {
+            // With `ARBOS_OPEN_SPACE` the bar waits for that space's chat, not
+            // the first chat that happens to have rows.
+            let wanted = std::env::var("ARBOS_OPEN_SPACE").ok();
+            let state = self.state.read(cx);
+            let ready = state.active_chat_id().is_some_and(|id| {
+                !state.messages_of(&id).is_empty()
+                    && wanted
+                        .as_ref()
+                        .is_none_or(|space| state.space_of_chat(&id) == *space)
+            });
+            if ready {
+                if let Some(query) = self.chat_search_rig.take() {
+                    self.open_chat_search(window, cx);
+                    self.chat_search_input
+                        .update(cx, |i, cx| i.set_text(query, cx));
+                }
+            }
+        }
         // Collapsed video call: the camera keeps showing in a draggable tile.
         let collapsed_video = self
             .state
