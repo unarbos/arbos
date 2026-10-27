@@ -691,6 +691,8 @@ final class AppModel: ObservableObject {
     @Published var projectSecrets: [Id: ProjectSecrets] = [:]
     /// Standing shell approvals per agent (#1544), loaded when the agent pane opens.
     @Published var shellGrants: [Id: [ShellGrant]] = [:]
+    /// Secret hand-off request cards: approval id → saving / saved(env) / failed(sentence).
+    @Published var handoff: [String: HandoffState] = [:]
     /// Fixture only: the Vault page's item list (the relay answers this live).
     var fixtureVaultItems: [[String: Any]] = []
     @Published var secretsBusy = false
@@ -4209,6 +4211,12 @@ final class AppModel: ObservableObject {
                 await refreshSecrets()
             case .secretsPaused:
                 await refreshSecrets()
+            case .messageRedacted(let payload):
+                // Secret hand-off: the row itself arrives through room sync (and the store's
+                // next snapshot is shallow); here the delivered notifications that may still
+                // show the pasted key go, and the search index follows the message list.
+                PushManager.shared.clearDelivered(chatId: payload.chat_id)
+                syncSearchIndex()
             case .secretExpiring(let payload):
                 PushManager.post(
                     id: p.id, title: "Secrets",
@@ -4805,6 +4813,43 @@ final class AppModel: ObservableObject {
     /// An approval card (S18) answered on the phone: for a secret request the relay row is the
     /// authority (`POST /secrets/requests/{id}/decide`), then the doc command `approve` /
     /// `reject` flips the card for agentd, exactly as the Mac does with `vaultRequestId`.
+    /// Secret hand-off request cards: where this device's save stands, by approval id.
+    enum HandoffState: Equatable {
+        case saving
+        /// Saved; the vault name.
+        case saved(String)
+        /// One plain sentence for the card.
+        case failed(String)
+    }
+
+    /// Secret hand-off request card → Save: the value leaves this device once, to
+    /// `POST /secrets` (source `chat`, the agent granted); the card is then answered with
+    /// the saved secret's id and names — never the value — so the agent learns only the name.
+    func saveSecretFromCard(chatId: Id, approvalId: String, projectId: Id, name: String, value: String, purpose: String) {
+        handoff[approvalId] = .saving
+        Task { @MainActor in
+            do {
+                let body: [String: Any] = [
+                    "name": name, "kind": "key", "value": value, "note": purpose,
+                    "agents": [["project_id": projectId, "note": purpose]],
+                    "source": ["kind": "chat", "project_id": projectId, "chat_id": chatId],
+                ]
+                let saved = try await api.createSecret(body)
+                markQuestionAnswered(chatId: chatId, questionId: "approval:\(approvalId)", answer: ["saved"])
+                if let doc = docs[chatId] {
+                    let payload: [String: Any] = ["approvalId": approvalId,
+                                                  "secret": ["id": saved.id, "name": saved.name, "env": saved.env]]
+                    try? doc.pushCommand("approve", payload: payload, device: deviceId)
+                    doc.commit()
+                }
+                handoff[approvalId] = .saved(saved.env)
+                await refreshSecrets()
+            } catch {
+                handoff[approvalId] = .failed("Couldn't save the secret. \(error.localizedDescription)")
+            }
+        }
+    }
+
     func decideApproval(chatId: Id, approvalId: String, choice: String) {
         let questionId = "approval:\(approvalId)"
         var secretRequestId: String?
