@@ -706,7 +706,7 @@ fn sender_picture(sender: &Sender, state: &AppState, theme: &Theme) -> AnyElemen
             people::avatar(state.avatar(&p.avatar_url), p, CARD_AVATAR, theme).into_any_element()
         }
         Sender::Agent(pid) => match state.project(pid) {
-            Some(p) => avatars::project(p, CARD_AVATAR, theme).into_any_element(),
+            Some(p) => avatars::project_in(state, p, CARD_AVATAR, theme).into_any_element(),
             None => avatars::element(pid, "Agent", None, CARD_AVATAR, theme).into_any_element(),
         },
         Sender::Me => {

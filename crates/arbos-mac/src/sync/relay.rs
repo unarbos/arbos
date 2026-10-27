@@ -153,6 +153,22 @@ enum RoomCmd {
     Typing(bool),
     /// Presence frame now (the focused chat changed, API §7c).
     Presence,
+    /// The condition behind a `not_available` refusal may have changed (a chat event for
+    /// this room, an unblock): resend the pending batches now ([feedback 2005]).
+    RetryRefused,
+}
+
+/// The people chat whose refused pushes should be retried when this push arrives: its
+/// members or settings changed (a lifted mute, a member who left or joined). A message push
+/// carries no such change; nothing else names a chat the sender can post into.
+fn refusal_nudge_chat(event: &PushEventDto) -> Option<&str> {
+    match event {
+        PushEventDto::PeopleChatUpdated(p) => Some(p.chat_id.as_str()),
+        PushEventDto::PeopleMemberAdded(p) => Some(p.chat_id.as_str()),
+        PushEventDto::PeopleMemberRemoved(p) => Some(p.chat_id.as_str()),
+        _ => None,
+    }
+    .filter(|id| !id.is_empty())
 }
 
 struct Room {
@@ -1361,6 +1377,9 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
                 continue;
             }
         };
+        if let Some(chat_id) = refusal_nudge_chat(&item.event) {
+            retry_refused_rooms(shared, Some(chat_id));
+        }
         match &item.event {
             PushEventDto::PeopleChatCreated(_)
             | PushEventDto::PeopleChatUpdated(_)
@@ -2647,6 +2666,32 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
 /// (#1545): read it after every registry refresh and after each block / unblock, so the row
 /// is right on pane re-open and app relaunch. Older relays without `/blocks` answer 404 and
 /// the list is left as it was; other errors are logged, never shown.
+/// Ask the rooms that stand refused to resend now ([feedback 2005]): one chat when the push
+/// names it, else every refused room (an unblock does not say which DM it frees). Rooms
+/// that are not refused ignore the command inside the session.
+fn retry_refused_rooms(shared: &Arc<Shared>, chat_id: Option<&str>) {
+    let targets: Vec<Id> = {
+        let refused = shared.push_refused.lock().unwrap();
+        match chat_id {
+            Some(id) => refused
+                .contains(id)
+                .then(|| id.to_string())
+                .into_iter()
+                .collect(),
+            None => refused.iter().cloned().collect(),
+        }
+    };
+    if targets.is_empty() {
+        return;
+    }
+    let rooms = shared.rooms.lock().unwrap();
+    for chat in targets {
+        if let Some(room) = rooms.get(&chat) {
+            let _ = room.cmds.send(RoomCmd::RetryRefused);
+        }
+    }
+}
+
 async fn refresh_blocks(shared: &Arc<Shared>) {
     match shared.get_json("/blocks").await {
         Ok(list) => {
@@ -3506,6 +3551,15 @@ async fn run_session(
                     }
                     RoomCmd::Presence => {
                         session.presence(shared.presence_header());
+                    }
+                    RoomCmd::RetryRefused => {
+                        if session.retry_refused(now_ms()) {
+                            eprintln!(
+                                "relay room {}: refusal may have lifted, resending {} pending",
+                                session.room(),
+                                session.pending().len()
+                            );
+                        }
                     }
                 }
                 perform_room_actions(
@@ -5451,7 +5505,11 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             tokio::spawn(async move {
                 match shared.delete(&format!("/blocks/{user_id}")).await {
                     // 404 = already not blocked on the relay: the list below says so.
-                    Ok(()) => shared.notice(format!("@{handle} unblocked.")),
+                    Ok(()) => {
+                        shared.notice(format!("@{handle} unblocked."));
+                        // A DM refused as `blocks_member` is postable again: resend now.
+                        retry_refused_rooms(&shared, None);
+                    }
                     Err(err) if format!("{err:#}").contains("HTTP 404") => {}
                     Err(err) => {
                         let _ = shared
@@ -8593,5 +8651,57 @@ mod link_fault_tests {
         assert!(!is_restart_close(1000));
         assert!(!is_restart_close(1006));
         assert!(!is_restart_close(1011));
+    }
+}
+
+#[cfg(test)]
+mod refused_retry_tests {
+    //! Which pushes nudge a refused room to resend ([feedback 2005]): the ones that change
+    //! who may post into the chat, never a plain message.
+    use super::*;
+
+    fn push(kind: &str, payload: Value) -> PushEventDto {
+        serde_json::from_value(json!({ "kind": kind, "payload": payload })).expect("push event")
+    }
+
+    #[test]
+    fn chat_and_member_changes_name_the_chat_to_retry() {
+        assert_eq!(
+            refusal_nudge_chat(&push("people_chat_updated", json!({ "chat_id": "dm-1" }))),
+            Some("dm-1")
+        );
+        assert_eq!(
+            refusal_nudge_chat(&push(
+                "people_member_added",
+                json!({ "chat_id": "g-2", "user_id": "user:sam", "handle": "sam", "by_handle": "me" })
+            )),
+            Some("g-2")
+        );
+        assert_eq!(
+            refusal_nudge_chat(&push(
+                "people_member_removed",
+                json!({ "chat_id": "g-3", "user_id": "user:sam", "handle": "sam", "by_handle": "me" })
+            )),
+            Some("g-3")
+        );
+        assert_eq!(
+            refusal_nudge_chat(&push("people_chat_updated", json!({ "chat_id": "" }))),
+            None,
+            "an empty id names no room"
+        );
+    }
+
+    #[test]
+    fn archives_and_deletions_do_not_nudge() {
+        let archived = push(
+            "chat_archived",
+            json!({ "chat_id": "dm-1", "project_id": "dm-1", "archived_at": 5 }),
+        );
+        assert_eq!(refusal_nudge_chat(&archived), None);
+        let deleted = push(
+            "people_chat_deleted",
+            json!({ "chat_id": "dm-1", "by_handle": "sam" }),
+        );
+        assert_eq!(refusal_nudge_chat(&deleted), None);
     }
 }
