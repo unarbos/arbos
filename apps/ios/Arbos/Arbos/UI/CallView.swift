@@ -57,6 +57,8 @@ struct CallScreen: View {
     }
     private var useGroupLayout: Bool { calls.tiles.count + waitingExpected.count >= 2 || (isGroupCall && !waitingExpected.isEmpty && calls.tiles.count <= 1) }
 
+    @State private var errorDetailsOpen = false
+
     var body: some View {
         ZStack {
             theme.bg.ignoresSafeArea()
@@ -94,11 +96,13 @@ struct CallScreen: View {
                 controls.padding(.bottom, 40)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // The call's note (Jacob 2026-10-26): under the header, never over the controls.
             if let err = calls.error {
                 VStack {
+                    ErrorNote(id: "call-error", error: err, detailsOpen: $errorDetailsOpen)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 64)
                     Spacer()
-                    Text(err).font(theme.font(Theme.tiny)).foregroundStyle(theme.danger)
-                        .multilineTextAlignment(.center).padding(.horizontal, 32).padding(.bottom, 150)
                 }
             }
         }
@@ -145,7 +149,7 @@ struct CallScreen: View {
             if calls.screenShareOn { return "Sharing screen" }
             return primary?.micOn == false ? "Muted" : "Connected"
         case .ringing: return "Incoming…"
-        case .idle: return calls.error ?? "Call ended"
+        case .idle: return calls.errorText ?? "Call ended"
         }
     }
 
