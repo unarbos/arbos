@@ -5,6 +5,7 @@ mod approval;
 mod attachments;
 mod budget;
 mod channels;
+mod chart;
 mod config;
 mod connectors;
 mod disk;
