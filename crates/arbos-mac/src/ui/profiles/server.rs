@@ -15,6 +15,7 @@ use gpui::{
 use crate::app::{ProfilePage, ServerSheet};
 use crate::model::{Person, ServerChannel, ServerInfo};
 use crate::ui::glass;
+use crate::ui::highlight;
 use crate::ui::icons::icon;
 use crate::ui::people;
 use crate::ui::shell::Shell;
@@ -206,7 +207,7 @@ fn channels_tab(
                 theme,
             )
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .group(kit::HOT)
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.open_server_sheet(
                     ServerSheet::NewChannel {
@@ -298,7 +299,7 @@ fn channels_tab(
                 );
             if !is_general {
                 let (sid, cid) = (server.id.clone(), ch.id.clone());
-                let group = SharedString::from(format!("channel-row-{key}"));
+                let group = SharedString::from(kit::HOT);
                 controls = controls.child(
                     div()
                         .id(ElementId::Name(SharedString::from(format!(
@@ -312,7 +313,7 @@ fn channels_tab(
                         .justify_center()
                         .opacity(0.0)
                         .group_hover(group, |s| s.opacity(1.0))
-                        .hover(|s| s.bg(theme.surface_2))
+                        .map(|el| highlight::button(el, theme))
                         .child(icon("xmark", 11.0, theme.text_muted))
                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -331,7 +332,7 @@ fn channels_tab(
         let rename_name = ch.name.clone();
         let rename_id = ch.id.clone();
         list.push(
-            kit::row(
+            kit::row_state(
                 ElementId::Name(SharedString::from(format!("profile-channel-{key}"))),
                 kit::Leading::Glyph("hash"),
                 ch.name.clone(),
@@ -339,12 +340,11 @@ fn channels_tab(
                 None,
                 trailing,
                 false,
+                is_selected,
                 theme,
             )
-            .group(SharedString::from(format!("channel-row-{key}")))
-            .when(is_selected, |el| el.bg(theme.surface_2))
+            .group(kit::HOT)
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
             .on_click(
                 cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                     if can_admin && event.click_count() >= 2 {
@@ -396,9 +396,8 @@ fn channels_tab(
                 .flex()
                 .items_center()
                 .rounded_full()
-                .bg(theme.field)
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
+                .map(|el| highlight::washed(el, theme.field, theme))
                 .text_size(px(TEXT_SMALL))
                 .text_color(theme.text)
                 .child("Unarchive")
@@ -460,7 +459,7 @@ fn members_tab(
                 theme,
             )
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .group(kit::HOT)
             .on_click(cx.listener(move |this, _, _, cx| {
                 let sid = sid.clone();
                 this.state
@@ -490,7 +489,7 @@ fn members_tab(
             !is_me && m.role != "owner" && (is_owner || (can_admin && m.role != "admin"));
         let promotable = is_owner && !is_me && m.role != "owner";
         let trailing = (removable || promotable).then(|| {
-            let group = SharedString::from(format!("member-row-{key}"));
+            let group = SharedString::from(kit::HOT);
             let mut controls = div().flex().items_center().gap(px(4.0)).flex_shrink_0();
             if promotable {
                 let (sid, uid) = (server.id.clone(), m.id.clone());
@@ -511,7 +510,7 @@ fn members_tab(
                             el.opacity(0.0)
                                 .group_hover(group.clone(), |s| s.opacity(1.0))
                         })
-                        .hover(|s| s.bg(theme.surface_2))
+                        .map(|el| highlight::button(el, theme))
                         .child(icon(
                             "crown",
                             12.0,
@@ -546,7 +545,7 @@ fn members_tab(
                         .justify_center()
                         .opacity(0.0)
                         .group_hover(group, |s| s.opacity(1.0))
-                        .hover(|s| s.bg(theme.surface_2))
+                        .map(|el| highlight::button(el, theme))
                         .child(icon("xmark", 11.0, theme.text_muted))
                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -569,9 +568,8 @@ fn members_tab(
                 trailing,
                 theme,
             )
-            .group(SharedString::from(format!("member-row-{key}")))
+            .group(kit::HOT)
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
             .on_click(cx.listener(move |this, _, _, cx| {
                 let handle = handle.clone();
                 this.push_profile(
@@ -702,7 +700,7 @@ fn settings_tab(
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .map(|el| highlight::button(el, theme))
             .child(icon("xmark", 11.0, theme.text_muted))
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -782,7 +780,7 @@ fn settings_tab(
             theme,
         )
         .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
+        .group(kit::HOT)
         .on_click(cx.listener(move |this, _, _, cx| {
             let sid = sid.clone();
             let (expires, single) = (this.invite_expires, this.invite_single_use);

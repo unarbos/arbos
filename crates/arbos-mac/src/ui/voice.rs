@@ -23,6 +23,7 @@ use crate::audio::{self, Pcm, RATE};
 use crate::model::{now_ms, Id, Message, MessageStatus, Role};
 use crate::sync::user_error::UserError;
 use crate::ui::frost::{frosted, PANEL_BLUR};
+use crate::ui::highlight;
 use crate::ui::theme::Theme;
 
 const TICK_MS: u64 = 50;
@@ -1367,7 +1368,7 @@ impl Render for Voice {
                 })
                 .text_size(px(12.0))
                 .text_color(if danger { theme.danger } else { theme.text })
-                .hover(|s| s.bg(theme.surface_2))
+                .map(|el| highlight::button(el, &theme))
                 .cursor_pointer()
                 .child(div().text_size(px(13.0)).child(glyph))
                 .child(label)
