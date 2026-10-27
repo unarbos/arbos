@@ -128,17 +128,19 @@ pub async fn on_notify(state: &AppState, body: &Value) -> Vec<String> {
         return rejected;
     };
     let client = Client::new(state.http.clone(), state.matrix.cfg.clone());
-    let chat = state
-        .db
-        .matrix_room_by_room_id(room_id)
-        .ok()
-        .flatten()
-        .map(|room| ChatRef {
-            chat_id: room.chat_id,
-            project_id: room.project_id,
-        });
-    let channel = if chat.is_none() {
-        state.db.channel_by_room_id(room_id).ok().flatten()
+    // Channel rooms are in `matrix_rooms` too (kind `channel`, chat_id = channel id), so the
+    // channel lookup comes first: a channel is never a mirrored chat.
+    let channel = state.db.channel_by_room_id(room_id).ok().flatten();
+    let chat = if channel.is_none() {
+        state
+            .db
+            .matrix_room_by_room_id(room_id)
+            .ok()
+            .flatten()
+            .map(|room| ChatRef {
+                chat_id: room.chat_id,
+                project_id: room.project_id,
+            })
     } else {
         None
     };
