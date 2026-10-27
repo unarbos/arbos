@@ -2101,6 +2101,59 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 },
             });
         }
+        ClientCommand::SecretHandoffSave {
+            chat_id,
+            approval_id,
+            project_id,
+            name,
+            purpose,
+            ..
+        } => {
+            let env = crate::model::secret_env_name(&name);
+            {
+                let mut view = shared.secrets.lock().unwrap();
+                view.secrets.retain(|s| s.env != env);
+                let project_name = shared
+                    .projects
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|p| p.id == project_id)
+                    .map(|p| p.name.clone());
+                view.secrets.push(Secret {
+                    id: new_id(),
+                    name: name.clone(),
+                    env: env.clone(),
+                    kind: "key".into(),
+                    note: purpose.clone(),
+                    hosts: Vec::new(),
+                    ask_every_time: false,
+                    inject_env: false,
+                    expires_at: None,
+                    version: 1,
+                    created_at: now_ms() as i64,
+                    last_used_at: None,
+                    username: None,
+                    vault_name: "Arbos".into(),
+                    agents: vec![fixture_agent(&project_id, "", true, &purpose)],
+                    directors: Vec::new(),
+                    others_ask: "refuse".into(),
+                    source: Some(crate::model::SecretSource {
+                        kind: "chat".into(),
+                        project_id: Some(project_id.clone()),
+                        project_name,
+                        chat_id: Some(chat_id.clone()),
+                    }),
+                });
+                view.secrets.sort_by(|a, b| a.env.cmp(&b.env));
+            }
+            emit_secrets(shared);
+            let _ = shared.events.send(SyncEvent::SecretHandoff {
+                approval_id: approval_id.clone(),
+                result: Ok(env),
+            });
+            decide_approval(shared, chat_id, approval_id, ApprovalState::Approved, None)
+        }
         ClientCommand::SecretAdd { item } => {
             {
                 let mut view = shared.secrets.lock().unwrap();
@@ -2133,6 +2186,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     agents,
                     directors: Vec::new(),
                     others_ask: "refuse".into(),
+                    source: None,
                 });
                 view.secrets.sort_by(|a, b| a.env.cmp(&b.env));
             }
@@ -2770,6 +2824,7 @@ fn seed_secrets() -> SecretsView {
         agents,
         directors: Vec::new(),
         others_ask: "refuse".into(),
+        source: None,
     };
     let mut stripe = secret(
         "STRIPE_KEY",
@@ -2791,6 +2846,27 @@ fn seed_secrets() -> SecretsView {
     // The iPhone fixture's twin: the Stripe key is a real value in the agents' environment,
     // and Sam may ask for it (Samir's row is off).
     stripe.inject_env = true;
+    // Secret hand-off rig: the key was given to Arbos in chat (list "given in chat", page
+    // "Added · In chat with Arbos").
+    if std::env::var("ARBOS_FIXTURE_SECRET_HANDOFF").is_ok() {
+        stripe.inject_env = false;
+        stripe.hosts = Vec::new();
+        stripe.note = "For the refunds report. Read-only until you say otherwise.".into();
+        stripe.last_used_at = None;
+        stripe.created_at = now - 120_000;
+        stripe.agents = vec![fixture_agent(
+            PROJECT_ARBOS,
+            "Arbos",
+            true,
+            "the refunds report",
+        )];
+        stripe.source = Some(crate::model::SecretSource {
+            kind: "chat".into(),
+            project_id: Some(PROJECT_ARBOS.into()),
+            project_name: Some("Arbos".into()),
+            chat_id: Some(CHAT_ARBOS_MAIN.into()),
+        });
+    }
     let dir = directory();
     stripe.directors = vec![
         fixture_person(&dir[0], true, "reports only", Some(120_000)),
@@ -5576,6 +5652,116 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
                     TurnKind::Reply,
                     MessageStatus::Done,
                     vec![text(BUBBLE_SORT_REPLY)],
+                );
+            }
+            _ => {}
+        }
+        // Secret hand-off rig (`ARBOS_FIXTURE_SECRET_HANDOFF=offer|saved|ghost|detect`): the
+        // request card open / saved, the "save this" ghost row, the offer card for a pasted key.
+        let handoff_card = |approval_id: &str,
+                            state: ApprovalState,
+                            payload: Value,
+                            title: &str,
+                            summary: &str| Part::Approval {
+            id: new_id(),
+            approval_id: approval_id.into(),
+            title: title.into(),
+            summary: summary.into(),
+            risk: ApprovalRisk::Credential,
+            payload,
+            state,
+            expires_at: Some(base + 600_000),
+            decided_at: (state != ApprovalState::Pending).then_some(base + 90_000),
+            decided_by: (state != ApprovalState::Pending)
+                .then(|| "user:01J9USER0JACOB000000000000".to_owned()),
+            reason: None,
+            grant: None,
+        };
+        match std::env::var("ARBOS_FIXTURE_SECRET_HANDOFF").as_deref() {
+            Ok(mode @ ("offer" | "saved")) => {
+                s.user("Can I give you a secret? It's the Stripe key for the refunds report.");
+                let state = if mode == "saved" {
+                    ApprovalState::Approved
+                } else {
+                    ApprovalState::Pending
+                };
+                s.assistant(
+                    TurnKind::Act,
+                    MessageStatus::Done,
+                    vec![
+                        text("Yes. Use the box below. It goes straight to your vault, never into this chat."),
+                        handoff_card(
+                            "01J9APPROVAL0SECRETOFFER00",
+                            state,
+                            json!({ "kind": "secret_offer", "name": "STRIPE_KEY", "purpose": "the refunds report",
+                                "agent": "Arbos", "projectId": PROJECT_ARBOS, "chatId": CHAT_ARBOS_MAIN, "answers": [] }),
+                            "Give Arbos a secret",
+                            "the refunds report",
+                        ),
+                    ],
+                );
+                if mode == "saved" {
+                    s.assistant(
+                        TurnKind::Reply,
+                        MessageStatus::Done,
+                        vec![text("Got it. I'll use STRIPE_KEY for the refunds report and keep the value out of this chat.")],
+                    );
+                }
+            }
+            Ok("ghost") => {
+                s.user("Let's do the refunds report next.");
+                s.assistant(
+                    TurnKind::Reply,
+                    MessageStatus::Done,
+                    vec![text("Sure — I need the Stripe key for that.")],
+                );
+                s.user("save this");
+                let id = main
+                    .core
+                    .messages()
+                    .last()
+                    .map(|m| m.id.clone())
+                    .unwrap_or_default();
+                main.core.redact_message_as_secret(
+                    &id,
+                    &arbos_core::doc::SecretRedaction {
+                        secret_id: "01J9SECRET0STRIPE000000000".into(),
+                        name: "STRIPE_KEY".into(),
+                        env: "STRIPE_KEY".into(),
+                        saved_by: "user:01J9USER0JACOB000000000000".into(),
+                        agent: Some(PROJECT_ARBOS.into()),
+                    },
+                );
+                s.assistant(
+                    TurnKind::Reply,
+                    MessageStatus::Done,
+                    vec![text("Saved as STRIPE_KEY and removed from this chat — also from my memory and working context. I can use it; the value stays in your vault. Running the refunds report now.")],
+                );
+            }
+            Ok("detect") => {
+                s.user("Let's do the refunds report next.");
+                s.assistant(
+                    TurnKind::Reply,
+                    MessageStatus::Done,
+                    vec![text("Sure — I need the Stripe key for that.")],
+                );
+                s.user(concat!(
+                    "sk_",
+                    "test_FIXTURE51HxQ9mT3vK2pLnR8wZ4eYc7bD1fG6hJ0kM9nP5qS2tU8vW3xA1"
+                ));
+                s.assistant(
+                    TurnKind::Act,
+                    MessageStatus::Done,
+                    vec![handoff_card(
+                        "01J9APPROVAL0SECRETDETECT0",
+                        ApprovalState::Pending,
+                        json!({ "kind": "secret_detected", "optional": true, "name": "STRIPE_KEY", "agent": "Arbos",
+                            "chatId": CHAT_ARBOS_MAIN, "messageId": "", "answers": [
+                                { "id": "save", "label": "Save as STRIPE_KEY and remove" },
+                                { "id": "deny", "label": "Leave it here" } ] }),
+                        "That looks like a key. Save it to your vault as STRIPE_KEY and remove it from this chat?",
+                        "Nothing is saved until you choose.",
+                    )],
                 );
             }
             _ => {}
