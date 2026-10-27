@@ -188,8 +188,12 @@ struct RootView: View {
         .environment(\.theme, theme)
         .preferredColorScheme(preferredScheme)
         .tint(theme.text)
-        .alert(item: $model.notice) { n in
-            Alert(title: Text("Arbos"), message: Text(n.text), dismissButton: .default(Text("OK")))
+        // Toasts (Jacob 2026-10-26): the top of the screen under the status bar — an info notice
+        // as the plain card, a failure as the shared `ErrorNote` — instead of the root alert.
+        .overlay(alignment: .top) {
+            ToastHost()
+                .environmentObject(model)
+                .environment(\.theme, theme)
         }
         // Fresh account: the name/handle sheet shows over the first-login terminal
         // screen (D82) while the machine boots (8–11 s), as Telegram and Grok ask for
