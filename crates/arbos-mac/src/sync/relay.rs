@@ -1415,6 +1415,33 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
                     });
                 }
             }
+            // I read this chat on another device: not unread here either (the relay holds the
+            // one cursor), and the app drops its banners for it.
+            PushEventDto::NotificationsCleared(payload) => {
+                let chat_id = payload.chat_id.clone();
+                if chat_id.is_empty() {
+                    continue;
+                }
+                if let Some(c) = shared
+                    .chats
+                    .lock()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|c| c.id == chat_id)
+                {
+                    c.unread = false;
+                    c.unread_count = 0;
+                }
+                shared
+                    .local_read_at
+                    .lock()
+                    .unwrap()
+                    .insert(chat_id.clone(), now_ms() as i64);
+                let _ = shared.events.send(SyncEvent::NotificationsCleared {
+                    chat_id,
+                    badge: payload.badge.max(0) as u64,
+                });
+            }
             PushEventDto::FeedbackCapture(payload) => {
                 if !payload.request_id.is_empty() {
                     let _ = shared.events.send(SyncEvent::FeedbackCapture {
