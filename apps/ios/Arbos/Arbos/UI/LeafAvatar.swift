@@ -300,7 +300,7 @@ struct ServerAvatar: View {
     var body: some View {
         if let key = server.imageKey, let url = model.blobURL(projectId: "servers:\(server.id)", key: key) {
             // D92 amendment: the uploaded / generated picture wins over the leaf.
-            AsyncImage(url: url) { phase in
+            AsyncImage(url: url) { phase in // avatar-lint: allow (server picture, one copy)
                 if let image = phase.image {
                     image.resizable().scaledToFill()
                 } else {

@@ -1464,7 +1464,7 @@ struct GroupProfileView: View {
     /// cluster or picked image (tap → the edit sheet) for a people group.
     @ViewBuilder private var heroPicture: some View {
         if let project {
-            ViewablePicture(name: project.name, url: project.imageURL) {
+            ViewablePicture(name: project.name, url: model.projectImageURL(project)?.absoluteString) {
                 AgentAvatar(project: project, theme: theme, size: PaneKit.heroAvatar, idle: true)
             }
         } else {
