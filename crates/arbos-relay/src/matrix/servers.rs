@@ -254,9 +254,7 @@ pub(crate) fn admin_of(
     principal: &Principal,
     id: &str,
 ) -> Result<(String, Server), Box<Response>> {
-    let me = user_of(principal)?;
-    let (s, m) = load(state, &me, id)?;
-    admin_required(&m)?;
+    let (me, s, _) = settings_server(state, principal, id, "server", &["avatar_generate"])?;
     Ok((me, s))
 }
 
@@ -270,6 +268,67 @@ fn admin_required(m: &ServerMember) -> Result<(), Box<Response>> {
             "owners and admins only",
         )))
     }
+}
+
+/// The server, if the caller may change its settings (name, picture, join rule, channels):
+/// the owner or an admin. Every attempt — allowed, plain member, non-member, box, admin
+/// token — leaves an audit row under `servers:{id}` (`settings_audit`).
+fn settings_server(
+    state: &AppState,
+    principal: &Principal,
+    id: &str,
+    target: &str,
+    fields: &[&str],
+) -> Result<(String, Server, ServerMember), Box<Response>> {
+    let slot = format!("{SERVER_BLOB_PREFIX}{id}");
+    let me = match user_of(principal) {
+        Ok(u) => u,
+        Err(r) => {
+            crate::settings_audit::record(
+                state,
+                &slot,
+                target,
+                id,
+                principal,
+                None,
+                fields,
+                false,
+                "devices_only",
+            );
+            return Err(r);
+        }
+    };
+    let (s, m) = match load(state, &me, id) {
+        Ok(v) => v,
+        Err(r) => {
+            crate::settings_audit::record(
+                state,
+                &slot,
+                target,
+                id,
+                principal,
+                None,
+                fields,
+                false,
+                "not_member",
+            );
+            return Err(r);
+        }
+    };
+    let allowed = m.can_admin();
+    crate::settings_audit::record(
+        state,
+        &slot,
+        target,
+        id,
+        principal,
+        Some(&m.role),
+        fields,
+        allowed,
+        if allowed { "ok" } else { "admin_only" },
+    );
+    admin_required(&m)?;
+    Ok((me, s, m))
 }
 
 fn notify_server_members(state: &AppState, server_id: &str, except: &str, event: &PushEventDto) {
@@ -483,17 +542,23 @@ pub async fn patch(
     Path(id): Path<String>,
     Json(b): Json<PatchBody>,
 ) -> Response {
-    let me = match user_of(&principal) {
-        Ok(u) => u,
-        Err(r) => return *r,
-    };
-    let (_, m) = match load(&state, &me, &id) {
+    let mut fields = Vec::new();
+    if b.name.is_some() {
+        fields.push("name");
+    }
+    if b.image_key.is_some() {
+        fields.push("image_key");
+    }
+    if b.open.is_some() {
+        fields.push("open");
+    }
+    if b.avatar_leaf.is_some() || b.avatar_leaf_color.is_some() {
+        fields.push("avatar_leaf");
+    }
+    let (me, _, _) = match settings_server(&state, &principal, &id, "server", &fields) {
         Ok(v) => v,
         Err(r) => return *r,
     };
-    if let Err(r) = admin_required(&m) {
-        return *r;
-    }
     let name = match b.name.as_deref().map(server_name) {
         Some(None) => {
             return api_error(
@@ -642,17 +707,11 @@ pub async fn channel_create(
     Path(id): Path<String>,
     Json(b): Json<ChannelBody>,
 ) -> Response {
-    let me = match user_of(&principal) {
-        Ok(u) => u,
-        Err(r) => return *r,
-    };
-    let (_, m) = match load(&state, &me, &id) {
+    let (me, _, _) = match settings_server(&state, &principal, &id, "channel", &["channel_create"])
+    {
         Ok(v) => v,
         Err(r) => return *r,
     };
-    if let Err(r) = admin_required(&m) {
-        return *r;
-    }
     let Some(name) = b.name.as_deref().and_then(channel_slug) else {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -722,17 +781,20 @@ pub async fn channel_patch(
     Path((id, cid)): Path<(String, String)>,
     Json(b): Json<ChannelBody>,
 ) -> Response {
-    let me = match user_of(&principal) {
-        Ok(u) => u,
-        Err(r) => return *r,
-    };
-    let (_, m) = match load(&state, &me, &id) {
+    let mut fields = Vec::new();
+    if b.name.is_some() {
+        fields.push("name");
+    }
+    if b.topic.is_some() {
+        fields.push("topic");
+    }
+    if b.restricted.is_some() {
+        fields.push("restricted");
+    }
+    let (me, _, _) = match settings_server(&state, &principal, &id, "channel", &fields) {
         Ok(v) => v,
         Err(r) => return *r,
     };
-    if let Err(r) = admin_required(&m) {
-        return *r;
-    }
     let Some(ch) = state
         .db
         .channel(&cid)
@@ -845,17 +907,11 @@ pub async fn channel_delete(
     principal: Principal,
     Path((id, cid)): Path<(String, String)>,
 ) -> Response {
-    let me = match user_of(&principal) {
-        Ok(u) => u,
-        Err(r) => return *r,
-    };
-    let (_, m) = match load(&state, &me, &id) {
+    let (me, _, _) = match settings_server(&state, &principal, &id, "channel", &["channel_delete"])
+    {
         Ok(v) => v,
         Err(r) => return *r,
     };
-    if let Err(r) = admin_required(&m) {
-        return *r;
-    }
     let Some(ch) = state
         .db
         .channel(&cid)
@@ -1697,6 +1753,304 @@ mod tests {
         );
         assert!(server_name("").is_none());
         assert_eq!(invite_code().len(), 10);
+    }
+}
+
+#[cfg(test)]
+mod settings_permission_tests {
+    //! Server and channel settings (name, picture, join rule; channel create / rename /
+    //! topic / restricted / delete) are the owner's and the admins'. Plain members, boxes,
+    //! strangers and the admin token get 403; every attempt is audited under `servers:{id}`.
+
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use axum::Json;
+
+    use super::*;
+    use crate::people::tests_support::person;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    struct Cast {
+        server: String,
+        channel: String,
+        owner: Principal,
+        admin: Principal,
+        member: Principal,
+        agent: Principal,
+        stranger: Principal,
+    }
+
+    fn cast(state: &AppState, seed: i64) -> Cast {
+        let (owner, owner_dev) = person(state, seed);
+        let (admin, admin_dev) = person(state, seed + 1);
+        let (member, member_dev) = person(state, seed + 2);
+        let (_, stranger_dev) = person(state, seed + 3);
+        let server = Server {
+            id: ulid(),
+            name: "Launch Crew".into(),
+            owner_user_id: owner.clone(),
+            image_key: None,
+            invite_code: format!("crew{seed}"),
+            space_room_id: None,
+            created_at: now_ms(),
+            is_open: false,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
+        };
+        state.db.insert_server(&server).unwrap();
+        state
+            .db
+            .add_server_member(&server.id, &admin, &owner)
+            .unwrap();
+        state
+            .db
+            .set_server_role(&server.id, &admin, "admin")
+            .unwrap();
+        state
+            .db
+            .add_server_member(&server.id, &member, &owner)
+            .unwrap();
+        let channel = Channel {
+            id: ulid(),
+            server_id: server.id.clone(),
+            name: "dev".into(),
+            topic: "builds".into(),
+            restricted: false,
+            position: 1,
+            room_id: None,
+            created_at: now_ms(),
+        };
+        state.db.insert_channel(&channel).unwrap();
+        Cast {
+            server: server.id,
+            channel: channel.id,
+            owner: owner_dev,
+            admin: admin_dev,
+            member: member_dev,
+            agent: Principal::Box { user_id: member },
+            stranger: stranger_dev,
+        }
+    }
+
+    fn patch_body() -> PatchBody {
+        PatchBody {
+            name: None,
+            image_key: None,
+            open: None,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
+        }
+    }
+
+    fn channel_body() -> ChannelBody {
+        ChannelBody {
+            name: None,
+            topic: None,
+            restricted: None,
+        }
+    }
+
+    async fn server_patch(state: &AppState, who: &Principal, id: &str, b: PatchBody) -> StatusCode {
+        patch(
+            State(state.clone()),
+            who.clone(),
+            Path(id.to_owned()),
+            Json(b),
+        )
+        .await
+        .status()
+    }
+
+    async fn ch_create(state: &AppState, who: &Principal, id: &str, name: &str) -> StatusCode {
+        channel_create(
+            State(state.clone()),
+            who.clone(),
+            Path(id.to_owned()),
+            Json(ChannelBody {
+                name: Some(name.into()),
+                ..channel_body()
+            }),
+        )
+        .await
+        .status()
+    }
+
+    async fn ch_patch(state: &AppState, who: &Principal, c: &Cast, b: ChannelBody) -> StatusCode {
+        channel_patch(
+            State(state.clone()),
+            who.clone(),
+            Path((c.server.clone(), c.channel.clone())),
+            Json(b),
+        )
+        .await
+        .status()
+    }
+
+    async fn ch_delete(state: &AppState, who: &Principal, c: &Cast) -> StatusCode {
+        channel_delete(
+            State(state.clone()),
+            who.clone(),
+            Path((c.server.clone(), c.channel.clone())),
+        )
+        .await
+        .status()
+    }
+
+    #[tokio::test]
+    async fn server_and_channel_settings_are_owner_and_admin_only() {
+        let state = test_state(AuthMode::Github);
+        let c = cast(&state, 8100);
+        let denied: [(&str, &Principal); 4] = [
+            ("member", &c.member),
+            ("agent", &c.agent),
+            ("stranger", &c.stranger),
+            ("admin-token", &Principal::Admin),
+        ];
+        for (who, p) in denied {
+            for (field, b) in [
+                (
+                    "name",
+                    PatchBody {
+                        name: Some("Hijacked".into()),
+                        ..patch_body()
+                    },
+                ),
+                (
+                    "open",
+                    PatchBody {
+                        open: Some(true),
+                        ..patch_body()
+                    },
+                ),
+                (
+                    "avatar_leaf",
+                    PatchBody {
+                        avatar_leaf: Some(Some(1)),
+                        avatar_leaf_color: Some(Some(2)),
+                        ..patch_body()
+                    },
+                ),
+            ] {
+                assert_eq!(
+                    server_patch(&state, p, &c.server, b).await,
+                    StatusCode::FORBIDDEN,
+                    "{who} changing server {field}"
+                );
+            }
+            assert_eq!(
+                ch_create(&state, p, &c.server, "spam").await,
+                StatusCode::FORBIDDEN,
+                "{who} creating a channel"
+            );
+            for (field, b) in [
+                (
+                    "name",
+                    ChannelBody {
+                        name: Some("renamed".into()),
+                        ..channel_body()
+                    },
+                ),
+                (
+                    "topic",
+                    ChannelBody {
+                        topic: Some("hijacked".into()),
+                        ..channel_body()
+                    },
+                ),
+                (
+                    "restricted",
+                    ChannelBody {
+                        restricted: Some(true),
+                        ..channel_body()
+                    },
+                ),
+            ] {
+                assert_eq!(
+                    ch_patch(&state, p, &c, b).await,
+                    StatusCode::FORBIDDEN,
+                    "{who} changing channel {field}"
+                );
+            }
+            assert_eq!(
+                ch_delete(&state, p, &c).await,
+                StatusCode::FORBIDDEN,
+                "{who} deleting a channel"
+            );
+        }
+        let s = state.db.server(&c.server).unwrap().unwrap();
+        assert_eq!(s.name, "Launch Crew");
+        assert!(!s.is_open);
+        let ch = state.db.channel(&c.channel).unwrap().unwrap();
+        assert_eq!(
+            (ch.name.as_str(), ch.topic.as_str(), ch.restricted),
+            ("dev", "builds", false)
+        );
+        assert_eq!(state.db.channels_of_server(&c.server).unwrap().len(), 1);
+        let slot = format!("{SERVER_BLOB_PREFIX}{}", c.server);
+        let rows = state.db.audit(&slot, 1000).unwrap();
+        assert_eq!(rows.len(), 4 * 8);
+        assert!(rows.iter().all(|r| r["allowed"] == false));
+        assert_eq!(
+            rows.iter().filter(|r| r["reason"] == "admin_only").count(),
+            8
+        );
+
+        // Admin and owner: every one of those goes through.
+        assert_eq!(
+            server_patch(
+                &state,
+                &c.admin,
+                &c.server,
+                PatchBody {
+                    name: Some("Launch Crew II".into()),
+                    ..patch_body()
+                }
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            server_patch(
+                &state,
+                &c.owner,
+                &c.server,
+                PatchBody {
+                    open: Some(true),
+                    ..patch_body()
+                }
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            ch_create(&state, &c.admin, &c.server, "ops").await,
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            ch_patch(
+                &state,
+                &c.owner,
+                &c,
+                ChannelBody {
+                    topic: Some("nightly builds".into()),
+                    ..channel_body()
+                }
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            ch_delete(&state, &c.admin, &c).await,
+            StatusCode::NO_CONTENT
+        );
+        let s = state.db.server(&c.server).unwrap().unwrap();
+        assert_eq!((s.name.as_str(), s.is_open), ("Launch Crew II", true));
+        let rows = state.db.audit(&slot, 1000).unwrap();
+        assert_eq!(rows.iter().filter(|r| r["allowed"] == true).count(), 5);
+        assert!(rows
+            .iter()
+            .any(|r| r["allowed"] == true && r["fields"] == json!(["channel_delete"])));
     }
 }
 
