@@ -21,6 +21,7 @@ use arbos_core::chart::{
     SeriesShape, PALETTE_DARK, PALETTE_LIGHT,
 };
 
+use super::highlight;
 use super::icons::icon;
 use super::theme::{Appearance, Theme};
 use super::transcript::CodeCopy;
@@ -145,7 +146,6 @@ pub fn icon_square(
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
     let color = tint.unwrap_or(theme.text_muted);
-    let hover_bg = theme.surface_2;
     let selector = id.to_string();
     div()
         .id(id)
@@ -158,7 +158,7 @@ pub fn icon_square(
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .hover(move |s| s.bg(hover_bg))
+        .map(|el| highlight::button(el, theme))
         .child(icon(glyph, ICON_GLYPH, color))
 }
 
