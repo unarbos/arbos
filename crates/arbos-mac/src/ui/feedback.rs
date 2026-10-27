@@ -27,6 +27,7 @@ use crate::sync::user_error::{ErrorClass, UserError};
 use crate::ui::composer::ComposerInput;
 use crate::ui::error_note;
 use crate::ui::frost::{frosted, PANEL_BLUR};
+use crate::ui::highlight;
 use crate::ui::theme::{Theme, PANEL_RADIUS};
 
 actions!(feedback, [SendFeedback, SubmitFeedback]);
@@ -376,12 +377,14 @@ impl FeedbackSheet {
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.9))
         } else {
-            base.bg(theme.surface_1)
-                .text_color(theme.text)
-                .border_1()
-                .border_color(theme.border_strong)
-                .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
+            highlight::washed(
+                base.text_color(theme.text)
+                    .border_1()
+                    .border_color(theme.border_strong)
+                    .cursor_pointer(),
+                theme.surface_1,
+                theme,
+            )
         }
     }
 }
