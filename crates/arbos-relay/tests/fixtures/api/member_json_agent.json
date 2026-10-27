@@ -23,6 +23,7 @@
     "avatar_leaf_color": null,
     "avatar_leaf_color_effective": 6,
     "avatar_leaf_effective": 12,
+    "avatar_version": 1700000000000,
     "color": "#8b7cf6",
     "description": "A fixture agent",
     "icon": "Ab",

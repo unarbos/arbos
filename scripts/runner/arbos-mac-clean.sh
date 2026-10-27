@@ -68,6 +68,34 @@ sweep_xctest_clones() {
 }
 sweep_xctest_clones
 
+# A booted simulator keeps a few hundred daemons runnable even when nothing uses it: two rig simulators
+# (one up for 70 min after its rig was done) put the box at load 340-548 on 2026-10-26 22:3x and ssh timed
+# out for every worker (#1957 is the rule: rigs shut down what they booted). Backstop, every pass: shut down a
+# simulator booted for more than SIM_IDLE_MIN minutes when no xcodebuild / xctest / screencapture / `simctl io`
+# of its user is running and nothing names its UDID. Device sets of ec2-user and arbosgui only (ours).
+SIM_IDLE_MIN=${SIM_IDLE_MIN:-30}
+sweep_idle_sims() {
+  local user pid udid name age busy
+  for user in ec2-user arbosgui; do
+    id -u "$user" >/dev/null 2>&1 || continue
+    while read -r pid udid; do
+      [ -n "$udid" ] || continue
+      age=$(( ( $(date +%s) - $(ps -o lstart= -p "$pid" 2>/dev/null | xargs -I{} date -j -f "%a %b %d %T %Y" "{}" +%s 2>/dev/null || echo 0) ) / 60 ))
+      [ "$age" -ge "$SIM_IDLE_MIN" ] || continue
+      busy=$(ps -axo user=,command= | awk -v u="$user" -v d="$udid" '
+        $1 == u && ($2 ~ /xcodebuild|xctest|screencapture|XCTestDevices/ || $0 ~ d) { n++ } END { print n + 0 }')
+      [ "$busy" -eq 0 ] || continue
+      name=$(sudo -u "$user" xcrun simctl list devices booted 2>/dev/null | grep -F "($udid)" | sed -E 's/^ *(.*) \('"$udid"'\).*/\1/' | head -n 1)
+      if sudo -u "$user" xcrun simctl shutdown "$udid" >/dev/null 2>&1; then
+        say "shut down idle simulator '${name:-?}' ($udid, $user): booted ${age} min, no xcodebuild/xctest/screencapture/simctl io of $user and nothing naming it (#1957 backstop)"
+        logger -t arbos-mac-clean "shut down idle simulator ${name:-?} $udid ($user, ${age} min idle)"
+      fi
+    done < <(ps -axo user=,pid=,command= | awk -v u="$user" '$1 == u && $3 ~ /launchd_sim$/ { match($0, /Devices\/[0-9A-F-]{36}/); print $2, substr($0, RSTART + 8, 36) }')
+  done
+  return 0
+}
+sweep_idle_sims
+
 if [ "${1:-}" = "--if-low" ]; then
   f=$(free_gb)
   [ "${f:-99}" -lt "$LOW_FREE_GB" ] || exit 0
@@ -75,6 +103,10 @@ if [ "${1:-}" = "--if-low" ]; then
 fi
 JOURNAL=/Users/Shared/arbos-run/loop-journal.log
 MIN_FREE_GB=${MIN_FREE_GB:-20}
+# Target dirs live on the internal SSD (/Volumes/ArbosScratch/<user>/…, #1846) when it is mounted; the home
+# paths are the fallback — both locations are checked.
+SCRATCH=${ARBOS_SCRATCH:-/Volumes/ArbosScratch}
+pick() { if [ -d "$SCRATCH/$1/$2" ]; then echo "$SCRATCH/$1/$2"; else echo "/Users/$1/$2"; fi; }
 TARGET_AGE_DAYS=${TARGET_AGE_DAYS:-2}
 PROTECT='(/Users/Shared/arbos-store-pending|/Users/Shared/arbos-tools|/Users/ec2-user/arbos-parity|/Users/ec2-user/arbos-ios|/Users/ec2-user/arbos-refresh|/Users/arbosgui/actions-runner)'
 
@@ -120,14 +152,14 @@ sudo -u ec2-user xcrun simctl delete unavailable >/dev/null 2>&1 && say "simctl 
 #    */release/deps/ (77 of them = 13 GB); only the newest per directory can still be linked;
 #  - rustc's deps/rustcXXXXXX scratch dirs survive a killed compile (0.7 GB each).
 # Runs in every pass (nightly and --if-low); skips files younger than 30 min so a build in flight is untouched.
-find /Users/ec2-user /Users/arbosgui -maxdepth 6 -type d -path "*/release/deps" -not -path "*/node_modules/*" 2>/dev/null | while read -r deps; do
+find /Users/ec2-user /Users/arbosgui "$SCRATCH" -maxdepth 6 -type d -path "*/release/deps" -not -path "*/node_modules/*" 2>/dev/null | while read -r deps; do
   newest=$(ls -t "$deps"/libarbos_ffi-*.a 2>/dev/null | head -n 1)
   find "$deps" -maxdepth 1 -name "libarbos_ffi-*.a" -mmin +30 2>/dev/null | while read -r f; do
     [ "$f" = "$newest" ] && continue
     mib=$(du -sm "$f" 2>/dev/null | cut -f1); rm -f "$f" && say "removed stale $f (${mib} MiB)"
   done
 done
-find /Users/ec2-user /Users/arbosgui -maxdepth 7 -type d -path "*/deps/rustc*" -mmin +30 2>/dev/null | while read -r d; do
+find /Users/ec2-user /Users/arbosgui "$SCRATCH" -maxdepth 7 -type d -path "*/deps/rustc*" -mmin +30 2>/dev/null | while read -r d; do
   mib=$(du -sm "$d" 2>/dev/null | cut -f1); rm -rf "$d" && say "removed rustc leftover $d (${mib} MiB)"
 done
 
@@ -168,17 +200,17 @@ fi
 # Two warm caches that are cheap to rebuild, dropped when space is short and nobody is using them (operator,
 # 2026-10-23 23:42): the release lane's smoke-test target (rebuilt by the next release's smoke step, ~4 min)
 # and the gate's debug tree (the uniffi-bindgen / xcframework toolchain the iOS half builds, ~5 min).
-SMOKE_TARGET=/Users/arbosgui/arbos-release-smoke-target
+SMOKE_TARGET=$(pick arbosgui arbos-release-smoke-target)
 if [ "$(free_gb)" -lt "$MIN_FREE_GB" ] && [ -d "$SMOKE_TARGET" ] && ! pgrep -u arbosgui -qx cargo && ! pgrep -u arbosgui -qx rustc; then
   sz=$(du -sg "$SMOKE_TARGET" 2>/dev/null | cut -f1)
   rm -rf "$SMOKE_TARGET" && say "removed the release lane's smoke target cache (${sz:-?} GB; the next release smoke rebuilds it)"
 fi
-GATE_DEBUG=/Users/ec2-user/arbos-rust-gate-target/debug
+GATE_DEBUG=$(pick ec2-user arbos-rust-gate-target)/debug
 if [ "$(free_gb)" -lt "$MIN_FREE_GB" ] && [ -d "$GATE_DEBUG" ] && ! pgrep -u ec2-user -qx cargo && ! pgrep -u ec2-user -qx rustc && ! pgrep -u ec2-user -qx xcodebuild; then
   sz=$(du -sg "$GATE_DEBUG" 2>/dev/null | cut -f1)
   rm -rf "$GATE_DEBUG" && say "removed the gate's debug tree (${sz:-?} GB; the next iOS half rebuilds the uniffi toolchain)"
 fi
-RELEASE_DEBUG=/Users/arbosgui/arbos-release-target/debug
+RELEASE_DEBUG=$(pick arbosgui arbos-release-target)/debug
 # Only the release lane's own cargo (user arbosgui) can hold this tree; the gate's builds run as
 # ec2-user in other target dirs and must not keep it alive (they almost always run).
 if [ "$(free_gb)" -lt "$MIN_FREE_GB" ] && [ -d "$RELEASE_DEBUG" ] && ! pgrep -u arbosgui -qx cargo && ! pgrep -u arbosgui -qx rustc; then

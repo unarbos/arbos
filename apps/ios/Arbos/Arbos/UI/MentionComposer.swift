@@ -1,3 +1,4 @@
+import ArbosFFI
 import SwiftUI
 import UIKit
 
@@ -224,26 +225,24 @@ enum MentionDraft {
         return CollectiveMention.allCases.filter { $0.handle.hasPrefix(q) }
     }
 
-    /// The picker's rows for `query` (lower-case): people and agents of the
-    /// chat whose handle, or any word of whose name, starts with it — handle
-    /// matches first, then name matches, alphabetical by handle; never me;
-    /// agents without a live project (soft-deleted) left out; at most six.
+    /// The picker's rows for the typed `@query`: people and agents of the chat
+    /// through the shared matcher on @handle and display name (`EntitySearch`,
+    /// [feedback shared-search-matcher-ios-2026-10-26]: exact > prefix >
+    /// word-start, name before handle, diacritics folded), then alphabetical by
+    /// handle, agents first on a tie; never me; agents without a live project
+    /// (soft-deleted) left out; at most six.
     static func candidates(query: String, members: [ChatMember], me: String?) -> [ChatMember] {
-        let q = query.lowercased()
-        var scored: [(ChatMember, Bool)] = []
+        var scored: [(ChatMember, UInt8)] = []
         for m in members {
             if m.isAgent, m.project == nil { continue }
             if !m.isAgent, let me, m.handle.lowercased() == me.lowercased() { continue }
-            let handle = ComposerMention.handle(of: m).lowercased()
-            let name = (m.isAgent ? (m.project?.name ?? m.handle) : (m.name ?? m.handle)).lowercased()
-            if q.isEmpty || handle.hasPrefix(q) {
-                scored.append((m, true))
-            } else if name.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).contains(where: { $0.hasPrefix(q) }) {
-                scored.append((m, false))
-            }
+            let handle = ComposerMention.handle(of: m)
+            let name = m.isAgent ? (m.project?.name ?? m.handle) : (m.name ?? m.handle)
+            guard let hit = EntitySearch.match(name: name, handle: handle, query: query) else { continue }
+            scored.append((m, hit.order))
         }
         scored.sort { a, b in
-            if a.1 != b.1 { return a.1 && !b.1 }
+            if a.1 != b.1 { return a.1 < b.1 }
             let ah = ComposerMention.handle(of: a.0).lowercased(), bh = ComposerMention.handle(of: b.0).lowercased()
             if ah != bh { return ah < bh }
             return a.0.isAgent && !b.0.isAgent
@@ -294,7 +293,8 @@ struct MentionTextView: UIViewRepresentable {
     var agentProject: (ChatMember) -> Project? = { $0.project }
     var maxLines: Int = 8
 
-    static let insets = UIEdgeInsets(top: 10, left: 16, bottom: 10, right: 0)
+    /// Grok: the caret 17 pt in from the field's edge, one 22 pt line centred in 48.
+    static let insets = UIEdgeInsets(top: Theme.composerTextPadY, left: Theme.composerTextInset, bottom: Theme.composerTextPadY, right: 0)
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -307,6 +307,7 @@ struct MentionTextView: UIViewRepresentable {
         view.textContainer.lineFragmentPadding = 0
         view.keyboardDismissMode = .interactive
         view.adjustsFontForContentSizeCategory = false
+        view.accessibilityIdentifier = "composer-field"
         view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         view.setContentHuggingPriority(.defaultLow, for: .horizontal)
         let coordinator = context.coordinator

@@ -81,9 +81,10 @@ pub fn when_label(ms: u64) -> String {
 }
 
 /// A 36 pt round control: × or a chevron.
-fn control(id: impl Into<ElementId>, glyph: &'static str, enabled: bool) -> Stateful<Div> {
+fn control(id: &'static str, glyph: &'static str, enabled: bool) -> Stateful<Div> {
     div()
         .id(id)
+        .debug_selector(move || id.to_owned())
         .size(px(CONTROL))
         .rounded_full()
         .bg(white(if enabled { 0.18 } else { 0.08 }))
@@ -97,9 +98,10 @@ fn control(id: impl Into<ElementId>, glyph: &'static str, enabled: bool) -> Stat
 }
 
 /// A bottom pill: glyph + label on white 16 %.
-fn pill(id: impl Into<ElementId>, glyph: &'static str, label: &'static str) -> Stateful<Div> {
+fn pill(id: &'static str, glyph: &'static str, label: &'static str) -> Stateful<Div> {
     div()
         .id(id)
+        .debug_selector(move || id.to_owned())
         .h(px(PILL_HEIGHT))
         .px(px(14.0))
         .rounded_full()
@@ -128,17 +130,24 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
     };
     let count = viewer.items.len();
     let kind = item.attachment.kind();
-    let picture = item
-        .attachment
-        .blob_ref
-        .as_ref()
-        .and_then(|k| state.thumbnails.get(k).cloned());
-    let failed = item
-        .attachment
-        .blob_ref
-        .as_ref()
-        .is_some_and(|k| state.thumbnails_failed.contains(k))
-        || item.attachment.blob_ref.is_none();
+    // A profile picture reads the avatar cache by URL; a chat picture its blob thumbnail.
+    let is_profile_picture = item.picture_url.is_some();
+    let picture = match &item.picture_url {
+        Some(url) => state.avatar(url),
+        None => item
+            .attachment
+            .blob_ref
+            .as_ref()
+            .and_then(|k| state.thumbnails.get(k).cloned()),
+    };
+    // The avatar cache has no failure state: a profile picture shows "Loading…" until it lands.
+    let failed = !is_profile_picture
+        && (item
+            .attachment
+            .blob_ref
+            .as_ref()
+            .is_some_and(|k| state.thumbnails_failed.contains(k))
+            || item.attachment.blob_ref.is_none());
     let can_act = item
         .attachment
         .blob_ref
@@ -158,11 +167,13 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
     let forward = shell.state.clone();
 
     // ----- caption, counter, × -------------------------------------------
-    let mut subline = when_label(item.when);
-    subline.push_str(" · ");
-    subline.push_str(&item.attachment.name);
+    let mut subline = if is_profile_picture {
+        item.attachment.name.clone()
+    } else {
+        format!("{} · {}", when_label(item.when), item.attachment.name)
+    };
     let size = item.attachment.size_label();
-    if !size.is_empty() {
+    if !size.is_empty() && !is_profile_picture {
         subline.push_str(" · ");
         subline.push_str(&size);
     }
@@ -290,6 +301,7 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
 
     let mut root = div()
         .id("media-viewer")
+        .debug_selector(|| "media-viewer".into())
         .key_context("MediaViewer")
         .track_focus(focus)
         .on_action(move |_: &Prev, _, cx| {
@@ -383,7 +395,7 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
     // when the album has more than one item.
     root = root.child(close_btn);
 
-    // ----- Close · Download · Forward -------------------------------------
+    // ----- Close · Download · Forward (a profile picture: Close only) -----
     root = root.child(
         div()
             .absolute()
@@ -399,20 +411,22 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
                     close_pill.update(cx, |s, cx| s.close_media_viewer(cx));
                 }),
             )
-            .child(
-                pill("media-viewer-download", "arrow-down", "Download").on_click(
-                    move |_, _, cx| {
+            .when(!is_profile_picture, |el| {
+                el.child(
+                    pill("media-viewer-download", "arrow-down", "Download").on_click(
+                        move |_, _, cx| {
+                            cx.stop_propagation();
+                            download.update(cx, |s, cx| s.media_viewer_download(cx));
+                        },
+                    ),
+                )
+                .child(
+                    pill("media-viewer-forward", "forward", "Forward").on_click(move |_, _, cx| {
                         cx.stop_propagation();
-                        download.update(cx, |s, cx| s.media_viewer_download(cx));
-                    },
-                ),
-            )
-            .child(
-                pill("media-viewer-forward", "forward", "Forward").on_click(move |_, _, cx| {
-                    cx.stop_propagation();
-                    forward.update(cx, |s, cx| s.media_viewer_toggle_forward(cx));
-                }),
-            ),
+                        forward.update(cx, |s, cx| s.media_viewer_toggle_forward(cx));
+                    }),
+                )
+            }),
     );
 
     if viewer.forward_open {

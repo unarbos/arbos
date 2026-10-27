@@ -33,6 +33,10 @@ pub const KEY_LAST_CHATS: &str = "last_chats";
 pub const KEY_ARCHIVED_CHATS: &str = "archived_chats";
 /// Set once the local archived ids were pushed up to the relay (§9c union migration).
 pub const KEY_ARCHIVE_MIGRATED: &str = "archive_migrated";
+/// `avatar:<url>` → the picture's bytes. The URL carries the picture's version
+/// (`…/avatar.jpg?v=<stamp>`, `/avatars/<user>.jpg?v=…`), so a changed picture is a new key
+/// and a cached one can never be stale; keys no current URL names are pruned with the registry.
+pub const KEY_AVATAR_PREFIX: &str = "avatar:";
 
 #[derive(Clone, Debug)]
 pub struct SavedDoc {
@@ -92,10 +96,14 @@ impl Store {
         }
     }
 
-    fn open_at(path: &Path) -> Result<Store> {
+    pub(crate) fn open_at(path: &Path) -> Result<Store> {
         let conn = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
+        // secure_delete: a snapshot replaced after a secret redaction leaves no old bytes in
+        // the file (secret hand-off, 2026-10-26).
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA secure_delete=ON;",
+        )?;
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if version != 0 && version != SCHEMA_VERSION {
             eprintln!("store: schema {version} → {SCHEMA_VERSION}; dropping");
@@ -158,6 +166,26 @@ impl Store {
             .execute("DELETE FROM kv WHERE k = ?1", params![key]);
     }
 
+    /// Every key under `prefix` (the avatar cache's URLs).
+    pub fn keys_with_prefix(&self, prefix: &str) -> Vec<String> {
+        let Ok(mut st) = self
+            .conn
+            .prepare("SELECT k FROM kv WHERE k LIKE ?1 ESCAPE '\\'")
+        else {
+            return Vec::new();
+        };
+        let pattern = format!(
+            "{}%",
+            prefix
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
+        st.query_map(params![pattern], |r| r.get::<_, String>(0))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
+    }
+
     // --- docs ----------------------------------------------------------------
 
     /// Snapshot and cursor land in one statement so they can never disagree.
@@ -184,6 +212,12 @@ impl Store {
                bytes = excluded.bytes, updated_at = excluded.updated_at",
             params![key, project_id, room_chat, cursor, snapshot, snapshot.len() as i64, now],
         );
+    }
+
+    /// After a room with a secret redaction was saved: fold the WAL into the main file and
+    /// truncate it, so the pages that held the old text are gone from disk too.
+    pub fn flush_after_redaction(&self) {
+        let _ = self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
     }
 
     /// Every saved room, most recently opened first.
@@ -320,5 +354,90 @@ pub fn remove_files(path: &Path) {
         let mut p = path.as_os_str().to_owned();
         p.push(suffix);
         let _ = std::fs::remove_file(PathBuf::from(p));
+    }
+}
+
+#[cfg(test)]
+mod secret_handoff_store_tests {
+    //! Secret hand-off: once a room saw a redaction, the Mac store's saved snapshot (and the
+    //! sqlite file around it) holds no byte of the removed value.
+    use super::*;
+    use arbos_core::doc::{ChatDoc, SecretRedaction, UserMessageOpts};
+
+    const KEY: &str = concat!(
+        "sk_",
+        "live_51HxQ9mT3vK2pLnR8wZ4eYc7bD1fG6hJ0kM9nP5qS2tU8vW3xA1"
+    );
+
+    fn holds(bytes: &[u8]) -> bool {
+        bytes.windows(KEY.len()).any(|w| w == KEY.as_bytes())
+    }
+
+    fn files_hold(path: &Path) -> bool {
+        ["", "-wal", "-shm"].iter().any(|suffix| {
+            let mut p = path.as_os_str().to_owned();
+            p.push(suffix);
+            std::fs::read(PathBuf::from(p)).is_ok_and(|b| holds(&b))
+        })
+    }
+
+    #[test]
+    fn a_redacted_room_is_saved_without_its_history() {
+        let dir = std::env::temp_dir().join(format!("arbos-store-handoff-{}", now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("store.sqlite");
+        let store = Store::open_at(&path).unwrap();
+        let doc = ChatDoc::new(Some(5), false);
+        doc.append_user_message(
+            "m1",
+            &format!("{KEY} save this"),
+            "dev",
+            &UserMessageOpts::default(),
+        )
+        .unwrap();
+        store.save_doc("p/c", "p", "c", 1, &doc.snapshot());
+        assert!(files_hold(&path), "setup: the store holds the key");
+
+        // the relay's redaction arrives (here: made locally, same ops); the next save is shallow
+        doc.redact_message_as_secret(
+            "m1",
+            &SecretRedaction {
+                name: "STRIPE_KEY".into(),
+                env: "STRIPE_KEY".into(),
+                ..Default::default()
+            },
+        );
+        assert!(doc.is_shallow_mode());
+        let bytes = doc.snapshot();
+        assert!(!holds(&bytes));
+        store.save_doc("p/c", "p", "c", 2, &bytes);
+        store.flush_after_redaction();
+        assert!(
+            !files_hold(&path),
+            "the sqlite file, WAL and shm hold no byte of the key"
+        );
+        let saved = store.load_docs();
+        assert_eq!(saved.len(), 1);
+        let back = ChatDoc::from_snapshot(Some(6), false, &saved[0].snapshot).unwrap();
+        assert_eq!(
+            back.message("m1").unwrap().parts[0]["kind"],
+            "secret_redacted"
+        );
+        drop(store);
+        // `ARBOS_HANDOFF_KEEP=<dir>` (scripts/secrets/handoff-invariant-check.sh --with-mac):
+        // keep the store files for the grep that follows.
+        if let Some(keep) = std::env::var_os("ARBOS_HANDOFF_KEEP") {
+            let keep = PathBuf::from(keep);
+            let _ = std::fs::create_dir_all(&keep);
+            for suffix in ["", "-wal", "-shm"] {
+                let mut p = path.as_os_str().to_owned();
+                p.push(suffix);
+                let _ = std::fs::copy(
+                    PathBuf::from(&p),
+                    keep.join(format!("store.sqlite{suffix}")),
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

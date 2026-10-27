@@ -327,7 +327,9 @@ final class MentionTable {
     func text(_ attr: AttributedString, link: Color, pill: Color, lineHeight: CGFloat) -> Text {
         let plain = String(attr.characters)
         let chips = find(in: plain)
-        guard !chips.isEmpty else { return Text(attr) }
+        // The prose between chips still gets its link icons (LinkIcons.text).
+        let icons = LinkIcons.shared
+        guard !chips.isEmpty else { return icons.text(attr, lineHeight: lineHeight) }
         var out = Text("")
         var cursor = attr.startIndex
         for (range, entry) in chips {
@@ -336,7 +338,7 @@ final class MentionTable {
             let hiOff = plain.distance(from: plain.startIndex, to: range.upperBound)
             let lo = attr.characters.index(attr.startIndex, offsetBy: loOff)
             let hi = attr.characters.index(attr.startIndex, offsetBy: hiOff)
-            out = out + Text(AttributedString(attr[cursor..<lo]))
+            out = out + icons.text(AttributedString(attr[cursor..<lo]), lineHeight: lineHeight)
             // The name run: accent on the pill, a link `ChatView` routes to the pane.
             var name = AttributedString(attr[attr.index(afterCharacter: lo)..<hi])
             name.swiftUI.foregroundColor = link
@@ -354,17 +356,18 @@ final class MentionTable {
             }
             cursor = hi
         }
-        out = out + Text(AttributedString(attr[cursor..<attr.endIndex]))
+        out = out + icons.text(AttributedString(attr[cursor..<attr.endIndex]), lineHeight: lineHeight)
         return out
     }
 }
 
 extension Markdown {
-    /// `inline(...)` as a `Text`, with mention chips when `mentions` knows the handles.
+    /// `inline(...)` as a `Text`, with mention chips when `mentions` knows the handles and the
+    /// site icon before every named link (`LinkIcons`).
     @MainActor
     static func inlineText(_ text: String, color: Color, link: Color, codeChip: Color, mentions: MentionTable?) -> Text {
         guard let mentions, !mentions.isEmpty else {
-            return Text(inline(text, color: color, link: link, codeChip: codeChip))
+            return LinkIcons.shared.text(inline(text, color: color, link: link, codeChip: codeChip), lineHeight: Theme.body * 1.2)
         }
         let attr = inline(mentions.display(text), color: color, link: link, codeChip: codeChip)
         return mentions.text(attr, link: link, pill: link.opacity(0.14), lineHeight: Theme.body * 1.2)

@@ -31,7 +31,12 @@ extension AppModel {
         let tints = ["fx-comms": 5, "fx-affine": 3, "fx-hyper": 1, "fx-expense": 6, "fx-invoices": 4, "fx-scout": 2]
         for i in list.indices { list[i].avatarColorIndexEffective = tints[list[i].id] }
         setFixture(projects: list, now: now)
-        if DebugHooks.fixtureServers { setFixtureServers(now: now) }
+        if DebugHooks.fixtureServers {
+            setFixtureServers(now: now)
+            // `ARBOS_OPEN_SERVER` lands on a server / channel; the live path applies it
+            // after `refreshServers`, which the fixture skips (back-swipe UI tests).
+            applyOpenServerHook()
+        }
     }
 
     /// Three servers for the home list's Servers segment (D88 servers otherwise come from the
@@ -103,6 +108,31 @@ extension AppModel {
             allMessages[c]?.append(user("c7", c, "clone arbos into /tmp and list the top level", at: t0 + 130_000))
             allMessages[c]?.append(assistant("c8", c, "On it.", at: t0 + 131_000))
             allMessages[c]?.append(shellCard("c9", c, at: t0 + 132_000))
+        }
+        // Secret hand-off rig (`ARBOS_FIXTURE_SECRET_HANDOFF=offer|saved|ghost|detect`).
+        if let mode = DebugHooks.fixtureSecretHandoff {
+            allMessages[c]?.removeAll { $0.id == "c6" }
+            switch mode {
+            case "offer", "saved":
+                allMessages[c]?.append(user("h1", c, "Can I give you a secret? It's the Stripe key for the refunds report.", at: t0 + 130_000))
+                allMessages[c]?.append(assistant("h2", c, "Yes. Use the box below. It goes straight to your vault, never into this chat.", at: t0 + 131_000))
+                allMessages[c]?.append(secretOfferCard("h3", c, saved: mode == "saved", at: t0 + 132_000))
+                if mode == "saved" {
+                    allMessages[c]?.append(assistant("h4", c, "Got it. I'll use STRIPE_KEY for the refunds report and keep the value out of this chat.", at: t0 + 140_000))
+                }
+            case "ghost":
+                allMessages[c]?.append(user("h1", c, "Let's do the refunds report next.", at: t0 + 130_000))
+                allMessages[c]?.append(assistant("h2", c, "Sure — I need the Stripe key for that.", at: t0 + 131_000))
+                allMessages[c]?.append(secretGhost("h3", c, name: "STRIPE_KEY", at: t0 + 132_000))
+                allMessages[c]?.append(assistant("h4", c, "Saved as STRIPE_KEY and removed from this chat — also from my memory and working context. I can use it; the value stays in your vault. Running the refunds report now.", at: t0 + 140_000))
+            case "detect":
+                allMessages[c]?.append(user("h1", c, "Let's do the refunds report next.", at: t0 + 130_000))
+                allMessages[c]?.append(assistant("h2", c, "Sure — I need the Stripe key for that.", at: t0 + 131_000))
+                allMessages[c]?.append(user("h3", c, "sk_" + "test_FIXTURE51HxQ9mT3vK2pLnR8wZ4eYc7bD1fG6hJ0kM9nP5qS2tU8vW3xA1", at: t0 + 132_000))
+                allMessages[c]?.append(secretDetectedCard("h4", c, at: t0 + 133_000))
+            default:
+                break
+            }
         }
         shellGrants["fx-comms"] = [ShellGrant(id: "grant-scratch", ruleClass: "file-delete", pathClass: "scratch", chatId: nil,
                                               grantedBy: "dev-iphone", createdAt: now - 3 * 3_600_000,
@@ -208,6 +238,21 @@ extension AppModel {
             Message(id: "g4", chatId: "fx-group-launch", role: .system, sender: "system", status: .done, turn: nil, decision: nil, subagentId: nil,
                     subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 40 * 60_000, completedAt: nil, pending: false,
                     parts: [.text(id: "g4t", text: "Jacob added Comms")], hiddenCount: 0, senderHandle: nil, senderName: nil),
+            // A member's portrait phone screenshot with a long note — the shape of Jacob's
+            // Arbonites report ([feedback image-caption-bubble-ios-2026-10-25]): the caption
+            // must wrap at the bubble's width, not the tall picture's.
+            Message(id: "g6", chatId: "fx-group-launch", role: .user, sender: "user:fx-u3", status: .done, turn: nil, decision: nil, subagentId: nil,
+                    subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 35 * 60_000, completedAt: nil, pending: false,
+                    parts: [.attachment(id: "g6a", attachment: Attachment(name: "IMG_4301.PNG", mime: "image/png", blobRef: "fixture-g6a", kind: "image")),
+                            .text(id: "g6t", text: "It's hard to explain, but I feel like your own sent texts could be improved a little. It now seems like it's still waiting for connection before it gets sent out because it's faded. Should be more colored imho @comms")],
+                    hiddenCount: 0, senderHandle: "mira-k", senderName: "Mira Kaplan"),
+            // A landscape picture with a short note: the picture spans the bubble, the note sits
+            // under it at the picture's width (the flush case, unchanged).
+            Message(id: "g7", chatId: "fx-group-launch", role: .user, sender: "user:fx-u4", status: .done, turn: nil, decision: nil, subagentId: nil,
+                    subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 33 * 60_000, completedAt: nil, pending: false,
+                    parts: [.attachment(id: "g7a", attachment: Attachment(name: "launch-hero.png", mime: "image/png", blobRef: "fixture-g7a", kind: "image")),
+                            .text(id: "g7t", text: "Hero for the landing page, v2.")],
+                    hiddenCount: 0, senderHandle: "sam", senderName: "Sam Okafor"),
         ]
         // Mira's second line replies to her first (quote header on another person's bubble).
         messages["fx-group-launch"]?[2].replyTo = "g1"
@@ -306,6 +351,24 @@ extension AppModel {
             }
             applyJobs(projectId: projectId, list)
         }
+        // `ARBOS_FIXTURE_READS=1`: the opened agent chat ends like Bubble's — a hidden job
+        // row that read a source file (its page as a link, the file attached) and a finished
+        // reply naming ten files and a docs page ([feedback library-chat-only-ios-2026-10-25]).
+        if DebugHooks.fixtureReads, let c = DebugHooks.openChat, peopleChat(c) == nil {
+            var job = streaming("fx-read-job", c, at: now - 40_000)
+            job.job = JobRef(["id": "fx-job-reads", "title": "Reading the repo"])
+            job.worker = true
+            job.hidden = true
+            job.parts = [.text(id: "fx-read-job-t", text: "Read https://github.com/unarbos/arbos/blob/main/crates/arbos-mac/src/app.rs"),
+                         .attachment(id: "fx-read-job-a", attachment: Attachment(name: "app.rs", mime: "text/plain", blobRef: "fixture-read-app"))]
+            messages[c, default: []].append(job)
+            let files = ["app.rs", "calls.rs", "auth.rs", "update.rs", "search.rs", "onboarding.rs", "transcript.rs", "relay.rs", "agent.rs", "people.rs"]
+            var reply = streaming("fx-read-reply", c, at: now - 20_000)
+            reply.status = .done
+            reply.completedAt = now - 19_000
+            reply.parts = [.text(id: "fx-read-reply-t", text: "I read \(files.joined(separator: ", ")) — nothing to change. Notes on the layout API: https://docs.rs/gpui")]
+            messages[c, default: []].append(reply)
+        }
         // `ARBOS_FIXTURE_TYPING=1|<handle>[,<handle>…]`: those people type in every fixture
         // people chat for the whole launch (`1` = the DM's other person / the group's first).
         if let spec = DebugHooks.fixtureTyping {
@@ -338,6 +401,29 @@ extension AppModel {
                     subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 6 * 60_000, completedAt: nil, pending: false,
                     parts: [.text(id: "d4t", text: "Sure — add it, and send the copy whenever you're ready.")], hiddenCount: 0, senderHandle: "jacob", senderName: "Jacob Steeves"),
         ]
+        // `ARBOS_FIXTURE_REPLY_DM=1` (rig, #1836): rows that answer messages in other chats —
+        // unconst replies here to Mira's Launch week line (a group I am in: linked); I reply
+        // to Sam's; and one from a chat I am not in (quote only, no link).
+        if DebugHooks.fixtureReplyDM {
+            var theirs = Message(id: "d5", chatId: "fx-dm-unconst", role: .user, sender: "user:gh_32490803", status: .done, turn: nil, decision: nil, subagentId: nil,
+                                 subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 5 * 60_000, completedAt: nil, pending: false,
+                                 parts: [.text(id: "d5t", text: "Works")], hiddenCount: 0, senderHandle: "unconst", senderName: "Unconst")
+            theirs.replyRef = ReplyRef(chatId: "fx-group-launch", projectId: "people", messageId: "g1", chatTitle: "Launch week",
+                                       sender: "user:fx-u3", senderName: "Mira Kaplan", senderHandle: "mira-k",
+                                       text: "Launch checklist is here: https://notion.so/arbos/launch-week")
+            var mine = Message(id: "d6", chatId: "fx-dm-unconst", role: .user, sender: "user:fx-me", status: .done, turn: nil, decision: nil, subagentId: nil,
+                               subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 4 * 60_000, completedAt: nil, pending: false,
+                               parts: [.text(id: "d6t", text: "Press kit looks good — ship it.")], hiddenCount: 0, senderHandle: "jacob", senderName: "Jacob Steeves")
+            mine.replyRef = ReplyRef(chatId: "fx-group-launch", projectId: "people", messageId: "g2", chatTitle: "Launch week",
+                                     sender: "user:fx-u4", senderName: "Sam Okafor", senderHandle: "sam", text: "press-kit-v3.pdf")
+            var outside = Message(id: "d7", chatId: "fx-dm-unconst", role: .user, sender: "user:gh_32490803", status: .done, turn: nil, decision: nil, subagentId: nil,
+                                  subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 3 * 60_000, completedAt: nil, pending: false,
+                                  parts: [.text(id: "d7t", text: "Same thing happened in ours.")], hiddenCount: 0, senderHandle: "unconst", senderName: "Unconst")
+            outside.replyRef = ReplyRef(chatId: "fx-not-my-chat", projectId: "people", messageId: "x1", chatTitle: "Design crit",
+                                        sender: "user:gh_900", senderName: "Alex Rivera", senderHandle: "alex-rivera",
+                                        text: "The pricing slide still shows last quarter's tiers.")
+            messages["fx-dm-unconst"]?.append(contentsOf: [theirs, mine, outside])
+        }
         caughtUp.insert("fx-dm-unconst")
         directory = [
             Person(id: "fx-u1", handle: "alex-rivera", avatarUrl: nil, name: "Alex Rivera", status: "member"),
@@ -382,6 +468,15 @@ extension AppModel {
                             agent("fx-hyper", "Hyper", false, "")]
         var stripe = secret("fx-sec-stripe", "STRIPE_KEY", "STRIPE_KEY", "key", "Stripe live key — refunds and reports. Never for payouts.", ["api.stripe.com"], stripeAgents, 12)
         stripe["inject_env"] = true
+        if DebugHooks.fixtureSecretHandoff != nil {
+            // Secret hand-off rig: the key was given to Comms in chat.
+            stripe["inject_env"] = false
+            stripe["hosts"] = []
+            stripe["note"] = "For the refunds report. Read-only until you say otherwise."
+            stripe["last_used_at"] = nil
+            stripe["agents"] = [agent("fx-comms", "Comms", true, "the refunds report")]
+            stripe["source"] = ["kind": "chat", "project_id": "fx-comms", "project_name": "Comms", "chat_id": "fx-comms-main"]
+        }
         // The People list (spec §7.7), the Mac fixture's twin: Sam may ask (on), Jen's row is off.
         stripe["people"] = [
             ["user_id": "fx-u4", "handle": "sam", "name": "Sam Okafor", "note": "reports only", "created_at": now - 9 * 86_400_000,
@@ -445,20 +540,40 @@ extension AppModel {
     /// `ARBOS_FIXTURE_WORKING=n` — the next agents too. Goes through the real parser.
     func fixtureBoxReport() -> BoxReport {
         let working = Set(["fx-comms"] + projects.dropFirst().prefix(max(0, DebugHooks.fixtureWorking - 1)).map(\.id))
-        let workspaces: [[String: Any]] = projects.filter { $0.id != peopleSlot }.map { p in
-            var turn: [String: Any] = ["running": working.contains(p.id)]
-            if working.contains(p.id) {
+        let nearLimit = DebugHooks.fixtureMachineNearLimit
+        let workspaces: [[String: Any]] = projects.filter { $0.id != peopleSlot }.enumerated().map { i, p in
+            let on = working.contains(p.id)
+            var turn: [String: Any] = ["running": on]
+            if on {
                 turn["current"] = ["elapsed_ms": p.id == "fx-comms" ? 42_000 : 128_000, "tool_calls": p.id == "fx-comms" ? 7 : 3]
             }
-            return ["project_id": p.id, "name": p.name, "healthy": true, "turn": turn]
+            // Settings › Machine's per-agent breakdown: a share per workspace, the busy ones
+            // biggest ([feedback machine-page-ios-2026-10-26]).
+            let usage: [String: Any] = on
+                ? ["cpu_pct": p.id == "fx-comms" ? 61.0 : 9.0, "mem_mb": p.id == "fx-comms" ? 1900 : 1100, "pids": 40, "disk_mb": p.id == "fx-comms" ? 2300 : 900]
+                : ["cpu_pct": 0.0, "mem_mb": 200 + 50 * i, "pids": 12, "disk_mb": i == 1 ? 1600 : 100 + 150 * i]
+            return ["project_id": p.id, "name": p.name, "healthy": true, "turn": turn,
+                    "jobs_running": on && p.id == "fx-comms" ? 1 : 0, "usage": usage]
         }
+        // `ARBOS_FIXTURE_MACHINE=near-limit`: disk 92 % and memory 88 % used, CPU 71 %.
+        let (diskAvail, memUsed, cpuPct, rx, tx, rxToday, txToday): (Int, Int, Double, Double, Double, Int, Int) = nearLimit
+            ? (819, 7209, 71.0, 4_800_000, 300_000, 6_100_000_000, 300_000_000)
+            : (6861, 2867, 23.0, 1_200_000, 80_000, 2_000_000_000, 100_000_000)
         let debug: [String: Any] = [
             "relay": ["state": "awake", "awake_for_s": 5 * 3600 + 12 * 60, "provider": "gvisor",
                       "agentd": ["image": "arbos-agent-0.1.7"]],
             "box": ["reachable": true, "state": [
-                "uptime_s": 5 * 3600 + 12 * 60, "load": [0.42, 0.38, 0.35],
-                "memory_mb": ["total": 8192, "available": 5325],
-                "disk": ["total_mb": 10240, "available_mb": 6861],
+                "uptime_s": 5 * 3600 + 12 * 60, "load": [38.5, 36.9, 32.1], "load_scope": "host",
+                "memory_mb": ["total": 8192, "available": 8192 - memUsed, "source": "cgroup"],
+                "disk": ["total_mb": 10240, "available_mb": diskAvail],
+                "resources": [
+                    "sampled_at": nowMs(), "load_scope": "host",
+                    "cpu": ["cores": 4.0, "pct": cpuPct, "source": "cgroup"],
+                    "memory": ["total_mb": 8192, "used_mb": memUsed, "source": "cgroup"],
+                    "disk": ["total_mb": 10240, "used_mb": 10240 - diskAvail, "available_mb": diskAvail,
+                             "inodes_total": 131_072, "inodes_avail": nearLimit ? 1_200 : 93_000],
+                    "net": ["rx_bps": rx, "tx_bps": tx, "rx_bytes_today": rxToday, "tx_bytes_today": txToday],
+                ],
                 "workspaces": workspaces,
             ]],
         ]
@@ -488,6 +603,28 @@ extension AppModel {
 
     /// Sends in fixture mode append locally so the composer can be exercised,
     /// then a scripted reply lands as complete bubbles (ack → working → result).
+    /// Fixture `openDM`: the existing DM with `handle`, else a new one built from the member
+    /// as the group lists them (Reply in DM rig and tests, #1836). No relay.
+    func fixtureOpenDM(handle: String, navigate: Bool) -> PeopleChat? {
+        let handle = handle.trimmingCharacters(in: CharacterSet(charactersIn: "@ "))
+        if let dm = peopleChats.first(where: { $0.kind == "dm" && $0.humans.contains { $0.handle == handle } }) {
+            if navigate { path = [.chat(chatId: dm.id, projectId: peopleSlot)] }
+            return dm
+        }
+        guard let peer = peopleChats.flatMap(\.members).first(where: { !$0.isAgent && $0.handle == handle }),
+              let me = peopleChats.flatMap(\.members).first(where: { $0.member == myUserId })
+        else { return nil }
+        let id = "fx-dm-\(handle)"
+        let dm = PeopleChat(id: id, kind: "dm", createdBy: me.id, createdAt: nowMs(), title: "@\(handle)", pending: false,
+                            members: [peer, me], headSeq: 0, readSeq: 0, unread: false, lockState: "people_only",
+                            lastActivityAt: nowMs(), myRole: "owner", muted: false, silenced: false)
+        peopleChats.insert(dm, at: 0)
+        messages[id] = []
+        caughtUp.insert(id)
+        if navigate { path = [.chat(chatId: id, projectId: peopleSlot)] }
+        return dm
+    }
+
     func fixtureAppend(chatId: Id, text: String, attachments: [Attachment], replyTo: Id? = nil,
                        forwardedFrom: String? = nil) {
         var list = messages[chatId] ?? []
@@ -514,6 +651,23 @@ extension AppModel {
             list[i].parts = [.text(id: "\(list[i].id)-t", text: "Got it.")]
         }
         list.append(assistant(newId(), chatId, text, at: nowMs()))
+        messages[chatId] = list
+    }
+
+    /// Rig (`ARBOS_SHOW=table`): Jacob's "Find me a book store in lima" turn as agentd
+    /// wrote it on 2026-10-25 — the ask, then the three `send_message` bubbles (conclusion,
+    /// GFM table of linked stores, details) — for the table renderer's shots.
+    func fixtureLimaReply(chatId: Id, bubbles: Int = AppModel.limaReply.count) {
+        var list = messages[chatId] ?? []
+        if let i = list.lastIndex(where: { $0.isStreaming }) {
+            list[i].status = .done
+            list[i].parts = [.text(id: "\(list[i].id)-t", text: "Got it.")]
+        }
+        let t = nowMs()
+        list.append(user(newId(), chatId, "Find me a book store in lima", at: t))
+        for (i, text) in AppModel.limaReply.prefix(bubbles).enumerated() {
+            list.append(assistant(newId(), chatId, text, at: t + Int64(1_000 * (i + 1))))
+        }
         messages[chatId] = list
     }
 
@@ -564,6 +718,90 @@ extension AppModel {
 
     Rows are keyed by `{msg}#{part}.{block}` and re-spliced only when their bytes change.
     """
+
+    /// Rig (`ARBOS_SHOW=math`): Jacob's "write bubble sort" turn (2026-10-26 10:50, his Mac
+    /// screenshot) — a Python code card, then prose with inline TeX — for the math renderer's shots.
+    func fixtureBubbleSortReply(chatId: Id) {
+        var list = messages[chatId] ?? []
+        if let i = list.lastIndex(where: { $0.isStreaming }) {
+            list[i].status = .done
+            list[i].parts = [.text(id: "\(list[i].id)-t", text: "Got it.")]
+        }
+        let t = nowMs()
+        list.append(user(newId(), chatId, "write bubble sort in python", at: t))
+        list.append(assistant(newId(), chatId, AppModel.bubbleSortReply, at: t + 1_000))
+        messages[chatId] = list
+    }
+
+    /// The reply to "write bubble sort in python" from Jacob's 2026-10-26 screenshot, byte for
+    /// byte (the Mac fixture's `ARBOS_FIXTURE_REPLY=math`): `$O(n^2)$` rendered as raw text.
+    static let bubbleSortReply = """
+    Here is a standard implementation of bubble sort in Python:
+
+    ```python
+    def bubble_sort(arr):
+        n = len(arr)
+        for i in range(n):
+            swapped = False
+            for j in range(0, n - i - 1):
+                if arr[j] > arr[j + 1]:
+                    arr[j], arr[j + 1] = arr[j + 1], arr[j]
+                    swapped = True
+            # If no two elements swapped, list is already sorted
+            if not swapped:
+                break
+        return arr
+
+    # Example usage:
+    items = [64, 34, 25, 12, 22, 11, 90]
+    print(bubble_sort(items))  # Output: [11, 12, 22, 25, 34, 64, 90]
+    ```
+
+    It runs in $O(n^2)$ time in the worst and average cases, and $O(n)$ time when the array is already sorted thanks to the `swapped` flag. Space complexity is $O(1)$.
+    """
+
+    /// Rig (`ARBOS_SHOW=links`): Jacob's "Read the latest from the New York post" turn — seven
+    /// linked headlines as bullets, then one line of prose — for the link icons' shots.
+    func fixtureNYPostReply(chatId: Id) {
+        var list = messages[chatId] ?? []
+        if let i = list.lastIndex(where: { $0.isStreaming }) {
+            list[i].status = .done
+            list[i].parts = [.text(id: "\(list[i].id)-t", text: "Got it.")]
+        }
+        let t = nowMs()
+        list.append(user(newId(), chatId, "Read the latest from the New York post", at: t))
+        list.append(assistant(newId(), chatId, AppModel.nyPostReply, at: t + 1_000))
+        messages[chatId] = list
+    }
+
+    /// The reply to "Read the latest from the New York post" (agent Bubble, 2026-10-25, Jacob's
+    /// screenshot), byte for byte in shape (the Mac fixture's `ARBOS_FIXTURE_REPLY=links`).
+    static let nyPostReply = """
+    - [Syringe attack: lawyer claims mistaken identity](https://nypost.com/2026/10/25/us-news/syringe-attack-lawyer-claims-mistaken-identity/)
+    - [Arrest story: a second Jewish victim minutes earlier](https://nypost.com/2026/10/25/us-news/arrest-story-second-jewish-victim-minutes-earlier/)
+    - [Ex-NYPD cop charged in a George Washington Bridge killing, free on $1M bail](https://nypost.com/2026/10/25/us-news/ex-nypd-cop-charged-in-gw-bridge-killing-free-on-1m-bail/)
+    - [Thomas Markle home search, child pornography, Philippine official’s comment](https://nypost.com/2026/10/25/world-news/thomas-markle-home-search-philippine-official-comment/)
+    - [Musk says SpaceX cut Ukraine’s Starlink access](https://nypost.com/2026/10/25/business/musk-says-spacex-cut-ukraines-starlink-access/)
+    - [Giants beat the Texans in overtime in J. J. McCarthy’s first start](https://nypost.com/2026/10/25/sports/giants-beat-texans-in-overtime-mccarthy-first-start/)
+    - [McCarthy’s wife after that win](https://nypost.com/2026/10/25/sports/mccarthys-wife-after-that-win/)
+
+    No times or bylines were on the page text I read. Want one of these opened?
+    """
+
+    /// The reply to "Find me a book store in lima" (agent Bubble, 2026-10-25 21:31 UTC),
+    /// one string per bubble, byte for byte (the Mac fixture's `ARBOS_FIXTURE_REPLY=table`).
+    static let limaReply: [String] = [
+        "Go to Librería El Virrey in Miraflores. Their site lists Sunday hours as 11am–7pm, so it should still be open this afternoon.",
+        """
+        | Store | Area | Sunday | What they sell |
+        | --- | --- | --- | --- |
+        | [Librería El Virrey](https://www.elvirrey.com/) | Miraflores, Calle Bolognesi 510 | 11am–7pm | Spanish literature, essays, history, art; some English at a higher price |
+        | [Communitas](https://www.communitas.pe/) | San Isidro, Av. 2 de Mayo 1690 | 10:30am–7:30pm | Humanities, literature, law, history, science, in Spanish |
+        | [Vallejo Librería Café](https://www.tangol.com/blog/en/the-3-best-bookstores-in-lima/n-15210) | San Isidro, Av. Camino Real 1119 | not listed | Books plus coffee or tea |
+        | [Assouline Lima](https://www.assouline.com/pages/store/lima) | Miraflores, street not listed | not listed | Luxury and design books |
+        """,
+        "El Virrey’s phone is (511) 713 0505. Their own page says the shop dates to late 1973; a travel write-up said 1972. Communitas is the other store with Sunday hours on its site, but it is in San Isidro, not Miraflores, and the page does not clearly say it is a walk-in shop, so check before you go. Vallejo is a bookstore-café; I only have a travel blog for it, and hours were not listed. Assouline is a luxury boutique, not a general bookstore. La Casa de Kanu in Barranco was called a favorite on an expat guide, but I have no street address or hours.\n\nHours were not checked on a second source, and I did not confirm anyone is open right now. No used-book shop and no central Lima store made this list with an address I could verify.\n\nWant me to check whether El Virrey is open right now, or look for an English-language shop?",
+    ]
 
     /// The shape of Jacob's Oct 23 screenshot — a heading, bold labels and bullets over
     /// twenty-odd lines (the Mac fixture's `ARBOS_FIXTURE_REPLY=long` carries the same text).
@@ -711,6 +949,42 @@ extension AppModel {
         return Message(id: id, chatId: chat, role: .assistant, sender: "agent", status: .done, turn: .reply, decision: "approval", subagentId: nil,
                        subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: at, completedAt: at, pending: false,
                        parts: [DocJSON.part(pm)], hiddenCount: 0)
+    }
+
+    /// Secret hand-off: the request card (`payload.kind = secret_offer`, no value field).
+    private func secretOfferCard(_ id: Id, _ chat: Id, saved: Bool, at: Int64) -> Message {
+        var pm: [String: Any] = [
+            "id": "\(id)-ap", "kind": "approval", "approvalId": "\(id)-approval", "state": saved ? "approved" : "pending",
+            "title": "Give Comms a secret", "risk": "credential", "summary": "the refunds report",
+            "payload": ["kind": "secret_offer", "name": "STRIPE_KEY", "purpose": "the refunds report", "agent": "Comms",
+                        "projectId": "fx-comms", "chatId": chat, "answers": []],
+        ]
+        if saved { pm["decidedBy"] = "user:fx-me"; pm["decidedAt"] = at + 60_000 }
+        return Message(id: id, chatId: chat, role: .assistant, sender: "agent", status: .done, turn: .reply, decision: "approval", subagentId: nil,
+                       subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: at, completedAt: at, pending: false,
+                       parts: [DocJSON.part(pm)], hiddenCount: 0)
+    }
+
+    /// Secret hand-off: the offer card for a pasted key (A save / B leave; optional).
+    private func secretDetectedCard(_ id: Id, _ chat: Id, at: Int64) -> Message {
+        let pm: [String: Any] = [
+            "id": "\(id)-ap", "kind": "approval", "approvalId": "\(id)-approval", "state": "pending",
+            "title": "That looks like a key. Save it to your vault as STRIPE_KEY and remove it from this chat?",
+            "risk": "credential", "summary": "Nothing is saved until you choose.",
+            "payload": ["kind": "secret_detected", "optional": true, "name": "STRIPE_KEY", "agent": "Comms",
+                        "chatId": chat, "messageId": "h3",
+                        "answers": [["id": "save", "label": "Save as STRIPE_KEY and remove"], ["id": "deny", "label": "Leave it here"]]],
+        ]
+        return Message(id: id, chatId: chat, role: .assistant, sender: "agent", status: .done, turn: .reply, decision: "approval", subagentId: nil,
+                       subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: at, completedAt: at, pending: false,
+                       parts: [DocJSON.part(pm)], hiddenCount: 0)
+    }
+
+    /// Secret hand-off: a user row whose value went into the vault — the ghost.
+    private func secretGhost(_ id: Id, _ chat: Id, name: String, at: Int64) -> Message {
+        Message(id: id, chatId: chat, role: .user, sender: "user", status: .done, turn: nil, decision: nil, subagentId: nil,
+                subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: at, completedAt: at, pending: false,
+                parts: [.secretRedacted(id: "\(id)-r", name: name, savedBy: "user:fx-me", agent: "fx-comms")], hiddenCount: 0)
     }
 
     private func stopped(_ id: Id, _ chat: Id, at: Int64) -> Message {

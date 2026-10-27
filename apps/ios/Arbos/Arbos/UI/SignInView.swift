@@ -117,10 +117,7 @@ struct SignInView: View {
                                         .foregroundStyle(theme.text)
                                 }
                             }
-                            .padding(.horizontal, 16)
-                            .frame(height: 50)
-                            .background(RoundedRectangle(cornerRadius: 25, style: .continuous).fill(theme.field))
-                            .overlay(RoundedRectangle(cornerRadius: 25, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                            .controlField()
                             Text("Self-hosting? Point the app at your own relay. Relays in pairing-code mode show a code field here.")
                                 .font(theme.font(Theme.tiny))
                                 .foregroundStyle(theme.muted)
@@ -188,10 +185,7 @@ struct PairingFields: View {
                         if digits != new || digits.count > 6 { code = String(digits.prefix(6)) }
                     }
             }
-            .padding(.horizontal, 16)
-            .frame(height: 50)
-            .background(RoundedRectangle(cornerRadius: 25, style: .continuous).fill(theme.field))
-            .overlay(RoundedRectangle(cornerRadius: 25, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+            .controlField()
             Button {
                 model.pair(code: code)
             } label: {

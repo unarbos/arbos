@@ -107,6 +107,8 @@ commands:  List<Map { id, kind, payload, issuedBy, issuedAt, status }>
 | `createdAt` / `completedAt` | i64 ms | |
 | `parts` | List\<Map\> | ordered parts |
 | `inReplyTo` | string? | assistant reply link |
+| `replyTo` | string? | user reply link to a row **in this chat** (the quote header) |
+| `replyRef` | Map? | **Reply in DM** (cross-chat reply): `{ chatId, projectId ("people" for DMs/groups), messageId, chatTitle, sender, senderName, senderHandle, text }` — the address of the quoted row plus a ≤ 240-char snapshot, so a reader who is not in the source chat still sees the quote. Written by `ChatDoc::set_reply_ref` (core `ReplyRef`); clients draw "Replying to `senderName` in `chatTitle`" + the quote, and make it a link only when the viewer is a member of `chatId`. agentd quotes the snapshot in the user turn. A row carries `replyTo` **or** `replyRef`, never both. |
 | `activity` | string? | plain-words working line while streaming |
 | `waitingUser` | bool? | open question |
 | `answersQuestionId` | string? | user answer row |

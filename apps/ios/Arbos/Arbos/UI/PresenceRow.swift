@@ -17,6 +17,10 @@ struct PresenceParticipant: Identifiable {
     let name: String
     let activity: PresenceActivity
     let picture: AnyView
+    /// The profile the picture opens (`ProfileToggle`, [feedback
+    /// profile-pane-toggle-ios-2026-10-26]): the person or the agent; `nil`
+    /// for a face the chat cannot name, which stays inert.
+    var target: ProfileTarget? = nil
 }
 
 /// The row's words, shared with the tests. Same rules as the Mac
@@ -68,21 +72,29 @@ struct PresenceRow: View {
     var onTasks: (() -> Void)? = nil
     /// Job tabs: a tap on the words opens the newest job's tab (the chip keeps the list).
     var onWords: (() -> Void)? = nil
+    /// A tap on a picture: the one profile action (`AppModel.toggleProfile`); the
+    /// label beside it says what the tap does ("Open Sam's profile" / "Close profile").
+    var onPicture: ((ProfileTarget) -> Void)? = nil
+    var pictureShowing: ((ProfileTarget) -> Bool)? = nil
 
-    /// Round picture size: the avatar column's disc — the sender's picture beside a
-    /// people-chat bubble, centred on the composer's `+` (`Theme.memberAvatar`).
-    static let avatar: CGFloat = Theme.memberAvatar
-    /// Where the first picture starts inside the 16 pt chat edge (= the `+` column,
-    /// which moves with the keyboard — read from the environment).
+    /// Round picture size: Grok's status-row picture ([feedback
+    /// iphone-composer-grok-parity-2026-10-25]: 76 px — smaller than the `+` disc, no
+    /// longer the bubble's 42 pt disc).
+    static let avatar: CGFloat = Theme.presenceAvatar
+    /// Where the first picture starts inside the 16 pt chat edge: 6 pt inside the `+`
+    /// disc's left edge, which moves with the keyboard — read from the environment.
     @Environment(\.composerInset) private var composerInset
-    var inset: CGFloat { Theme.avatarColumnInset(composerInset: composerInset) }
+    var inset: CGFloat { Theme.presenceInset(composerInset: composerInset) }
     /// How far each further picture tucks under the one before it.
     static let overlap: CGFloat = 8
-    /// Pictures → text: the picture → bubble gap, so the text starts where the bubble body starts.
-    static let gap: CGFloat = Theme.memberAvatarGap
+    /// Pictures → text: Grok's 42 px.
+    static let gap: CGFloat = Theme.presenceGap
     /// Pictures shown before "+N".
     static let maxPictures = 3
-    static let height: CGFloat = avatar + 6
+    /// The row is exactly the picture tall; ChatView adds Grok's 68 px below it.
+    static let height: CGFloat = avatar
+    /// The words: Grok's 17 pt body, muted.
+    static let textSize: CGFloat = Theme.body
 
     /// One line. Alone, a participant keeps the full display name; from two on,
     /// first names ("Mira and Sam are typing…"), so the line stays one line.
@@ -111,6 +123,19 @@ struct PresenceRow: View {
         Circle().strokeBorder(theme.bg, lineWidth: 1).padding(-1)
     }
 
+    /// The face as a profile target when the row can name it and the chat
+    /// handed over the action; a plain picture otherwise.
+    @ViewBuilder
+    private func picture(_ p: PresenceParticipant) -> some View {
+        if let target = p.target, let onPicture {
+            Button { onPicture(target) } label: { p.picture }
+                .buttonStyle(.plain)
+                .accessibilityLabel(ProfileToggle.label(name: p.name, showing: pictureShowing?(target) ?? false))
+        } else {
+            p.picture
+        }
+    }
+
     private var shown: [PresenceParticipant] { Array(participants.prefix(Self.maxPictures)) }
     private var more: Int { max(0, participants.count - Self.maxPictures) }
 
@@ -120,7 +145,7 @@ struct PresenceRow: View {
                 // The picture is the bubble picture's exact box; with several, a ring in
                 // the page colour sits just *outside* each one so the overlaps read.
                 ForEach(shown) { p in
-                    p.picture
+                    picture(p)
                         .frame(width: Self.avatar, height: Self.avatar)
                         .clipShape(Circle())
                         .overlay { if participants.count > 1 { ring } }
@@ -139,7 +164,7 @@ struct PresenceRow: View {
                 }
             }
             .frame(height: Self.avatar)
-            WorkingStatusText(text: shownText, color: queued ? theme.warn : theme.muted)
+            WorkingStatusText(text: shownText, color: queued ? theme.warn : theme.muted, size: Self.textSize)
                 .lineLimit(1)
                 .id(shownText)
                 .contentShape(Rectangle())

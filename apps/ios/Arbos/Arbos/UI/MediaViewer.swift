@@ -1,3 +1,4 @@
+import ArbosFFI
 import AVKit
 import Photos
 import QuickLook
@@ -28,6 +29,13 @@ struct MediaItem: Identifiable, Equatable {
     /// Who shared it ("Samir Haddad", "You", the agent's name).
     var by: String
     var at: Int64
+    /// A profile picture (Jacob, 2026-10-25: tap the hero to view it): fetched from this URL
+    /// instead of a chat blob — no Download / Forward, and `caption` under the name.
+    var pictureURL: String? = nil
+    var caption: String? = nil
+
+    /// The line under the name: the caption of a profile picture, else when it was shared.
+    var subline: String { caption ?? whenLabel }
 
     /// "Today at 2:14 PM", "Yesterday at 9:03 AM", "Oct 12 at 4:40 PM".
     var whenLabel: String {
@@ -94,6 +102,12 @@ enum MediaAlbum {
         if m.sender.hasPrefix("agent:"), let n = projectName(String(m.sender.dropFirst(6))) { return n }
         if m.sender.hasPrefix("project:"), let n = projectName(String(m.sender.dropFirst(8))) { return n }
         return m.role == .assistant ? "Agent" : "You"
+    }
+
+    /// `name`'s profile picture at `url`, as a one-page album (Jacob, 2026-10-25).
+    static func picture(name: String, url: String) -> MediaItem {
+        MediaItem(id: "picture#\(url)", name: "Profile picture", mime: "image/jpeg", kind: .image, blobRef: nil, slot: "",
+                  by: name, at: 0, pictureURL: url, caption: "Profile picture")
     }
 
     /// The "Forwarded from <name>" line a forwarded attachment travels with (Mac
@@ -175,6 +189,11 @@ struct MediaViewer: View {
         .onAppear {
             if openForward { showForward = true }
             if openDownload { Task { await download() } }
+            #if DEBUG
+            if let ms = DebugHooks.viewerCloseMs {
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(ms)) { close() }
+            }
+            #endif
         }
         .sheet(isPresented: $showForward) {
             if let item {
@@ -233,7 +252,7 @@ struct MediaViewer: View {
             if let item {
                 VStack(spacing: 2) {
                     Text(item.by).font(theme.font(15, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
-                    Text(item.whenLabel).font(theme.font(13)).foregroundStyle(.white.opacity(0.67)).lineLimit(1)
+                    Text(item.subline).font(theme.font(13)).foregroundStyle(.white.opacity(0.67)).lineLimit(1)
                 }
             }
 
@@ -279,12 +298,15 @@ struct MediaViewer: View {
                 // Close beside Download / Forward — same as Mac; always exits even
                 // when swipe-down or the top × lose the gesture race with zoom/paging.
                 pill("Close", system: "xmark") { close() }
-                pill("Download", system: "arrow.down.to.line") { Task { await download() } }
-                    .disabled(!canAct || busy)
-                    .opacity(canAct ? 1 : 0.5)
-                pill("Forward", system: "arrowshape.turn.up.right") { showForward = true }
-                    .disabled(!canAct || busy)
-                    .opacity(canAct ? 1 : 0.5)
+                // A profile picture is not a chat attachment: Close only.
+                if item?.pictureURL == nil {
+                    pill("Download", system: "arrow.down.to.line") { Task { await download() } }
+                        .disabled(!canAct || busy)
+                        .opacity(canAct ? 1 : 0.5)
+                    pill("Forward", system: "arrowshape.turn.up.right") { showForward = true }
+                        .disabled(!canAct || busy)
+                        .opacity(canAct ? 1 : 0.5)
+                }
             }
             .padding(.bottom, 14)
         }
@@ -442,7 +464,7 @@ private struct ZoomableImagePage: View {
                 }
             }
         }
-        .task(id: item.blobRef) {
+        .task(id: item.blobRef ?? item.pictureURL) {
             if let (data, _) = await MediaFetch.bytes(for: item, model: model), let img = UIImage(data: data) {
                 image = img
             } else {
@@ -706,6 +728,12 @@ enum MediaFetch {
     /// in the simulator fixture — a generated picture / PDF for `fixture-*` keys.
     @MainActor
     static func bytes(for item: MediaItem, model: AppModel) async -> (Data, String)? {
+        // A profile picture: its public URL (the relay's `/avatars/…`, GitHub's CDN, or a
+        // tokened blob URL) — never with the device bearer, which must not reach another host.
+        if let picture = item.pictureURL {
+            guard let url = URL(string: picture), url.scheme?.hasPrefix("http") == true else { return nil }
+            return await data(url, headers: [:])
+        }
         guard let ref = item.blobRef, !ref.hasPrefix("local:") else { return nil }
         #if DEBUG
         if model.isFixture, ref.hasPrefix("fixture-") {
@@ -761,7 +789,7 @@ struct BlobImage: View {
                 ProgressView().tint(theme.muted)
             }
         }
-        .task(id: item.blobRef) {
+        .task(id: item.blobRef ?? item.pictureURL) {
             if let (data, _) = await MediaFetch.bytes(for: item, model: model), let img = UIImage(data: data) {
                 image = img
             } else {
@@ -779,6 +807,8 @@ enum FixtureMedia {
         switch item.kind {
         case .image where item.name.contains("Screenshot"):
             return pagePNG().map { ($0, "image/png") }
+        case .image where item.name.hasPrefix("IMG_"):
+            return phoneShotPNG().map { ($0, "image/png") }
         case .image:
             return png(seed: ref).map { ($0, "image/png") }
         case .file:
@@ -826,6 +856,46 @@ enum FixtureMedia {
         return img.pngData()
     }
 
+    /// A 390 × 844 portrait "phone screenshot": dark chat page with a header pill and a
+    /// few bubbles — the tall picture of [feedback image-caption-bubble-ios-2026-10-25],
+    /// whose caption must not wrap at the picture's ~150 pt fitted width.
+    private static func phoneShotPNG() -> Data? {
+        let (w, h) = (390, 844)
+        let img = UIGraphicsImageRenderer(size: CGSize(width: w, height: h), format: {
+            let f = UIGraphicsImageRendererFormat(); f.scale = 1; return f
+        }()).image { ctx in
+            let cg = ctx.cgContext
+            func fillPath(_ path: UIBezierPath) { cg.addPath(path.cgPath); cg.fillPath() }
+            cg.setFillColor(UIColor(white: 0.07, alpha: 1).cgColor); cg.fill(CGRect(x: 0, y: 0, width: w, height: h))
+            // Status bar + header pill.
+            cg.setFillColor(UIColor(white: 0.9, alpha: 1).cgColor)
+            cg.fill(CGRect(x: 32, y: 22, width: 36, height: 12))
+            cg.setFillColor(UIColor(white: 0.16, alpha: 1).cgColor)
+            fillPath(UIBezierPath(roundedRect: CGRect(x: 110, y: 62, width: 170, height: 44), cornerRadius: 22))
+            // Bubbles: three incoming on the left, two outgoing on the right.
+            let rows: [(CGFloat, CGFloat, CGFloat, Bool)] = [(150, 230, 70, false), (236, 180, 48, false), (300, 210, 92, true),
+                                                              (408, 250, 120, false), (544, 160, 48, true), (608, 240, 96, false)]
+            for (y, bw, bh, mine) in rows {
+                let x: CGFloat = mine ? CGFloat(w) - 18 - bw : 18
+                cg.setFillColor((mine ? UIColor(white: 0.32, alpha: 1) : UIColor(white: 0.14, alpha: 1)).cgColor)
+                fillPath(UIBezierPath(roundedRect: CGRect(x: x, y: y, width: bw, height: bh), cornerRadius: 18))
+                cg.setFillColor(UIColor(white: mine ? 0.85 : 0.6, alpha: 1).cgColor)
+                var ly = y + 16
+                while ly + 8 < y + bh - 10 {
+                    cg.fill(CGRect(x: x + 14, y: ly, width: bw - 28 - CGFloat((Int(ly) * 7) % 40), height: 8))
+                    ly += 20
+                }
+            }
+            // Composer.
+            cg.setFillColor(UIColor(white: 0.14, alpha: 1).cgColor)
+            fillPath(UIBezierPath(roundedRect: CGRect(x: 70, y: CGFloat(h) - 86, width: 240, height: 52), cornerRadius: 26))
+            fillPath(UIBezierPath(ovalIn: CGRect(x: 14, y: CGFloat(h) - 86, width: 52, height: 52)))
+            cg.setFillColor(UIColor.white.cgColor)
+            fillPath(UIBezierPath(ovalIn: CGRect(x: CGFloat(w) - 66, y: CGFloat(h) - 86, width: 52, height: 52)))
+        }
+        return img.pngData()
+    }
+
     private static func pdf(title: String) -> Data {
         let page = CGRect(x: 0, y: 0, width: 612, height: 792)
         return UIGraphicsPDFRenderer(bounds: page).pdfData { ctx in
@@ -858,10 +928,10 @@ struct ShareFile: Identifiable, Equatable {
 
 extension AppModel {
     /// The chats the Forward sheet offers: every DM, group and agent that is
-    /// not archived, most recent first, filtered by `query`. Channels are left
-    /// out — they carry no attachments yet (Matrix `m.text`).
+    /// not archived, through the shared matcher on title, @handle and kind line
+    /// (`EntitySearch`), best match first and most recent inside a tie.
+    /// Channels are left out — they carry no attachments yet (Matrix `m.text`).
     func forwardTargets(matching query: String) -> [ForwardTarget] {
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         var out: [ForwardTarget] = []
         for c in peopleChats where !isArchived(peopleChatId: c.id) {
             let title: String
@@ -883,10 +953,13 @@ extension AppModel {
             let at = chats(of: p.id).map(\.lastMessageAt).max() ?? 0
             out.append(ForwardTarget(id: "p:\(p.id)", kind: .agent(p), title: p.name, subtitle: "Agent", activity: at))
         }
-        if !q.isEmpty {
-            out = out.filter { $0.title.lowercased().contains(q) || $0.subtitle.lowercased().contains(q) }
+        out.sort { $0.activity > $1.activity }
+        return EntitySearch.filter(out, query: query) { t in
+            if t.subtitle.hasPrefix("@") {
+                return SearchCandidate(name: t.title, handle: String(t.subtitle.dropFirst()), title: nil)
+            }
+            return SearchCandidate(name: t.title, handle: "", title: t.subtitle)
         }
-        return out.sorted { $0.activity > $1.activity }
     }
 
     /// Forward a viewer item: fetch its bytes, then send them to `target` as a

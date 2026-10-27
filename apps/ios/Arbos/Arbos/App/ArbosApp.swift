@@ -10,6 +10,8 @@ struct ArbosApp: App {
         WindowGroup {
             RootView()
                 .environmentObject(model)
+                // The code-card grammars load off the main thread at launch.
+                .task { CodeHighlight.warm() }
         }
     }
 }
@@ -194,10 +196,9 @@ struct MainShellView: View {
     }
 }
 
-/// The profile sheet: one page, or — for pages whose member rows open people —
-/// a NavigationStack rooted on it so a tapped member is pushed and its back
-/// chevron (the page's own `ProfileTopBar`) pops to the page as it was. The
-/// agent page brings its own NavigationStack and so stays a plain root.
+/// The profile sheet: a NavigationStack rooted on the page so a tapped member
+/// (or an agent's owner) is pushed and its back chevron (the page's own
+/// `ProfileTopBar`) pops to the page as it was.
 private struct ProfileSheet: View {
     @EnvironmentObject private var model: AppModel
     let target: ProfileTarget

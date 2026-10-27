@@ -41,8 +41,8 @@ final class AgentIdentityTests: XCTestCase {
     /// The core rule through the FFI, as a table: id wins, then handle, then the row's own name.
     func testResolverTable() {
         let cards = [
-            AgentCard(id: "01TEST", name: "TestAgent", handle: "testagent", leaf: 3, leafColor: 7, colorIndex: nil, imageKey: "avatar-1.jpg"),
-            AgentCard(id: "01HOME", name: "Home", handle: "home", leaf: nil, leafColor: nil, colorIndex: nil, imageKey: nil),
+            AgentCard(id: "01TEST", name: "TestAgent", handle: "testagent", leaf: 3, leafColor: 7, colorIndex: nil, imageKey: "avatar-1.jpg", avatarVersion: 0),
+            AgentCard(id: "01HOME", name: "Home", handle: "home", leaf: nil, leafColor: nil, colorIndex: nil, imageKey: nil, avatarVersion: 0),
         ]
         let byId = resolveAgent(sender: "agent:01TEST", handle: "old", name: "Old Name", cards: cards)
         XCTAssertEqual(byId.name, "TestAgent")

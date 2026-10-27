@@ -3,13 +3,14 @@
 //! sheets, menu rows, and the centered sheet scaffold every modal uses.
 
 use gpui::{
-    div, prelude::*, px, Div, ElementId, FontWeight, Global, InteractiveElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, Pixels, Point, SharedString, Stateful, Window,
-    WindowControlArea,
+    div, prelude::*, px, AnyElement, BoxShadow, Div, ElementId, FontWeight, Global,
+    InteractiveElement, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, SharedString,
+    Stateful, Window, WindowControlArea,
 };
 
-use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
+use crate::ui::frost::{frosted, frosted_always, MENU_BLUR, PANEL_BLUR};
 use crate::ui::icons::icon;
+use crate::ui::profiles::kit;
 use crate::ui::theme::{Theme, CONTROL, PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
 /// Drag this region to move the window.
@@ -124,6 +125,75 @@ pub fn control_disc(
         .child(icon(glyph, glyph_size, theme.text))
 }
 
+/// What a chat-header control is made of ([feedback mac-header-glass-2026-10-25],
+/// [feedback mac-header-pill-glass-matte-2026-10-26]; the iPhone's
+/// `HeaderGlassBackground`).
+///
+/// Jacob's reference is Grok Bot's header: frosted pills, the transcript
+/// visibly blurred through them, a light rim — over a flat dark background.
+/// #1830 gave the header that frost on Glass and left Matte solid; Jacob's
+/// Mac is on Matte, so he still saw a flat `bubble_assistant` pill
+/// (2026-10-26). The header pill and disc are frosted glass on BOTH surfaces
+/// now: Matte means no window vibrancy, not a flat header. Nothing else of
+/// the glass restyle moves with it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HeaderStyle {
+    /// White-alpha over a dark underlay (dark), a translucent white or grey
+    /// (light): the list shows through.
+    pub fill: gpui::Hsla,
+    /// The 1 pt light rim.
+    pub rim: gpui::Hsla,
+    /// The specular line along the top edge.
+    pub highlight: gpui::Hsla,
+}
+
+#[cfg(test)]
+impl HeaderStyle {
+    /// Frosted glass: a see-through fill with a visible rim. Read by the
+    /// tests on every chat kind × surface × appearance.
+    pub fn is_frosted(&self) -> bool {
+        self.fill.a < 1.0 && self.rim.a > 0.0
+    }
+}
+
+/// The pure part of a header control's look, for the tests.
+pub fn header_style(theme: &Theme) -> HeaderStyle {
+    HeaderStyle {
+        fill: theme.header_glass(),
+        rim: theme.header_glass_rim(),
+        highlight: theme.header_glass_highlight(),
+    }
+}
+
+/// Fill a header control (the name pill, the header disc): the glass fill,
+/// an inset 1 pt rim, a 1 pt specular line along the top edge and a 1 pt
+/// lift — the "glass plate" of `docs/glass-surface-directions.md` — on Glass
+/// and on Matte alike.
+pub fn header_surface<E: Styled>(el: E, theme: &Theme) -> E {
+    let style = header_style(theme);
+    el.bg(style.fill).shadow(vec![
+        BoxShadow::new(px(0.0), px(0.0), style.rim)
+            .spread_radius(px(1.0))
+            .inset(),
+        BoxShadow::new(px(0.0), px(1.0), style.highlight).inset(),
+        BoxShadow::new(px(0.0), px(1.0), gpui::hsla(0.0, 0.0, 0.0, 0.28)).blur_radius(px(3.0)),
+    ])
+}
+
+/// The blur under a header control ([feedback
+/// mac-header-pill-see-through-2026-10-26]): light enough that a line of
+/// transcript scrolling under the pill stays legible through it — Grok Bot's
+/// pill softens the text behind, it does not erase it. The menus' 16 pt
+/// (`MENU_BLUR`) turned it to mush, and with nothing behind it the pill then
+/// read as a solid chip (Jacob's 14:15 CR shot of v0.6.275).
+pub const HEADER_BLUR: f32 = 5.0;
+
+/// Blur the list under a header control (its rounded bounds), whatever the
+/// surface.
+pub fn header_frost(radius: f32, el: impl IntoElement) -> AnyElement {
+    frosted_always(radius, HEADER_BLUR, el).into_any_element()
+}
+
 /// A glass circle: field fill at 85 %, hairline rim. Content centred.
 pub fn circle(id: impl Into<ElementId>, size: f32, theme: &Theme) -> Stateful<Div> {
     div()
@@ -224,39 +294,37 @@ pub fn group(theme: &Theme) -> Div {
 /// One row in a grouped card: label left, value right. Not interactive.
 pub fn row(label: impl Into<SharedString>, theme: &Theme) -> Div {
     // The pane kit's metrics (profiles::kit): 48 pt rows, 16 pt inset. The
-    // hairline hangs 1 pt below the row like `kit::row`'s: between rows it
-    // lands on the next row's first pixel, under the last row the card's clip
-    // swallows it. A bottom border inside the row drew a stray line under a
-    // one-row card (Settings › Notifications, Jacob Oct 21).
+    // hairline is the kit's one divider, hung 1 pt below the row: between
+    // rows it lands on the next row's first pixel, under the last row the
+    // card's clip swallows it. A bottom border inside the row drew a stray
+    // line under a one-row card (Settings › Notifications, Jacob Oct 21).
     div()
         .relative()
         .flex()
         .items_center()
         .gap(px(12.0))
         .min_h(px(48.0))
-        .px(px(16.0))
+        .px(px(kit::INSET))
         .py(px(6.0))
         .text_size(px(TEXT_BODY))
         .text_color(theme.text)
         .child(div().flex_1().min_w_0().child(label.into()))
-        .child(
-            div()
-                .absolute()
-                .left(px(16.0))
-                .right(px(0.0))
-                .bottom(px(-1.0))
-                .h(px(1.0))
-                .bg(theme.border),
-        )
+        .child(kit::hairline_below(theme))
 }
 
 /// Apple-style icon tile for settings rows: 30 px rounded square, muted
 /// monochrome fill, white glyph (D80).
 pub fn icon_tile(glyph: &str, theme: &Theme) -> Div {
+    icon_tile_sized(glyph, 30.0, theme)
+}
+
+/// The settings tile at another size (the palette's 24 pt row picture);
+/// radius and glyph scale with it.
+pub fn icon_tile_sized(glyph: &str, size: f32, theme: &Theme) -> Div {
     div()
-        .size(px(30.0))
+        .size(px(size))
         .flex_shrink_0()
-        .rounded(px(7.5))
+        .rounded(px(size * 0.25))
         .bg(match theme.appearance {
             crate::ui::theme::Appearance::Dark => gpui::Hsla::from(gpui::rgb(0x5c5c60)),
             crate::ui::theme::Appearance::Light => gpui::Hsla::from(gpui::rgb(0x6e6e73)),
@@ -264,7 +332,7 @@ pub fn icon_tile(glyph: &str, theme: &Theme) -> Div {
         .flex()
         .items_center()
         .justify_center()
-        .child(icon(glyph, 15.0, gpui::white()))
+        .child(icon(glyph, size * 0.5, gpui::white()))
 }
 
 /// Segmented choice inside a row: `[Dark] Light`.
@@ -375,19 +443,37 @@ pub fn menu_divider(theme: &Theme) -> Div {
         .bg(theme.border)
 }
 
+/// A floating surface's glass plate on Glass ([feedback
+/// mac-glass-contrast-2026-10-26]): the card tint plus the header's 1 pt rim
+/// and top highlight, over the lift shadow it already had. On Matte the
+/// card keeps its solid fill and plain border.
+pub fn plate<E: Styled>(el: E, theme: &Theme) -> E {
+    let el = el
+        .bg(theme.card())
+        .border_1()
+        .border_color(theme.border_strong);
+    if !theme.is_frost() {
+        return el.shadow_lg();
+    }
+    el.shadow(vec![
+        BoxShadow::new(px(0.0), px(0.0), theme.plate_rim())
+            .spread_radius(px(1.0))
+            .inset(),
+        BoxShadow::new(px(0.0), px(1.0), theme.plate_highlight()).inset(),
+        BoxShadow::new(px(0.0), px(8.0), gpui::hsla(0.0, 0.0, 0.0, 0.28)).blur_radius(px(24.0)),
+    ])
+}
+
 /// A dropdown card under a header control: frosted, rounded, shadowed.
 pub fn menu_card(width: f32, theme: &Theme) -> Div {
-    div()
+    let card = div()
         .w(px(width))
         .flex()
         .flex_col()
         .gap(px(MENU_GAP))
         .p(px(MENU_CARD_PADDING))
-        .rounded(px(PANEL_RADIUS))
-        .bg(theme.card())
-        .border_1()
-        .border_color(theme.border_strong)
-        .shadow_lg()
+        .rounded(px(PANEL_RADIUS));
+    plate(card, theme)
 }
 
 /// Frosted dropdown used by the tab "+" menu and sidebar row menus. Occludes
@@ -418,11 +504,8 @@ pub fn sheet(width: f32, theme: &Theme, header: Div, body: impl IntoElement) -> 
         .max_h_full()
         .flex()
         .flex_col()
-        .rounded(px(PANEL_RADIUS + 6.0))
-        .bg(theme.card())
-        .border_1()
-        .border_color(theme.border_strong)
-        .shadow_lg()
+        .rounded(px(PANEL_RADIUS + 6.0));
+    let card = plate(card, theme)
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(header)
         .child(body);

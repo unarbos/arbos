@@ -64,6 +64,16 @@ pub fn migrate_accounts(c: &Connection) {
         "ALTER TABLE box_history ADD COLUMN archived_at INTEGER",
         // Who may add this person to a people group: anyone | people_i_know | nobody.
         "ALTER TABLE users ADD COLUMN group_add TEXT NOT NULL DEFAULT 'anyone'",
+        // Where `name` came from: `github` (seeded from the profile at first sign-in) or `user`
+        // (set through PATCH /me). Only a user-set name is how agents address the person.
+        "ALTER TABLE users ADD COLUMN name_source TEXT NOT NULL DEFAULT 'github'",
+        // Earlier display names (JSON array), newest last: the box rewrites memory that named
+        // the owner by one of them to "the owner".
+        "ALTER TABLE users ADD COLUMN former_names TEXT NOT NULL DEFAULT '[]'",
+        // Per-user box provider (admin, `PUT /admin/users/{id}/box {"provider"}`): where this
+        // user's NEXT box is created when it differs from ARBOS_DEFAULT_PROVIDER — scratch Daytona
+        // boxes for carry tests on a gVisor-default host (ARB-339). NULL = the relay default.
+        "ALTER TABLE users ADD COLUMN box_provider TEXT",
     ] {
         let _ = c.execute(stmt, []);
     }
@@ -84,6 +94,9 @@ pub struct User {
     /// Made by `POST /admin/users/test`; no GitHub account behind it; deletable.
     pub test: bool,
 }
+
+/// `(login, profile name, address name, former names)` — see `Db::user_address`.
+pub type UserAddress = (Option<String>, Option<String>, Option<String>, Vec<String>);
 
 /// What GitHub tells us about the signed-in account.
 #[derive(Debug, Clone)]
@@ -434,6 +447,28 @@ impl Db {
         Ok(())
     }
 
+    /// How agents address a person: `(login, name, address_name)`. `address_name` is the name the
+    /// user set themselves (PATCH /me); a name seeded from the GitHub profile is a label, not an
+    /// address — "Const" / "Arbos" were GitHub profile names, never how Jacob wanted to be called.
+    pub fn user_address(&self, user_id: &str) -> Result<Option<UserAddress>> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT login, name, name_source, former_names FROM users WHERE id = ?1",
+                params![user_id],
+                |r| {
+                    let login: Option<String> = r.get(0)?;
+                    let name: Option<String> = r.get(1)?;
+                    let source: String = r.get(2)?;
+                    let former: String = r.get(3)?;
+                    let former: Vec<String> = serde_json::from_str(&former).unwrap_or_default();
+                    let address = if source == "user" { name.clone() } else { None };
+                    Ok((login, name, address, former))
+                },
+            )
+            .optional()
+        })
+    }
+
     /// Display name and/or handle (`PATCH /me`). `login` must already be validated and unique.
     /// `None` for a field leaves it unchanged; empty `name` stores NULL (clients show `@handle`).
     pub fn set_user_profile(
@@ -447,13 +482,42 @@ impl Db {
         }
         let name_sql: Option<Option<&str>> =
             name.map(|s| if s.is_empty() { None } else { Some(s) });
+        if let Some(new_name) = name_sql {
+            // The old name joins `former_names` so boxes can retire it from memory.
+            let _ = self.with(|c| {
+                let prev: Option<(Option<String>, String)> = c
+                    .query_row(
+                        "SELECT name, former_names FROM users WHERE id = ?1",
+                        params![user_id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?;
+                if let Some((Some(old), former)) = prev {
+                    let old = old.trim().to_owned();
+                    if !old.is_empty() && Some(old.as_str()) != new_name {
+                        let mut v: Vec<String> = serde_json::from_str(&former).unwrap_or_default();
+                        if !v.iter().any(|x| x == &old) {
+                            v.push(old);
+                        }
+                        c.execute(
+                            "UPDATE users SET former_names = ?2 WHERE id = ?1",
+                            params![
+                                user_id,
+                                serde_json::to_string(&v).unwrap_or_else(|_| "[]".into())
+                            ],
+                        )?;
+                    }
+                }
+                Ok(())
+            });
+        }
         let n = self.with(|c| match (name_sql, login) {
             (Some(name), Some(login)) => c.execute(
-                "UPDATE users SET name = ?2, login = ?3 WHERE id = ?1",
+                "UPDATE users SET name = ?2, login = ?3, name_source = 'user' WHERE id = ?1",
                 params![user_id, name, login],
             ),
             (Some(name), None) => c.execute(
-                "UPDATE users SET name = ?2 WHERE id = ?1",
+                "UPDATE users SET name = ?2, name_source = 'user' WHERE id = ?1",
                 params![user_id, name],
             ),
             (None, Some(login)) => c.execute(
@@ -1149,5 +1213,63 @@ mod box_history_archive_tests {
             db.box_history_to_archive(Some("gh_a"), 2).unwrap(),
             vec![("gh_a".into(), "a-new1".into())]
         );
+    }
+}
+
+#[cfg(test)]
+mod address_name_tests {
+    use super::GithubIdentity;
+    use crate::db::Db;
+
+    /// P0 Bubble "Hello, Const" (2026-10-26): the name GitHub seeded at first sign-in is a label,
+    /// not how the person is addressed. Only a name set through PATCH /me is the address, and
+    /// a later GitHub sign-in must not overwrite it.
+    #[test]
+    fn only_a_user_set_name_is_the_address() {
+        let dir = std::env::temp_dir().join(format!(
+            "arbos-addr-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let db = Db::open(&dir.join("relay.db")).expect("db");
+        let gh = GithubIdentity {
+            id: 32490803,
+            login: "const".into(),
+            avatar_url: None,
+            name: Some("Const".into()),
+        };
+        let (u, created) = db.upsert_github_user(&gh, 20.0).unwrap();
+        assert!(created);
+        let (login, name, address, former) = db.user_address(&u.id).unwrap().unwrap();
+        assert!(former.is_empty());
+        assert_eq!(login.as_deref(), Some("const"));
+        assert_eq!(
+            name.as_deref(),
+            Some("Const"),
+            "the GitHub name is kept as a label"
+        );
+        assert_eq!(address, None, "but it is not an address");
+        db.set_user_profile(&u.id, Some("Jacob"), None).unwrap();
+        let (_, name, address, former) = db.user_address(&u.id).unwrap().unwrap();
+        assert_eq!(name.as_deref(), Some("Jacob"));
+        assert_eq!(address.as_deref(), Some("Jacob"));
+        assert_eq!(
+            former,
+            vec!["Const".to_owned()],
+            "the old label is remembered for the boxes"
+        );
+        // Another GitHub sign-in keeps the user's choice.
+        let (_, _) = db.upsert_github_user(&gh, 20.0).unwrap();
+        let (_, _, address, _) = db.user_address(&u.id).unwrap().unwrap();
+        assert_eq!(address.as_deref(), Some("Jacob"));
+        // Clearing the name clears the address too; the source flips back only on a new name.
+        db.set_user_profile(&u.id, Some(""), None).unwrap();
+        let (_, name, _, former) = db.user_address(&u.id).unwrap().unwrap();
+        assert_eq!(name, None);
+        assert_eq!(former, vec!["Const".to_owned(), "Jacob".to_owned()]);
+        assert!(db.user_address("gh_nobody").unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

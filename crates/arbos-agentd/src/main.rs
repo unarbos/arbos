@@ -5,6 +5,7 @@ mod approval;
 mod attachments;
 mod budget;
 mod channels;
+mod chart;
 mod config;
 mod connectors;
 mod disk;
@@ -12,6 +13,7 @@ mod eval;
 mod feedback;
 mod goals;
 mod groups;
+mod handoff;
 mod harness;
 mod hooks;
 mod http;
@@ -28,16 +30,19 @@ mod memory;
 mod people;
 mod relay_error;
 mod reply;
+mod resources;
 mod responders;
 mod routines;
 mod rpc_child;
 mod selfref;
 mod settings;
+mod silence;
 mod skills;
 mod status;
 mod store;
 mod sync;
 mod tree;
+mod truncate;
 mod vault;
 mod voice;
 mod web;
@@ -342,6 +347,9 @@ async fn boot() -> Result<()> {
     // Disk headroom (#1641): arm the ballast and keep it armed while there is room.
     disk::boot(&cfg.work_root)?;
     disk::spawn_ballast_keeper(cfg.work_root.clone());
+    // Settings → Machine: CPU / memory / disk / network of the box and of every workspace,
+    // sampled every 5 s for `GET /box/state`.
+    resources::start(cfg.work_root.clone());
     let sup = Supervisor::new(cfg.clone());
 
     // Box HTTP (health, per-workspace history/metrics, browser stream) first: the relay's preview

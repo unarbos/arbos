@@ -6,7 +6,9 @@ import UIKit
 /// (❤️ 👍🏽 💪🏽 👎🏻 👌🏾 🤝 🔥 💯 + add-emoji, which raises the system emoji
 /// keyboard) and the message menu (Copy · Reply · Delete, `MessageMenu`) below
 /// it. The Mac's `ui/reactions.rs` is the same capsule behind the hover rail's
-/// smiley.
+/// smiley. The composer keyboard goes down as the overlay opens and the group is
+/// fitted to the visible area by `MessageActionsLayout` (menu flips above the
+/// bubble when there is no room below).
 enum ReactionCapsule {
     /// Quick-react set; anything else comes from the emoji keyboard.
     static var palette: [String] { MessageReaction.palette }
@@ -53,31 +55,57 @@ struct MessageActionsOverlay<Bubble: View>: View {
 
     @State private var pickOpen = false
     @State private var picked = ""
+    /// The bubble's frame when the press landed. The composer's keyboard goes down as
+    /// the overlay opens and the transcript reflows under the blur; the held bubble
+    /// stays where the finger is (iMessage) instead of following that reflow.
+    @State private var pressedFrame: CGRect?
+    @ObservedObject private var keyboard = KeyboardFrameObserver.shared
 
     private var mine: Bool { row.role == .user }
     private var gap: CGFloat { 8 }
     private var menuWidth: CGFloat { 250 }
-    private var menuHeight: CGFloat { CGFloat(items.count) * 44 + (items.contains(.delete) ? 8 : 0) }
+    /// The menu's height is its rows' (the same geometry `menu` draws and hit-tests).
+    private var menuHeight: CGFloat { MessageActionsMenuRows.compute(items: items, width: menuWidth).height }
 
     var body: some View {
-        let groupHeight = ReactionCapsule.height + gap + frame.height + gap + menuHeight
-        let wanted = frame.minY - ReactionCapsule.height - gap
-        let lowest = max(safeTop + 8, height - safeBottom - 8 - groupHeight)
-        let top = min(max(wanted, safeTop + 8), lowest)
-        ZStack(alignment: .topLeading) {
-            Rectangle()
-                .fill(.ultraThinMaterial)
-                .overlay(Color.black.opacity(theme.isDark ? 0.35 : 0.12))
-                .ignoresSafeArea()
-                .onTapGesture { onDismiss() }
-            VStack(alignment: mine ? .trailing : .leading, spacing: gap) {
+        GeometryReader { geo in
+            let bubbleFrame = pressedFrame ?? frame
+            let layout = MessageActionsLayout.compute(.init(
+                bubble: bubbleFrame,
+                capsuleHeight: ReactionCapsule.height,
+                menuHeight: menuHeight,
+                gap: gap,
+                height: height,
+                safeTop: safeTop,
+                safeBottom: safeBottom,
+                keyboardInset: keyboard.inset(overlayFrame: geo.frame(in: .global))
+            ))
+            ZStack(alignment: .topLeading) {
+                Rectangle()
+                    .fill(.ultraThinMaterial)
+                    .overlay(Color.black.opacity(theme.isDark ? 0.35 : 0.12))
+                    .ignoresSafeArea()
+                    .onTapGesture { onDismiss() }
                 capsule
+                    .frame(width: width, alignment: mine ? .trailing : .leading)
+                    .offset(y: layout.capsuleY)
+                    .accessibilityIdentifier("message-actions-capsule")
                 bubble()
                     .frame(width: width)
+                    // Only a bubble taller than the visible area is cut (layout rule 5).
+                    .frame(height: layout.bubbleHeight < bubbleFrame.height ? layout.bubbleHeight : nil, alignment: .top)
+                    .clipped()
+                    .offset(y: layout.bubbleY)
                 menu
+                    .frame(width: width, alignment: mine ? .trailing : .leading)
+                    .offset(y: layout.menuY)
+                    .accessibilityIdentifier("message-actions-menu")
             }
-            .frame(width: width, alignment: mine ? .trailing : .leading)
-            .offset(y: top)
+            .animation(.easeOut(duration: 0.2), value: layout)
+            .onAppear { if pressedFrame == nil { pressedFrame = frame } }
+        }
+        .ignoresSafeArea()
+        .overlay {
             if pickOpen {
                 EmojiKeyboardField(text: $picked) { text in
                     if let emoji = ReactionCapsule.pickedEmoji(text) { onReact(emoji) }
@@ -89,6 +117,13 @@ struct MessageActionsOverlay<Bubble: View>: View {
         .transition(.opacity)
     }
 
+    // Every cell and every menu row is tappable over its WHOLE rect (feedback
+    // iphone-bubble-menu-hit-area-2026-10-26): a `.plain` Button only hit-tests the drawn
+    // glyphs — not `.frame` padding, not a `Spacer`, not a `Color.clear` background — so
+    // taps between the icon and the right edge of a row, or beside an emoji, fell
+    // through. `.contentShape(Rectangle())` over the full frame fixes that; the pressed
+    // highlight comes from `MenuRowButtonStyle` / `CapsuleCellButtonStyle`.
+
     private var capsule: some View {
         HStack(spacing: 0) {
             ForEach(ReactionCapsule.palette, id: \.self) { emoji in
@@ -99,8 +134,9 @@ struct MessageActionsOverlay<Bubble: View>: View {
                         .font(.system(size: ReactionCapsule.emojiSize))
                         .frame(width: ReactionCapsule.cell, height: ReactionCapsule.cell)
                         .background(Circle().fill(held.contains(emoji) ? theme.accent.opacity(0.22) : Color.clear))
+                        .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(CapsuleCellButtonStyle(pressed: theme.text.opacity(0.1)))
                 .accessibilityLabel("React \(emoji)")
             }
             Button {
@@ -116,48 +152,159 @@ struct MessageActionsOverlay<Bubble: View>: View {
                         .offset(x: 4, y: -3)
                 }
                 .frame(width: ReactionCapsule.cell, height: ReactionCapsule.cell)
+                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(CapsuleCellButtonStyle(pressed: theme.text.opacity(0.1)))
             .accessibilityLabel("More emoji")
         }
         .padding(ReactionCapsule.padding)
         .background(Capsule(style: .continuous).fill(theme.card))
         .overlay(Capsule(style: .continuous).strokeBorder(theme.separator, lineWidth: 1))
+        .overlay { hitRectsOverlay(ReactionCapsule.cellFrames) }
         .shadow(color: .black.opacity(0.35), radius: 14, y: 6)
         .padding(.horizontal, 16)
     }
 
     private var menu: some View {
-        VStack(spacing: 0) {
-            ForEach(Array(items.enumerated()), id: \.element) { i, item in
-                if item.isDestructive, i > 0 {
-                    Rectangle().fill(theme.bg.opacity(0.6)).frame(height: 8)
-                }
+        let rows = MessageActionsMenuRows.compute(items: items, width: menuWidth)
+        return VStack(spacing: 0) {
+            ForEach(rows.rows, id: \.item) { row in
                 Button {
-                    onMenu(item)
+                    onMenu(row.item)
                 } label: {
-                    HStack(spacing: 12) {
-                        Image(systemName: item.systemImage)
-                            .font(.system(size: 17))
-                            .frame(width: 22)
-                        Text(item.label).font(theme.font(Theme.body))
-                        Spacer(minLength: 0)
+                    VStack(spacing: 0) {
+                        if row.bandAbove > 0 {
+                            Rectangle().fill(theme.bg.opacity(0.6)).frame(height: row.bandAbove)
+                        }
+                        HStack(spacing: 12) {
+                            Image(systemName: row.item.systemImage)
+                                .font(.system(size: 17))
+                                .frame(width: 22)
+                            Text(row.item.label).font(theme.font(Theme.body))
+                            Spacer(minLength: 0)
+                        }
+                        .foregroundStyle(row.item.isDestructive ? theme.danger : theme.text)
+                        .padding(.horizontal, 16)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(height: MessageActionsMenuRows.rowHeight)
                     }
-                    .foregroundStyle(item.isDestructive ? theme.danger : theme.text)
-                    .padding(.horizontal, 16)
-                    .frame(height: 44)
+                    .frame(width: row.frame.width, height: row.frame.height)
+                    .overlay(alignment: .bottom) {
+                        if row.dividerBelow {
+                            Rectangle().fill(theme.separator)
+                                .frame(height: MessageActionsMenuRows.dividerHeight)
+                                .padding(.leading, MessageActionsMenuRows.dividerInset)
+                        }
+                    }
+                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
-                if i + 1 < items.count, !items[i + 1].isDestructive {
-                    Rectangle().fill(theme.separator).frame(height: 0.5).padding(.leading, 50)
-                }
+                .buttonStyle(MenuRowButtonStyle(pressed: theme.text.opacity(0.08), bandAbove: row.bandAbove))
+                .accessibilityIdentifier("message-menu-\(row.item.label.lowercased().replacingOccurrences(of: " ", with: "-"))")
             }
         }
-        .frame(width: menuWidth)
+        .frame(width: menuWidth, height: rows.height)
         .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(theme.card))
         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(theme.separator, lineWidth: 1))
+        .overlay { hitRectsOverlay(rows.rows.map(\.hitRect)) }
         .shadow(color: .black.opacity(0.35), radius: 14, y: 6)
         .padding(.horizontal, 16)
+    }
+
+    /// Rig only (`ARBOS_HIT_RECTS=1`): strokes each hit rect so a shot shows what a tap reaches.
+    @ViewBuilder
+    private func hitRectsOverlay(_ rects: [CGRect]) -> some View {
+        if DebugHooks.hitRects {
+            ZStack(alignment: .topLeading) {
+                ForEach(Array(rects.enumerated()), id: \.offset) { _, r in
+                    Rectangle()
+                        .strokeBorder(Color.green, lineWidth: 1.5)
+                        .background(Color.green.opacity(0.12))
+                        .frame(width: r.width, height: r.height)
+                        .offset(x: r.minX, y: r.minY)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .allowsHitTesting(false)
+        }
+    }
+}
+
+/// A menu row's pressed state: the label row tints, the destructive band above it does not.
+struct MenuRowButtonStyle: ButtonStyle {
+    let pressed: Color
+    let bandAbove: CGFloat
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(alignment: .bottom) {
+                if configuration.isPressed {
+                    Rectangle().fill(pressed).frame(height: MessageActionsMenuRows.rowHeight)
+                }
+            }
+    }
+}
+
+/// A capsule cell's pressed state: a soft disc under the emoji.
+struct CapsuleCellButtonStyle: ButtonStyle {
+    let pressed: Color
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(Circle().fill(configuration.isPressed ? pressed : Color.clear))
+            .scaleEffect(configuration.isPressed ? 1.12 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
+/// Where the keyboard is on screen, from the moment the app starts, so the
+/// actions overlay keeps the capsule and the menu above it — the system keyboard
+/// while it animates down as the menu opens, the emoji keyboard the add-emoji
+/// control raises (feedback iphone-bubble-menu-keyboard-2026-10-25).
+@MainActor
+final class KeyboardFrameObserver: ObservableObject {
+    static let shared = KeyboardFrameObserver()
+
+    /// The keyboard's end frame in screen coordinates; `nil` when it is down.
+    @Published private(set) var frame: CGRect?
+
+    private var tokens: [NSObjectProtocol] = []
+
+    init() {
+        let center = NotificationCenter.default
+        tokens.append(center.addObserver(forName: UIResponder.keyboardWillChangeFrameNotification, object: nil, queue: .main) { [weak self] note in
+            // Documented as the *end* frame: a dismissal reports a frame below the screen.
+            let end = (note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue
+            MainActor.assumeIsolated { self?.update(end) }
+        })
+        tokens.append(center.addObserver(forName: UIResponder.keyboardWillHideNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.update(nil) }
+        })
+    }
+
+    private func update(_ end: CGRect?) {
+        guard let end, let screen = UIApplication.shared.connectedScenes
+            .compactMap({ ($0 as? UIWindowScene)?.screen }).first,
+              end.minY < screen.bounds.maxY, end.height > 0
+        else { frame = nil; return }
+        frame = end
+    }
+
+    /// How far the keyboard reaches up into an overlay whose frame (in `.global`
+    /// space) is `overlayFrame`; 0 when the keyboard is down or below it.
+    func inset(overlayFrame: CGRect) -> CGFloat {
+        guard let frame else { return 0 }
+        return max(0, overlayFrame.maxY - frame.minY)
+    }
+
+    /// The window's safe area (status bar / notch, home indicator). A `GeometryReader`
+    /// under `.ignoresSafeArea()` reports zero insets, so the full-screen overlay asks
+    /// the window instead.
+    static var windowSafeArea: UIEdgeInsets {
+        let window = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows)
+            .first { $0.isKeyWindow }
+        return window?.safeAreaInsets ?? .zero
     }
 }
 

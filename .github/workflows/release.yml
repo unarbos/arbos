@@ -244,6 +244,21 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.plan.outputs.sha }}
+      # Heavy-job cap on the shared EC2 Mac (#1839): at most two of {gate Mac half, gate iOS half, TF
+      # archive, Mac release} at a time; this job waits for a slot (bounded) and releases it at the end.
+      - name: Heavy-job slot
+        id: slot
+        if: runner.environment == 'self-hosted'
+        run: |
+          if [ -x /usr/local/bin/arbos-heavy-slot.sh ]; then
+            slot=$(/usr/local/bin/arbos-heavy-slot.sh acquire "mac-release" --pid "$PPID")
+          else
+            slot=none
+          fi
+          echo "slot=$slot" >> "$GITHUB_OUTPUT"
+          # Simulators this job boots are shut down at the end (two booted sims = ~300 runtime processes each
+          # side of the box, the load-average driver on 2026-10-25 23:5x); the GUI session's stay untouched.
+          xcrun simctl list devices booted 2>/dev/null | grep -oE '[0-9A-F-]{36}' | sort -u > "$RUNNER_TEMP/sims-before.txt" || true
       - name: Rust toolchain
         run: |
           set -euo pipefail
@@ -267,9 +282,13 @@ jobs:
         if: runner.environment == 'self-hosted'
         run: |
           set -euo pipefail
-          mkdir -p "$HOME/arbos-release-target"
-          echo "CARGO_TARGET_DIR=$HOME/arbos-release-target" >> "$GITHUB_ENV"
-          echo "target dir: $HOME/arbos-release-target ($(du -sh "$HOME/arbos-release-target" 2>/dev/null | cut -f1) so far)"
+          # ARBOS_SCRATCH (the Mac mini's internal SSD, rebuildable caches only — #1846) when mounted, else $HOME.
+          ARBOS_SCRATCH="${ARBOS_SCRATCH:-/Volumes/ArbosScratch}"
+          if [ -d "$ARBOS_SCRATCH/$USER" ]; then target="$ARBOS_SCRATCH/$USER/arbos-release-target"; else target="$HOME/arbos-release-target"; fi
+          mkdir -p "$target"
+          echo "CARGO_TARGET_DIR=$target" >> "$GITHUB_ENV"
+          echo "ARBOS_RELEASE_TARGET_ROOT=$(dirname "$target")" >> "$GITHUB_ENV"
+          echo "target dir: $target ($(du -sh "$target" 2>/dev/null | cut -f1) so far)"
       # The certificate goes into a throwaway keychain in $RUNNER_TEMP and is
       # removed by the last step whatever happens. No tracing in these steps.
       - name: Import the Developer ID certificate
@@ -308,7 +327,7 @@ jobs:
           # changes cargo's metadata hash, so each release left ~1.7 GB of stale debug artifacts in the
           # release target dir — 36 GB a day, #1439). The release trees are untouched by this step.
           if [[ "${RUNNER_ENVIRONMENT:-}" == "self-hosted" ]]; then
-            export CARGO_TARGET_DIR="$HOME/arbos-release-smoke-target"
+            export CARGO_TARGET_DIR="${ARBOS_RELEASE_TARGET_ROOT:-$HOME}/arbos-release-smoke-target"
             mkdir -p "$CARGO_TARGET_DIR"
             trap 'scripts/release/smoke-target-prune.sh "$CARGO_TARGET_DIR" 25 || true' EXIT
           fi
@@ -341,7 +360,12 @@ jobs:
             echo "::warning title=Not notarized::NOTARY_KEY_P8 / NOTARY_KEY_ID / NOTARY_ISSUER_ID are not all set."
           fi
           export ARBOS_DIST="$GITHUB_WORKSPACE/dist"
-          scripts/bundle-mac.sh
+          # The Mac shares its 8 cores with the gate's halves, the TestFlight archive and the rigs: two
+          # -j8 builds plus a simulator boot took it to load 263 on 2026-10-26 and ssh timed out for every
+          # worker. Half the codegen threads and a mild nice keep the box answering; a solo build is only
+          # slightly longer.
+          export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
+          nice -n 5 scripts/bundle-mac.sh
           source dist/build-info.env
           {
             echo "signing=$ARBOS_SIGNING"
@@ -379,6 +403,13 @@ jobs:
             dist/notarization-*.log
           retention-days: 7
           if-no-files-found: error
+      - name: Release the heavy-job slot
+        if: always() && runner.environment == 'self-hosted' && steps.slot.outputs.slot != ''
+        run: |
+          /usr/local/bin/arbos-heavy-slot.sh release "${{ steps.slot.outputs.slot }}" || true
+          for u in $(xcrun simctl list devices booted 2>/dev/null | grep -oE '[0-9A-F-]{36}' | sort -u); do
+            grep -qx "$u" "$RUNNER_TEMP/sims-before.txt" 2>/dev/null || xcrun simctl shutdown "$u" >/dev/null 2>&1 || true
+          done
 
   linux:
     name: Relay, agentd, arbosctl, image

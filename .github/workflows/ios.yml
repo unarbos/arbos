@@ -88,6 +88,21 @@ jobs:
             (github.event_name == 'push' && github.ref_name == 'main') }}
     steps:
       - uses: actions/checkout@v4
+      # Heavy-job cap on the shared EC2 Mac (#1839): at most two of {gate Mac half, gate iOS half, TF
+      # archive, Mac release} at a time; this job waits for a slot (bounded) and releases it at the end.
+      - name: Heavy-job slot
+        id: slot
+        if: runner.environment == 'self-hosted'
+        run: |
+          if [ -x /usr/local/bin/arbos-heavy-slot.sh ]; then
+            slot=$(/usr/local/bin/arbos-heavy-slot.sh acquire "tf-archive" --pid "$PPID")
+          else
+            slot=none
+          fi
+          echo "slot=$slot" >> "$GITHUB_OUTPUT"
+          # Simulators this job boots are shut down at the end (two booted sims = ~300 runtime processes each
+          # side of the box, the load-average driver on 2026-10-25 23:5x); the GUI session's stay untouched.
+          xcrun simctl list devices booted 2>/dev/null | grep -oE '[0-9A-F-]{36}' | sort -u > "$RUNNER_TEMP/sims-before.txt" || true
       - name: Build number
         id: build
         run: echo "number=$(date -u +%Y%m%d%H%M)" >> "$GITHUB_OUTPUT"
@@ -263,3 +278,10 @@ jobs:
           path: apps/ios/Arbos/build/xcodebuild-*.log
           if-no-files-found: ignore
           retention-days: 14
+      - name: Release the heavy-job slot
+        if: always() && runner.environment == 'self-hosted' && steps.slot.outputs.slot != ''
+        run: |
+          /usr/local/bin/arbos-heavy-slot.sh release "${{ steps.slot.outputs.slot }}" || true
+          for u in $(xcrun simctl list devices booted 2>/dev/null | grep -oE '[0-9A-F-]{36}' | sort -u); do
+            grep -qx "$u" "$RUNNER_TEMP/sims-before.txt" 2>/dev/null || xcrun simctl shutdown "$u" >/dev/null 2>&1 || true
+          done

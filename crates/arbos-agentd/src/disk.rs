@@ -39,7 +39,16 @@ pub struct DiskStatus {
     pub total_mb: u64,
     pub avail_mb: u64,
     pub used_pct: u64,
+    /// Free inodes (file slots), when the filesystem reports them. A 2 GiB work image has
+    /// 131 072; one dereferenced copy of pi's package tree is 18 000 of them (2026-10-26: the
+    /// lt-eval box refused every write at "87 % full" with 240 MB free and 0 inodes).
+    #[serde(default)]
+    pub inodes_avail: Option<u64>,
 }
+
+/// Fewer free inodes than this and the next session file, log or blob cannot be created,
+/// whatever the byte count says: the gate treats it as a full disk.
+pub const INODE_FLOOR: u64 = 1024;
 
 impl DiskStatus {
     pub fn new(total_mb: u64, avail_mb: u64) -> Self {
@@ -50,17 +59,36 @@ impl DiskStatus {
             total_mb,
             avail_mb,
             used_pct,
+            inodes_avail: None,
         }
     }
 
-    /// "1.9 GB of 2.0 GB used (96 %)".
+    pub fn with_inodes(mut self, avail: u64) -> Self {
+        self.inodes_avail = Some(avail);
+        self
+    }
+
+    /// No file can be created even though bytes are free.
+    pub fn inodes_exhausted(&self) -> bool {
+        self.inodes_avail.is_some_and(|n| n < INODE_FLOOR)
+    }
+
+    /// "1.9 GB of 2.0 GB used (96 %)" — or, when the file slots ran out first, says so.
     pub fn human(&self) -> String {
-        format!(
+        let bytes = format!(
             "{} of {} used ({} %)",
             fmt_mb(self.total_mb.saturating_sub(self.avail_mb)),
             fmt_mb(self.total_mb),
             self.used_pct
-        )
+        );
+        if self.inodes_exhausted() {
+            format!(
+                "{bytes}; no free file slots left — too many small files, {} MB free cannot be used",
+                self.avail_mb
+            )
+        } else {
+            bytes
+        }
     }
 }
 
@@ -80,7 +108,12 @@ pub fn status(path: &Path) -> Option<DiskStatus> {
     let total = s.blocks() as u64 * frag / MIB;
     // what a non-root process can still write
     let avail = s.blocks_available() as u64 * frag / MIB;
-    Some(DiskStatus::new(total, avail))
+    let st = DiskStatus::new(total, avail);
+    // 0 total inodes = the filesystem does not count them (btrfs, some 9p mounts): no verdict.
+    if s.files() as u64 > 0 {
+        return Some(st.with_inodes(s.files_available() as u64));
+    }
+    Some(st)
 }
 
 /// What the gate decided for one turn.
@@ -98,6 +131,10 @@ pub enum Gate {
 /// Pure decision: `after_release` is the status after the ballast was dropped (None when there
 /// was no ballast to drop).
 pub fn decide(before: DiskStatus, after_release: Option<DiskStatus>) -> Gate {
+    // Out of inodes: releasing the ballast frees one slot, not thousands; the turn cannot run.
+    if before.inodes_exhausted() {
+        return Gate::Blocked(after_release.unwrap_or(before));
+    }
     if before.avail_mb >= FLOOR_MB {
         return if before.used_pct >= WARN_PCT {
             Gate::Warn(before)
@@ -610,6 +647,15 @@ mod tests {
         );
         let hard = DiskStatus::new(2048, 5);
         assert_eq!(decide(full, Some(hard)), Gate::Blocked(hard));
+        // lt-eval box, 2026-10-26 02:07 UTC: 244 MB free, 0 of 131 072 inodes free — every
+        // create failed with ENOSPC while the gate said "87 % full, carry on".
+        let no_inodes = DiskStatus::new(2048, 244).with_inodes(0);
+        assert!(no_inodes.inodes_exhausted());
+        assert_eq!(decide(no_inodes, None), Gate::Blocked(no_inodes));
+        assert!(no_inodes.human().contains("no free file slots"));
+        let plenty = DiskStatus::new(2048, 1000).with_inodes(90_000);
+        assert_eq!(decide(plenty, None), Gate::Ok);
+        assert!(!plenty.human().contains("file slots"));
     }
 
     #[test]

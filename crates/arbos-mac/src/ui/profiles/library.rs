@@ -115,10 +115,24 @@ impl Entry {
         }
     }
 
-    pub fn by(&self) -> &str {
-        match self {
-            Entry::Attachment(f) => &f.by,
-            Entry::Link(l) => &l.by,
+    /// Who shared it, by name: the agent's project name, a person's name, else
+    /// what the row carried ("@sam", "You").
+    pub fn by(&self, state: &AppState) -> String {
+        let raw = match self {
+            Entry::Attachment(f) => f.by.as_str(),
+            Entry::Link(l) => l.by.as_str(),
+        };
+        match self.sender() {
+            Sender::Agent(pid) => state
+                .project(pid)
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| raw.to_string()),
+            Sender::Person(p) => p
+                .name
+                .clone()
+                .filter(|n| !n.trim().is_empty())
+                .unwrap_or_else(|| raw.to_string()),
+            Sender::Me => raw.to_string(),
         }
     }
 
@@ -421,6 +435,7 @@ pub(super) fn sections(
                 when: f.when,
                 chat_id: f.chat_id.clone(),
                 part_id: f.part_id.clone(),
+                picture_url: None,
             })
             .collect(),
     );
@@ -564,7 +579,7 @@ fn row(
                 .child(rel_time(now, entry.when())),
         )
     };
-    el = el.child(kit::hairline_below(kit::INSET + THUMB + kit::GAP, theme));
+    el = el.child(kit::hairline_below(theme));
     if hover.is_some_and(|h| h.armed) {
         let above = shell
             .library
@@ -812,7 +827,7 @@ fn preview(entry: &Entry, state: &AppState, theme: &Theme) -> AnyElement {
                                 div()
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(theme.text)
-                                    .child(entry.by().to_string()),
+                                    .child(entry.by(state)),
                             )
                             .child(format!(" · {when}")),
                     ),
@@ -1110,6 +1125,7 @@ mod render_tests {
                 bytes: Some(212_000),
                 kind: Some(kind),
                 title: None,
+                chart_part: None,
             },
         }
     }
@@ -1162,7 +1178,16 @@ mod render_tests {
             }))
             .expect("chat");
             s.chats.insert("g1".into(), vec![chat]);
-            let mut today = shared("m1", "Deck, dashboard and the press kit.", now - 3_600_000);
+            // Clock-independent: today's rows sit at `now` itself (a row "an hour
+            // ago" was yesterday for the first hour after midnight and reddened
+            // the gate), yesterday's an hour before today's local midnight.
+            let today_start = Local::now()
+                .date_naive()
+                .and_hms_opt(0, 0, 0)
+                .and_then(|t| t.and_local_timezone(Local).single())
+                .map(|t| t.timestamp_millis() as u64)
+                .unwrap_or(now);
+            let mut today = shared("m1", "Deck, dashboard and the press kit.", now - 2);
             today.parts = vec![
                 attachment("deck-v3-slide-04.png", "image/png", AttachmentKind::Image),
                 attachment("press-kit-v3.pdf", "application/pdf", AttachmentKind::Pdf),
@@ -1171,12 +1196,8 @@ mod render_tests {
                 attachment("signup-funnel.png", "image/png", AttachmentKind::Image),
                 attachment("launch-day-team.jpg", "image/jpeg", AttachmentKind::Image),
             ];
-            let link = shared(
-                "m2",
-                "Landing page: https://arbos.life/launch",
-                now - 60_000,
-            );
-            let mut yesterday = shared("m0", "", now - 30 * 3_600_000);
+            let link = shared("m2", "Landing page: https://arbos.life/launch", now - 1);
+            let mut yesterday = shared("m0", "", today_start.saturating_sub(3_600_000));
             yesterday.parts = vec![attachment(
                 "q3-review.pdf",
                 "application/pdf",

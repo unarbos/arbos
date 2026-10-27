@@ -77,7 +77,7 @@ pub fn row(
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(header)
         .children(panel)
-        .when(open, |el| el.child(kit::hairline_below(kit::INSET, theme)))
+        .when(open, |el| el.child(kit::hairline_below(theme)))
 }
 
 impl Shell {

@@ -19,12 +19,12 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use arbos_core::api::{
-    DecideSecretResponseDto, ProjectSecretItemDto, ProjectSecretSummaryDto, ProjectSecretsDto,
-    PushEventDto, SecretAccessDto, SecretAccessEnvelopeDto, SecretAccessScopeDto,
-    SecretActivityDto, SecretActivityPageDto, SecretDetailDto, SecretDirectorDto, SecretDto,
-    SecretEnvelopeDto, SecretExpiringPayloadDto, SecretRequestDto, SecretRequestPushPayloadDto,
-    SecretRequestTargetDto, SecretRequestsDto, SecretsOverviewDto, SecretsPausedDto,
-    SecretsPausedPayloadDto,
+    DecideSecretResponseDto, MessageRedactedPayloadDto, ProjectSecretItemDto,
+    ProjectSecretSummaryDto, ProjectSecretsDto, PushEventDto, SecretAccessDto,
+    SecretAccessEnvelopeDto, SecretAccessScopeDto, SecretActivityDto, SecretActivityPageDto,
+    SecretDetailDto, SecretDirectorDto, SecretDto, SecretEnvelopeDto, SecretExpiringPayloadDto,
+    SecretRequestDto, SecretRequestPushPayloadDto, SecretRequestTargetDto, SecretRequestsDto,
+    SecretSourceDto, SecretsOverviewDto, SecretsPausedDto, SecretsPausedPayloadDto,
 };
 use arbos_core::ids::{now_ms, ulid};
 
@@ -503,6 +503,22 @@ pub(crate) fn secret_dto(state: &AppState, s: &Secret) -> SecretDto {
         people: directors.clone(),
         directors,
         others_ask: Some(s.others_ask.clone()),
+        source: Some(secret_source_dto(state, s)),
+    }
+}
+
+/// `source` block on a secret: `settings`, or `chat` + the agent it was handed to.
+fn secret_source_dto(state: &AppState, s: &Secret) -> SecretSourceDto {
+    let project_name = s
+        .source_project_id
+        .as_deref()
+        .and_then(|p| state.db.project(p).ok().flatten())
+        .map(|p| p.name);
+    SecretSourceDto {
+        kind: s.source_kind.clone(),
+        project_id: s.source_project_id.clone(),
+        project_name,
+        chat_id: s.source_chat_id.clone(),
     }
 }
 
@@ -1126,6 +1142,21 @@ pub struct CreateBody {
     pub expires_at: Option<i64>,
     #[serde(default)]
     pub agents: Vec<AgentPick>,
+    /// Where the value was given: absent = the Settings form; `{ kind: "chat", project_id,
+    /// chat_id }` = the request card in a chat (the client posts the value here, never into
+    /// the chat; the agent gets the name back through the card).
+    #[serde(default)]
+    pub source: Option<SourceBody>,
+}
+
+#[derive(Deserialize, Default, Clone)]
+pub struct SourceBody {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub chat_id: Option<String>,
 }
 
 /// The kind a form implies when the body does not say: login fields → login, `text` → text.
@@ -1206,6 +1237,30 @@ pub async fn create(
         // Ask every time, which has nothing to ask once the value is just there.
         inject_env: b.inject_env.unwrap_or(false),
         others_ask: "refuse".into(),
+        source_kind: "settings".into(),
+        source_project_id: None,
+        source_chat_id: None,
+    };
+    let (s, created_from) = match b.source.as_ref().filter(|src| src.kind == "chat") {
+        Some(src) => {
+            // Only the user's own agent can be the one it was handed to.
+            let pid = src
+                .project_id
+                .as_deref()
+                .and_then(|p| state.db.project(p).ok().flatten())
+                .filter(|p| p.user_id == user_id)
+                .map(|p| p.id);
+            (
+                Secret {
+                    source_kind: "chat".into(),
+                    source_project_id: pid,
+                    source_chat_id: src.chat_id.clone(),
+                    ..s
+                },
+                "chat",
+            )
+        }
+        None => (s, "settings"),
     };
     let v1 = SecretVersion {
         secret_id: id.clone(),
@@ -1219,7 +1274,7 @@ pub async fn create(
         &state,
         &user_id,
         AuditEntry {
-            detail: json!({ "kind": s.kind, "hosts": s.hosts }),
+            detail: json!({ "kind": s.kind, "hosts": s.hosts, "source": s.source_kind, "project_id": s.source_project_id, "chat_id": s.source_chat_id }),
             ..entry("created", &s, &format!("user:{user_id}"))
         },
     );
@@ -1232,7 +1287,7 @@ pub async fn create(
             pick.note.as_deref(),
             None,
             true,
-            "settings",
+            created_from,
         )? {
             after_access_change(&state, &s, &a);
         }
@@ -1932,6 +1987,277 @@ pub async fn scrub(
         );
     }
     Ok(Json(secret_envelope(&state, &s)).into_response())
+}
+
+/// `POST /box/secrets/from-message` body: the "save this" path (spec: secret hand-off).
+#[derive(Deserialize, Default)]
+pub struct FromMessageBody {
+    #[serde(default)]
+    pub chat_id: String,
+    #[serde(default)]
+    pub message_id: String,
+    /// The chat is a people chat (the project is a member), not the agent's own.
+    #[serde(default)]
+    pub people_chat: bool,
+    /// Wanted name; absent → the suggestion for the key's shape (`STRIPE_KEY`), `_2` on a clash.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Becomes the note and the access note.
+    #[serde(default)]
+    pub purpose: Option<String>,
+    /// `sk_l…3xA1` — picks one token when the message holds several; never the value.
+    #[serde(default)]
+    pub hint: Option<String>,
+}
+
+/// A name nobody has yet: `name`, else `name_2`, `name_3`, …
+fn free_name(state: &AppState, user_id: &str, wanted: &str) -> Result<(String, String), ApiErr> {
+    let (name, env) = validate_name(wanted)?;
+    let taken = |n: &str| -> Result<bool, ApiErr> {
+        Ok(state
+            .db
+            .secret_by_name(user_id, n)
+            .map_err(internal)?
+            .is_some())
+    };
+    if !taken(&name)? && !taken(&env)? {
+        return Ok((name, env));
+    }
+    for i in 2..100 {
+        let (n, e) = validate_name(&format!("{name}_{i}"))?;
+        if !taken(&n)? && !taken(&e)? {
+            return Ok((n, e));
+        }
+    }
+    Err(err(
+        StatusCode::CONFLICT,
+        "already_exists",
+        format!("You already have a secret called {env}."),
+    ))
+}
+
+/// `POST /box/secrets/from-message` → 201 `{ secret, message_id, redacted: true }`.
+///
+/// The one place a value leaves a chat for the vault. The relay reads the message **once**
+/// from the room doc, takes the token that looks like a key (or the one the hint names),
+/// encrypts it into the owner's vault, grants the asking agent access, and rewrites the row
+/// into the `secret_redacted` ghost ("Secret saved as NAME") — one update every device and the
+/// box import — then replaces the room's stored history with a shallow checkpoint so no row
+/// or checkpoint keeps the old text. Boxes get `secret_scrub` (sessions, memory, logs) and
+/// the owner's devices `message_redacted` (search, notifications, local snapshot).
+pub async fn box_from_message(
+    State(state): State<AppState>,
+    principal: Principal,
+    headers: HeaderMap,
+    Json(b): Json<FromMessageBody>,
+) -> ApiResult {
+    let (user_id, project_id) = box_project(&state, &principal, &headers)?;
+    if b.chat_id.trim().is_empty() || b.message_id.trim().is_empty() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "chat_id and message_id required",
+        ));
+    }
+    let settings = state.db.secrets_settings(&user_id).map_err(internal)?;
+    if settings.paused {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "paused",
+            Refusal::Paused.message("", ""),
+        ));
+    }
+    let room_project: Option<&str> = if b.people_chat {
+        if !crate::people::room_access(&state, &principal, &b.chat_id) {
+            return Err(err(
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "not a member of that chat",
+            ));
+        }
+        None
+    } else {
+        Some(project_id.as_str())
+    };
+    let doc = crate::matrix::backfill::load_doc(&state, &b.chat_id, room_project)
+        .map_err(internal)?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "no such chat"))?;
+    let msg = doc
+        .message(&b.message_id)
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not_found", "no such message"))?;
+    if msg.role != "user" {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "only a person's message can be saved",
+        ));
+    }
+    // The value goes into the owner's vault, so it must be the owner's own message.
+    let sender = msg
+        .rest
+        .get("sender")
+        .and_then(Value::as_str)
+        .unwrap_or("user");
+    if sender != "user" && sender != format!("user:{user_id}") {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "not_owner_message",
+            "only the owner's own message can go into the owner's vault",
+        ));
+    }
+    let text = msg.text();
+    let found = arbos_core::redact::find_key_like(&text);
+    let pick = match b.hint.as_deref().map(str::trim).filter(|h| !h.is_empty()) {
+        Some(h) => found
+            .iter()
+            .find(|k| arbos_core::redact::matches_hint(k.value(&text), h)),
+        None => match found.len() {
+            0 => None,
+            1 => found.first(),
+            _ => found
+                .iter()
+                .find(|k| k.confident)
+                .filter(|_| found.iter().filter(|k| k.confident).count() == 1),
+        },
+    };
+    let Some(pick) = pick else {
+        return Err(err(
+            StatusCode::NOT_FOUND,
+            if found.is_empty() {
+                "no_key_found"
+            } else {
+                "ambiguous"
+            },
+            if found.is_empty() {
+                "nothing in that message looks like a key"
+            } else {
+                "several tokens look like keys; say which with a hint"
+            },
+        ));
+    };
+    let value = pick.value(&text).to_owned();
+    let wanted = b
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .unwrap_or(pick.suggested_name);
+    let (name, env) = free_name(&state, &user_id, wanted)?;
+    let purpose: String = b
+        .purpose
+        .unwrap_or_default()
+        .trim()
+        .chars()
+        .take(500)
+        .collect();
+    let dek = user_dek(&state, &user_id).map_err(internal)?;
+    let now = now_ms();
+    let id = ulid();
+    let kind = if value.contains('\n') { "text" } else { "key" };
+    let fields = fields_for_kind(kind, &json!({ "value": value, "text": value }))?;
+    drop(value);
+    let s = Secret {
+        id: id.clone(),
+        user_id: user_id.clone(),
+        name,
+        env,
+        kind: kind.to_owned(),
+        note: purpose.clone(),
+        hosts: Vec::new(),
+        ask_every_time: false,
+        expires_at: None,
+        current_version: 1,
+        created_at: now,
+        updated_at: now,
+        last_used_at: None,
+        daytona_secrets: json!({}),
+        inject_env: false,
+        others_ask: "refuse".into(),
+        source_kind: "chat".into(),
+        source_project_id: Some(project_id.clone()),
+        source_chat_id: Some(b.chat_id.clone()),
+    };
+    let v1 = SecretVersion {
+        secret_id: id.clone(),
+        version: 1,
+        fields_enc: encrypt_fields(&dek, &id, 1, &Value::Object(fields)).map_err(internal)?,
+        created_at: now,
+        retire_at: None,
+    };
+    state.db.insert_secret(&s, &v1).map_err(internal)?;
+    audit(
+        &state,
+        &user_id,
+        AuditEntry {
+            detail: json!({ "kind": s.kind, "source": "chat", "project_id": project_id, "chat_id": b.chat_id, "message_id": b.message_id }),
+            ..entry("created", &s, &format!("agent:{project_id}"))
+        },
+    );
+    if let Some(a) = grant_access(
+        &state,
+        &user_id,
+        &s,
+        &project_id,
+        (!purpose.is_empty()).then_some(purpose.as_str()),
+        None,
+        true,
+        "chat",
+    )? {
+        after_access_change(&state, &s, &a);
+    }
+
+    // The row becomes the ghost; then the stored history forgets the old text.
+    let redaction = arbos_core::doc::SecretRedaction {
+        secret_id: s.id.clone(),
+        name: s.name.clone(),
+        env: s.env.clone(),
+        saved_by: format!("user:{user_id}"),
+        agent: Some(project_id.clone()),
+    };
+    let message_id = b.message_id.clone();
+    crate::notices::write_doc(&state, room_project, &b.chat_id, move |doc| {
+        anyhow::ensure!(
+            doc.redact_message_as_secret(&message_id, &redaction),
+            "message vanished"
+        );
+        Ok(())
+    })
+    .await
+    .map_err(internal)?;
+    crate::notices::compact_shallow(&state, room_project, &b.chat_id).map_err(internal)?;
+    audit(
+        &state,
+        &user_id,
+        AuditEntry {
+            detail: json!({ "values": 1, "chat_id": b.chat_id, "message_id": b.message_id, "compacted": true }),
+            ..entry("scrubbed", &s, &format!("agent:{project_id}"))
+        },
+    );
+    // Every box of the owner scrubs its sessions, memory and logs (the value was in a chat
+    // any of its agents may have read); the owner's devices drop search / notification copies.
+    for p in state.db.projects_of_user(&user_id).unwrap_or_default() {
+        push_box(
+            &state,
+            &p.id,
+            "secret_scrub",
+            json!({ "secret_id": s.id, "env": s.env, "ref": placeholder(&s.env, "value"), "chat_id": b.chat_id, "message_id": b.message_id }),
+        );
+    }
+    push_user(
+        &state,
+        &user_id,
+        PushEventDto::MessageRedacted(MessageRedactedPayloadDto {
+            chat_id: b.chat_id.clone(),
+            project_id: room_project.map(str::to_owned),
+            message_id: b.message_id.clone(),
+            secret_id: s.id.clone(),
+            name: s.name.clone(),
+        }),
+    );
+    let mut body = to_json(secret_envelope(&state, &s));
+    body["message_id"] = json!(b.message_id);
+    body["redacted"] = json!(true);
+    Ok((StatusCode::CREATED, Json(body)).into_response())
 }
 
 /// `GET /projects/{id}/secrets` → `{ paused, items, requests, activity }` for the agent profile.
@@ -3078,6 +3404,9 @@ pub fn migrate_f8(state: &AppState) -> anyhow::Result<()> {
                 daytona_secrets: it.daytona_secrets.clone(),
                 inject_env: false,
                 others_ask: "refuse".into(),
+                source_kind: "settings".into(),
+                source_project_id: None,
+                source_chat_id: None,
             };
             let v1 = SecretVersion {
                 secret_id: s.id.clone(),
@@ -3309,6 +3638,7 @@ mod tests {
                 avatar_leaf: None,
                 avatar_leaf_color: None,
                 image_key: None,
+                avatar_version: 0,
             })
             .unwrap();
         state
@@ -3354,6 +3684,9 @@ mod tests {
             daytona_secrets: json!({}),
             inject_env: false,
             others_ask: "refuse".into(),
+            source_kind: "settings".into(),
+            source_project_id: None,
+            source_chat_id: None,
         };
         let v1 = SecretVersion {
             secret_id: s.id.clone(),
@@ -3390,6 +3723,9 @@ mod tests {
             daytona_secrets: json!({}),
             inject_env: false,
             others_ask: "refuse".into(),
+            source_kind: "settings".into(),
+            source_project_id: None,
+            source_chat_id: None,
         };
         let v1 = SecretVersion {
             secret_id: s.id.clone(),
@@ -4095,5 +4431,441 @@ mod tests {
         )
         .unwrap();
         assert!(owner_use.once.is_none());
+    }
+
+    // ---- secret hand-off: "save this" (POST /box/secrets/from-message) -------------------------
+
+    const HANDOFF_KEY: &str = concat!(
+        "sk_",
+        "live_51HxQ9mT3vK2pLnR8wZ4eYc7bD1fG6hJ0kM9nP5qS2tU8vW3xA1"
+    );
+
+    fn holds(bytes: &[u8], needle: &str) -> bool {
+        let n = needle.as_bytes();
+        bytes.windows(n.len()).any(|w| w == n)
+    }
+
+    /// Every byte the relay keeps for a room: the checkpoint and every row.
+    fn room_bytes(state: &AppState, room: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        if let Some((_, cp)) = state.db.checkpoint_bytes(room).unwrap() {
+            out.extend(cp);
+        }
+        for r in state.db.rows_after(room, 0, None, 10_000).unwrap() {
+            out.extend(r.bytes);
+        }
+        out
+    }
+
+    /// Owner + project + a room with two user messages; the first holds the key. Returns
+    /// `(state, owner, project_id, chat_id, room_name)`.
+    async fn handoff_setup(text: &str) -> (AppState, String, String, String, String) {
+        let state = test_state(AuthMode::Github);
+        let (owner, _) = person(&state, 701);
+        insert_project(&state, &owner, "proj_handoff", "Arbos");
+        let chat_id = "chat_handoff".to_owned();
+        let room = arbos_core::wire::room_name("proj_handoff", &chat_id);
+        let sender = format!("user:{owner}");
+        let text = text.to_owned();
+        crate::notices::write_doc(&state, Some("proj_handoff"), &chat_id, move |doc| {
+            let opts = arbos_core::doc::UserMessageOpts {
+                sender: Some(sender),
+                ..Default::default()
+            };
+            doc.append_user_message("m_key", &text, "dev1", &opts)?;
+            doc.append_user_message("m_plain", "and run the refunds report", "dev1", &opts)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        (state, owner, "proj_handoff".into(), chat_id, room)
+    }
+
+    fn box_headers(project: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("x-arbos-project", project.parse().unwrap());
+        h
+    }
+
+    async fn from_message(
+        state: &AppState,
+        owner: &str,
+        project: &str,
+        body: FromMessageBody,
+    ) -> Result<(StatusCode, Value), ApiErr> {
+        let res = box_from_message(
+            State(state.clone()),
+            Principal::Box {
+                user_id: owner.to_owned(),
+            },
+            box_headers(project),
+            Json(body),
+        )
+        .await?;
+        let status = res.status();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        Ok((
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        ))
+    }
+
+    /// `ARBOS_HANDOFF_KEEP=<dir>` (scripts/secrets/handoff-invariant-check.sh): keep the relay's
+    /// data dir and a TRACE journal of the run there, for the grep that follows.
+    fn keep_dir() -> Option<std::path::PathBuf> {
+        std::env::var_os("ARBOS_HANDOFF_KEEP").map(std::path::PathBuf::from)
+    }
+
+    fn journal_guard(
+        keep: &Option<std::path::PathBuf>,
+    ) -> Option<tracing::subscriber::DefaultGuard> {
+        let dir = keep.as_ref()?;
+        std::fs::create_dir_all(dir).ok()?;
+        let file = std::fs::File::create(dir.join("relay-journal.log")).ok()?;
+        let sub = tracing_subscriber::fmt()
+            .with_writer(std::sync::Mutex::new(file))
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .finish();
+        Some(tracing::subscriber::set_default(sub))
+    }
+
+    fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+        let _ = std::fs::create_dir_all(to);
+        if let Ok(rd) = std::fs::read_dir(from) {
+            for e in rd.flatten() {
+                let p = e.path();
+                let dest = to.join(e.file_name());
+                if p.is_dir() {
+                    copy_tree(&p, &dest);
+                } else {
+                    let _ = std::fs::copy(&p, &dest);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn save_this_moves_the_value_into_the_vault_and_out_of_every_relay_byte() {
+        let keep = keep_dir();
+        let _journal = journal_guard(&keep);
+        let text = format!("here is the stripe key {HANDOFF_KEY} save this");
+        let (state, owner, project, chat, room) = handoff_setup(&text).await;
+        tracing::debug!(chat = %chat, "handoff check: message with the key written");
+        assert!(
+            holds(&room_bytes(&state, &room), HANDOFF_KEY),
+            "setup: the row holds the key"
+        );
+        let _ = state.db.take_pushes(&project);
+
+        let (status, body) = from_message(
+            &state,
+            &owner,
+            &project,
+            FromMessageBody {
+                chat_id: chat.clone(),
+                message_id: "m_key".into(),
+                purpose: Some("the refunds report".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["secret"]["name"], "STRIPE_KEY");
+        assert_eq!(body["secret"]["env"], "STRIPE_KEY");
+        assert_eq!(body["secret"]["source"]["kind"], "chat");
+        assert_eq!(body["secret"]["source"]["project_id"], project);
+        assert_eq!(body["secret"]["source"]["project_name"], "Arbos");
+        assert_eq!(body["redacted"], true);
+        assert!(
+            !body.to_string().contains(HANDOFF_KEY),
+            "the answer never carries the value"
+        );
+
+        // the vault has it, encrypted, and it decrypts to the exact token
+        let id = body["secret"]["id"].as_str().unwrap();
+        let s = state.db.secret(&owner, id).unwrap().unwrap();
+        let dek = user_dek(&state, &owner).unwrap();
+        let plain = plain_of(&state, &dek, &s).unwrap();
+        assert_eq!(plain.current["value"], HANDOFF_KEY);
+        assert_eq!(s.note, "the refunds report");
+        assert_eq!(s.source_chat_id.as_deref(), Some(chat.as_str()));
+        let access = state.db.access(&project, "secret", id).unwrap().unwrap();
+        assert!(access.enabled);
+        assert_eq!(access.created_from, "chat");
+        assert_eq!(access.note, "the refunds report");
+
+        // the row is the ghost, the other message untouched
+        let doc = crate::matrix::backfill::load_doc(&state, &chat, Some(&project))
+            .unwrap()
+            .unwrap();
+        let m = doc.message("m_key").unwrap();
+        assert_eq!(m.parts.len(), 1);
+        assert_eq!(m.parts[0]["kind"], "secret_redacted");
+        assert_eq!(m.parts[0]["name"], "STRIPE_KEY");
+        assert_eq!(m.parts[0]["savedBy"], format!("user:{owner}"));
+        assert_eq!(m.parts[0]["agent"], project);
+        assert_eq!(m.text(), "");
+        assert_eq!(
+            doc.message("m_plain").unwrap().text(),
+            "and run the refunds report"
+        );
+
+        // and no byte the relay stores for the room holds the key any more
+        let st = state.db.room_state(&room).unwrap();
+        assert_eq!(st.row_count, 0, "rows folded into the shallow checkpoint");
+        assert!(st.checkpoint_seq >= 1);
+        assert!(!holds(&room_bytes(&state, &room), HANDOFF_KEY));
+        // …nor the database files themselves (main file + WAL), the way the e2e check greps them
+        for name in ["relay.db", "relay.db-wal"] {
+            let p = state.cfg.data_dir.join(name);
+            if let Ok(bytes) = std::fs::read(&p) {
+                assert!(
+                    !holds(&bytes, HANDOFF_KEY),
+                    "{} still holds the key",
+                    p.display()
+                );
+            }
+        }
+
+        // audit: created + scrubbed, no value in detail
+        let acts = state
+            .db
+            .list_audit(
+                &owner,
+                &AuditQuery {
+                    target_id: Some(id.to_owned()),
+                    limit: 50,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let kinds: Vec<&str> = acts.iter().map(|a| a.action.as_str()).collect();
+        assert!(
+            kinds.contains(&"created")
+                && kinds.contains(&"scrubbed")
+                && kinds.contains(&"access_on"),
+            "{kinds:?}"
+        );
+        for a in &acts {
+            assert!(!a.detail.to_string().contains(HANDOFF_KEY));
+        }
+
+        // pushes: the box scrubs, the devices drop their copies
+        let pushes = state.db.take_pushes(&project).unwrap();
+        let kinds: Vec<&str> = pushes.iter().map(|p| p.1.as_str()).collect();
+        assert!(kinds.contains(&"secret_access_changed"), "{kinds:?}");
+        assert!(kinds.contains(&"secret_scrub"), "{kinds:?}");
+        for p in &pushes {
+            assert!(!p.2.to_string().contains(HANDOFF_KEY));
+        }
+        let user_pushes: Vec<String> = state
+            .db
+            .with(|c| {
+                let mut st =
+                    c.prepare("SELECT kind FROM user_pushes WHERE delivered_at IS NULL")?;
+                let v = st
+                    .query_map([], |r| r.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                Ok(v)
+            })
+            .unwrap();
+        assert!(
+            user_pushes.contains(&"message_redacted".to_owned()),
+            "{user_pushes:?}"
+        );
+        if let Some(dir) = keep {
+            let _ = state.db.flush_after_scrub();
+            copy_tree(&state.cfg.data_dir, &dir.join("data"));
+            let _ = std::fs::write(
+                dir.join("README.txt"),
+                "relay data dir after the save-this path (relay.db, -wal, blobs/…) + relay-journal.log (TRACE)\n",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn save_this_needs_a_key_a_hint_for_two_and_a_free_name() {
+        // nothing key-like → 404 no_key_found
+        let (state, owner, project, chat, _) = handoff_setup("just prose here").await;
+        let e = from_message(
+            &state,
+            &owner,
+            &project,
+            FromMessageBody {
+                chat_id: chat.clone(),
+                message_id: "m_key".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!((e.0, e.1.as_str()), (StatusCode::NOT_FOUND, "no_key_found"));
+
+        // two confident keys → ambiguous without a hint; the hint picks one
+        let gh = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let (state, owner, project, chat, room) =
+            handoff_setup(&format!("stripe {HANDOFF_KEY} and github {gh}")).await;
+        let e = from_message(
+            &state,
+            &owner,
+            &project,
+            FromMessageBody {
+                chat_id: chat.clone(),
+                message_id: "m_key".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.1, "ambiguous");
+        let hint = arbos_core::redact::key_hint(gh);
+        let (status, body) = from_message(
+            &state,
+            &owner,
+            &project,
+            FromMessageBody {
+                chat_id: chat.clone(),
+                message_id: "m_key".into(),
+                hint: Some(hint),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(body["secret"]["name"], "GITHUB_TOKEN");
+        let bytes = room_bytes(&state, &room);
+        assert!(
+            !holds(&bytes, gh) && !holds(&bytes, HANDOFF_KEY),
+            "the whole row went, both tokens with it"
+        );
+
+        // a taken name gets _2
+        let (state, owner, project, chat, _) =
+            handoff_setup(&format!("{HANDOFF_KEY} save this")).await;
+        insert_key_secret(&state, &owner, "sec_taken", "STRIPE_KEY", "STRIPE_KEY");
+        let (_, body) = from_message(
+            &state,
+            &owner,
+            &project,
+            FromMessageBody {
+                chat_id: chat.clone(),
+                message_id: "m_key".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(body["secret"]["name"], "STRIPE_KEY_2");
+
+        // someone else's message never goes into the owner's vault; an agent row neither
+        let (state, owner, project, chat, _) = handoff_setup(HANDOFF_KEY).await;
+        let (guest, _) = person(&state, 702);
+        let guest_sender = format!("user:{guest}");
+        crate::notices::write_doc(&state, Some(&project), &chat, move |doc| {
+            doc.append_user_message(
+                "m_guest",
+                HANDOFF_KEY,
+                "dev2",
+                &arbos_core::doc::UserMessageOpts {
+                    sender: Some(guest_sender),
+                    ..Default::default()
+                },
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let e = from_message(
+            &state,
+            &owner,
+            &project,
+            FromMessageBody {
+                chat_id: chat.clone(),
+                message_id: "m_guest".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.1, "not_owner_message");
+        let e = from_message(
+            &state,
+            &owner,
+            &project,
+            FromMessageBody {
+                chat_id: chat.clone(),
+                message_id: "nope".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_card_save_records_where_the_secret_came_from() {
+        let state = test_state(AuthMode::Github);
+        let (owner, principal) = person(&state, 703);
+        insert_project(&state, &owner, "proj_card", "Arbos");
+        let res = create(
+            State(state.clone()),
+            principal,
+            Json(CreateBody {
+                name: "STRIPE_KEY".into(),
+                value: Some(HANDOFF_KEY.into()),
+                note: Some("refunds report".into()),
+                agents: vec![AgentPick {
+                    project_id: "proj_card".into(),
+                    note: Some("refunds report".into()),
+                }],
+                source: Some(SourceBody {
+                    kind: "chat".into(),
+                    project_id: Some("proj_card".into()),
+                    chat_id: Some("chat_1".into()),
+                }),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(res.status(), StatusCode::CREATED);
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["secret"]["source"]["kind"], "chat");
+        assert_eq!(body["secret"]["source"]["project_name"], "Arbos");
+        assert_eq!(body["secret"]["source"]["chat_id"], "chat_1");
+        assert!(!bytes
+            .windows(HANDOFF_KEY.len())
+            .any(|w| w == HANDOFF_KEY.as_bytes()));
+        let id = body["secret"]["id"].as_str().unwrap();
+        let access = state.db.access("proj_card", "secret", id).unwrap().unwrap();
+        assert_eq!(access.created_from, "chat");
+        // a settings save stays `settings`
+        let (owner2, principal2) = person(&state, 704);
+        let res = create(
+            State(state.clone()),
+            principal2,
+            Json(CreateBody {
+                name: "OTHER".into(),
+                value: Some("v".repeat(20)),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["secret"]["source"]["kind"], "settings");
+        assert!(state.db.secret_by_name(&owner2, "OTHER").unwrap().is_some());
     }
 }

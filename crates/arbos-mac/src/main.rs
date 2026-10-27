@@ -4,11 +4,13 @@ mod app;
 mod audio;
 mod auth;
 mod calls;
+mod chat_search;
 mod image_picker;
 mod jobtabs;
 mod model;
 mod onboarding;
 mod palette;
+mod panic_log;
 mod search;
 mod search_index;
 mod sign_in;
@@ -25,6 +27,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::app::AppState;
+use crate::ui::chat_search as chat_search_ui;
 use crate::ui::composer;
 use crate::ui::feedback;
 use crate::ui::media_viewer;
@@ -39,6 +42,9 @@ use crate::ui::widgets;
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    // Before any thread or window: a panic that would end as a bare SIGABRT leaves its
+    // message and backtrace in ~/Library/Logs/Arbos/panic.log (reported on the next launch).
+    panic_log::install();
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let handle = runtime.handle().clone();
 
@@ -90,6 +96,9 @@ fn main() {
             }
         });
     }
+    // The code-card grammars (≈ 15 ms) load off the main thread so the first
+    // fenced block in a chat never waits for them.
+    std::thread::spawn(arbos_core::highlight::warm);
     app.run(move |cx: &mut App| {
         gpui_tokio::init_from_handle(cx, handle);
         // Matte is the default (D10, D90); the saved Settings choice wins over
@@ -156,6 +165,9 @@ fn main() {
             )
             .expect("open main window");
         reapply_window_background(cx);
+        // The desktop behind the window, for the adaptive Glass washes
+        // ([feedback mac-glass-adaptive-2026-10-26]); samples only on Glass.
+        crate::ui::backdrop::start(window.into(), cx);
         // Notification clicks and foreground banners (macOS); no-op elsewhere.
         crate::ui::notify::init();
         let _ = window.update(cx, |_, _, cx| cx.activate(true));
@@ -294,12 +306,36 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-b", shell::ToggleRail, None),
         KeyBinding::new("ctrl-b", shell::ToggleRail, None),
         // App-wide search (Jacob 2026-10-24): ⌘⇧F opens the command palette,
-        // ⌘K is its alias (free before this). ⌘F is deliberately unbound — it
-        // is reserved for in-chat search, which does not exist yet.
+        // ⌘K is its alias (free before this).
         KeyBinding::new("cmd-shift-f", shell::OpenPalette, None),
         KeyBinding::new("ctrl-shift-f", shell::OpenPalette, None),
         KeyBinding::new("cmd-k", shell::OpenPalette, None),
         KeyBinding::new("ctrl-k", shell::OpenPalette, None),
+        // In-chat search (Jacob 2026-10-26, [feedback search-in-chat-mac-2026-10-26]):
+        // ⌘F opens the Search-in-chat bar (refocuses it when up); ⌘G / ⇧⌘G
+        // step through the hits from anywhere; in the bar's field Enter /
+        // ⇧Enter step, ⇥ pins the offered sender, Esc closes (the shell's
+        // Escape). The field's own Send / Newline / AcceptMention bindings
+        // are overridden inside the bar by the deeper "ChatSearch" context.
+        KeyBinding::new("cmd-f", chat_search_ui::Open, None),
+        KeyBinding::new("ctrl-f", chat_search_ui::Open, None),
+        KeyBinding::new("cmd-g", chat_search_ui::Next, None),
+        KeyBinding::new("cmd-shift-g", chat_search_ui::Prev, None),
+        KeyBinding::new(
+            "enter",
+            chat_search_ui::Next,
+            Some("ChatSearch > ComposerInput"),
+        ),
+        KeyBinding::new(
+            "shift-enter",
+            chat_search_ui::Prev,
+            Some("ChatSearch > ComposerInput"),
+        ),
+        KeyBinding::new(
+            "tab",
+            chat_search_ui::PinSender,
+            Some("ChatSearch > ComposerInput"),
+        ),
         // Palette open: ⌘1–⌘9 open that row (↑ ↓ ⏎ Esc are the field's and the shell's).
         KeyBinding::new("cmd-1", palette_ui::Pick1, Some("Palette")),
         KeyBinding::new("cmd-2", palette_ui::Pick2, Some("Palette")),
@@ -331,8 +367,9 @@ fn bind_keys(cx: &mut App) {
 #[cfg(test)]
 mod keymap_tests {
     //! Jacob's shortcut rules (search-palette-2026-10-24, 13:49 UTC): ⌘⇧F =
-    //! app-wide search (the palette), ⌘K its alias, ⌘F reserved for in-chat
-    //! search and so bound to nothing, Send Feedback on ⌘⌥F.
+    //! app-wide search (the palette), ⌘K its alias, Send Feedback on ⌘⌥F —
+    //! and ⌘F, reserved then, is in-chat search since
+    //! [feedback search-in-chat-mac-2026-10-26] (Jacob 2026-10-26).
     use gpui::{Keystroke, TestAppContext};
 
     use super::*;
@@ -360,11 +397,56 @@ mod keymap_tests {
     }
 
     #[gpui::test]
-    fn cmd_f_stays_unbound_for_in_chat_search(cx: &mut TestAppContext) {
-        assert!(
-            actions_for(cx, "cmd-f").is_empty(),
-            "⌘F is reserved for in-chat search (not built yet)"
-        );
+    fn cmd_f_opens_in_chat_search_and_cmd_g_steps_through_it(cx: &mut TestAppContext) {
+        assert_eq!(actions_for(cx, "cmd-f"), vec!["chat_search::Open"]);
+        assert_eq!(actions_for(cx, "cmd-g"), vec!["chat_search::Next"]);
+        assert_eq!(actions_for(cx, "cmd-shift-g"), vec!["chat_search::Prev"]);
+        // Not the palette, not the old sidebar FocusSearch.
+        assert!(!actions_for(cx, "cmd-f").contains(&"shell::OpenPalette".to_string()));
+    }
+
+    /// Inside the bar's field the deeper "ChatSearch" context takes Enter,
+    /// ⇧Enter and ⇥ from the composer's Send / Newline / AcceptMention.
+    #[gpui::test]
+    fn enter_shift_enter_and_tab_in_the_bar_field_step_and_pin(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            bind_keys(cx);
+            let mut outer = gpui::KeyContext::default();
+            outer.add("ChatSearch");
+            let mut inner = gpui::KeyContext::default();
+            inner.add("ComposerInput");
+            let stack = vec![outer, inner];
+            let keymap = cx.key_bindings();
+            let first = |keys: &str, stack: &[gpui::KeyContext]| {
+                let stroke = Keystroke::parse(keys).expect("keystroke");
+                keymap
+                    .borrow()
+                    .bindings_for_input(&[stroke], stack)
+                    .0
+                    .first()
+                    .map(|b| b.action().name().to_string())
+            };
+            assert_eq!(first("enter", &stack).as_deref(), Some("chat_search::Next"));
+            assert_eq!(
+                first("shift-enter", &stack).as_deref(),
+                Some("chat_search::Prev")
+            );
+            assert_eq!(
+                first("tab", &stack).as_deref(),
+                Some("chat_search::PinSender")
+            );
+            // The plain composer keeps its keys.
+            let mut plain = gpui::KeyContext::default();
+            plain.add("ComposerInput");
+            assert_eq!(
+                first("enter", &[plain.clone()]).as_deref(),
+                Some("composer::Send")
+            );
+            assert_eq!(
+                first("shift-enter", &[plain]).as_deref(),
+                Some("composer::Newline")
+            );
+        });
     }
 
     #[gpui::test]

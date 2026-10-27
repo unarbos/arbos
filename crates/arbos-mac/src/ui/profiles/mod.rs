@@ -13,6 +13,7 @@ mod channel;
 mod group;
 pub(crate) mod kit;
 pub(crate) mod library;
+pub(crate) mod machine;
 mod me;
 pub(crate) mod pane;
 mod server;
@@ -29,6 +30,7 @@ use crate::app::{AppState, ProfilePage};
 use crate::model::{now_ms, Attachment, AttachmentKind, Chat, Id, Message, Part};
 use crate::ui::glass;
 use crate::ui::icons::icon;
+use crate::ui::mention;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, CONTROL_GAP, CONTROL_GLYPH, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
@@ -108,6 +110,7 @@ pub(super) fn pushed_frame(
         );
     }
     let back = glass::control_disc("profile-back", "chevron-left", CONTROL_GLYPH, theme)
+        .debug_selector(|| "profile-back".into())
         .on_click(cx.listener(|this, _, _, cx| this.back_profile(cx)));
     pane_frame(
         SHEET_WIDTH,
@@ -257,12 +260,14 @@ pub(crate) fn pane_frame(
 
 /// Big avatar, name, status line (the agent's label — clickable when
 /// `status_click` is given: Grok's "Add a label").
+#[allow(clippy::too_many_arguments)]
 pub(super) fn hero(
     avatar: AnyElement,
     name: AnyElement,
     status: &str,
     status_color: Hsla,
     status_click: Option<HeroClick>,
+    status_element: Option<AnyElement>,
     theme: &Theme,
 ) -> Div {
     let subtitle = div()
@@ -276,12 +281,14 @@ pub(super) fn hero(
         .text_color(status_color)
         .debug_selector(|| "hero-subtitle".into())
         .child(status.to_string());
-    let subtitle = match status_click {
-        Some(f) => subtitle
+    let subtitle: AnyElement = match (status_element, status_click) {
+        (Some(el), _) => el,
+        (None, Some(f)) => subtitle
             .cursor_text()
             .hover(|s| s.bg(theme.field))
-            .on_click(move |e, w, cx| f(e, w, cx)),
-        None => subtitle,
+            .on_click(move |e, w, cx| f(e, w, cx))
+            .into_any_element(),
+        (None, None) => subtitle.into_any_element(),
     };
     div()
         .flex_shrink_0()
@@ -304,6 +311,37 @@ pub(super) fn hero(
         .child(subtitle)
 }
 
+/// "Run by Name" / "Run by @handle" — the owner line under a foreign agent's
+/// name: the display name when the owner has one, the handle otherwise (the
+/// no-raw-handle rule is about agents' speech, not this label).
+pub(crate) fn run_by_label(name: Option<&str>, handle: &str) -> String {
+    match name.map(str::trim).filter(|n| !n.is_empty()) {
+        Some(n) => format!("Run by {n}"),
+        None => format!("Run by @{handle}"),
+    }
+}
+
+/// The foreign agent's owner link in the hero (Jacob 2026-10-25, [feedback
+/// agent-pane-run-by-link-mac-2026-10-25]): a mention-chip pill — the accent
+/// at `alpha` (14 % at rest, 22 % under the pointer, 30 % pressed, the
+/// 120 ms ease-out of `mention::ChipPointer`), accent text, pointing hand.
+/// The caller wires the pointer events and the click (push the owner's page).
+pub(crate) fn run_by_link(label: &str, alpha: f32, theme: &Theme) -> Stateful<Div> {
+    div()
+        .id("run-by-link")
+        .debug_selector(|| "run-by-link".into())
+        .px(px(mention::PILL_PAD_X + 4.0))
+        .py(px(mention::PILL_PAD_Y + 1.0))
+        .rounded(px(mention::PILL_RADIUS))
+        .max_w(px(SHEET_WIDTH - 64.0))
+        .truncate()
+        .text_size(px(HERO_SUBTITLE))
+        .text_color(theme.accent)
+        .bg(mention::pill_color(theme.accent, alpha))
+        .cursor_pointer()
+        .child(label.to_string())
+}
+
 /// A click handler a page hands the shared hero (`cx.listener(..)`, boxed).
 pub(super) type HeroClick = Box<dyn Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App)>;
 
@@ -314,7 +352,21 @@ pub(super) fn editable_picture(
     picture: AnyElement,
     on_click: Option<HeroClick>,
 ) -> Stateful<Div> {
-    let editable = on_click.is_some();
+    hero_picture(id, picture, on_click, None)
+}
+
+/// The shared hero picture: `edit` (something you own) shows the crayon on hover and opens the
+/// picker; otherwise `view` (Jacob, 2026-10-25: tap a profile picture to see it full-size)
+/// makes the picture a plain click into the media viewer — no crayon; neither = just the picture
+/// (a letter / leaf avatar with nothing to view).
+pub(super) fn hero_picture(
+    id: &'static str,
+    picture: AnyElement,
+    edit: Option<HeroClick>,
+    view: Option<HeroClick>,
+) -> Stateful<Div> {
+    let editable = edit.is_some();
+    let on_click = edit.or(view);
     div()
         .id(id)
         .debug_selector(move || id.to_owned())
@@ -482,7 +534,9 @@ pub(crate) enum Sender {
 }
 
 impl Sender {
-    fn of(state: &AppState, m: &Message) -> Self {
+    /// `chat_project` is the chat's own space: an assistant row that names no
+    /// agent (`box:…`, `assistant`) is that space's agent.
+    fn of(state: &AppState, m: &Message, chat_project: &str) -> Self {
         if let Some(pid) = m
             .sender
             .strip_prefix("agent:")
@@ -492,6 +546,9 @@ impl Sender {
         }
         if state.is_mine(m) {
             return Sender::Me;
+        }
+        if !m.sender.starts_with("user:") && m.role == crate::model::Role::Assistant {
+            return Sender::Agent(chat_project.to_string());
         }
         Sender::Person(crate::model::Person {
             id: m.sender.trim_start_matches("user:").to_string(),
@@ -545,9 +602,13 @@ pub(super) fn collect(state: &AppState, chats: &[&Chat]) -> Content {
         links: Vec::new(),
     };
     for chat in chats {
-        for m in state.messages_of(&chat.id) {
+        for m in state
+            .messages_of(&chat.id)
+            .iter()
+            .filter(|m| !state.hides_message(&chat.id, m))
+        {
             let by = sender_label(state, m);
-            let sender = Sender::of(state, m);
+            let sender = Sender::of(state, m, &chat.project_id);
             for part in &m.parts {
                 match part {
                     Part::Attachment { id, attachment } => {
@@ -709,7 +770,7 @@ pub(super) fn link_list(
                 .overflow_hidden()
                 .bg(theme.surface_2)
                 .child(
-                    gpui::img(img)
+                    gpui::img(crate::ui::picture_fit::fit(&img, kit::AVATAR))
                         .size(px(kit::AVATAR))
                         .rounded(px(10.0))
                         .object_fit(gpui::ObjectFit::Cover),

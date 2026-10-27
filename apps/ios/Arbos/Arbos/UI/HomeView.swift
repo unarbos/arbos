@@ -22,7 +22,7 @@ enum HomeListFilter: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 
     /// Scroll anchor for the matching home section (`ScrollViewReader`).
-    var sectionId: String { "home-section-\(rawValue)" }
+    var sectionId: String { "home-section-" + rawValue }
 
     /// Agent (project) rows are listed under All and Agents.
     var showsProjects: Bool { self == .all || self == .agents }
@@ -106,6 +106,9 @@ struct HomeView: View {
                 } else {
                     homeList
                 }
+                // One fade for the list and the search results, from the physical top edge
+                // through the bar and the tabs ([feedback iphone-list-top-fade-2026-10-26]).
+                ListTopFade(screen: searching ? .homeSearch : .home)
                 topBar
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { bottomBar }
@@ -164,8 +167,13 @@ struct HomeView: View {
                 .presentationCornerRadius(28)
                 .preferredColorScheme(theme.isDark ? .dark : .light)
             }
-            .sheet(isPresented: $showSettings) {
-                SettingsView().environmentObject(model).environment(\.theme, theme)
+            .sheet(isPresented: $showSettings, onDismiss: { model.pendingSettingsLanding = nil }) {
+                SettingsView(landing: model.pendingSettingsLanding ?? DebugHooks.settingsPage)
+                    .environmentObject(model).environment(\.theme, theme)
+            }
+            // A Settings row picked in search: the sheet opens straight on that page.
+            .onChange(of: model.pendingSettingsLanding) { _, landing in
+                if landing != nil, !showSettings { showSettings = true }
             }
         }
         .task {
@@ -268,9 +276,9 @@ struct HomeView: View {
     }
 
     private var homeList: some View {
-        ScrollViewReader { proxy in
+            ScrollViewReader { proxy in
                 List {
-                    Color.clear.frame(height: 66)
+                    Color.clear.frame(height: showsFilterBar ? HomeChrome.listTop : HomeChrome.barOnlyListTop)
                         .listRowInsets(EdgeInsets())
                         .listRowSeparator(.hidden)
                         .listRowBackground(Color.clear)
@@ -282,10 +290,6 @@ struct HomeView: View {
                             .listRowSeparator(.hidden)
                             .listRowBackground(Color.clear)
                     } else {
-                        listFilterBar
-                            .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 8, trailing: 20))
-                            .listRowSeparator(.hidden)
-                            .listRowBackground(theme.bg)
                         if let update = model.availableUpdate {
                             UpdateCard(update: update)
                                 .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 22))
@@ -335,23 +339,18 @@ struct HomeView: View {
                 .listStyle(.plain)
                 .scrollContentBackground(.hidden)
                 .background(theme.bg)
-                // Fade under the top bar as an overlay — a List `.mask` clips the
-                // system scroll indicator on the right edge (feedback
-                // app-01M5MY2Y9HTFR019WAEPPDCNYS). Same treatment as ChatView's
-                // headerBlur: keep the soft edge, leave the scroller free.
+                // The top fade is `ListTopFade` in the body's ZStack (an overlay, never a
+                // List `.mask`, which clips the scroll indicator — feedback
+                // app-01M5MY2Y9HTFR019WAEPPDCNYS).
                 .scrollIndicators(.visible)
-                .overlay(alignment: .top) {
-                    LinearGradient(colors: [theme.bg, theme.bg.opacity(0)], startPoint: .top, endPoint: .bottom)
-                        .frame(height: 100)
-                        .allowsHitTesting(false)
-                }
                 .refreshable { await model.refreshRegistry() }
+                .rigListScroll(proxy, ids: (agentSectionEntries + peopleSectionEntries + serverSectionEntries).map(\.id))
                 .onChange(of: filterScrollTicket) { _, _ in
                     withAnimation(.snappy(duration: 0.25)) {
                         proxy.scrollTo(listFilter.sectionId, anchor: .top)
                     }
                 }
-        }
+            }
     }
 
     // MARK: Top bar
@@ -470,9 +469,29 @@ struct HomeView: View {
         .accessibilityLabel("Hidden chats, \(hiddenCount)")
     }
 
-    /// Account circle (→ Settings) left, the + menu right (New Message / New group / …).
-    /// Search lives in the bottom bar, so the header carries no search disc.
+    /// The filter tabs are fixed chrome under the bar (not a list row) whenever there is
+    /// anything to filter; the search results replace them.
+    private var showsFilterBar: Bool {
+        !searching && !(model.projects.isEmpty && model.peopleChats.isEmpty && model.servers.isEmpty)
+    }
+
+    /// Account circle (→ Settings) left, the + menu right (New Message / New group / …),
+    /// the All · Agents · People · Servers tabs under them. Search lives in the bottom
+    /// bar, so the header carries no search disc.
     private var topBar: some View {
+        VStack(spacing: 0) {
+            topBarRow
+            if showsFilterBar {
+                listFilterBar
+                    .padding(.horizontal, 20)
+                    .padding(.top, 8)
+                    .padding(.bottom, 4)
+            }
+        }
+        .zIndex(1)
+    }
+
+    private var topBarRow: some View {
         HStack(spacing: 10) {
             Button { showSettings = true } label: {
                 ZStack(alignment: .bottomTrailing) {
@@ -519,7 +538,7 @@ struct HomeView: View {
             } label: {
                 GlassCircle {
                     Image(systemName: "plus")
-                        .font(theme.font(19, weight: .regular))
+                        .font(theme.font(Controls.glyph, weight: .regular))
                         .foregroundStyle(theme.text)
                 }
             }
@@ -527,10 +546,9 @@ struct HomeView: View {
             .accessibilityLabel("Create")
             .accessibilityIdentifier("home-create-menu")
         }
-        // Grok home header: 20 pt side margins, 42 pt circles.
-        .padding(.horizontal, 20)
-        .padding(.top, 6)
-        .zIndex(1)
+        // One top bar for every screen: `Controls.inset` / `Controls.top` (was Grok's 20 here
+        // and 16 in chats; [feedback iphone-header-composer-sizing-2026-10-26]).
+        .controlBar()
     }
 
     // MARK: Empty / error
@@ -1009,7 +1027,7 @@ struct UpdateCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
-                GlassCircle(size: 36) {
+                GlassCircle(size: 36) { // control-size: exception rowIconTiles
                     Image(systemName: "arrow.down.circle.fill").font(.system(size: 17)).foregroundStyle(theme.text)
                 }
                 VStack(alignment: .leading, spacing: 2) {
@@ -1022,7 +1040,7 @@ struct UpdateCard: View {
                 Button { model.dismissUpdate() } label: {
                     Text("Later").font(theme.font(Theme.small, weight: .semibold)).foregroundStyle(theme.text)
                         .frame(maxWidth: .infinity).frame(height: 38)
-                        .background(Capsule().fill(theme.field)).overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1))
+                        .background(Capsule().fill(theme.field)).overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1)) // control-size: exception inlineChips
                 }
                 .buttonStyle(.plain)
                 Button { model.openTestFlight() } label: {
@@ -1049,7 +1067,7 @@ struct WaitlistCard: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            GlassCircle(size: 36) {
+            GlassCircle(size: 36) { // control-size: exception rowIconTiles
                 Image(systemName: "hourglass").font(.system(size: 16)).foregroundStyle(theme.text)
             }
             VStack(alignment: .leading, spacing: 2) {
@@ -1102,7 +1120,7 @@ struct HiddenChatsView: View {
         ZStack(alignment: .top) {
             theme.bg.ignoresSafeArea()
             List {
-                Color.clear.frame(height: 66)
+                Color.clear.frame(height: HomeChrome.barOnlyListTop)
                     .listRowInsets(EdgeInsets())
                     .listRowSeparator(.hidden)
                     .listRowBackground(Color.clear)
@@ -1203,12 +1221,13 @@ struct HiddenChatsView: View {
             .scrollContentBackground(.hidden)
             .background(theme.bg)
             .scrollIndicators(.visible)
+            ListTopFade(screen: .hiddenChats)
             // Grok page header: back circle left, title centred in a pill.
             HStack {
                 Button { dismiss() } label: {
                     GlassCircle {
                         Image(systemName: "chevron.left")
-                            .font(theme.font(17, weight: .semibold))
+                            .font(theme.font(Controls.glyph, weight: .semibold))
                             .foregroundStyle(theme.text)
                     }
                 }
@@ -1218,14 +1237,13 @@ struct HiddenChatsView: View {
                     Text("Hidden chats")
                         .font(theme.font(Theme.body, weight: .semibold))
                         .foregroundStyle(theme.text)
-                        .padding(.horizontal, 16)
-                        .frame(height: Theme.control)
+                        .padding(.horizontal, Controls.textInset)
+                        .frame(height: Controls.height)
                 }
                 Spacer()
                 Color.clear.frame(width: Theme.control, height: Theme.control)
             }
-            .padding(.horizontal, 20)
-            .padding(.top, 6)
+            .controlBar()
         }
         .toolbar(.hidden, for: .navigationBar)
         .toolbar(.hidden, for: .tabBar)

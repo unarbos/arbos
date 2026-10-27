@@ -17,6 +17,8 @@
 //! the sidebar row); the top bar carries Grok's share disc (the invite sheet:
 //! let a person in on this agent) beside the close disc.
 
+use std::time::Instant;
+
 use gpui::{div, prelude::*, px, Context, Div, ElementId, Focusable, SharedString, Stateful};
 
 use crate::app::{AgentPick, ProfilePage};
@@ -35,7 +37,7 @@ use crate::ui::theme::{Theme, TEXT_SMALL};
 
 use super::kit::{self, Leading};
 use super::pane::{self, Hero, Picture, ProfilePane, Section};
-use super::{chats_of, collect, editable_name, editable_picture, HeroClick, HERO_AVATAR};
+use super::{chats_of, collect, editable_name, hero_picture, HeroClick, HERO_AVATAR};
 
 /// The agent pane's tabs — Grok Bot's ([feedback agent-pane-details-tab-2026-10-24],
 /// Jacob 2026-10-24; supersedes Profile · Settings · Library of 2026-10-22):
@@ -75,6 +77,10 @@ fn project_from_member(state: &crate::app::AppState, project_id: &str) -> Option
             avatar_color_index: a.avatar_color_index,
             avatar_leaf: a.avatar_leaf,
             avatar_leaf_color: a.avatar_leaf_color,
+            // The owner's picture travels with the roster copy; without it the hero drew the
+            // automatic leaf for every foreign agent (Jacob, 2026-10-25: "Hezbola").
+            image_url: a.image_url.clone(),
+            avatar_version: a.avatar_version,
             description: a.description.clone(),
             owner_person: a.owner.clone(),
             model: a.model.clone().unwrap_or_default(),
@@ -127,17 +133,25 @@ pub(super) fn page(
         let chats: Vec<&crate::model::Chat> = chats_of(state, &project.id);
         collect(state, &chats)
     });
+    // The owner's display name for the "Run by …" link (API §9 `owner`, else a member row).
+    let owner_name: Option<String> = project
+        .owner_handle
+        .as_deref()
+        .map(|o| o.trim_start_matches('@'))
+        .and_then(|o| state.person_by_handle(o))
+        .and_then(|p| p.name.clone())
+        .filter(|n| !n.trim().is_empty());
     let routines: Vec<Routine> = state.routines_of(&project.id).to_vec();
     let box_report = state.box_report.clone();
     let machine = state.machine.clone();
     let now = now_ms() as i64;
 
     // D92 amendment: the uploaded / generated picture wins over the leaf (read while `state`
-    // is borrowed).
-    let hero_image = project
-        .image_url
-        .as_deref()
-        .and_then(|url| state.avatar(url));
+    // is borrowed) — from the newest copy the store holds, like every other surface.
+    let hero_image = crate::sync::agent_avatar::newest(&state.projects, &project.id)
+        .and_then(|f| f.image_url)
+        .or_else(|| project.image_url.clone())
+        .and_then(|url| state.avatar(&url));
     if avatar_state != AvatarState::Idle || streaming {
         PulseClock::request(cx);
     }
@@ -158,7 +172,7 @@ pub(super) fn page(
                 .rounded_full()
                 .overflow_hidden()
                 .child(
-                    gpui::img(image)
+                    gpui::img(crate::ui::picture_fit::fit(&image, HERO_AVATAR))
                         .size(px(HERO_AVATAR))
                         .rounded_full()
                         .object_fit(gpui::ObjectFit::Cover),
@@ -173,7 +187,18 @@ pub(super) fn page(
         });
         Box::new(f) as HeroClick
     });
-    let avatar = editable_picture("profile-avatar", picture, pic_click).into_any_element();
+    // Someone else's agent: its picture opens full-size in the media viewer (a leaf opens nothing).
+    let view_click = (!mine)
+        .then(|| project.image_url.clone())
+        .flatten()
+        .map(|url| {
+            let name = project.name.clone();
+            let f = cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                this.view_picture(&name, &url, cx);
+            });
+            Box::new(f) as HeroClick
+        });
+    let avatar = hero_picture("profile-avatar", picture, pic_click, view_click).into_any_element();
     let p_rename = pid.clone();
     let name_click = mine.then(|| {
         let f = cx.listener(move |this, _: &gpui::ClickEvent, window, cx| {
@@ -220,7 +245,24 @@ pub(super) fn page(
         });
         Box::new(f) as HeroClick
     });
-    let editor = editing_description.then(|| label_editor(shell, &theme).into_any_element());
+    // Someone else's agent: "Run by …" is a link to the owner's page, pushed
+    // over this one with ‹ back (Jacob 2026-10-25, [feedback
+    // agent-pane-run-by-link-mac-2026-10-25]). With no label it is the
+    // subtitle; under a label it is the line below it.
+    let run_by = (!mine)
+        .then(|| owner_handle.clone())
+        .flatten()
+        .map(|handle| run_by_link_element(&handle, owner_name.as_deref(), &pid, shell, &theme, cx));
+    let (subtitle_element, run_by_below) = match (run_by, &label) {
+        (Some(link), None) => (Some(link), None),
+        (Some(link), Some(_)) => (None, Some(link)),
+        (None, _) => (None, None),
+    };
+    let editor = if editing_description {
+        Some(label_editor(shell, &theme).into_any_element())
+    } else {
+        run_by_below.map(|link| div().pt(px(2.0)).child(link).into_any_element())
+    };
     let hero = Hero {
         picture: Picture::Element(avatar),
         name: name_el,
@@ -228,7 +270,9 @@ pub(super) fn page(
         subtitle: (!editing_description).then_some(subtitle),
         subtitle_color,
         subtitle_click,
+        subtitle_element,
         editor,
+        action: None,
     };
 
     let body: Vec<Section> = match tab {
@@ -355,6 +399,60 @@ pub(super) fn page(
         shell,
         cx,
     ))
+}
+
+/// The "Run by …" chip: pointer states from `Shell.run_by_chip` (14 / 22 /
+/// 30 % accent, 120 ms ease-out), a release on it pushes the owner's page
+/// (`ProfilePage::User`) over the agent's — `‹` in the top bar brings the
+/// agent back with its tab and scroll.
+fn run_by_link_element(
+    owner_handle: &str,
+    owner_name: Option<&str>,
+    project_id: &Id,
+    shell: &Shell,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> gpui::AnyElement {
+    let now = Instant::now();
+    let (alpha, fading) = shell.run_by_chip.alpha(&(), now, false);
+    if fading {
+        PulseClock::request(cx);
+    }
+    let label = super::run_by_label(owner_name, owner_handle);
+    let (handle, pid) = (owner_handle.to_owned(), project_id.clone());
+    super::run_by_link(&label, alpha, theme)
+        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+            if this
+                .run_by_chip
+                .hover(hovered.then_some(()), Instant::now())
+            {
+                cx.notify();
+            }
+        }))
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(|this, _, _, cx| {
+                cx.stop_propagation();
+                this.run_by_chip.press((), Instant::now());
+                cx.notify();
+            }),
+        )
+        .on_mouse_up(
+            gpui::MouseButton::Left,
+            cx.listener(move |this, _, _, cx| {
+                if this.run_by_chip.release(Instant::now()).is_some() {
+                    this.push_profile(
+                        ProfilePage::User {
+                            handle: handle.clone(),
+                            space_id: Some(pid.clone()),
+                        },
+                        cx,
+                    );
+                }
+                cx.notify();
+            }),
+        )
+        .into_any_element()
 }
 
 /// The hero's label field while the label is being edited: the shared
@@ -757,7 +855,20 @@ fn computer_sections(
                         kit::value_row("agent-box-memory", "Memory", mem, theme).into_any_element(),
                     );
                 }
-                if let Some(load) = r.load_1m {
+                // CPU share from the box's cgroup (agentd ≥ 0.6.277); the load average is
+                // the host's inside Daytona (`load_is_host`), so it is drawn only when it is
+                // really the box's and no CPU figure exists.
+                if let Some(cpu) = r.cpu_pct {
+                    rows.push(
+                        kit::value_row(
+                            "agent-box-cpu",
+                            "CPU",
+                            format!("{} %", cpu.round() as u64),
+                            theme,
+                        )
+                        .into_any_element(),
+                    );
+                } else if let Some(load) = r.load_1m.filter(|_| !r.load_is_host) {
                     rows.push(
                         kit::value_row("agent-box-load", "Load", format!("{load:.2}"), theme)
                             .into_any_element(),
@@ -1043,6 +1154,10 @@ mod tests {
         assert_eq!(r.image.as_deref(), Some("arbos-agent-0.1.114"));
         assert_eq!(r.disk_available_mb, Some(6900));
         assert_eq!(r.load_1m, Some(0.42));
+        assert!(!r.load_is_host);
+        assert_eq!(r.cpu_pct, None);
+        assert!(r.usage_rows().is_empty());
+        assert_eq!(r.jobs_running(), None);
         assert_eq!(r.workspaces.len(), 2);
         assert_eq!(r.running().count(), 1);
         assert_eq!(r.workspace("p1").unwrap().tool_calls, Some(7));
@@ -1057,5 +1172,250 @@ mod tests {
             Some("box has no url yet")
         );
         assert!(asleep.workspaces.is_empty());
+    }
+
+    /// agentd ≥ 0.6.277 ([feedback machine-page-agentd-2026-10-26]): `resources` carries the
+    /// cgroup cap (inside Daytona `/proc/meminfo` is the host's), `load_scope` says the load is
+    /// the host's, and every workspace has its share and job count.
+    #[test]
+    fn box_report_reads_the_samplers_resources_and_per_workspace_usage() {
+        let v: serde_json::Value = serde_json::json!({
+            "relay": { "state": "awake", "awake_for_s": 100, "agentd": { "image": "arbos-agent-0.1.152" } },
+            "box": { "reachable": true, "state": {
+                "uptime_s": 100, "load": [38.5, 36.9, 32.1], "load_scope": "host",
+                "memory_mb": { "total": 8192, "available": 7039, "source": "cgroup" },
+                "disk": { "path": "/work", "total_mb": 10240, "available_mb": 9925 },
+                "resources": {
+                    "sampled_at": 1, "load_scope": "host",
+                    "cpu": { "cores": 4.0, "pct": 23.4, "source": "cgroup" },
+                    "memory": { "total_mb": 8192, "used_mb": 1153, "peak_mb": 1204, "source": "cgroup" },
+                    "disk": { "total_mb": 10240, "used_mb": 315, "available_mb": 9925, "inodes_total": 131072, "inodes_avail": 93000 },
+                    "net": { "rx_bps": 1200000.0, "tx_bps": 80000.0, "rx_bytes_today": 2000000000u64, "tx_bytes_today": 100000000u64 }
+                },
+                "workspaces": [
+                    { "project_id": "p1", "name": "Arbos", "healthy": true, "jobs_running": 1,
+                      "usage": { "cpu_pct": 61.0, "mem_mb": 1900, "pids": 40, "disk_mb": 2300 },
+                      "turn": { "running": true, "current": { "elapsed_ms": 42000, "tool_calls": 7 } } },
+                    { "project_id": "p2", "name": "Comms", "healthy": true, "jobs_running": 0,
+                      "usage": { "cpu_pct": 0.0, "mem_mb": 600, "pids": 12, "disk_mb": 400 },
+                      "turn": { "running": false, "current": null } }
+                ]
+            } }
+        });
+        let r = BoxReport::from_debug(&v, 5);
+        assert!(r.load_is_host);
+        assert_eq!(r.cpu_cores, Some(4.0));
+        assert_eq!(r.cpu_pct, Some(23.4));
+        assert_eq!(r.mem_total_mb, Some(8192));
+        assert_eq!(r.mem_available_mb, Some(8192 - 1153));
+        assert_eq!(r.inodes_avail, Some(93000));
+        assert_eq!(r.net_rx_bps, Some(1_200_000.0));
+        assert_eq!(r.net_tx_today, Some(100_000_000));
+        assert_eq!(r.jobs_running(), Some(1));
+        let rows = r.usage_rows();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].name, "Arbos");
+        assert_eq!(rows[0].disk_mb, Some(2300));
+        assert_eq!(rows[1].jobs_running, Some(0));
+    }
+}
+
+/// The foreign agent's "Run by …" owner link: a mention-chip pill under the
+/// name, a click pushes the owner's page over the agent's and `‹` brings the
+/// agent back (Jacob 2026-10-25, [feedback agent-pane-run-by-link-mac-2026-10-25]).
+#[cfg(test)]
+mod run_by_tests {
+    use futures::future::BoxFuture;
+    use gpui::{
+        point, prelude::*, Bounds, Entity, Modifiers, Pixels, TestAppContext, VisualTestContext,
+    };
+    use tokio::sync::mpsc;
+
+    use crate::app::{AppState, ProfilePage};
+    use crate::model::{Person, Project};
+    use crate::sync::{ClientCommand, SyncEvent, SyncSource};
+    use crate::ui::motion::PulseClock;
+    use crate::ui::profiles::{run_by_label, run_by_link};
+    use crate::ui::shell::Shell;
+    use crate::ui::theme::Theme;
+
+    #[test]
+    fn the_label_names_the_owner_by_display_name_then_handle() {
+        assert_eq!(
+            run_by_label(Some("Sami Kassab"), "sami"),
+            "Run by Sami Kassab"
+        );
+        assert_eq!(run_by_label(Some("  "), "sami"), "Run by @sami");
+        assert_eq!(run_by_label(None, "sami"), "Run by @sami");
+    }
+
+    struct Idle;
+
+    impl SyncSource for Idle {
+        fn name(&self) -> &'static str {
+            "idle"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            _commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    fn foreign_agent() -> Project {
+        Project {
+            id: "p-test-agent".into(),
+            name: "TestAgent".into(),
+            shared: true,
+            owner_handle: Some("sami".into()),
+            owner_person: Some(Person {
+                id: "gh_2".into(),
+                handle: "sami".into(),
+                name: Some("Sami Kassab".into()),
+                role: "owner".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn mount(
+        cx: &mut TestAppContext,
+    ) -> (
+        tokio::runtime::Runtime,
+        Entity<AppState>,
+        Entity<Shell>,
+        &mut VisualTestContext,
+    ) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| {
+            gpui_tokio::init_from_handle(cx, handle);
+            cx.set_global(Theme::dark(crate::ui::theme::Surface::Matte));
+            if !cx.has_global::<PulseClock>() {
+                PulseClock::init(cx);
+            }
+        });
+        let state = cx.new(|cx| AppState::new(Box::new(Idle), cx));
+        state.update(cx, |s, cx| {
+            s.apply(SyncEvent::Projects(vec![foreign_agent()]), cx);
+            s.open_profile(
+                ProfilePage::Agent {
+                    project_id: "p-test-agent".into(),
+                },
+                cx,
+            );
+        });
+        let (shell, vcx) = cx.add_window_view(|window, cx| Shell::new(state.clone(), window, cx));
+        vcx.run_until_parked();
+        (rt, state, shell, vcx)
+    }
+
+    fn settle(shell: &Entity<Shell>, vcx: &mut VisualTestContext) {
+        for _ in 0..3 {
+            shell.update(vcx, |_, cx| cx.notify());
+            vcx.run_until_parked();
+        }
+    }
+
+    fn centre(b: Bounds<Pixels>) -> gpui::Point<Pixels> {
+        point(b.left() + b.size.width / 2.0, b.top() + b.size.height / 2.0)
+    }
+
+    /// Headless: the link renders under the name of someone else's agent, a
+    /// click pushes the owner's page (one frame on the stack, `‹` in the top
+    /// bar), and `‹` returns to the agent's page with an empty stack.
+    #[gpui::test]
+    fn the_run_by_link_pushes_the_owner_and_back_returns(cx: &mut TestAppContext) {
+        let (_rt, state, shell, vcx) = mount(cx);
+        settle(&shell, vcx);
+        let link = vcx
+            .debug_bounds("run-by-link")
+            .expect("the Run by link is drawn");
+        let name = vcx.debug_bounds("hero-subtitle");
+        assert!(name.is_none(), "the link replaces the plain subtitle");
+        assert!(
+            vcx.debug_bounds("profile-back").is_none(),
+            "no back disc on the first page"
+        );
+        vcx.simulate_click(centre(link), Modifiers::default());
+        settle(&shell, vcx);
+        state.read_with(vcx, |s, _| {
+            assert_eq!(
+                s.profile,
+                Some(ProfilePage::User {
+                    handle: "sami".into(),
+                    space_id: Some("p-test-agent".into()),
+                }),
+                "the owner's page is open"
+            );
+            assert_eq!(
+                s.profile_stack.len(),
+                1,
+                "the agent's page waits underneath"
+            );
+        });
+        let back = vcx
+            .debug_bounds("profile-back")
+            .expect("‹ back disc on the pushed page");
+        assert_eq!(
+            f32::from(back.size.width),
+            crate::ui::theme::CONTROL,
+            "the family's disc"
+        );
+        vcx.simulate_click(centre(back), Modifiers::default());
+        settle(&shell, vcx);
+        state.read_with(vcx, |s, _| {
+            assert_eq!(
+                s.profile,
+                Some(ProfilePage::Agent {
+                    project_id: "p-test-agent".into()
+                }),
+                "back on the agent's page"
+            );
+            assert!(s.profile_stack.is_empty());
+        });
+        assert!(
+            vcx.debug_bounds("run-by-link").is_some(),
+            "the link is back too"
+        );
+    }
+
+    struct Pill;
+
+    impl gpui::Render for Pill {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
+            gpui::div()
+                .w(gpui::px(340.0))
+                .h(gpui::px(200.0))
+                .flex()
+                .items_start()
+                .justify_center()
+                .child(run_by_link("Run by Sami Kassab", 0.14, &theme))
+        }
+    }
+
+    /// The pill alone: one line, the chip's rest alpha, inside the hero width.
+    #[gpui::test]
+    fn the_link_is_one_chip_sized_line(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::dark(crate::ui::theme::Surface::Matte)));
+        let (_view, vcx) = cx.add_window_view(|_, _| Pill);
+        vcx.run_until_parked();
+        let b = vcx.debug_bounds("run-by-link").expect("link");
+        let h: f32 = b.size.height.into();
+        let w: f32 = b.size.width.into();
+        assert!(h < 30.0, "one 12 pt line in a pill: {h}");
+        assert!(w > 60.0 && w <= 340.0 - 64.0, "hugging its text: {w}");
     }
 }

@@ -144,6 +144,10 @@ pub const NOT_RISKY_TOOLS: &[&str] = &[
     "recall",
     "peek",
     "deliver_file",
+    // Posts a chart into the user's own chat like `deliver_file`; its name matches the
+    // `tool-send` pattern (`post_`) and raised a card on the first live use
+    // ([feedback chart-post-not-gated-2026-10-27]).
+    "post_chart",
     "routines_list",
     "routines_create",
     "routines_update",
@@ -1148,6 +1152,11 @@ mod tests {
             ("send_message", json!({ "to": "TestAgent", "text": "hi" })),
             ("send_message", json!({ "text": "still working" })),
             ("local_devices", json!({})),
+            ("deliver_file", json!({ "path": "out/report.pdf" })),
+            (
+                "post_chart",
+                json!({ "chart": { "kind": "line", "series": [] }, "caption": "x" }),
+            ),
         ] {
             assert_eq!(
                 classify_tool(tool, &args),

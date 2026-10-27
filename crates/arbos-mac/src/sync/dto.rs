@@ -355,6 +355,12 @@ impl From<&SecretDto> for Secret {
                 d.people.iter().map(SecretDirector::from).collect()
             },
             others_ask: d.others_ask.clone().unwrap_or_else(|| "refuse".into()),
+            source: d.source.as_ref().map(|src| crate::model::SecretSource {
+                kind: src.kind.clone(),
+                project_id: src.project_id.clone(),
+                project_name: src.project_name.clone(),
+                chat_id: src.chat_id.clone(),
+            }),
         }
     }
 }
@@ -432,6 +438,7 @@ fn secret_from_summary(s: &ProjectSecretSummaryDto) -> Secret {
         agents: Vec::new(),
         directors: Vec::new(),
         others_ask: "refuse".into(),
+        source: None,
     }
 }
 
@@ -694,7 +701,9 @@ pub(crate) fn project_from_dto(
         avatar_leaf: p.avatar_leaf.and_then(leaf_index),
         avatar_leaf_color: p.avatar_leaf_color.and_then(leaf_index),
         image_url: None,
+        avatar_version: p.avatar_version.unwrap_or(0),
         message_grants: p.message_grants.iter().map(message_grant_from).collect(),
+        blocked_senders: Vec::new(),
     }
 }
 
@@ -837,7 +846,7 @@ pub(crate) fn chat_from_create(dto: &CreateChatResponseDto) -> Chat {
     chat_from_dto(&dto.chat)
 }
 
-fn agent_from_member(m: &ChatMemberDto, pid: &str, http_url: &str, token: &str) -> AgentMember {
+fn agent_from_member(m: &ChatMemberDto, pid: &str, http_url: &str) -> AgentMember {
     let project = m.project.as_ref();
     let name = project
         .map(|p| p.name.as_str())
@@ -896,10 +905,15 @@ fn agent_from_member(m: &ChatMemberDto, pid: &str, http_url: &str, token: &str) 
             .and_then(|p| p.avatar_leaf_color_effective)
             .or(m.avatar_leaf_color_effective)
             .and_then(leaf_index),
-        image_url: project
-            .and_then(|p| p.image_key.as_deref())
-            .and_then(non_empty)
-            .map(|k| format!("{http_url}/blob/{pid}/{k}?token={token}")),
+        // The public versioned picture route, not the owner-only blob slot (a viewer who
+        // only shares the group got 403 there and drew the leaf — Jacob, 2026-10-25).
+        image_url: super::agent_avatar::picture_url(
+            http_url,
+            pid,
+            project.and_then(|p| p.image_key.as_deref()),
+            project.and_then(|p| p.avatar_version).unwrap_or(0),
+        ),
+        avatar_version: project.and_then(|p| p.avatar_version).unwrap_or(0),
     }
 }
 
@@ -937,7 +951,7 @@ pub(crate) fn people_space_from(
                 avatar_color_index: m.avatar_color_index_effective.map(color_index),
             });
         } else if let Some(pid) = m.member.strip_prefix("agent:") {
-            agents.push(agent_from_member(m, pid, http_url, token));
+            agents.push(agent_from_member(m, pid, http_url));
         }
     }
     let people_owner: Option<String> = people
@@ -1011,7 +1025,9 @@ pub(crate) fn people_space_from(
             .as_deref()
             .and_then(non_empty)
             .map(|k| format!("{http_url}/blob/people:{id}/{k}?token={token}")),
+        avatar_version: 0,
         message_grants: Vec::new(),
+        blocked_senders: dto.blocked_senders.clone(),
     };
     let chat = Chat {
         id: id.clone(),
@@ -1554,10 +1570,24 @@ mod tests {
         assert!(s.directors[0].enabled);
         assert_eq!(s.directors[0].last_asked_at, Some(1_700_000_003_000));
         assert_eq!(s.others_ask, "refuse");
+        // Secret hand-off: the fixture's secret came from Settings; one given in chat says so.
+        assert_eq!(s.source.as_ref().map(|x| x.kind.as_str()), Some("settings"));
+        assert!(s.source_label().is_none() && s.added_label().is_none());
+        let mut given = secret.clone();
+        given.source = Some(arbos_core::api::SecretSourceDto {
+            kind: "chat".into(),
+            project_id: Some("proj_secrets_fixture".into()),
+            project_name: Some("Research".into()),
+            chat_id: Some("chat_1".into()),
+        });
+        let g = Secret::from(&given);
+        assert_eq!(g.source_label(), Some("given in chat"));
+        assert_eq!(g.added_label().as_deref(), Some("In chat with Research"));
         // A relay from before #1442 sends only `directors[]` and no switch: still on, still refuse.
         let mut old = secret.clone();
         old.people.clear();
         old.others_ask = None;
+        old.source = None;
         old.directors[0].enabled = None;
         let s_old = Secret::from(&old);
         assert_eq!(s_old.directors.len(), 1);

@@ -52,13 +52,69 @@ pub fn act_to_job_on(override_file: &std::path::Path) -> bool {
     switch_on("ARBOS_ACT_TO_JOB", override_file, true)
 }
 
-/// Seconds an act turn may run before it is converted (`ARBOS_ACT_TO_JOB_SECS`, default 6).
-pub fn act_to_job_after() -> std::time::Duration {
-    let secs = std::env::var("ARBOS_ACT_TO_JOB_SECS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(6);
+/// Override file for the act→job threshold: `.arbos/act-to-job-secs` (a number of seconds), in the
+/// project's state dir first, then box-wide.
+pub const ACT_TO_JOB_SECS_FILE: &str = "act-to-job-secs";
+/// Default seconds an act turn may run before it is converted. 6 → 12 (Jacob, 2026-10-26 03:06
+/// UTC, cost knob 2): a one-search ask stays inline on the talking model; Hezbola's "Search them
+/// online" was converted at 6.6 s during its only tool call and paid a Sonnet worker for it.
+pub const ACT_TO_JOB_SECS_DEFAULT: u64 = 12;
+
+/// Seconds an act turn may run before it is converted: override files, then
+/// `ARBOS_ACT_TO_JOB_SECS`, then `ACT_TO_JOB_SECS_DEFAULT`. Read per turn (an A/B flips it with
+/// a file, no restart).
+pub fn act_to_job_after_with(files: &[std::path::PathBuf]) -> std::time::Duration {
+    let from_file = files.iter().find_map(|f| {
+        std::fs::read_to_string(f)
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+    });
+    let secs = from_file
+        .or_else(|| {
+            std::env::var("ARBOS_ACT_TO_JOB_SECS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+        })
+        .unwrap_or(ACT_TO_JOB_SECS_DEFAULT);
     std::time::Duration::from_secs(secs)
+}
+
+/// Override file for the research-job worker model: `.arbos/research-worker-model` holding a model
+/// id, or `off` to run research jobs on the subagent model like every other kind.
+pub const RESEARCH_WORKER_MODEL_FILE: &str = "research-worker-model";
+/// Default model for `research` jobs (Jacob, 2026-10-26 03:06 UTC, cost knob 1): the worker lane
+/// was 31 Sonnet calls / $0.76 of a $5.14 run; research (web pages → a comparison) is what the
+/// talking model does well. `code` and the rest keep the subagent model.
+pub const RESEARCH_WORKER_MODEL_DEFAULT: &str = "anthropic/claude-haiku-5.5";
+
+/// The model a `research` job's worker runs on: override files (project, then box), then
+/// `ARBOS_RESEARCH_WORKER_MODEL`, then the default; `off` / empty → `None` (use the subagent model).
+pub fn research_worker_model_with(files: &[std::path::PathBuf]) -> Option<String> {
+    let raw = files
+        .iter()
+        .find_map(|f| {
+            std::fs::read_to_string(f)
+                .ok()
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+        })
+        .or_else(|| std::env::var("ARBOS_RESEARCH_WORKER_MODEL").ok())
+        .unwrap_or_else(|| RESEARCH_WORKER_MODEL_DEFAULT.to_owned());
+    let v = raw.trim();
+    if v.is_empty() || parse_switch(v) == Some(false) {
+        None
+    } else {
+        Some(v.to_owned())
+    }
+}
+
+/// The worker model for a job of `kind`: `research` takes the research worker model when one is
+/// set, everything else the subagent model.
+pub fn worker_model_for(kind: &str, research: Option<&str>, subagent: &str) -> String {
+    match (kind, research) {
+        ("research", Some(m)) => m.to_owned(),
+        _ => subagent.to_owned(),
+    }
 }
 
 /// Tool calls beyond which an act turn counts as long work (`ARBOS_ACT_TO_JOB_TOOL_CALLS`, default 3).
@@ -462,6 +518,22 @@ impl Config {
         act_to_job_on(&self.box_flag_file(ACT_TO_JOB_FILE))
     }
 
+    /// Seconds before an act turn becomes a job (cost knob 2); project file, box file, env, default.
+    pub fn act_to_job_after(&self) -> std::time::Duration {
+        act_to_job_after_with(&self.knob_files(ACT_TO_JOB_SECS_FILE))
+    }
+
+    /// The model `research` jobs run on (cost knob 1); `None` = the subagent model.
+    pub fn research_worker_model(&self) -> Option<String> {
+        research_worker_model_with(&self.knob_files(RESEARCH_WORKER_MODEL_FILE))
+    }
+
+    /// A knob's override files in precedence order: this project's `.arbos/<name>` (so an A/B can
+    /// run two projects on one box with different settings), then the box-wide file.
+    fn knob_files(&self, name: &str) -> Vec<PathBuf> {
+        vec![self.state_dir.join(name), self.box_flag_file(name)]
+    }
+
     /// Send tool (duplex step 1): read per turn, so a toggle needs no respawn.
     pub fn send_tool(&self) -> SendTool {
         send_tool_mode(&self.box_flag_file(SEND_TOOL_FILE))
@@ -519,6 +591,81 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Cost knobs (Jacob 2026-10-26): per-project file > box file > env > default; `off` turns
+    /// the research model off; the threshold default is 12 s.
+    #[test]
+    fn cost_knob_precedence() {
+        let dir = std::env::temp_dir().join(format!("arbos-knobs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let proj = dir.join("p").join(RESEARCH_WORKER_MODEL_FILE);
+        let bx = dir.join("b").join(RESEARCH_WORKER_MODEL_FILE);
+        std::fs::create_dir_all(proj.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(bx.parent().unwrap()).unwrap();
+        let files = vec![proj.clone(), bx.clone()];
+        if std::env::var("ARBOS_RESEARCH_WORKER_MODEL").is_err() {
+            assert_eq!(
+                research_worker_model_with(&files).as_deref(),
+                Some(RESEARCH_WORKER_MODEL_DEFAULT)
+            );
+        }
+        std::fs::write(&bx, "off\n").unwrap();
+        assert_eq!(research_worker_model_with(&files), None);
+        std::fs::write(&proj, "anthropic/claude-sonnet-5.5\n").unwrap();
+        assert_eq!(
+            research_worker_model_with(&files).as_deref(),
+            Some("anthropic/claude-sonnet-5.5"),
+            "the project file wins over the box file"
+        );
+        std::fs::write(&proj, "  \n").unwrap();
+        assert_eq!(
+            research_worker_model_with(&files),
+            None,
+            "blank project file falls through to the box file (off)"
+        );
+        assert_eq!(
+            worker_model_for(
+                "research",
+                Some("anthropic/claude-haiku-5.5"),
+                "anthropic/claude-sonnet-5.5"
+            ),
+            "anthropic/claude-haiku-5.5"
+        );
+        assert_eq!(
+            worker_model_for(
+                "code",
+                Some("anthropic/claude-haiku-5.5"),
+                "anthropic/claude-sonnet-5.5"
+            ),
+            "anthropic/claude-sonnet-5.5"
+        );
+        assert_eq!(
+            worker_model_for("research", None, "anthropic/claude-sonnet-5.5"),
+            "anthropic/claude-sonnet-5.5"
+        );
+        let sp = dir.join("p").join(ACT_TO_JOB_SECS_FILE);
+        let sb = dir.join("b").join(ACT_TO_JOB_SECS_FILE);
+        let sfiles = vec![sp.clone(), sb.clone()];
+        if std::env::var("ARBOS_ACT_TO_JOB_SECS").is_err() {
+            assert_eq!(
+                act_to_job_after_with(&sfiles).as_secs(),
+                ACT_TO_JOB_SECS_DEFAULT
+            );
+            assert_eq!(ACT_TO_JOB_SECS_DEFAULT, 12);
+        }
+        std::fs::write(&sb, "6\n").unwrap();
+        assert_eq!(act_to_job_after_with(&sfiles).as_secs(), 6);
+        std::fs::write(&sp, "20").unwrap();
+        assert_eq!(act_to_job_after_with(&sfiles).as_secs(), 20);
+        std::fs::write(&sp, "soon").unwrap();
+        assert_eq!(
+            act_to_job_after_with(&sfiles).as_secs(),
+            6,
+            "a garbage project file falls through"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn switch_words() {

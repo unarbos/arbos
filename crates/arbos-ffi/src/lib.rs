@@ -17,7 +17,11 @@ use serde_json::Value;
 uniffi::setup_scaffolding!();
 
 pub mod avatar;
+pub mod chart;
+pub mod highlight;
 pub mod matrix;
+pub mod search;
+pub mod settings_search;
 
 /// Frame decode, doc import, or writer failure. Sans-IO session has no transport errors.
 #[derive(Debug, Clone, thiserror::Error, uniffi::Error)]
@@ -99,9 +103,15 @@ pub enum RoomAction {
         code: String,
         message: String,
     },
-    /// A `not_available` push refusal on this connection (`batchId` from the error).
+    /// A `not_available` push refusal on this connection (`batchId` from the error) with the
+    /// relay's `reason` (`blocked_by` / `blocks_member` / `silenced` / `chat_unavailable`)
+    /// and, on a block, the other party.
     PushRefused {
         batch_id: Option<String>,
+        code: String,
+        reason: Option<String>,
+        by_handle: Option<String>,
+        by_name: Option<String>,
     },
     Presence {
         device: Option<String>,
@@ -157,7 +167,19 @@ impl From<ClientAction> for RoomAction {
                 after_ms: after.as_millis() as u64,
             },
             ClientAction::SessionError { code, message } => Self::SessionError { code, message },
-            ClientAction::PushRefused { batch_id } => Self::PushRefused { batch_id },
+            ClientAction::PushRefused {
+                batch_id,
+                code,
+                reason,
+                by_handle,
+                by_name,
+            } => Self::PushRefused {
+                batch_id,
+                code,
+                reason,
+                by_handle,
+                by_name,
+            },
             ClientAction::Presence {
                 device,
                 handle,
@@ -465,6 +487,40 @@ pub struct UserMessageOptsRecord {
     /// row as `forwardedFrom` (the "Forwarded from <name>" header).
     #[uniffi(default = None)]
     pub forwarded_from: Option<String>,
+    /// Bubble menu → Reply in DM: where the quoted message lives plus its
+    /// snapshot, stored on the row as `replyRef` (core `ReplyRef`).
+    #[uniffi(default = None)]
+    pub reply_ref: Option<ReplyRefRecord>,
+}
+
+/// A cross-chat reply reference (maps to core `doc::ReplyRef`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, uniffi::Record)]
+pub struct ReplyRefRecord {
+    pub chat_id: String,
+    /// `"people"` for DMs / people groups, else the project id.
+    pub project_id: String,
+    pub message_id: String,
+    pub chat_title: String,
+    pub sender: String,
+    pub sender_name: String,
+    pub sender_handle: String,
+    /// The quoted prose; the Rust side cuts it to the snapshot length.
+    pub text: String,
+}
+
+impl From<ReplyRefRecord> for doc::ReplyRef {
+    fn from(r: ReplyRefRecord) -> Self {
+        Self {
+            chat_id: r.chat_id,
+            project_id: r.project_id,
+            message_id: r.message_id,
+            chat_title: r.chat_title,
+            sender: r.sender,
+            sender_name: r.sender_name,
+            sender_handle: r.sender_handle,
+            text: doc::ReplyRef::snapshot_text(&r.text),
+        }
+    }
 }
 
 impl From<UserMessageOptsRecord> for doc::UserMessageOpts {
@@ -711,12 +767,16 @@ impl ChatDoc {
         opts: UserMessageOptsRecord,
     ) -> Result<(), FfiError> {
         let forwarded_from = opts.forwarded_from.clone();
+        let reply_ref = opts.reply_ref.clone().map(doc::ReplyRef::from);
         let core_opts = doc::UserMessageOpts::from(opts);
         let doc = self.lock_doc();
         doc.append_user_message(&id, &text, &device_id, &core_opts)
             .map_err(write_err)?;
         if let Some(by) = forwarded_from.as_deref().filter(|b| !b.trim().is_empty()) {
             doc.set_message_fields(&id, &[("forwardedFrom", Value::String(by.to_owned()))]);
+        }
+        if let Some(r) = reply_ref.filter(|r| !r.chat_id.is_empty() && !r.message_id.is_empty()) {
+            doc.set_reply_ref(&id, &r);
         }
         Ok(())
     }
@@ -1010,6 +1070,16 @@ mod tests {
                 sender_name: Some("Me".into()),
                 sender_avatar: None,
                 forwarded_from: Some("Sam Rivera".into()),
+                reply_ref: Some(ReplyRefRecord {
+                    chat_id: "01SRC".into(),
+                    project_id: "people".into(),
+                    message_id: "01ORIG".into(),
+                    chat_title: "Arbonites".into(),
+                    sender: "user:gh_1".into(),
+                    sender_name: "Jacob".into(),
+                    sender_handle: "unconst".into(),
+                    text: "Testing reply in dm".into(),
+                }),
             },
         )
         .unwrap();
@@ -1017,6 +1087,10 @@ mod tests {
         assert_eq!(doc.message_count(), 1);
         let row: Value = serde_json::from_str(&doc.read_message_json(0).unwrap()).unwrap();
         assert_eq!(row["forwardedFrom"], "Sam Rivera");
+        assert_eq!(row["replyRef"]["chatId"], "01SRC");
+        assert_eq!(row["replyRef"]["messageId"], "01ORIG");
+        assert_eq!(row["replyRef"]["chatTitle"], "Arbonites");
+        assert_eq!(row["replyRef"]["text"], "Testing reply in dm");
         assert_eq!(row["role"], "user");
         assert_eq!(row["sender"], "user:me");
         assert_eq!(row["senderHandle"], "me");

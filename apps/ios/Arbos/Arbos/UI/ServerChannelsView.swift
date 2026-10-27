@@ -119,8 +119,9 @@ struct ServerChannelsView: View {
     var body: some View {
         ZStack(alignment: .top) {
             theme.bg.ignoresSafeArea()
+            ScrollViewReader { proxy in
             List {
-                Color.clear.frame(height: 66)
+                Color.clear.frame(height: HomeChrome.barOnlyListTop)
                     .listRowInsets(EdgeInsets())
                     .listRowSeparator(.hidden)
                     .listRowBackground(Color.clear)
@@ -168,14 +169,14 @@ struct ServerChannelsView: View {
             .scrollContentBackground(.hidden)
             .background(theme.bg)
             .refreshable { await model.refreshServers() }
+            .rigListScroll(proxy, ids: server?.liveChannels.map(\.id) ?? [])
+            }
+            ListTopFade(screen: .serverChannels)
             header
         }
-        .toolbar(.hidden, for: .navigationBar)
-        .toolbar(.hidden, for: .tabBar)
-        .navigationBarBackButtonHidden(true)
-        // Custom back hides the system edge-swipe; List also eats
-        // InteractivePopGestureEnabler. Same swipe-right → Home as ChatView.
-        .simultaneousGesture(serverBackSwipe)
+        // Custom back chevron; swipe right (edge pop or anywhere) goes back to Home —
+        // `BackSwipe.swift`, the same rules as every chat screen.
+        .backSwipeToPop()
         .sheet(isPresented: $showNewChannel) {
             NewChannelSheet(serverId: serverId).environmentObject(model).environment(\.theme, theme)
         }
@@ -195,47 +196,33 @@ struct ServerChannelsView: View {
         // `AppModel.forgetServer` empties the path when the server goes (deleted, left, removed).
     }
 
-    /// Swipe right pops back to the main chats list (Home). Matches ChatView
-    /// and SettingsPage so the server channel list is not a dead end without
-    /// tapping the back circle.
-    private var serverBackSwipe: some Gesture {
-        DragGesture(minimumDistance: 50, coordinateSpace: .local)
-            .onEnded { value in
-                let dx = value.translation.width
-                let absX = abs(dx), absY = abs(value.translation.height)
-                let vx = value.velocity.width, vy = value.velocity.height
-                if dx > 0, absX > 70, absX > absY * 1.25, abs(vx) >= abs(vy) || absX > 120 {
-                    dismiss()
-                }
-            }
-    }
-
     /// Same header as Hidden chats: back circle left, the title pill centred.
     private var header: some View {
         HStack {
             Button { dismiss() } label: {
                 GlassCircle {
                     Image(systemName: "chevron.left")
-                        .font(theme.font(17, weight: .semibold))
+                        .font(theme.font(Controls.glyph, weight: .semibold))
                         .foregroundStyle(theme.text)
                 }
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Back")
+            .accessibilityIdentifier("server-back:\(serverId)")
             Spacer()
             GlassPill {
-                HStack(spacing: 8) {
+                HStack(spacing: Theme.headerPillGap) {
                     if let server {
-                        ServerAvatar(server: server, size: Theme.avatar)
+                        ServerAvatar(server: server, size: Controls.avatar)
                     }
                     Text(server?.name ?? "Server")
                         .font(.system(size: Theme.body, weight: .semibold))
                         .foregroundStyle(theme.text)
                         .lineLimit(1)
                 }
-                .padding(.leading, 10)
-                .padding(.trailing, 16)
-                .frame(height: Theme.control)
+                .padding(.leading, Controls.avatarInset)
+                .padding(.trailing, Controls.textInset)
+                .frame(height: Controls.height)
                 .contentShape(Capsule())
                 .onTapGesture { model.showProfile(.server(serverId: serverId)) }
                 .accessibilityAddTraits(.isButton)
@@ -246,7 +233,7 @@ struct ServerChannelsView: View {
                 Button { showNewChannel = true } label: {
                     GlassCircle {
                         Image(systemName: "plus")
-                            .font(theme.font(19, weight: .regular))
+                            .font(theme.font(Controls.glyph, weight: .regular))
                             .foregroundStyle(theme.text)
                     }
                 }
@@ -257,8 +244,7 @@ struct ServerChannelsView: View {
                 Color.clear.frame(width: Theme.control, height: Theme.control)
             }
         }
-        .padding(.horizontal, 20)
-        .padding(.top, 6)
+        .controlBar()
     }
 }
 
@@ -293,9 +279,7 @@ struct NewChannelSheet: View {
                                 .submitLabel(.done)
                                 .onSubmit { create() }
                         }
-                        .padding(.horizontal, 14).frame(height: Theme.fieldHeight)
-                        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
-                        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                        .controlField()
                         if !name.isEmpty, slug != name {
                             Text(slug.isEmpty ? "Use letters, digits and dashes." : "Will be #\(slug)")
                                 .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
@@ -406,7 +390,7 @@ struct JoinServerView: View {
 
     var body: some View {
         VStack(spacing: 18) {
-            GlassCircle(size: 92) {
+            GlassCircle(size: 92) { // control-size: exception illustrationDiscs
                 Image(systemName: "link").font(.system(size: 34, weight: .medium)).foregroundStyle(theme.text)
             }
             .padding(.top, 28)
@@ -424,9 +408,7 @@ struct JoinServerView: View {
                 .submitLabel(.join)
                 .onSubmit(join)
                 .onChange(of: link) { _, _ in searchOpen() }
-                .padding(.horizontal, 16).frame(height: 50)
-                .background(RoundedRectangle(cornerRadius: 25, style: .continuous).fill(theme.field))
-                .overlay(RoundedRectangle(cornerRadius: 25, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                .controlField()
                 .padding(.horizontal, 24)
             Button(action: join) {
                 Text(joining ? "Joining…" : "Join")
