@@ -1,0 +1,32 @@
+#!/bin/bash
+# ax <command…> — run a command in the Accessibility-capable runner (ax-runner.sh) and wait for it.
+# Prints its output, exits with its code. stdin is passed through a file. Use for osascript UI scripting
+# and CGEvent clicks; captures (screencapture) stay in the caller (Screen Recording lives with Terminal).
+set -u
+Q=/Users/Shared/arbos-run
+# Recursion guard (05:53 Oct 27): a command already running inside the ax-runner must not queue behind
+# itself. Run it in place instead.
+if [ -n "${ARBOS_AX_RUNNER:-}" ]; then
+  echo "ax: already inside the ax-runner (pid $ARBOS_AX_RUNNER); running in place" >&2
+  exec "$@"
+fi
+id="$(date +%s%N 2>/dev/null || date +%s)-$$-$RANDOM"
+f="$Q/ax-cmd-$id"
+in="$f.stdin"; : > "$in"
+[ -t 0 ] || cat > "$in"
+{
+  printf 'cd %q\n' "$PWD"
+  printf 'export PATH=%q\n' "$PATH"
+  for v in DISPLAY GUI_LOCK_FILE ARBOS_SCRATCH; do [ -n "${!v:-}" ] && printf 'export %s=%q\n' "$v" "${!v}"; done
+  printf '%q ' "$@"; printf '< %q\n' "$in"
+} > "$f.sh.tmp"
+mv "$f.sh.tmp" "$f.sh"
+deadline=$(( $(date +%s) + ${AX_TIMEOUT_S:-600} ))
+while [ ! -f "$f.rc" ]; do
+  sleep 0.2
+  if [ "$(date +%s)" -ge "$deadline" ]; then echo "ax: timed out waiting for ax-runner (is it up? $Q/ax-runner.status)" >&2; rm -f "$f.sh" "$in"; exit 124; fi
+done
+cat "$f.log" 2>/dev/null
+rc=$(cat "$f.rc" 2>/dev/null || echo 1)
+rm -f "$f.log" "$f.rc" "$f.done" "$in"
+exit "$rc"
