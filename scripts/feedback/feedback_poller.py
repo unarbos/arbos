@@ -2388,6 +2388,12 @@ class Loop:
                 members = self.compatible_batch(deferred)
                 log(f"Gate: deferred-fairness batch of {len(members)} (bumped ≥ {self.DEFER_AFTER}× for sibling conflicts): " + ", ".join(members))
         pool_batch = False
+        if not members and pool_first and plan:
+            # A plan half that came from a red pool batch is the pool's own bisect: never pre-empt it.
+            own = any(set(h) == set(half) for v in (cur.get("rust_gate_bisects") or {}).values() for h in v.get("halves", []) for half in plan[:1])
+            if own:
+                pool_first = False
+                log("Gate: pool-first stands aside — the next plan half is the pool's own bisect")
         if not members and pool_first:
             # Pool-first: the whole pool (plan-half members included — they are pool items too) runs now.
             members = self.compatible_batch(list(ready))
@@ -3037,6 +3043,14 @@ class Loop:
         # item of the other again. Keyed by the half's members; cleared when a half settles.
         bisects = cur.setdefault("rust_gate_bisects", {})
         bisects[active["id"]] = {"halves": [sorted(first), sorted(rest)], "green": [], "at": iso()}
+        if cur.get("pool_first"):
+            # #2014 regression (03:04–03:35 Oct 27): pool-first re-assembled the full pool every tick and the
+            # halves it had just planned never ran (five identical red runs). A red pool batch hands over to
+            # its own bisect: pool-first is cleared here; it re-arms by itself if the pool starves again.
+            cur.pop("pool_first", None)
+            cur["last_pool_batch_at"] = iso()
+            self.store.event("_loop", "pool_first_cleared", run=active["id"], members=len(order), reason="red; bisecting")
+            log(f"Gate: pool-first cleared — pool batch {active['id']} was red; its bisect halves run next")
         for old_id in [k for k, v in bisects.items() if minutes_between(v.get("at") or iso(), iso()) > 24 * 60]:
             bisects.pop(old_id, None)
         self.store.save_cursor(cur)
