@@ -15,16 +15,18 @@
 //! [`StyledText`] and wires the mouse to the model from inside its own paint,
 //! where the text layout is guaranteed to exist.
 
+use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{
     linear_color_stop, linear_gradient, point, px, size, App, Bounds, Context, Corners,
     CursorStyle, DispatchPhase, Element, ElementId, Entity, FocusHandle, FontWeight,
     GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement, LayoutId,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString,
-    StyledText, TextAlign, TextLayout, TextRun, TransformationMatrix, Window,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderImage,
+    SharedString, StyledText, TextAlign, TextLayout, TextRun, TransformationMatrix, Window,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -462,6 +464,38 @@ impl Model {
     }
 }
 
+/// The site pictures the bubbles' named links draw in their icon cell
+/// ([`crate::ui::markdown::LINK_ICON_CELL`]), by host: `Some(image)` once the
+/// relay answered with one, `None` when the site has none (a neutral rounded
+/// square stands in); a host that is still loading is absent and draws the
+/// same placeholder.
+#[derive(Default)]
+pub struct LinkIcons {
+    pub by_host: HashMap<String, Option<Arc<RenderImage>>>,
+}
+
+impl LinkIcons {
+    pub fn empty() -> Rc<Self> {
+        Rc::new(Self::default())
+    }
+
+    pub fn picture(&self, host: &str) -> Option<Arc<RenderImage>> {
+        self.by_host.get(host).cloned().flatten()
+    }
+}
+
+/// The icon drawn before a named link, in points (Grok Bot's is 16 at its 15 pt body).
+pub const LINK_ICON: f32 = 14.0;
+/// The gap the icon keeps to the link text, inside the cell.
+pub const LINK_ICON_GAP: f32 = 4.0;
+
+/// One named link's icon cell inside a [`SelectableText`]: the cell's bytes
+/// (element-local) and the picture, when the site has one.
+pub struct LinkIcon {
+    pub range: Range<usize>,
+    pub picture: Option<Arc<RenderImage>>,
+}
+
 /// The per-render snapshot of the selection, plus what a text block needs to
 /// draw its highlight and wire its mouse events.
 #[derive(Clone)]
@@ -478,6 +512,24 @@ pub struct Selectable {
     /// the pointer).
     mentions: Rc<Mentions>,
     chip_accent: Hsla,
+    /// Site pictures for the named links, and the placeholder's colour.
+    link_icons: Rc<LinkIcons>,
+    icon_placeholder: Hsla,
+    /// Search-in-chat marks for this bubble's words, while the bar is up.
+    marks: Option<Rc<SearchMarks>>,
+}
+
+/// What ⌘F Search-in-chat paints on a hit's words ([feedback
+/// search-in-chat-mac-2026-10-26]): every hit's words on the accent wash,
+/// the revealed hit's in Find's yellow with dark text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SearchMarks {
+    /// Folded keyword (`chat_search::hit_ranges`); empty = sender-only query, no word marks.
+    pub needle: String,
+    pub current: bool,
+    pub wash: Hsla,
+    pub current_wash: Hsla,
+    pub current_text: Hsla,
 }
 
 impl Selectable {
@@ -490,7 +542,25 @@ impl Selectable {
             color,
             mentions: Mentions::empty(),
             chip_accent: Hsla::default(),
+            link_icons: LinkIcons::empty(),
+            icon_placeholder: Hsla::default(),
+            marks: None,
         }
+    }
+
+    /// The words a Search-in-chat query hits are marked in every text of
+    /// the bubbles built from this.
+    pub fn with_marks(mut self, marks: Option<SearchMarks>) -> Self {
+        self.marks = marks.map(Rc::new);
+        self
+    }
+
+    /// Named links draw their site's picture (or `placeholder`, a neutral
+    /// rounded square) in their icon cell.
+    pub fn with_link_icons(mut self, icons: Rc<LinkIcons>, placeholder: Hsla) -> Self {
+        self.link_icons = icons;
+        self.icon_placeholder = placeholder;
+        self
     }
 
     /// Mention chips: `@Name` runs of a known entity draw as a chip (`accent`
@@ -546,6 +616,9 @@ impl Selectable {
             color: self.color,
             mentions: self.mentions.clone(),
             chip_accent: self.chip_accent,
+            link_icons: self.link_icons.clone(),
+            icon_placeholder: self.icon_placeholder,
+            marks: self.marks.clone(),
         }
     }
 }
@@ -560,6 +633,9 @@ pub struct BubbleSelectable {
     color: Hsla,
     mentions: Rc<Mentions>,
     chip_accent: Hsla,
+    link_icons: Rc<LinkIcons>,
+    icon_placeholder: Hsla,
+    marks: Option<Rc<SearchMarks>>,
 }
 
 /// One mention chip inside a [`SelectableText`]: the `@Name` run (element-local
@@ -623,6 +699,21 @@ impl BubbleSelectable {
                 accent,
             });
         }
+        // Search-in-chat: the hit words on the wash, the revealed hit's in
+        // Find's yellow; the selection highlight then splits them like any run.
+        let runs = match self.marks.as_deref() {
+            Some(marks) if !marks.needle.is_empty() => {
+                let (bg, fg) = if marks.current {
+                    (marks.current_wash, Some(marks.current_text))
+                } else {
+                    (marks.wash, None)
+                };
+                crate::chat_search::hit_ranges(&text, &marks.needle)
+                    .into_iter()
+                    .fold(runs, |runs, range| mark(runs, range, bg, fg))
+            }
+            _ => runs,
+        };
         let runs = match &self.range {
             Some(range) => highlight(runs, local_range(range, at, text.len()), self.color),
             None => runs,
@@ -634,6 +725,9 @@ impl BubbleSelectable {
             at,
             links: Vec::new(),
             chips,
+            icons: Vec::new(),
+            link_icons: self.link_icons.clone(),
+            icon_placeholder: self.icon_placeholder,
             selection: self.entity.clone(),
         }
     }
@@ -730,6 +824,18 @@ pub fn paragraph_range(text: &str, index: usize) -> Range<usize> {
 
 /// Split `runs` at the selection edges and paint the inside with `color`.
 pub fn highlight(runs: Vec<TextRun>, range: Range<usize>, color: Hsla) -> Vec<TextRun> {
+    mark(runs, range, color, None)
+}
+
+/// Split `runs` at `range` and paint the inside: `background` behind it and,
+/// when given, `color` on its glyphs (a search hit's words; the selection
+/// highlight keeps the glyph colour).
+pub fn mark(
+    runs: Vec<TextRun>,
+    range: Range<usize>,
+    background: Hsla,
+    color: Option<Hsla>,
+) -> Vec<TextRun> {
     if range.is_empty() {
         return runs;
     }
@@ -746,9 +852,13 @@ pub fn highlight(runs: Vec<TextRun>, range: Range<usize>, color: Hsla) -> Vec<Te
             out.push(TextRun {
                 len: cut - cursor,
                 background_color: if inside {
-                    Some(color)
+                    Some(background)
                 } else {
                     run.background_color
+                },
+                color: match color {
+                    Some(c) if inside => c,
+                    _ => run.color,
                 },
                 ..run.clone()
             });
@@ -834,6 +944,10 @@ pub struct SelectableText {
     styled: StyledText,
     links: Vec<(Range<usize>, String)>,
     chips: Vec<Chip>,
+    /// Named links' icon cells, with the site picture when it is known.
+    icons: Vec<LinkIcon>,
+    link_icons: Rc<LinkIcons>,
+    icon_placeholder: Hsla,
     selection: Entity<TextSelection>,
 }
 
@@ -842,6 +956,21 @@ impl SelectableText {
     /// one opens it.
     pub fn with_links(mut self, links: Vec<(Range<usize>, String)>) -> Self {
         self.links = links;
+        self
+    }
+
+    /// The icon cells of the named links (element-local byte range of each
+    /// cell, the site's host): drawn with the host's picture from the bubble's
+    /// [`LinkIcons`], else the placeholder.
+    pub fn with_icons(mut self, icons: Vec<(Range<usize>, String)>) -> Self {
+        let pictures = self.link_icons.clone();
+        self.icons = icons
+            .into_iter()
+            .map(|(range, host)| LinkIcon {
+                range,
+                picture: pictures.picture(&host),
+            })
+            .collect();
         self
     }
 }
@@ -948,6 +1077,9 @@ impl Element for SelectableText {
             .paint(None, inspector_id, bounds, state, &mut (), window, cx);
         for chip in chips.iter() {
             paint_chip_picture(&layout, chip, window, cx);
+        }
+        for icon in &self.icons {
+            paint_link_icon(&layout, icon, self.icon_placeholder, window);
         }
         let links = std::mem::take(&mut self.links);
         let focus_handle = selection.read(cx).focus_handle.clone();
@@ -1163,6 +1295,52 @@ fn paint_chip_pill(layout: &TextLayout, chip: &Chip, color: Hsla, window: &mut W
 
 /// The entity's picture, a `PICTURE` pt disc centred in the `@` glyph's cell
 /// (which the run paints transparent). Painted over the text.
+/// The site's picture in a named link's icon cell: a rounded square
+/// [`LINK_ICON`] tall (smaller when the cell or the line is), left-aligned in
+/// the cell so [`LINK_ICON_GAP`] stays before the name; the placeholder is the
+/// same square in a neutral colour. Nothing is drawn when the cell wrapped.
+fn paint_link_icon(layout: &TextLayout, icon: &LinkIcon, placeholder: Hsla, window: &mut Window) {
+    let Some(at) = layout.position_for_index(icon.range.start) else {
+        return;
+    };
+    let Some(after) = layout.position_for_index(icon.range.end) else {
+        return;
+    };
+    if after.y != at.y {
+        return;
+    }
+    let line_h = layout.line_height();
+    let cell_w = after.x - at.x;
+    let d = px(LINK_ICON).min(line_h).min(cell_w - px(LINK_ICON_GAP));
+    if d <= px(4.0) {
+        return;
+    }
+    let bounds = Bounds::new(point(at.x, at.y + (line_h - d) / 2.0), size(d, d));
+    let radii = Corners::all(d * 0.25);
+    #[cfg(test)]
+    PAINTED_LINK_ICONS.with(|n| n.set(n.get() + 1));
+    match &icon.picture {
+        Some(image) => {
+            let _ = window.paint_image(bounds, radii, image.clone(), 0, false);
+        }
+        None => window.paint_quad(gpui::quad(
+            bounds,
+            radii,
+            placeholder,
+            gpui::Edges::all(px(0.0)),
+            gpui::transparent_black(),
+            gpui::BorderStyle::default(),
+        )),
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many link icon cells were painted (picture or placeholder), for the
+    /// headless render tests.
+    pub static PAINTED_LINK_ICONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn paint_chip_picture(layout: &TextLayout, chip: &Chip, window: &mut Window, cx: &mut App) {
     let Some(at) = layout.position_for_index(chip.range.start) else {
         return;

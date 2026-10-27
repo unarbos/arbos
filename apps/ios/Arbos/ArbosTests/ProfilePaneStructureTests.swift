@@ -44,6 +44,7 @@ final class ProfilePaneStructureTests: XCTestCase {
         XCTAssertEqual(AgentPane.subtitle(description: "", mine: true, ownerHandle: nil), "Add a label")
         XCTAssertEqual(AgentPane.subtitle(description: " Drafts before it sends. ", mine: true, ownerHandle: nil), "Drafts before it sends.")
         XCTAssertEqual(AgentPane.subtitle(description: "", mine: false, ownerHandle: "@sami"), "Run by @sami")
+        XCTAssertEqual(AgentPane.subtitle(description: "", mine: false, ownerHandle: "@sami", ownerName: "Sami Kassab"), "Run by Sami Kassab")
 
         let working = BoxWorkspace(projectId: "p", name: "Arbos", healthy: true, running: true, elapsedMs: 42_000, toolCalls: 7)
         XCTAssertEqual(AgentPane.codingStatus(streaming: false, workspace: working, machine: .awake, alwaysOn: false), "Working · 42 s · 7 tool calls")
@@ -115,6 +116,25 @@ final class BlockRowTests: XCTestCase {
         list.removeAll { $0.id == ken.id }
         XCTAssertEqual(BlockRow.title(blocked: BlockRow.entry(in: list, id: ken.id, handle: ken.handle) != nil), "Block user")
     }
+
+    /// On someone else's agent the "Run by …" line is a link to the owner's page (Jacob
+    /// 2026-10-25, [feedback agent-pane-run-by-link-ios-2026-10-25]): the display name when the
+    /// owner has one, "@handle" otherwise; never on my own agent or without an owner. The Mac
+    /// twin is `agent::run_by_tests` in `profiles/agent.rs`.
+    func testForeignAgentRunByLineIsAnOwnerLink() {
+        let named = AgentPane.ownerLink(mine: false, ownerHandle: "@sami", ownerName: "Sami Kassab")
+        XCTAssertEqual(named?.label, "Run by Sami Kassab")
+        XCTAssertEqual(named?.handle, "sami")
+        let bare = AgentPane.ownerLink(mine: false, ownerHandle: "sami", ownerName: "  ")
+        XCTAssertEqual(bare?.label, "Run by @sami")
+        XCTAssertNil(AgentPane.ownerLink(mine: true, ownerHandle: "sami", ownerName: "Sami Kassab"), "my own agent has no owner line")
+        XCTAssertNil(AgentPane.ownerLink(mine: false, ownerHandle: nil, ownerName: nil), "no owner, no link")
+        XCTAssertEqual(AgentPane.runByLabel(name: nil, handle: "sami"), "Run by @sami")
+        XCTAssertEqual(ChipLinkStyle.restAlpha, 0.14)
+        XCTAssertEqual(ChipLinkStyle.pressedAlpha, 0.30)
+        // The agent page pushes the owner inside the root sheet's stack, like member rows do.
+        XCTAssertTrue(ProfileTarget.agent(projectId: "p").pushesPeople)
+    }
 }
 
 /// Jacob 2026-10-25 ("Add a message button to a user"): the person pane's hero carries one
@@ -144,6 +164,6 @@ final class MessageButtonTests: XCTestCase {
     /// The hero keeps its order with the pill: picture, name, subtitle, then the action.
     func testTheHeroActionSitsUnderTheSubtitle() {
         XCTAssertEqual(PaneKit.heroActionGap, 6)
-        XCTAssertEqual(Theme.control, 42, "the pill is the control family's height")
+        XCTAssertEqual(Theme.control, Controls.diameter, "the pill is the control family's height")
     }
 }

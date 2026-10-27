@@ -259,7 +259,11 @@ impl Store {
             std::fs::create_dir_all(p)?;
         }
         let c = Connection::open(path)?;
-        c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
+        // secure_delete: overwritten and deleted content is zeroed in the page, so a scrubbed
+        // T3 row or a re-saved room snapshot leaves no old bytes behind in the file.
+        c.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA secure_delete=ON;",
+        )?;
         c.execute_batch(SCHEMA)?;
         // Additive migration for stores created before demo-review item 2.
         let has_last_status: bool = c
@@ -949,6 +953,16 @@ impl Store {
 
     /// Replace every occurrence of `values` in T3 text (and its FTS index). Returns how many
     /// rows changed. Used by Scrub from context.
+    /// After a scrub: fold the WAL into the main file and truncate it, so the pages that held
+    /// the old text are gone from disk too (with `secure_delete` on, the freed content inside
+    /// the main file is already zeroed).
+    pub fn flush_after_scrub(&self) -> Result<()> {
+        self.with(|c| {
+            c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+            Ok(())
+        })
+    }
+
     pub fn t3_scrub(&self, values: &[String]) -> Result<usize> {
         let needles: Vec<&str> = values
             .iter()
@@ -1054,6 +1068,23 @@ impl Store {
             Ok(())
         })?;
         Ok(id)
+    }
+
+    /// Rewrite a record's text in place (FTS kept in step); the id, tier and provenance stay.
+    pub fn memory_set_text(&self, id: &str, text: &str) -> Result<()> {
+        let text = redact(text);
+        self.with(|c| {
+            c.execute(
+                "UPDATE memory SET text = ?2 WHERE id = ?1",
+                params![id, text],
+            )?;
+            c.execute("DELETE FROM memory_fts WHERE id = ?1", params![id])?;
+            c.execute(
+                "INSERT INTO memory_fts(text, id, tier) SELECT text, id, tier FROM memory WHERE id = ?1",
+                params![id],
+            )?;
+            Ok(())
+        })
     }
 
     /// INVALIDATE: set `invalid_at` and `expired_at`; the row stays (D7).

@@ -454,6 +454,35 @@ impl Supervisor {
                 .unwrap_or_default();
             match self.ensure_workspace(project, &chats, &pushes).await {
                 Ok(w) => {
+                    // The owner's profile (address name) rides on every listing: the agent
+                    // addresses the owner from it, live, never from a row's `senderName`.
+                    if let Some(o) = e.get("owner").or_else(|| listing.get("owner")) {
+                        let before = w.agent.people.owner_profile();
+                        w.agent.people.set_owner_profile(o);
+                        if w.agent.people.owner_profile() != before {
+                            // The prompt's "Your owner" section follows the profile; the pi
+                            // session re-reads it (at once when idle, else after the turn).
+                            w.agent
+                                .refresh_session_prompt("owner profile changed")
+                                .await;
+                        }
+                        let names: Vec<String> = ["address_name", "name"]
+                            .iter()
+                            .filter_map(|k| o.get(*k).and_then(Value::as_str))
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_owned)
+                            .chain(
+                                o.get("former_names")
+                                    .and_then(Value::as_array)
+                                    .into_iter()
+                                    .flatten()
+                                    .filter_map(Value::as_str)
+                                    .map(str::to_owned),
+                            )
+                            .collect();
+                        w.agent.memory.set_owner_names(names);
+                    }
                     w.agent.note_people_chats(&people_chats, true).await;
                     seen.push(w.project_id.clone());
                 }

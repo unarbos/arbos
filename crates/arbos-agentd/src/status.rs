@@ -934,7 +934,13 @@ pub(crate) mod tests {
     }
 
     pub(crate) async fn test_agent() -> (Arc<Agent>, std::path::PathBuf) {
+        test_agent_with(axum::Router::new()).await
+    }
+
+    /// Same, with extra mock-relay routes merged in (`/box/secrets/…` for the hand-off tests).
+    pub(crate) async fn test_agent_with(extra: axum::Router) -> (Arc<Agent>, std::path::PathBuf) {
         let app = axum::Router::new()
+            .merge(extra)
             .route(
                 "/proxy/v1/chat/completions",
                 axum::routing::post(mock_quick),
@@ -942,6 +948,11 @@ pub(crate) mod tests {
             .route(
                 "/projects/{id}/activity",
                 axum::routing::post(mock_activity),
+            )
+            // deliver_file's upload (media.rs): the stub accepts any blob.
+            .route(
+                "/blob/{slot}/{key}",
+                axum::routing::put(|| async { axum::http::StatusCode::CREATED }),
             );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -1346,6 +1357,76 @@ pub(crate) mod tests {
             Some(user_msg),
             "send_message(reply_to) threads the bubble under the ask"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Feedback app-01M5WGH5…: in a people chat an empty `route reply` plus leftover prose
+    /// ("Addressed to @hezbola; staying silent…") must not post a fallback bubble. Quiet means
+    /// no row — the notes are discarded, not announced.
+    #[tokio::test]
+    async fn empty_reply_in_people_chat_discards_staying_silent_fallback() {
+        use crate::config::SendTool;
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUIETFALLBACK0001";
+        let me = format!("agent:{}", agent.cfg.project_id);
+        agent.people.test_insert(
+            chat,
+            crate::people::PeopleChatInfo {
+                members: vec![
+                    serde_json::json!({
+                        "member": me,
+                        "handle": "doug-agent",
+                        "project": { "name": "Doug agent" },
+                    }),
+                    serde_json::json!({
+                        "member": "agent:HEZ",
+                        "handle": "hezbola",
+                        "project": { "name": "Hezbola" },
+                    }),
+                ],
+                slug: "doug-agent".into(),
+                kind: "group".into(),
+                ..Default::default()
+            },
+        );
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        {
+            let mut tl = agent.turn.lock().await;
+            let t = tl.as_mut().unwrap();
+            t.ack_text.clear();
+            t.activity = None;
+            t.send_tool = SendTool::On;
+            t.route = Some(arbos_core::route::ValidRoute::Reply { reply: None });
+            agent.test_open_row(&host, t).await;
+            agent
+                .test_prose_then_finish(
+                    &host,
+                    t,
+                    "Addressed to @hezbola; staying silent. That question is for Hezbola; nothing to add from me.",
+                )
+                .await;
+            assert!(
+                !t.posted_fallback,
+                "empty reply in a people chat must not fall back"
+            );
+            assert!(
+                t.streamed_text.trim().is_empty(),
+                "silence notes must stay out of the bubble"
+            );
+            assert!(
+                t.unposted_text.trim().is_empty(),
+                "leftover prose is discarded so quiet_in_shared_chat can remove the row"
+            );
+            assert!(crate::agent::quiet_in_shared_chat(t, true, true, true));
+        }
+        let rows = reply_rows(&host, "m-busy");
+        let posted: Vec<String> = rows
+            .iter()
+            .map(|r| r.text().trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .collect();
+        assert!(posted.is_empty(), "no 'staying silent' bubble: {posted:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

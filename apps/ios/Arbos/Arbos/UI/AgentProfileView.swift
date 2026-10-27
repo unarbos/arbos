@@ -123,9 +123,7 @@ struct AgentEditSheet: View {
                     .focused($nameFocused)
                     .submitLabel(.done)
                     .onSubmit(commitName)
-                    .padding(.horizontal, 16).frame(height: 46)
-                    .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(theme.field))
-                    .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                    .controlField()
                     .padding(.horizontal, 48)
             } else {
                 Button {
@@ -349,15 +347,37 @@ struct AgentProfileView: View {
 
     private func hero(_ project: Project) -> PaneHero {
         let hasLabel = !project.description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let subtitle = AgentPane.subtitle(description: project.description, mine: isMine, ownerHandle: project.ownerHandle)
+        let subtitle = AgentPane.subtitle(description: project.description, mine: isMine, ownerHandle: project.ownerHandle, ownerName: project.ownerName)
+        // Someone else's agent: "Run by …" is a link to the owner's page (Jacob 2026-10-25).
+        let owner = AgentPane.ownerLink(mine: isMine, ownerHandle: project.ownerHandle, ownerName: project.ownerName)
+        // The owner's page is pushed over this one by the root sheet's NavigationStack
+        // (`ProfileSheet`, `ProfileTarget.pushesPeople`); its top-bar chevron pops back here.
+        let openOwner: (() -> Void)? = owner.map { link in { model.showProfile(.user(ownerPerson(project, handle: link.handle))) } }
         return PaneHero(
             picture: .image(AnyView(heroPicture(project))),
             name: project.name,
             nameAction: isMine ? { startRename() } : nil,
             subtitle: subtitle,
             subtitleTint: hasLabel || !isMine ? nil : theme.placeholder,
-            subtitleAction: isMine ? { startLabelEdit() } : nil,
-            subtitleEditor: editingLabel ? AnyView(labelEditor) : nil
+            subtitleAction: isMine ? { startLabelEdit() } : (hasLabel ? nil : openOwner),
+            subtitleLink: !isMine && !hasLabel && owner != nil,
+            subtitleEditor: editingLabel ? AnyView(labelEditor) : nil,
+            subtitleBelow: (hasLabel && owner != nil) ? AnyView(
+                Button(action: { openOwner?() }) { Text(owner!.label).lineLimit(1) }
+                    .buttonStyle(ChipLinkStyle())
+                    .accessibilityHint("Opens their profile")
+            ) : nil
+        )
+    }
+
+    /// The owner as the person page wants them: the relay's `owner` card when the project
+    /// carries it, else the handle resolved through the chats we share.
+    private func ownerPerson(_ project: Project, handle: String) -> ProfilePerson {
+        ProfilePerson(
+            id: project.ownerId ?? model.personId(handle: handle) ?? handle,
+            handle: handle,
+            name: project.ownerName,
+            avatarUrl: project.ownerAvatarUrl
         )
     }
 
@@ -382,8 +402,8 @@ struct AgentProfileView: View {
             .onChange(of: labelDraft) { _, v in if v.count > 500 { labelDraft = String(v.prefix(500)) } }
             .padding(.horizontal, 12)
             .frame(height: 32)
-            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(theme.field))
-            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(theme.field)) // control-size: exception inlineChips
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1)) // control-size: exception inlineChips
             .padding(.horizontal, 56)
     }
 
@@ -552,7 +572,13 @@ struct AgentProfileView: View {
                 var rows: [AnyView] = []
                 if let disk = AgentPane.freeOf(available: r.diskAvailableMb, total: r.diskTotalMb) { rows.append(AnyView(PaneRow(title: "Disk", value: disk))) }
                 if let mem = AgentPane.freeOf(available: r.memAvailableMb, total: r.memTotalMb) { rows.append(AnyView(PaneRow(title: "Memory", value: mem))) }
-                if let load = r.load1m { rows.append(AnyView(PaneRow(title: "Load", value: String(format: "%.2f", load)))) }
+                // CPU share from the box's cgroup (agentd ≥ 0.6.277); the load average is the host's
+                // inside Daytona (`loadIsHost`), drawn only when it is really the box's and no CPU exists.
+                if let cpu = r.cpuPct {
+                    rows.append(AnyView(PaneRow(title: "CPU", value: "\(Int(cpu.rounded())) %")))
+                } else if let load = r.load1m, !r.loadIsHost {
+                    rows.append(AnyView(PaneRow(title: "Load", value: String(format: "%.2f", load))))
+                }
                 if let up = r.uptimeS { rows.append(AnyView(PaneRow(title: "Up for", value: AgentPane.durationS(up)))) }
                 out.append(.card(rows))
             case .running:

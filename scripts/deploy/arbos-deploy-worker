@@ -68,6 +68,11 @@ BUILD_USER="${BUILD_USER:-const}"
 
 REPO="$STATE/repo"
 LOG="$STATE/log"
+# `dry-tick` (#1880): run a whole tick against a throwaway copy of the state and the queue, with every
+# effect (deploy, image roll, hook request, systemd-run) replaced by a log line — the pre-install
+# smoke in install-deploy-hook.sh. A worker whose tick cannot get to the end is not installed.
+DRY_RUN="${ARBOS_DEPLOY_DRY_RUN:-0}"
+dry() { [[ "$DRY_RUN" == 1 ]]; }
 # Under systemd there is no HOME and no SUDO_UID: git would call the build user's clone
 # (/home/const/arbos-build/repo, used by deploy-relay.sh) "dubious ownership" and fail to
 # read its HEAD. Trust the checkouts this host deploys from.
@@ -263,6 +268,7 @@ relay_connect_probe() {
 
 deploy_relay() {
   local sha="$1" tmp t0
+  dry && { log "dry-run: would deploy relay $sha"; return 0; }
   tmp="$(mktemp -d)"
   git -C "$REPO" show "$sha:scripts/feedback/deploy-relay.sh" > "$tmp/deploy-relay.sh"
   t0=$(date +%s)
@@ -292,6 +298,7 @@ deploy_relay() {
 
 deploy_voice() {
   local sha="$1" t0
+  dry && { log "dry-run: would deploy voice $sha"; return 0; }
   t0=$(date +%s)
   log "voice: deploying $sha"
   git -C "$REPO" checkout -q --detach "$sha"
@@ -502,6 +509,7 @@ pending_boxes() {
   admin_users | python3 -c '
 import sys, json
 target, tier = sys.argv[1], sys.argv[2]
+skipped = set(sys.argv[3].split())
 for u in json.load(sys.stdin):
     m = u.get("machine") or {}
     is_test = u["id"].startswith("test_")
@@ -511,8 +519,35 @@ for u in json.load(sys.stdin):
         continue
     if is_test and m.get("state") == "error":
         continue
+    if u["id"] in skipped:
+        continue
     if m.get("snapshot") != target and not (m.get("upgrade") or {}).get("in_progress"):
-        print(u["id"])' "$1" "${2:-all}"
+        print(u["id"])' "$1" "${2:-all}" "$(skipped_boxes | tr '\n' ' ')"
+}
+
+# A box the relay cannot carry over — "/work is N MiB; too large to carry through the relay in one
+# piece" (gh_268993031, 3979 MiB > the relay's 3500, 2026-10-26 17:13–17:27) — fails the same way on
+# every attempt, and each attempt first quiesces the box's agentd, so the retries themselves hurt the
+# user. Three attempts on that ONE box were counted as "3 consecutive boxes in error" and held the lane
+# for every later image. Such a box is written to $STATE/agentd.skip (uid, reason, when) after its
+# first failure: it is left on its image, it is not pending for this or any later roll, it does not
+# count toward the consecutive-failure stop, and `status` names it until the operator clears it with
+# `arbos-deploy-worker unskip <uid>` (after shrinking /work or raising the relay's limit).
+# Since ARB-339 the relay measures /work BEFORE quiescing and carries it in parts (ceiling 16 GiB,
+# ARBOS_UPGRADE_MAX_WORK_MIB); a refusal arrives as `upgrade.last_refused` with the box untouched
+# (box_outcome → `refused`), and this regex stays for the error-state path of older relays.
+UNCARRYABLE_RE='too large to carry|nothing to carry over'
+skipped_boxes() { [[ -f "$STATE/agentd.skip" ]] && cut -d'|' -f1 "$STATE/agentd.skip" || true; }
+box_fail_reason() {
+  # box_fail_reason <uid> — the relay's own reason for the last failed upgrade of this box (its journal
+  # carries it; the admin JSON only says "error").
+  journalctl -u arbos-relay --since "-20 min" --no-pager -o cat 2>/dev/null \
+    | grep -E "box upgrade failed user=$1 " | tail -n 1 | sed -n 's/.*error=//p' | tr -d '\r' | cut -c1-200
+}
+skip_box() {
+  # skip_box <uid> <reason> — idempotent
+  grep -q "^$1|" "$STATE/agentd.skip" 2>/dev/null && return 0
+  printf '%s|%s|%s\n' "$1" "$2" "$(date -u +%FT%TZ)" >> "$STATE/agentd.skip"
 }
 
 errored_test_boxes() {
@@ -527,8 +562,18 @@ for u in json.load(sys.stdin):
 }
 
 real_min_sha() {
+  # real_min_sha [skipped uids] — the relay's real_min_sha (the sha of the earliest-reporting awake real
+  # box), recomputed here from the same box list when skipped boxes must not count.
   curl -fsS --max-time 30 -H "Authorization: Bearer $(secret_from "$RELAY_ENV" ARBOS_RELAY_ADMIN_TOKEN)" "$RELAY_URL/admin/calls" \
-    | python3 -c 'import sys, json; a = json.load(sys.stdin).get("agentd") or {}; print(a.get("real_min_sha") or a.get("fleet_min_sha") or "")' 2>/dev/null || true
+    | python3 -c '
+import sys, json
+a = json.load(sys.stdin).get("agentd") or {}
+skipped = set(sys.argv[1].split()) if len(sys.argv) > 1 else set()
+if not skipped:
+    print(a.get("real_min_sha") or a.get("fleet_min_sha") or ""); sys.exit(0)
+real = sorted(((b.get("reported_at") or 0), b.get("sha") or "") for b in a.get("boxes") or []
+              if not b.get("test") and b.get("state") == "awake" and b.get("sha") and b.get("user_id") not in skipped)
+print(real[0][1] if real else (a.get("real_min_sha") or ""))' "${1:-}" 2>/dev/null || true
 }
 
 box_quiet() {
@@ -623,24 +668,31 @@ upgrade_box() {
     /usr/local/bin/arbosctl --relay "$RELAY_URL" admin upgrade-box "$1" 2>&1 | tr -d '\n' | cut -c1-200
 }
 
-# box_outcome <uid> <target> → ok | error | pending : what the relay reports for the box after its upgrade.
+# box_outcome <uid> <target> [since-ms] → ok | error | pending | refused<TAB><reason> : what the relay reports
+# for the box after its upgrade. `refused` (relay ≥ ARB-339): the relay measured /work BEFORE quiescing the box,
+# said no, and left the box running on its image — `upgrade.last_refused` carries the reason and the time; only a
+# refusal newer than this attempt (since-ms) counts, an older one is history.
 box_outcome() {
   admin_users | python3 -c '
 import sys, json
-uid, target = sys.argv[1], sys.argv[2]
+uid, target, since = sys.argv[1], sys.argv[2], int(sys.argv[3] or 0)
 for u in json.load(sys.stdin):
     if u["id"] == uid:
         m = u.get("machine") or {}
-        if (m.get("upgrade") or {}).get("in_progress"):
+        up = m.get("upgrade") or {}
+        refused = up.get("last_refused") or {}
+        if up.get("in_progress"):
             print("pending")
         elif m.get("state") == "error":
             print("error")
+        elif refused.get("at") and int(refused["at"]) >= since and m.get("snapshot") != target:
+            print("refused\t" + str(refused.get("reason") or "refused")[:200].replace("\n", " "))
         elif m.get("snapshot") == target and m.get("state") == "awake":
             print("ok")
         else:
             print("pending")
         sys.exit(0)
-print("pending")' "$1" "$2" 2>/dev/null || echo pending
+print("pending")' "$1" "$2" "${3:-0}" 2>/dev/null || echo pending
 }
 
 # A roll stops itself after ROLL_MAX_CONSECUTIVE_FAILURES boxes in a row end in `error` (2026-10-25 05:10:
@@ -648,11 +700,12 @@ print("pending")' "$1" "$2" 2>/dev/null || echo pending
 # had passed). The lane is held with the reason; the fleet owner recreates the boxes; nothing is deleted.
 ROLL_MAX_CONSECUTIVE_FAILURES="${ROLL_MAX_CONSECUTIVE_FAILURES:-3}"
 ROLL_FAILURES=0
+ROLL_FAILED_UIDS=""
 
 roll_pass() {
   # roll_pass <target> — one pass over every pending box (real first, then test), quiet ones only.
   # Returns 2 when the consecutive-failure limit stopped the roll.
-  local target="$1" uid tier outcome go counts passes
+  local target="$1" uid tier outcome go counts passes reason
   for tier in real test; do
     for uid in $(pending_boxes "$target" "$tier" || true); do
       go=0
@@ -674,25 +727,45 @@ roll_pass() {
       fi
       if (( go )); then
         busy_counter "$uid" "$target" reset >/dev/null
+        attempt_ms=$(date +%s%3N)
         log "agentd: upgrading box of $uid → $target: $(upgrade_box "$uid")"
         # One at a time: give it up to 4 minutes before the next box.
         outcome=pending
         for _ in $(seq 1 24); do
           sleep 10
-          outcome="$(box_outcome "$uid" "$target")"
+          outcome="$(box_outcome "$uid" "$target" "$attempt_ms")"
           [[ "$outcome" != "pending" ]] && break
         done
+        if [[ "$outcome" == refused* ]]; then
+          # The relay measured first and said no; the box was never quiesced and is still awake on its
+          # image. Same bookkeeping as the uncarryable skip: not pending, not a failure, operator clears.
+          reason="${outcome#refused}"; reason="${reason#"${reason%%[![:space:]]*}"}"
+          skip_box "$uid" "$reason"
+          log "agentd: $uid box_upgrade_skipped — the relay refused the carry before touching the box ($reason); left on its image, not retried; operator: shrink /work or raise ARBOS_UPGRADE_MAX_WORK_MIB, then 'arbos-deploy-worker unskip $uid'"
+          event agentd "$(cat "$STATE/agentd.rolling.sha" 2>/dev/null || echo unknown)" box_upgrade_skipped "$uid: $reason; box untouched, left on its image until the operator clears the skip"
+          continue
+        fi
         if [[ "$outcome" == "error" ]]; then
-          ROLL_FAILURES=$((ROLL_FAILURES + 1))
-          log "agentd: box of $uid is in error after its upgrade to $target ($ROLL_FAILURES consecutive)"
-          event agentd "$(cat "$STATE/agentd.rolling.sha" 2>/dev/null || echo unknown)" box_upgrade_failed "$uid → $target ended in error ($ROLL_FAILURES consecutive)"
+          reason="$(box_fail_reason "$uid")"
+          if [[ "$reason" =~ $UNCARRYABLE_RE ]]; then
+            skip_box "$uid" "$reason"
+            log "agentd: $uid box_upgrade_skipped — the relay cannot carry its /work ($reason); left on its image, not retried; operator: shrink /work or raise the relay limit, then 'arbos-deploy-worker unskip $uid'"
+            event agentd "$(cat "$STATE/agentd.rolling.sha" 2>/dev/null || echo unknown)" box_upgrade_skipped "$uid: $reason; left on its image until the operator clears the skip"
+            continue
+          fi
+          # Consecutive failures count distinct boxes: the same box failing three times is one bad box.
+          if [[ " $ROLL_FAILED_UIDS " != *" $uid "* ]]; then
+            ROLL_FAILURES=$((ROLL_FAILURES + 1)); ROLL_FAILED_UIDS="$ROLL_FAILED_UIDS $uid"
+          fi
+          log "agentd: box of $uid is in error after its upgrade to $target ($ROLL_FAILURES consecutive${reason:+; relay: $reason})"
+          event agentd "$(cat "$STATE/agentd.rolling.sha" 2>/dev/null || echo unknown)" box_upgrade_failed "$uid → $target ended in error ($ROLL_FAILURES consecutive)${reason:+: $reason}"
           if (( ROLL_FAILURES >= ROLL_MAX_CONSECUTIVE_FAILURES )); then
             log "agentd: STOPPING the roll — $ROLL_FAILURES boxes in a row ended in error; lane held, remaining boxes untouched"
             hold_agentd "$(cat "$STATE/agentd.rolling.sha" 2>/dev/null || echo unknown)" "$target" "roll stopped: $ROLL_FAILURES consecutive box upgrades ended in error (last $uid); fleet owner recreates the boxes"
             return 2
           fi
         elif [[ "$outcome" == "ok" ]]; then
-          ROLL_FAILURES=0
+          ROLL_FAILURES=0; ROLL_FAILED_UIDS=""
         fi
       elif (( ${passes:-0} < BUSY_PASSES_BEFORE_PROBE )); then
         log "agentd: $uid not quiet (inference in the last 5 min), later (pass ${passes:-0}/${BUSY_PASSES_BEFORE_PROBE} before the idle-window probe)"
@@ -723,15 +796,21 @@ roll_boxes() {
 
 finish_roll() {
   # finish_roll <sha> <snapshot> — deployed only when the relay sees real boxes on this commit.
-  local sha="$1" snapshot="$2" seen
-  seen="$(real_min_sha)"
+  local sha="$1" snapshot="$2" seen skipped
+  skipped="$(skipped_boxes | tr '\n' ' ')"
+  seen="$(real_min_sha "$skipped")"
   if [[ -n "$seen" ]] && git -C "$REPO" cat-file -e "$seen^{commit}" 2>/dev/null \
      && git -C "$REPO" merge-base --is-ancestor "$sha" "$seen" 2>/dev/null \
      && [[ -z "$(pending_boxes "$snapshot" all || true)" ]]; then
     echo "$sha" > "$STATE/agentd.deployed-sha"
     rm -f "$STATE/agentd.rolling" "$QUEUE/agentd.rolling"
-    event agentd "$sha" deployed "snapshot $snapshot on every box; real_min_sha $seen"
-    log "agentd: deployed — real_min_sha $seen contains $sha, snapshot $snapshot everywhere"
+    if [[ -n "$skipped" ]]; then
+      event agentd "$sha" deployed "snapshot $snapshot on every box except skipped: $skipped; real_min_sha $seen"
+      log "agentd: deployed — real_min_sha $seen contains $sha, snapshot $snapshot everywhere EXCEPT skipped box(es) left on their image: $skipped (see 'status')"
+    else
+      event agentd "$sha" deployed "snapshot $snapshot on every box; real_min_sha $seen"
+      log "agentd: deployed — real_min_sha $seen contains $sha, snapshot $snapshot everywhere"
+    fi
     # #1708: every box must also RUN this commit's pi-ext seed (machine.agentd.seed_sha from its
     # hello). A box whose persisted /etc kept an older seed is named here, loudly.
     local stale
@@ -956,6 +1035,7 @@ roll_unit_running() {
 }
 
 start_roll_unit() {
+  dry && { log "dry-run: would start the image roll unit for $1"; return 0; }
   # A finished (failed) transient unit stays loaded until reset; clear it, then start the roll.
   # --no-block: without it systemd-run waits for the oneshot to finish, so the tick (and with it
   # the timer and every other queued deploy) sat inside the 15–40 minute roll (22:27–22:58 Oct 21,
@@ -979,7 +1059,10 @@ auto_requests() {
     [[ -n "$deployed" ]] || continue
     [[ "$deployed" == "$head" ]] && continue
     git -C "$REPO" cat-file -e "$deployed^{commit}" 2>/dev/null || continue
-    queued="$(sed -n 's/^sha=//p' "$QUEUE/$kind" 2>/dev/null)"
+    # No queue file for this kind (voice, most of the time) → sed exits 2 and, under `set -e`,
+    # ended the whole tick here: no relay/voice/agentd deploy from 04:40 to 07:1x UTC on
+    # 2026-10-26 (every tick "status=2/INVALIDARGUMENT"). An absent file is an empty queue.
+    queued="$(sed -n 's/^sha=//p' "$QUEUE/$kind" 2>/dev/null || true)"
     [[ "$queued" == "$head" ]] && continue
     # A queued request that already contains the newest green is NEWER than it (its CI is still
     # running): leave it — overwriting it with the older green started three images one minute
@@ -990,6 +1073,7 @@ auto_requests() {
     fi
     # shellcheck disable=SC2046
     if ! git -C "$REPO" diff --quiet "$deployed" "$head" -- $(paths_of "$kind"); then
+      if dry; then log "dry-run: would request $kind $head (newest green)"; continue; fi
       ARBOS_DEPLOY_QUEUE="$QUEUE" "$HOOK" "$kind" "$head" >/dev/null && log "auto: $kind differs from main in its paths; requested $head (newest green)"
     fi
   done
@@ -1185,6 +1269,7 @@ continue_roll_if_due() {
   local at
   at="$(sed -n 's/^at=//p' "$STATE/agentd.rolling" | head -1)"
   (( $(date -u +%s) - ${at:-0} >= ROLL_RETRY_EVERY_S )) || return 0
+  dry && { log "dry-run: would start a roll-continue unit"; return 0; }
   systemctl reset-failed arbos-deploy-agentd.service 2>/dev/null || true
   systemd-run --unit=arbos-deploy-agentd --collect --quiet --no-block \
     --property=Type=oneshot --property=StandardOutput=journal \
@@ -1194,7 +1279,22 @@ continue_roll_if_due() {
 
 tick() {
   need_root
-  [[ -e "$KILL_FILE" ]] && exit 0
+  if dry; then
+    # Throwaway state: the real metadata files and queue are copied, the repo clone is shared read-only
+    # (fetch only), the lock is private so a live tick is never blocked, nothing is removed or written
+    # anywhere real. KILL_FILE is ignored so the smoke runs even while deploys are paused.
+    local scratch real_state="$STATE" real_queue="$QUEUE"
+    scratch="$(mktemp -d /tmp/arbos-deploy-dry.XXXXXX)"
+    mkdir -p "$scratch/state/failed" "$scratch/state/runs" "$scratch/queue"
+    find "$real_state" -maxdepth 1 -type f -exec cp -a {} "$scratch/state/" \; 2>/dev/null || true
+    cp -a "$real_state/failed/." "$scratch/state/failed/" 2>/dev/null || true
+    cp -a "$real_queue/." "$scratch/queue/" 2>/dev/null || true
+    STATE="$scratch/state"; QUEUE="$scratch/queue"; LOG="$STATE/log"; EVENTS="$STATE/events.jsonl"
+    REPO="$real_state/repo"
+    log "dry-run tick: state copy $scratch (repo $REPO shared, fetch only)"
+  else
+    [[ -e "$KILL_FILE" ]] && exit 0
+  fi
   mkdir -p "$STATE"
   exec 9> "$STATE/.lock"
   flock -n 9 || exit 0
@@ -1206,6 +1306,10 @@ tick() {
     [[ -f "$f" ]] && handle_request "$f"
   done
   continue_roll_if_due
+  if dry; then
+    log "dry-run tick: reached the end (auto_requests, every queued request, roll-continue) — worker ok"
+    rm -rf "$(dirname "$STATE")"
+  fi
   return 0
 }
 
@@ -1218,6 +1322,10 @@ status() {
   for f in "$QUEUE"/*; do [[ -f "$f" ]] && { echo "  $(basename "$f"): $(tr '\n' ' ' < "$f")"; }; done
   echo "failed:"; for f in "$STATE"/failed/*; do [[ -f "$f" ]] && echo "  $(basename "$f"): $(tr '\n' ' ' < "$f")"; done
   if agentd_held; then echo "agentd lane HELD: $(tr '\n' ' ' < "$(agentd_hold_file)")"; else echo "agentd lane: open"; fi
+  if [[ -s "$STATE/agentd.skip" ]]; then
+    echo "skipped boxes (left on their image; 'unskip <uid>' after the fix):"
+    while IFS='|' read -r u r w; do echo "  $u since $w: $r"; done < "$STATE/agentd.skip"
+  fi
   echo "agentd roll unit: $(systemctl show -p ActiveState --value arbos-deploy-agentd.service 2>/dev/null || true)"
   [[ -f "$STATE/agentd.rolling" ]] && echo "agentd roll pending: $(tr '\n' ' ' < "$STATE/agentd.rolling")"
   echo "events (last 5):"; tail -n 5 "$EVENTS" 2>/dev/null || true
@@ -1250,20 +1358,47 @@ selftest() {
   [[ "$(seed_check_parse "$(printf '%s\n3\n' "$sha40")")" == "$sha40 3" ]] || { echo "selftest: seed_check_parse without newline" >&2; return 1; }
   [[ "$(seed_check_parse "$(printf '%s\n\n0\n' "$sha40")")" == "$sha40 0" ]] || { echo "selftest: seed_check_parse zero hits" >&2; return 1; }
   [[ "$(seed_check_parse "$(printf '\n\n')")" == "? 0" ]] || { echo "selftest: seed_check_parse no seed" >&2; return 1; }
+  # Uncarryable boxes: classified by the relay's reason, skipped once, listed, cleared.
+  [[ "/work is 3979 MiB; too large to carry through the relay in one piece" =~ $UNCARRYABLE_RE ]] || { echo "selftest: uncarryable regex" >&2; return 1; }
+  [[ "upgrade failed: daytona start: HTTP 500" =~ $UNCARRYABLE_RE ]] && { echo "selftest: uncarryable regex too wide" >&2; return 1; }
+  skip_box gh_1 "/work is 3979 MiB; too large"; skip_box gh_1 "again"; skip_box gh_2 "nothing to carry over"
+  [[ "$(skipped_boxes | tr '\n' ' ')" == "gh_1 gh_2 " ]] || { echo "selftest: skipped_boxes ($(skipped_boxes | tr '\n' ' '))" >&2; return 1; }
+  [[ "$(grep -c . "$STATE/agentd.skip")" == 2 ]] || { echo "selftest: skip_box not idempotent" >&2; return 1; }
+  # box_outcome with the relay's measure-first refusal (ARB-339): a refusal newer than the attempt is
+  # `refused<TAB>reason`; an older one is history (pending); a run in progress wins; a box already on the
+  # target is ok whatever it was refused before.
+  local users='[{"id":"gh_9","machine":{"state":"awake","snapshot":"old","upgrade":{"in_progress":false,"last_refused":{"reason":"/work is 3979 MiB; too large to carry through the relay (limit 16384 MiB)","at":2000,"work_mib":3979}}}}]'
+  admin_users() { echo "$users"; }
+  [[ "$(box_outcome gh_9 new 1000)" == $'refused\t/work is 3979 MiB; too large to carry through the relay (limit 16384 MiB)' ]] || { echo "selftest: box_outcome refused ($(box_outcome gh_9 new 1000))" >&2; return 1; }
+  [[ "$(box_outcome gh_9 new 3000)" == "pending" ]] || { echo "selftest: box_outcome stale refusal must be pending" >&2; return 1; }
+  users='[{"id":"gh_9","machine":{"state":"awake","snapshot":"new","upgrade":{"in_progress":false,"last_refused":{"reason":"x; too large to carry","at":2000}}}}]'
+  [[ "$(box_outcome gh_9 new 1000)" == "ok" ]] || { echo "selftest: box_outcome on target must be ok" >&2; return 1; }
+  users='[{"id":"gh_9","machine":{"state":"waking","snapshot":"old","upgrade":{"in_progress":true,"phase":"measure","last_refused":{"reason":"x; too large to carry","at":2000}}}}]'
+  [[ "$(box_outcome gh_9 new 1000)" == "pending" ]] || { echo "selftest: box_outcome in progress must be pending" >&2; return 1; }
+  local o; o="$(box_outcome gh_9 new 1000)"; o="${o#refused}"; o="${o#"${o%%[![:space:]]*}"}"
+  [[ "$o" == "pending" ]] || { echo "selftest: reason strip" >&2; return 1; }
   echo "selftest ok"
 }
 
 case "${1:-}" in
   tick) tick ;;
+  dry-tick) DRY_RUN=1; tick ;;
   selftest) selftest ;;
   roll-image) roll_image "${2:?sha}" ;;
   roll-continue) roll_continue ;;
   status) status ;;
+  unskip)
+    [[ -n "${2:-}" ]] || { echo "usage: arbos-deploy-worker unskip <uid>" >&2; exit 2; }
+    if grep -q "^$2|" "$STATE/agentd.skip" 2>/dev/null; then
+      grep -v "^$2|" "$STATE/agentd.skip" > "$STATE/agentd.skip.new" || true; mv "$STATE/agentd.skip.new" "$STATE/agentd.skip"
+      event agentd "$(resolve origin/main 2>/dev/null || echo unknown)" box_unskipped "$2 is pending again (operator)"
+      echo "$2: pending again at the next roll"
+    else echo "$2: not skipped"; fi ;;
   hold-agentd)
     case "${2:-}" in
       off) rm -f "$(agentd_hold_file)"; event agentd "$(resolve origin/main 2>/dev/null || echo unknown)" roll_hold_lifted "lifted by the operator"; echo "agentd lane open" ;;
       on) hold_agentd "$(resolve origin/main 2>/dev/null || echo unknown)" manual "${3:-held by the operator}"; echo "agentd lane held" ;;
       *) if agentd_held; then tr '\n' ' ' < "$(agentd_hold_file)"; echo; else echo "agentd lane open"; fi ;;
     esac ;;
-  *) echo "usage: arbos-deploy-worker tick | roll-image <sha> | roll-continue | status | hold-agentd [on <reason>|off] | selftest" >&2; exit 2 ;;
+  *) echo "usage: arbos-deploy-worker tick | roll-image <sha> | roll-continue | status | hold-agentd [on <reason>|off] | unskip <uid> | selftest" >&2; exit 2 ;;
 esac

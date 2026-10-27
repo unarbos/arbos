@@ -13,7 +13,9 @@ name = "arbos-mac"
 path = "src/main.rs"
 
 [dependencies]
-arbos-core.workspace = true
+# `chart-png`: Save PNG of a chart bubble renders through the core picture renderer (resvg,
+# which gpui already builds).
+arbos-core = { workspace = true, features = ["chart-png"] }
 arbos-client.workspace = true
 arbos-matrix.workspace = true
 arbos-update.workspace = true
@@ -68,10 +70,12 @@ nokhwa = { version = "0.10", default-features = false, features = ["input-avfoun
 objc2 = "0.6"
 block2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSURL", "NSString", "NSError", "NSObject", "NSGeometry", "NSBundle", "NSArray", "NSSet", "NSEnumerator"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSWindow", "NSView", "NSResponder", "NSDockTile", "NSPanel", "NSSavePanel", "NSOpenPanel", "block2", "objc2-uniform-type-identifiers"] }
+# NSVisualEffectView / NSAppearance / NSGraphics: the Glass surface's window material
+# (`ui::vibrancy`, [feedback mac-glass-contrast-2026-10-26]).
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSWindow", "NSView", "NSResponder", "NSDockTile", "NSPanel", "NSSavePanel", "NSOpenPanel", "NSVisualEffectView", "NSAppearance", "NSGraphics", "block2", "objc2-uniform-type-identifiers"] }
 # Avatar picker: NSOpenPanel limited to image UTTypes (PNG, JPEG, HEIC, GIF, WebP).
 objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = ["std", "UTType", "UTCoreTypes"] }
-objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationAttachment", "UNNotificationSound", "UNNotificationTrigger", "UNNotificationAction", "UNNotificationCategory"] }
+objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationAttachment", "UNNotificationSound", "UNNotificationTrigger", "UNNotificationAction", "UNNotificationCategory", "UNNotificationSettings"] }
 objc2-authentication-services = { version = "0.3", default-features = false, features = ["std", "block2", "ASWebAuthenticationSession", "ASFoundation"] }
 
 [dev-dependencies]

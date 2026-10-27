@@ -50,9 +50,12 @@ fn render_cross_chat_note(r: &ReplyRef, me: &Me<'_>) -> String {
         EXCERPT_CHARS,
     );
     let tail = if cut {
-        " (excerpt of a longer message)"
+        format!(
+            " [truncated: showing {EXCERPT_CHARS} of {} chars; the full message is in that chat, not here]",
+            r.text.split_whitespace().collect::<Vec<_>>().join(" ").chars().count()
+        )
     } else {
-        ""
+        String::new()
     };
     format!(
         "[Replying here, privately, to {who} in {place}: \"{body}\"{tail}. That message is not in this chat; answer with it in mind.]\n\n"
@@ -61,14 +64,29 @@ fn render_cross_chat_note(r: &ReplyRef, me: &Me<'_>) -> String {
 
 fn render_note(quoted: &MessageView, replying: &MessageView, me: &Me<'_>) -> String {
     let who = quoted_author(quoted, replying, me);
-    let (body, cut) = excerpt(&quoted_text(quoted), EXCERPT_CHARS);
-    let tail = if cut {
-        " (excerpt of a longer message)"
+    // The message being replied to travels whole (Jacob, 2026-10-26): a code post cut to an
+    // excerpt is exactly what the agent cannot answer about. Beyond the full cap the marker
+    // names the fetch call.
+    let text = quoted_text(quoted);
+    let chat_id = replying
+        .rest
+        .get("chatId")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let body = crate::truncate::clip_marked(
+        text.trim(),
+        crate::truncate::FULL_MSG_CHARS,
+        &quoted.id,
+        Some(&crate::truncate::fetch_message_hint(chat_id, &quoted.id)),
+    );
+    let body = if body.contains('\n') {
+        format!("\n<<<\n{body}\n>>>\n")
     } else {
-        ""
+        format!("\"{body}\"")
     };
     format!(
-        "[Replying to {who}: \"{body}\"{tail}. Answer with that message in mind; you can see it.]\n\n"
+        "[Replying to {who}: {body} (message id {}). Answer with that message in mind; you can see it.]\n\n",
+        quoted.id
     )
 }
 

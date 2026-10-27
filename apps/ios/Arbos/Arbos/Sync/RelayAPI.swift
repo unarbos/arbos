@@ -10,6 +10,8 @@ struct RelayError: Error, LocalizedError {
     var message: String
     /// `error.type` from the self-serve relay (token_expired, credits_exhausted, …).
     var type: String? = nil
+    /// `error.detail` when the relay sends one (the avatar routes: the provider's words).
+    var detail: String? = nil
 
     var errorDescription: String? {
         message.isEmpty ? "HTTP \(status)" : "HTTP \(status): \(message)"
@@ -20,7 +22,11 @@ struct RelayError: Error, LocalizedError {
     /// Decode `ApiErrorDto` when the body is the current shape; plain text for older relays.
     static func from(status: Int, body: Data) -> RelayError {
         if let dto = try? JSONDecoder().decode(ApiErrorDto.self, from: body) {
-            return RelayError(status: status, message: dto.error.message, type: dto.error.type)
+            let detail = ((try? JSONSerialization.jsonObject(with: body)) as? [String: Any])
+                .flatMap { $0["error"] as? [String: Any] }
+                .flatMap { $0["detail"] as? String }
+                .flatMap { $0.isEmpty ? nil : $0 }
+            return RelayError(status: status, message: dto.error.message, type: dto.error.type, detail: detail)
         }
         let text = (String(data: body, encoding: .utf8) ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -105,23 +111,26 @@ final class RelayAPI {
         return "ios/\(v) (\(b))"
     }
 
-    func request(_ method: String, _ path: String, body: Any? = nil, auth: Bool = true, headers: [String: String] = [:]) async throws -> (Data, HTTPURLResponse) {
+    /// `timeout`: this one request's limit instead of the session's 30 s (an avatar generation
+    /// gets 90 s so the relay's 75 s budget always answers first).
+    func request(_ method: String, _ path: String, body: Any? = nil, auth: Bool = true, headers: [String: String] = [:], timeout: TimeInterval? = nil) async throws -> (Data, HTTPURLResponse) {
         do {
-            return try await requestOnce(method, path, body: body, auth: auth, headers: headers)
+            return try await requestOnce(method, path, body: body, auth: auth, headers: headers, timeout: timeout)
         } catch let error as RelayError where error.isUnauthorized && auth {
             if let refresher, await refresher() {
-                return try await requestOnce(method, path, body: body, auth: auth, headers: headers)
+                return try await requestOnce(method, path, body: body, auth: auth, headers: headers, timeout: timeout)
             }
             throw error
         }
     }
 
-    private func requestOnce(_ method: String, _ path: String, body: Any?, auth: Bool, headers: [String: String] = [:]) async throws -> (Data, HTTPURLResponse) {
+    private func requestOnce(_ method: String, _ path: String, body: Any?, auth: Bool, headers: [String: String] = [:], timeout: TimeInterval? = nil) async throws -> (Data, HTTPURLResponse) {
         guard let url = URL(string: endpoint.httpUrl + path) else {
             throw RelayError(status: 0, message: "Bad relay URL")
         }
         var req = URLRequest(url: url)
         req.httpMethod = method
+        if let timeout { req.timeoutInterval = timeout }
         if auth {
             req.setValue("Bearer \(token())", forHTTPHeaderField: "Authorization")
         }
@@ -141,6 +150,14 @@ final class RelayAPI {
             throw RelayError.from(status: http.statusCode, body: data)
         }
         return (data, http)
+    }
+
+    /// `GET /link-icon?domain=` — the site's 64×64 PNG for the bubbles' named links, `nil` when the
+    /// site has none (204) or the call failed (nobody asked; the bubble keeps its placeholder).
+    func linkIcon(host: String) async -> Data? {
+        guard let q = host.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return nil }
+        guard let (data, http) = try? await request("GET", "/link-icon?domain=\(q)") else { return nil }
+        return http.statusCode == 200 && !data.isEmpty ? data : nil
     }
 
     func json(_ method: String, _ path: String, body: Any? = nil, auth: Bool = true) async throws -> Any {
@@ -478,7 +495,8 @@ final class RelayAPI {
         return key
     }
 
-    /// `PUT /me/avatar` (raw JPEG) → `MeUserResponseDto`; updates the signed-in user's picture.
+    /// `PUT /me/avatar` (raw PNG or JPEG master) → `MeUserResponseDto`; updates the signed-in
+    /// user's picture. The relay checks that the type and the bytes agree.
     func putMeAvatar(jpeg: Data) async throws -> String {
         guard let url = URL(string: "\(endpoint.httpUrl)/me/avatar") else {
             throw RelayError(status: 0, message: "Bad relay URL")
@@ -486,7 +504,7 @@ final class RelayAPI {
         var req = URLRequest(url: url)
         req.httpMethod = "PUT"
         req.setValue("Bearer \(token())", forHTTPHeaderField: "Authorization")
-        req.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
+        req.setValue(PictureMaster.mime(jpeg), forHTTPHeaderField: "Content-Type")
         req.httpBody = jpeg
         let (body, response) = try await session.data(for: req)
         guard let http = response as? HTTPURLResponse, http.statusCode < 400 else {
@@ -995,10 +1013,16 @@ final class RelayAPI {
         return body
     }
 
+    /// How long one avatar generation may take on the wire: past the relay's 75 s budget (40 s
+    /// per provider attempt), so the relay's own 504 reaches the sheet before this client gives up
+    /// (Jacob, 2026-10-26: the session's 30 s had cut a slow generation first).
+    static let avatarGenerateTimeout: TimeInterval = 90
+
     private func generateAvatar(path: String, prompt: String) async throws -> String {
-        let v = try await json("POST", path, body: ["prompt": prompt])
+        let (data, _) = try await request("POST", path, body: ["prompt": prompt], timeout: Self.avatarGenerateTimeout)
+        let v = (try? JSONSerialization.jsonObject(with: data)) ?? NSNull()
         guard let d = v as? [String: Any], let key = d["image_key"] as? String, !key.isEmpty else {
-            throw RelayError(status: 0, message: "The relay sent no picture")
+            throw RelayError(status: 0, message: "Couldn't generate the image.", detail: "The relay sent no picture")
         }
         return key
     }
@@ -1066,8 +1090,15 @@ final class RelayAPI {
     /// Announce a message we just wrote so recipients get a real preview
     /// (§7c): people chats `POST /chats/{id}/notify`, project chats
     /// `POST /projects/{pid}/chats/{cid}/notify`. Deduped by the relay.
-    func notifyMessage(chatId: String, projectId: Id?, messageId: String, text: String) async throws {
-        let body: [String: Any] = ["message_id": messageId, "text": String(text.prefix(140))]
+    func notifyMessage(chatId: String, projectId: Id?, messageId: String, text: String,
+                       replyRef: ReplyRef? = nil) async throws {
+        var body: [String: Any] = ["message_id": messageId, "text": String(text.prefix(140))]
+        if let r = replyRef {
+            // Reply in DM (#1834): the push says what the DM answers; the relay keeps the
+            // address only for recipients who are members of the source chat.
+            body["reply_ref"] = ["chat_id": r.chatId, "project_id": r.projectId, "message_id": r.messageId,
+                                 "chat_title": r.chatTitle, "sender_name": r.who, "text": r.text]
+        }
         if let projectId, projectId != peopleSlot {
             _ = try await request("POST", "/projects/\(projectId)/chats/\(chatId)/notify", body: body)
         } else {

@@ -2,7 +2,7 @@
 //! keys are sha256 hex or ULIDs; people-chat slots use `people:{chat_id}`. Path traversal is refused.
 
 use axum::body::Body;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
@@ -138,19 +138,36 @@ pub async fn put(
     StatusCode::NO_CONTENT.into_response()
 }
 
+/// `GET /blob/{slot}/{key}[?w=<px>]`. `w=` applies to image blobs only — the group / server /
+/// preview pictures the apps draw — and serves the picture at that bucket (`avatar_image`);
+/// any other blob, or a `w` the picture is already within, streams the stored bytes.
 pub async fn get(
     State(state): State<AppState>,
     principal: Principal,
     Path((project_id, key)): Path<(String, String)>,
+    Query(size): Query<crate::avatar_image::SizeQuery>,
 ) -> Response {
     if !state.allows(&principal, &project_id) {
         return StatusCode::FORBIDDEN.into_response();
+    }
+    if let Some(w) = size.w {
+        if let StoredImage::Image(kind) = stored_image(&state, &project_id, &key).await {
+            if let Some(bytes) = read(&state, &project_id, &key).await {
+                return crate::avatar_image::respond(
+                    &state,
+                    crate::avatar_image::Master { kind, bytes },
+                    Some(w),
+                    None,
+                )
+                .await;
+            }
+        }
     }
     serve(&state, &project_id, &key).await
 }
 
 /// The whole stored blob in memory (access already checked by the caller); `None` when there is
-/// no such blob. For small things only — the avatar setter copying a 512 px preview.
+/// no such blob. For small things only — the avatar setter copying a picture master.
 pub async fn read(state: &AppState, slot: &str, key: &str) -> Option<Vec<u8>> {
     if !safe_key(key) || !safe_key(slot) {
         return None;

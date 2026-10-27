@@ -172,7 +172,7 @@ pub(super) fn page(
                 .rounded_full()
                 .overflow_hidden()
                 .child(
-                    gpui::img(image)
+                    gpui::img(crate::ui::picture_fit::fit(&image, HERO_AVATAR))
                         .size(px(HERO_AVATAR))
                         .rounded_full()
                         .object_fit(gpui::ObjectFit::Cover),

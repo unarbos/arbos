@@ -20,7 +20,7 @@ const MAX_BYTES: u64 = 60 * 1024 * 1024;
 const DEFAULT_IMAGE_MODEL: &str = "gpt-image-1";
 
 /// One line in the workspace's `.arbos/audit.jsonl` (the file the pi extension and the approval gate write).
-fn audit(agent: &Agent, kind: &str, fields: Value) {
+pub(crate) fn audit(agent: &Agent, kind: &str, fields: Value) {
     let mut entry = json!({ "kind": kind, "at": now_ms() });
     if let (Some(e), Some(f)) = (entry.as_object_mut(), fields.as_object()) {
         for (k, v) in f {
@@ -43,9 +43,9 @@ fn audit(agent: &Agent, kind: &str, fields: Value) {
 
 pub fn tool_specs() -> Vec<Value> {
     vec![
-        json!({ "name": "deliver_file", "description": "Hand a file you produced to the user as a downloadable attachment card in the chat (slides, documents, spreadsheets, PDFs, images, video, audio, archives). Write the file under the out/ folder of your project folder first, then call this with its path. kind is inferred from the extension when omitted.",
-                "inputSchema": { "type": "object", "properties": { "path": { "type": "string", "description": "Absolute path, or relative to your project folder" }, "title": { "type": "string", "description": "Short caption shown on the card (defaults to the file name)" }, "kind": { "type": "string", "enum": ["image", "video", "slides", "doc", "sheet", "pdf", "audio", "file"] }, "session_id": { "type": "string", "description": "Subagents: your ARBOS_SESSION_ID" } }, "required": ["path"] } }),
-        json!({ "name": "generate_image", "description": "Generate an image from a text prompt (through the relay; no key needed here). Saves out/<id>.png in your project folder and delivers it to the user as an attachment card. One call per image.",
+        json!({ "name": "deliver_file", "description": "Put a file or picture into THIS chat as a real message — the same in a 1:1, a group, a server channel or a DM, shown to every participant on Mac and iPhone: an image appears inline, any other file as a card with a download button. This is the only way to show the user a file or a picture; never paste a path, a markdown image or a link instead. Give `path` (a file you made, under your project's out/ folder) or `url` (a public image or file to fetch and post). Returns `posted: true` with the message id of the row in the chat; an error means the file was NOT posted — then say so plainly instead of claiming it was.",
+                "inputSchema": { "type": "object", "properties": { "path": { "type": "string", "description": "Absolute path, or relative to your project folder" }, "url": { "type": "string", "description": "https URL of an image or file to fetch and post (instead of path)" }, "title": { "type": "string", "description": "Short caption shown on the card (defaults to the file name)" }, "caption": { "type": "string", "description": "One sentence shown with the file in the same message (optional)" }, "kind": { "type": "string", "enum": ["image", "video", "slides", "doc", "sheet", "pdf", "audio", "file"] }, "reply_to": { "type": "string", "description": "Message id this answers (default: the message that started this turn)" }, "session_id": { "type": "string", "description": "Subagents: your ARBOS_SESSION_ID" } } } }),
+        json!({ "name": "generate_image", "description": "Generate an image from a text prompt (through the relay; no key needed here). Saves out/<id>.png in your project folder and posts it inline in this chat (any chat type) the way deliver_file does. One call per image.",
                 "inputSchema": { "type": "object", "properties": { "prompt": { "type": "string" }, "size": { "type": "string", "enum": ["1024x1024", "1024x1536", "1536x1024"], "description": "default 1024x1024" }, "quality": { "type": "string", "enum": ["low", "medium", "high"], "description": "default medium" }, "title": { "type": "string" }, "session_id": { "type": "string" } }, "required": ["prompt"] } }),
     ]
 }
@@ -68,7 +68,7 @@ pub fn media_python() -> String {
 /// "## Producing files" for the main-agent prompt and the subagent pack.
 pub fn prompt_section(cfg: &Config) -> String {
     format!(
-        "## Producing files\n\nWhen the user wants a document, slides, a spreadsheet, a PDF, an image or a video, make the file and hand it over with `deliver_file(path, title?)`: it appears in the chat as a card with a download button. Write files under `{out}/` with a clear name (`report.pptx`, `budget.xlsx`). Python at `{py}` has python-pptx, python-docx, openpyxl, Pillow and reportlab; `ffmpeg` is on PATH for video and audio. For a picture from a description use `generate_image(prompt, size?)`; it saves and delivers the PNG itself. After delivering, say in one line what the file contains; never paste its contents or the path unless asked.\n\n",
+        "## Producing files and pictures\n\nWhen the user wants a document, slides, a spreadsheet, a PDF, an image or a video, make the file and put it in the chat with `deliver_file(path, title?, caption?)`: it lands as a real message in THIS chat — a 1:1, a group, a server channel or a DM alike — an image inline, any other file as a card with a download button, visible to every participant. A picture or file that already exists on the web goes in with `deliver_file(url=…)`. This is the only way to show a file or picture; a path, a markdown image or a link in a message is not. Write files under `{out}/` with a clear name (`report.pptx`, `budget.xlsx`). Python at `{py}` has python-pptx, python-docx, openpyxl, Pillow and reportlab; `ffmpeg` is on PATH for video and audio. For a picture from a description use `generate_image(prompt, size?)`; it saves and posts the PNG itself. A file is in the chat only when the tool returned `posted: true` with a message id; if it returned an error, say the file could not be posted and why — never say you posted or attached something otherwise. After posting, say in one line what the file is; never paste its contents or its path unless asked.\n\n",
         out = out_dir(cfg).display(),
         py = media_python()
     )
@@ -82,7 +82,10 @@ pub fn kind_for(name: &str, mime: &str) -> &'static str {
         .map(|e| e.to_ascii_lowercase())
         .unwrap_or_default();
     match ext.as_str() {
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "heic" | "tiff" => "image",
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "heic" | "tiff" => "image",
+        // Neither client previews SVG: an "image" that never renders was Jacob's blank card
+        // (2026-10-26); as a file card it opens and downloads.
+        "svg" => "file",
         "mp4" | "mov" | "webm" | "mkv" | "avi" => "video",
         "pptx" | "ppt" | "key" | "odp" => "slides",
         "docx" | "doc" | "odt" | "rtf" | "md" | "txt" | "html" => "doc",
@@ -151,31 +154,70 @@ const KINDS: [&str; 8] = [
     "image", "video", "slides", "doc", "sheet", "pdf", "audio", "file",
 ];
 
-/// Where the card goes: the calling subagent's progress message, else the running main turn's
-/// assistant message, else the newest running subagent.
-async fn target(a: &Agent, session_id: Option<&str>) -> Option<(String, String)> {
+/// Where the file lands: the chat and the ask it answers. A worker (`session_id`) posts into the
+/// chat its job or hand-off belongs to, under that ask; the main turn posts into its own chat.
+/// Never the worker's own progress row: that row is `hidden`/`worker` and both clients skip it,
+/// which is how three logo deliveries in Jacob's group "never appeared" (2026-10-26).
+#[derive(Debug, Clone)]
+pub struct Target {
+    pub chat_id: String,
+    /// The user message the file answers (`inReplyTo`), when known.
+    pub ask_id: Option<String>,
+    /// The main turn is the poster (counts as its result).
+    pub main_turn: bool,
+}
+
+pub(crate) async fn target(a: &Agent, session_id: Option<&str>) -> Option<Target> {
+    let worker_target = |chat_id: &str, row_id: &str, host_doc_ask: Option<String>| Target {
+        chat_id: chat_id.to_owned(),
+        ask_id: host_doc_ask.or_else(|| Some(row_id.to_owned())),
+        main_turn: false,
+    };
     if let Some(sid) = session_id.filter(|s| !s.is_empty()) {
-        if let Some(t) = a.subagent_msgs.lock().await.get(sid) {
-            return Some(t.clone());
+        if let Some((chat_id, row_id)) = a.subagent_msgs.lock().await.get(sid).cloned() {
+            let ask = row_in_reply_to(a, &chat_id, &row_id).await;
+            return Some(worker_target(&chat_id, &row_id, ask));
         }
     }
     {
-        let mut tl = a.turn.lock().await;
-        if let Some(t) = tl.as_mut() {
-            // The next prose opens a new text part so the card keeps its place in the message.
-            t.text_part_dirty = true;
-            return Some((t.chat_id.clone(), t.assistant_msg_id.clone()));
+        let tl = a.turn.lock().await;
+        if let Some(t) = tl.as_ref() {
+            return Some(Target {
+                chat_id: t.chat_id.clone(),
+                ask_id: Some(t.user_msg_id.clone()),
+                main_turn: true,
+            });
         }
     }
-    a.subagent_msgs
+    let newest = a
+        .subagent_msgs
         .lock()
         .await
         .values()
         .max_by_key(|(_, msg)| msg.clone())
-        .cloned()
+        .cloned();
+    match newest {
+        Some((chat_id, row_id)) => {
+            let ask = row_in_reply_to(a, &chat_id, &row_id).await;
+            Some(worker_target(&chat_id, &row_id, ask))
+        }
+        None => None,
+    }
 }
 
-async fn upload(
+/// `inReplyTo` of a row in `chat_id` (the ask a worker row answers), when the chat is open.
+async fn row_in_reply_to(a: &Agent, chat_id: &str, row_id: &str) -> Option<String> {
+    let host = a.sync.host(chat_id).await?;
+    let h = host.lock().await;
+    h.doc
+        .message(row_id)?
+        .rest
+        .get("inReplyTo")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+pub(crate) async fn upload(
     a: &Arc<Agent>,
     chat_id: &str,
     bytes: Vec<u8>,
@@ -199,95 +241,294 @@ async fn upload(
     Ok(key)
 }
 
-/// Resolve, read, upload and append the part. Returns the attachment JSON that landed in the doc.
+/// Fetch `url` (https, ≤ `MAX_BYTES`) for `deliver_file(url=…)`: returns the bytes, the MIME type
+/// the server named and a file name (the URL's last path segment, with an extension that fits
+/// the MIME type when the URL has none).
+async fn fetch_url(a: &Arc<Agent>, url: &str) -> anyhow::Result<(Vec<u8>, String, String)> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| anyhow::anyhow!("{url}: {e}"))?;
+    if parsed.scheme() != "https" && parsed.scheme() != "http" {
+        anyhow::bail!("{url}: only http(s) URLs can be fetched");
+    }
+    let r = a
+        .http_client()
+        .get(parsed.clone())
+        .header("user-agent", "Mozilla/5.0 (compatible; Arbos agent)")
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("{url}: {e}"))?;
+    if !r.status().is_success() {
+        anyhow::bail!("{url}: HTTP {}", r.status());
+    }
+    let mime = r
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| {
+            v.split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase()
+        })
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "application/octet-stream".to_owned());
+    if r.content_length().is_some_and(|n| n > MAX_BYTES) {
+        anyhow::bail!("{url}: larger than {} MiB", MAX_BYTES / (1024 * 1024));
+    }
+    let bytes = r.bytes().await?.to_vec();
+    if bytes.len() as u64 > MAX_BYTES {
+        anyhow::bail!("{url}: larger than {} MiB", MAX_BYTES / (1024 * 1024));
+    }
+    let mut name = parsed
+        .path_segments()
+        .and_then(|mut s| s.next_back())
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            s.chars()
+                .filter(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '_'))
+                .collect::<String>()
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "download".to_owned());
+    if Path::new(&name).extension().is_none() {
+        if let Some(ext) = ext_for_mime(&mime) {
+            name = format!("{name}.{ext}");
+        }
+    }
+    Ok((bytes, mime, name))
+}
+
+fn ext_for_mime(mime: &str) -> Option<&'static str> {
+    Some(match mime {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/svg+xml" => "svg",
+        "application/pdf" => "pdf",
+        "video/mp4" => "mp4",
+        "audio/mpeg" => "mp3",
+        "text/plain" => "txt",
+        "text/markdown" => "md",
+        "application/json" => "json",
+        _ => return None,
+    })
+}
+
+/// What a successful delivery left in the chat.
+#[derive(Debug, Clone)]
+pub struct Posted {
+    pub chat_id: String,
+    pub message_id: String,
+    pub attachment: Value,
+}
+
+/// Source of a delivery: a file on the box, or bytes fetched from a URL.
+pub enum Source<'a> {
+    Path(&'a str),
+    Url(&'a str),
+}
+
+/// Resolve, read or fetch, upload, and write the attachment as its own finished message in the
+/// target chat — then read it back. Returns what landed, with the message id.
 pub async fn deliver(
     a: &Arc<Agent>,
-    path: &str,
+    source: Source<'_>,
     title: Option<&str>,
+    caption: Option<&str>,
     kind: Option<&str>,
+    reply_to: Option<&str>,
     session_id: Option<&str>,
-) -> anyhow::Result<Value> {
-    let p = Path::new(path);
-    let p = if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        a.cfg.work_dir.join(p)
+) -> anyhow::Result<Posted> {
+    let Some(target) = target(a, session_id).await else {
+        anyhow::bail!("no running turn or job to post the file from");
     };
-    let meta = tokio::fs::metadata(&p)
-        .await
-        .map_err(|e| anyhow::anyhow!("{}: {e}", p.display()))?;
-    if !meta.is_file() {
-        anyhow::bail!("{} is not a file", p.display());
-    }
-    if meta.len() > MAX_BYTES {
-        anyhow::bail!(
-            "{} is {} MiB; the limit is {} MiB (compress or split it)",
-            p.display(),
-            meta.len() / (1024 * 1024),
-            MAX_BYTES / (1024 * 1024)
-        );
-    }
-    let name = p
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("file")
-        .to_owned();
-    let mime = mime_for(&name);
+    let (bytes, mime, name, origin) = match source {
+        Source::Path(path) => {
+            let p = Path::new(path);
+            let p = if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                a.cfg.work_dir.join(p)
+            };
+            let meta = tokio::fs::metadata(&p)
+                .await
+                .map_err(|e| anyhow::anyhow!("{}: {e}", p.display()))?;
+            if !meta.is_file() {
+                anyhow::bail!("{} is not a file", p.display());
+            }
+            if meta.len() > MAX_BYTES {
+                anyhow::bail!(
+                    "{} is {} MiB; the limit is {} MiB (compress or split it)",
+                    p.display(),
+                    meta.len() / (1024 * 1024),
+                    MAX_BYTES / (1024 * 1024)
+                );
+            }
+            let name = p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("file")
+                .to_owned();
+            let mime = mime_for(&name).to_owned();
+            let bytes = tokio::fs::read(&p).await?;
+            (bytes, mime, name, p.display().to_string())
+        }
+        Source::Url(url) => {
+            let (bytes, mime, name) = fetch_url(a, url).await?;
+            // Keep a copy under out/ so the Library rule holds (what was exchanged exists on
+            // the box) and the user can ask for it again.
+            let dir = out_dir(&a.cfg);
+            let _ = tokio::fs::create_dir_all(&dir).await;
+            let saved = dir.join(format!("{}-{}", ulid().to_lowercase(), name));
+            let _ = tokio::fs::write(&saved, &bytes).await;
+            let mime = if mime == "application/octet-stream" {
+                mime_for(&name).to_owned()
+            } else {
+                mime
+            };
+            (bytes, mime, name, url.to_owned())
+        }
+    };
     let kind = match kind.filter(|k| KINDS.contains(k)) {
+        Some("image") if mime == "image/svg+xml" => "file".to_owned(),
         Some(k) => k.to_owned(),
-        None => kind_for(&name, mime).to_owned(),
+        None => kind_for(&name, &mime).to_owned(),
     };
     let title = title
         .map(str::trim)
         .filter(|t| !t.is_empty())
         .unwrap_or(&name)
         .to_owned();
-    let Some((chat_id, msg_id)) = target(a, session_id).await else {
-        anyhow::bail!("no running turn to attach the file to");
-    };
-    let bytes = tokio::fs::read(&p).await?;
     let size = bytes.len() as u64;
-    let key = upload(a, &chat_id, bytes, mime).await?;
+    let key = upload(a, &target.chat_id, bytes, &mime).await?;
     let attachment = json!({
         "name": name, "mime": mime, "ref": key, "bytes": size, "kind": kind, "title": title,
     });
-    let Some(host) = a.sync.host(&chat_id).await else {
-        anyhow::bail!("chat {chat_id} is not open on this box");
+    let Some(host) = a.sync.host(&target.chat_id).await else {
+        anyhow::bail!("chat {} is not open on this box", target.chat_id);
     };
+    let msg_id = ulid();
+    let caption = caption.map(str::trim).filter(|c| !c.is_empty());
     {
         let h = host.lock().await;
+        let ask = reply_to
+            .map(str::trim)
+            .filter(|r| !r.is_empty() && h.doc.message(r).is_some())
+            .map(str::to_owned)
+            .or_else(|| target.ask_id.clone())
+            .unwrap_or_default();
+        let text_part = h
+            .doc
+            .start_assistant_message(&msg_id, &ask, &a.cfg.device_id);
+        h.doc
+            .set_message_fields(&msg_id, &[("turnRole", json!("attachment"))]);
+        if let Some(attr) = a.people_reply_fields(&target.chat_id) {
+            h.doc.set_message_fields(&msg_id, &attr.fields);
+        }
+        if !ask.is_empty() && a.reply_to_wanted_for(&h.doc, &target.chat_id, &ask) {
+            h.doc
+                .set_message_fields(&msg_id, &[("replyTo", json!(ask))]);
+        }
+        if let Some(c) = caption {
+            // D19 backstop: the caption bypasses write_text, so redact here (#1974 review).
+            h.doc
+                .append_text(&msg_id, &text_part, &crate::store::redact(c));
+        }
         if h.doc.add_attachment_part(&msg_id, &attachment).is_none() {
-            anyhow::bail!("message {msg_id} not found in chat {chat_id}");
+            anyhow::bail!("message {msg_id} not found in chat {}", target.chat_id);
+        }
+        h.doc
+            .finish_message(&msg_id, arbos_core::doc::MessageStatus::Done);
+        // Read it back: the row must hold the attachment, or this was not a delivery.
+        let ok = h.doc.message(&msg_id).is_some_and(|m| {
+            m.parts.iter().any(|p| {
+                p.get("kind").and_then(Value::as_str) == Some("attachment")
+                    && p.pointer("/attachment/ref").and_then(Value::as_str) == Some(key.as_str())
+            })
+        });
+        if !ok {
+            let _ = h.doc.delete_message(&msg_id);
+            anyhow::bail!("the attachment row did not read back from the chat doc");
+        }
+    }
+    if target.main_turn {
+        if let Some(t) = a.turn.lock().await.as_mut() {
+            t.attachments_posted.push(msg_id.clone());
         }
     }
     let _ = a.store.t3_append(
-        &chat_id,
+        &target.chat_id,
         None,
         session_id,
         "attachment",
         Some("assistant"),
-        &format!("delivered {name} ({size} bytes, {kind}) as blob {key}"),
-        Some(&json!({ "message_id": msg_id, "path": p.display().to_string(), "attachment": attachment })),
+        &format!("posted {name} ({size} bytes, {kind}) as blob {key}"),
+        Some(&json!({ "message_id": msg_id, "source": origin, "attachment": attachment, "caption": caption })),
     );
     audit(
         a,
         "file_delivered",
-        json!({ "chatId": chat_id, "messageId": msg_id, "name": name, "bytes": size, "kind": kind, "ref": key, "path": p.display().to_string() }),
+        json!({ "chatId": target.chat_id, "messageId": msg_id, "name": name, "bytes": size, "kind": kind, "ref": key, "source": origin, "worker": !target.main_turn }),
     );
-    Ok(attachment)
+    Ok(Posted {
+        chat_id: target.chat_id,
+        message_id: msg_id,
+        attachment,
+    })
+}
+
+fn posted_result(p: &Posted, extra: Value) -> Value {
+    let mut v = json!({
+        "posted": true,
+        "message_id": p.message_id,
+        "chat_id": p.chat_id,
+        "name": p.attachment["name"],
+        "kind": p.attachment["kind"],
+        "bytes": p.attachment["bytes"],
+        "ref": p.attachment["ref"],
+        "note": if p.attachment["kind"] == "image" {
+            "The picture is in the chat as its own message, inline for everyone. Say in one line what it shows; do not repeat the path."
+        } else {
+            "The file is in the chat as a card with a download button, visible to everyone. Say in one line what it contains; do not repeat the path."
+        },
+    });
+    if let (Some(o), Some(e)) = (v.as_object_mut(), extra.as_object()) {
+        for (k, val) in e {
+            o.insert(k.clone(), val.clone());
+        }
+    }
+    v
 }
 
 pub async fn deliver_file(a: &Arc<Agent>, args: &Value) -> Value {
     let s = |k: &str| args.get(k).and_then(Value::as_str);
-    let Some(path) = s("path").filter(|p| !p.trim().is_empty()) else {
-        return err_result("path is required");
+    let path = s("path").map(str::trim).filter(|p| !p.is_empty());
+    let url = s("url").map(str::trim).filter(|u| !u.is_empty());
+    let source = match (path, url) {
+        (Some(p), _) => Source::Path(p),
+        (None, Some(u)) => Source::Url(u),
+        (None, None) => return err_result("path or url is required; nothing was posted"),
     };
-    match deliver(a, path.trim(), s("title"), s("kind"), s("session_id")).await {
-        Ok(att) => text_result(
-            json!({ "delivered": true, "name": att["name"], "kind": att["kind"], "bytes": att["bytes"], "ref": att["ref"], "note": "The user sees a card with a download button. Describe the file in one line; do not repeat the path." })
+    match deliver(a, source, s("title"), s("caption"), s("kind"), s("reply_to"), s("session_id")).await {
+        Ok(p) => {
+            let svg = p.attachment["mime"] == "image/svg+xml";
+            text_result(
+                posted_result(
+                    &p,
+                    if svg {
+                        json!({ "hint": "SVG shows as a file card, not inline. For an inline picture render it to PNG first (for example with Pillow via cairosvg, or `rsvg-convert`) and post the PNG." })
+                    } else {
+                        json!({})
+                    },
+                )
                 .to_string(),
-        ),
-        Err(e) => err_result(e),
+            )
+        }
+        Err(e) => err_result(format!(
+            "NOT posted — the file is not in the chat: {e}. Tell the user plainly that it could not be posted; do not say it was."
+        )),
     }
 }
 
@@ -355,20 +596,202 @@ pub async fn generate_image(a: &Arc<Agent>, args: &Value) -> Value {
     );
     match deliver(
         a,
-        &path.display().to_string(),
+        Source::Path(&path.display().to_string()),
         Some(&title),
+        None,
         Some("image"),
+        None,
         s("session_id"),
     )
     .await
     {
-        Ok(att) => text_result(
-            json!({ "delivered": true, "path": path.display().to_string(), "bytes": att["bytes"], "ref": att["ref"], "mock": mock, "note": if mock { "ARBOS_IMAGE_MOCK=1: the relay drew a labelled placeholder instead of calling the provider." } else { "The user sees the image inline with a download button." } })
-                .to_string(),
+        Ok(p) => text_result(
+            posted_result(
+                &p,
+                json!({ "path": path.display().to_string(), "mock": mock, "mock_note": if mock { "ARBOS_IMAGE_MOCK=1: the relay drew a labelled placeholder instead of calling the provider." } else { "" } }),
+            )
+            .to_string(),
         ),
         Err(e) => err_result(format!(
-            "image saved to {} but not delivered: {e}",
+            "image saved to {} but NOT posted to the chat: {e}. Tell the user it could not be posted; do not say it was.",
             path.display()
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::status::tests::test_agent;
+
+    fn attachment_parts(m: &arbos_core::doc::MessageView) -> Vec<Value> {
+        m.parts
+            .iter()
+            .filter(|p| p.get("kind").and_then(Value::as_str) == Some("attachment"))
+            .cloned()
+            .collect()
+    }
+
+    /// Jacob, 2026-10-26 (Affine, group chat): three logo deliveries landed on the job worker's
+    /// `hidden` row, which both clients skip, while the agent said "I've posted the logo". A
+    /// worker's file now lands as its own visible message under the ask, and the tool answers
+    /// with that message's id — read back from the doc.
+    #[tokio::test]
+    async fn a_worker_delivery_is_its_own_visible_row_under_the_ask() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATATTACH0000000001";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let ask = ulid();
+        let hidden_row = ulid();
+        {
+            let h = host.lock().await;
+            h.doc
+                .append_user_message(
+                    &ask,
+                    "post the logo here",
+                    "dev-mac",
+                    &arbos_core::doc::UserMessageOpts::default(),
+                )
+                .unwrap();
+            h.doc
+                .start_assistant_message(&hidden_row, &ask, &agent.cfg.device_id);
+            h.doc.set_message_fields(
+                &hidden_row,
+                &[
+                    ("job", json!({ "id": "j1", "title": "Reading affine.io", "kind": "code", "touches": [] })),
+                    ("worker", json!(true)),
+                    ("hidden", json!(true)),
+                ],
+            );
+        }
+        let sid = "01TESTWORKERSESSION0000001";
+        agent
+            .subagent_msgs
+            .lock()
+            .await
+            .insert(sid.to_owned(), (chat.to_owned(), hidden_row.clone()));
+        let dir = out_dir(&agent.cfg);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("affine-logo.png"), b"\x89PNG\r\n\x1a\nfake").unwrap();
+
+        let posted = deliver(
+            &agent,
+            Source::Path("out/affine-logo.png"),
+            Some("affine.io logo"),
+            Some("The affine.io mark."),
+            None,
+            None,
+            Some(sid),
+        )
+        .await
+        .unwrap();
+        assert_eq!(posted.chat_id, chat);
+        assert_ne!(
+            posted.message_id, hidden_row,
+            "never the worker's hidden row"
+        );
+        let h = host.lock().await;
+        let row = h.doc.message(&posted.message_id).expect("the row exists");
+        assert_eq!(row.role, "assistant");
+        assert_eq!(row.status, "done");
+        assert!(row.rest.get("hidden").is_none() && row.rest.get("job").is_none());
+        assert_eq!(row.rest["inReplyTo"], json!(ask));
+        assert_eq!(row.rest["turnRole"], json!("attachment"));
+        assert_eq!(row.text(), "The affine.io mark.");
+        let parts = attachment_parts(&row);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["attachment"]["kind"], json!("image"));
+        assert_eq!(parts[0]["attachment"]["mime"], json!("image/png"));
+        assert_eq!(parts[0]["attachment"]["title"], json!("affine.io logo"));
+        let worker = h.doc.message(&hidden_row).unwrap();
+        assert!(
+            attachment_parts(&worker).is_empty(),
+            "nothing on the hidden row"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// From the main turn the file is a posted result (no fallback line, no "didn't answer"
+    /// row after it), and the tool's answer carries `posted: true` + the message id.
+    #[tokio::test]
+    async fn a_main_turn_delivery_counts_as_a_posted_result() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATATTACH0000000002";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        {
+            let h = host.lock().await;
+            h.doc
+                .append_user_message(
+                    "m-busy",
+                    "post the report",
+                    "dev-mac",
+                    &arbos_core::doc::UserMessageOpts::default(),
+                )
+                .unwrap();
+        }
+        let _busy = agent.test_hold_turn(chat).await;
+        let dir = out_dir(&agent.cfg);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("report.pdf"), b"%PDF-1.4 fake").unwrap();
+        let v = deliver_file(&agent, &json!({ "path": "out/report.pdf" })).await;
+        assert!(v.get("isError").is_none(), "{v}");
+        let text = v["content"][0]["text"].as_str().unwrap();
+        let r: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(r["posted"], json!(true));
+        assert_eq!(r["kind"], json!("pdf"));
+        let id = r["message_id"].as_str().unwrap().to_owned();
+        {
+            let tl = agent.turn.lock().await;
+            let t = tl.as_ref().unwrap();
+            assert_eq!(t.attachments_posted, vec![id.clone()]);
+        }
+        let h = host.lock().await;
+        let row = h.doc.message(&id).unwrap();
+        assert_eq!(row.rest["inReplyTo"], json!("m-busy"));
+        assert_eq!(attachment_parts(&row).len(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Honesty: a delivery that fails returns an error that says NOT posted, writes no row and
+    /// never reports a message id; an SVG is a file card, not an "image" that never renders.
+    #[tokio::test]
+    async fn a_failed_delivery_says_not_posted_and_leaves_no_row() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATATTACH0000000003";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        let before = host.lock().await.doc.messages().len();
+        let v = deliver_file(&agent, &json!({ "path": "out/does-not-exist.png" })).await;
+        assert_eq!(v["isError"], json!(true));
+        let text = v["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("NOT posted"), "{text}");
+        assert!(!text.contains("message_id"));
+        assert_eq!(host.lock().await.doc.messages().len(), before);
+        assert!(agent
+            .turn
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .attachments_posted
+            .is_empty());
+        let v = deliver_file(&agent, &json!({})).await;
+        assert_eq!(v["isError"], json!(true));
+        // SVG → file card + hint
+        let dir = out_dir(&agent.cfg);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("mark.svg"),
+            b"<svg xmlns='http://www.w3.org/2000/svg'/>",
+        )
+        .unwrap();
+        let v = deliver_file(&agent, &json!({ "path": "out/mark.svg", "kind": "image" })).await;
+        let r: Value = serde_json::from_str(v["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(r["posted"], json!(true));
+        assert_eq!(r["kind"], json!("file"));
+        assert!(r["hint"].as_str().unwrap().contains("PNG"));
+        assert_eq!(kind_for("logo.svg", "image/svg+xml"), "file");
+        assert_eq!(kind_for("logo.png", "image/png"), "image");
+        let _ = std::fs::remove_dir_all(root);
     }
 }

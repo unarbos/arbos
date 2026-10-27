@@ -11,7 +11,9 @@ use gpui::{
 
 use crate::app::AppState;
 use crate::model::{ConnectorProvider, ConnectorStatus, ConnectorsView};
+use crate::sync::user_error::UserError;
 use crate::ui::composer::ComposerInput;
+use crate::ui::error_note;
 use crate::ui::frost::{frosted, MENU_BLUR};
 use crate::ui::glass;
 use crate::ui::icons::icon;
@@ -286,7 +288,7 @@ impl ConnectorsPanel {
             .gap(px(8.0))
             .py(px(9.0))
             .relative()
-            .child(kit::hairline_below(16.0, theme))
+            .child(kit::hairline_below(theme))
             .child(
                 div()
                     .flex()
@@ -313,13 +315,17 @@ impl ConnectorsPanel {
             );
         if let Some(err) = cn.and_then(|c| c.last_error.clone()) {
             if !connected {
-                row = row.child(
-                    div()
-                        .pl(px(42.0))
-                        .text_size(px(10.5))
-                        .text_color(theme.danger)
-                        .child(err),
-                );
+                // The connector's last failure, in the one shared element (no Try again here:
+                // Connect in the row is the retry).
+                let error = UserError::from_text(format!("connect {}", p.label), err);
+                row = row.child(div().pl(px(42.0)).pt(px(6.0)).child(error_note::render(
+                    &format!("connector-error-{}", p.provider),
+                    &error,
+                    false,
+                    error_note::Style::Inline,
+                    theme,
+                    error_note::Handlers::new(),
+                )));
             }
         }
         if menu_open {

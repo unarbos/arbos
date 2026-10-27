@@ -395,3 +395,235 @@ mod tests {
         assert_eq!(stamp_of(&serde_json::json!({ "name": "x" })), 0);
     }
 }
+
+#[cfg(test)]
+mod relaunch_tests {
+    //! Jacob, 2026-10-26 (Mac v0.6.268): after relaunching, every surface drew the agent's
+    //! old picture — the leaf placeholder — because the cold launch's first picture fetch
+    //! failed (network not up yet) and the URL was then marked done for the session, and
+    //! because nothing persisted the pictures the last run had. The relaunch, headless:
+    //! save the registry and the fetched pictures to a store → drop it (quit) → open it
+    //! again (relaunch) → every surface (header / sidebar record, status row, bubbles,
+    //! members list, hero, Secrets picker) resolves to the newest key AND its bytes are
+    //! there before any request leaves; a changed picture is a new key with no cached bytes
+    //! (a fetch), and the old key is pruned.
+
+    use super::*;
+    use crate::model::{AgentMember, Project, SpaceKind};
+    use crate::sync::relay::picture_urls;
+    use crate::sync::store::{Store, KEY_AVATAR_PREFIX, KEY_PROJECTS};
+    use crate::ui::avatars::{agent_identity, member_identity};
+
+    fn record(url: Option<&str>, version: i64) -> Project {
+        Project {
+            id: "01HEZ".into(),
+            name: "Hezbola".into(),
+            avatar_leaf: Some(4),
+            avatar_leaf_color: Some(1),
+            image_url: url.map(str::to_owned),
+            avatar_version: version,
+            ..Default::default()
+        }
+    }
+
+    fn group(p: &Project) -> Project {
+        Project {
+            id: "chat_group".into(),
+            name: "Launch week".into(),
+            kind: SpaceKind::Group,
+            agents: vec![AgentMember {
+                project_id: p.id.clone(),
+                name: p.name.clone(),
+                handle: Project::mention_slug(&p.name),
+                avatar_leaf: p.avatar_leaf,
+                avatar_leaf_color: p.avatar_leaf_color,
+                image_url: p.image_url.clone(),
+                avatar_version: p.avatar_version,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// What each surface asks for, as a URL: the header / sidebar / Secrets picker read the
+    /// record (through `newest`), the status row resolves by id, the bubble by the row's
+    /// sender against the open chat's roster, the members list from the roster copy.
+    fn surface_urls(projects: &[Project]) -> Vec<(&'static str, Option<String>)> {
+        let chat = projects.iter().find(|p| p.id == "chat_group");
+        let record = newest(projects, "01HEZ").and_then(|f| f.image_url);
+        let status = agent_identity(None, projects, "01HEZ", None, Some("Hezbola")).image_key;
+        let bubble = agent_identity(
+            chat,
+            projects,
+            "agent:01HEZ",
+            Some("hezbola"),
+            Some("Hezbola"),
+        )
+        .image_key;
+        let member = chat
+            .and_then(|c| c.agents.first())
+            .map(|a| member_identity(chat, projects, a).image_key)
+            .unwrap_or(None);
+        // The activity row of a turn the box has not attributed yet (`sender: "agent"`,
+        // Jacob's "Reading 500" leaf): in a one-agent chat it is that agent.
+        let activity = agent_identity(chat, projects, "agent", None, None).image_key;
+        vec![
+            ("header / sidebar / hero / secrets picker", record),
+            ("status row", status),
+            ("activity row (unattributed live turn)", activity),
+            ("bubble", bubble),
+            ("members list", member),
+        ]
+    }
+
+    fn save(store: &Store, projects: &[Project], pictures: &[(&str, &[u8])]) {
+        store.put_json(KEY_PROJECTS, &projects.to_vec());
+        for (url, bytes) in pictures {
+            store.put(&format!("{KEY_AVATAR_PREFIX}{url}"), bytes);
+        }
+        // What `save_registry` does with pictures no URL names any more.
+        let wanted: Vec<String> = picture_urls(projects);
+        for key in store.keys_with_prefix(KEY_AVATAR_PREFIX) {
+            if !wanted.contains(&key[KEY_AVATAR_PREFIX.len()..].to_string()) {
+                store.remove(&key);
+            }
+        }
+    }
+
+    #[test]
+    fn relaunch_paints_the_newest_picture_on_every_surface_from_the_store() {
+        let dir = std::env::temp_dir().join(format!(
+            "arbos-avatar-relaunch-{}-{}",
+            std::process::id(),
+            crate::model::now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("store.sqlite");
+
+        let url_a =
+            picture_url("https://relay.example", "01HEZ", Some("avatar-a.jpg"), 100).unwrap();
+        let p = record(Some(&url_a), 100);
+        let projects = vec![p.clone(), group(&p)];
+
+        // Jacob's agents: their avatar predates the stamp (`avatar_version` 0 on the relay),
+        // and a relaunch used to restore the roster copy without its picture. With the
+        // stamps tied, that lossy copy won the resolver → leaf on every people-chat surface.
+        // Now the copy with the picture wins the tie, whatever the store returned.
+        {
+            let url0 =
+                picture_url("https://relay.example", "01HEZ", Some("avatar-0.jpg"), 0).unwrap();
+            let rec0 = record(Some(&url0), 0);
+            let mut lossy_group = group(&rec0);
+            lossy_group.agents[0].image_url = None;
+            let legacy = vec![rec0, lossy_group];
+            for (surface, url) in surface_urls(&legacy) {
+                assert_eq!(
+                    url.as_deref(),
+                    Some(url0.as_str()),
+                    "{surface} (stamp 0, lossy roster copy)"
+                );
+            }
+        }
+
+        // Run 1: the registry is saved and the picture fetched.
+        {
+            let store = Store::open_at(&path).unwrap();
+            save(&store, &projects, &[(&url_a, b"JPEG-A")]);
+        } // quit
+
+        // Run 2 (relaunch): before any request, every surface has the newest key and its bytes.
+        {
+            let store = Store::open_at(&path).unwrap();
+            let restored: Vec<Project> = store.get_json(KEY_PROJECTS).unwrap();
+            // The roster copies kept their picture through the disk (the wire struct used to
+            // drop it).
+            assert_eq!(
+                restored[1].agents[0].image_url.as_deref(),
+                Some(url_a.as_str()),
+                "roster copy survives the store"
+            );
+            assert_eq!(restored[1].agents[0].avatar_version, 100);
+            for (surface, url) in surface_urls(&restored) {
+                let url = url.unwrap_or_else(|| panic!("{surface}: no picture URL"));
+                assert_eq!(url, url_a, "{surface}");
+                assert_eq!(
+                    store.get(&format!("{KEY_AVATAR_PREFIX}{url}")).as_deref(),
+                    Some(&b"JPEG-A"[..]),
+                    "{surface}: cached bytes paint at first content"
+                );
+            }
+            // Only the URLs the registry draws are cached, and the store answers every one.
+            let urls = picture_urls(&restored);
+            assert_eq!(urls, vec![url_a.clone()]);
+
+            // The owner changes the picture while this run is up: the newest copy wins on
+            // every surface, its key is new (so it is fetched, never served stale), and the
+            // old key is pruned when the registry is saved.
+            let url_b =
+                picture_url("https://relay.example", "01HEZ", Some("avatar-b.jpg"), 200).unwrap();
+            let mut live = restored.clone();
+            apply(
+                &mut live,
+                "01HEZ",
+                &Facts {
+                    image_url: Some(url_b.clone()),
+                    leaf: Some(4),
+                    leaf_color: Some(1),
+                    version: 200,
+                },
+                false,
+            );
+            for (surface, url) in surface_urls(&live) {
+                assert_eq!(url.as_deref(), Some(url_b.as_str()), "{surface}");
+            }
+            assert!(
+                store.get(&format!("{KEY_AVATAR_PREFIX}{url_b}")).is_none(),
+                "a new key has no cached bytes: it is fetched"
+            );
+            save(&store, &live, &[(&url_b, b"JPEG-B")]);
+            assert!(
+                store.get(&format!("{KEY_AVATAR_PREFIX}{url_a}")).is_none(),
+                "the old key is pruned"
+            );
+        } // quit
+
+        // Run 3 (relaunch after the change): B everywhere, from the store.
+        {
+            let store = Store::open_at(&path).unwrap();
+            let restored: Vec<Project> = store.get_json(KEY_PROJECTS).unwrap();
+            let url_b =
+                picture_url("https://relay.example", "01HEZ", Some("avatar-b.jpg"), 200).unwrap();
+            for (surface, url) in surface_urls(&restored) {
+                assert_eq!(url.as_deref(), Some(url_b.as_str()), "{surface}");
+                assert_eq!(
+                    store
+                        .get(&format!("{KEY_AVATAR_PREFIX}{}", url.unwrap()))
+                        .as_deref(),
+                    Some(&b"JPEG-B"[..]),
+                    "{surface}"
+                );
+            }
+            // A pre-#1813 store (projects without the stamp, no cached pictures): the fields
+            // default, the URLs are still what the surfaces ask for, and nothing is served
+            // from a cache that does not exist — the fetch (with retries now) brings them.
+            let mut legacy_json = serde_json::to_value(vec![record(
+                Some("https://relay.example/projects/01HEZ/avatar.jpg?v=0"),
+                0,
+            )])
+            .unwrap();
+            legacy_json[0]
+                .as_object_mut()
+                .unwrap()
+                .remove("avatar_version");
+            let legacy: Vec<Project> = serde_json::from_value(legacy_json).unwrap();
+            assert_eq!(legacy[0].avatar_version, 0);
+            assert_eq!(
+                newest(&legacy, "01HEZ")
+                    .and_then(|f| f.image_url)
+                    .as_deref(),
+                Some("https://relay.example/projects/01HEZ/avatar.jpg?v=0")
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

@@ -17,6 +17,7 @@ use gpui::{
 use crate::app::ProfilePage;
 use crate::model::{Chat, LinkState, Project, ServerChannel, ServerInfo};
 use crate::ui::avatars;
+use crate::ui::blocked;
 use crate::ui::composer::Composer;
 use crate::ui::glass::{self, WindowDrag};
 use crate::ui::groups;
@@ -24,6 +25,7 @@ use crate::ui::icons::icon;
 use crate::ui::identity;
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
+use crate::ui::profile_target;
 use crate::ui::shell::Shell;
 use crate::ui::sidebar::{self, machine_dot};
 use crate::ui::theme::{
@@ -54,7 +56,11 @@ pub fn render(
     // The pill wears a blue ring while its right pane is open (mockups b, f;
     // parity review 2026-10-20).
     let pane_open = match state.profile.as_ref() {
-        Some(ProfilePage::User { space_id, .. }) => space_id.as_deref() == Some(space.id.as_str()),
+        // The DM's person, whichever target opened them (a chip's page has no space).
+        Some(ProfilePage::User { handle, .. }) => space
+            .person()
+            .filter(|_| is_people && !space.is_people_group())
+            .is_some_and(|p| p.handle.eq_ignore_ascii_case(handle)),
         Some(ProfilePage::Group { space_id }) => space_id == &space.id,
         Some(ProfilePage::Agent { project_id }) => project_id == &space.id,
         Some(ProfilePage::Me)
@@ -98,26 +104,40 @@ pub fn render(
         .filter(|_| is_people && !space.is_people_group())
     {
         let image = state.avatar(&person.avatar_url);
-        let handle = person.handle.clone();
-        let sid = space.id.clone();
-        name_part(
-            people::avatar(image, person, AVATAR_HEADER, &theme),
-            name_label(person.display_name(), &theme).into_any_element(),
-            &theme,
-        )
-        .on_click(cx.listener(move |this, _, _, cx| {
+        let page = ProfilePage::User {
+            handle: person.handle.clone(),
+            space_id: Some(space.id.clone()),
+        };
+        // Blocked ([feedback blocked-state-mac-2026-10-26]): the tag after the name.
+        let label: AnyElement = if state.is_blocked(person) {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .min_w_0()
+                .child(name_label(person.display_name(), &theme))
+                .child(blocked::tag(&theme))
+                .into_any_element()
+        } else {
+            name_label(person.display_name(), &theme).into_any_element()
+        };
+        // The DM pill is a profile target too (`ui::profile_target`): the
+        // person's pane opens, a second click — here or on their name in a
+        // bubble — closes it.
+        let part = profile_target::mark(
+            name_part(
+                people::avatar(image, person, AVATAR_HEADER, &theme),
+                label,
+                &theme,
+            ),
+            &person.display_name(),
+            state.profile_shows(&page),
+        );
+        part.on_click(cx.listener(move |this, _, _, cx| {
             this.members_open = false;
             this.add_agent_open = false;
-            let (handle, sid) = (handle.clone(), sid.clone());
-            this.state.update(cx, |s, cx| {
-                s.toggle_profile(
-                    ProfilePage::User {
-                        handle,
-                        space_id: Some(sid),
-                    },
-                    cx,
-                )
-            });
+            let page = page.clone();
+            this.state.update(cx, |s, cx| s.toggle_profile(page, cx));
         }))
     } else if space.is_people_group() {
         let sid = space.id.clone();
@@ -161,16 +181,30 @@ pub fn render(
         } else {
             name_label(space.name.clone(), &theme).into_any_element()
         };
-        // D92 amendment: the picture built before the clock takes `cx`.
-        let picture_disc = groups::picture(space, state, AVATAR_HEADER, &theme);
-        if avatar_state != avatars::AvatarState::Idle {
-            PulseClock::request(cx);
-        }
         // A project with other people: the group pane; my own agent: its
         // profile. Double-click the name to rename (owned agents only) — so
         // a single click opens the page only after the double-click window
         // (#1068).
         let groupish = space.is_groupish();
+        // The agent pill is a profile target (`ui::profile_target`): its
+        // click goes through `open_from_name` → `AppState::toggle_profile`
+        // after the double-click window, so it opens, closes and swaps like
+        // the agent's name in a bubble; the label and hand are the shared ones.
+        let page = if groupish {
+            ProfilePage::Group {
+                space_id: space.id.clone(),
+            }
+        } else {
+            ProfilePage::Agent {
+                project_id: space.id.clone(),
+            }
+        };
+        let showing = state.profile_shows(&page);
+        // D92 amendment: the picture built before the clock takes `cx`.
+        let picture_disc = groups::picture(space, state, AVATAR_HEADER, &theme);
+        if avatar_state != avatars::AvatarState::Idle {
+            PulseClock::request(cx);
+        }
         // The machine dot hangs off the disc's corner, inside the slot's box.
         let picture = div()
             .relative()
@@ -195,8 +229,9 @@ pub fn render(
                             .bg(machine_dot(machine, &theme)),
                     ),
             );
-        name_part(picture, name_el, &theme).on_click(cx.listener(
-            move |this, event: &gpui::ClickEvent, window, cx| {
+        let part = profile_target::mark(name_part(picture, name_el, &theme), &space.name, showing);
+        part.on_click(
+            cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                 this.members_open = false;
                 this.add_agent_open = false;
                 let p = pid.clone();
@@ -207,8 +242,8 @@ pub fn render(
                 } else {
                     this.name_clicked(p, groupish, cx);
                 }
-            },
-        ))
+            }),
+        )
     };
     pill = pill.child(name_part);
 
@@ -228,10 +263,11 @@ pub fn render(
 }
 
 /// The pill's frame, the same for every chat kind — agent, DM, group, server
-/// channel: `PILL_HEIGHT` tall, round, the header material for the theme
-/// (`glass::header_surface`: frost on Glass, `bubble_assistant` on Matte), a
-/// 2 pt accent ring while its right pane is open (mockups b, f; parity review
-/// 2026-10-20). `pr` is the right pad (tighter when a "+" follows the name).
+/// channel, job tab: `PILL_HEIGHT` tall, round, frosted glass on Glass and
+/// Matte alike (`glass::header_surface`; [feedback
+/// mac-header-pill-glass-matte-2026-10-26]), a 2 pt accent ring while its
+/// right pane is open (mockups b, f; parity review 2026-10-20). `pr` is the
+/// right pad (tighter when a "+" follows the name).
 pub(crate) fn pill_frame(theme: &Theme, pane_open: bool, pr: f32) -> Stateful<Div> {
     let pill = div()
         .id("header-title")
@@ -248,7 +284,7 @@ pub(crate) fn pill_frame(theme: &Theme, pane_open: bool, pr: f32) -> Stateful<Di
             gpui::transparent_black()
         })
         .min_w_0();
-    glass::header_surface(pill, theme.bubble_assistant, theme)
+    glass::header_surface(pill, theme)
 }
 
 /// The pill plus, hanging under it, the connection pill ([feedback
@@ -261,9 +297,9 @@ pub(crate) fn pill_frame(theme: &Theme, pane_open: bool, pr: f32) -> Stateful<Di
 /// `metrics::PILL_TOP`, the drag catchment and the fade band are unchanged,
 /// and it floats over the list like the bar itself.
 fn with_link_pill(pill: Stateful<Div>, shell: &Shell, cx: &mut Context<Shell>) -> AnyElement {
-    let theme = Theme::of(cx).clone();
-    // On Glass the list blurs through the pill ([feedback mac-header-glass-2026-10-25]).
-    let pill = glass::header_frost(metrics::PILL_HEIGHT / 2.0, &theme, pill);
+    // The list blurs through the pill on both surfaces ([feedback
+    // mac-header-glass-2026-10-25], [feedback mac-header-pill-glass-matte-2026-10-26]).
+    let pill = glass::header_frost(metrics::PILL_HEIGHT / 2.0, pill);
     let Some(status) = link_pill(shell, cx) else {
         return pill;
     };
@@ -344,9 +380,9 @@ fn link_pill(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
 fn sidebar_toggle(shell: &Shell, theme: &Theme, cx: &mut Context<Shell>) -> AnyElement {
     let _ = shell.state.read(cx).sidebar_overlay;
     let disc = glass::control_disc("header-sidebar", "sidebar-left", CONTROL_GLYPH_WIDE, theme);
-    // The header's material ([feedback mac-header-glass-2026-10-25]): frost on
-    // Glass, the strip disc's `surface_2` on Matte.
-    let disc = glass::header_surface(disc, theme.surface_2, theme)
+    // The header's material ([feedback mac-header-glass-2026-10-25]): frosted
+    // glass on both surfaces, like the pill beside it.
+    let disc = glass::header_surface(disc, theme)
         // The bar is a window-drag region; a control is not part of it.
         .on_mouse_down(
             gpui::MouseButton::Left,
@@ -362,7 +398,7 @@ fn sidebar_toggle(shell: &Shell, theme: &Theme, cx: &mut Context<Shell>) -> AnyE
                 s.toggle_rail(narrow, cx)
             });
         }));
-    glass::header_frost(CONTROL / 2.0, theme, disc)
+    glass::header_frost(CONTROL / 2.0, disc)
 }
 
 /// Geometry every chat header shares — one number each, read by the tests.
@@ -1316,47 +1352,116 @@ mod header_tests {
     }
 }
 
-/// [feedback mac-header-glass-2026-10-25]: the header pill and disc wear the
-/// header material — frost on Glass, solid on Matte — for every chat kind,
-/// and the frosted wrap leaves the bar's geometry untouched. The iPhone twin
-/// is `HeaderGlassStructureTests`.
+/// [feedback mac-header-glass-2026-10-25] and [feedback
+/// mac-header-pill-glass-matte-2026-10-26]: the header pill and disc are
+/// frosted glass for every chat kind on BOTH surfaces — #1830 left Matte
+/// solid, and Jacob's Mac is on Matte (his AffineTeam group, v0.6.268) — and
+/// the frosted wrap leaves the bar's geometry untouched. The iPhone twin is
+/// `HeaderGlassStructureTests`.
 #[cfg(test)]
 mod glass_tests {
     use gpui::{div, prelude::*, px, TestAppContext};
 
     use super::{bar_frame, metrics, pill_frame};
-    use crate::ui::glass::{self, HeaderMaterial};
+    use crate::ui::glass;
     use crate::ui::theme::{Appearance, Surface, Theme, CONTROL};
 
-    const KINDS: [&str; 4] = ["agent", "dm", "group", "channel"];
+    /// The chat kinds the header serves, with the pill's right pad for each
+    /// (4 after an agent's "+", 10 otherwise). A job tab is an agent tab:
+    /// the same `render`, the same pill.
+    const KINDS: [(&str, f32); 5] = [
+        ("agent", 4.0),
+        ("job tab", 4.0),
+        ("dm", 10.0),
+        ("group", 10.0),
+        ("channel", 10.0),
+    ];
+    const SURFACES: [Surface; 2] = [Surface::Glass, Surface::Matte];
+    const APPEARANCES: [Appearance; 2] = [Appearance::Dark, Appearance::Light];
 
     #[test]
-    fn glass_gives_every_kind_a_translucent_pill_and_disc_matte_keeps_them_solid() {
-        for appearance in [Appearance::Dark, Appearance::Light] {
-            let glass = Theme::with(appearance, Surface::Glass);
-            let matte = Theme::with(appearance, Surface::Matte);
-            for _kind in KINDS {
-                for solid in [glass.bubble_assistant, glass.surface_2] {
-                    let g = glass::header_style(solid, &glass);
-                    assert_eq!(g.material, HeaderMaterial::Frosted);
-                    assert!(g.blur, "the list blurs through the control on Glass");
+    fn every_kind_gets_a_frosted_pill_and_disc_on_glass_and_on_matte() {
+        for appearance in APPEARANCES {
+            for surface in SURFACES {
+                let theme = Theme::with(appearance, surface);
+                let style = glass::header_style(&theme);
+                for (kind, _) in KINDS {
                     assert!(
-                        g.fill.a < 1.0,
-                        "a see-through fill on Glass ({appearance:?})"
+                        style.is_frosted(),
+                        "{kind} on {appearance:?} {surface:?}: frosted glass, not a flat fill"
                     );
-                    assert_ne!(g.fill, solid, "not the Matte fill");
-                    let m = glass::header_style(solid, &matte);
-                    assert_eq!(m.material, HeaderMaterial::Solid);
-                    assert!(!m.blur);
-                    assert_eq!(m.fill, solid, "Matte keeps today's fill");
+                    assert!(
+                        style.fill.a < 1.0,
+                        "{kind} on {appearance:?} {surface:?}: the list shows through"
+                    );
+                    // Not the solids the pill and the disc were filled with
+                    // before #1830 (Glass) and before this item (Matte).
+                    assert_ne!(style.fill, theme.bubble_assistant, "{kind}: old pill fill");
+                    assert_ne!(style.fill, theme.surface_2, "{kind}: old disc fill");
+                    assert!(style.rim.a > 0.0, "{kind}: a visible rim");
+                    assert!(style.highlight.a > 0.0, "{kind}: a top highlight");
                 }
             }
-            // The pill and the disc share one fill and one rim on Glass.
-            assert_eq!(
-                glass::header_style(glass.bubble_assistant, &glass).fill,
-                glass::header_style(glass.surface_2, &glass).fill
-            );
+            // One material on both surfaces: Grok Bot's pill over its flat
+            // black transcript is the reference, so the Matte header gets the
+            // very fill, rim and highlight the Glass header has.
+            let glass = glass::header_style(&Theme::with(appearance, Surface::Glass));
+            let matte = glass::header_style(&Theme::with(appearance, Surface::Matte));
+            assert_eq!(glass, matte, "{appearance:?}: the same glass on Matte");
         }
+    }
+
+    /// [feedback mac-header-pill-see-through-2026-10-26]: the dark pill is
+    /// see-through — a thin fill and a light blur, so the transcript shows
+    /// through it and it is read as glass by its rim (Grok Bot's pill over a
+    /// black page is ≈ +12/255 lighter than the page) — while white text on
+    /// it keeps ≥ 4.5:1 over the brightest backdrop the pill ever sits on
+    /// (the chat column's 85 % page wash over a white desktop, ≈ `#373737`).
+    #[test]
+    fn the_dark_pill_is_see_through_and_its_text_still_reads() {
+        let theme = Theme::with(Appearance::Dark, Surface::Glass);
+        let style = glass::header_style(&theme);
+        assert!(
+            style.fill.a <= 0.35,
+            "a thin fill, the list shows through: {}",
+            style.fill.a
+        );
+        // Through a function so clippy does not fold the comparison away.
+        let blur = std::hint::black_box(glass::HEADER_BLUR);
+        assert!(blur <= 6.0, "a light blur keeps the text behind legible");
+        assert!(style.rim.a >= 0.25, "the rim carries the shape");
+        let lum = |c: gpui::Hsla| {
+            let rgb = c.to_rgb();
+            let ch = |v: f32| {
+                if v <= 0.039_28 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * ch(rgb.r) + 0.7152 * ch(rgb.g) + 0.0722 * ch(rgb.b)
+        };
+        let over = |top: gpui::Hsla, under: gpui::Hsla| {
+            let (t, u) = (top.to_rgb(), under.to_rgb());
+            gpui::Rgba {
+                r: t.a * t.r + (1.0 - t.a) * u.r,
+                g: t.a * t.g + (1.0 - t.a) * u.g,
+                b: t.a * t.b + (1.0 - t.a) * u.b,
+                a: 1.0,
+            }
+            .into()
+        };
+        for backdrop in [theme.bg, gpui::rgb(0x373737).into()] {
+            let pill = over(style.fill, backdrop);
+            let contrast = (lum(theme.text) + 0.05) / (lum(pill) + 0.05);
+            assert!(contrast >= 4.5, "white on the pill: {contrast:.2}:1");
+        }
+        // Over the flat Matte page the pill is a step above it, not a plate.
+        let lift = (over(style.fill, theme.bg).to_rgb().r - theme.bg.to_rgb().r) * 255.0;
+        assert!(
+            (6.0..=24.0).contains(&lift),
+            "pill lift over its page: {lift:.1}/255"
+        );
     }
 
     struct GlassBar {
@@ -1372,14 +1477,13 @@ mod glass_tests {
         ) -> impl IntoElement {
             let theme = Theme::of(cx).clone();
             let pill = pill_frame(&theme, false, self.pr).w(px(140.0));
-            let pill = glass::header_frost(metrics::PILL_HEIGHT / 2.0, &theme, pill);
+            let pill = glass::header_frost(metrics::PILL_HEIGHT / 2.0, pill);
             let left = self.folded.then(|| {
                 let disc = glass::header_surface(
                     div().id("toggle").size(px(CONTROL)).rounded_full(),
-                    theme.surface_2,
                     &theme,
                 );
-                glass::header_frost(CONTROL / 2.0, &theme, disc)
+                glass::header_frost(CONTROL / 2.0, disc)
             });
             div().w(px(884.0)).h(px(400.0)).child(
                 div()
@@ -1389,28 +1493,33 @@ mod glass_tests {
         }
     }
 
-    /// Headless render on Glass: the frosted pill and disc draw, and the bar
-    /// keeps `metrics` for every kind (pads differ per kind: 4 with a "+", 10 without).
+    /// Headless render on Glass and on Matte, dark and light: the frosted
+    /// pill and disc draw for every kind, folded and not, and the bar keeps
+    /// `metrics` (sizes and placements are not this item's to move).
     #[gpui::test]
-    fn frosted_header_renders_and_keeps_the_bar_geometry(cx: &mut TestAppContext) {
-        for appearance in [Appearance::Dark, Appearance::Light] {
-            cx.update(|cx| cx.set_global(Theme::with(appearance, Surface::Glass)));
-            for (kind, pr) in KINDS.iter().zip([4.0, 10.0, 10.0, 10.0]) {
-                for folded in [false, true] {
-                    let (_view, vcx) = cx.add_window_view(|_, _| GlassBar { folded, pr });
-                    vcx.run_until_parked();
-                    let bar = vcx.debug_bounds("chat-header-bar").expect("bar drawn");
-                    let pill = vcx.debug_bounds("chat-header-pill").expect("pill drawn");
-                    let h: f32 = bar.size.height.into();
-                    let top: f32 = (pill.origin.y - bar.origin.y).into();
-                    let ph: f32 = pill.size.height.into();
-                    assert_eq!(h, metrics::HEIGHT, "{kind} bar height, folded={folded}");
-                    assert_eq!(top, metrics::PILL_TOP, "{kind} pill top, folded={folded}");
-                    assert_eq!(
-                        ph,
-                        metrics::PILL_HEIGHT,
-                        "{kind} pill height, folded={folded}"
-                    );
+    fn frosted_header_renders_on_both_surfaces_and_keeps_the_bar_geometry(cx: &mut TestAppContext) {
+        for appearance in APPEARANCES {
+            for surface in SURFACES {
+                cx.update(|cx| cx.set_global(Theme::with(appearance, surface)));
+                for (kind, pr) in KINDS {
+                    for folded in [false, true] {
+                        let (_view, vcx) = cx.add_window_view(|_, _| GlassBar { folded, pr });
+                        vcx.run_until_parked();
+                        let bar = vcx.debug_bounds("chat-header-bar").expect("bar drawn");
+                        let pill = vcx.debug_bounds("chat-header-pill").expect("pill drawn");
+                        let h: f32 = bar.size.height.into();
+                        let top: f32 = (pill.origin.y - bar.origin.y).into();
+                        let ph: f32 = pill.size.height.into();
+                        let pw: f32 = pill.size.width.into();
+                        let at = format!("{kind} on {appearance:?} {surface:?}, folded={folded}");
+                        assert_eq!(h, metrics::HEIGHT, "bar height, {at}");
+                        assert_eq!(top, metrics::PILL_TOP, "pill top, {at}");
+                        assert_eq!(ph, metrics::PILL_HEIGHT, "pill height, {at}");
+                        assert_eq!(pw, 140.0, "pill width, {at}");
+                        let cx_pill: f32 = (pill.origin.x + pill.size.width / 2.0).into();
+                        let cx_bar: f32 = (bar.origin.x + bar.size.width / 2.0).into();
+                        assert!((cx_pill - cx_bar).abs() <= 1.0, "pill centred, {at}");
+                    }
                 }
             }
         }
