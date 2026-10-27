@@ -323,6 +323,11 @@ pub struct PeopleChatDto {
     #[typeshare(serialized_as = "I54")]
     pub read_seq: i64,
     pub unread: bool,
+    /// Members this viewer has blocked, as `user:<id>` ([feedback
+    /// blocked-state-relay-2026-10-26]): the clients hide their rows for the viewer alone;
+    /// the relay's pushes, alerts and unread counts for the viewer skip them too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_senders: Vec<String>,
     pub lock_state: String,
     pub me: ChatMeDto,
 }

@@ -1653,10 +1653,14 @@ public struct PeopleChatDto: Codable {
 	public let last_activity_at: Int64
 	public let read_seq: Int64
 	public let unread: Bool
+	/// Members this viewer has blocked, as `user:<id>` ([feedback
+	/// blocked-state-relay-2026-10-26]): the clients hide their rows for the viewer alone;
+	/// the relay's pushes, alerts and unread counts for the viewer skip them too.
+	public let blocked_senders: [String]?
 	public let lock_state: String
 	public let me: ChatMeDto
 
-	public init(id: String, archived_at: Int64?, kind: String, created_by: String, created_at: Int64, title: String, image_key: String?, avatar_leaf: Int64?, avatar_leaf_color: Int64?, description: String?, pending: Bool, members: [ChatMemberDto], banned: [ChatMemberDto]?, room: String, head_seq: Int64, last_activity_at: Int64, read_seq: Int64, unread: Bool, lock_state: String, me: ChatMeDto) {
+	public init(id: String, archived_at: Int64?, kind: String, created_by: String, created_at: Int64, title: String, image_key: String?, avatar_leaf: Int64?, avatar_leaf_color: Int64?, description: String?, pending: Bool, members: [ChatMemberDto], banned: [ChatMemberDto]?, room: String, head_seq: Int64, last_activity_at: Int64, read_seq: Int64, unread: Bool, blocked_senders: [String]?, lock_state: String, me: ChatMeDto) {
 		self.id = id
 		self.archived_at = archived_at
 		self.kind = kind
@@ -1675,6 +1679,7 @@ public struct PeopleChatDto: Codable {
 		self.last_activity_at = last_activity_at
 		self.read_seq = read_seq
 		self.unread = unread
+		self.blocked_senders = blocked_senders
 		self.lock_state = lock_state
 		self.me = me
 	}
