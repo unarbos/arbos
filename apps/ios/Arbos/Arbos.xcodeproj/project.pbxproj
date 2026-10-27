@@ -46,6 +46,7 @@
 		A1BB00000000000000000002 /* BackSwipe.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000001 /* BackSwipe.swift */; };
 		A1BB00000000000000000004 /* BackSwipeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000003 /* BackSwipeTests.swift */; };
 		A1BB00000000000000000006 /* BackSwipeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000005 /* BackSwipeUITests.swift */; };
+		A1BB00000000000000000031 /* ScrollPerfUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB00000000000000000030 /* ScrollPerfUITests.swift */; };
 		A11B0000000000000000A002 /* LibraryList.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11B0000000000000000A001 /* LibraryList.swift */; };
 		A15EC9000000000000000002 /* AgentPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15EC9000000000000000001 /* AgentPicker.swift */; };
 		A11B0000000000000000A004 /* LibraryListTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11B0000000000000000A003 /* LibraryListTests.swift */; };
@@ -248,6 +249,7 @@
 		A1BB00000000000000000001 /* BackSwipe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackSwipe.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000003 /* BackSwipeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackSwipeTests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000005 /* BackSwipeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackSwipeUITests.swift; sourceTree = "<group>"; };
+		A1BB00000000000000000030 /* ScrollPerfUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollPerfUITests.swift; sourceTree = "<group>"; };
 		A1BB00000000000000000010 /* ArbosUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ArbosUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A11B0000000000000000A001 /* LibraryList.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryList.swift; sourceTree = "<group>"; };
 		A15EC9000000000000000001 /* AgentPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentPicker.swift; sourceTree = "<group>"; };
@@ -638,6 +640,7 @@
 			isa = PBXGroup;
 			children = (
 				A1BB00000000000000000005 /* BackSwipeUITests.swift */,
+				A1BB00000000000000000030 /* ScrollPerfUITests.swift */,
 			);
 			path = ArbosUITests;
 			sourceTree = "<group>";
@@ -978,6 +981,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A1BB00000000000000000006 /* BackSwipeUITests.swift in Sources */,
+				A1BB00000000000000000031 /* ScrollPerfUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

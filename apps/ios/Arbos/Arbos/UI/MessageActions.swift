@@ -367,7 +367,8 @@ extension View {
             // ([feedback app-01M5Q1N6C1HAKHC6P2XPEWMRSS]).
             simultaneousGesture(
                 LongPressGesture(minimumDuration: 0.35)
-                    .onEnded { _ in onLongPress() }
+                    .onEnded { _ in onLongPress() },
+                enabled: ChatGestures.longPress
             )
         } else {
             contextMenu { MessageMenuContent(items: MessageMenu.copyOnly, action: onCopyMenu) }
