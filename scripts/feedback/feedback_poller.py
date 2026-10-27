@@ -2429,6 +2429,7 @@ class Loop:
                 pool_first = True
                 self.store.event("_loop", "pool_first_on", by="scheduler", starved_min=int(minutes_between(last_pool, iso())))
                 log(f"Gate: pool-first armed by the scheduler — no pool batch settled since {last_pool[:16]}; the pool runs ahead of solo slots, deferred-fairness and {len(plan)} plan half(ves)")
+        deferred_batch = False
         if not members and not pool_first:
             solo = sorted(((f, st) for f, st in ready if st.get("solo_next")), key=lambda fs: fs[1].get("created") or "")
             if solo:
@@ -2444,8 +2445,17 @@ class Loop:
             # HomeView.swift) for three rounds while the pool kept re-merging the same conflicts.
             deferred = sorted(((f, st) for f, st in ready if (st.get("sibling_conflicts") or 0) >= self.DEFER_AFTER),
                               key=lambda fs: (-(fs[1].get("sibling_conflicts") or 0), fs[1].get("created") or ""))
-            if deferred:
+            # Mirror of #2019 for this lane: a red deferred batch hands over to its own bisect halves. Its members lose
+            # the deferred flag at the red (see the red path), and while the next plan half is a half of a red deferred
+            # batch, no deferred batch forms ahead of it (14:46–15:37 Oct 27: the same batch of 3 re-ran four times,
+            # red each time on one member's old head, and planned eight halves it never let run).
+            own_deferred = any(v.get("deferred") and any(set(h) == set(half) for h in v.get("halves", []))
+                               for v in (cur.get("rust_gate_bisects") or {}).values() for half in plan[:1])
+            if deferred and own_deferred:
+                log("Gate: deferred-fairness stands aside — the next plan half is a red deferred batch's own bisect")
+            elif deferred:
                 members = self.compatible_batch(deferred)
+                deferred_batch = len(members) > 1
                 log(f"Gate: deferred-fairness batch of {len(members)} (bumped ≥ {self.DEFER_AFTER}× for sibling conflicts): " + ", ".join(members))
         pool_batch = False
         if not members and pool_first and plan:
@@ -2470,10 +2480,13 @@ class Loop:
         self.store.save_cursor(cur)
         if members:
             self.rust_gate_start(members)
-            if pool_batch:
+            if pool_batch or deferred_batch:
                 cur = self.store.cursor()
                 if cur.get("rust_gate"):
-                    cur["rust_gate"]["pool_batch"] = True
+                    if pool_batch:
+                        cur["rust_gate"]["pool_batch"] = True
+                    if deferred_batch:
+                        cur["rust_gate"]["deferred_batch"] = True
                     self.store.save_cursor(cur)
                 if pool_first:
                     log(f"Gate: pool-first — the full pool batch of {len(members)} runs now, ahead of plan halves, solo slots and deferred-fairness")
@@ -3102,7 +3115,18 @@ class Loop:
         # 2026-10-23 21:09/22:10/22:14, three batches in a row); then no item of one half is batched with an
         # item of the other again. Keyed by the half's members; cleared when a half settles.
         bisects = cur.setdefault("rust_gate_bisects", {})
-        bisects[active["id"]] = {"halves": [sorted(first), sorted(rest)], "green": [], "at": iso()}
+        bisects[active["id"]] = {"halves": [sorted(first), sorted(rest)], "green": [], "at": iso(), "deferred": bool(active.get("deferred_batch"))}
+        if active.get("deferred_batch"):
+            # The deferred items had their fair turn and it was red: drop the deferred flag so the same batch does not
+            # re-form ahead of the halves this red just planned (#2019's rule, for the deferred lane).
+            for fid in order:
+                st = self.store.state(fid)
+                if (st.get("sibling_conflicts") or 0) >= self.DEFER_AFTER:
+                    st["sibling_conflicts_before_red"] = st.get("sibling_conflicts")
+                    st["sibling_conflicts"] = 0
+                    self.store.save_state(fid, st)
+                    self.store.event(fid, "deferred_flag_dropped", run=active["id"], reason="deferred batch red; its bisect halves run next")
+            log(f"Gate: deferred-fairness batch {active['id']} was red; its members' deferred flag is dropped and its bisect halves run next")
         if active.get("pool_batch"):
             # A settled pool batch, red or green, restarts the starvation clock. Only a POOL batch does: at 08:02
             # Oct 27 a red plan half (20261027T073846-12, the pool's own bisect that pool-first had stood aside
