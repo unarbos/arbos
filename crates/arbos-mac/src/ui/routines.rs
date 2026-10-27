@@ -12,6 +12,7 @@ use gpui::{
 use crate::app::AppState;
 use crate::model::{now_ms, Id, Routine, RoutineRun, RoutineRunStatus, RoutineTrigger};
 use crate::ui::composer::ComposerInput;
+use crate::ui::error_note;
 use crate::ui::frost::{frosted, MENU_BLUR};
 use crate::ui::theme::{Theme, PANEL_RADIUS, RAIL_WIDTH};
 
@@ -418,6 +419,7 @@ impl RoutinesPanel {
                         .text_size(px(11.5))
                         .text_color(theme.text_faint)
                         .cursor_pointer()
+                        // error-ui: exception destructive-action (Delete on hover)
                         .hover(|s| s.text_color(theme.danger).bg(theme.danger_soft))
                         .child("Delete")
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -587,11 +589,24 @@ impl RoutinesPanel {
                 .into_any_element()],
             &theme,
         );
+        // The form's note (validation, as a refusal) under the header, before the first field.
+        let note = self.error.as_ref().map(|words| {
+            let slot = crate::app::refused("create the routine", words);
+            error_note::render(
+                "routine-error",
+                &slot.error,
+                false,
+                error_note::Style::Inline,
+                &theme,
+                error_note::Handlers::new(),
+            )
+        });
         let mut body = div()
             .flex()
             .flex_col()
             .gap(px(10.0))
             .child(header)
+            .children(note)
             .child(field("NAME", self.name_input.clone(), &theme))
             .child(field(
                 "PROMPT · Enter creates",
@@ -639,14 +654,6 @@ impl RoutinesPanel {
                 )
                 .child(chats),
         );
-        if let Some(err) = &self.error {
-            body = body.child(
-                div()
-                    .text_size(px(11.5))
-                    .text_color(theme.danger)
-                    .child(err.clone()),
-            );
-        }
         body.child(
             div()
                 .flex()

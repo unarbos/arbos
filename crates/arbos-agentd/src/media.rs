@@ -20,7 +20,7 @@ const MAX_BYTES: u64 = 60 * 1024 * 1024;
 const DEFAULT_IMAGE_MODEL: &str = "gpt-image-1";
 
 /// One line in the workspace's `.arbos/audit.jsonl` (the file the pi extension and the approval gate write).
-fn audit(agent: &Agent, kind: &str, fields: Value) {
+pub(crate) fn audit(agent: &Agent, kind: &str, fields: Value) {
     let mut entry = json!({ "kind": kind, "at": now_ms() });
     if let (Some(e), Some(f)) = (entry.as_object_mut(), fields.as_object()) {
         for (k, v) in f {
@@ -167,7 +167,7 @@ pub struct Target {
     pub main_turn: bool,
 }
 
-async fn target(a: &Agent, session_id: Option<&str>) -> Option<Target> {
+pub(crate) async fn target(a: &Agent, session_id: Option<&str>) -> Option<Target> {
     let worker_target = |chat_id: &str, row_id: &str, host_doc_ask: Option<String>| Target {
         chat_id: chat_id.to_owned(),
         ask_id: host_doc_ask.or_else(|| Some(row_id.to_owned())),
@@ -217,7 +217,7 @@ async fn row_in_reply_to(a: &Agent, chat_id: &str, row_id: &str) -> Option<Strin
         .map(str::to_owned)
 }
 
-async fn upload(
+pub(crate) async fn upload(
     a: &Arc<Agent>,
     chat_id: &str,
     bytes: Vec<u8>,
@@ -432,7 +432,9 @@ pub async fn deliver(
                 .set_message_fields(&msg_id, &[("replyTo", json!(ask))]);
         }
         if let Some(c) = caption {
-            h.doc.append_text(&msg_id, &text_part, c);
+            // D19 backstop: the caption bypasses write_text, so redact here (#1974 review).
+            h.doc
+                .append_text(&msg_id, &text_part, &crate::store::redact(c));
         }
         if h.doc.add_attachment_part(&msg_id, &attachment).is_none() {
             anyhow::bail!("message {msg_id} not found in chat {}", target.chat_id);
@@ -451,6 +453,7 @@ pub async fn deliver(
             anyhow::bail!("the attachment row did not read back from the chat doc");
         }
     }
+    a.note_posted(&target.chat_id, &msg_id).await;
     if target.main_turn {
         if let Some(t) = a.turn.lock().await.as_mut() {
             t.attachments_posted.push(msg_id.clone());
@@ -747,6 +750,54 @@ mod tests {
         let row = h.doc.message(&id).unwrap();
         assert_eq!(row.rest["inReplyTo"], json!("m-busy"));
         assert_eq!(attachment_parts(&row).len(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// #2025: with nothing read back in the chat, a bubble that claims a post is refused with the
+    /// correction; after a real delivery the same bubble goes through.
+    #[tokio::test]
+    async fn a_posted_claim_needs_a_read_back_row() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATATTACH0000000004";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        {
+            let h = host.lock().await;
+            h.doc
+                .append_user_message(
+                    "m-busy",
+                    "post the chart",
+                    "dev-mac",
+                    &arbos_core::doc::UserMessageOpts::default(),
+                )
+                .unwrap();
+        }
+        let _busy = agent.test_hold_turn(chat).await;
+        let r = agent
+            .hook_send_message(
+                "Correction: the chart is posted. The chat service then confirmed it.",
+                None,
+                None,
+            )
+            .await;
+        assert!(r.is_err(), "claim with no read-back must be refused");
+        assert!(r.unwrap_err().contains("Not sent"));
+        assert!(agent
+            .hook_send_message(
+                "The chart did not confirm as posted; the card above needs your approval.",
+                None,
+                None
+            )
+            .await
+            .is_ok());
+        let dir = out_dir(&agent.cfg);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("chart.png"), b"\x89PNG\r\n\x1a\nfake").unwrap();
+        let v = deliver_file(&agent, &json!({ "path": "out/chart.png" })).await;
+        assert!(v.get("isError").is_none(), "{v}");
+        assert!(agent
+            .hook_send_message("The chart is posted above as a picture.", None, None)
+            .await
+            .is_ok());
         let _ = std::fs::remove_dir_all(root);
     }
 

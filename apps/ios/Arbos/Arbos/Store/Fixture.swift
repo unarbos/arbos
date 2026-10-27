@@ -109,6 +109,31 @@ extension AppModel {
             allMessages[c]?.append(assistant("c8", c, "On it.", at: t0 + 131_000))
             allMessages[c]?.append(shellCard("c9", c, at: t0 + 132_000))
         }
+        // Secret hand-off rig (`ARBOS_FIXTURE_SECRET_HANDOFF=offer|saved|ghost|detect`).
+        if let mode = DebugHooks.fixtureSecretHandoff {
+            allMessages[c]?.removeAll { $0.id == "c6" }
+            switch mode {
+            case "offer", "saved":
+                allMessages[c]?.append(user("h1", c, "Can I give you a secret? It's the Stripe key for the refunds report.", at: t0 + 130_000))
+                allMessages[c]?.append(assistant("h2", c, "Yes. Use the box below. It goes straight to your vault, never into this chat.", at: t0 + 131_000))
+                allMessages[c]?.append(secretOfferCard("h3", c, saved: mode == "saved", at: t0 + 132_000))
+                if mode == "saved" {
+                    allMessages[c]?.append(assistant("h4", c, "Got it. I'll use STRIPE_KEY for the refunds report and keep the value out of this chat.", at: t0 + 140_000))
+                }
+            case "ghost":
+                allMessages[c]?.append(user("h1", c, "Let's do the refunds report next.", at: t0 + 130_000))
+                allMessages[c]?.append(assistant("h2", c, "Sure — I need the Stripe key for that.", at: t0 + 131_000))
+                allMessages[c]?.append(secretGhost("h3", c, name: "STRIPE_KEY", at: t0 + 132_000))
+                allMessages[c]?.append(assistant("h4", c, "Saved as STRIPE_KEY and removed from this chat — also from my memory and working context. I can use it; the value stays in your vault. Running the refunds report now.", at: t0 + 140_000))
+            case "detect":
+                allMessages[c]?.append(user("h1", c, "Let's do the refunds report next.", at: t0 + 130_000))
+                allMessages[c]?.append(assistant("h2", c, "Sure — I need the Stripe key for that.", at: t0 + 131_000))
+                allMessages[c]?.append(user("h3", c, "sk_" + "test_FIXTURE51HxQ9mT3vK2pLnR8wZ4eYc7bD1fG6hJ0kM9nP5qS2tU8vW3xA1", at: t0 + 132_000))
+                allMessages[c]?.append(secretDetectedCard("h4", c, at: t0 + 133_000))
+            default:
+                break
+            }
+        }
         shellGrants["fx-comms"] = [ShellGrant(id: "grant-scratch", ruleClass: "file-delete", pathClass: "scratch", chatId: nil,
                                               grantedBy: "dev-iphone", createdAt: now - 3 * 3_600_000,
                                               label: "File deletes in /tmp", detail: "scratch only: /tmp and /work/tmp")]
@@ -443,6 +468,15 @@ extension AppModel {
                             agent("fx-hyper", "Hyper", false, "")]
         var stripe = secret("fx-sec-stripe", "STRIPE_KEY", "STRIPE_KEY", "key", "Stripe live key — refunds and reports. Never for payouts.", ["api.stripe.com"], stripeAgents, 12)
         stripe["inject_env"] = true
+        if DebugHooks.fixtureSecretHandoff != nil {
+            // Secret hand-off rig: the key was given to Comms in chat.
+            stripe["inject_env"] = false
+            stripe["hosts"] = []
+            stripe["note"] = "For the refunds report. Read-only until you say otherwise."
+            stripe["last_used_at"] = nil
+            stripe["agents"] = [agent("fx-comms", "Comms", true, "the refunds report")]
+            stripe["source"] = ["kind": "chat", "project_id": "fx-comms", "project_name": "Comms", "chat_id": "fx-comms-main"]
+        }
         // The People list (spec §7.7), the Mac fixture's twin: Sam may ask (on), Jen's row is off.
         stripe["people"] = [
             ["user_id": "fx-u4", "handle": "sam", "name": "Sam Okafor", "note": "reports only", "created_at": now - 9 * 86_400_000,
@@ -506,20 +540,40 @@ extension AppModel {
     /// `ARBOS_FIXTURE_WORKING=n` — the next agents too. Goes through the real parser.
     func fixtureBoxReport() -> BoxReport {
         let working = Set(["fx-comms"] + projects.dropFirst().prefix(max(0, DebugHooks.fixtureWorking - 1)).map(\.id))
-        let workspaces: [[String: Any]] = projects.filter { $0.id != peopleSlot }.map { p in
-            var turn: [String: Any] = ["running": working.contains(p.id)]
-            if working.contains(p.id) {
+        let nearLimit = DebugHooks.fixtureMachineNearLimit
+        let workspaces: [[String: Any]] = projects.filter { $0.id != peopleSlot }.enumerated().map { i, p in
+            let on = working.contains(p.id)
+            var turn: [String: Any] = ["running": on]
+            if on {
                 turn["current"] = ["elapsed_ms": p.id == "fx-comms" ? 42_000 : 128_000, "tool_calls": p.id == "fx-comms" ? 7 : 3]
             }
-            return ["project_id": p.id, "name": p.name, "healthy": true, "turn": turn]
+            // Settings › Machine's per-agent breakdown: a share per workspace, the busy ones
+            // biggest ([feedback machine-page-ios-2026-10-26]).
+            let usage: [String: Any] = on
+                ? ["cpu_pct": p.id == "fx-comms" ? 61.0 : 9.0, "mem_mb": p.id == "fx-comms" ? 1900 : 1100, "pids": 40, "disk_mb": p.id == "fx-comms" ? 2300 : 900]
+                : ["cpu_pct": 0.0, "mem_mb": 200 + 50 * i, "pids": 12, "disk_mb": i == 1 ? 1600 : 100 + 150 * i]
+            return ["project_id": p.id, "name": p.name, "healthy": true, "turn": turn,
+                    "jobs_running": on && p.id == "fx-comms" ? 1 : 0, "usage": usage]
         }
+        // `ARBOS_FIXTURE_MACHINE=near-limit`: disk 92 % and memory 88 % used, CPU 71 %.
+        let (diskAvail, memUsed, cpuPct, rx, tx, rxToday, txToday): (Int, Int, Double, Double, Double, Int, Int) = nearLimit
+            ? (819, 7209, 71.0, 4_800_000, 300_000, 6_100_000_000, 300_000_000)
+            : (6861, 2867, 23.0, 1_200_000, 80_000, 2_000_000_000, 100_000_000)
         let debug: [String: Any] = [
             "relay": ["state": "awake", "awake_for_s": 5 * 3600 + 12 * 60, "provider": "gvisor",
                       "agentd": ["image": "arbos-agent-0.1.7"]],
             "box": ["reachable": true, "state": [
-                "uptime_s": 5 * 3600 + 12 * 60, "load": [0.42, 0.38, 0.35],
-                "memory_mb": ["total": 8192, "available": 5325],
-                "disk": ["total_mb": 10240, "available_mb": 6861],
+                "uptime_s": 5 * 3600 + 12 * 60, "load": [38.5, 36.9, 32.1], "load_scope": "host",
+                "memory_mb": ["total": 8192, "available": 8192 - memUsed, "source": "cgroup"],
+                "disk": ["total_mb": 10240, "available_mb": diskAvail],
+                "resources": [
+                    "sampled_at": nowMs(), "load_scope": "host",
+                    "cpu": ["cores": 4.0, "pct": cpuPct, "source": "cgroup"],
+                    "memory": ["total_mb": 8192, "used_mb": memUsed, "source": "cgroup"],
+                    "disk": ["total_mb": 10240, "used_mb": 10240 - diskAvail, "available_mb": diskAvail,
+                             "inodes_total": 131_072, "inodes_avail": nearLimit ? 1_200 : 93_000],
+                    "net": ["rx_bps": rx, "tx_bps": tx, "rx_bytes_today": rxToday, "tx_bytes_today": txToday],
+                ],
                 "workspaces": workspaces,
             ]],
         ]
@@ -895,6 +949,42 @@ extension AppModel {
         return Message(id: id, chatId: chat, role: .assistant, sender: "agent", status: .done, turn: .reply, decision: "approval", subagentId: nil,
                        subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: at, completedAt: at, pending: false,
                        parts: [DocJSON.part(pm)], hiddenCount: 0)
+    }
+
+    /// Secret hand-off: the request card (`payload.kind = secret_offer`, no value field).
+    private func secretOfferCard(_ id: Id, _ chat: Id, saved: Bool, at: Int64) -> Message {
+        var pm: [String: Any] = [
+            "id": "\(id)-ap", "kind": "approval", "approvalId": "\(id)-approval", "state": saved ? "approved" : "pending",
+            "title": "Give Comms a secret", "risk": "credential", "summary": "the refunds report",
+            "payload": ["kind": "secret_offer", "name": "STRIPE_KEY", "purpose": "the refunds report", "agent": "Comms",
+                        "projectId": "fx-comms", "chatId": chat, "answers": []],
+        ]
+        if saved { pm["decidedBy"] = "user:fx-me"; pm["decidedAt"] = at + 60_000 }
+        return Message(id: id, chatId: chat, role: .assistant, sender: "agent", status: .done, turn: .reply, decision: "approval", subagentId: nil,
+                       subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: at, completedAt: at, pending: false,
+                       parts: [DocJSON.part(pm)], hiddenCount: 0)
+    }
+
+    /// Secret hand-off: the offer card for a pasted key (A save / B leave; optional).
+    private func secretDetectedCard(_ id: Id, _ chat: Id, at: Int64) -> Message {
+        let pm: [String: Any] = [
+            "id": "\(id)-ap", "kind": "approval", "approvalId": "\(id)-approval", "state": "pending",
+            "title": "That looks like a key. Save it to your vault as STRIPE_KEY and remove it from this chat?",
+            "risk": "credential", "summary": "Nothing is saved until you choose.",
+            "payload": ["kind": "secret_detected", "optional": true, "name": "STRIPE_KEY", "agent": "Comms",
+                        "chatId": chat, "messageId": "h3",
+                        "answers": [["id": "save", "label": "Save as STRIPE_KEY and remove"], ["id": "deny", "label": "Leave it here"]]],
+        ]
+        return Message(id: id, chatId: chat, role: .assistant, sender: "agent", status: .done, turn: .reply, decision: "approval", subagentId: nil,
+                       subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: at, completedAt: at, pending: false,
+                       parts: [DocJSON.part(pm)], hiddenCount: 0)
+    }
+
+    /// Secret hand-off: a user row whose value went into the vault — the ghost.
+    private func secretGhost(_ id: Id, _ chat: Id, name: String, at: Int64) -> Message {
+        Message(id: id, chatId: chat, role: .user, sender: "user", status: .done, turn: nil, decision: nil, subagentId: nil,
+                subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: at, completedAt: at, pending: false,
+                parts: [.secretRedacted(id: "\(id)-r", name: name, savedBy: "user:fx-me", agent: "fx-comms")], hiddenCount: 0)
     }
 
     private func stopped(_ id: Id, _ chat: Id, at: Int64) -> Message {

@@ -386,7 +386,7 @@ export default function arbosPiExt(pi: ExtensionAPI) {
       case "pending":
         return {
           block: true,
-          reason: `The approval for this action (${approvalId}) was not decided in time. Nothing ran; tell the user it needs their approval.`,
+          reason: `The approval for this action (${approvalId}) was not decided in time. Nothing ran and nothing will run or "confirm" later: whatever it was meant to post, send or change is NOT done. Tell the user it needs their approval; never say it was posted or sent.`,
         };
       default: {
         const _exhaustive: never = state;

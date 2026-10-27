@@ -68,6 +68,34 @@ sweep_xctest_clones() {
 }
 sweep_xctest_clones
 
+# A booted simulator keeps a few hundred daemons runnable even when nothing uses it: two rig simulators
+# (one up for 70 min after its rig was done) put the box at load 340-548 on 2026-10-26 22:3x and ssh timed
+# out for every worker (#1957 is the rule: rigs shut down what they booted). Backstop, every pass: shut down a
+# simulator booted for more than SIM_IDLE_MIN minutes when no xcodebuild / xctest / screencapture / `simctl io`
+# of its user is running and nothing names its UDID. Device sets of ec2-user and arbosgui only (ours).
+SIM_IDLE_MIN=${SIM_IDLE_MIN:-30}
+sweep_idle_sims() {
+  local user pid udid name age busy
+  for user in ec2-user arbosgui; do
+    id -u "$user" >/dev/null 2>&1 || continue
+    while read -r pid udid; do
+      [ -n "$udid" ] || continue
+      age=$(( ( $(date +%s) - $(ps -o lstart= -p "$pid" 2>/dev/null | xargs -I{} date -j -f "%a %b %d %T %Y" "{}" +%s 2>/dev/null || echo 0) ) / 60 ))
+      [ "$age" -ge "$SIM_IDLE_MIN" ] || continue
+      busy=$(ps -axo user=,command= | awk -v u="$user" -v d="$udid" '
+        $1 == u && ($2 ~ /xcodebuild|xctest|screencapture|XCTestDevices/ || $0 ~ d) { n++ } END { print n + 0 }')
+      [ "$busy" -eq 0 ] || continue
+      name=$(sudo -u "$user" xcrun simctl list devices booted 2>/dev/null | grep -F "($udid)" | sed -E 's/^ *(.*) \('"$udid"'\).*/\1/' | head -n 1)
+      if sudo -u "$user" xcrun simctl shutdown "$udid" >/dev/null 2>&1; then
+        say "shut down idle simulator '${name:-?}' ($udid, $user): booted ${age} min, no xcodebuild/xctest/screencapture/simctl io of $user and nothing naming it (#1957 backstop)"
+        logger -t arbos-mac-clean "shut down idle simulator ${name:-?} $udid ($user, ${age} min idle)"
+      fi
+    done < <(ps -axo user=,pid=,command= | awk -v u="$user" '$1 == u && $3 ~ /launchd_sim$/ { match($0, /Devices\/[0-9A-F-]{36}/); print $2, substr($0, RSTART + 8, 36) }')
+  done
+  return 0
+}
+sweep_idle_sims
+
 if [ "${1:-}" = "--if-low" ]; then
   f=$(free_gb)
   [ "${f:-99}" -lt "$LOW_FREE_GB" ] || exit 0
