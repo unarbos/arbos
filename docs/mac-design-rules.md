@@ -273,13 +273,22 @@ reference, so Matte (no window vibrancy) is not an excuse for a flat fill.
 default) and he saw the solid `bubble_assistant` pill on his AffineTeam group
 (v0.6.268). Recipe (`glass::header_surface` + `glass::header_frost`,
 `Theme::header_glass*`): the list blurred through the control's rounded
-bounds, a see-through fill (dark `#3b3f45` @ 56 %, light white @ 60 % — the
-same on both surfaces; the backdrop blur composites ≈ 20 % darker than its
-source on Metal and wgpu alike, so over flat `#fcfcfc` the light pill lands
-near the `#ededed` of the solid pill it replaces), a 1 pt rim (white 18 % /
-black 10 %), a top highlight (white 30 % / 90 %) and a 1 pt lift. Sizes and
-placements are untouched; the rest of the glass restyle stays paused. Pinned
-by `header::glass_tests` (every kind × surface × appearance).
+bounds at a **light** blur (`glass::HEADER_BLUR` 5 pt — a line of transcript
+passing under the pill stays legible; the menus' 16 pt turned it to mush), a
+see-through fill (dark `#3b3f45` @ **30 %**, light white @ 60 % — the same on
+both surfaces; the backdrop blur composites ≈ 20 % darker than its source on
+Metal and wgpu alike, so over flat `#fcfcfc` the light pill lands near the
+`#ededed` of the solid pill it replaces), a 1 pt rim (white **30 %** / black
+10 %), a top highlight (white **45 %** / 90 %) and a 1 pt lift. The dark pill
+is read as glass the way Grok Bot's is over its black page: ≈ +12/255 above
+the page, its shape carried by the rim, the transcript visible through it —
+not as a plate. (v0.6.275 shipped 56 % / 18 % / 30 % / 16 pt and Jacob's
+14:15 CR shot still read "opaque dark gray"; [feedback
+mac-header-pill-see-through-2026-10-26].) White text on it keeps ≥ 4.5:1
+because the pill always lies over the chat column — the page on Matte, the
+85 % page wash on Glass. Sizes and placements are untouched; the rest of the
+glass restyle stays paused. Pinned by `header::glass_tests` (every kind ×
+surface × appearance; `the_dark_pill_is_see_through_and_its_text_still_reads`).
 
 ## Message timestamps (Jacob 2026-10-24, [feedback timestamps-hover-only-2026-10-24])
 
@@ -799,6 +808,59 @@ centred; click opens the DM we have / starts one; none on my own pane or a
 blocked person's, back once unblocked). Rig: `ARBOS_OPEN_PROFILE=user`
 (the DM peer's pane), `user:message` (the pill pressed), `group:member`
 (a member with no DM yet).
+
+### Profile targets toggle the pane (Jacob 2026-10-26, [feedback profile-pane-toggle-mac-2026-10-26])
+
+**Every picture or name of a person or an agent in the chat is one profile
+target: a click opens their page in the right pane; a click on that target —
+or on any other target for the same person or agent — while their page shows
+closes the pane; a click on someone else swaps the page in place, with no
+back stack.** Jacob (2026-10-26, Allan's bubble with the @Affine chip):
+"clicking the agent or user in the chat should open their user profile right
+bar. Clicking it again should close it. Same if you click the user profile
+picture to open the side bar clicking it again should close it." Same in
+agent chats, DMs, groups, server channels and job tabs; the iPhone's sheet
+follows the same single action ([feedback profile-pane-toggle-ios-2026-10-26]).
+
+| Target | Before | Now |
+|---|---|---|
+| Sender name in a person's bubble (group / channel) | pushed the person's page over whatever was open; a second click did nothing | toggle |
+| Sender name in an agent's bubble | pushed the agent's page; second click nothing | toggle |
+| Disc beside a person's / an agent's bubble | as the name (push, no close) | toggle, the same target as the name |
+| @mention chip, people and agents (bubble text and the composer) | opened and swapped, never closed; a person's chip page carried no `space_id`, so the DM pill did not see it as "open" | toggle; a person is the same person whichever chat the page came from |
+| Chat header pill — agent chat / job tab | toggled (after the 250 ms double-click window on an owned agent) | unchanged, now labelled |
+| Chat header pill — DM | toggled, but only against a page with its own `space_id` | toggles against the person, from any target |
+| Status-row pictures (typing people, working agents) | nothing: no click, arrow cursor | toggle; a face no card can name (`AgentIdentity::known` false) stays inert |
+| Sidebar footer / rail: my picture | toggled `Me` | unchanged |
+| Pane rows (members, "Run by …" owner link) | push, `‹` returns | unchanged — a page's own rows still stack |
+
+One action: `AppState::toggle_profile(page)` — close when
+`profile_shows(&page)` (`ProfilePage::same_subject`: a person by handle,
+case-insensitive, whatever the `space_id`; everything else by id), else
+`open_profile` (the stack clears). `ui::profile_target::attach` gives a
+target the pointing hand, the `Button` role, the accessible label — **"Open
+<name>'s profile"** / **"Close profile"**, from the pane's state at draw
+time — and the click; `profile_target::mark` is the same without the click
+for the header pill, whose listener keeps the rename double-click. The
+status-row pictures carry `Participant.page` (person by handle, agent by
+project) and `presence::row(.., Some(&state), ..)` attaches them. The DM
+pill's ring (`header::render` `pane_open`) and `pane::is_open` read
+`profile_shows` too. Pictures come from the shared resolver as before
+(`people::avatar`, `avatars::agent_picture` / `agent_identity`).
+
+Pinned by `profile_target::tests` (label; same-subject; a source scan that
+`transcript.rs`, `presence.rs`, `mention.rs` and `header.rs` call no
+`open_profile` / `push_profile` of their own) and the headless
+`profile_target::render_tests` on the real shell — Allan and Affine in a
+group, Allan typing, his bubble with the @Affine chip, a DM with Allan:
+`every_target_opens_and_a_second_click_closes` (name, disc, chip, status-row
+face, for a person and an agent), `any_target_for_the_same_profile_closes_it`,
+`a_different_person_swaps_the_page_in_place` (no ‹, empty stack),
+`the_header_pill_toggles_the_same_person_as_the_bubbles`,
+`the_label_tracks_whose_page_is_showing`. The test platform exposes neither
+the cursor nor the AccessKit tree, so hand and label are pinned by
+construction (every target goes through `attach` / `mark`; the scan guards
+the road).
 
 ## Pane animations (Jacob 2026-10-24, [feedback right-pane-slide-2026-10-24], [feedback sidebar-slide-2026-10-24])
 
