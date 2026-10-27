@@ -48,9 +48,12 @@ final class MentionTable {
     init() {}
 
     init(model: AppModel, theme: Theme) {
-        for p in model.projects {
-            let slug = mentionSlug(p.name)
+        for record in model.projects {
+            let slug = mentionSlug(record.name)
             guard !slug.isEmpty else { continue }
+            // Through the shared resolver, like every other surface (Jacob, 2026-10-26: the
+            // chip drew the record's copy while the working row drew the resolver's).
+            let p = model.agent(id: record.id, name: record.name)
             add(slug, MentionEntry(
                 name: p.name.trimmingCharacters(in: .whitespaces),
                 target: .agent(projectId: p.id),
@@ -138,6 +141,10 @@ final class MentionTable {
                 h.combine(p.id)
                 h.combine(p.name)
                 h.combine(p.avatarColorIndex)
+                h.combine(p.avatarLeaf)
+                h.combine(p.avatarLeafColor)
+                h.combine(p.imageKey)
+                h.combine(p.avatarVersion)
             }
             // Sorted: a chat moving to the top on activity must not change the table.
             for chat in model.peopleChats.sorted(by: { $0.id < $1.id }) {
@@ -154,6 +161,7 @@ final class MentionTable {
                     h.combine(m.project?.avatarLeaf)
                     h.combine(m.project?.avatarLeafColor)
                     h.combine(m.project?.imageKey)
+                    h.combine(m.project?.avatarVersion)
                     h.combine(m.isAgent)
                 }
             }

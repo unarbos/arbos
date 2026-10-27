@@ -68,6 +68,7 @@ CLI:  feedback_poller.py [run] | status | testers | set-cursor <ISO-8601>
       | leadtime [since-ISO] | memtree-cost [YYYY-MM-DD]   (audit numbers; memtree-cost asks GET /admin/usage/memory-tree, else relay.db as root)
       | gate-tree <sha-or-branch> <fid>…   (gate a hand-prepared integration tree as one run and land it whole)
       | gate-abort   (drop the active gate run without verdicts; every ready branch re-batches at its current head)
+      | park <id> <note…>   (hand a gating item back to its owner at the head the red run judged; a newer push re-gates by itself)
       | gate-next <fid>… [--then <fid>…] [--abort]   (pin: these items gate next and alone; while a pinned item is with its owner nothing else merges)
       | gate-unpin <fid>…   | unfail <fid>…   (a failed item whose fix is on main goes back to pushed)
 """
@@ -1449,8 +1450,21 @@ class Loop:
         new commits touch the branch's files, re-gate (status gating; the pool batches it and a green run holds it
         again). A conflict goes to the agent / owner as a merge-main follow-up."""
         aw = st.get("awaiting") or {}
+        if aw.get("conflict"):
+            # "conflict — owner merging main": the owner's resolving push is the way out. Pick it up without waiting
+            # for main to move again, and re-gate it (the resolved tree is new) — still held for Jacob.
+            live = self.gh.branch_head(st["branch"])
+            if live and live != st.get("branch_head"):
+                st["branch_head"] = live
+                aw.update(conflict=False, ready=False, regate_due=True)
+                aw.pop("conflict_noted", None)
+                st["awaiting"] = aw
+                self.store.save_state(fid, st)
+                self.store.event(fid, "awaiting_conflict_resolved", head=live[:8])
+                log(f"[{fid}] held item: owner pushed {live[:8]} after the conflict; re-gates when idle, still awaiting Jacob")
         main_head = self.gh.branch_head("main") or ""
         if not main_head or main_head == aw.get("main_head"):
+            self.regate_awaiting_if_idle(fid, st)
             return
         cmp = self.gh.compare(aw.get("main_head") or main_head, main_head)
         moved_files = {f["filename"] for f in cmp.get("files", [])}
@@ -2198,6 +2212,33 @@ class Loop:
         retries = st.get("gate_retries", 0)
         st["main_conflicts"] = st.get("main_conflicts", 0) + 1
         self.arm_solo_slot(fid, st)
+        if st.get("awaiting") and st.get("status") in ("awaiting_jacob", "gating") and not st.get("approved_by_jacob"):
+            # A held item (release-approval gate) never fails for a conflict: Jacob's per-item yes is still pending and
+            # the branch is his to approve or decline. It stays `awaiting_jacob` as "conflict — owner merging main";
+            # the owner is told once (agent follow-up while retries remain, then the issue), and the next push on the
+            # branch re-gates. 13:37 Oct 27: #1551/#1853/#1888/#1948 fell to `failed` here minutes after being restored.
+            aw = st["awaiting"]
+            aw.update(conflict=True, ready=False)
+            st.update(status="awaiting_jacob", awaiting=aw)
+            self.store.save_state(fid, st)
+            if not aw.get("conflict_noted"):
+                aw["conflict_noted"] = iso()
+                self.store.save_state(fid, st)
+                self.store.event(fid, "awaiting_conflict_held", head=head[:8], retries=retries)
+                who = st.get("handed_off_to") or "owner"
+                self.gh.comment(st["issue"], f"Conflict — owner merging main. `{st['branch']}`@{head[:8]} no longer merges with `main`. {who}: merge "
+                                "`origin/main` into the branch (a merge, never a rebase), resolve, push; the loop re-gates. The branch is kept and "
+                                "the item stays held for Jacob's approval." + (f"\n\n```\n{detail[-2000:]}\n```" if detail else ""))
+                if st.get("agent_id") and not st.get("handed_off_to") and retries < 2:
+                    with contextlib.suppress(HttpError):
+                        self.cursor.followup(st["agent_id"], (
+                            f"Your branch `{st['branch']}` no longer merges cleanly into `main`. Run `git fetch origin main && "
+                            f"git merge origin/main` on the branch, resolve the conflicts with the smallest change, run the checks, "
+                            "and push the merge (no rebase, no force-push). End with the SUMMARY:/PUSHED: lines again."))
+                        st["gate_retries"] = retries + 1
+                        self.store.save_state(fid, st)
+            log(f"[{fid}] held item conflicts with main at {head[:8]}; stays awaiting_jacob (conflict — owner merging main)")
+            return
         if st.get("handed_off_to"):
             st["status"] = "handed_off"
             self.store.save_state(fid, st)
@@ -2388,6 +2429,7 @@ class Loop:
                 pool_first = True
                 self.store.event("_loop", "pool_first_on", by="scheduler", starved_min=int(minutes_between(last_pool, iso())))
                 log(f"Gate: pool-first armed by the scheduler — no pool batch settled since {last_pool[:16]}; the pool runs ahead of solo slots, deferred-fairness and {len(plan)} plan half(ves)")
+        deferred_batch = False
         if not members and not pool_first:
             solo = sorted(((f, st) for f, st in ready if st.get("solo_next")), key=lambda fs: fs[1].get("created") or "")
             if solo:
@@ -2403,8 +2445,17 @@ class Loop:
             # HomeView.swift) for three rounds while the pool kept re-merging the same conflicts.
             deferred = sorted(((f, st) for f, st in ready if (st.get("sibling_conflicts") or 0) >= self.DEFER_AFTER),
                               key=lambda fs: (-(fs[1].get("sibling_conflicts") or 0), fs[1].get("created") or ""))
-            if deferred:
+            # Mirror of #2019 for this lane: a red deferred batch hands over to its own bisect halves. Its members lose
+            # the deferred flag at the red (see the red path), and while the next plan half is a half of a red deferred
+            # batch, no deferred batch forms ahead of it (14:46–15:37 Oct 27: the same batch of 3 re-ran four times,
+            # red each time on one member's old head, and planned eight halves it never let run).
+            own_deferred = any(v.get("deferred") and any(set(h) == set(half) for h in v.get("halves", []))
+                               for v in (cur.get("rust_gate_bisects") or {}).values() for half in plan[:1])
+            if deferred and own_deferred:
+                log("Gate: deferred-fairness stands aside — the next plan half is a red deferred batch's own bisect")
+            elif deferred:
                 members = self.compatible_batch(deferred)
+                deferred_batch = len(members) > 1
                 log(f"Gate: deferred-fairness batch of {len(members)} (bumped ≥ {self.DEFER_AFTER}× for sibling conflicts): " + ", ".join(members))
         pool_batch = False
         if not members and pool_first and plan:
@@ -2429,10 +2480,13 @@ class Loop:
         self.store.save_cursor(cur)
         if members:
             self.rust_gate_start(members)
-            if pool_batch:
+            if pool_batch or deferred_batch:
                 cur = self.store.cursor()
                 if cur.get("rust_gate"):
-                    cur["rust_gate"]["pool_batch"] = True
+                    if pool_batch:
+                        cur["rust_gate"]["pool_batch"] = True
+                    if deferred_batch:
+                        cur["rust_gate"]["deferred_batch"] = True
                     self.store.save_cursor(cur)
                 if pool_first:
                     log(f"Gate: pool-first — the full pool batch of {len(members)} runs now, ahead of plan halves, solo slots and deferred-fairness")
@@ -3061,7 +3115,18 @@ class Loop:
         # 2026-10-23 21:09/22:10/22:14, three batches in a row); then no item of one half is batched with an
         # item of the other again. Keyed by the half's members; cleared when a half settles.
         bisects = cur.setdefault("rust_gate_bisects", {})
-        bisects[active["id"]] = {"halves": [sorted(first), sorted(rest)], "green": [], "at": iso()}
+        bisects[active["id"]] = {"halves": [sorted(first), sorted(rest)], "green": [], "at": iso(), "deferred": bool(active.get("deferred_batch"))}
+        if active.get("deferred_batch"):
+            # The deferred items had their fair turn and it was red: drop the deferred flag so the same batch does not
+            # re-form ahead of the halves this red just planned (#2019's rule, for the deferred lane).
+            for fid in order:
+                st = self.store.state(fid)
+                if (st.get("sibling_conflicts") or 0) >= self.DEFER_AFTER:
+                    st["sibling_conflicts_before_red"] = st.get("sibling_conflicts")
+                    st["sibling_conflicts"] = 0
+                    self.store.save_state(fid, st)
+                    self.store.event(fid, "deferred_flag_dropped", run=active["id"], reason="deferred batch red; its bisect halves run next")
+            log(f"Gate: deferred-fairness batch {active['id']} was red; its members' deferred flag is dropped and its bisect halves run next")
         if active.get("pool_batch"):
             # A settled pool batch, red or green, restarts the starvation clock. Only a POOL batch does: at 08:02
             # Oct 27 a red plan half (20261027T073846-12, the pool's own bisect that pool-first had stood aside
@@ -3081,6 +3146,13 @@ class Loop:
         log(f"Rust gate {active['id']} red with {len(order)} branches: bisecting into {len(first)} + {len(rest)}")
         for fid in order:
             self.store.event(fid, "rust_gate_bisect", run=active["id"], members=len(order))
+            # The head this red run judged, per member: a park (operator) must point gated_head at THIS head, not at
+            # whatever the branch shows when the park lands — a push in between is otherwise swallowed (#1995
+            # 08:32 push / 08:35 park; #1962/#1963 09:01 push / 09:55 park, 2026-10-27).
+            st = self.store.state(fid)
+            if st.get("branch_head") == members[fid] or st.get("status") == "gating":
+                st["last_red"] = {"head": members[fid], "run": active["id"], "at": iso()}
+                self.store.save_state(fid, st)
 
     def ios_gate(self, branch: str, head: str) -> tuple[bool, str]:
         """ssh to the gate Mac and run ios-gate.sh <branch> <sha>; (ok, output)."""
@@ -4325,7 +4397,10 @@ class Loop:
                 self.store.save_state(fid, st)
                 self.store.event(fid, "confirmation_hold_over")
             head = refs.get(f"feedback/{fid}")
-            if head and head != st.get("gated_head"):
+            # A parked item compares against the head the gate judged (`parked_head`, set by the park from
+            # `last_red`), not against the head the park happened to see: a push recorded before the park is a new
+            # head too and re-registers (2026-10-27: #1995, #1962/#1963 sat handed_off with their fix pushed).
+            if head and head != (st.get("parked_head") or st.get("gated_head")):
                 cmp = self.gh.compare("main", head)
                 tagged = any(f"[feedback {fid}]" in c["commit"]["message"] for c in cmp.get("commits", []))
                 if cmp.get("status") in ("ahead", "diverged") and tagged:
@@ -4338,6 +4413,7 @@ class Loop:
                                     if f["filename"] not in seen:
                                         seen.append(f["filename"])
                         files = seen
+                    st.pop("parked_head", None)
                     st.update(status="gating", branch=f"feedback/{fid}", branch_head=head, files=files,
                               expects_ios=touches_ios(files),
                               expects_rust=bool(self.rust_crates(files)),
@@ -5161,6 +5237,28 @@ def main(argv: list[str]) -> int:
                     loop.gh.comment(st["issue"], f"Not a failure after all: the fix `{st['commit'][:8]}` is on `main`; the build that carries it was still in the runner queue ({why.rstrip('.')}). Back to tracking the builds.")
                     loop.gh.set_labels(st["issue"], [], ["needs-human"])
             print(f"{fid}: back to pushed")
+        return 0
+    if cmd == "park":
+        # `park <id> <note…>`: hand a gating item back to its owner after a red the gate pinned on it. gated_head and
+        # parked_head are the head the RED run judged (`last_red`, or the item's own failing verdict) — never the
+        # live head: a push recorded between the red and the park stayed invisible when the park copied branch_head
+        # (#1995 08:32/08:35, #1962/#1963 09:01/09:55, 2026-10-27). The follower re-registers any other head, so a
+        # push already made re-gates on the next tick; a pin is released.
+        if len(argv) < 4:
+            print("park <id> <note…>")
+            return 2
+        fid, note = argv[2], " ".join(argv[3:])
+        st = loop.store.state(fid)
+        if not st or st.get("status") != "gating":
+            print(f"{fid}: not gating ({(st or {}).get('status')})")
+            return 2
+        rg = st.get("rust_gate") or {}
+        red = (st.get("last_red") or {}).get("head") or (rg.get("head") if rg.get("verdict") in ("fail", "conflict") else None) or st.get("branch_head")
+        st.update(status="handed_off", gated_head=red, parked_head=red, gate_pinned=False)
+        loop.store.save_state(fid, st)
+        loop.store.event(fid, "parked_by_operator", head=red, live_head=st.get("branch_head"), note=note[:400])
+        later = st.get("branch_head") != red
+        print(f"{fid}: parked at the red head {red[:9]}" + (f"; live head {st['branch_head'][:9]} is newer and re-registers on the next tick" if later else ""))
         return 0
     if cmd == "approval-gate":
         # Standing rule: the gate is always on. `approval-gate on [--allow a,b]` widens the allow list;

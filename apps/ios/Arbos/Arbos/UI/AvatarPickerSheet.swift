@@ -477,7 +477,7 @@ struct AvatarPickerSheet: View {
     static func viewablePicture(target: AvatarTarget, model: AppModel) -> (name: String, url: String)? {
         switch target {
         case .agent(let id):
-            guard let p = model.project(id), let url = p.imageURL, !url.isEmpty else { return nil }
+            guard let p = model.project(id), let url = model.projectImageURL(p)?.absoluteString, !url.isEmpty else { return nil }
             return (p.name, url)
         case .group(let id):
             guard let c = model.peopleChats.first(where: { $0.id == id }), let key = c.imageKey,

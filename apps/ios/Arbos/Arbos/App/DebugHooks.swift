@@ -31,6 +31,8 @@ enum DebugHooks {
     /// Rig (#1596): print each people-chat send's text and `mentions` ids to the console.
     static var traceSends: Bool { value("ARBOS_TRACE_SENDS") == "1" }
     static var pairCode: String? { value("ARBOS_PAIR_CODE") }
+    /// Rig: a test-token sign-in skips the first-login stages (the account exists already).
+    static var skipFirstLogin: Bool { value("ARBOS_SKIP_FIRST_LOGIN") == "1" }
     static var fixture: Bool { value("ARBOS_FIXTURE") == "1" }
     /// D89 waitlist card and Machine rows: the fixture account's place in line.
     static var fixtureWaitlist: Int? { value("ARBOS_FIXTURE_WAITLIST").flatMap { Int($0) } }
