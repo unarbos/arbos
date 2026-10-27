@@ -406,6 +406,15 @@ pub async fn announce_with(
         if sender.user_id.as_deref() == Some(user.as_str()) {
             continue;
         }
+        // A recipient who blocked the sender gets no alert and no badge for this row
+        // (hidden for them alone, [feedback blocked-state-relay-2026-10-26]).
+        if sender
+            .user_id
+            .as_deref()
+            .is_some_and(|from| state.db.blocks(&user, from).unwrap_or(false))
+        {
+            continue;
+        }
         if user_focused_on_chat(state, &user, &chat.chat_id).await {
             let _ = state.db.mark_chat_read(&user, &chat.chat_id);
             // Queued after the message job for this chat, so the receipt lands on it.
