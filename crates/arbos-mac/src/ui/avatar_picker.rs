@@ -361,6 +361,7 @@ pub(crate) fn tab_pill(
                 .items_center()
                 .text_size(px(13.0))
                 .font_weight(FontWeight::MEDIUM)
+                // hover-fill: exception choice
                 .when(is_selected, |d| d.bg(p.cancel_bg).text_color(p.title))
                 .when(!is_selected, |d| d.text_color(label_muted))
                 .cursor_pointer()

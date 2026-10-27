@@ -14,6 +14,7 @@ use crate::model::{now_ms, Id, Routine, RoutineRun, RoutineRunStatus, RoutineTri
 use crate::ui::composer::ComposerInput;
 use crate::ui::error_note;
 use crate::ui::frost::{frosted, MENU_BLUR};
+use crate::ui::highlight;
 use crate::ui::theme::{Theme, PANEL_RADIUS, RAIL_WIDTH};
 
 pub const PANEL_WIDTH: f32 = 560.0;
@@ -233,10 +234,12 @@ impl RoutinesPanel {
             .cursor_pointer()
             .when(primary, |el| el.bg(theme.text).text_color(theme.bg))
             .when(!primary, |el| {
-                el.text_color(theme.text_muted)
-                    .border_1()
-                    .border_color(theme.border)
-                    .hover(|s| s.bg(theme.surface_2))
+                highlight::button(
+                    el.text_color(theme.text_muted)
+                        .border_1()
+                        .border_color(theme.border),
+                    theme,
+                )
             })
             .child(label.into())
     }
@@ -420,7 +423,7 @@ impl RoutinesPanel {
                         .text_color(theme.text_faint)
                         .cursor_pointer()
                         // error-ui: exception destructive-action (Delete on hover)
-                        .hover(|s| s.text_color(theme.danger).bg(theme.danger_soft))
+                        .hover(|s| s.text_color(theme.danger).bg(theme.danger_soft)) // hover-fill: exception danger
                         .child("Delete")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.state
@@ -520,6 +523,7 @@ impl RoutinesPanel {
                     .rounded_full()
                     .text_size(px(11.5))
                     .cursor_pointer()
+                    // hover-fill: exception choice
                     .bg(if selected {
                         theme.accent_soft
                     } else {
@@ -557,6 +561,7 @@ impl RoutinesPanel {
                     .rounded_full()
                     .text_size(px(11.5))
                     .cursor_pointer()
+                    // hover-fill: exception choice
                     .bg(if selected {
                         theme.accent_soft
                     } else {
