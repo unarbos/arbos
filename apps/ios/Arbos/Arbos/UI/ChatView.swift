@@ -1614,6 +1614,7 @@ struct ChatSession: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("New messages")
         .accessibilityHint("Scrolls to the latest message")
+        .accessibilityIdentifier("chat-jump-to-latest")
         .accessibilityAddTraits(.isButton)
         .accessibilityAction { jumpToLatest() }
     }
@@ -1740,6 +1741,7 @@ struct ChatSession: View {
                         messagesCount: messages.count,
                         canReply: { isMessageRow($0) },
                         onQuoteTap: { revealQuoted($0) },
+                        onReply: { beginReply(to: $0) },
                         onMenu: { runMessageMenu($0, row: $1) },
                         actionsRowId: actionsRow?.id,
                         onLongPress: { row in openActions(row) }
@@ -2138,7 +2140,7 @@ struct ChatSession: View {
     }
 
     /// Reply to this row: composer preview + focus (people chats also address the agent).
-    /// Long-press → Reply on the bubble.
+    /// Long-press → Reply on the bubble, and the bubble's swipe right (`BubbleSwipe`).
     private func beginReply(to row: Row) {
         guard let m = messageById[row.messageId] else { return }
         editing = nil
@@ -2383,6 +2385,7 @@ struct ChatSession: View {
         .clipped()
         .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(theme.bubbleAssistant))
         .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("composer-reply-preview")
     }
 
     /// Reply in DM: the same bar, "Replying to Jacob in Arbonites" + the snapshot the row
@@ -3461,6 +3464,8 @@ private struct TranscriptRows: View, Equatable {
     let messagesCount: Int
     let canReply: (Row) -> Bool
     let onQuoteTap: (Quote) -> Void
+    /// Swipe right on a message bubble (`BubbleSwipe`) → the composer's reply quote.
+    let onReply: (Row) -> Void
     let onMenu: (MessageMenuItem, Row) -> Void
     /// The bubble whose long-press actions are open (it alone reports its frame).
     let actionsRowId: String?
@@ -3498,6 +3503,7 @@ private struct TranscriptRows: View, Equatable {
             RowView(model: model, theme: theme, composerInset: composerInset, row: row, chatId: chatId, width: width, timeReveal: timeReveal,
                     onQuoteTap: onQuoteTap,
                     highlighted: highlightedMessage == row.messageId,
+                    onReply: reply ? { onReply(row) } : nil,
                     mentions: mentions)
                 .equatable()
                 .padding(.top, row.id == firstId ? 0 : row.gapBefore)
