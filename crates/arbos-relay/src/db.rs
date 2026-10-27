@@ -585,6 +585,8 @@ impl Db {
         c.execute_batch(crate::db_people::PEOPLE_SCHEMA)?;
         Self::migrate_mono_avatar_defaults(&c)?;
         c.execute_batch(crate::db_push::PUSH_SCHEMA)?;
+        c.execute_batch(crate::push::store::OUTBOX_SCHEMA)?;
+        c.execute_batch(crate::push::eligibility::LEVEL_SCHEMA)?;
         c.execute_batch(crate::db_calls::CALLS_SCHEMA)?;
         crate::db_calls::migrate_calls(&c);
         c.execute_batch(crate::db_voice::VOICE_SCHEMA)?;
@@ -861,6 +863,17 @@ impl Db {
     }
 
     // ---- projects and chats -------------------------------------------------------------------
+
+    /// Admin: a project's daily cap in USD, or the unlimited sentinel.
+    pub fn set_project_spend_cap(&self, id: &str, cap: f64) -> Result<bool> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE projects SET spend_cap_daily = ?2 WHERE id = ?1",
+                params![id, cap],
+            )
+            .map(|n| n > 0)
+        })
+    }
 
     pub fn insert_project(&self, p: &Project) -> Result<()> {
         self.with(|c| {

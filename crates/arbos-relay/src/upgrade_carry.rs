@@ -212,6 +212,9 @@ pub struct Measure {
 pub fn measure(entries: &[Entry]) -> Measure {
     let mut m = Measure::default();
     let mut seen = std::collections::HashSet::new();
+    // Projects whose pi-ext package tree holds regular files: on a current image the directory
+    // holds only the two seed symlinks, so a file below it means a dereferenced copy.
+    let mut copies = Vec::new();
     for e in entries {
         if !e.carried() {
             m.skipped_special += 1;
@@ -227,13 +230,18 @@ pub fn measure(entries: &[Entry]) -> Measure {
         if is_rebuildable(&e.path) {
             m.rebuildable_entries += 1;
             m.rebuildable_bytes += bytes;
-            if e.kind == 'd' && e.path.ends_with(REBUILDABLE_SUFFIX) {
+            if e.kind == 'f' {
                 if let Some(p) = e.path.strip_prefix("./").and_then(|r| r.split('/').next()) {
-                    m.projects_with_copies.push(p.to_owned());
+                    if copies.last().is_none_or(|last: &String| last != p)
+                        && !copies.iter().any(|c| c == p)
+                    {
+                        copies.push(p.to_owned());
+                    }
                 }
             }
         }
     }
+    m.projects_with_copies = copies;
     m
 }
 
@@ -808,17 +816,39 @@ mod tests {
                 9,
                 "./.arbos/pi/extensions/arbos-pi-ext/node_modules",
             ),
+            (
+                "d",
+                4096,
+                10,
+                "./p2/.arbos/pi/extensions/arbos-pi-ext/node_modules",
+            ),
+            (
+                "l",
+                40,
+                11,
+                "./p2/.arbos/pi/extensions/arbos-pi-ext/node_modules/typebox",
+            ),
+            (
+                "l",
+                40,
+                12,
+                "./p2/.arbos/pi/extensions/arbos-pi-ext/node_modules/@earendil-works",
+            ),
         ]);
         let e = parse_listing(&b);
-        assert_eq!(e.len(), 10);
+        assert_eq!(e.len(), 13);
         assert_eq!(e[6].path, "./p1/tab\tin name");
         let m = measure(&e);
-        assert_eq!(m.entries, 9, "the socket is not carried");
+        assert_eq!(m.entries, 12, "the socket is not carried");
         assert_eq!(m.skipped_special, 1);
         assert_eq!(m.bytes, 100 + 5 + 50, "hardlinked bytes count once");
-        assert_eq!(m.rebuildable_entries, 2);
+        assert_eq!(m.rebuildable_entries, 5);
         assert_eq!(m.rebuildable_bytes, 50);
-        assert_eq!(m.projects_with_copies, vec!["p1".to_owned()]);
+        assert_eq!(
+            m.projects_with_copies,
+            vec!["p1".to_owned()],
+            "p2 holds only the seed's symlinks: a current-image project, not a copy"
+        );
         assert!(!is_rebuildable(
             "./.arbos/pi/extensions/arbos-pi-ext/node_modules"
         ));

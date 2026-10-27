@@ -785,3 +785,138 @@ extension View {
         self.padding(.horizontal, Controls.inset).padding(.top, Controls.top)
     }
 }
+
+// MARK: - List top fade ([feedback iphone-list-top-fade-2026-10-26], Jacob 2026-10-26 16:05 CR)
+
+/// The fade every floating top bar sits on. Jacob's TestFlight shot: scrolled chat rows read at
+/// full strength behind the status bar and around the All · Agents · People · Servers tabs —
+/// Home's fade was a 100 pt gradient that began at the safe-area top, under the status bar, and
+/// the tabs scrolled with the list. Now one layer for every list: it starts at the **physical top
+/// edge** (`ignoresSafeArea(.container, edges: .top)` on the fade, never on the list), is opaque
+/// through the status bar and the whole chrome (bar, and the tab bar where there is one), then
+/// fades out over `band` — the Mac's list / transcript top fade (`header::metrics::FADE_BAND`:
+/// text gone at the edge, full ≈ 50 pt down). On Glass the band is `.ultraThinMaterial` under the
+/// wash (the iOS 26 glass discs blur only their own capsule); on Matte it is the page colour.
+/// `ListTopFadeTests` asserts the layer's top inset is 0 and its height covers status bar + chrome
+/// on every screen in `Screen`.
+struct ListTopFade: View {
+    @Environment(\.theme) private var theme
+    let screen: Screen
+    /// Chrome below the bar that is not part of the screen's fixed declaration (the chat's
+    /// Search-in-chat bar, call strips, member chips).
+    var extra: CGFloat = 0
+
+    /// The wash over the material on Glass. The chat header used 0.78 (#1336), which still let a
+    /// row read at about half strength through the material under the tabs (first after-shot of
+    /// this fix); 0.94 keeps the frosted edge and hides the text.
+    static let glassWash: Double = 0.94
+
+    /// Every iPhone list with a floating top bar. `solid` is how far past the status bar the layer
+    /// stays opaque; `band` is the Mac-family gradient after it (the Mac's `FADE_BAND` = bar + 6:
+    /// rows gone at the edge, full where the content starts at rest).
+    enum Screen: String, CaseIterable {
+        case home, homeSearch, hiddenChats, serverChannels, chat, agentPage, personPage, groupPage, serverPage, channelPage, ownProfile, library
+        /// The bar's top gap: pane pages keep `ProfileTopBar`'s 16, the rest `Controls.top`.
+        var barTop: CGFloat {
+            switch self {
+            case .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library: return 16
+            case .home, .homeSearch, .hiddenChats, .serverChannels, .chat: return Controls.top
+            }
+        }
+        /// Fixed chrome under the bar: Home's filter tabs. The pane pages pin hero + tabs themselves.
+        var chrome: CGFloat {
+            switch self {
+            case .home: return HomeChrome.filterBand
+            case .homeSearch, .hiddenChats, .serverChannels, .chat, .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library: return 0
+            }
+        }
+        /// Opaque past the status bar. Home: through the disc row and the whole tab bar, so nothing
+        /// reads through behind the discs or around the tabs (Jacob's shot). Chat: 20 pt into the
+        /// header (its `headerBlur` since #1336). Bar-only lists and pane pages: the status bar alone.
+        var solid: CGFloat {
+            switch self {
+            case .home: return Controls.top + Controls.diameter + HomeChrome.filterBand
+            case .chat: return 20
+            case .homeSearch, .hiddenChats, .serverChannels, .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library: return 0
+            }
+        }
+        /// The gradient after `solid`, ending where the content starts at rest.
+        var band: CGFloat {
+            switch self {
+            case .home: return HomeChrome.listTop - solid
+            case .chat: return Controls.top + Controls.diameter + 6 - solid
+            case .homeSearch, .hiddenChats, .serverChannels: return HomeChrome.barOnlyListTop
+            case .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library: return PaneKit.pageTop
+            }
+        }
+    }
+
+    /// The layer's geometry for a status-bar height: where it starts, how far it is opaque, how tall it is.
+    struct Spec: Equatable {
+        let topInset: CGFloat
+        let solid: CGFloat
+        let height: CGFloat
+    }
+
+    static func spec(_ screen: Screen, statusBar: CGFloat, extra: CGFloat = 0) -> Spec {
+        let solid = statusBar + screen.solid + extra
+        return Spec(topInset: 0, solid: solid, height: solid + screen.band)
+    }
+
+    var body: some View {
+        // The reader keeps the safe area, so its top inset is the status bar; the layer inside
+        // it ignores the top edge and so starts at the physical top (a reader that ignored the
+        // safe area itself would report an inset of 0 — the first after-shot's gap).
+        GeometryReader { geo in
+            let spec = Self.spec(screen, statusBar: geo.safeAreaInsets.top, extra: extra)
+            ZStack {
+                if theme.isGlass {
+                    Rectangle().fill(.ultraThinMaterial)
+                }
+                theme.bg.opacity(theme.isGlass ? Self.glassWash : 1)
+            }
+            .frame(height: spec.height)
+            .mask(
+                LinearGradient(
+                    stops: [
+                        .init(color: .black, location: 0),
+                        .init(color: .black, location: spec.solid / spec.height),
+                        .init(color: .clear, location: 1),
+                    ],
+                    startPoint: .top, endPoint: .bottom)
+            )
+            .frame(maxWidth: .infinity, alignment: .top)
+            .ignoresSafeArea(.container, edges: .top)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+extension View {
+    /// Rig: `ARBOS_LIST_SCROLL=<n>` scrolls the enclosing `ScrollViewReader`'s list so `ids[n]`
+    /// sits at the top, once the rows are on screen.
+    func rigListScroll<ID: Hashable>(_ proxy: ScrollViewProxy, ids: [ID]) -> some View {
+        onAppear {
+            guard let n = DebugHooks.listScroll, ids.indices.contains(n) else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                withAnimation(nil) { proxy.scrollTo(ids[n], anchor: .top) }
+            }
+        }
+    }
+}
+
+/// Home's fixed chrome under the account / `+` discs: the filter tabs
+/// ([feedback iphone-list-top-fade-2026-10-26]: the tabs no longer scroll with the list, so the
+/// fade can be opaque through them).
+extension HomeChrome {
+    /// Tab pill (32) with `filterTop` above and 4 below.
+    static let filterTop: CGFloat = 8
+    static let filterBand: CGFloat = filterTop + 32 + 4
+    /// Rows scrolling under the tabs vanish over this band; the first row sits at its end at rest.
+    static let fadeBand: CGFloat = 20
+    /// The list's first row starts this far under the safe-area top: bar + tabs + the fade band.
+    static let listTop: CGFloat = Controls.top + Controls.diameter + filterBand + fadeBand
+    /// Lists with a bar and nothing under it (hidden chats, server channels, search results).
+    static let barOnlyListTop: CGFloat = Controls.top + Controls.diameter + 12
+}
