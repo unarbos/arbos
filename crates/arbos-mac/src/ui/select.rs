@@ -1269,9 +1269,13 @@ impl Element for SelectableText {
                     return;
                 };
                 // A plain click opens what is under the pointer, in the
-                // element the press began in (the one whose text it is).
+                // element the press began in (the one whose text it is). The
+                // second click of a double-click selects a word and opens
+                // nothing; a synthetic click (an accessibility clicker, a
+                // CGEvent without a click state) reaches the app as click
+                // count 0 and is a single click.
                 if plain_click
-                    && event.click_count == 1
+                    && event.click_count <= 1
                     && hitbox.is_hovered(window)
                     && selection.read(cx).model.pressed_in(&bubble.key, &span)
                 {
@@ -2268,6 +2272,59 @@ mod tests {
             opened(&selection, vcx).len(),
             lines,
             "the tail is plain text"
+        );
+    }
+
+    /// A synthetic click arrives with click count 0 (a CGEvent posted without
+    /// a click state, an accessibility clicker) and is a single click; the
+    /// second click of a double-click (count 2) selects the word instead.
+    #[gpui::test]
+    fn a_click_count_of_zero_is_a_single_click_and_a_double_click_is_not(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (selection, vcx, bounds, line_h) = link_bubble(cx, 1200.0);
+        let none = gpui::Modifiers::default();
+        let on_link = point(bounds.origin.x + px(40.0), bounds.origin.y + line_h / 2.0);
+        vcx.simulate_event(MouseDownEvent {
+            position: on_link,
+            modifiers: none,
+            button: MouseButton::Left,
+            click_count: 0,
+            first_mouse: false,
+        });
+        vcx.simulate_event(MouseUpEvent {
+            position: on_link,
+            modifiers: none,
+            button: MouseButton::Left,
+            click_count: 0,
+        });
+        vcx.run_until_parked();
+        assert_eq!(opened(&selection, vcx).len(), 1, "count 0 opens once");
+
+        for count in [1, 2] {
+            vcx.simulate_event(MouseDownEvent {
+                position: on_link,
+                modifiers: none,
+                button: MouseButton::Left,
+                click_count: count,
+                first_mouse: false,
+            });
+            vcx.simulate_event(MouseUpEvent {
+                position: on_link,
+                modifiers: none,
+                button: MouseButton::Left,
+                click_count: count,
+            });
+            vcx.run_until_parked();
+        }
+        assert_eq!(
+            opened(&selection, vcx).len(),
+            2,
+            "the double-click's second release selected a word, not a link"
+        );
+        assert!(
+            selection.read_with(&*vcx, |s, _| s.selected_text().is_some()),
+            "the double-click selected the word"
         );
     }
 
