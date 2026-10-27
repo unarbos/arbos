@@ -19,7 +19,7 @@ use crate::model::SpaceKind;
 use crate::model::{
     add_members_plan, added_line, call_ended_line, created_group, reachable_line,
     reconcile_optimistic_notices, trace_rows, AccountView, Call, CallEnded, CallKind, CallMissed,
-    OptimisticNotice, Person, Reachable, Sender, Voice,
+    MembershipNotice, NoticeSubject, OptimisticNotice, Person, Reachable, Sender, Voice,
 };
 use crate::model::{
     new_id, now_ms, Attachment, AttachmentKind, BoxReport, BoxState, ChannelSel, ChannelsView,
@@ -4365,6 +4365,7 @@ impl AppState {
                 subagent_id: None,
                 subagent_name: None,
                 handoff_messages: None,
+                notice: None,
                 worker: false,
                 job: None,
                 hidden: false,
@@ -5127,6 +5128,7 @@ impl AppState {
                 subagent_id: None,
                 subagent_name: None,
                 handoff_messages: None,
+                notice: None,
                 worker: false,
                 job: None,
                 hidden: false,
@@ -5532,6 +5534,7 @@ impl AppState {
                 subagent_id: None,
                 subagent_name: None,
                 handoff_messages: None,
+                notice: None,
                 worker: false,
                 job: None,
                 hidden: false,
@@ -7326,6 +7329,7 @@ impl AppState {
                 subagent_id: None,
                 subagent_name: None,
                 handoff_messages: None,
+                notice: None,
                 worker: false,
                 job: None,
                 hidden: false,
@@ -7460,6 +7464,7 @@ impl AppState {
                 subagent_id: None,
                 subagent_name: None,
                 handoff_messages: None,
+                notice: None,
                 worker: false,
                 job: None,
                 hidden: false,
@@ -8570,10 +8575,21 @@ impl AppState {
                 .find(|p| &p.id == id)
                 .map(|p| p.name.clone())
         }));
+        let mut subjects: Vec<NoticeSubject> = picked
+            .iter()
+            .map(|p| NoticeSubject {
+                kind: "user".into(),
+                id: p.id.clone(),
+            })
+            .collect();
+        subjects.extend(plan.agent_ids.iter().map(|id| NoticeSubject {
+            kind: "agent".into(),
+            id: id.clone(),
+        }));
         if let Some(p) = self.projects.iter_mut().find(|p| p.id == plan.chat_id) {
             p.people.extend(picked);
         }
-        self.show_membership_notice(&plan.chat_id, &names, cx);
+        self.show_membership_notice(&plan.chat_id, &names, subjects, cx);
         self.command(ClientCommand::AddMembers {
             chat_id: plan.chat_id,
             handles: plan.handles,
@@ -8912,7 +8928,11 @@ impl AppState {
             .find(|p| p.id == project_id)
             .map(|p| vec![p.name.clone()])
             .unwrap_or_default();
-        self.show_membership_notice(&chat_id, &names, cx);
+        let subjects = vec![NoticeSubject {
+            kind: "agent".into(),
+            id: project_id.clone(),
+        }];
+        self.show_membership_notice(&chat_id, &names, subjects, cx);
         self.command(ClientCommand::AddAgent {
             chat_id,
             project_id,
@@ -8923,12 +8943,24 @@ impl AppState {
     /// The adding device's own "<me> added <names>" line, on screen the moment Add is pressed
     /// (ARB-393). The relay writes the row of record; [`Self::fold_optimistic_notices`] swaps
     /// this copy out when that row lands.
-    fn show_membership_notice(&mut self, chat_id: &str, names: &[String], cx: &mut Context<Self>) {
+    fn show_membership_notice(
+        &mut self,
+        chat_id: &str,
+        names: &[String],
+        subjects: Vec<NoticeSubject>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(text) = added_line(&self.me_name(), names) else {
             return;
         };
         let now = now_ms();
-        let notice = OptimisticNotice::new(text, now);
+        let me_id = self.me_id();
+        let facts = (!me_id.is_empty() && !subjects.is_empty()).then(|| MembershipNotice {
+            kind: "added".into(),
+            actor: me_id,
+            subjects,
+        });
+        let notice = OptimisticNotice::new(text, now, facts);
         if trace_rows() {
             eprintln!(
                 "rows: optimistic-notice chat={chat_id} id={} text={:?} at={now}",
