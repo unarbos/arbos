@@ -178,6 +178,7 @@ struct ServerChannelsView: View {
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
             .background(theme.bg)
+        .claimFailures("join-server", ["join the server"])
             .refreshable { await model.refreshServers() }
             .rigListScroll(proxy, ids: server?.liveChannels.map(\.id) ?? [])
             }
@@ -267,7 +268,6 @@ struct NewChannelSheet: View {
     @State private var name = ""
     @State private var restricted = false
     @State private var creating = false
-    @State private var errorText: String?
     @FocusState private var focused: Bool
 
     private var slug: String { AppModel.channelSlug(name) }
@@ -276,6 +276,9 @@ struct NewChannelSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 22) {
+                    // The sheet's note: under the header, before the first field.
+                    SheetErrorNote(id: "new-channel-error", onTryAgain: create)
+                        .padding(.horizontal, 16)
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Channel name").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                         HStack(spacing: 6) {
@@ -303,13 +306,6 @@ struct NewChannelSheet: View {
                                 trailing: AnyView(Toggle("", isOn: $restricted).labelsHidden().tint(theme.primary)))
                     }
 
-                    if let errorText {
-                        Text(errorText)
-                            .font(theme.font(Theme.small))
-                            .foregroundStyle(theme.danger)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal, 20)
-                    }
                     Color.clear.frame(height: 24)
                 }
                 .padding(.top, 28)
@@ -344,21 +340,18 @@ struct NewChannelSheet: View {
         .presentationBackground(theme.bg)
         .presentationCornerRadius(28)
         .preferredColorScheme(theme.isDark ? .dark : .light)
+        .claimFailures("new-channel", ["create the channel"])
     }
 
     private func create() {
         guard !slug.isEmpty, !creating else { return }
         creating = true
-        errorText = nil
         Task {
             if let c = await model.createChannel(serverId: serverId, name: slug, restricted: restricted) {
                 dismiss()
                 model.open(channel: c)
-            } else {
-                // Copy onto this screen: RootView's alert is behind the sheet.
-                errorText = model.notice?.text ?? "Could not create the channel."
-                model.notice = nil
             }
+            // A refusal is the claimed failure, drawn by the note at the top of the sheet.
             creating = false
         }
     }
@@ -375,7 +368,6 @@ struct JoinServerView: View {
     @State private var joining = false
     @State private var searching = false
     @State private var openHits: [Server] = []
-    @State private var errorText: String?
     @FocusState private var focused: Bool
 
     /// The code at the end of `https://…/join/<code>` or `arbos://server/<code>`, or the bare code.
@@ -430,11 +422,9 @@ struct JoinServerView: View {
             .disabled(code.isEmpty || joining || (!looksLikeInvite && openHits.isEmpty))
             .opacity(code.isEmpty || joining || (!looksLikeInvite && openHits.isEmpty) ? 0.45 : 1)
             .padding(.horizontal, 24)
-            if let errorText {
-                Text(errorText)
-                    .font(theme.font(Theme.small)).foregroundStyle(theme.danger)
-                    .multilineTextAlignment(.center).padding(.horizontal, 36)
-            }
+            // The note: under the Join button, before the open-server list — the shared element.
+            SheetErrorNote(id: "join-server-error", onTryAgain: join)
+                .padding(.horizontal, 24)
             if !openHits.isEmpty {
                 VStack(spacing: 0) {
                     ForEach(Array(openHits.enumerated()), id: \.element.id) { i, s in
@@ -477,13 +467,9 @@ struct JoinServerView: View {
         if looksLikeInvite {
             guard !code.isEmpty else { return }
             joining = true
-            errorText = nil
             Task {
                 if await model.joinServer(code: code) {
                     onDone()
-                } else {
-                    errorText = model.notice?.text ?? "Could not join the server."
-                    model.notice = nil
                 }
                 joining = false
             }
@@ -495,13 +481,9 @@ struct JoinServerView: View {
     private func joinOpen(_ s: Server) {
         guard !joining else { return }
         joining = true
-        errorText = nil
         Task {
             if await model.joinOpenServer(s.id) {
                 onDone()
-            } else {
-                errorText = model.notice?.text ?? "Could not join the server."
-                model.notice = nil
             }
             joining = false
         }
