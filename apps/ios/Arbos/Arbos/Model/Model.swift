@@ -494,9 +494,12 @@ struct Attachment: Codable, Equatable {
     var kind: String? = nil
     /// Size on the relay, when the producer knew it (the file card's "PDF · 1.8 MB").
     var bytes: Int64? = nil
+    /// The fallback picture of a chart bubble: names the `chart` part of the same message.
+    /// A client that draws the chart hides this attachment ([feedback chart-bubble-ios-2026-10-26]).
+    var chartPart: String? = nil
 
     enum CodingKeys: String, CodingKey {
-        case name, mime, kind, bytes
+        case name, mime, kind, bytes, chartPart
         case blobRef = "ref"
     }
 
@@ -599,6 +602,10 @@ enum Part: Equatable {
     case status(id: Id, code: StatusKind, message: String)
     case question(id: Id, question: Question)
     case subagentResult(id: Id)
+    /// Chart bubble ([feedback chart-bubble-ios-2026-10-26]): the structured chart `post_chart`
+    /// posted. `spec` is the validated `arbos_core::chart::Chart` as JSON (what the FFI reads),
+    /// `table` its markdown table, `fallback` the PNG attachment part this client hides.
+    case chart(id: Id, specVersion: Int, spec: String, table: String, fallback: String?)
     /// Secret hand-off: the message's value moved into the vault; the row is the ghost
     /// "Secret saved as NAME". Names only — there is no value field.
     case secretRedacted(id: Id, name: String, savedBy: String, agent: String?)
@@ -608,7 +615,7 @@ enum Part: Equatable {
         switch self {
         case .text(let id, _), .reasoning(let id), .tool(let id, _, _), .attachment(let id, _),
              .error(let id, _, _), .status(let id, _, _), .question(let id, _), .subagentResult(let id),
-             .secretRedacted(let id, _, _, _), .unknown(let id):
+             .chart(let id, _, _, _, _), .secretRedacted(let id, _, _, _), .unknown(let id):
             return id
         }
     }
@@ -992,6 +999,59 @@ struct ReplyRef: Equatable, Hashable {
     }
 }
 
+/// The facts behind a membership system line (relay `notices::Notice`).
+struct MembershipNotice: Equatable {
+    struct Subject: Equatable {
+        /// `user` or `agent`.
+        var kind: String
+        var id: String
+    }
+
+    /// `added` | `removed` | `left` | `joined`.
+    var kind: String
+    /// User id of the person who acted.
+    var actor: String
+    var subjects: [Subject]
+
+    init(kind: String, actor: String, subjects: [Subject]) {
+        self.kind = kind
+        self.actor = actor
+        self.subjects = subjects
+    }
+
+    init?(row: Any?) {
+        guard let m = row as? [String: Any],
+              let kind = m["kind"] as? String, !kind.isEmpty,
+              let actor = m["actor"] as? String, !actor.isEmpty else { return nil }
+        self.kind = kind
+        self.actor = actor
+        subjects = ((m["subjects"] as? [Any]) ?? []).compactMap { raw in
+            guard let s = raw as? [String: Any],
+                  let k = s["kind"] as? String, let id = s["id"] as? String, !id.isEmpty else { return nil }
+            return Subject(kind: k, id: id)
+        }
+    }
+
+    /// The line worded from `nameOf(kind, id)` — the live roster name of a `user` / `agent`.
+    /// nil when anyone named is unknown here (a person who left, a deleted agent): the caller
+    /// then shows the row's stored words.
+    func text(nameOf: (String, String) -> String?) -> String? {
+        guard let who = nameOf("user", actor) else { return nil }
+        var names: [String] = []
+        for s in subjects {
+            guard let n = nameOf(s.kind, s.id) else { return nil }
+            names.append(n)
+        }
+        switch kind {
+        case "added": return names.isEmpty ? nil : "\(who) added \(OptimisticNotice.joinNames(names))"
+        case "removed": return names.isEmpty ? nil : "\(who) removed \(OptimisticNotice.joinNames(names))"
+        case "left": return "\(who) left"
+        case "joined": return "\(who) joined"
+        default: return nil
+        }
+    }
+}
+
 struct Message: Identifiable, Equatable {
     var id: Id
     var chatId: Id
@@ -1054,8 +1114,18 @@ struct Message: Identifiable, Equatable {
     var greeting: Bool = false
     /// Emoji reactions on this message (`reactions` map in the chat doc). Multiple emojis allowed.
     var reactions: [MessageReaction] = []
+    /// A membership line's facts (relay `notices::Notice`): actor and subjects by id, so the
+    /// line is worded from the live roster and a rename applies to old lines too ("Const
+    /// added Aureum" → "Jacob added Aureum", 2026-10-26). nil on rows older than the field.
+    var notice: MembershipNotice? = nil
 
     var isStreaming: Bool { status == .streaming }
+
+    /// Does this message carry the `chart` part `partId`? (Its fallback picture is hidden only
+    /// when the chart it stands in for is really here.)
+    func hasChartPart(_ partId: String) -> Bool {
+        parts.contains { if case .chart(let id, _, _, _, _) = $0 { return id == partId } else { return false } }
+    }
 
     var plainText: String {
         parts.compactMap(\.textValue).joined(separator: "\n")
@@ -1219,7 +1289,8 @@ enum DocJSON {
             activity: str(m["activity"]).flatMap { $0.isEmpty ? nil : $0 },
             voice: bool(m["voice"]) || str(m["source"]) == "voice",
             greeting: bool(m["greeting"]),
-            reactions: reactions(m["reactions"])
+            reactions: reactions(m["reactions"]),
+            notice: MembershipNotice(row: m["notice"])
         )
     }
 
@@ -1283,8 +1354,24 @@ enum DocJSON {
                     mime: str(a["mime"]) ?? "application/octet-stream",
                     blobRef: str(a["ref"]),
                     kind: str(a["kind"]).flatMap { $0 == "attachment" ? nil : $0 },
-                    bytes: (a["bytes"] as? NSNumber)?.int64Value
+                    bytes: (a["bytes"] as? NSNumber)?.int64Value,
+                    chartPart: str(a["chartPart"])
                 )
+            )
+        case "chart":
+            // The spec travels as JSON text: the core parses and lays it out through the FFI.
+            let spec: String = {
+                guard let obj = pm["chart"], JSONSerialization.isValidJSONObject(obj),
+                      let data = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys]),
+                      let text = String(data: data, encoding: .utf8) else { return "" }
+                return text
+            }()
+            return .chart(
+                id: id,
+                specVersion: (pm["specVersion"] as? NSNumber)?.intValue ?? 0,
+                spec: spec,
+                table: str(pm["table"]) ?? "",
+                fallback: str(pm["fallback"])
             )
         case "error":
             return .error(id: id, code: str(pm["code"]) ?? "error", message: str(pm["message"]) ?? "")

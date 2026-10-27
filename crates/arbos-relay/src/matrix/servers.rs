@@ -1584,6 +1584,9 @@ pub async fn me_matrix(State(state): State<AppState>, principal: Principal) -> R
     {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
+    // A device that can read channels can be told about them: the relay becomes this user's
+    // push gateway (every live device; reads.rs `on_notify` fans channel messages out).
+    state.matrix.pushers(&state, &me, true);
     Json(json!({ "homeserver": homeserver, "user_id": mxid, "access_token": token, "device_id": mx_device }))
         .into_response()
 }

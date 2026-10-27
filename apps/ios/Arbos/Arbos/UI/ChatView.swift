@@ -213,6 +213,8 @@ struct ChatSession: View {
     private static let memoCancelDistance: CGFloat = 56
 
     @State private var showProfile = false
+    /// Unblock asks first ([feedback blocked-state-ios-2026-10-26]).
+    @State private var confirmUnblock = false
     @State private var showSearch = false
     @State private var searchText = ""
     /// Group chats: pick members to call, or call everyone.
@@ -481,6 +483,12 @@ struct ChatSession: View {
     private var isChannel: Bool { projectId == channelSlot }
     private var channelServer: Server? { channel.flatMap { model.server($0.serverId) } }
     private var counterpart: ChatMember? { people?.counterpart(me: model.user?.id) }
+    /// The DM's other person while they are on my block list ([feedback
+    /// blocked-state-ios-2026-10-26]): the header tag and the composer bar follow it.
+    private var blockedPeer: ChatMember? {
+        guard let people, !people.isGroup || people.kind == "dm", let other = counterpart else { return nil }
+        return BlockedState.isBlocked(id: other.id, handle: other.handle, in: model.blocked) ? other : nil
+    }
     private var messages: [Message] { model.messages(of: chatId) }
     private var needsAnswer: Bool { !isChannel && model.chatNeedsAnswer(chatId) }
     /// True while a turn runs, a subagent hand-off is still open, or right
@@ -629,6 +637,16 @@ struct ChatSession: View {
             let id = m.member.hasPrefix("agent:") ? String(m.member.dropFirst(6)) : m.member
             if let name = m.project?.name ?? m.name, !name.isEmpty { agentNames[id] = name }
         }
+        // People by user id → current name (handle when unnamed); me from the live `/me`.
+        var memberNames: [String: String] = [:]
+        for m in people?.humans ?? [] {
+            let name = m.name?.trimmingCharacters(in: .whitespaces) ?? ""
+            memberNames[m.id] = name.isEmpty ? "@\(m.handle)" : name
+        }
+        if let who = model.user {
+            let name = who.name?.trimmingCharacters(in: .whitespaces) ?? ""
+            memberNames[who.id] = name.isEmpty ? "@\(who.login)" : name
+        }
         let list = messages
         #if DEBUG
         let refreshStarted = Date()
@@ -643,6 +661,9 @@ struct ChatSession: View {
         // Sender names inside the bubbles: groups and channels only — never a 1:1 chat.
         let multiParty = isChannel || (people?.isGroup ?? false)
         let peopleFlag = isPeople || isChannel
+        // People I blocked: their rows fold into one line for me (groups only; a DM with
+        // them has the composer bar) — [feedback blocked-state-ios-2026-10-26].
+        let hiddenSenders = people.map { model.hiddenSenders(in: $0) } ?? []
 
         // Incremental: same ids and only the last message's content changed (streaming
         // token) — rebuild only the tail. A middle edit (reaction, etc.) falls through.
@@ -661,7 +682,7 @@ struct ChatSession: View {
                 let prev = list.count >= 2 ? list[list.count - 2] : nil
                 let slice = prev.map { [$0, last] } ?? [last]
                 let rebuilt = Transcript.rows(slice, byId: byId, projectId: slot, me: me,
-                                              people: peopleFlag, agentNames: agentNames, multiParty: multiParty)
+                                              people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames, hiddenSenders: hiddenSenders)
                 let newTail: [Row]
                 if let prev {
                     let start = rebuilt.firstIndex(where: { $0.messageId == last.id }).map { ix -> Int in
@@ -688,7 +709,7 @@ struct ChatSession: View {
             let prev = list.count >= 2 ? list[list.count - 2] : nil
             let slice = prev.map { [$0, last] } ?? [last]
             let rebuilt = Transcript.rows(slice, byId: byId, projectId: slot, me: me,
-                                          people: peopleFlag, agentNames: agentNames, multiParty: multiParty)
+                                          people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames, hiddenSenders: hiddenSenders)
             let newTail: [Row]
             if let prev {
                 let start = rebuilt.firstIndex(where: { $0.messageId == last.id }).map { ix -> Int in
@@ -713,7 +734,7 @@ struct ChatSession: View {
 
         let byId = Transcript.index(list)
         let next = Transcript.rows(list, byId: byId, projectId: slot, me: me,
-                                   people: peopleFlag, agentNames: agentNames, multiParty: multiParty)
+                                   people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames, hiddenSenders: hiddenSenders)
         // Rows appended after the last one we had (new messages) join the window, so the
         // oldest row on screen does not fall out of the view tree when a new one lands.
         // History that arrives above it — the first snapshot, a backfill, an older
@@ -845,6 +866,10 @@ struct ChatSession: View {
                             .frame(maxWidth: .infinity)
                             .frame(height: Theme.composerHeight)
                             .accessibilityIdentifier("group-silenced")
+                    } else if let peer = blockedPeer {
+                        // A DM with someone I blocked has no input ([feedback
+                        // blocked-state-ios-2026-10-26]): "You blocked X · Unblock" in its place.
+                        BlockedComposerBar(name: peer.displayName) { confirmUnblock = true }
                     } else {
                         composer
                     }
@@ -894,7 +919,8 @@ struct ChatSession: View {
                         },
                         onDismiss: { closeActions() },
                         bubble: {
-                            RowView(model: model, theme: theme, composerInset: composerSideInset, row: row, chatId: chatId, width: geo.size.width, timeReveal: 0,
+                            RowView(model: model, theme: theme, composerInset: composerSideInset, row: row, chatId: chatId, width: geo.size.width,
+                                    people: isPeople || isChannel, timeReveal: 0,
                                     mentions: MentionTable.Cache.shared.table(model: model, theme: theme))
                                 .padding(.horizontal, 16)
                         }
@@ -933,6 +959,11 @@ struct ChatSession: View {
                 .environment(\.theme, theme)
             }
         }
+        .confirmationDialog(BlockedState.confirmTitle(handle: blockedPeer?.handle ?? counterpart?.handle ?? ""), isPresented: $confirmUnblock, titleVisibility: .visible) {
+            Button(BlockedState.unblock) {
+                if let peer = blockedPeer, let entry = BlockRow.entry(in: model.blocked, id: peer.id, handle: peer.handle) { model.unblock(entry) }
+            }
+        } message: { Text(BlockedState.confirmNote) }
         .sheet(isPresented: $showProfile) {
             AgentEditSheet(projectId: projectId).environmentObject(model).environment(\.theme, theme)
         }
@@ -1304,9 +1335,11 @@ struct ChatSession: View {
             if isChannel, old.last?.id != new.last?.id { model.markChannelRead(chatId) }
         }
         // Adding a person or agent updates membership without a new message — rebuild so "@handle joined" appears.
-        .onChange(of: people?.members.map { "\($0.id):\($0.joinedAt)" } ?? []) { _, _ in
+        // A member's rename re-words the membership lines that name them, so the key carries names.
+        .onChange(of: people?.members.map { "\($0.id):\($0.joinedAt):\($0.name ?? "")" } ?? []) { _, _ in
             refreshRows()
         }
+        .onChange(of: model.user?.name) { _, _ in refreshRows() }
         .onChange(of: model.caughtUp.contains(chatId), initial: true) { _, ready in
             if ready, !sentOnce, !DebugHooks.liveDemo, let text = DebugHooks.autoSend, DebugHooks.openChat == chatId {
                 // Several messages separated by " ||| " go out a few seconds apart
@@ -1358,22 +1391,13 @@ struct ChatSession: View {
 
     // MARK: Header (floating glass)
 
-    /// Strip the messages scroll under (ref-02): frosted on Glass, solid fade on Matte.
+    /// Strip the messages scroll under (ref-02): the shared `ListTopFade` from the physical
+    /// top edge — frosted on Glass, solid on Matte — plus whatever the header stacks
+    /// (member chips, the Search-in-chat bar, call strips).
     private var headerBlur: some View {
-        ZStack {
-            if theme.isGlass {
-                Rectangle().fill(.ultraThinMaterial)
-            }
-            theme.bg.opacity(theme.isGlass ? 0.78 : 1)
-        }
-        .frame(height: (showsMemberChips ? 156 : 118) + (Controls.diameter - 42) + headerExtra)
-        .mask(LinearGradient(colors: [.black, .black, .clear], startPoint: .top, endPoint: .bottom))
-        .ignoresSafeArea(edges: .top)
-        .allowsHitTesting(false)
+        ListTopFade(screen: .chat, extra: (showsMemberChips ? 38 : 0) + headerExtra)
     }
 
-    /// Which kind of chat this header fronts — the spec is the same for all four
-    /// ([feedback ios-header-glass-2026-10-25]).
     private var headerKind: ChatHeaderKind {
         if channel != nil { return .channel }
         if let people { return people.isGroup ? .group : .dm }
@@ -1456,6 +1480,8 @@ struct ChatSession: View {
                                     .font(.system(size: Theme.body, weight: .semibold))
                                     .foregroundStyle(theme.text)
                                     .lineLimit(1)
+                                // Blocked ([feedback blocked-state-ios-2026-10-26]): the tag after the name.
+                                if blockedPeer != nil { BlockedTag() }
                             } else {
                                 // Named multi-human group with no picture: title initials.
                                 PersonAvatar(url: nil, handle: people.title, size: Controls.avatar, name: people.title, id: people.id)
@@ -1608,6 +1634,7 @@ struct ChatSession: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("New messages")
         .accessibilityHint("Scrolls to the latest message")
+        .accessibilityIdentifier("chat-jump-to-latest")
         .accessibilityAddTraits(.isButton)
         .accessibilityAction { jumpToLatest() }
     }
@@ -1723,6 +1750,7 @@ struct ChatSession: View {
                         model: model,
                         theme: theme,
                         composerInset: composerSideInset,
+                        people: isPeople || isChannel,
                         mentions: mentions,
                         shown: shown,
                         shownStamp: Self.shownStamp(rowsVersion, windowCount, windowSkipEnd, searchText, showSearch),
@@ -1734,6 +1762,7 @@ struct ChatSession: View {
                         messagesCount: messages.count,
                         canReply: { isMessageRow($0) },
                         onQuoteTap: { revealQuoted($0) },
+                        onReply: { beginReply(to: $0) },
                         onMenu: { runMessageMenu($0, row: $1) },
                         actionsRowId: actionsRow?.id,
                         onLongPress: { row in openActions(row) }
@@ -2012,7 +2041,7 @@ struct ChatSession: View {
         switch row.kind {
         // A secret ghost row has nothing to copy, forward or quote; Delete stays off too —
         // the row is the record that a value went to the vault.
-        case .system, .question, .error, .forwardHint, .secretGhost:
+        case .system, .question, .error, .forwardHint, .secretGhost, .hidden:
             return false
         case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
             return messageById[row.messageId] != nil
@@ -2132,7 +2161,7 @@ struct ChatSession: View {
     }
 
     /// Reply to this row: composer preview + focus (people chats also address the agent).
-    /// Long-press → Reply on the bubble.
+    /// Long-press → Reply on the bubble, and the bubble's swipe right (`BubbleSwipe`).
     private func beginReply(to row: Row) {
         guard let m = messageById[row.messageId] else { return }
         editing = nil
@@ -2377,6 +2406,7 @@ struct ChatSession: View {
         .clipped()
         .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(theme.bubbleAssistant))
         .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("composer-reply-preview")
     }
 
     /// Reply in DM: the same bar, "Replying to Jacob in Arbonites" + the snapshot the row
@@ -3210,6 +3240,8 @@ private struct TranscriptRows: View, Equatable {
     let model: AppModel
     let theme: Theme
     let composerInset: CGFloat
+    /// People chat: the wider bubble caps (`Theme.peopleBubbleInset`).
+    let people: Bool
     let mentions: MentionTable
     let shown: [Row]
     /// Identity of `shown` (rows version + window bounds + search): compared instead of the array.
@@ -3222,6 +3254,8 @@ private struct TranscriptRows: View, Equatable {
     let messagesCount: Int
     let canReply: (Row) -> Bool
     let onQuoteTap: (Quote) -> Void
+    /// Swipe right on a message bubble (`BubbleSwipe`) → the composer's reply quote.
+    let onReply: (Row) -> Void
     let onMenu: (MessageMenuItem, Row) -> Void
     /// The bubble whose long-press actions are open (it alone reports its frame).
     let actionsRowId: String?
@@ -3231,6 +3265,7 @@ private struct TranscriptRows: View, Equatable {
         let same = lhs.shownStamp == rhs.shownStamp
             && lhs.actionsRowId == rhs.actionsRowId
             && lhs.composerInset == rhs.composerInset
+            && lhs.people == rhs.people
             && lhs.theme == rhs.theme
             && lhs.chatId == rhs.chatId
             && lhs.width == rhs.width
@@ -3256,9 +3291,11 @@ private struct TranscriptRows: View, Equatable {
         let firstId = shown.first?.id
         ForEach(shown) { row in
             let reply = canReply(row)
-            RowView(model: model, theme: theme, composerInset: composerInset, row: row, chatId: chatId, width: width, timeReveal: timeReveal,
+            RowView(model: model, theme: theme, composerInset: composerInset, row: row, chatId: chatId, width: width,
+                    people: people, timeReveal: timeReveal,
                     onQuoteTap: onQuoteTap,
                     highlighted: highlightedMessage == row.messageId,
+                    onReply: reply ? { onReply(row) } : nil,
                     mentions: mentions)
                 .equatable()
                 .padding(.top, row.id == firstId ? 0 : row.gapBefore)

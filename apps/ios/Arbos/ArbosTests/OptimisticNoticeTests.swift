@@ -70,6 +70,28 @@ final class OptimisticNoticeTests: XCTestCase {
         XCTAssertEqual(snap.count, 1)
     }
 
+    /// The relay's row confirms the local one by facts (actor + subjects by id), whatever the
+    /// words — a stale local name no longer leaves two lines (#2004).
+    func testFactsConfirmTheLocalNoticeWhateverTheWords() {
+        let now: Int64 = 1_000
+        let facts = MembershipNotice(kind: "added", actor: "gh_1", subjects: [.init(kind: "agent", id: "p1")])
+        let local = OptimisticNotice(text: "Const added Aureum", now: now, notice: facts)
+        var relay = relayRow("r1", "Jacob added Aureum", at: now + 50)
+        relay.notice = facts
+        XCTAssertTrue(local.isConfirmed(by: relay))
+        relay.notice = MembershipNotice(kind: "added", actor: "gh_2", subjects: [.init(kind: "agent", id: "p1")])
+        XCTAssertFalse(local.isConfirmed(by: relay))
+    }
+
+    /// A membership line is worded from the live roster: a rename reaches old lines.
+    func testNoticeTextFollowsTheLiveNames() {
+        let n = MembershipNotice(kind: "added", actor: "gh_1", subjects: [.init(kind: "user", id: "gh_2"), .init(kind: "agent", id: "p1")])
+        let names = ["user:gh_1": "Jacob", "user:gh_2": "Doug", "agent:p1": "Aureum"]
+        XCTAssertEqual(n.text { kind, id in names["\(kind):\(id)"] }, "Jacob added Doug and Aureum")
+        XCTAssertNil(n.text { kind, id in kind == "agent" ? nil : names["\(kind):\(id)"] })
+        XCTAssertEqual(MembershipNotice(kind: "left", actor: "gh_1", subjects: []).text { _, id in names["user:\(id)"] }, "Jacob left")
+    }
+
     @MainActor
     func testAddMembersPaintsTheNoticeBeforeTheRelayAnswers() {
         let model = AppModel()
