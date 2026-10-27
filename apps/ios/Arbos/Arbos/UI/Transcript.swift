@@ -1239,24 +1239,31 @@ struct RowView: View, Equatable {
                 .accessibilityIdentifier("own-bubble-\(delivery)")
             }
         case .other(let text, let handle, let avatar, let named, let quote):
-            let openPerson = { model.openPersonProfile(handle: handle, avatarUrl: avatar, chatId: chatId) }
+            // The avatar and the name are one profile target (`ProfileToggle`): a tap
+            // opens the person's sheet, a tap on either while it is up dismisses it.
+            let personTarget = model.personTarget(handle: handle, avatarUrl: avatar, chatId: chatId)
+            let personName = model.personName(handle: handle) ?? "@\(handle)"
+            let personLabel = ProfileToggle.label(name: personName, showing: model.profileShows(personTarget))
+            let openPerson = { model.toggleProfile(personTarget) }
             HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
                 Button(action: openPerson) {
                     PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
                 }
                 .buttonStyle(.plain)
                 .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
-                .accessibilityLabel("@\(handle), profile")
+                .accessibilityLabel(personLabel)
+                .accessibilityIdentifier("sender-avatar")
                 // Group / channel: the name inside the bubble, in the sender's colour,
                 // then the reply quote, then the text. No time in the bubble (drag to reveal).
                 VStack(alignment: .leading, spacing: 0) {
                     if named {
                         Button(action: openPerson) {
-                            LiveSenderName(name: model.personName(handle: handle) ?? "@\(handle)",
+                            LiveSenderName(name: personName,
                                            url: avatar, seed: model.personId(handle: handle) ?? handle, agent: false)
                         }
                         .buttonStyle(.plain)
                         .padding(.bottom, Self.nameToTextGap)
+                        .accessibilityLabel(personLabel)
                         .accessibilityIdentifier("bubble-name")
                     }
                     if let quote {
@@ -1278,18 +1285,21 @@ struct RowView: View, Equatable {
             }
             .task(id: avatar) { SenderAccents.shared.load(url: avatar) }
         case .member(let blocks, let live, let handle, let name, let avatar, let named, let agentId, let quote):
-            let openMember = {
-                if let agentId { model.showProfile(.agent(projectId: agentId)) }
-                else { model.openPersonProfile(handle: handle, avatarUrl: avatar, chatId: chatId) }
-            }
             // One identity for the disc, the caption and the bar (#1592): the same resolver
             // the presence row asks, with the same row fields.
             let agent = model.agent(sender: agentId ?? "", handle: handle, name: name, chatId: chatId)
+            // The disc and the name are one profile target (`ProfileToggle`): a tap opens
+            // the agent's sheet, a tap on either while it is up dismisses it.
+            let memberTarget: ProfileTarget = agentId.map { ProfileTarget.agent(projectId: $0) }
+                ?? model.personTarget(handle: handle, avatarUrl: avatar, chatId: chatId)
+            let memberLabel = ProfileToggle.label(name: agent.name, showing: model.profileShows(memberTarget))
+            let openMember = { model.toggleProfile(memberTarget) }
             HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
                 Button(action: openMember) { memberAvatar(agent) }
                     .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
                     .buttonStyle(.plain)
-                    .accessibilityLabel("@\(handle), profile")
+                    .accessibilityLabel(memberLabel)
+                    .accessibilityIdentifier("sender-avatar")
                 memberBubble(
                     agent,
                     content: VStack(alignment: .leading, spacing: 0) {
@@ -1299,6 +1309,7 @@ struct RowView: View, Equatable {
                             }
                             .buttonStyle(.plain)
                             .padding(.bottom, Self.nameToTextGap)
+                            .accessibilityLabel(memberLabel)
                             .accessibilityIdentifier("bubble-name")
                         }
                         if let quote {
