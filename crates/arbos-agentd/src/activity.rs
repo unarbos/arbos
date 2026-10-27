@@ -95,6 +95,7 @@ pub fn label(tool_name: &str, args: &Value) -> Option<String> {
         "generate_image" => Some("Making the image".into()),
         "deliver_file" => Some("Sending the file".into()),
         "submit_feedback" => Some("Filing your feedback".into()),
+        "publish_site" | "unpublish_site" | "list_sites" => Some("Publishing the site".into()),
         "connector_call" | "connectors_list" => Some("Checking your connected accounts".into()),
         "local_run" | "local_read" | "local_list" | "local_devices" => {
             Some("Working on your computer".into())
@@ -374,6 +375,7 @@ fn code_label(code: &str) -> Option<String> {
         "web_search" => "Searching the web",
         "web_fetch" => "Reading a web page",
         "submit_feedback" => "Filing your feedback",
+        "publish_site" | "unpublish_site" | "list_sites" => "Publishing the site",
         _ => return None,
     };
     Some(l.into())
