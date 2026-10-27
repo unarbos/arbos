@@ -1084,3 +1084,45 @@ landmarks in all 15 languages, aliases and fallbacks), the Mac's
 iPhone's `CodeHighlightTests`. Rig: `ARBOS_FIXTURE_REPLY=math` (Mac) /
 `ARBOS_SHOW=math` (iPhone) is Jacob's bubble-sort turn; `ARBOS_RIG_CODE_COPY=hover|pressed|copied`
 paints the copy square in that state for a capture (the check needs `copied`).
+## Chart bubbles: a native chart card, the code card's frame (Jacob 2026-10-26, approved mock; [feedback chart-bubble-mac-2026-10-26], iPhone [feedback chart-bubble-ios-2026-10-26], agentd [feedback chart-post-tool-agentd-2026-10-26], core [feedback chart-core-2026-10-26])
+
+**An agent posts a chart as data, not a picture, and the apps draw it natively.**
+`post_chart(chart, caption)` (agentd) writes one row: `text` (the caption) →
+`attachment` (a 1200 × 675 light PNG agentd renders on the box, `chartPart`
+naming the chart part — what an app that cannot draw the chart shows, and what
+push previews and Library use) → `chart` (`specVersion`, the validated
+`arbos_core::chart::Chart`, its markdown `table`, `fallback` = the attachment
+id). The data lives in the part (≤ 32 KB), never in a blob. Both apps skip
+unknown part kinds, so an older build shows the picture; a build that knows the
+part draws the chart and hides the attachment that names it.
+
+One source of numbers: `arbos_core::chart` validates (8 series · 500 points per
+series · 2 000 total · 100 categories · pie 12 slices, one series · 12
+annotations), resolves scales (linear / log / time / category), nice ticks,
+stacking, value formats (`%` glued, other units spaced, currency in front,
+compact `1.2k`, durations) and the readout columns; `layout(w, h, style)` gives
+the pixel geometry the Mac canvas and the picture paint; `hit` the readout under
+the pointer; `table_markdown` / `table_tsv` the data. The iPhone draws Swift
+Charts from the same model through `arbos-ffi`.
+
+| Item | Mac | iPhone |
+|---|---|---|
+| Frame | the code card's: inside the bubble, `code_bg`, `border` hairline, radius **10**, padding 12; one block of the bubble (`Block::Chart`), so corners, the hover rail and selection treat it like a code card | radius 12, the same tokens |
+| Header | title 13 semibold, subtitle 11.5 `text_muted`; the axis title sits above the plot (horizontal), never rotated | 15 / 13 |
+| Icon squares | **24** pt, 6 pt radius, hairline, 13 pt glyph in `text_muted`, inset 8 from the card's top-right: **Copy data** (`copy` → `check` in `online` for 1.5 s, the code card's `#copy-check`), **Save PNG** (`download`), **Expand** (`expand`) | the same three |
+| Series colours | the code-card token palette in order — keyword `#95D0CD`, function `#E6B387`, string `#D898D8`, number `#F1C972`, then `accent`, `online`; light: the derived light set. A `color` the agent gave is kept in both themes | the same (`ChartPalette`) |
+| Plot | canvas 210 pt (bar 200, pie 220): gridlines = `border`, ticks 11 pt `text_faint`, lines 2 pt round-joined, areas 18 % fill, bars 62 % slot width with 3 pt top radii, pie slices seamed in the bubble colour with the share inside slices ≥ 6 % | Swift Charts marks from the core model's domains and ticks |
+| Values | **none at rest**. Hover: a 1 pt crosshair at the nearest column, a dot per series ringed in the bubble colour, one readout chip (x label, then dot · name · value per series; `surface_2` / `surface_1`, hairline, radius 8) beside the crosshair at the plot's top, flipped left near the right edge. Bars: the hovered category stays full, the others dim to 45 % | touch-and-hold: the same readout centred above the thumb |
+| Copy data | TSV with a header row (units in the header) | the same |
+| Save PNG | the core picture renderer in the **current theme at 2x** (`chart_card::png_bytes`), to Downloads with the "Saved to …" toast and the Finder reveal every saved attachment gets; a failure is the shared error toast ("couldn't save the chart") | `ImageRenderer` at 3x, to Photos |
+| Expand | an **in-window overlay** (`ui::chart_viewer`): scrim 58 % / 40 %, a panel ≤ 1140 × 706 (radius 16, `bg`, hairline, shadow) with the title · subtitle, **Copy data** · **Save PNG** pills and the close disc top-right, the plot at the panel's width with the same hover readout, and a Chart \| Data switch whose Data view is the table in the markdown table's style; Esc, the disc or the scrim closes; focus follows `viewer_focus` like the media viewer | a full-screen cover with ×, title, share; Chart \| Data; Save image · Copy data pills |
+| Fallback | the PNG as an inline picture + the caption (older builds); push body = the caption | the same |
+
+Code: `ui/chart_card.rs` (`card`, `plot`, `paint_plot`, `save_png`), `ui/chart_viewer.rs`,
+`model::Part::Chart` + `Attachment::chart_part`, `markdown::Block::Chart`, the
+transcript's row builder (a chart part is a `Markdown` row; an attachment whose
+`chart_part` names a chart part of the same message is skipped). Pinned by
+`transcript::chart_tests` (part parse, rows + the hidden picture, the headless card:
+title / legend / plot height / the three 24 pt squares at the top-right, Copy data
+→ TSV + check, Save / Expand wired) and `chart_card::tests` (palette per theme,
+file names, the 2x themed PNG); the numbers by `arbos_core::chart::tests`.

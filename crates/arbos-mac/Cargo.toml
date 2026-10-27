@@ -13,7 +13,9 @@ name = "arbos-mac"
 path = "src/main.rs"
 
 [dependencies]
-arbos-core.workspace = true
+# `chart-png`: Save PNG of a chart bubble renders through the core picture renderer (resvg,
+# which gpui already builds).
+arbos-core = { workspace = true, features = ["chart-png"] }
 arbos-client.workspace = true
 arbos-matrix.workspace = true
 arbos-update.workspace = true
