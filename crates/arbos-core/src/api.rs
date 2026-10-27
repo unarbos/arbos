@@ -1582,6 +1582,25 @@ pub struct PeopleMessagePayloadDto {
     pub text: Option<String>,
 }
 
+/// `channel_message` payload: a message in a server channel (Matrix room), fanned out by the
+/// relay's push gateway (`POST /_matrix/push/v1/notify`) to every member device the homeserver's
+/// push rules name — never the sender's own, never a server the recipient archived. Clients post
+/// a local banner "<sender> in #channel" unless that channel is on screen; a tap opens it.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChannelMessagePayloadDto {
+    pub server_id: String,
+    pub server_name: String,
+    pub channel_id: String,
+    pub channel_name: String,
+    pub room_id: String,
+    pub event_id: String,
+    pub sender: SenderDto,
+    /// First line of the message, when it has text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
 /// `people_chat_updated` payload.
 #[typeshare]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1871,6 +1890,8 @@ pub struct NotificationsClearedPayloadDto {
 pub enum PushEventDto {
     #[serde(rename = "people_message")]
     PeopleMessage(PeopleMessagePayloadDto),
+    #[serde(rename = "channel_message")]
+    ChannelMessage(ChannelMessagePayloadDto),
     #[serde(rename = "people_chat_updated")]
     PeopleChatUpdated(PeopleChatUpdatedPayloadDto),
     #[serde(rename = "people_member_added")]
