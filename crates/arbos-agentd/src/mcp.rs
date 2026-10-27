@@ -166,6 +166,8 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
             | "local_list"
             | "vault_request"
             | "secrets_request"
+            | "request_secret"
+            | "secrets_save_from_message"
             | "browser_fill"
     ) {
         if let Err(refusal) = a.gate_tool(name, args, &chat_for_scratch).await {
@@ -800,6 +802,10 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
             crate::vault::secrets_request(a, args, &chat_for_scratch).await
         }
         "egress" => crate::vault::egress(a, args, &chat_for_scratch).await,
+        "request_secret" => crate::handoff::request_secret(a, args, &chat_for_scratch).await,
+        "secrets_save_from_message" => {
+            crate::handoff::secrets_save_from_message(a, args, &chat_for_scratch).await
+        }
         "web_search" => crate::web::web_search(a, args, &chat_for_scratch).await,
         "web_fetch" => crate::web::web_fetch(a, args, &chat_for_scratch).await,
         "submit_feedback" => crate::feedback::submit_feedback(a, args, &chat_for_scratch).await,
