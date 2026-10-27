@@ -7,6 +7,7 @@ use gpui::{div, prelude::*, px, Context, Div, ElementId, FontWeight, SharedStrin
 
 use crate::model::{Project, Voice};
 use crate::ui::glass;
+use crate::ui::highlight::{self, Shape};
 use crate::ui::icons::icon;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Appearance, Theme, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
@@ -56,6 +57,8 @@ pub fn sheet(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
 /// Row height: a body title over a tiny one-line description, 10 pt of air
 /// above and below (the pane kit's list rows).
 const ROW_HEIGHT: f32 = 56.0;
+/// The list's corners; each row's highlight pill is concentric with them.
+const LIST_RADIUS: f32 = 14.0;
 
 pub fn list(
     shell: &Shell,
@@ -103,7 +106,7 @@ pub fn list(
             .h(px(ROW_HEIGHT))
             .px(px(14.0))
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .map(|el| highlight::row(el, false, Shape::Nested(LIST_RADIUS), theme))
     };
     let check = |on: bool, theme: &Theme| {
         div()
@@ -120,7 +123,7 @@ pub fn list(
         .id(eid("list".into()))
         .flex()
         .flex_col()
-        .rounded(px(14.0))
+        .rounded(px(LIST_RADIUS))
         .overflow_y_scroll()
         .max_h(px(max_height))
         .bg(list_bg)

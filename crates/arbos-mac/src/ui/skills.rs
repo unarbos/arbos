@@ -15,6 +15,7 @@ use crate::app::AppState;
 use crate::model::{Id, Part, Skill};
 use crate::ui::composer::ComposerInput;
 use crate::ui::frost::{frosted, MENU_BLUR};
+use crate::ui::highlight;
 use crate::ui::theme::{Theme, PANEL_RADIUS, RAIL_WIDTH};
 
 pub const CARD_WIDTH: f32 = 760.0;
@@ -321,12 +322,7 @@ impl SkillsPanel {
                     .py(px(7.0))
                     .rounded(px(8.0))
                     .cursor_pointer()
-                    .bg(if selected {
-                        theme.surface_2
-                    } else {
-                        gpui::transparent_black()
-                    })
-                    .hover(|s| s.bg(theme.surface_2))
+                    .map(|el| highlight::row(el, selected, highlight::Shape::Own, theme))
                     .child(
                         div()
                             .text_size(px(12.5))
@@ -412,12 +408,12 @@ impl SkillsPanel {
                 .cursor_pointer()
                 .when(primary, |el| el.bg(theme.text).text_color(theme.bg))
                 .when(!primary && !danger, |el| {
-                    el.text_color(theme.text_muted)
-                        .hover(|s| s.bg(theme.surface_2))
+                    highlight::button(el.text_color(theme.text_muted), theme)
                 })
                 .when(danger, |el| {
                     // error-ui: exception destructive-action (a Delete label, not a message)
                     el.text_color(theme.danger)
+                        // hover-fill: exception danger
                         .hover(|s| s.bg(theme.danger_soft))
                 })
                 .child(label)
@@ -555,9 +551,8 @@ impl Render for SkillsPanel {
                     .rounded(px(6.0))
                     .text_size(px(12.0))
                     .text_color(theme.text)
-                    .bg(theme.surface_2)
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme.border_strong))
+                    .map(|el| highlight::washed(el, theme.surface_2, &theme))
                     .child("+ New")
                     .on_click(cx.listener(|this, _, window, cx| this.start_new(window, cx))),
             );
