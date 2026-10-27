@@ -2957,6 +2957,7 @@ class Loop:
     # Sibling-conflict policy: bumped DEFER_AFTER times → next batches are deferred items only (oldest-deferred
     # first); bumped SIBLING_LIMIT times (so at least two rounds among deferred items) → treated as a main conflict.
     DEFER_AFTER = 2
+    SHIP_CARRIER_GAP_MIN = 15  # a carrying run that did not fail is replaced by its successor within this; the ship clock stays paused
     POOL_STARVED_MIN = 120  # no pool batch merged for this long while plan halves run → pool-first arms itself
     SIBLING_LIMIT = 4
     # Solo slot (operator rule, 2026-10-23 23:34): an item bumped 3× by siblings, or sent to its owner twice for a
@@ -3525,21 +3526,46 @@ class Loop:
         if ios_ok and mac_ok and (st.get("expects_ios") or st.get("expects_ci")):
             self.ship(fid, st)
             return
-        if waited > self.cfg.ship_timeout_min:
-            # The budget is for builds that never happen, not for GitHub's macos runner queue: when the iOS /
-            # Release run that will carry the fix is queued or running, keep waiting (02:55 Oct 22: #1252's iOS run
-            # sat 96 min in the queue and the item was failed although its code was on main and in v0.6.104).
+        # The ship clock pauses while a carrying run exists (coordinator, 2026-10-27 17:32): the budget is for builds
+        # that never happen, not for the single Mac runner's queue. `ship_paused_min` is the time already spent
+        # under a carrier; `ship_pause_started` marks a pause in progress. The clock resumes only when the last
+        # carrier ended in FAILURE — a run cancelled by a newer push is replaced by that push's run, and the gap
+        # before the replacement appears is bridged (13:25 Oct 27: #1978 failed "nothing shipped" four minutes
+        # before the run that carried it to TestFlight 202610271329463223 was created).
+        paused = (st.get("ship_paused_min") or 0) + (minutes_between(st["ship_pause_started"], iso()) if st.get("ship_pause_started") else 0)
+        waited_eff = waited - paused
+        if waited_eff > self.cfg.ship_timeout_min:
             pending = None
             if st.get("expects_ios") and not st.get("ios_done"):
                 pending = self.gh.pending_run_containing("ios.yml", sha, since)
             if pending is None and st.get("expects_ci") and not st.get("release_done"):
                 pending = self.gh.pending_run_containing("release.yml", sha, since) or self.gh.pending_run_containing("ci.yml", sha, since)
             if pending:
+                st["ship_carrier"] = {"id": pending.get("id"), "url": pending["html_url"], "status": pending.get("status"), "seen": iso()}
+                st.setdefault("ship_pause_started", iso())
                 if st.get("ship_wait_noted") != pending["html_url"]:
                     st["ship_wait_noted"] = pending["html_url"]
-                    log(f"[{fid}] ship budget passed but the carrying run is still {pending['status']}: {pending['html_url']}; waiting")
+                    log(f"[{fid}] ship budget passed but the carrying run is still {pending['status']}: {pending['html_url']}; clock paused")
                 self.store.save_state(fid, st)
                 return
+            last = st.get("ship_carrier")
+            if last and st.get("ship_pause_started"):
+                conclusion = None
+                if last.get("id"):
+                    with contextlib.suppress(HttpError):
+                        conclusion = self.gh.repo_api("GET", f"/actions/runs/{last['id']}").get("conclusion")
+                if conclusion != "failure" and minutes_between(last.get("seen") or iso(), iso()) < self.SHIP_CARRIER_GAP_MIN:
+                    # cancelled / superseded / just finished: its replacement (or the adoption) is seconds away
+                    self.store.save_state(fid, st)
+                    return
+                st["ship_paused_min"] = (st.get("ship_paused_min") or 0) + minutes_between(st["ship_pause_started"], iso())
+                st.pop("ship_pause_started", None)
+                self.store.event(fid, "ship_clock_resumed", carrier=last.get("url"), conclusion=conclusion, paused_min=int(st["ship_paused_min"]))
+                log(f"[{fid}] carrying run {last.get('url')} ended ({conclusion}); ship clock resumes with {int(st['ship_paused_min'])} min paused")
+                waited_eff = waited - st["ship_paused_min"]
+                if waited_eff <= self.cfg.ship_timeout_min:
+                    self.store.save_state(fid, st)
+                    return
             if st.get("expects_ios") and st.get("ios_done") and not st.get("testflight_ready_at") and self.adopt_later_testflight(fid, st, sha, since):
                 if mac_ok:
                     self.ship(fid, st)
@@ -3553,7 +3579,9 @@ class Loop:
                 carried = self.gh.later_ios_build(sha, since)
             if carried is None and st.get("expects_ci") and not st.get("release_done"):
                 carried = self.gh.later_release(sha, since)
-            if carried and waited <= self.cfg.ship_timeout_min + 45:
+            if carried and waited_eff <= self.cfg.ship_timeout_min + 45:
+                st["ship_carrier"] = {"id": carried.get("id"), "url": carried["html_url"], "status": "success", "seen": iso()}
+                st.setdefault("ship_pause_started", iso())
                 if st.get("ship_wait_noted") != carried["html_url"]:
                     st["ship_wait_noted"] = carried["html_url"]
                     log(f"[{fid}] ship budget passed but a green carrying run exists: {carried['html_url']}; waiting for the build to be adopted")
