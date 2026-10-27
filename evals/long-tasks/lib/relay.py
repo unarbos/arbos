@@ -1,6 +1,7 @@
 """Relay access for the long-task eval: HTTP with the test user's token, arbosctl wrapper,
 usage, routines. Nothing here talks to a model; everything goes through the product path."""
 
+import fcntl
 import json
 import os
 import subprocess
@@ -64,21 +65,56 @@ def write_ctl_config(access_token, device_id):
     CTL_CONFIG.write_text(json.dumps({"relay_url": RELAY, "device_token": access_token, "device_id": device_id}, indent=2))
 
 
+def _save_tokens(new, prev):
+    for k in ("user", "device_id", "test"):
+        new.setdefault(k, prev.get(k))
+    new["issued_at"] = time.time()
+    tmp = TOKENS.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(new))
+    tmp.replace(TOKENS)
+    write_ctl_config(new["access_token"], new.get("device_id", ""))
+    return new
+
+
+def fresh_device(label):
+    """Mint a new signed-in device for the test user (admin) and make it the harness's token pair.
+    Refresh tokens rotate and a replay revokes the device, so every run starts on its own device
+    instead of inheriting a refresh token another process may have consumed (2026-10-25 08:40)."""
+    t = json.loads(TOKENS.read_text())
+    uid = t["user"]["id"]
+    with TOKENS.with_suffix(".lock").open("w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        st, new = http("POST", f"{RELAY}/admin/users/{uid}/devices", token=admin_token(), body={"name": f"lt-eval {label}"})
+        if st != 201:
+            raise SystemExit(f"fresh device for the run failed: {st} {new}")
+        return _save_tokens(new, t)["device_id"]
+
+
 def user_token():
-    """Access token, refreshed when < 10 min remain (the relay issues 1 h tokens)."""
+    """Access token, refreshed when < 10 min remain (the relay issues 1 h tokens). The refresh runs
+    under a file lock and re-reads the file first, so lane threads and parallel harness processes
+    never present the same refresh token twice (a replay outside the relay's 30 s grace revokes
+    the device). If the token was still consumed elsewhere, attach a fresh device instead of dying."""
     t = json.loads(TOKENS.read_text())
     issued = t.get("issued_at", TOKENS.stat().st_mtime)
-    if time.time() > issued + t.get("expires_in", 3600) - 600:
+    if time.time() <= issued + t.get("expires_in", 3600) - 600:
+        return t["access_token"]
+    with TOKENS.with_suffix(".lock").open("w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        t = json.loads(TOKENS.read_text())
+        issued = t.get("issued_at", TOKENS.stat().st_mtime)
+        if time.time() <= issued + t.get("expires_in", 3600) - 600:
+            return t["access_token"]  # another process refreshed while we waited
         st, new = http("POST", f"{RELAY}/auth/refresh", body={"refresh_token": t["refresh_token"]})
-        if st != 200:
+        if st == 401 and t.get("test", True) and (t.get("user") or {}).get("id"):
+            st, new = http("POST", f"{RELAY}/admin/users/{t['user']['id']}/devices", token=admin_token(),
+                           body={"name": f"lt-eval harness (re-minted {time.strftime('%Y-%m-%d %H:%M')} UTC)"})
+            if st != 201:
+                raise SystemExit(f"token refresh failed and re-mint failed: {st} {new}")
+            print(f"token refresh rejected; attached a fresh device {new.get('device_id')}", flush=True)
+        elif st != 200:
             raise SystemExit(f"token refresh failed: {st} {new}")
-        for k in ("user", "device_id", "test"):
-            new.setdefault(k, t.get(k))
-        new["issued_at"] = time.time()
-        TOKENS.write_text(json.dumps(new))
-        write_ctl_config(new["access_token"], new.get("device_id", ""))
-        t = new
-    return t["access_token"]
+        return _save_tokens(new, t)["access_token"]
 
 
 def user_id():
@@ -189,10 +225,10 @@ def chat_open(project, title):
 
 
 def chat_dump(project, chat_id, reset=False):
-    # Keep the local replica between dumps. After `chat reset` the client asks the relay for rows
-    # with `excludeOwn`, so its own user rows are gone and the box's rows that causally depend on
-    # them stay pending until the relay checkpoints — the doc then looks empty for minutes. A
-    # reset is only a repair step when a replica looks stuck (#1103 catch-up race).
+    # Keep the local replica between dumps. Since #2069 arbosctl replays with `excludeOwn:false`
+    # (like the apps and agentd), so a `chat reset` rebuilds the whole doc from the relay — its
+    # own rows and the box replies that depend on them included. A reset stays a repair step for
+    # a replica that looks stuck (#1103 catch-up race); it no longer loses the device's own turns.
     if reset:
         ctl("chat", "reset", project, chat_id, timeout=60)
     code, out, err = ctl("chat", "dump", project, chat_id, timeout=120)
@@ -318,31 +354,34 @@ def people_send_as(peer, chat_id, text):
     return p.returncode
 
 
-def capped_user_turn(handle, cap_usd, prompt, timeout_s=240, second_prompt=None):
-    """Create (once) a scratch user with a tiny daily cap, one project, send one message as them
-    and return what the chat showed. Lets the suite see the cap behaviour without capping lt-eval."""
+def capped_user_turn(handle, cap_usd, prompt, timeout_s=240, second_prompt=None, name="Long-task eval capped", device_name="lt eval capped driver", state_dir="ctl-capped", project_name="capped-lane", chat_title="cap check"):
+    """Create (once) a scratch user — with a tiny daily cap when `cap_usd` is set — one project, send
+    one message as them and return what the chat showed. Lets the suite see the cap behaviour without
+    capping lt-eval, and (with a profile `name` that differs from the `device_name`) how the agent
+    addresses the user."""
     st, users = admin("GET", "/admin/users")
     users = users if isinstance(users, list) else (users or {}).get("users") or []
     u = next((x for x in users if x.get("login") == handle), None)
     if u is None:
-        st, v = admin("POST", "/admin/users/test", {"handle": handle, "name": "Long-task eval capped"})
+        st, v = admin("POST", "/admin/users/test", {"handle": handle, "name": name})
         if st != 201:
-            raise RuntimeError(f"create capped user: {st} {v}")
+            raise RuntimeError(f"create scratch user {handle}: {st} {v}")
         uid = v["user"]["id"]
     else:
         uid = u["id"]
-    st, tok = admin("POST", f"/admin/users/{uid}/devices", {"name": "lt eval capped driver"})
+    st, tok = admin("POST", f"/admin/users/{uid}/devices", {"name": device_name})
     if st not in (200, 201):
-        raise RuntimeError(f"capped device: {st} {tok}")
-    cfg = STATE_DIR / "ctl-capped" / "arbosctl.json"
+        raise RuntimeError(f"scratch device: {st} {tok}")
+    cfg = STATE_DIR / state_dir / "arbosctl.json"
     cfg.parent.mkdir(parents=True, exist_ok=True)
     cfg.write_text(json.dumps({"relay_url": RELAY, "device_token": tok["access_token"], "device_id": tok.get("device_id", "")}))
     env = dict(os.environ, ARBOSCTL_CONFIG=str(cfg))
-    subprocess.run([ARBOSCTL, "admin", "cap", uid, str(cap_usd)], capture_output=True, text=True, timeout=60, env=dict(os.environ, ARBOSCTL_CONFIG=str(CTL_CONFIG)))
+    if cap_usd is not None:
+        subprocess.run([ARBOSCTL, "admin", "cap", uid, str(cap_usd)], capture_output=True, text=True, timeout=60, env=dict(os.environ, ARBOSCTL_CONFIG=str(CTL_CONFIG)))
     st, projects_v = http("GET", f"{RELAY}/projects", token=tok["access_token"])
     plist = projects_v if isinstance(projects_v, list) else (projects_v or {}).get("projects") or []
     if not plist:
-        subprocess.run([ARBOSCTL, "project", "create", "--name", "capped-lane"], capture_output=True, text=True, timeout=120, env=env)
+        subprocess.run([ARBOSCTL, "project", "create", "--name", project_name], capture_output=True, text=True, timeout=120, env=env)
         st, projects_v = http("GET", f"{RELAY}/projects", token=tok["access_token"])
         plist = projects_v if isinstance(projects_v, list) else (projects_v or {}).get("projects") or []
     pid = plist[0]["id"]
@@ -353,7 +392,7 @@ def capped_user_turn(handle, cap_usd, prompt, timeout_s=240, second_prompt=None)
             break
         time.sleep(10)
     time.sleep(20)
-    p = subprocess.run([ARBOSCTL, "chat", "open", pid, "--title", "cap check"], capture_output=True, text=True, timeout=60, env=env)
+    p = subprocess.run([ARBOSCTL, "chat", "open", pid, "--title", chat_title], capture_output=True, text=True, timeout=60, env=env)
     chat_id = p.stdout.strip().splitlines()[-1].split()[-1]
     time.sleep(3)
     t0 = time.time()

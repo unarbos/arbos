@@ -1,18 +1,19 @@
 {
-  "id": "s3-cron-delete",
-  "lane": "c",
-  "category": "scheduling",
-  "title": "Delete the recurring job",
-  "turns": [
-    {
-      "prompt": "Delete the ticker job completely. Confirm there are no scheduled jobs left.",
-      "routine": {
-        "count": 0
-      },
-      "after_s": 5,
-      "timeout_s": 300
-    }
-  ],
-  "same_chat_as": "s1-cron-create-fires",
-  "cleanup_routines": true
+ "id": "s3-cron-delete",
+ "lane": "c",
+ "category": "scheduling",
+ "title": "Delete the recurring job",
+ "turns": [
+  {
+   "prompt": "Delete the ticker job completely. Confirm there are no scheduled jobs left.",
+   "routine": {
+    "count": 0
+   },
+   "after_s": 5,
+   "timeout_s": 300
+  }
+ ],
+ "same_chat_as": "s1-cron-create-fires",
+ "cleanup_routines": true,
+ "regression": "#1713 over-application (asks before deleting a routine it created; note on the issue)"
 }
