@@ -2,7 +2,7 @@
 # Long-task agent eval (D94): one command, end to end.
 #   preflight → run every task through the product path → grade → scoreboard → report → issues
 #
-# Usage: scripts/evals/long-tasks/run-suite.sh [--tasks a,b] [--lanes a,b] [--no-issues] [--budget-usd 8] [--run-id ID]
+# Usage: scripts/evals/long-tasks/run-suite.sh [--tasks a,b] [--lanes a,b] [--issues] [--budget-usd 8] [--run-id ID]
 # Needs: OP_SERVICE_ACCOUNT_TOKEN (vault "Arbos"), a built arbosctl (target/release/arbosctl or $ARBOSCTL),
 #        ssh access to the relay host as const with the Cloud Agents key (LT_HOST_SSH_KEY, default ~/.ssh/arbos_cloud).
 # Secrets are read into the environment only; nothing is written to the repo.
@@ -11,11 +11,13 @@ ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 EVAL="$ROOT/evals/long-tasks"
 STORE="${LT_STORE:-/cursor/stores/bc-055bfdfb-336d-43af-bd4b-a794e153944c}"
 RUN_ID="$(date -u +%Y%m%dT%H%M)"
-FILE_ISSUES=1
+# Failures are triaged by hand (one root cause, one issue); the auto-filer is opt-in (--issues) — run 6 filed 37 noise issues when it was the default.
+FILE_ISSUES=0
 ARGS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-issues) FILE_ISSUES=0; shift ;;
+    --issues) FILE_ISSUES=1; shift ;;
     --run-id) RUN_ID="$2"; shift 2 ;;
     *) ARGS+=("$1"); shift ;;
   esac
@@ -53,7 +55,9 @@ if [ -z "${LT_FIXTURE_BASE:-}" ]; then
 fi
 
 echo "== run $RUN_ID"
+python3 "$EVAL/sweep.py" || true   # no routine from an earlier run may still be spending
 python3 "$EVAL/run.py" --run-id "$RUN_ID" "${ARGS[@]}"
+python3 "$EVAL/sweep.py" || true   # and none from this one
 
 ISSUES_JSON="$EVAL/results/$RUN_ID/issues.json"
 if [ "$FILE_ISSUES" = 1 ]; then
@@ -87,7 +91,14 @@ if [ "${LT_COMMIT:-1}" = 1 ] && [ -n "${ARBOS_GITHUB:-}" ]; then
   (
     cd "$ROOT"
     git fetch -q "$REMOTE" main
+    # SUMMARY.md is regenerated from every scoreboard, so a locally modified copy must not block
+    # the branch switch (it did once: "commit your changes or stash them"); keep the run's files aside
+    TMPSB="$(mktemp -d)"
+    cp "$EVAL/scoreboard/$RUN_ID".* "$TMPSB"/
+    git checkout -q -- evals/long-tasks/scoreboard/SUMMARY.md 2>/dev/null || true
     git checkout -q -B "feedback/$FID" FETCH_HEAD
+    cp "$TMPSB"/* "$EVAL/scoreboard/"
+    python3 "$EVAL/report.py" --run "$RUN_ID" --report-out "$TMPSB/report.md" >/dev/null
     git add evals/long-tasks/scoreboard
     if git -c user.name="Cursor agent (bc-dcc557ae)" -c user.email="agents@arbos.life" commit -qm "evals(long-tasks): run $RUN_ID scoreboard [feedback $FID]"; then
       git push -q "$REMOTE" "feedback/$FID"

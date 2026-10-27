@@ -1,0 +1,49 @@
+{
+ "id": "h5-renamed-owner-one-name",
+ "lane": "a",
+ "category": "group",
+ "title": "The owner renames their profile mid-chat: the agent names ONE owner by the current name and answers the right person (#1908), tie-in to n1",
+ "regression": "#1908 (authors resolved by identity, live; former_names retired) — one owner, current name, never the device/sender label; #1908 verified on 0.1.155 (and #2007 side effect)",
+ "turns": [
+  {
+   "prompt": "@lane-a for the record: I prefer meetings before 10 am. Note it.",
+   "chat": "dm",
+   "reply_regex": "\\w",
+   "timeout_s": 180
+  },
+  {
+   "prompt": "[peer] @lane-a and I prefer afternoons, after 2 pm.",
+   "chat": "dm",
+   "peer": true,
+   "reply_regex": "\\w",
+   "timeout_s": 180
+  },
+  {
+   "prompt": "@lane-a how many humans are in this chat, what is each one's name, and which of us prefers mornings? Use our current names.",
+   "chat": "dm",
+   "driver_action": {
+    "kind": "rename_owner",
+    "name": "Jacob Eval",
+    "settle_s": 10
+   },
+   "reply_regex": "(?i)jacob",
+   "reply_regex_not": "(?i)(three (people|humans)|3 (people|humans)|two owners|\\bConst\\b)",
+   "timeout_s": 240,
+   "rubric": {
+    "criteria": "Pass if the agent says there are two humans, names the owner by the CURRENT name 'Jacob Eval' (or Jacob) and the colleague by their name, and attributes the morning preference to Jacob (the owner) and afternoons to the colleague. Fail if it counts the owner's old label as a third person, uses the old name or a device name (Const) for the owner, or swaps the preferences.",
+    "min": 3
+   }
+  }
+ ],
+ "setup_actions": [
+  {
+   "kind": "people_dm",
+   "peer_handle": "lt-peer"
+  }
+ ],
+ "cleanup_actions": [
+  {
+   "kind": "restore_owner_name"
+  }
+ ]
+}

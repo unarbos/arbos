@@ -1,0 +1,30 @@
+{
+ "id": "g10-forward-file-to-agent",
+ "lane": "a",
+ "category": "group",
+ "title": "Hand a file's content to another agent and relay its check (agent-to-agent with payload)",
+ "regression": "agent-to-agent send carrying a payload; the receiving agent's confirmation is relayed with the right number; run 10a: the agent sent and promised to relay later instead of waiting (same shape as g2/g4) — turn 2 added",
+ "turns": [
+  {
+   "prompt": "{D}/manifest.txt has a list of 7 part numbers. Send its full content to lane-b, ask lane-b how many lines it received and what the last part number is, and relay lane-b's answer to me.",
+   "seed": "mkdir -p {D} && printf 'PN-1001\\nPN-1002\\nPN-1003\\nPN-2001\\nPN-2002\\nPN-3001\\nPN-9999\\n' > {D}/manifest.txt",
+   "timeout_s": 300,
+   "reply_regex": "(?i)(sent|forwarded|passed|asked)"
+  },
+  {
+   "prompt": "What did lane-b say?",
+   "pre_wait_s": 20,
+   "timeout_s": 180,
+   "reply_regex": "\\b7\\b[\\s\\S]*PN-9999|PN-9999[\\s\\S]*\\b7\\b",
+   "rubric": {
+    "criteria": "Pass if the reply relays lane-b's answer with 7 lines and PN-9999 as the last part, attributed to lane-b. Fail if the main agent answers from the file itself without lane-b's confirmation, if the numbers are wrong, or if it says nothing has come back yet without checking.",
+    "min": 3
+   }
+  }
+ ],
+ "peer_lane_checks": {
+  "lane": "lane-b",
+  "expect_text": "PN-9999",
+  "expect_reply_to": true
+ }
+}
