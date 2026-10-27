@@ -2018,7 +2018,9 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                             .events
                             .send(SyncEvent::MatrixTimeline { room_id, rows });
                     }
-                    Ok(None) => {}
+                    Ok(None) => {
+                        let _ = shared.events.send(SyncEvent::ChannelHistoryEnd { room_id });
+                    }
                     Err(MatrixError::NoRoom(_)) => {}
                     Err(err) => shared.diagnostic("channel-history", err.to_string()),
                 }
