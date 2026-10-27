@@ -292,6 +292,39 @@ preference" and was reverted by Jacob ([feedback header-pill-restore-2026-10-24]
 Code: `header::bar_frame` (equal side slots, `justify_center`) and
 `header::metrics`; pinned by `header_tests::the_pill_is_centred_not_parked_at_the_left_edge`.
 
+### Connection capsule under the pill — shown for every chat kind, whole (Jacob 2026-10-22 [feedback connection-pill]; 2026-10-27 [feedback offline-chip-group-header-2026-10-27])
+
+The small dark capsule under the pill — a 6 pt dot and two words, "Offline" ·
+"Relay down" · "Reconnecting…" · "Syncing…" · "Reconnecting shortly…" — is the
+**connection capsule** (#1339): it reports *this Mac's link to the relay for
+the open chat* (`AppState::link_pill` = the chat's own room socket and the
+relay's registry poll, highest verdict wins, shown once a state has held
+1.2 s). It is not a member's presence, not typing, not the agent status row.
+
+| Chat kind | Capsule | Why |
+| --- | --- | --- |
+| Agent chat / job tab | shown | the agent's room is a relay room; sends queue while the link is down |
+| DM | shown | same |
+| People group | shown | same — "Offline" under Arbonites was a true reading of the group's room link |
+| Server channel | shown | same (the channel's room id is the chat id) |
+
+Rule in code: `header::ChatKind::shows_link_pill` (an exhaustive match, so a
+new kind must decide). Geometry (`header::metrics`): top `LINK_PILL_TOP` =
+pill top 12 + pill 36 + gap 3 = **51**, height **22**, centred on the pill;
+its box reaches `LINK_PILL_OVERHANG` **13** pt below the 60 pt bar, so the bar
+does not clip its children and the shell's floating header overlay is
+`OVERLAY_HEIGHT` **73** tall (the capsule has no hitbox, and the drag
+catchment under the bar — `DRAG_OVERHANG` 24 — already covers that band). It
+steps aside while the ⌘F bar is open (that bar owns the slot under the pill,
+`chat_search::metrics::TOP` 56). What Jacob saw on 2026-10-27 (Arbonites, Dark
+Glass, v0.6.296): a4e0031ed (2026-10-24) had put `overflow_hidden` on the bar
+and on the overlay at `HEIGHT`, so the capsule (51–73) showed only its top
+9 pt — the upper half of "Offline". Pinned by
+`header::link_pill_tests` (the real `Shell`, one chat of each kind: capsule
+whole under the pill, inside the overlay's clip box, pill and bar unmoved;
+gone with the link live; gone while ⌘F is open) and
+`every_kind_shows_the_capsule_and_the_header_leaves_room_for_it`.
+
 ### Material: frosted glass on both surfaces (Jacob 2026-10-25 + 2026-10-26, [feedback mac-header-glass-2026-10-25], [feedback mac-header-pill-glass-matte-2026-10-26])
 
 The pill and the folded-sidebar disc are **frosted glass whatever the
