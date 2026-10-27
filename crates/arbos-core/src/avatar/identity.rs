@@ -188,20 +188,19 @@ pub fn resolve<'c>(
     }
 }
 
-/// Of every copy of `hit`'s agent in `cards`, the one with the highest avatar stamp. Among
-/// equal stamps a copy that carries the picture beats one that does not — the two describe
-/// the same state, so the pictureless one is a lossy copy (a roster row restored without
-/// its picture), not a reset: a reset moves the stamp. Otherwise the caller's order holds.
+/// Of every copy of `hit`'s agent in `cards`, the one with the highest avatar stamp; the
+/// first in the caller's order among equals. The stamp is the only truth: a guess such as
+/// "the copy with a picture is the whole one" let a stale picture beat a reset whose stamp
+/// tied (Jacob, 2026-10-26); the relay stamps every row, so two differing states never share
+/// a stamp, and a copy that lost its picture on the way (the Mac store once dropped it) is
+/// fixed at the source, not here.
 fn newest_copy<'c>(hit: &'c AgentCard, cards: &[&'c AgentCard]) -> &'c AgentCard {
-    let has_picture = |c: &AgentCard| c.image_key.as_deref().is_some_and(|k| !k.is_empty());
     cards
         .iter()
         .copied()
         .filter(|c| c.id == hit.id)
         .fold(hit, |best, c| {
-            if c.avatar_version > best.avatar_version
-                || (c.avatar_version == best.avatar_version && has_picture(c) && !has_picture(best))
-            {
+            if c.avatar_version > best.avatar_version {
                 c
             } else {
                 best
@@ -481,20 +480,25 @@ mod tests {
         assert_eq!(r.image_key, None);
         assert_eq!(r.avatar_version, 1_700_000_200_000);
 
-        // Equal stamps, one copy without the picture (a roster row restored from disk without
-        // it — Jacob's relaunch, 2026-10-26): the copy with the picture wins in either order.
-        let lossy = card("01TEST", "TestAgent");
-        let whole = AgentCard {
+        // Equal stamps and a disagreement (one copy with a picture, one without): the stamp
+        // is the only truth, so the caller's order decides — never "the one with a picture",
+        // which would resurrect a stale picture over a reset (Jacob, 2026-10-26).
+        let no_picture = card("01TEST", "TestAgent");
+        let picture = AgentCard {
             image_key: Some("avatar-1.jpg".into()),
             ..card("01TEST", "TestAgent")
         };
-        for cards in [
-            [lossy.clone(), whole.clone()],
-            [whole.clone(), lossy.clone()],
-        ] {
-            let r = resolve(&bubble, cards.iter());
-            assert_eq!(r.image_key.as_deref(), Some("avatar-1.jpg"), "{cards:?}");
-        }
+        assert_eq!(
+            resolve(&bubble, [&no_picture, &picture]).image_key,
+            None,
+            "a reset that reads first stays a reset"
+        );
+        assert_eq!(
+            resolve(&bubble, [&picture, &no_picture])
+                .image_key
+                .as_deref(),
+            Some("avatar-1.jpg")
+        );
 
         // Unstamped copies (an older relay) keep the caller's order: the roster wins.
         let unstamped = [
