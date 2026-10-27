@@ -14,7 +14,8 @@ struct FeedbackSheet: View {
     @State private var photoItem: PhotosPickerItem?
     @State private var sending = false
     @State private var sent: String?
-    @State private var error: String?
+    @State private var error: UserError?
+    @State private var errorDetailsOpen = false
     @State private var showFull = false
     @FocusState private var noteFocused: Bool
 
@@ -28,6 +29,11 @@ struct FeedbackSheet: View {
                     if let sent {
                         sentView(sent)
                     } else {
+                        // The sheet's note: at the top of the body, under the title (Jacob 2026-10-26).
+                        if let error {
+                            ErrorNote(id: "feedback-error", error: error, detailsOpen: $errorDetailsOpen, onTryAgain: send)
+                                .padding(.horizontal, 16)
+                        }
                         if let project {
                             HStack(spacing: 8) {
                                 AgentAvatar(project: project, theme: theme, size: 22, still: true)
@@ -42,9 +48,6 @@ struct FeedbackSheet: View {
                             .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                             .multilineTextAlignment(.center)
                             .padding(.horizontal, 28)
-                        if let error {
-                            Text(error).font(theme.font(Theme.tiny)).foregroundStyle(theme.danger).multilineTextAlignment(.center).padding(.horizontal, 24)
-                        }
                         Button(action: send) {
                             HStack(spacing: 8) {
                                 if sending { ProgressView().tint(theme.onPrimary).controlSize(.small) }
@@ -217,8 +220,8 @@ struct FeedbackSheet: View {
             } catch {
                 let e = error as? RelayError
                 self.error = (e?.status == 404 || e?.status == 405)
-                    ? "This relay cannot take feedback yet. Try again after the next relay update."
-                    : "Could not send: \(error.localizedDescription)"
+                    ? UserError.refused("send your feedback", "This relay cannot take feedback yet. Try again after the next relay update.")
+                    : UserError.classify("send your feedback", error)
             }
             sending = false
         }
