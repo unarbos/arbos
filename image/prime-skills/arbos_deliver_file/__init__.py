@@ -52,6 +52,17 @@ async def generate_image(prompt: str, size: str = "1024x1024", title: str | None
     return await _call("generate_image", args)
 
 
+async def post_chart(chart: dict, caption: str, reply_to: str | None = None) -> str:
+    """Post a native chart (line, area, bar, scatter, pie) from structured series: `chart` is the
+    `post_chart` spec (kind, title, series [{name, points | values}], categories, x/y {label, unit}),
+    `caption` one or two sentences stating the finding. Caps: 8 series, 500 points each, 2 000 total,
+    100 categories, 32 KB — bigger data is a CSV through `run`. Raises when NOT posted."""
+    args = {"chart": chart, "caption": caption, "session_id": SESSION_ID}
+    if reply_to:
+        args["reply_to"] = reply_to
+    return await _call("post_chart", args)
+
+
 def summary(result: str) -> dict:
     """Parse the JSON text `run` returns."""
     try:
