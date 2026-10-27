@@ -141,6 +141,17 @@ def iso(t: dt.datetime | None = None) -> str:
     return (t or utcnow()).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# Files that make the iPhone build (the gate's iOS half) relevant. `packages/ArbosFFI/**` is the typeshare-generated
+# Swift package every iOS and Mac target compiles: 2026-10-27 04:23 an agentd branch regenerated RelayTypes.swift
+# (PushEvent.messageRedacted) with the iOS half skipped, and every iOS half after it failed on an inexhaustive
+# switch in AppModel.swift until the handler branch landed. The client-core crates feed the same package.
+IOS_PATH_PREFIXES = ("apps/ios/", "packages/ArbosFFI/", "crates/arbos-core/", "crates/arbos-client/", "crates/arbos-ffi/")
+
+
+def touches_ios(files: list[str] | None) -> bool:
+    return any(f.startswith(IOS_PATH_PREFIXES) or f == ".github/workflows/ios.yml" for f in files or [])
+
+
 def parse_iso(s: str) -> dt.datetime:
     s = s.strip()
     if s.endswith("Z"):
@@ -1977,7 +1988,7 @@ class Loop:
                                     seen.append(f["filename"])
                     files = seen
                 st.update(status="gating", branch=branch, branch_head=head, files=files,
-                          expects_ios=any(f.startswith(("apps/ios/", "crates/arbos-core/", "crates/arbos-client/", "crates/arbos-ffi/")) or f == ".github/workflows/ios.yml" for f in files),
+                          expects_ios=touches_ios(files),
                           expects_rust=bool(self.rust_crates(files)),
                           expects_ci=any(not f.startswith("apps/ios/") for f in files),
                           agent_summary=self.summary_line(result))
@@ -2003,7 +2014,7 @@ class Loop:
         files = [f["filename"] for f in self.gh.commit(commit["sha"]).get("files", [])]
         st.update(status="pushed", commit=commit["sha"], commit_url=commit["html_url"],
                   commit_message=commit["commit"]["message"].splitlines()[0], pushed_at=iso(), files=files,
-                  expects_ios=any(f.startswith("apps/ios/") or f == ".github/workflows/ios.yml" for f in files),
+                  expects_ios=touches_ios(files),
                   expects_ci=any(not f.startswith("apps/ios/") for f in files))
         self.store.save_state(fid, st)
         self.store.event(fid, "pushed", commit=commit["sha"], files=files)
@@ -2122,7 +2133,7 @@ class Loop:
             return recorded
         files = self.branch_files(fid, cmp) or st.get("files") or []
         st.update(branch_head=head, files=files,
-                  expects_ios=any(f.startswith(("apps/ios/", "crates/arbos-core/", "crates/arbos-client/", "crates/arbos-ffi/")) or f == ".github/workflows/ios.yml" for f in files),
+                  expects_ios=touches_ios(files),
                   expects_rust=bool(self.rust_crates(files)),
                   expects_ci=any(not f.startswith("apps/ios/") for f in files))
         self.store.save_state(fid, st)
@@ -2333,7 +2344,7 @@ class Loop:
             cur.pop("rust_gate_tree", None)
             tfiles = [f["filename"] for c in self.gh.compare(tree["base"], tree["tree"]).get("commits", []) for f in self.gh.commit(c["sha"]).get("files", [])]
             tree.update(started=iso(), warm=False, needs_mac=True, linux="pending", mac="pending", mac_started=None, land_tree=True,
-                        needs_ios=any(f.startswith("apps/ios/") for f in tfiles), ios="pending" if any(f.startswith("apps/ios/") for f in tfiles) else "skipped")
+                        needs_ios=touches_ios(tfiles), ios="pending" if touches_ios(tfiles) else "skipped")
             cur["rust_gate"] = tree
             self.store.save_cursor(cur)
             log(f"Rust gate {tree['id']}: integration tree {tree['tree'][:8]} with {len(tree['members'])} fixes (CI on {tree['branch']}; Mac release build)")
@@ -2353,6 +2364,22 @@ class Loop:
         # the deferred-fairness batch do NOT jump the pool; bisect / plan halves still finish first; pins (Jacob
         # P0 / live regression only) stay ahead. Cleared by itself once a pool batch merges something.
         pool_first = bool(cur.get("pool_first"))
+        # Pool starvation arms pool-first by itself (coordinator 2026-10-27 02:17: no pool batch since 22:15 —
+        # pins, then two plan halves that went red and bisected, then a re-gate push, took every slot for 4 h).
+        # Before: pool-first was an operator switch and still let plan halves go first, so even when armed it
+        # did not help against a long bisect chain. Now: when the pool has items and no pool batch has merged
+        # for POOL_STARVED_MIN, pool-first arms itself; and while it is set the full pool batch runs AHEAD of
+        # bisect / plan halves too (pins stay ahead of everything). It clears when a pool batch settles green.
+        pool_has_items = any(not st.get("gate_pinned") and not st.get("solo_next") for _, st in ready)
+        last_pool = cur.get("last_pool_batch_at") or cur.get("pool_first_armed_from") or ""
+        if not pool_first and pool_has_items and not members and plan:
+            if not last_pool:
+                cur["pool_first_armed_from"] = iso()
+            elif minutes_between(last_pool, iso()) >= self.POOL_STARVED_MIN:
+                cur["pool_first"] = iso()
+                pool_first = True
+                self.store.event("_loop", "pool_first_on", by="scheduler", starved_min=int(minutes_between(last_pool, iso())))
+                log(f"Gate: pool-first armed by the scheduler — no pool batch since {last_pool[:16]}; the pool runs ahead of {len(plan)} plan half(ves)")
         if not members and not pool_first:
             solo = sorted(((f, st) for f, st in ready if st.get("solo_next")), key=lambda fs: fs[1].get("created") or "")
             if solo:
@@ -2371,12 +2398,22 @@ class Loop:
             if deferred:
                 members = self.compatible_batch(deferred)
                 log(f"Gate: deferred-fairness batch of {len(members)} (bumped ≥ {self.DEFER_AFTER}× for sibling conflicts): " + ", ".join(members))
+        pool_batch = False
+        if not members and pool_first and plan:
+            # A plan half that came from a red pool batch is the pool's own bisect: never pre-empt it.
+            own = any(set(h) == set(half) for v in (cur.get("rust_gate_bisects") or {}).values() for h in v.get("halves", []) for half in plan[:1])
+            if own:
+                pool_first = False
+                log("Gate: pool-first stands aside — the next plan half is the pool's own bisect")
+        if not members and pool_first:
+            # Pool-first: the whole pool (plan-half members included — they are pool items too) runs now.
+            members = self.compatible_batch(list(ready))
+            pool_batch = bool(members)
         while plan and not members:
             half = plan.pop(0)
             # Match by item, gate at its CURRENT head: a bisected item whose owner pushed a repair meanwhile keeps
             # its place in the queue instead of dropping to the back.
             members = self.compatible_batch([(f, st) for f, st in ready if f in half])
-        pool_batch = False
         if not members:
             members = self.compatible_batch(list(ready))
             pool_batch = bool(members)
@@ -2390,7 +2427,7 @@ class Loop:
                     cur["rust_gate"]["pool_batch"] = True
                     self.store.save_cursor(cur)
                 if pool_first:
-                    log(f"Gate: pool-first — the full pool batch of {len(members)} runs now; solo slots and deferred-fairness wait behind it")
+                    log(f"Gate: pool-first — the full pool batch of {len(members)} runs now, ahead of plan halves, solo slots and deferred-fairness")
             return
         main_head = self.gh.branch_head("main")
         if main_head and cur.get("rust_gate_warm") != main_head and self.rust_gate_mac("start-batch", f"warm-{main_head[:8]}", main_head, "1") is not None:
@@ -2572,7 +2609,7 @@ class Loop:
             files += self.store.state(fid).get("files") or []
         crates = self.rust_crates(files)
         mac = "arbos-mac" in crates or crates == ["workspace"]
-        ios = any(f.startswith("apps/ios/") or f == ".github/workflows/ios.yml" for f in files)
+        ios = touches_ios(files)
         linux = any(not f.startswith("apps/ios/") for f in files)  # ci.yml ignores apps/ios-only pushes
         cur = self.store.cursor()
         cur["rust_gate"] = {"id": run_id, "branch": branch, "base": base, "tree": tree, "members": {fid: members[fid] for fid in merged},
@@ -2837,7 +2874,7 @@ class Loop:
             files = [f["filename"] for f in self.gh.commit(fix["sha"]).get("files", [])]
             st.update(status="pushed", commit=fix["sha"], commit_url=fix["html_url"], commit_message=fix["commit"]["message"].splitlines()[0],
                       pushed_at=iso(), merge_sha=merged["sha"], merge_url=merged["html_url"], commit_date=merged["commit"]["committer"]["date"],
-                      files=files, expects_ios=any(f.startswith("apps/ios/") for f in files), expects_ci=any(not f.startswith("apps/ios/") for f in files),
+                      files=files, expects_ios=touches_ios(files), expects_ci=any(not f.startswith("apps/ios/") for f in files),
                       rust_gate={"head": members.get(fid), "ok": True, "verdict": "ok", "at": iso(), "run": active["id"], "batch": len(members),
                                  "linux_run": active.get("linux_run"), "mac": active["mac"], "tree": tree})
             for k in ("branch_head", "gated_head"):
@@ -2858,6 +2895,7 @@ class Loop:
     # Sibling-conflict policy: bumped DEFER_AFTER times → next batches are deferred items only (oldest-deferred
     # first); bumped SIBLING_LIMIT times (so at least two rounds among deferred items) → treated as a main conflict.
     DEFER_AFTER = 2
+    POOL_STARVED_MIN = 120  # no pool batch merged for this long while plan halves run → pool-first arms itself
     SIBLING_LIMIT = 4
     # Solo slot (operator rule, 2026-10-23 23:34): an item bumped 3× by siblings, or sent to its owner twice for a
     # main conflict caused by pool landings, runs ALONE in the slot right after the current run once its owner
@@ -2978,6 +3016,9 @@ class Loop:
                     log(f"[{fid}] merge after the Rust gate failed: {e}")
             cur = self.store.cursor()
             cur["rust_gate_warm"] = active["tree"] if active["mac"] == "ok" else None
+            if active.get("pool_batch"):
+                cur["last_pool_batch_at"] = iso()
+                cur.pop("pool_first_armed_from", None)
             if active.get("pool_batch") and cur.get("pool_first"):
                 cur.pop("pool_first", None)
                 self.store.event("_loop", "pool_first_cleared", run=active["id"], members=len(order))
@@ -3013,6 +3054,14 @@ class Loop:
         # item of the other again. Keyed by the half's members; cleared when a half settles.
         bisects = cur.setdefault("rust_gate_bisects", {})
         bisects[active["id"]] = {"halves": [sorted(first), sorted(rest)], "green": [], "at": iso()}
+        if cur.get("pool_first"):
+            # #2014 regression (03:04–03:35 Oct 27): pool-first re-assembled the full pool every tick and the
+            # halves it had just planned never ran (five identical red runs). A red pool batch hands over to
+            # its own bisect: pool-first is cleared here; it re-arms by itself if the pool starves again.
+            cur.pop("pool_first", None)
+            cur["last_pool_batch_at"] = iso()
+            self.store.event("_loop", "pool_first_cleared", run=active["id"], members=len(order), reason="red; bisecting")
+            log(f"Gate: pool-first cleared — pool batch {active['id']} was red; its bisect halves run next")
         for old_id in [k for k, v in bisects.items() if minutes_between(v.get("at") or iso(), iso()) > 24 * 60]:
             bisects.pop(old_id, None)
         self.store.save_cursor(cur)
@@ -3167,7 +3216,7 @@ class Loop:
         if not st.get("expects_ios") and not st.get("expects_ci"):
             # Nothing to wait for would mean a silent 90-min timeout; derive the expectations from the commit.
             files = st.get("files") or [f["filename"] for f in self.gh.commit(sha).get("files", [])]
-            st.update(files=files, expects_ios=any(f.startswith("apps/ios/") for f in files),
+            st.update(files=files, expects_ios=touches_ios(files),
                       expects_ci=any(not f.startswith("apps/ios/") for f in files))
             self.store.save_state(fid, st)
         if not st.get("commit_date"):
@@ -3786,6 +3835,38 @@ class Loop:
         self.store.event(fid, "tracked", issue=number, owner=owner)
         return st
 
+    DEPLOY_RESTART_BEFORE_S = 240  # a relay comes up ~10 s before its "deployed" event; the build+swap window before it
+    DEPLOY_RESTART_AFTER_S = 60
+
+    def relay_deploy_near(self, started_iso: str) -> str | None:
+        """The sha of a CD relay deploy whose `deployed` event (deploy-events.jsonl, written by the deploy worker)
+        sits within [-DEPLOY_RESTART_BEFORE_S, +DEPLOY_RESTART_AFTER_S] of a relay start time; None = no deploy
+        explains that restart. Reads the tail of the file only."""
+        path = self.cfg.state_dir / "deploy-events.jsonl"
+        try:
+            with open(path, "rb") as f:
+                f.seek(0, 2)
+                f.seek(max(0, f.tell() - 65536))
+                tail = f.read().decode(errors="replace")
+        except OSError:
+            return None
+        started = parse_iso(started_iso)
+        for line in reversed(tail.splitlines()):
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if ev.get("deploy") != "relay" or ev.get("event") != "deployed":
+                continue
+            try:
+                at = parse_iso(ev["at"])
+            except (KeyError, ValueError):
+                continue
+            delta = (at - started).total_seconds()
+            if -self.DEPLOY_RESTART_AFTER_S <= delta <= self.DEPLOY_RESTART_BEFORE_S:
+                return str(ev.get("sha") or "deploy")
+        return None
+
     def watch_relay_restarts(self) -> None:
         """Every relay restart drops every client's websocket; a burst of them leaves the apps on
         "Reconnecting…" for minutes (2026-10-22 18:5x: four restarts in 95 min — three CD relay deploys and an
@@ -3808,8 +3889,17 @@ class Loop:
         last = watch.get("last_uptime")
         if last is not None and uptime < last:
             started = (now - dt.timedelta(seconds=int(uptime))).strftime("%Y-%m-%dT%H:%M:%SZ")
-            watch["restarts"].append(started)
-            log(f"relay-restarts: the relay restarted at {started} (uptime {uptime}s)")
+            deploy = self.relay_deploy_near(started)
+            if deploy:
+                # A CD relay deploy restarts the relay on purpose (one per coalescing window, hotfixes aside);
+                # it is in the deploy log, so it is not a crash and does not count (#1964: three deploys in an
+                # hour — 19:57, 20:33, 20:40 Oct 26, two of them P0 hotfixes — filed as "relay restarted 3×").
+                watch.setdefault("deploy_restarts", []).append(started)
+                watch["deploy_restarts"] = watch["deploy_restarts"][-20:]
+                log(f"relay-restarts: the relay restarted at {started} for the CD deploy of {deploy[:8]} (not counted)")
+            else:
+                watch["restarts"].append(started)
+                log(f"relay-restarts: the relay restarted at {started} (uptime {uptime}s) — no deploy near it: counted as a crash")
         watch["last_uptime"] = uptime
         cutoff = (now - dt.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
         recent = [t for t in watch["restarts"] if t >= cutoff]
@@ -3818,7 +3908,7 @@ class Loop:
             self.gh.ensure_label("relay-restarts", "D93F0B", "The relay restarted repeatedly; every restart drops every client's websocket")
             body = ("The relay restarted **" + str(len(recent)) + " times in the last hour** (healthz `uptime_s` resets): " + ", ".join(recent) +
                     ".\n\nEvery restart closes every client's websocket; the apps show \"Reconnecting…\" and their backoff grows with each "
-                    "drop. Sources: CD relay deploys (`deploy-events.jsonl`) and, before the hot snapshot switch, image rolls. "
+                    "drop. Restarts that match a CD relay deploy in `deploy-events.jsonl` are not counted — these are crashes or restarts nothing in the deploy log explains. "
                     "This issue closes itself after a quiet hour. Runbook: docs/feedback-loop.md → relay restarts.")
             issue = self.gh.create_issue(f"relay restarted {len(recent)}× in the last hour — clients reconnecting", body, ["relay-restarts"])
             watch["issue"] = issue["number"]
@@ -4167,7 +4257,7 @@ class Loop:
                                         seen.append(f["filename"])
                         files = seen
                     st.update(status="gating", branch=f"feedback/{fid}", branch_head=head, files=files,
-                              expects_ios=any(f.startswith("apps/ios/") or f == ".github/workflows/ios.yml" for f in files),
+                              expects_ios=touches_ios(files),
                               expects_rust=bool(self.rust_crates(files)),
                               expects_ci=any(not f.startswith("apps/ios/") for f in files),
                               agent_summary=f"handed-off fix by {st.get('handed_off_to')}")
@@ -4188,7 +4278,7 @@ class Loop:
             st.update(status="pushed", commit=commit["sha"], commit_url=commit["html_url"],
                       commit_message=commit["commit"]["message"].splitlines()[0], pushed_at=iso(), files=files,
                       commit_date=commit["commit"]["committer"]["date"],
-                      expects_ios=any(f.startswith("apps/ios/") for f in files),
+                      expects_ios=touches_ios(files),
                       expects_ci=any(not f.startswith("apps/ios/") for f in files))
             self.store.save_state(fid, st)
             self.store.event(fid, "handoff_landed", commit=commit["sha"], files=files)

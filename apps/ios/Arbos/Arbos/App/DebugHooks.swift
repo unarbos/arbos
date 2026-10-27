@@ -38,10 +38,16 @@ enum DebugHooks {
     static var fixtureVault: Bool { value("ARBOS_FIXTURE_VAULT") == "1" }
     /// #1544 rig: the Comms chat ends with a destructive-shell card (four standing rows).
     static var fixtureShellCard: Bool { value("ARBOS_FIXTURE_SHELL_CARD") == "1" }
+    /// Secret hand-off rig: the Comms chat ends with the request card (`offer` / `saved`), the
+    /// "save this" ghost row (`ghost`) or the offer card for a pasted key (`detect`).
+    static var fixtureSecretHandoff: String? { value("ARBOS_FIXTURE_SECRET_HANDOFF") }
     /// With `ARBOS_OPEN_CHAT`: that chat ends with a several-block agent reply (#1389 rigs).
     static var fixtureLongReply: Bool { value("ARBOS_FIXTURE_LONG_REPLY") == "1" }
     /// Presence-row rig (typing-indicator-left-2026-10-23): n agents working in the fixture group.
     static var fixtureWorking: Int { value("ARBOS_FIXTURE_WORKING").flatMap { Int($0) } ?? 0 }
+    /// `ARBOS_FIXTURE_MACHINE=near-limit`: the box report says disk 92 % and memory 88 % used
+    /// (Settings › Machine's warning state on the rig).
+    static var fixtureMachineNearLimit: Bool { value("ARBOS_FIXTURE_MACHINE") == "near-limit" }
     /// Tasks-chip rig (duplex §2.4): the first n of three background jobs open in the opened
     /// agent chat — 1 running with a step, 2 running with no step yet, 3 queued behind a lock.
     static var fixtureJobs: Int { min(3, value("ARBOS_FIXTURE_JOBS").flatMap { Int($0) } ?? 0) }

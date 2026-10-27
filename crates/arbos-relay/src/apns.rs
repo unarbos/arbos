@@ -101,8 +101,9 @@ pub fn from_env() -> Option<Arc<Pusher>> {
         .ok()
         .filter(|s| !s.trim().is_empty());
     let (Some(p8), Some(key_id), Some(team_id)) = (p8, key_id, team_id) else {
-        tracing::info!(
-            "APNS_KEY_P8/APNS_KEY_ID/APNS_TEAM_ID not set: iOS push notifications are off"
+        tracing::warn!(
+            "APNS_KEY_P8/APNS_KEY_ID/APNS_TEAM_ID not set: iOS push notifications are off \
+             (relay-server.sh reads them from the vault item \"Arbos APNs auth key\")"
         );
         return None;
     };
@@ -240,16 +241,45 @@ impl Apns {
         if let Some(id) = &out.collapse_id {
             req = req.header("apns-collapse-id", id);
         }
+        // One line per attempt, whatever Apple answers: the delivery audit trail
+        // (`journalctl -u arbos-relay | grep apns`) names the device by token
+        // prefix only — the full token is a credential for that one device.
+        let token_prefix: String = out.device_token.chars().take(8).collect();
+        let topic = out.topic.as_deref().unwrap_or(&self.topic).to_owned();
+        let collapse_id = out.collapse_id.clone().unwrap_or_default();
         let resp = match req.send().await {
             Ok(r) => r,
-            Err(e) => return Delivery::Failed(format!("apns transport: {e}")),
+            Err(e) => {
+                tracing::warn!(
+                    token = %token_prefix, environment = %out.environment, topic = %topic,
+                    push_type = out.push_type, collapse_id = %collapse_id, error = %e,
+                    "apns send: transport error"
+                );
+                return Delivery::Failed(format!("apns transport: {e}"));
+            }
         };
         let status = resp.status();
+        let apns_id = resp
+            .headers()
+            .get("apns-id")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_owned();
         if status.is_success() {
+            tracing::info!(
+                status = status.as_u16(), apns_id = %apns_id, token = %token_prefix,
+                environment = %out.environment, topic = %topic, push_type = out.push_type,
+                collapse_id = %collapse_id, "apns send: accepted"
+            );
             return Delivery::Sent;
         }
         let body: Value = resp.json().await.unwrap_or(Value::Null);
         let reason = body["reason"].as_str().unwrap_or("").to_owned();
+        tracing::warn!(
+            status = status.as_u16(), reason = %reason, apns_id = %apns_id, token = %token_prefix,
+            environment = %out.environment, topic = %topic, push_type = out.push_type,
+            collapse_id = %collapse_id, "apns send: rejected"
+        );
         match (status.as_u16(), reason.as_str()) {
             (410, _) | (400, "BadDeviceToken") | (400, "DeviceTokenNotForTopic") => {
                 Delivery::TokenGone

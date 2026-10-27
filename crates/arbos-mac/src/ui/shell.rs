@@ -13,16 +13,19 @@ use gpui::{
 };
 
 use crate::app::SignInMode;
-use crate::app::{AppState, DetailsTarget, ProfilePage, ServerSheet};
+use crate::app::{AppEvent, AppState, DetailsTarget, ProfilePage, ServerSheet};
 use crate::image_picker;
-use crate::model::{now_ms, CallKind, MachineState};
+use crate::model::{now_ms, CallKind, MachineState, Person};
 use crate::sign_in;
 use crate::sync::user_error::{ErrorClass, UserError};
 use crate::sync::PictureSource;
 use crate::ui::avatar_picker;
 use crate::ui::avatars::{self, leaf, LeafPick};
+use crate::ui::blocked;
 use crate::ui::callview;
 use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
+use crate::ui::chart_viewer;
+use crate::ui::chat_search;
 use crate::ui::composer::{self, Composer, ComposerEvent, ComposerInput};
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
 use crate::ui::create_entity::{self, Kind as CreateKind};
@@ -53,8 +56,9 @@ use crate::ui::skills::{self, SkillsPanel};
 use crate::ui::slide::{self, ChatSlide, PaneSlides};
 use crate::ui::theme::{
     reapply_window_background, AppearancePref, GlassOpacity, Surface, Theme, COLUMN_MARGIN,
-    COMPOSER_BOTTOM, COMPOSER_WIDTH, DRAWER_WIDTH, GLASS_OPACITY_MAX, GLASS_OPACITY_MIN,
-    HEADER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS, TAB_BAR_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
+    COMPOSER_BOTTOM, COMPOSER_HEIGHT, COMPOSER_WIDTH, DRAWER_WIDTH, GLASS_OPACITY_MAX,
+    GLASS_OPACITY_MIN, HEADER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS, TAB_BAR_HEIGHT, TEXT_BODY,
+    TEXT_SMALL, TEXT_TINY,
 };
 use crate::ui::transcript::COLUMN_MAX_WIDTH;
 use crate::ui::transcript::{column_row, Transcript, TranscriptEvent};
@@ -225,6 +229,13 @@ pub struct Shell {
     /// The command palette's search field (⌘⇧F / ⌘K / the sidebar's Search
     /// disc; [feedback search-palette-2026-10-24]).
     pub(crate) search_input: Entity<ComposerInput>,
+    /// ⌘F Search-in-chat's field ([feedback search-in-chat-mac-2026-10-26]);
+    /// its text drives `AppState::chat_search`.
+    pub(crate) chat_search_input: Entity<ComposerInput>,
+    /// Rig: `ARBOS_CHAT_SEARCH=<text>` opens the Search-in-chat bar with that
+    /// query once the first chat with rows is on screen (synthetic key events
+    /// do not reach the GPUI field on the shared display). Consumed on use.
+    chat_search_rig: Option<String>,
     /// The palette: open/closed, highlighted row, rows drawn last frame.
     pub(crate) palette: palette::PaletteState,
     /// The palette's result list scroll (keeps the highlight in view).
@@ -238,6 +249,8 @@ pub struct Shell {
     forward_message_focused_for: Option<crate::model::Id>,
     /// `AppState::media_viewer_generation` the viewer was last focused for.
     viewer_focused_generation: u64,
+    /// `AppState::chart_viewer_generation` the chart overlay was last focused for.
+    chart_viewer_focused_generation: u64,
     pub(crate) connectors: Entity<ConnectorsPanel>,
     pub(crate) skills: Entity<SkillsPanel>,
     pub(crate) local: Entity<LocalPanel>,
@@ -353,6 +366,11 @@ pub struct Shell {
     /// Group pane › Members: the row whose ✕ was clicked (`user:<id>` or
     /// `agent:<project>`); it shows "Remove … ?" with Cancel / Remove.
     pub(crate) member_remove_armed: Option<String>,
+    /// The person an Unblock is being confirmed for ([feedback blocked-state-mac-2026-10-26]):
+    /// the pane's footer row, the DM composer bar and the chat note draw the confirm in their
+    /// place while this names their person; `confirm_unblock` lifts the block, `cancel_unblock`
+    /// puts the row / bar back.
+    pub(crate) unblock_armed: Option<Person>,
     /// Settings → Devices: the device whose Sign out is asking (Oct 23).
     pub(crate) device_revoke_armed: Option<String>,
     /// Settings → Devices: the load-failure note's Details disclosure.
@@ -480,6 +498,16 @@ impl Shell {
                         s.set_reply_to(chat_id.clone(), message_id.clone(), cx)
                     });
                     cx.notify();
+                }
+                TranscriptEvent::Unblock { person } => {
+                    // A group: the confirm needs a place — the person's pane, opened over
+                    // the chat with the confirm already armed on its Unblock row.
+                    let page = ProfilePage::User {
+                        handle: person.handle.clone(),
+                        space_id: this.state.read(cx).selected_project.clone(),
+                    };
+                    this.state.update(cx, |s, cx| s.open_profile(page, cx));
+                    this.arm_unblock(person.clone(), cx);
                 }
             },
         )
@@ -700,6 +728,33 @@ impl Shell {
                 }));
             });
         }
+        let chat_search_input = cx.new(ComposerInput::new);
+        chat_search_input.update(cx, |input, _| {
+            input.set_placeholder("Search in chat");
+            input.set_font_size(chat_search::metrics::FIELD_FONT);
+        });
+        // Every keystroke re-runs the search; Enter / ⇧Enter / ⇥ / Esc are
+        // actions in the bar's "ChatSearch" context.
+        cx.observe(&chat_search_input, |this, input, cx| {
+            let typed = input.read(cx).text().to_string();
+            this.state
+                .update(cx, |s, cx| s.chat_search_set_text(typed, cx));
+            cx.notify();
+        })
+        .detach();
+        // Rows of the searched chat changed (a message, a channel page): the
+        // hits follow, after the state's own update has finished.
+        cx.subscribe(&state, |_, state, event: &AppEvent, cx| {
+            if let AppEvent::TranscriptText { chat_id, .. }
+            | AppEvent::TranscriptChanged { chat_id } = event
+            {
+                let chat_id = chat_id.clone();
+                cx.defer(move |cx| {
+                    state.update(cx, |s, cx| s.chat_search_refresh(&chat_id, cx));
+                });
+            }
+        })
+        .detach();
         let viewer_search = cx.new(ComposerInput::new);
         viewer_search.update(cx, |input, _| {
             input.set_placeholder("Search");
@@ -987,11 +1042,16 @@ impl Shell {
             avatar_picker: None,
             avatar_prompt_input,
             search_input,
+            chat_search_input,
+            chat_search_rig: std::env::var("ARBOS_CHAT_SEARCH")
+                .ok()
+                .filter(|q| !q.trim().is_empty()),
             palette,
             palette_scroll: ScrollHandle::new(),
             viewer_search,
             viewer_focus: cx.focus_handle(),
             viewer_focused_generation: 0,
+            chart_viewer_focused_generation: 0,
             forward_message_focused_for: None,
             connectors,
             skills,
@@ -1020,6 +1080,7 @@ impl Shell {
             channel_delete_armed: false,
             run_by_chip: Default::default(),
             member_remove_armed: None,
+            unblock_armed: None,
             device_revoke_armed: None,
             devices_error_details_open: false,
             update_error_details_open: false,
@@ -1207,6 +1268,7 @@ impl Shell {
             || focused(&self.pairing_input)
             || focused(&self.project_input)
             || focused(&self.search_input)
+            || focused(&self.chat_search_input)
             || focused(&self.viewer_search)
             || focused(&self.people_input)
             || focused(&self.server_input)
@@ -1243,6 +1305,9 @@ impl Shell {
             } else {
                 self.viewer_focus.clone()
             });
+        }
+        if state.chart_viewer.is_some() {
+            return Some(self.viewer_focus.clone());
         }
         None
     }
@@ -2119,6 +2184,66 @@ impl Shell {
     /// it and occludes it — so its × / Esc / backdrop close only the viewer and the picker is
     /// back as it was (Jacob, 2026-10-26: the first cut dropped the picker here, so the X
     /// seemed to close both).
+    /// Unblock asked for: the surface that holds `person` shows the confirm.
+    pub(crate) fn arm_unblock(&mut self, person: Person, cx: &mut Context<Self>) {
+        self.unblock_armed = Some(person);
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_unblock(&mut self, cx: &mut Context<Self>) {
+        if self.unblock_armed.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// The confirm's Unblock: `DELETE /blocks/{id}` through the state; the surfaces follow the
+    /// relay's block list back to their plain state.
+    pub(crate) fn confirm_unblock(&mut self, cx: &mut Context<Self>) {
+        let Some(person) = self.unblock_armed.take() else {
+            return;
+        };
+        self.state.update(cx, |s, cx| s.unblock_user(&person, cx));
+        cx.notify();
+    }
+
+    /// The composer's stand-in for a DM with someone I blocked: the "You blocked X · Unblock"
+    /// bar, or the confirm in its place while Unblock is being asked.
+    fn blocked_composer(
+        &self,
+        person: &Person,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if self.unblock_armed_for(person) {
+            let (cancel, go) = blocked::confirm_buttons("composer-unblock", theme);
+            return div()
+                .w_full()
+                .rounded(px(COMPOSER_HEIGHT / 2.0))
+                .bg(theme.surface_2)
+                .child(blocked::confirm(
+                    "composer-unblock",
+                    &person.handle,
+                    cancel.on_click(cx.listener(|this, _, _, cx| this.cancel_unblock(cx))),
+                    go.on_click(cx.listener(|this, _, _, cx| this.confirm_unblock(cx))),
+                    theme,
+                ))
+                .into_any_element();
+        }
+        let (bar, unblock) = blocked::composer_bar(person, theme);
+        let person = person.clone();
+        bar.child(unblock.on_click(cx.listener(move |this, _, _, cx| {
+            this.arm_unblock(person.clone(), cx);
+        })))
+        .into_any_element()
+    }
+
+    /// Is the confirm up for this person?
+    pub(crate) fn unblock_armed_for(&self, person: &Person) -> bool {
+        self.unblock_armed.as_ref().is_some_and(|p| {
+            (!p.id.is_empty() && p.id == person.id) || p.handle.eq_ignore_ascii_case(&person.handle)
+        })
+    }
+
     pub(crate) fn view_picture(&mut self, name: &str, url: &str, cx: &mut Context<Self>) {
         self.state
             .update(cx, |s, cx| s.open_picture_viewer(name, url, cx));
@@ -2372,6 +2497,98 @@ impl Shell {
         cx.notify();
     }
 
+    // ----- ⌘F Search-in-chat ([feedback search-in-chat-mac-2026-10-26]) ---------
+
+    /// ⌘F: the bar drops under the header pill of the open chat and takes
+    /// the keyboard; pressed again while it is up, the cursor goes back to
+    /// its field (Find's convention — the key never closes the bar).
+    fn open_chat_search_action(
+        &mut self,
+        _: &chat_search::Open,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_chat_search(window, cx);
+    }
+
+    pub(crate) fn open_chat_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.menu_open = false;
+        self.close_popovers(cx);
+        if self.palette.open {
+            self.close_palette(window, cx);
+        }
+        let was_open = self.state.read(cx).chat_search_open();
+        let opened = self.state.update(cx, |s, cx| s.open_chat_search(cx));
+        if !opened {
+            return;
+        }
+        if !was_open {
+            self.chat_search_input.update(cx, |i, cx| i.clear(cx));
+        }
+        let handle = self.chat_search_input.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    /// Esc / ✕: the bar goes, its marks with it; the composer types again.
+    pub(crate) fn close_chat_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| s.close_chat_search(cx));
+        self.chat_search_input.update(cx, |i, cx| i.clear(cx));
+        Composer::focus(&self.composer, window, cx);
+        cx.notify();
+    }
+
+    fn chat_search_close_action(
+        &mut self,
+        _: &chat_search::Close,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.state.read(cx).chat_search_open() {
+            self.close_chat_search(window, cx);
+        }
+    }
+
+    /// Enter / › / ⌘G.
+    fn chat_search_next(&mut self, _: &chat_search::Next, _: &mut Window, cx: &mut Context<Self>) {
+        if self.state.read(cx).chat_search_open() {
+            self.state.update(cx, |s, cx| s.chat_search_step(1, cx));
+        }
+    }
+
+    /// ⇧Enter / ‹ / ⇧⌘G.
+    fn chat_search_prev(&mut self, _: &chat_search::Prev, _: &mut Window, cx: &mut Context<Self>) {
+        if self.state.read(cx).chat_search_open() {
+            self.state.update(cx, |s, cx| s.chat_search_step(-1, cx));
+        }
+    }
+
+    /// ⇥ in the field: pin the sender the typed name offers.
+    fn chat_search_pin_action(
+        &mut self,
+        _: &chat_search::PinSender,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(sender) = self.state.read(cx).chat_search_offer() {
+            self.pin_chat_search_sender(sender, window, cx);
+        }
+    }
+
+    pub(crate) fn pin_chat_search_sender(
+        &mut self,
+        sender: crate::chat_search::Sender,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state
+            .update(cx, |s, cx| s.chat_search_pin_sender(sender, cx));
+        self.chat_search_input.update(cx, |i, cx| i.clear(cx));
+        let handle = self.chat_search_input.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
     /// ↑ / ↓ in the palette field (`ComposerInput::on_arrow`).
     pub(crate) fn palette_step(&mut self, delta: i32, cx: &mut Context<Self>) {
         if !self.palette.open {
@@ -2437,6 +2654,11 @@ impl Shell {
             Composer::focus(&self.composer, window, cx);
             return;
         }
+        if self.state.read(cx).chart_viewer.is_some() {
+            self.state.update(cx, |s, cx| s.close_chart_viewer(cx));
+            Composer::focus(&self.composer, window, cx);
+            return;
+        }
         if let Some(viewer) = self.state.read(cx).media_viewer.as_ref() {
             // Esc closes the Forward picker first, then the viewer.
             if viewer.forward_open {
@@ -2450,6 +2672,10 @@ impl Shell {
                     Composer::focus(&self.composer, window, cx);
                 }
             }
+            return;
+        }
+        if self.state.read(cx).chat_search_open() {
+            self.close_chat_search(window, cx);
             return;
         }
         if self.voice.update(cx, |v, cx| v.escape(cx)) {
@@ -2902,42 +3128,41 @@ impl Shell {
             )
     }
 
-    /// The per-room push refusal (`not_available`): "Messages in this chat aren't being
-    /// delivered right now." in the same slot, while the relay refuses; it clears itself on
-    /// the room's next ACK (`SyncEvent::PushRefused { refused: false }`).
+    /// The per-room push refusal in the same slot, while the relay refuses; it clears itself
+    /// on the room's next ACK (`SyncEvent::PushRefused { refused: false }`). A refusal with a
+    /// `reason` says so in plain words ([feedback blocked-state-relay-2026-10-26]): "<name> has
+    /// blocked you in this chat." / "Couldn't post: you've blocked <name>, who is in this chat.
+    /// Unblock to post." / the mute line; anything else keeps "Messages in this chat aren't
+    /// being delivered right now."
     fn render_delivery_note(&self, cx: &mut Context<Self>) -> Option<Div> {
         let theme = Theme::of(cx).clone();
         let state = self.state.read(cx);
         let chat = state.active_chat_id()?;
-        if !state.push_refused.contains(&chat) {
-            return None;
+        let why = state.push_refused.get(&chat)?.clone();
+        let error = delivery_error(&why);
+        let mut handlers =
+            error_note::Handlers::new().toggle_details(cx.listener(|this, _, _, cx| {
+                this.delivery_error_details_open = !this.delivery_error_details_open;
+                cx.notify();
+            }));
+        // "Unblock to post": the capsule arms the confirm for the person named
+        // ([feedback blocked-state-mac-2026-10-26]); the DM's composer bar shows it.
+        if let Some(handle) = why.unblock_handle() {
+            let person = state.person_by_handle(handle).unwrap_or_else(|| Person {
+                handle: handle.to_owned(),
+                ..Person::default()
+            });
+            handlers = handlers.extra(
+                blocked::UNBLOCK_LABEL,
+                cx.listener(move |this, _, _, cx| this.arm_unblock(person.clone(), cx)),
+            );
         }
-        let error = UserError::of(
-            "",
-            ErrorClass::Offline {
-                device_offline: false,
-            },
-            "the relay refused the push: not_available",
-        );
-        let error = UserError {
-            verb: String::new(),
-            class: ErrorClass::Refused {
-                message: Some(
-                    "Messages in this chat aren't being delivered right now. We'll keep trying."
-                        .into(),
-                ),
-            },
-            ..error
-        };
         Some(self.chat_note(
             "delivery-error",
             &error,
             self.delivery_error_details_open,
             &theme,
-            error_note::Handlers::new().toggle_details(cx.listener(|this, _, _, cx| {
-                this.delivery_error_details_open = !this.delivery_error_details_open;
-                cx.notify();
-            })),
+            handlers,
         ))
     }
 
@@ -3087,6 +3312,13 @@ impl Shell {
         let channel = state
             .selected_channel_info()
             .map(|(server, ch)| (server.clone(), ch.clone(), state.channel_can_post()));
+        // A DM with someone I blocked has no input ([feedback blocked-state-mac-2026-10-26]):
+        // "You blocked X · Unblock" stands in the composer's place, the confirm in its turn.
+        let blocked_peer = project
+            .as_ref()
+            .filter(|p| p.is_people() && !p.is_people_group())
+            .and_then(|p| p.person().cloned())
+            .filter(|person| state.is_blocked(person));
         if animating || shake.is_some() || presence.is_some() {
             PulseClock::request(cx);
         }
@@ -3100,6 +3332,10 @@ impl Shell {
         // not moved.
         // Wheel over the input (sibling of the list) still scrolls the chat —
         // same as dragging over a bubble ([feedback app-01M5PDB3QYAPBPA4FJXZE1FFD0]).
+        let composer_slot: AnyElement = match &blocked_peer {
+            Some(person) => self.blocked_composer(person, &theme, cx),
+            None => self.composer.clone().into_any_element(),
+        };
         let composer_block = column_row(
             div()
                 .w_full()
@@ -3108,7 +3344,7 @@ impl Shell {
                     this.transcript
                         .update(cx, |t, cx| t.scroll_from_wheel(event, cx));
                 }))
-                .child(self.composer.clone())
+                .child(composer_slot)
                 .into_any_element(),
         );
 
@@ -3136,11 +3372,15 @@ impl Shell {
                     show_sidebar_toggle,
                     cx,
                 ));
-            let pre: Vec<AnyElement> = self
-                .render_banner(cx)
+            // The Search-in-chat bar first, under the header; then the banner.
+            let pre: Vec<AnyElement> = chat_search::bar(self, cx)
                 .into_iter()
-                .chain(self.render_delivery_note(cx))
-                .map(IntoElement::into_any_element)
+                .chain(
+                    self.render_banner(cx)
+                        .into_iter()
+                        .chain(self.render_delivery_note(cx))
+                        .map(IntoElement::into_any_element),
+                )
                 .collect();
             let bottom = div()
                 .w_full()
@@ -3225,6 +3465,10 @@ impl Shell {
             .child(header::render(self, &space, show_sidebar_toggle, cx));
         let floating_header = dropped;
         let mut pre: Vec<AnyElement> = Vec::new();
+        // ⌘F: the Search-in-chat bar is the first thing under the header.
+        if let Some(bar) = chat_search::bar(self, cx) {
+            pre.push(bar);
+        }
         let mut header_bar = Some(header_bar);
         if !floating_header {
             column = column.child(header_bar.take().expect("the header is built once"));
@@ -3354,13 +3598,12 @@ impl Shell {
                             .child(hint),
                     )
                     .children(add_agent)
-                    .child(
-                        div()
-                            .w(px(COMPOSER_WIDTH))
-                            .max_w_full()
-                            .pt(px(12.0))
-                            .child(self.composer.clone()),
-                    ),
+                    .child(div().w(px(COMPOSER_WIDTH)).max_w_full().pt(px(12.0)).child(
+                        match &blocked_peer {
+                            Some(person) => self.blocked_composer(person, &theme, cx),
+                            None => self.composer.clone().into_any_element(),
+                        },
+                    )),
             );
         } else {
             // Transcript above, composer pinned at the bottom. On the first
@@ -3382,6 +3625,7 @@ impl Shell {
                         let (jobs, open) = crate::ui::tasks::for_chat(self.state.read(cx), &id);
                         crate::ui::tasks::presence_row(
                             p,
+                            &self.state,
                             id,
                             jobs,
                             open,
@@ -3391,7 +3635,7 @@ impl Shell {
                             cx,
                         )
                     }
-                    None => crate::ui::presence::row(p, &theme, cx),
+                    None => crate::ui::presence::row(p, Some(&self.state), &theme, cx),
                 };
                 div()
                     .absolute()
@@ -4320,6 +4564,8 @@ impl Render for Shell {
         let sidebar_width = state.sidebar_width;
         let details = state.details_open.clone();
         let viewer_open = state.media_viewer.is_some();
+        let chart_viewer_open = state.chart_viewer.is_some();
+        let chart_viewer_generation = state.chart_viewer_generation;
         let viewer_forward_open = state.media_viewer.as_ref().is_some_and(|v| v.forward_open);
         let viewer_generation = state.media_viewer_generation;
         let forward_message_open = state.forward_message.as_ref().map(|f| f.message_id.clone());
@@ -4339,6 +4585,11 @@ impl Render for Shell {
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::toggle_rail))
             .on_action(cx.listener(Self::open_palette_action))
+            .on_action(cx.listener(Self::open_chat_search_action))
+            .on_action(cx.listener(Self::chat_search_next))
+            .on_action(cx.listener(Self::chat_search_prev))
+            .on_action(cx.listener(Self::chat_search_close_action))
+            .on_action(cx.listener(Self::chat_search_pin_action))
             .on_action(cx.listener(Self::escape))
             .on_action(cx.listener(Self::send_feedback))
             .on_action(cx.listener(Self::paste_into_chat))
@@ -4812,6 +5063,13 @@ impl Render for Shell {
                 window.focus(&self.viewer_focus, cx);
             }
             root = root.child(media_viewer::overlay(self, &self.viewer_focus, cx));
+        } else if chart_viewer_open {
+            // Esc closes; focus moves into the overlay once per opening.
+            if self.chart_viewer_focused_generation != chart_viewer_generation {
+                self.chart_viewer_focused_generation = chart_viewer_generation;
+                window.focus(&self.viewer_focus, cx);
+            }
+            root = root.child(chart_viewer::overlay(self, &self.viewer_focus, cx));
         } else if self.state.read(cx).forward_message.is_none()
             && (self.viewer_focus.is_focused(window)
                 || self
@@ -4830,6 +5088,26 @@ impl Render for Shell {
             root = root.child(overlay);
         }
         self.enforce_modal_focus(window, cx);
+        // Rig: the Search-in-chat bar with its query, once a chat with rows is up.
+        if self.chat_search_rig.is_some() {
+            // With `ARBOS_OPEN_SPACE` the bar waits for that space's chat, not
+            // the first chat that happens to have rows.
+            let wanted = std::env::var("ARBOS_OPEN_SPACE").ok();
+            let state = self.state.read(cx);
+            let ready = state.active_chat_id().is_some_and(|id| {
+                !state.messages_of(&id).is_empty()
+                    && wanted
+                        .as_ref()
+                        .is_none_or(|space| state.space_of_chat(&id) == *space)
+            });
+            if ready {
+                if let Some(query) = self.chat_search_rig.take() {
+                    self.open_chat_search(window, cx);
+                    self.chat_search_input
+                        .update(cx, |i, cx| i.set_text(query, cx));
+                }
+            }
+        }
         // Collapsed video call: the camera keeps showing in a draggable tile.
         let collapsed_video = self
             .state
@@ -4914,5 +5192,33 @@ pub(crate) fn human_bytes(bytes: i64) -> String {
         format!("{:.1} MB", b / 1_000_000.0)
     } else {
         format!("{:.2} GB", b / 1_000_000_000.0)
+    }
+}
+
+/// The chat-level note's error for a push refusal: the refusal's sentence as the relay's
+/// words (`ErrorClass::Refused`), the raw code / reason behind Details.
+pub(crate) fn delivery_error(why: &crate::sync::PushRefusal) -> UserError {
+    let raw = match (&why.reason, &why.by_handle) {
+        (Some(reason), Some(handle)) => {
+            format!(
+                "the relay refused the push: {} ({reason}, @{handle})",
+                why.code
+            )
+        }
+        _ => format!("the relay refused the push: {}", why.code),
+    };
+    let error = UserError::of(
+        "",
+        ErrorClass::Offline {
+            device_offline: false,
+        },
+        raw,
+    );
+    UserError {
+        verb: String::new(),
+        class: ErrorClass::Refused {
+            message: Some(why.sentence()),
+        },
+        ..error
     }
 }

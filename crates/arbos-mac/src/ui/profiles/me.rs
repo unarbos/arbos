@@ -65,6 +65,7 @@ impl Shell {
         let account_image = account.as_ref().and_then(|a| state.avatar(&a.avatar_url));
         let profile_tab = state.profile_tab;
         let notify_on = state.notifier.enabled;
+        let permission = state.notification_permission();
         let read_receipts = state.read_receipts;
         let secrets_value = if state.secrets.loaded {
             state.secrets.row_value()
@@ -531,7 +532,45 @@ impl Shell {
 
         // ----- Notifications page body -------------------------------------------
         let notifications_body = {
-            let group = settings_group(&theme)
+            // macOS's own answer first: a denial here is why "no banners" — and the
+            // one place to fix it is System Settings, so the row opens it.
+            let system_row = match permission {
+                crate::ui::notify::Permission::Denied => Some(
+                    glass::row("Allowed by macOS".to_string(), &theme)
+                        .child(value("Off".to_string(), &theme))
+                        .child(
+                            link_button(
+                                "notify-system-settings",
+                                "Open System Settings",
+                                false,
+                                &theme,
+                            )
+                            .ml(px(10.0))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.state.update(cx, |s, _| s.open_notification_settings());
+                            })),
+                        ),
+                ),
+                crate::ui::notify::Permission::NotDetermined => Some(
+                    glass::row("Allowed by macOS".to_string(), &theme)
+                        .child(value("Not asked yet".to_string(), &theme))
+                        .child(
+                            link_button("notify-system-allow", "Allow", false, &theme)
+                                .ml(px(10.0))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.state.update(cx, |s, cx| s.allow_notifications(cx));
+                                })),
+                        ),
+                ),
+                crate::ui::notify::Permission::Allowed | crate::ui::notify::Permission::Unknown => {
+                    None
+                }
+            };
+            let mut group = settings_group(&theme);
+            if let Some(row) = system_row {
+                group = group.child(row);
+            }
+            let group = group
                 .child(seg_row(
                     "Notifications",
                     div()
@@ -1122,7 +1161,16 @@ impl Shell {
                     "settings-notifications",
                     "bell",
                     SettingsPage::Notifications,
-                    Some(if notify_on { "On" } else { "Off" }.into()),
+                    Some(
+                        if permission == crate::ui::notify::Permission::Denied {
+                            "Off in macOS"
+                        } else if notify_on {
+                            "On"
+                        } else {
+                            "Off"
+                        }
+                        .into(),
+                    ),
                     &theme,
                     cx,
                 )

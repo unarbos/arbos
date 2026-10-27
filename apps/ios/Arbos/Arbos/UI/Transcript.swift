@@ -143,7 +143,11 @@ enum RowKind: Equatable {
     /// `lane`: in a people chat the card sits after the sender's avatar lane, like the bubble it
     /// belongs to (#1440 follow-up: the card must share the bubble's left edge and cap width).
     /// `shellCard`: a destructive-shell card with standing options (#1544).
-    case question(questionId: String?, text: String, options: [ChoiceOption], multi: Bool, picked: [String], open: Bool, lane: Bool, shellCard: Bool = false)
+    case question(questionId: String?, text: String, options: [ChoiceOption], multi: Bool, picked: [String], open: Bool, lane: Bool, shellCard: Bool = false, offer: SecretOffer? = nil)
+    /// Secret hand-off: the message's value moved into the vault — "Secret saved as NAME"
+    /// in the sender's slot (mine right, another member's left under their name). Nothing
+    /// here is the value; nothing to copy or search.
+    case secretGhost(name: String, mine: Bool, handle: String, avatar: String?, named: Bool)
     /// A file card; tap opens the media viewer on it (Open → Quick Look).
     /// `caption` is an optional description bar under a video when the sender typed
     /// one with the attachment — not a separate text bubble.
@@ -236,6 +240,13 @@ enum Transcript {
                 var hasImage = false
                 var hasAttachment = false
                 let mine = !people || me == nil || message.sender == me || message.sender == "user"
+                // Secret hand-off: a redacted row is the ghost bubble and nothing else.
+                if let ghostName = message.parts.lazy.compactMap(\.secretRedactedName).first {
+                    chunk.append(Row(id: "\(message.id)#ghost", messageId: message.id, role: mine ? .user : .project,
+                                     kind: .secretGhost(name: ghostName, mine: mine, handle: message.senderHandle ?? "someone",
+                                                        avatar: message.senderAvatar, named: named)))
+                    break
+                }
                 // Collect picture / video attachments first so a typed description can sit
                 // as a caption bar on the last one instead of a second bubble.
                 var mediaParts: [(id: String, a: Attachment)] = []
@@ -366,7 +377,8 @@ enum Transcript {
                         chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
                                          kind: .question(questionId: q.questionId, text: q.question, options: q.options,
                                                          multi: q.multi, picked: q.answer, open: q.open,
-                                                         lane: people && message.senderHandle != nil, shellCard: q.shellCard)))
+                                                         lane: people && message.senderHandle != nil, shellCard: q.shellCard,
+                                                         offer: q.secretOffer)))
                     case .status(let id, .handoff, let text):
                         // Legacy status line; the turn-based row above already covers it.
                         if handoffName == nil {
@@ -384,7 +396,7 @@ enum Transcript {
                                                    lane: people && message.senderHandle != nil))
                     case .error(let id, let code, let text):
                         errors.append((id: id, code: code, text: text))
-                    case .status, .tool, .subagentResult, .reasoning, .unknown:
+                    case .status, .tool, .subagentResult, .reasoning, .secretRedacted, .unknown:
                         break
                     }
                 }
@@ -400,7 +412,7 @@ enum Transcript {
                 let onlyEmpty = message.parts.allSatisfy { part in
                     switch part {
                     case .text, .status, .error: return true
-                    case .tool, .attachment, .question, .subagentResult, .reasoning, .unknown: return false
+                    case .tool, .attachment, .question, .subagentResult, .reasoning, .secretRedacted, .unknown: return false
                     }
                 }
                 let failed = !errors.isEmpty || message.status == .error
@@ -1141,7 +1153,7 @@ struct RowView: View, Equatable {
     /// Bubbles get a swipe time; centred system / card / error rows do not.
     private var showsSwipeTime: Bool {
         switch row.kind {
-        case .system, .question, .error, .forwardHint:
+        case .system, .question, .error, .forwardHint, .secretGhost:
             return false
         case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
             return true
@@ -1239,24 +1251,31 @@ struct RowView: View, Equatable {
                 .accessibilityIdentifier("own-bubble-\(delivery)")
             }
         case .other(let text, let handle, let avatar, let named, let quote):
-            let openPerson = { model.openPersonProfile(handle: handle, avatarUrl: avatar, chatId: chatId) }
+            // The avatar and the name are one profile target (`ProfileToggle`): a tap
+            // opens the person's sheet, a tap on either while it is up dismisses it.
+            let personTarget = model.personTarget(handle: handle, avatarUrl: avatar, chatId: chatId)
+            let personName = model.personName(handle: handle) ?? "@\(handle)"
+            let personLabel = ProfileToggle.label(name: personName, showing: model.profileShows(personTarget))
+            let openPerson = { model.toggleProfile(personTarget) }
             HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
                 Button(action: openPerson) {
                     PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
                 }
                 .buttonStyle(.plain)
                 .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
-                .accessibilityLabel("@\(handle), profile")
+                .accessibilityLabel(personLabel)
+                .accessibilityIdentifier("sender-avatar")
                 // Group / channel: the name inside the bubble, in the sender's colour,
                 // then the reply quote, then the text. No time in the bubble (drag to reveal).
                 VStack(alignment: .leading, spacing: 0) {
                     if named {
                         Button(action: openPerson) {
-                            LiveSenderName(name: model.personName(handle: handle) ?? "@\(handle)",
+                            LiveSenderName(name: personName,
                                            url: avatar, seed: model.personId(handle: handle) ?? handle, agent: false)
                         }
                         .buttonStyle(.plain)
                         .padding(.bottom, Self.nameToTextGap)
+                        .accessibilityLabel(personLabel)
                         .accessibilityIdentifier("bubble-name")
                     }
                     if let quote {
@@ -1278,18 +1297,21 @@ struct RowView: View, Equatable {
             }
             .task(id: avatar) { SenderAccents.shared.load(url: avatar) }
         case .member(let blocks, let live, let handle, let name, let avatar, let named, let agentId, let quote):
-            let openMember = {
-                if let agentId { model.showProfile(.agent(projectId: agentId)) }
-                else { model.openPersonProfile(handle: handle, avatarUrl: avatar, chatId: chatId) }
-            }
             // One identity for the disc, the caption and the bar (#1592): the same resolver
             // the presence row asks, with the same row fields.
             let agent = model.agent(sender: agentId ?? "", handle: handle, name: name, chatId: chatId)
+            // The disc and the name are one profile target (`ProfileToggle`): a tap opens
+            // the agent's sheet, a tap on either while it is up dismisses it.
+            let memberTarget: ProfileTarget = agentId.map { ProfileTarget.agent(projectId: $0) }
+                ?? model.personTarget(handle: handle, avatarUrl: avatar, chatId: chatId)
+            let memberLabel = ProfileToggle.label(name: agent.name, showing: model.profileShows(memberTarget))
+            let openMember = { model.toggleProfile(memberTarget) }
             HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
                 Button(action: openMember) { memberAvatar(agent) }
                     .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
                     .buttonStyle(.plain)
-                    .accessibilityLabel("@\(handle), profile")
+                    .accessibilityLabel(memberLabel)
+                    .accessibilityIdentifier("sender-avatar")
                 memberBubble(
                     agent,
                     content: VStack(alignment: .leading, spacing: 0) {
@@ -1299,6 +1321,7 @@ struct RowView: View, Equatable {
                             }
                             .buttonStyle(.plain)
                             .padding(.bottom, Self.nameToTextGap)
+                            .accessibilityLabel(memberLabel)
                             .accessibilityIdentifier("bubble-name")
                         }
                         if let quote {
@@ -1360,13 +1383,45 @@ struct RowView: View, Equatable {
             .foregroundStyle(theme.muted)
             .frame(maxWidth: .infinity)
             .multilineTextAlignment(.center)
-        case .question(let questionId, let text, let options, let multi, let picked, let open, let lane, let shellCard):
+        case .secretGhost(let name, let mine, let handle, let avatar, let named):
+            // The ghost: surface fill with a hairline, muted ink, the key glyph; the name is
+            // the only thing in text ink. Mine sits right like my bubble, another member's
+            // left under their name with their avatar — never a value, never selectable.
+            let lead = mine ? "Secret saved as " : "\(model.personName(handle: handle) ?? "@\(handle)") saved a secret as "
+            let ghost = HStack(spacing: 7) {
+                Image(systemName: "key")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(theme.muted)
+                (Text(lead).foregroundColor(theme.muted) + Text(name).foregroundColor(theme.text).fontWeight(.medium))
+                    .font(theme.font(Theme.body))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, Theme.bubbleHPad)
+            .padding(.vertical, Theme.bubbleVPad)
+            .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.card))
+            .overlay(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).strokeBorder(theme.separator, lineWidth: 1))
+            .accessibilityLabel("\(lead)\(name)")
+            .accessibilityIdentifier("secret-ghost")
+            if mine {
+                HStack(spacing: 8) {
+                    Spacer(minLength: 0)
+                    ghost.frame(maxWidth: maxBubble, alignment: .trailing)
+                }
+            } else {
+                HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
+                    PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
+                        .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
+                    ghost.frame(maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset), alignment: .leading)
+                    Spacer(minLength: 0)
+                }
+            }
+        case .question(let questionId, let text, let options, let multi, let picked, let open, let lane, let shellCard, let offer):
             // The card is a transcript row like a bubble: the same left edge (after the avatar
             // lane in a people chat) and the same cap width as an incoming bubble.
             HStack(spacing: 0) {
                 if lane { Color.clear.frame(width: Theme.memberLane(composerInset: composerInset), height: 1) }
                 QuestionCard(rowId: row.id, chatId: chatId, questionId: questionId, title: text, options: options,
-                             multi: multi, picked: picked, open: open, shellCard: shellCard)
+                             multi: multi, picked: picked, open: open, shellCard: shellCard, offer: offer)
                     .frame(maxWidth: lane ? maxBubble - Theme.memberLane(composerInset: composerInset) : maxBubble, alignment: .leading)
                 Spacer(minLength: 0)
             }
@@ -1521,7 +1576,8 @@ struct RowView: View, Equatable {
     private var reactionLeading: CGFloat {
         switch row.kind {
         case .other, .member: return Theme.memberLane(composerInset: composerInset)
-        case .question(_, _, _, _, _, _, let lane, _): return lane ? Theme.memberLane(composerInset: composerInset) : 0
+        case .question(_, _, _, _, _, _, let lane, _, _): return lane ? Theme.memberLane(composerInset: composerInset) : 0
+        case .secretGhost(_, let mine, _, _, _): return mine ? 0 : Theme.memberLane(composerInset: composerInset)
         case .image(_, _, _, let lane): return lane ? Theme.memberLane(composerInset: composerInset) : 0
         default: return 0
         }
@@ -1922,68 +1978,84 @@ struct TableBlock: View {
     }
 }
 
-/// A fenced ``` block: the language and a Copy pill in the header (the Mac's
-/// code card), the mono body under it. Copy puts the block on the pasteboard,
-/// tints while pressed and reads "Copied" for 1.5 s (Jacob 2026-10-24: the
-/// Mac pill showed no click effect; the iPhone card had no Copy at all).
+/// A fenced ``` block as Grok Bot's code card ([feedback
+/// code-highlighting-ios-2026-10-26]): no header row, a copy icon floating
+/// top-right, the mono body coloured by the shared highlighter (keywords,
+/// function names, strings, numbers, comments in italic), 1 pt indent guides,
+/// and long lines scrolling sideways inside the card. Copy puts the block on the
+/// pasteboard, tints while pressed and shows a check for 1.5 s.
 struct CodeCard: View {
     @Environment(\.theme) private var theme
     let lang: String
     let code: String
     /// Screenshot rig (`ARBOS_RIG_CODE_COPY=pressed|copied`): the simulator
-    /// cannot hold a touch through a capture, and "Copied" lasts 1.5 s.
+    /// cannot hold a touch through a capture, and the check lasts 1.5 s.
     private static let rig = ProcessInfo.processInfo.environment["ARBOS_RIG_CODE_COPY"]
     @State private var copied = CodeCard.rig == "copied"
 
     static let copiedFor: Duration = .seconds(1.5)
+    static let radius: CGFloat = 12
+
+    /// The button's action: the block, verbatim, on the general pasteboard.
+    static func copyToPasteboard(_ code: String) {
+        UIPasteboard.general.string = code
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text(lang.isEmpty ? "code" : lang)
-                    .font(theme.font(Theme.tiny))
-                    .foregroundStyle(theme.muted)
-                Spacer(minLength: 8)
-                Button {
-                    UIPasteboard.general.string = code
-                    Haptics.pick()
-                    copied = true
-                    Task { @MainActor in
-                        try? await Task.sleep(for: Self.copiedFor)
-                        copied = false
-                    }
-                } label: {
-                    HStack(spacing: 3) {
-                        if copied {
-                            Image(systemName: "checkmark").font(theme.font(11, weight: .semibold))
-                        }
-                        Text(copied ? "Copied" : "Copy")
-                            .font(theme.font(Theme.tiny, weight: .medium))
-                    }
-                    .foregroundStyle(copied ? theme.online : theme.muted)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(copied ? theme.online.opacity(0.14) : .clear)
-                    )
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(CopyPillPress(tint: theme.accent, forced: CodeCard.rig == "pressed"))
-                .accessibilityLabel(copied ? "Copied" : "Copy code")
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .overlay(alignment: .bottom) { Rectangle().fill(theme.separator).frame(height: 0.5) }
+        let size = CodeHighlight.fontSize * theme.textScale
+        let advance = CodeHighlight.glyphAdvance(size: size)
+        let lineHeight = CodeHighlight.lineHeight(size: size)
+        let font = theme.font(CodeHighlight.fontSize, design: .monospaced)
+        let text = CodeHighlight.attributed(lang: lang, code: code, palette: theme.codePalette, font: font, plain: theme.text)
+        let guides = CodeHighlight.indentGuides(code, advance: advance)
+        ZStack(alignment: .topTrailing) {
             ScrollView(.horizontal, showsIndicators: false) {
-                Text(code)
-                    .font(theme.font(14, design: .monospaced))
-                    .foregroundStyle(theme.text)
-                    .padding(10)
+                Text(text)
+                    .lineSpacing(0)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .overlay(alignment: .topLeading) {
+                        ForEach(Array(guides.enumerated()), id: \.offset) { _, guide in
+                            Rectangle()
+                                .fill(theme.codePalette.guide)
+                                .frame(width: 1, height: lineHeight)
+                                .offset(x: guide.x, y: CGFloat(guide.line) * lineHeight)
+                        }
+                    }
+                    .padding(.leading, CodeHighlight.padX)
+                    .padding(.trailing, CodeHighlight.padRight)
+                    .padding(.vertical, CodeHighlight.padY)
+                    .accessibilityIdentifier("code-body")
             }
+            Button {
+                Self.copyToPasteboard(code)
+                Haptics.pick()
+                copied = true
+                Task { @MainActor in
+                    try? await Task.sleep(for: Self.copiedFor)
+                    copied = false
+                }
+            } label: {
+                Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(copied ? theme.online : theme.muted)
+                    .frame(width: CodeHighlight.copySize, height: CodeHighlight.copySize)
+                    .background(
+                        // The card's own colour, so the square covers the code under it.
+                        ZStack { theme.bubbleAssistant; theme.bg.opacity(0.6) }
+                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    )
+                    .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(theme.separator, lineWidth: 0.5))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(CopyPillPress(tint: theme.accent, forced: CodeCard.rig == "pressed"))
+            .accessibilityLabel(copied ? "Copied" : "Copy code")
+            .accessibilityIdentifier(copied ? "code-copy-check" : "code-copy")
+            .padding(CodeHighlight.copyInset)
         }
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.bg.opacity(0.6)))
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(RoundedRectangle(cornerRadius: Self.radius, style: .continuous).fill(theme.bg.opacity(0.6)))
+        .overlay(RoundedRectangle(cornerRadius: Self.radius, style: .continuous).stroke(theme.separator, lineWidth: 0.5))
+        .clipShape(RoundedRectangle(cornerRadius: Self.radius, style: .continuous))
+        .accessibilityIdentifier("code-card")
     }
 }
 
