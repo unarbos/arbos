@@ -123,6 +123,11 @@ exit code; `axbin/osascript` is a shim on `runner.sh`'s PATH that forwards every
 - An ax job is killed after `AX_JOB_MAX_S` (600 s) with rc 124 and a line in `ax-runner.status` and syslog; a
   caller waits at most `AX_TIMEOUT_S` (600 s) for its result. A click step that needs longer is doing something
   wrong — split it.
+- GPUI windows (the Arbos Mac app) ignore `System Events click at …` — that is an Accessibility *action*, and GPUI
+  exposes no per-element AX tree, so the click lands nowhere. For a real click use `cgclick` (a CGEvent mouse
+  click; `/Users/Shared/arbos-tools/bin/cgclick`, source `/Users/Shared/arbos-tools/src/cgclick.swift`) through
+  the ax-runner: `ax /Users/Shared/arbos-tools/bin/cgclick <x> <y>`. CGEvent posting needs the same
+  Accessibility grant, which is why it must go through `ax`, never directly from a `runner.sh` command.
 - After a reboot both runners are gone: start `ax-runner.sh` via `sudo launchctl asuser 502 sudo -u arbosgui …`
   from ssh and `runner.sh` via `open /Users/Shared/arbos-run/start-runner.command` (Terminal identity).
 
