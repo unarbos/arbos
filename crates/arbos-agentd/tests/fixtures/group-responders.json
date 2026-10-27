@@ -36,6 +36,14 @@
         { "id": "p_chef", "name": "@chef", "role": "Recipes, meal plans, grocery lists, cooking technique.", "host": false },
         { "id": "p_budget", "name": "@budget", "role": "Personal finance: budgets, splitting costs, currency, expense tracking.", "host": false }
       ]
+    },
+    "arbonites": {
+      "kind": "people_group",
+      "title": "group",
+      "agents": [
+        { "id": "hez", "name": "@hezbola", "role": "Jacob's Blender and rendering agent: runs Blender on its own box, renders frames, posts status in the chat.", "host": false },
+        { "id": "doug", "name": "@doug-agent", "role": "Doug's coding agent: reviews renders and code, steers work through this shared chat.", "host": false }
+      ]
     }
   },
   "cases": [
@@ -88,6 +96,14 @@
     { "id": "c47", "roster": "people2", "from": "@jacob", "text": "Call?", "recent": [{ "from": "@jacob", "text": "Yo Jen" }, { "from": "@jacob", "text": "Ken" }], "expected": [], "note": "short call invite after pinging people by name; agents stay quiet" },
     { "id": "c48", "roster": "people2", "from": "@sam", "text": "Ken", "recent": [{ "from": "@sam", "text": "Yo Jen" }], "expected": [], "note": "first-name ping to a person, nobody" },
     { "id": "c49", "roster": "people3", "from": "@cem", "text": "you free for a quick call?", "recent": [{ "from": "@cem", "text": "hey Ben" }], "expected": [], "note": "call invite to a person after a human greeting" },
-    { "id": "c50", "roster": "launch", "from": "the user", "text": "no dont do it yet", "recent": [{ "from": "the user", "text": "Ops, can you file a feedback report?" }, { "from": "Project Ops", "text": "Filing that feedback report now." }], "expected": ["ops"], "note": "cancel aimed at the agent that just started; no Understood pile-on from the others" }
+    { "id": "c50", "roster": "launch", "from": "the user", "text": "no dont do it yet", "recent": [{ "from": "the user", "text": "Ops, can you file a feedback report?" }, { "from": "Project Ops", "text": "Filing that feedback report now." }], "expected": ["ops"], "note": "cancel aimed at the agent that just started; no Understood pile-on from the others" },
+    { "id": "m01", "roster": "arbonites", "from": "Jacob", "text": "@hezbola can you communicate directly with @doug-agent?", "recent": [{ "from": "Jacob", "text": "@doug-agent do you and @hezbola have access to the same box?" }, { "from": "@hezbola (agent)", "text": "Jacob, the Blender install is on my box only; Doug and I communicate only through this shared chat." }, { "from": "@doug-agent (agent)", "text": "No, Jacob — separate boxes. All our communication is this chat." }], "expected": ["hez"], "note": "mention as object: addressed replies, object stays quiet (Arbonites 2026-10-26)" },
+    { "id": "m02", "roster": "arbonites", "from": "Jacob", "text": "Can you communicate directly with @doug-agent?", "recent": [{ "from": "Jacob", "text": "@doug-agent do you and @hezbola have access to the same box?" }, { "from": "@hezbola (agent)", "text": "Jacob, the Blender install is on my box only; Doug and I communicate only through this shared chat." }, { "from": "@doug-agent (agent)", "text": "No, Jacob — separate boxes. All our communication is this chat." }], "expected": ["hez"], "note": "mentioned as object only, follow-up to Hezbola's answer" },
+    { "id": "m03", "roster": "arbonites", "from": "Jacob", "text": "@doug-agent can you check Hezbola's frame 120 render?", "recent": [], "expected": ["doug"], "note": "directly asked replies" },
+    { "id": "m04", "roster": "arbonites", "from": "Jacob", "text": "@hezbola what did @doug-agent say about the lighting?", "recent": [], "expected": ["hez"], "note": "multi-mention, second is the object" },
+    { "id": "m05", "roster": "arbonites", "from": "Jacob", "text": "@hezbola @doug-agent are you both ready for the render pass?", "recent": [], "expected": ["hez", "doug"], "note": "two vocative mentions, both asked" },
+    { "id": "m06", "roster": "arbonites", "from": "Jacob", "text": "@hezbola send the renders to @doug-agent when they're done", "recent": [], "expected": ["hez"], "note": "send to @x: object" },
+    { "id": "m07", "roster": "arbonites", "from": "Jacob", "text": "@doug-agent's renders look off, can anyone explain why?", "recent": [], "expected": ["hez", "doug"], "note": "possessive mention plus an open question to the room" },
+    { "id": "m08", "roster": "arbonites", "from": "Jacob", "text": "thanks @hezbola", "recent": [{ "from": "@hezbola (agent)", "text": "Frame 120 rendered at out/stack_frame120_blender.png." }], "expected": [], "note": "thanks: nobody" }
   ]
 }

@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use arbos_core::doc::ReplyRef;
 pub use arbos_core::widget::{ChoiceOption, FieldKind, FormField, QuestionState, Widget};
 
 pub type Id = String;
@@ -123,6 +124,10 @@ pub struct Project {
     /// owner allowed to message this agent. Empty unless I own it.
     #[serde(default)]
     pub message_grants: Vec<MessageGrant>,
+    /// Members I blocked, as `user:<id>` — the relay's `blockedSenders` hint on a people
+    /// chat ([feedback blocked-state-mac-2026-10-26]): their rows are hidden for me alone.
+    #[serde(default)]
+    pub blocked_senders: Vec<String>,
 }
 
 /// One row of an agent's "Who may message X" card (`message_grants` on the project).
@@ -979,6 +984,15 @@ struct AgentMemberWire {
     model: Option<String>,
     #[serde(default)]
     owner: Option<Person>,
+    /// The picture and its stamp round-trip through the on-disk store (`Project.agents` is
+    /// persisted as JSON). Until 2026-10-26 this wire struct dropped both, so every roster
+    /// copy came back from a relaunch without its picture; with the stamps equal (agents
+    /// whose avatar predates #1813 carry 0) that lossy copy won the resolver and every
+    /// people-chat surface drew the leaf until the next registry read.
+    #[serde(default)]
+    image_url: Option<String>,
+    #[serde(default)]
+    avatar_version: i64,
 }
 
 impl From<AgentMemberWire> for AgentMember {
@@ -1000,8 +1014,8 @@ impl From<AgentMemberWire> for AgentMember {
             ),
             avatar_leaf: w.avatar_leaf_effective.or(w.avatar_leaf),
             avatar_leaf_color: w.avatar_leaf_color_effective.or(w.avatar_leaf_color),
-            image_url: None,
-            avatar_version: 0,
+            image_url: w.image_url,
+            avatar_version: w.avatar_version,
             description: w.description,
             model: w.model,
             owner: w.owner,
@@ -1275,6 +1289,11 @@ pub struct Attachment {
     /// Caption for the card; the file name when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// The fallback picture of a chart bubble: names the `chart` part of the same message.
+    /// A client that draws the chart hides this attachment; an older one shows the picture
+    /// ([feedback chart-bubble-mac-2026-10-26]).
+    #[serde(default, rename = "chartPart", skip_serializing_if = "Option::is_none")]
+    pub chart_part: Option<String>,
 }
 
 impl Attachment {
@@ -1453,6 +1472,37 @@ pub enum Part {
         /// #1544: the standing choice made on a destructive-shell card (a path class).
         #[serde(default)]
         grant: Option<String>,
+    },
+    /// The row a message becomes when its value moved into the vault (secret hand-off):
+    /// "Secret saved as NAME". Names only — there is no value field.
+    SecretRedacted {
+        id: Id,
+        #[serde(default)]
+        name: String,
+        #[serde(default)]
+        env: String,
+        #[serde(default)]
+        secret_id: String,
+        /// `user:<id>` whose message held the value.
+        #[serde(default)]
+        saved_by: String,
+        /// Project id of the agent that saved it.
+        #[serde(default)]
+        agent: Option<String>,
+    },
+    /// Chart bubble ([feedback chart-bubble-mac-2026-10-26]): the structured chart
+    /// `post_chart` posted. `chart` is the validated `arbos_core::chart::Chart` as JSON,
+    /// `table` its markdown table, `fallback` the PNG attachment part this client hides.
+    Chart {
+        id: Id,
+        #[serde(default)]
+        spec_version: u32,
+        #[serde(default)]
+        chart: serde_json::Value,
+        #[serde(default)]
+        table: String,
+        #[serde(default)]
+        fallback: Option<String>,
     },
     #[serde(other)]
     Unknown,
@@ -1941,6 +1991,11 @@ pub struct Message {
     /// shows "Forwarded from <name>" above the text (`forwardedFrom`).
     #[serde(default)]
     pub forwarded_from: Option<String>,
+    /// Bubble menu → Reply in DM: the quoted message in another chat, with its
+    /// snapshot (`replyRef`); the bubble shows the quote header plus
+    /// "Replying to <who> in <chat>".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_ref: Option<ReplyRef>,
     /// On an agent's reply in a people chat: who asked and whose machine answered.
     #[serde(default)]
     pub asked_by_handle: Option<String>,
@@ -2151,6 +2206,14 @@ impl Message {
                 }
                 _ => None,
             })
+    }
+
+    /// Does this message carry the `chart` part `part_id`? (Its fallback picture is
+    /// hidden only when the chart it stands in for is really here.)
+    pub fn has_chart_part(&self, part_id: &str) -> bool {
+        self.parts
+            .iter()
+            .any(|p| matches!(p, Part::Chart { id, .. } if id == part_id))
     }
 
     /// Open `question` parts of this message, newest last.
@@ -2472,9 +2535,42 @@ pub struct Secret {
     /// `refuse | card`: what a non-listed person's ask does (spec §7.7).
     #[serde(default)]
     pub others_ask: String,
+    /// Where it came from: `settings`, or `chat` + the agent it was handed to (secret hand-off).
+    #[serde(default)]
+    pub source: Option<SecretSource>,
+}
+
+/// Where a secret came from (`secret.source`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SecretSource {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub project_name: Option<String>,
+    #[serde(default)]
+    pub chat_id: Option<String>,
 }
 
 impl Secret {
+    /// "given in chat" for a hand-off secret, else nothing (list subtitle).
+    pub fn source_label(&self) -> Option<&'static str> {
+        self.source
+            .as_ref()
+            .filter(|s| s.kind == "chat")
+            .map(|_| "given in chat")
+    }
+
+    /// "In chat with Arbos" — the Secret page's Added row, when it came from a chat.
+    pub fn added_label(&self) -> Option<String> {
+        let s = self.source.as_ref().filter(|s| s.kind == "chat")?;
+        Some(match s.project_name.as_deref().filter(|n| !n.is_empty()) {
+            Some(n) => format!("In chat with {n}"),
+            None => "In chat".to_owned(),
+        })
+    }
+
     pub fn kind_label(&self) -> &'static str {
         match self.kind.as_str() {
             "login" => "Login",
@@ -2728,7 +2824,7 @@ pub struct DevicesView {
     pub items: Vec<DeviceView>,
     pub loaded: bool,
     /// Why the list could not be read, when it could not.
-    pub error: Option<String>,
+    pub error: Option<crate::sync::user_error::UserError>,
 }
 
 /// Settings → Secrets state (`GET /secrets` + `GET /secrets/requests`).
@@ -3212,12 +3308,26 @@ pub struct BoxReport {
     pub reachable: bool,
     pub unreachable_reason: Option<String>,
     pub uptime_s: Option<u64>,
-    /// 1-minute load average.
+    /// 1-minute load average. Inside a Daytona sandbox this is the **host's** (`load_scope`
+    /// = `host`, agentd ≥ 0.6.277): then it says nothing about the box and is not drawn.
     pub load_1m: Option<f64>,
+    pub load_is_host: bool,
     pub mem_total_mb: Option<u64>,
     pub mem_available_mb: Option<u64>,
     pub disk_total_mb: Option<u64>,
     pub disk_available_mb: Option<u64>,
+    /// `resources.cpu` (agentd ≥ 0.6.277): cores the box may use and the share busy over
+    /// the last 5 s.
+    pub cpu_cores: Option<f64>,
+    pub cpu_pct: Option<f64>,
+    /// `resources.disk.inodes_*`: file slots (#1857 — a box can be "full" with bytes free).
+    pub inodes_total: Option<u64>,
+    pub inodes_avail: Option<u64>,
+    /// `resources.net`: bytes per second over the last 5 s and bytes since the UTC day began.
+    pub net_rx_bps: Option<f64>,
+    pub net_tx_bps: Option<f64>,
+    pub net_rx_today: Option<u64>,
+    pub net_tx_today: Option<u64>,
     pub workspaces: Vec<BoxWorkspace>,
 }
 
@@ -3232,6 +3342,13 @@ pub struct BoxWorkspace {
     /// How long the current turn has run (`turn.current.elapsed_ms`).
     pub elapsed_ms: Option<u64>,
     pub tool_calls: Option<u64>,
+    /// Background jobs (sub-agents) running for this agent (`jobs_running`, agentd ≥ 0.6.277).
+    pub jobs_running: Option<u64>,
+    /// Its share of the box (`usage`, from the workspace cgroup and a cached `du`).
+    pub cpu_pct: Option<f64>,
+    pub mem_mb: Option<u64>,
+    pub pids: Option<u64>,
+    pub disk_mb: Option<u64>,
 }
 
 impl BoxReport {
@@ -3258,10 +3375,30 @@ impl BoxReport {
         }
         out.uptime_s = st["uptime_s"].as_u64();
         out.load_1m = st["load"].get(0).and_then(|l| l.as_f64());
-        out.mem_total_mb = st["memory_mb"]["total"].as_u64();
-        out.mem_available_mb = st["memory_mb"]["available"].as_u64();
+        out.load_is_host = st["load_scope"].as_str() == Some("host");
+        // `memory_mb` carries the cgroup cap on agentd ≥ 0.6.277 (the host's figures before);
+        // `resources.memory` is the same view with `used` instead of `available`.
+        let res = &st["resources"];
+        out.mem_total_mb = res["memory"]["total_mb"]
+            .as_u64()
+            .or_else(|| st["memory_mb"]["total"].as_u64());
+        out.mem_available_mb = match (
+            res["memory"]["total_mb"].as_u64(),
+            res["memory"]["used_mb"].as_u64(),
+        ) {
+            (Some(t), Some(u)) => Some(t.saturating_sub(u)),
+            _ => st["memory_mb"]["available"].as_u64(),
+        };
         out.disk_total_mb = st["disk"]["total_mb"].as_u64();
         out.disk_available_mb = st["disk"]["available_mb"].as_u64();
+        out.cpu_cores = res["cpu"]["cores"].as_f64();
+        out.cpu_pct = res["cpu"]["pct"].as_f64();
+        out.inodes_total = res["disk"]["inodes_total"].as_u64();
+        out.inodes_avail = res["disk"]["inodes_avail"].as_u64();
+        out.net_rx_bps = res["net"]["rx_bps"].as_f64();
+        out.net_tx_bps = res["net"]["tx_bps"].as_f64();
+        out.net_rx_today = res["net"]["rx_bytes_today"].as_u64();
+        out.net_tx_today = res["net"]["tx_bytes_today"].as_u64();
         out.workspaces = st["workspaces"]
             .as_array()
             .map(|ws| {
@@ -3273,11 +3410,43 @@ impl BoxReport {
                         running: w["turn"]["running"].as_bool().unwrap_or(false),
                         elapsed_ms: w["turn"]["current"]["elapsed_ms"].as_u64(),
                         tool_calls: w["turn"]["current"]["tool_calls"].as_u64(),
+                        jobs_running: w["jobs_running"].as_u64(),
+                        cpu_pct: w["usage"]["cpu_pct"].as_f64(),
+                        mem_mb: w["usage"]["mem_mb"].as_u64(),
+                        pids: w["usage"]["pids"].as_u64(),
+                        disk_mb: w["usage"]["disk_mb"].as_u64(),
                     })
                     .collect()
             })
             .unwrap_or_default();
         out
+    }
+
+    /// Workspaces whose box share the sampler reported (agentd ≥ 0.6.277), biggest memory
+    /// first — the per-agent breakdown.
+    pub fn usage_rows(&self) -> Vec<&BoxWorkspace> {
+        let mut rows: Vec<&BoxWorkspace> = self
+            .workspaces
+            .iter()
+            .filter(|w| w.cpu_pct.is_some() || w.mem_mb.is_some() || w.disk_mb.is_some())
+            .collect();
+        rows.sort_by(|a, b| {
+            b.running
+                .cmp(&a.running)
+                .then(b.mem_mb.unwrap_or(0).cmp(&a.mem_mb.unwrap_or(0)))
+                .then(a.name.cmp(&b.name))
+        });
+        rows
+    }
+
+    /// Background jobs running across every workspace, when any workspace reports the count.
+    pub fn jobs_running(&self) -> Option<u64> {
+        let counts: Vec<u64> = self
+            .workspaces
+            .iter()
+            .filter_map(|w| w.jobs_running)
+            .collect();
+        (!counts.is_empty()).then(|| counts.iter().sum())
     }
 
     /// The workspace of one agent, if the box lists it.
@@ -3574,6 +3743,250 @@ pub fn now_ms() -> u64 {
 
 pub fn new_id() -> Id {
     ulid::Ulid::new().to_string()
+}
+
+/// `ARBOS_TRACE_ROWS=1`: one stderr line per hop of a row's path through this app (socket
+/// frame → doc import → snapshot → app state → transcript), each with a ms timestamp, so a
+/// "the notice came late" report can say which hop waited. Off by default; read once.
+pub fn trace_rows() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("ARBOS_TRACE_ROWS").is_ok_and(|v| v == "1"))
+}
+
+/// A membership notice this device shows before the relay's own row arrives (ARB-393): the
+/// adding Mac writes "<me> added <names>" into its transcript the moment Add is pressed, so the
+/// line never waits on the round trip. The relay stays the author of record — when its system
+/// row with the same words lands, the local copy is dropped; a failed add or a row that never
+/// comes removes it after [`OptimisticNotice::TTL_MS`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OptimisticNotice {
+    /// The local row's id (`local-notice:<ulid>`); never pushed to the relay.
+    pub id: Id,
+    pub text: String,
+    pub created_at: u64,
+}
+
+impl OptimisticNotice {
+    /// Row id prefix: a snapshot never carries these, so they are easy to tell apart.
+    pub const ID_PREFIX: &'static str = "local-notice:";
+    /// How long an unconfirmed local notice may stay on screen.
+    pub const TTL_MS: u64 = 60_000;
+    /// The relay stamps its row with its own clock; a row this much older than the local one
+    /// still counts as the same notice.
+    const SKEW_MS: u64 = 15_000;
+
+    pub fn new(text: String, now: u64) -> Self {
+        Self {
+            id: format!("{}{}", Self::ID_PREFIX, new_id()),
+            text,
+            created_at: now,
+        }
+    }
+
+    /// The transcript row for this notice: a centred system stamp like the relay's.
+    pub fn message(&self, chat_id: &str) -> Message {
+        Message {
+            id: self.id.clone(),
+            chat_id: chat_id.to_owned(),
+            role: Role::System,
+            sender: "system".into(),
+            status: MessageStatus::Done,
+            turn: None,
+            decision: None,
+            subagent_id: None,
+            subagent_name: None,
+            handoff_messages: None,
+            worker: false,
+            job: None,
+            hidden: false,
+            agent_reply_to: None,
+            reactions: Default::default(),
+            in_reply_to: None,
+            routine_name: None,
+            sender_name: None,
+            sender_icon: None,
+            sender_handle: None,
+            sender_avatar: None,
+            sender_avatar_color: None,
+            mentions: Vec::new(),
+            reply_to: None,
+            forwarded_from: None,
+            reply_ref: None,
+            asked_by_handle: None,
+            owner_handle: None,
+            usage: None,
+            return_contract: None,
+            waiting_user: false,
+            waiting_approval: false,
+            model: None,
+            effort: None,
+            created_at: self.created_at,
+            completed_at: None,
+            call_id: None,
+            activity: None,
+            pending: false,
+            parts: vec![Part::Text {
+                id: format!("{}:text", self.id),
+                text: self.text.clone(),
+            }],
+            hidden_parts: Vec::new(),
+            greeting: false,
+        }
+    }
+
+    /// The relay's row for this notice: a system line with the same words, written no earlier
+    /// than the local one (minus clock skew).
+    pub fn confirmed_by(&self, m: &Message) -> bool {
+        m.role == Role::System
+            && !m.id.starts_with(Self::ID_PREFIX)
+            && m.created_at + Self::SKEW_MS >= self.created_at
+            && m.plain_text().trim() == self.text
+    }
+}
+
+/// "A", "A and B", "A, B and C" — the relay's `notices::join_names`, so the local line reads
+/// exactly like the row that replaces it.
+pub fn join_names(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.clone(),
+        [a, b] => format!("{a} and {b}"),
+        [init @ .., last] => format!("{} and {last}", init.join(", ")),
+    }
+}
+
+/// "<who> added <names>"; `None` with nobody to name.
+pub fn added_line(who: &str, names: &[String]) -> Option<String> {
+    (!names.is_empty()).then(|| format!("{who} added {}", join_names(names)))
+}
+
+/// Fold this chat's local notices into a fresh snapshot from the relay: a notice the snapshot
+/// confirms (same words, relay row) or one past its TTL is dropped; the rest are re-inserted in
+/// time order so they survive the list replacement. Returns how many were confirmed.
+pub fn reconcile_optimistic_notices(
+    messages: &mut Vec<Message>,
+    notices: &mut Vec<OptimisticNotice>,
+    now: u64,
+) -> usize {
+    let mut confirmed = 0;
+    notices.retain(|n| {
+        if messages.iter().any(|m| n.confirmed_by(m)) {
+            confirmed += 1;
+            return false;
+        }
+        now.saturating_sub(n.created_at) < OptimisticNotice::TTL_MS
+    });
+    // Snapshots never carry local rows; a stale copy from an earlier merge must not double up.
+    messages.retain(|m| !m.id.starts_with(OptimisticNotice::ID_PREFIX));
+    let chat_id = messages
+        .iter()
+        .find(|m| !m.chat_id.is_empty())
+        .map(|m| m.chat_id.clone())
+        .unwrap_or_default();
+    for n in notices.iter() {
+        let at = messages
+            .iter()
+            .rposition(|m| m.created_at <= n.created_at)
+            .map(|ix| ix + 1)
+            .unwrap_or(0);
+        messages.insert(at, n.message(&chat_id));
+    }
+    confirmed
+}
+
+#[cfg(test)]
+mod optimistic_notice_tests {
+    use super::*;
+
+    fn relay_row(id: &str, text: &str, created_at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "chatId": "c", "role": "system", "sender": "system", "status": "done",
+            "createdAt": created_at, "parts": [{ "kind": "text", "id": "p", "text": text }]
+        }))
+        .unwrap()
+    }
+
+    fn user_row(id: &str, created_at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "chatId": "c", "role": "user", "sender": "user:u_me", "status": "done",
+            "createdAt": created_at, "parts": [{ "kind": "text", "id": "p", "text": "hi" }]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_local_line_reads_like_the_relay_s() {
+        assert_eq!(
+            added_line("Jacob", &["Affine".to_string()]).as_deref(),
+            Some("Jacob added Affine")
+        );
+        assert_eq!(
+            added_line("Jacob", &["Home".into(), "hjkb".into(), "Doug".into()]).as_deref(),
+            Some("Jacob added Home, hjkb and Doug")
+        );
+        assert_eq!(added_line("Jacob", &[]), None);
+        let n = OptimisticNotice::new("Jacob added Affine".into(), 1_000);
+        let m = n.message("c");
+        assert_eq!(m.role, Role::System);
+        assert_eq!(m.plain_text(), "Jacob added Affine");
+        assert!(m.id.starts_with(OptimisticNotice::ID_PREFIX));
+    }
+
+    #[test]
+    fn a_local_notice_survives_snapshots_until_the_relay_row_confirms_it() {
+        let now = 100_000;
+        let mut notices = vec![OptimisticNotice::new("Jacob added Affine".into(), now)];
+        // Snapshot 1: something unrelated arrived; the local line stays, in time order.
+        let mut snap = vec![user_row("m1", now - 5_000), user_row("m2", now + 300)];
+        let confirmed = reconcile_optimistic_notices(&mut snap, &mut notices, now + 400);
+        assert_eq!(confirmed, 0);
+        assert_eq!(
+            snap.iter().map(|m| m.plain_text()).collect::<Vec<_>>(),
+            vec!["hi", "Jacob added Affine", "hi"]
+        );
+        assert_eq!(snap[1].chat_id, "c");
+        assert_eq!(notices.len(), 1);
+        // Snapshot 2: the relay's row (its clock a little behind ours) — the local copy goes,
+        // the relay's stays, nothing doubles up.
+        let mut snap = vec![
+            user_row("m1", now - 5_000),
+            user_row("m2", now + 300),
+            relay_row("r1", "Jacob added Affine", now - 2_000),
+        ];
+        let confirmed = reconcile_optimistic_notices(&mut snap, &mut notices, now + 900);
+        assert_eq!(confirmed, 1);
+        assert!(notices.is_empty());
+        assert_eq!(
+            snap.iter()
+                .filter(|m| m.plain_text() == "Jacob added Affine")
+                .count(),
+            1
+        );
+        assert!(snap
+            .iter()
+            .all(|m| !m.id.starts_with(OptimisticNotice::ID_PREFIX)));
+    }
+
+    #[test]
+    fn other_notices_and_old_rows_do_not_confirm_and_a_stale_notice_expires() {
+        let now = 100_000;
+        let mut notices = vec![OptimisticNotice::new("Jacob added Affine".into(), now)];
+        let mut snap = vec![
+            relay_row("old", "Jacob added Affine", now - 60_000),
+            relay_row("other", "Jacob removed Affine", now + 10),
+        ];
+        assert_eq!(
+            reconcile_optimistic_notices(&mut snap, &mut notices, now + 100),
+            0
+        );
+        assert_eq!(notices.len(), 1);
+        assert_eq!(snap.len(), 3);
+        // Past the TTL with no confirmation: the local line is withdrawn.
+        let mut snap = vec![user_row("m1", now - 5_000)];
+        reconcile_optimistic_notices(&mut snap, &mut notices, now + OptimisticNotice::TTL_MS);
+        assert!(notices.is_empty());
+        assert_eq!(snap.len(), 1);
+    }
 }
 
 #[cfg(test)]

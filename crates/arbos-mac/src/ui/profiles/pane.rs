@@ -56,6 +56,11 @@ pub struct Hero {
     /// edited (the own profile's handle field with Cancel / Save). The iPhone
     /// edits in a sheet, so its hero has no twin field.
     pub editor: Option<AnyElement>,
+    /// The hero's one action pill under the name and handle (a person's
+    /// "Message", [feedback profile-message-button-mac-2026-10-25]); `None`
+    /// on panes with no primary action, and on a person you cannot message
+    /// (yourself, someone you blocked).
+    pub action: Option<AnyElement>,
 }
 
 pub enum Picture {
@@ -141,9 +146,10 @@ fn title_of(page: &ProfilePage, state: &AppState) -> String {
 }
 
 /// Is this page the one open in the right pane (the header pill / server
-/// header ring)?
+/// header ring)? Same subject counts: a person's page opened from a chip is
+/// the DM pill's person too (`ProfilePage::same_subject`).
 pub fn is_open(state: &AppState, page: &ProfilePage) -> bool {
-    state.profile.as_ref() == Some(page)
+    state.profile_shows(page)
 }
 
 fn glyph_tile(glyph: &'static str, theme: &Theme) -> AnyElement {
@@ -273,7 +279,12 @@ pub fn render(pane: ProfilePane, shell: &Shell, cx: &mut Context<Shell>) -> Stat
             pane.hero.subtitle_element,
             &theme,
         )
-        .children(pane.hero.editor),
+        .children(pane.hero.editor)
+        .children(
+            pane.hero
+                .action
+                .map(|a| div().pt(px(HERO_ACTION_GAP)).child(a)),
+        ),
     );
     let blocks = layout(pane.tabs.len(), pane.footer.len());
     if blocks.contains(&Block::TabPill) {
@@ -319,6 +330,10 @@ pub fn render(pane: ProfilePane, shell: &Shell, cx: &mut Context<Shell>) -> Stat
 /// land Grok's 24 pt under the pill: 18 − 7 + 10 + 3 = 24
 /// (`grok-right-pane-details.png`: pill bottom 244, "Coding" top 268).
 pub(crate) const FIRST_TITLE_PULL: f32 = 7.0;
+
+/// Extra room over the hero's action pill: with the hero column's 6 pt gap the
+/// pill sits 12 under the "@handle" line, a control's gap and a half.
+pub(crate) const HERO_ACTION_GAP: f32 = 6.0;
 
 /// Which panes may carry Grok's share disc beside the ×: the agent pane (its
 /// owner's invite sheet) and no other. Jacob 2026-10-25: "remove this button

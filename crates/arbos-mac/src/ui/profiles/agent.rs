@@ -77,6 +77,10 @@ fn project_from_member(state: &crate::app::AppState, project_id: &str) -> Option
             avatar_color_index: a.avatar_color_index,
             avatar_leaf: a.avatar_leaf,
             avatar_leaf_color: a.avatar_leaf_color,
+            // The owner's picture travels with the roster copy; without it the hero drew the
+            // automatic leaf for every foreign agent (Jacob, 2026-10-25: "Hezbola").
+            image_url: a.image_url.clone(),
+            avatar_version: a.avatar_version,
             description: a.description.clone(),
             owner_person: a.owner.clone(),
             model: a.model.clone().unwrap_or_default(),
@@ -143,11 +147,11 @@ pub(super) fn page(
     let now = now_ms() as i64;
 
     // D92 amendment: the uploaded / generated picture wins over the leaf (read while `state`
-    // is borrowed).
-    let hero_image = project
-        .image_url
-        .as_deref()
-        .and_then(|url| state.avatar(url));
+    // is borrowed) — from the newest copy the store holds, like every other surface.
+    let hero_image = crate::sync::agent_avatar::newest(&state.projects, &project.id)
+        .and_then(|f| f.image_url)
+        .or_else(|| project.image_url.clone())
+        .and_then(|url| state.avatar(&url));
     if avatar_state != AvatarState::Idle || streaming {
         PulseClock::request(cx);
     }
@@ -168,7 +172,7 @@ pub(super) fn page(
                 .rounded_full()
                 .overflow_hidden()
                 .child(
-                    gpui::img(image)
+                    gpui::img(crate::ui::picture_fit::fit(&image, HERO_AVATAR))
                         .size(px(HERO_AVATAR))
                         .rounded_full()
                         .object_fit(gpui::ObjectFit::Cover),
@@ -268,6 +272,7 @@ pub(super) fn page(
         subtitle_click,
         subtitle_element,
         editor,
+        action: None,
     };
 
     let body: Vec<Section> = match tab {
@@ -850,7 +855,20 @@ fn computer_sections(
                         kit::value_row("agent-box-memory", "Memory", mem, theme).into_any_element(),
                     );
                 }
-                if let Some(load) = r.load_1m {
+                // CPU share from the box's cgroup (agentd ≥ 0.6.277); the load average is
+                // the host's inside Daytona (`load_is_host`), so it is drawn only when it is
+                // really the box's and no CPU figure exists.
+                if let Some(cpu) = r.cpu_pct {
+                    rows.push(
+                        kit::value_row(
+                            "agent-box-cpu",
+                            "CPU",
+                            format!("{} %", cpu.round() as u64),
+                            theme,
+                        )
+                        .into_any_element(),
+                    );
+                } else if let Some(load) = r.load_1m.filter(|_| !r.load_is_host) {
                     rows.push(
                         kit::value_row("agent-box-load", "Load", format!("{load:.2}"), theme)
                             .into_any_element(),
@@ -1136,6 +1154,10 @@ mod tests {
         assert_eq!(r.image.as_deref(), Some("arbos-agent-0.1.114"));
         assert_eq!(r.disk_available_mb, Some(6900));
         assert_eq!(r.load_1m, Some(0.42));
+        assert!(!r.load_is_host);
+        assert_eq!(r.cpu_pct, None);
+        assert!(r.usage_rows().is_empty());
+        assert_eq!(r.jobs_running(), None);
         assert_eq!(r.workspaces.len(), 2);
         assert_eq!(r.running().count(), 1);
         assert_eq!(r.workspace("p1").unwrap().tool_calls, Some(7));
@@ -1150,6 +1172,51 @@ mod tests {
             Some("box has no url yet")
         );
         assert!(asleep.workspaces.is_empty());
+    }
+
+    /// agentd ≥ 0.6.277 ([feedback machine-page-agentd-2026-10-26]): `resources` carries the
+    /// cgroup cap (inside Daytona `/proc/meminfo` is the host's), `load_scope` says the load is
+    /// the host's, and every workspace has its share and job count.
+    #[test]
+    fn box_report_reads_the_samplers_resources_and_per_workspace_usage() {
+        let v: serde_json::Value = serde_json::json!({
+            "relay": { "state": "awake", "awake_for_s": 100, "agentd": { "image": "arbos-agent-0.1.152" } },
+            "box": { "reachable": true, "state": {
+                "uptime_s": 100, "load": [38.5, 36.9, 32.1], "load_scope": "host",
+                "memory_mb": { "total": 8192, "available": 7039, "source": "cgroup" },
+                "disk": { "path": "/work", "total_mb": 10240, "available_mb": 9925 },
+                "resources": {
+                    "sampled_at": 1, "load_scope": "host",
+                    "cpu": { "cores": 4.0, "pct": 23.4, "source": "cgroup" },
+                    "memory": { "total_mb": 8192, "used_mb": 1153, "peak_mb": 1204, "source": "cgroup" },
+                    "disk": { "total_mb": 10240, "used_mb": 315, "available_mb": 9925, "inodes_total": 131072, "inodes_avail": 93000 },
+                    "net": { "rx_bps": 1200000.0, "tx_bps": 80000.0, "rx_bytes_today": 2000000000u64, "tx_bytes_today": 100000000u64 }
+                },
+                "workspaces": [
+                    { "project_id": "p1", "name": "Arbos", "healthy": true, "jobs_running": 1,
+                      "usage": { "cpu_pct": 61.0, "mem_mb": 1900, "pids": 40, "disk_mb": 2300 },
+                      "turn": { "running": true, "current": { "elapsed_ms": 42000, "tool_calls": 7 } } },
+                    { "project_id": "p2", "name": "Comms", "healthy": true, "jobs_running": 0,
+                      "usage": { "cpu_pct": 0.0, "mem_mb": 600, "pids": 12, "disk_mb": 400 },
+                      "turn": { "running": false, "current": null } }
+                ]
+            } }
+        });
+        let r = BoxReport::from_debug(&v, 5);
+        assert!(r.load_is_host);
+        assert_eq!(r.cpu_cores, Some(4.0));
+        assert_eq!(r.cpu_pct, Some(23.4));
+        assert_eq!(r.mem_total_mb, Some(8192));
+        assert_eq!(r.mem_available_mb, Some(8192 - 1153));
+        assert_eq!(r.inodes_avail, Some(93000));
+        assert_eq!(r.net_rx_bps, Some(1_200_000.0));
+        assert_eq!(r.net_tx_today, Some(100_000_000));
+        assert_eq!(r.jobs_running(), Some(1));
+        let rows = r.usage_rows();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].name, "Arbos");
+        assert_eq!(rows[0].disk_mb, Some(2300));
+        assert_eq!(rows[1].jobs_running, Some(0));
     }
 }
 

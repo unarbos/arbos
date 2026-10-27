@@ -454,6 +454,35 @@ impl Supervisor {
                 .unwrap_or_default();
             match self.ensure_workspace(project, &chats, &pushes).await {
                 Ok(w) => {
+                    // The owner's profile (address name) rides on every listing: the agent
+                    // addresses the owner from it, live, never from a row's `senderName`.
+                    if let Some(o) = e.get("owner").or_else(|| listing.get("owner")) {
+                        let before = w.agent.people.owner_profile();
+                        w.agent.people.set_owner_profile(o);
+                        if w.agent.people.owner_profile() != before {
+                            // The prompt's "Your owner" section follows the profile; the pi
+                            // session re-reads it (at once when idle, else after the turn).
+                            w.agent
+                                .refresh_session_prompt("owner profile changed")
+                                .await;
+                        }
+                        let names: Vec<String> = ["address_name", "name"]
+                            .iter()
+                            .filter_map(|k| o.get(*k).and_then(Value::as_str))
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_owned)
+                            .chain(
+                                o.get("former_names")
+                                    .and_then(Value::as_array)
+                                    .into_iter()
+                                    .flatten()
+                                    .filter_map(Value::as_str)
+                                    .map(str::to_owned),
+                            )
+                            .collect();
+                        w.agent.memory.set_owner_names(names);
+                    }
                     w.agent.note_people_chats(&people_chats, true).await;
                     seen.push(w.project_id.clone());
                 }
@@ -825,8 +854,27 @@ pub fn context_window_tokens() -> u64 {
 pub fn write_models_json(cfg: &Config, talking: &str, subagent: &str) -> Result<()> {
     let context_window = context_window_tokens();
     let mut window_overrides = serde_json::Map::new();
-    for id in [talking, subagent] {
-        window_overrides.insert(id.to_owned(), json!({ "contextWindow": context_window }));
+    // The research-job worker model (cost knob 1) must be in pi's catalog too; it is usually the
+    // talking model already, but a user may talk on another one.
+    let research = cfg.research_worker_model();
+    let mut ids = vec![talking, subagent];
+    if let Some(r) = research.as_deref() {
+        if !ids.contains(&r) {
+            ids.push(r);
+        }
+    }
+    for id in &ids {
+        window_overrides.insert((*id).to_owned(), json!({ "contextWindow": context_window }));
+    }
+    let mut relay_models = vec![
+        json!({ "id": talking, "name": format!("{talking} (relay)"), "reasoning": false, "input": ["text", "image"], "contextWindow": context_window, "maxTokens": 32000, "cost": { "input": 0.1, "output": 0.5, "cacheRead": 0.01, "cacheWrite": 0.125 } }),
+        json!({ "id": subagent, "name": format!("{subagent} (relay)"), "reasoning": true, "input": ["text", "image"], "contextWindow": context_window, "maxTokens": 64000, "cost": { "input": 2, "output": 10, "cacheRead": 0.2, "cacheWrite": 2.5 } }),
+    ];
+    if let Some(r) = research
+        .as_deref()
+        .filter(|r| *r != talking && *r != subagent)
+    {
+        relay_models.push(json!({ "id": r, "name": format!("{r} (relay)"), "reasoning": false, "input": ["text", "image"], "contextWindow": context_window, "maxTokens": 32000, "cost": { "input": 0.1, "output": 0.5, "cacheRead": 0.01, "cacheWrite": 0.125 } }));
     }
     let mut models = json!({
         "providers": {
@@ -835,10 +883,7 @@ pub fn write_models_json(cfg: &Config, talking: &str, subagent: &str) -> Result<
                 "baseUrl": format!("{}/v1", cfg.proxy_base()),
                 "api": "openai-completions",
                 "apiKey": cfg.box_token,
-                "models": [
-                    { "id": talking, "name": format!("{talking} (relay)"), "reasoning": false, "input": ["text", "image"], "contextWindow": context_window, "maxTokens": 32000, "cost": { "input": 0.1, "output": 0.5, "cacheRead": 0.01, "cacheWrite": 0.125 } },
-                    { "id": subagent, "name": format!("{subagent} (relay)"), "reasoning": true, "input": ["text", "image"], "contextWindow": context_window, "maxTokens": 64000, "cost": { "input": 2, "output": 10, "cacheRead": 0.2, "cacheWrite": 2.5 } }
-                ]
+                "models": relay_models
             }
         }
     });

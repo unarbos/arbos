@@ -13,11 +13,13 @@ use crate::app::AppState;
 use crate::model::{AgentMember, Person, Project};
 use crate::ui::avatars;
 use crate::ui::composer::ComposerInput;
+use crate::ui::error_note;
 use crate::ui::frost::{frosted, MENU_BLUR};
 use crate::ui::glass;
 use crate::ui::groups::project_color;
 use crate::ui::icons::icon;
 use crate::ui::identity;
+use crate::ui::profiles::kit;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
@@ -34,8 +36,6 @@ pub const CARD_INSET: f32 = 16.0;
 pub const ROW_PADDING_X: f32 = 14.0;
 pub const ROW_GLYPH: f32 = 40.0;
 pub const ROW_GAP: f32 = identity::ROW_GAP;
-/// Where the text column starts inside the card; the hairlines between rows start there too.
-pub const ROW_TEXT_INSET: f32 = ROW_PADDING_X + ROW_GLYPH + ROW_GAP;
 
 /// Members of a space with their decoded avatars (list rows, headers).
 pub type PeopleWithAvatars = Vec<(Person, Option<Arc<RenderImage>>)>;
@@ -52,7 +52,7 @@ pub fn avatar(image: Option<Arc<RenderImage>>, person: &Person, size: f32, theme
         .justify_center();
     match image {
         Some(image) => base.child(
-            gpui::img(image)
+            gpui::img(crate::ui::picture_fit::fit(&image, size))
                 .size(px(size))
                 .rounded_full()
                 .object_fit(gpui::ObjectFit::Cover),
@@ -102,15 +102,7 @@ pub fn new_chat_sheet(
     let servers_available = s.servers_available;
     // Servers hold people only: no agent rows in their picker.
     let my_agents: Vec<Project> = if group_mode && !add_to.as_ref().is_some_and(|t| t.is_server) {
-        let q = typed.to_lowercase();
-        s.my_projects()
-            .filter(|p| {
-                q.is_empty()
-                    || p.name.to_lowercase().contains(&q)
-                    || Project::mention_slug(&p.name).contains(&q)
-            })
-            .cloned()
-            .collect()
+        agent_picker_rows(s.my_projects().cloned().collect(), &query)
     } else {
         Vec::new()
     };
@@ -160,6 +152,25 @@ pub fn new_chat_sheet(
         .pb(px(18.0))
         .min_h_0()
         .overflow_y_scroll();
+    // A refusal (no such user, nobody picked, the relay said no) is the shared error note at
+    // the top of the body, before the search field — one place for every people sheet.
+    if let Some(slot) = error.as_ref() {
+        body = body.child(div().mx(px(CARD_INSET)).child(error_note::render(
+            "people-sheet-error",
+            &slot.error,
+            slot.details_open,
+            error_note::Style::Inline,
+            &theme,
+            error_note::Handlers::new().toggle_details(cx.listener(|this, _, _, cx| {
+                this.state.update(cx, |s, cx| {
+                    if let Some(slot) = s.people_error.as_mut() {
+                        slot.toggle_details();
+                    }
+                    cx.notify();
+                });
+            })),
+        )));
+    }
 
     if group_mode {
         body = new_group_body(
@@ -173,7 +184,6 @@ pub fn new_chat_sheet(
             &results,
             &typed,
             busy,
-            error,
             add_to.as_ref(),
             &me_handle,
             state,
@@ -263,9 +273,7 @@ pub fn new_chat_sheet(
                 .flex_shrink_0()
                 .mx(px(CARD_INSET))
                 .child(agent_row);
-            group = group
-                .child(div().h(px(0.5)).ml(px(ROW_TEXT_INSET)).bg(theme.border))
-                .child(group_row);
+            group = group.child(kit::divider(&theme)).child(group_row);
             // D88 rule 8: servers, when this relay runs them.
             if servers_available {
                 let server_row = |id: &'static str,
@@ -314,15 +322,13 @@ pub fn new_chat_sheet(
                             this.open_server_sheet(sheet.clone(), window, cx);
                         }))
                 };
-                group = group
-                    .child(div().h(px(0.5)).ml(px(ROW_TEXT_INSET)).bg(theme.border))
-                    .child(server_row(
-                        "new-server",
-                        "hash",
-                        "New server",
-                        "Channels for a crowd, with an invite link",
-                        crate::app::ServerSheet::NewServer,
-                    ));
+                group = group.child(kit::divider(&theme)).child(server_row(
+                    "new-server",
+                    "hash",
+                    "New server",
+                    "Channels for a crowd, with an invite link",
+                    crate::app::ServerSheet::NewServer,
+                ));
                 // "Join a server" (paste a link) is gone (Jacob 2026-10-22): invite links
                 // open the app through arbos.life/s/<code>; people are added by name.
             }
@@ -332,17 +338,6 @@ pub fn new_chat_sheet(
         // People.
         let mut list = glass::group(&theme).mx(px(CARD_INSET));
         let mut any = false;
-        if let Some(err) = error {
-            any = true;
-            list = list.child(
-                div()
-                    .px(px(14.0))
-                    .py(px(10.0))
-                    .text_size(px(TEXT_SMALL))
-                    .text_color(theme.danger)
-                    .child(err),
-            );
-        }
         if results.is_empty() && !typed.is_empty() && !busy {
             any = true;
             list = list.child(
@@ -383,9 +378,8 @@ pub fn new_chat_sheet(
                     .gap(px(ROW_GAP))
                     .px(px(ROW_PADDING_X))
                     .py(px(9.0))
-                    .when(i + 1 < count, |el| {
-                        el.border_b_1().border_color(theme.border)
-                    })
+                    .relative()
+                    .when(i + 1 < count, |el| el.child(kit::hairline_below(&theme)))
                     .cursor_pointer()
                     .hover(|st| st.bg(theme.surface_2))
                     .child(avatar(image, &person, ROW_GLYPH, &theme))
@@ -586,7 +580,6 @@ fn new_group_body(
     results: &[(Person, Option<Arc<RenderImage>>)],
     typed: &str,
     busy: bool,
-    error: Option<String>,
     add_to: Option<&crate::app::AddTarget>,
     _me_handle: &str,
     state: &Entity<AppState>,
@@ -601,6 +594,7 @@ fn new_group_body(
             .gap(px(8.0))
             .overflow_x_scroll();
         let projects = state.read(cx).projects.clone();
+        let images = avatars::project_images(state.read(cx));
         for pid in picked_agents {
             let id = pid.clone();
             let label = agent_names
@@ -612,7 +606,10 @@ fn new_group_body(
             let picture = projects
                 .iter()
                 .find(|p| &p.id == pid)
-                .map(|p| avatars::project(p, CHIP_AVATAR, theme).into_any_element())
+                .map(|p| {
+                    avatars::project_with(images.get(&p.id).cloned(), p, CHIP_AVATAR, theme)
+                        .into_any_element()
+                })
                 .unwrap_or_else(|| div().size(px(CHIP_AVATAR)).into_any_element());
             chips = chips.child(member_chip(
                 format!("group-chip-agent-{pid}"),
@@ -642,19 +639,10 @@ fn new_group_body(
         body = body.child(chips);
     }
     body = body.child(search);
-    if let Some(err) = error {
-        body = body.child(
-            div()
-                .px(px(30.0))
-                .text_size(px(TEXT_SMALL))
-                .text_color(theme.danger)
-                .text_center()
-                .child(err),
-        );
-    }
 
     if !my_agents.is_empty() {
         let count = my_agents.len();
+        let images = avatars::project_images(state.read(cx));
         let mut list = glass::group(theme).mx(px(16.0));
         for (i, project) in my_agents.iter().enumerate() {
             let pid = project.id.clone();
@@ -671,14 +659,18 @@ fn new_group_body(
                     .gap(px(identity::ROW_GAP))
                     .px(px(14.0))
                     .py(px(9.0))
-                    .when(i + 1 < count, |el| {
-                        el.border_b_1().border_color(theme.border)
-                    })
+                    .relative()
+                    .when(i + 1 < count, |el| el.child(kit::hairline_below(theme)))
                     .when(already, |el| el.opacity(0.5))
                     .when(!already, |el| {
                         el.cursor_pointer().hover(|st| st.bg(theme.surface_2))
                     })
-                    .child(avatars::project(project, 40.0, theme))
+                    .child(avatars::project_with(
+                        images.get(&project.id).cloned(),
+                        project,
+                        40.0,
+                        theme,
+                    ))
                     .child(
                         div()
                             .flex()
@@ -769,9 +761,8 @@ fn new_group_body(
                 .gap(px(identity::ROW_GAP))
                 .px(px(14.0))
                 .py(px(9.0))
-                .when(i + 1 < count, |el| {
-                    el.border_b_1().border_color(theme.border)
-                })
+                .relative()
+                .when(i + 1 < count, |el| el.child(kit::hairline_below(theme)))
                 .when(already, |el| el.opacity(0.5))
                 .when(!already, |el| {
                     el.cursor_pointer().hover(|st| st.bg(theme.surface_2))
@@ -1383,6 +1374,7 @@ pub fn project_members_popover(
                             .py(px(2.0))
                             .rounded(px(5.0))
                             .text_size(px(11.0))
+                            // error-ui: exception destructive-action (Remove, not a message)
                             .text_color(theme.danger)
                             .cursor_pointer()
                             .hover(|st| st.bg(theme.surface_2))
@@ -1417,6 +1409,57 @@ pub fn project_members_popover(
         .child(frosted(PANEL_RADIUS, MENU_BLUR, card))
 }
 
+/// The agent rows of the New group / Add members picker for what was typed:
+/// my agents through the shared matcher (name, @slug, description), best
+/// first, list order inside a tie; an empty query keeps them all.
+pub fn agent_picker_rows(agents: Vec<Project>, query: &str) -> Vec<Project> {
+    use arbos_core::search::{filter, normalize_query, Fields};
+    filter(agents, &normalize_query(query), |p| {
+        Fields::new(p.name.clone(), Project::mention_slug(&p.name))
+            .with_title(p.description.clone().unwrap_or_default())
+    })
+}
+
+#[cfg(test)]
+mod agent_picker_tests {
+    //! [feedback shared-search-matcher-mac-2026-10-26]: the agent rows of the
+    //! group picker used a lower-cased substring; now the shared matcher.
+    use super::*;
+
+    fn agent(name: &str, description: &str) -> Project {
+        Project {
+            id: format!("p-{name}"),
+            name: name.into(),
+            description: (!description.is_empty()).then(|| description.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn names(v: &[Project]) -> Vec<&str> {
+        v.iter().map(|p| p.name.as_str()).collect()
+    }
+
+    #[test]
+    fn agents_match_name_slug_or_description_ranked() {
+        let all = vec![
+            agent("Comms", "Research assistant"),
+            agent("Research Bot", ""),
+            agent("Affine Research", ""),
+            agent("Doug", ""),
+        ];
+        assert_eq!(
+            names(&agent_picker_rows(all.clone(), "res")),
+            ["Research Bot", "Affine Research", "Comms"]
+        );
+        assert_eq!(
+            names(&agent_picker_rows(all.clone(), "@affine-res")),
+            ["Affine Research"]
+        );
+        assert_eq!(names(&agent_picker_rows(all.clone(), "")), names(&all));
+        assert!(agent_picker_rows(all, "zzq").is_empty());
+    }
+}
+
 #[cfg(test)]
 mod first_paint_tests {
     //! The New Message sheet's create rows and people rows share one geometry
@@ -1431,8 +1474,9 @@ mod first_paint_tests {
         assert_eq!(ROW_GAP, identity::ROW_GAP, "the shared picture + name gap");
         assert_eq!(ROW_GAP, 10.0);
         assert_eq!(
-            ROW_TEXT_INSET, 64.0,
-            "text column and hairlines start 64 pt into the card"
+            ROW_PADDING_X + ROW_GLYPH + ROW_GAP,
+            64.0,
+            "text column starts 64 pt into the card (the dividers are the kit's, 16 / 16)"
         );
     }
 

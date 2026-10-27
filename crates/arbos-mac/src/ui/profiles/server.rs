@@ -135,6 +135,7 @@ pub(super) fn page(
         subtitle_click: None,
         subtitle_element: None,
         editor: None,
+        action: None,
     };
 
     // ----- tabs: Channels | Members | Settings (the same set on the iPhone) ------

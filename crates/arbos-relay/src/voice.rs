@@ -1661,6 +1661,7 @@ mod inbox_tests {
         serde_json::from_slice(&bytes).unwrap_or(Value::Null)
     }
 
+    /// A box's announcement: never a cross-chat reply (`reply_ref` is a person's, #1834).
     fn notify(
         message_id: &str,
         text: &str,
@@ -1671,8 +1672,10 @@ mod inbox_tests {
             message_id: message_id.into(),
             text: text.into(),
             project_id: None,
+            reply_ref: None,
             kind: kind.map(str::to_owned),
             voice_text: voice_text.map(str::to_owned),
+            mentions: Vec::new(),
         }
     }
 

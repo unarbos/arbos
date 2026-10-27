@@ -423,6 +423,16 @@ fn picture(shell: &Shell, entry: &Entry, theme: &Theme, cx: &Context<Shell>) -> 
             .child(icon(glyph, AVATAR * 0.58, theme.text_muted))
     };
     match &entry.target {
+        Target::Setting(setting) => {
+            if let crate::palette::SettingTarget::Agent { project_id, .. } = setting {
+                if let Some(space) = state.project(project_id) {
+                    return groups::picture(space, state, AVATAR, theme).into_any_element();
+                }
+            }
+            // The Settings list's own tile, at the palette's picture size.
+            glass::icon_tile_sized(crate::palette::target_glyph(setting), AVATAR, theme)
+                .into_any_element()
+        }
         Target::Space(id) | Target::Message { space_id: id, .. } => {
             let Some(space) = state.project(id) else {
                 return tile("person").into_any_element();

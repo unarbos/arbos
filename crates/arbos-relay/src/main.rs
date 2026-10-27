@@ -7,6 +7,7 @@ mod api_fixture_capture;
 mod apns;
 mod auth;
 mod avatar;
+mod avatar_image;
 mod blobs;
 mod boxes;
 mod browser;
@@ -36,6 +37,7 @@ mod groups;
 mod image_sniff;
 mod images;
 mod inspect;
+mod link_icons;
 mod livekit;
 mod local;
 mod matrix;
@@ -45,6 +47,7 @@ mod notices;
 mod notify;
 mod people;
 mod proxy;
+mod push;
 mod releases;
 mod restart;
 mod room_health;
@@ -57,6 +60,7 @@ mod skills;
 mod smoke;
 mod state;
 mod upgrade;
+mod upgrade_carry;
 mod vault;
 mod vaults;
 mod voice;
@@ -246,6 +250,18 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .map(|v| v.split(',').filter_map(|s| s.trim().parse().ok()).collect())
             .unwrap_or_else(|| vec![2_000, 5_000]),
+        avatar_attempt_timeout: std::time::Duration::from_secs(
+            std::env::var("ARBOS_AVATAR_ATTEMPT_TIMEOUT_S")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(40),
+        ),
+        avatar_total_timeout: std::time::Duration::from_secs(
+            std::env::var("ARBOS_AVATAR_TOTAL_TIMEOUT_S")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(75),
+        ),
         voice_mock: std::env::var("ARBOS_VOICE_MOCK").is_ok_and(|v| v == "1"),
         openai_audio_base: std::env::var("ARBOS_OPENAI_AUDIO_BASE")
             .ok()
@@ -321,8 +337,9 @@ async fn main() -> anyhow::Result<()> {
         jwt_key: Arc::new(jwt_key),
         download_cache: Arc::new(Mutex::new(None)),
         upgrading: Arc::new(Mutex::new(HashMap::new())),
+        upgrade_refused: Arc::new(Mutex::new(HashMap::new())),
         refresh_grace: Arc::new(Mutex::new(HashMap::new())),
-        push: apns::from_env().unwrap_or_else(|| Arc::new(apns::Pusher::Off)),
+        push: Arc::new(push::Push::from_env(db.clone())),
         focus: Arc::new(Mutex::new(HashMap::new())),
         fallback_sent: Arc::new(Mutex::new(HashMap::new())),
         livekit: livekit::from_env(),
@@ -376,6 +393,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     db.local_devices_reset()?;
+    state.push.spawn_worker();
     rooms::spawn_sweeper(state.clone()).await;
     boxes::spawn_wake_runner(state.clone()).await;
     routines::spawn_scheduler(state.clone()).await;
@@ -417,6 +435,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/projects/{file}/avatar.jpg", get(images::project_avatar))
         .route("/me/pushes", get(people::me_pushes))
         .route("/me/unread", get(notify::me_unread))
+        .route(
+            "/me/notifications",
+            get(notify::me_notifications).put(notify::put_me_notifications),
+        )
         .route("/chats/{id}/calls", post(calls::start_people_call))
         .route("/chats/{id}/call", get(calls::people_chat_call))
         .route(
@@ -526,6 +548,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/admin/matrix/reads/{user}",
             put(matrix::appservice::set_reads),
+        )
+        .route(
+            "/admin/matrix/pushers",
+            post(matrix::appservice::backfill_pushers),
         )
         .route("/admin/installs", get(releases::admin_installs))
         .route("/releases/current", get(releases::current))
@@ -717,6 +743,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/admin/push", get(admin::push_status))
         .route("/admin/push/test", post(admin::push_test))
+        .route("/admin/push/drain", post(admin::push_drain))
         .route(
             "/admin/fleet",
             get(fleet::admin_fleet).put(fleet::admin_fleet_update),
@@ -732,6 +759,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/admin/users/{id}/credits",
             axum::routing::put(admin::set_credits),
+        )
+        .route(
+            "/admin/projects/{id}/spend-cap",
+            axum::routing::put(admin::set_project_cap),
         )
         .route(
             "/admin/killswitch",
@@ -796,6 +827,7 @@ async fn main() -> anyhow::Result<()> {
             delete(moderation::delete_message),
         )
         .route("/blob/{project}/{key}", get(blobs::get).put(blobs::put))
+        .route("/link-icon", get(link_icons::get))
         .route("/feedback", post(feedback::submit))
         .route("/feedback/capture/{id}", post(feedback::device_capture))
         .route("/box/feedback/capture", post(feedback::box_capture_request))
@@ -926,6 +958,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/box/secrets/{id}/scrub", get(secrets::box_scrub))
         .route("/box/secrets/request", post(secrets::box_request))
+        .route("/box/secrets/from-message", post(secrets::box_from_message))
         .route(
             "/box/secrets/requests/{id}",
             get(secrets::box_request_status),

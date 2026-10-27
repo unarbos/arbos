@@ -108,10 +108,12 @@ final class CoreChatDoc {
 
     /// `forwardedFrom` = the original sender's name on a forwarded message (the bubble's
     /// "Forwarded from <name>" header; written as `forwardedFrom` on the row).
+    /// `replyRef` = a cross-chat reply (Reply in DM, crdt-sync §6.2 `replyRef`): the quoted
+    /// message's address and snapshot, written through core as one value map.
     func insertUserMessage(
         id: Id, text: String, deviceId: String, attachments: [Attachment] = [],
         author: Author? = nil, mentions: [String] = [], replyTo: String? = nil,
-        forwardedFrom: String? = nil
+        forwardedFrom: String? = nil, replyRef: ReplyRef? = nil
     ) throws {
         let opts = UserMessageOptsRecord(
             attachments: attachments.map {
@@ -123,7 +125,12 @@ final class CoreChatDoc {
             senderHandle: author?.handle,
             senderName: author?.name,
             senderAvatar: author?.avatar,
-            forwardedFrom: forwardedFrom
+            forwardedFrom: forwardedFrom,
+            replyRef: replyRef.map {
+                ReplyRefRecord(chatId: $0.chatId, projectId: $0.projectId, messageId: $0.messageId,
+                               chatTitle: $0.chatTitle, sender: $0.sender, senderName: $0.senderName,
+                               senderHandle: $0.senderHandle, text: $0.text)
+            }
         )
         try doc.insertUserMessage(id: id, text: text, deviceId: deviceId, opts: opts)
     }

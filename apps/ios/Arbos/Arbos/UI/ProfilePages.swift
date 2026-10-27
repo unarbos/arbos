@@ -41,12 +41,10 @@ enum ProfileTarget: Identifiable, Equatable, Hashable {
     /// D88 (#1317): a channel's own page — what the `# general` pill opens.
     case channel(channelId: String)
 
-    /// Pages whose member rows push a person over them (back chevron returns
-    /// here). The agent page runs its own NavigationStack, so it stays a root.
-    var pushesPeople: Bool {
-        if case .agent = self { return false }
-        return true
-    }
+    /// Pages whose rows push a person over them (back chevron returns here):
+    /// every kind — the agent page's "Run by …" owner link pushes too
+    /// ([feedback agent-pane-run-by-link-ios-2026-10-25]).
+    var pushesPeople: Bool { true }
 
     var id: String {
         switch self {
@@ -67,9 +65,19 @@ struct ProfileTopBar<Trailing: View>: View {
     @Environment(\.dismiss) private var dismiss
     /// Override when `dismiss` is a no-op (Settings as a tab root). Sheets keep the default.
     var onBack: (() -> Void)? = nil
+    /// Which page this bar fronts — its `ListTopFade` runs from the physical top edge under
+    /// the bar ([feedback iphone-list-top-fade-2026-10-26]).
+    var screen: ListTopFade.Screen = .agentPage
     @ViewBuilder var trailing: () -> Trailing
 
     var body: some View {
+        ZStack(alignment: .top) {
+            ListTopFade(screen: screen)
+            bar
+        }
+    }
+
+    private var bar: some View {
         HStack {
             Button { (onBack ?? { dismiss() })() } label: {
                 GlassCircle { Image(systemName: "chevron.left").font(.system(size: 17, weight: .semibold)).foregroundStyle(theme.text) }
@@ -97,6 +105,8 @@ struct ProfileTopBar<Trailing: View>: View {
 /// * danger row: centred red label, same height;
 /// * tabs: one capsule pill, `field` fill on the selected tab.
 enum PaneKit {
+    /// A pane page's content starts this far under the safe-area top (the bar is 16 + 48).
+    static let pageTop: CGFloat = 80
     static let rowHeight: CGFloat = 48
     static let inset: CGFloat = 16
     /// Picture → name on a row: Grok Bot's sidebar / members rows measure 11–12 pt
@@ -359,8 +369,13 @@ struct PaneHeader<Avatar: View>: View {
     var subtitleTint: Color? = nil
     /// A tap on the subtitle (the agent pane's label: tap to edit it in place).
     var subtitleAction: (() -> Void)? = nil
+    /// The subtitle is a link (the foreign agent's "Run by …"): a mention-chip pill,
+    /// accent text, 14 % accent fill, 30 % while pressed ([feedback agent-pane-run-by-link-ios-2026-10-25]).
+    var subtitleLink = false
     /// Drawn instead of the subtitle while it is being edited.
     var subtitleEditor: AnyView? = nil
+    /// Drawn under the subtitle (the "Run by …" link under an agent's label).
+    var subtitleBelow: AnyView? = nil
     /// The hero's one action pill under the subtitle (a person's Message,
     /// [feedback profile-message-button-ios-2026-10-25]); nil on panes without one.
     var action: AnyView? = nil
@@ -378,12 +393,19 @@ struct PaneHeader<Avatar: View>: View {
             }
             if let subtitleEditor {
                 subtitleEditor
+            } else if let subtitleAction, subtitleLink {
+                Button(action: subtitleAction) { Text(subtitle).lineLimit(1) }
+                    .buttonStyle(ChipLinkStyle())
+                    .accessibilityHint("Opens their profile")
             } else if let subtitleAction {
                 Button(action: subtitleAction) { subtitleText }
                     .buttonStyle(.plain)
                     .accessibilityHint("Edits the label")
             } else {
                 subtitleText
+            }
+            if let subtitleBelow {
+                subtitleBelow
             }
             if let action {
                 action.padding(.top, PaneKit.heroActionGap)
@@ -414,6 +436,26 @@ struct PaneHeader<Avatar: View>: View {
     }
 }
 
+/// A link drawn as a mention chip (the Mac's `run_by_link`): accent text on an accent
+/// capsule at 14 %, 30 % while the finger is down, a 120 ms ease-out between them —
+/// the chip pointer rules ([feedback mention-chip-hover-2026-10-24]).
+struct ChipLinkStyle: ButtonStyle {
+    @Environment(\.theme) private var theme
+    static let restAlpha: Double = 0.14
+    static let pressedAlpha: Double = 0.30
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(theme.font(Theme.small))
+            .foregroundStyle(theme.accent)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(theme.accent.opacity(configuration.isPressed ? Self.pressedAlpha : Self.restAlpha)))
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .contentShape(Capsule())
+    }
+}
+
 /// The hero's action pill ("Message" on a person's pane, [feedback
 /// profile-message-button-ios-2026-10-25]): the iPhone's control family —
 /// `Theme.control` 42 tall like the top bar's back disc, a capsule on the
@@ -433,7 +475,7 @@ struct PanePillButton: View {
             }
             .foregroundStyle(theme.text)
             .padding(.horizontal, 22)
-            .frame(height: Theme.control)
+            .frame(height: Controls.height)
             .contentShape(Capsule())
         }
         .buttonStyle(PanePillStyle())
@@ -448,9 +490,8 @@ private struct PanePillStyle: ButtonStyle {
             .background {
                 ZStack {
                     if theme.isGlass { Capsule().fill(.ultraThinMaterial) }
-                    Capsule().fill(theme.field.opacity(theme.isGlass ? 0.85 : 1))
-                    if configuration.isPressed { Capsule().fill(theme.text.opacity(0.12)) }
-                    Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1)
+                    ControlSurface(shape: Capsule(), pressed: configuration.isPressed)
+                        .opacity(theme.isGlass ? ChatHeaderGlass.legacyTint : 1)
                 }
             }
     }
@@ -477,7 +518,7 @@ private struct PaneCrayon: ViewModifier {
                     .font(theme.font(13, weight: .semibold))
                     .foregroundStyle(theme.text)
                     .frame(width: 30, height: 30)
-                    .background(Circle().fill(theme.field))
+                    .background(Circle().fill(theme.field)) // control-size: exception rowIconTiles
                     .overlay(Circle().strokeBorder(theme.bg, lineWidth: 2))
             }
         }
@@ -486,6 +527,46 @@ private struct PaneCrayon: ViewModifier {
 
 extension View {
     func paneCrayon(_ on: Bool = true) -> some View { modifier(PaneCrayon(on: on)) }
+}
+
+/// Jacob, 2026-10-25: a tap on a profile picture opens it full-size in the media viewer chat
+/// photos use (tap / swipe-down closes, pinch zooms). With no picture (`url` empty — initials
+/// or a leaf) the content is just drawn: nothing to view. Panes whose picture opens the avatar
+/// picker instead get **View** inside the picker.
+struct ViewablePicture<Content: View>: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    let name: String
+    let url: String?
+    @ViewBuilder let content: () -> Content
+    @State private var viewer: MediaViewerState?
+
+    var body: some View {
+        if let url, !url.isEmpty {
+            Button {
+                viewer = MediaViewerState(items: [MediaAlbum.picture(name: name, url: url)], index: 0)
+            } label: {
+                content().contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("View picture")
+            .accessibilityIdentifier("hero-view-picture")
+            .onAppear {
+                if DebugHooks.viewPicture {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                        viewer = MediaViewerState(items: [MediaAlbum.picture(name: name, url: url)], index: 0)
+                    }
+                }
+            }
+            .fullScreenCover(item: $viewer) { v in
+                MediaViewer(album: v.items, index: v.index, onClose: { viewer = nil })
+                    .environmentObject(model)
+                    .environment(\.theme, theme)
+            }
+        } else {
+            content()
+        }
+    }
 }
 
 // ----- the shared pane kit (PaneKit) and the names the pages use ------------
@@ -788,14 +869,16 @@ struct UserProfileView: View {
             theme.bg.ignoresSafeArea()
             ScrollView {
                 VStack(spacing: 18) {
-                    Color.clear.frame(height: 80)
+                    Color.clear.frame(height: PaneKit.pageTop)
                     // The shared pane (D93): picture, name, @handle, the Message pill
                     // (Jacob 2026-10-25; not on my own pane, not once I blocked them);
                     // Links | Groups (the Mac's set); one Block user row. No last-seen,
                     // no username field, no Add members.
                     ProfilePane(
                         hero: PaneHero(
-                            picture: .image(AnyView(PersonAvatar(url: person.avatarUrl, handle: person.handle, size: PaneKit.heroAvatar, name: person.name, id: person.id, colorIndex: person.avatarColorIndex))),
+                            picture: .image(AnyView(ViewablePicture(name: person.displayName, url: person.avatarUrl) {
+                                PersonAvatar(url: person.avatarUrl, handle: person.handle, size: PaneKit.heroAvatar, name: person.name, id: person.id, colorIndex: person.avatarColorIndex)
+                            })),
                             name: person.displayName,
                             subtitle: "@\(person.handle)",
                             action: MessageButton.shows(isMe: isMe, blocked: blockedEntry != nil) ? AnyView(messageButton) : nil
@@ -811,7 +894,7 @@ struct UserProfileView: View {
                 }
             }
             .scrollIndicators(.visible)
-            ProfileTopBar { EmptyView() }
+            ProfileTopBar(screen: .personPage) { EmptyView() }
         }
         .confirmationDialog("Block @\(person.handle)?", isPresented: $confirmBlock, titleVisibility: .visible) {
             Button("Block", role: .destructive) {
@@ -1082,7 +1165,7 @@ struct GroupProfileView: View {
             theme.bg.ignoresSafeArea()
             ScrollView {
                 VStack(spacing: 18) {
-                    Color.clear.frame(height: 80)
+                    Color.clear.frame(height: PaneKit.pageTop)
                     // The shared pane (D93): picture (crayon when a people group — it
                     // opens the edit sheet), name, member count, Members | Library.
                     // Leave / Delete group chat in the footer (same rule as the chat
@@ -1101,7 +1184,7 @@ struct GroupProfileView: View {
                     Color.clear.frame(height: 40)
                 }
             }
-            ProfileTopBar { EmptyView() }
+            ProfileTopBar(screen: .groupPage) { EmptyView() }
         }
     }
 
@@ -1362,7 +1445,9 @@ struct GroupProfileView: View {
     /// cluster or picked image (tap → the edit sheet) for a people group.
     @ViewBuilder private var heroPicture: some View {
         if let project {
-            AgentAvatar(project: project, theme: theme, size: PaneKit.heroAvatar, idle: true)
+            ViewablePicture(name: project.name, url: project.imageURL) {
+                AgentAvatar(project: project, theme: theme, size: PaneKit.heroAvatar, idle: true)
+            }
         } else {
             Button { showEdit = true } label: {
                 AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL, leaf: people?.leafPick, neutralName: people?.isNeutralAvatar == true ? people?.title : nil)
@@ -1929,7 +2014,7 @@ struct ServerProfileView: View {
             theme.bg.ignoresSafeArea()
             ScrollView {
                 VStack(spacing: 18) {
-                    Color.clear.frame(height: 80)
+                    Color.clear.frame(height: PaneKit.pageTop)
                     if let server {
                         ProfilePane(
                             hero: hero(server),
@@ -1948,7 +2033,7 @@ struct ServerProfileView: View {
                     Color.clear.frame(height: 40)
                 }
             }
-            ProfileTopBar { EmptyView() }
+            ProfileTopBar(screen: .serverPage) { EmptyView() }
         }
     }
 
@@ -1975,7 +2060,9 @@ struct ServerProfileView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Change server picture")
             } else {
-                ServerAvatar(server: server, size: PaneHeader<EmptyView>.avatarSize)
+                ViewablePicture(name: server.name, url: server.imageKey.flatMap { model.blobURL(projectId: "servers:\(server.id)", key: $0)?.absoluteString }) {
+                    ServerAvatar(server: server, size: PaneHeader<EmptyView>.avatarSize)
+                }
             }
         }
     }
@@ -2460,7 +2547,7 @@ struct GroupEditSheet: View {
                         ZStack(alignment: .bottomTrailing) {
                             AvatarCluster(members: clusterMembers, size: 72, imageUrl: existingImageURL, leaf: people?.leafPick, neutralName: people?.isNeutralAvatar == true ? people?.title : nil)
                                 .frame(width: 112, height: 112)
-                            GlassCircle(size: 36) {
+                            GlassCircle(size: 36) { // control-size: exception rowIconTiles
                                 Image(systemName: "camera.fill")
                                     .font(theme.font(14, weight: .semibold))
                                     .foregroundStyle(theme.text)
@@ -2479,9 +2566,7 @@ struct GroupEditSheet: View {
                             .autocorrectionDisabled()
                             .focused($nameFocused)
                             .background(SelectAllOnDoubleTap())
-                            .padding(.horizontal, 14).frame(height: Theme.fieldHeight)
-                            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
-                            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                            .controlField()
                     }
                     .padding(.horizontal, 16)
 
@@ -2491,10 +2576,7 @@ struct GroupEditSheet: View {
                             .font(theme.font(Theme.body))
                             .foregroundStyle(theme.text)
                             .lineLimit(3...6)
-                            .padding(.horizontal, 14).padding(.vertical, 12)
-                            .frame(minHeight: Theme.fieldHeight, alignment: .topLeading)
-                            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
-                            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                            .controlFieldGrowing()
                     }
                     .padding(.horizontal, 16)
 
@@ -2572,8 +2654,12 @@ struct PaneHero {
     var subtitleTint: Color? = nil
     /// A tap on the subtitle (the agent pane's label: tap to edit it in place).
     var subtitleAction: (() -> Void)? = nil
+    /// The subtitle is a link — the foreign agent's "Run by …" (a chip pill).
+    var subtitleLink = false
     /// Drawn instead of the subtitle while it is being edited.
     var subtitleEditor: AnyView? = nil
+    /// Drawn under the subtitle (the "Run by …" link under an agent's label).
+    var subtitleBelow: AnyView? = nil
     /// The hero's one action pill under the subtitle (a person's Message); nil
     /// on panes with no primary action and on a person you cannot message.
     var action: AnyView? = nil
@@ -2669,8 +2755,8 @@ struct ProfilePane: View {
             } header: {
                 VStack(spacing: 18) {
                     PaneHeader(name: hero.name, subtitle: hero.subtitle, badge: hero.badge, nameAction: hero.nameAction,
-                               subtitleTint: hero.subtitleTint, subtitleAction: hero.subtitleAction, subtitleEditor: hero.subtitleEditor,
-                               action: hero.action) {
+                               subtitleTint: hero.subtitleTint, subtitleAction: hero.subtitleAction, subtitleLink: hero.subtitleLink,
+                               subtitleEditor: hero.subtitleEditor, subtitleBelow: hero.subtitleBelow, action: hero.action) {
                         switch hero.picture {
                         case .image(let v): v
                         case .glyph(let glyph):
@@ -2776,7 +2862,7 @@ struct ChannelProfileView: View {
             theme.bg.ignoresSafeArea()
             ScrollView {
                 VStack(spacing: 18) {
-                    Color.clear.frame(height: 80)
+                    Color.clear.frame(height: PaneKit.pageTop)
                     if let channel, let server {
                         let restricted = model.channelRestricted(channel)
                         let count = max(server.memberCount, server.members.count)
@@ -2799,7 +2885,7 @@ struct ChannelProfileView: View {
                     Color.clear.frame(height: 40)
                 }
             }
-            ProfileTopBar { EmptyView() }
+            ProfileTopBar(screen: .channelPage) { EmptyView() }
         }
         .task {
             if let t = model.openServerHookTab { tab = t; model.openServerHookTab = nil }

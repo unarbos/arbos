@@ -343,7 +343,8 @@ impl Db {
                 "SELECT COUNT(*) FROM chat_events e
                  WHERE e.chat_id = ?2
                    AND e.id > COALESCE((SELECT r.event_id FROM chat_user_reads r WHERE r.user_id = ?1 AND r.chat_id = ?2), 0)
-                   AND (e.sender_user IS NULL OR e.sender_user != ?1)",
+                   AND (e.sender_user IS NULL OR e.sender_user != ?1)
+                   AND (e.sender_user IS NULL OR e.sender_user NOT IN (SELECT blocked FROM blocks WHERE blocker = ?1))",
                 params![user_id, chat_id],
                 |r| r.get(0),
             )
@@ -380,6 +381,7 @@ fn unread_query(c: &Connection, user_id: &str) -> rusqlite::Result<Vec<UnreadCha
         "SELECT e.chat_id, e.project_id, COUNT(*) FROM chat_events e
          WHERE e.id > COALESCE((SELECT r.event_id FROM chat_user_reads r WHERE r.user_id = ?1 AND r.chat_id = e.chat_id), 0)
            AND (e.sender_user IS NULL OR e.sender_user != ?1)
+           AND (e.sender_user IS NULL OR e.sender_user NOT IN (SELECT blocked FROM blocks WHERE blocker = ?1))
            AND NOT EXISTS (SELECT 1 FROM chat_user_archive a WHERE a.user_id = ?1 AND a.chat_id = e.chat_id)
            AND (
              e.chat_id IN (SELECT chat_id FROM people_members WHERE member = ?2 AND left_at IS NULL)

@@ -301,6 +301,7 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
 
     let mut root = div()
         .id("media-viewer")
+        .debug_selector(|| "media-viewer".into())
         .key_context("MediaViewer")
         .track_focus(focus)
         .on_action(move |_: &Prev, _, cx| {
