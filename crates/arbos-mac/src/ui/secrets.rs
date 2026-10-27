@@ -960,10 +960,14 @@ impl SecretsPanel {
                     format!("secret-{}", s.id),
                     s.glyph(),
                     s.env.clone(),
-                    Some(format!(
-                        "{who} · {}",
-                        secret_usage(s.last_used_at, None, true)
-                    )),
+                    Some(match s.source_label() {
+                        // Secret hand-off: "Arbos · given in chat · never used".
+                        Some(given) => format!(
+                            "{who} · {given} · {}",
+                            secret_usage(s.last_used_at, None, true)
+                        ),
+                        None => format!("{who} · {}", secret_usage(s.last_used_at, None, true)),
+                    }),
                     paused,
                     theme,
                 )
@@ -1055,6 +1059,10 @@ impl SecretsPanel {
         let mut g = Self::group(theme).child(Self::value_row("Kind", s.kind_label(), theme));
         if s.name != s.env {
             g = g.child(Self::value_row("Name", s.name.clone(), theme));
+        }
+        // Secret hand-off: where it came from ("In chat with Arbos").
+        if let Some(added) = s.added_label() {
+            g = g.child(Self::value_row("Added", added, theme));
         }
         if let Some(u) = s.username.as_deref().filter(|u| !u.is_empty()) {
             g = g.child(Self::value_row("Username", u.to_string(), theme));
