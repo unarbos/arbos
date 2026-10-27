@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 
 use crate::auth;
 use crate::calls::{self, CallCmd, CallEvent};
+use crate::chat_search;
 use crate::model::SpaceKind;
 use crate::model::{
     add_members_plan, added_line, call_ended_line, created_group, reachable_line,
@@ -72,6 +73,22 @@ pub enum ProfilePage {
     Server { server_id: Id },
     /// A channel of a server (D88, #1317): what the `# general` header pill opens.
     Channel { server_id: Id, channel_id: Id },
+}
+
+impl ProfilePage {
+    /// True when both pages show the same person, agent, group, server or
+    /// channel. A person's page is the same person whichever chat it was
+    /// opened from (`space_id` only says where the Message pill goes), so a
+    /// click on their sender name, their @mention chip or the DM header pill
+    /// all count as "that profile is showing" ([feedback profile-pane-toggle-mac-2026-10-26]).
+    pub fn same_subject(&self, other: &ProfilePage) -> bool {
+        match (self, other) {
+            (ProfilePage::User { handle: a, .. }, ProfilePage::User { handle: b, .. }) => {
+                a.eq_ignore_ascii_case(b)
+            }
+            _ => self == other,
+        }
+    }
 }
 
 /// Who the Add members picker adds to — a group or a server (D88) — and who is in already.
@@ -602,6 +619,9 @@ pub struct AppState {
     pub reveal_nonce: u64,
     /// Brief highlight on the message a home-search hit or a quote click opened.
     pub highlight_message: Option<Id>,
+    /// ⌘F Search-in-chat ([feedback search-in-chat-mac-2026-10-26]): the open
+    /// bar's query, hits and cursor for the chat it was opened in.
+    pub chat_search: Option<ChatSearch>,
     pub link: Link,
     /// Each room's socket state (keyed like the docs: chat id, or the project
     /// id for the project doc) and when it last changed, for the header's
@@ -1064,6 +1084,7 @@ impl AppState {
             reveal_message: None,
             reveal_nonce: 0,
             highlight_message: None,
+            chat_search: None,
             link: Link::Connecting,
             room_links: HashMap::new(),
             relay_link: (LinkState::Live, 0),
@@ -2785,6 +2806,7 @@ impl AppState {
             SyncEvent::MatrixTimeline { room_id, rows } => {
                 self.on_matrix_timeline(room_id, rows, cx)
             }
+            SyncEvent::ChannelHistoryEnd { room_id } => self.chat_search_history_end(&room_id, cx),
             SyncEvent::MatrixConnection { connected, error } => {
                 if let (false, Some(err)) = (connected, &error) {
                     log::warn!("servers: homeserver connection: {err}");
@@ -3233,6 +3255,8 @@ impl AppState {
         }
         self.reveal_message = None;
         self.highlight_message = None;
+        // The Search-in-chat bar belongs to the chat it was opened in.
+        self.chat_search = None;
         if self
             .renaming_project
             .as_ref()
@@ -4431,6 +4455,7 @@ impl AppState {
         self.search_chat = None;
         self.reveal_message = None;
         self.highlight_message = None;
+        self.chat_search = None;
         self.renaming_project = None;
         self.selected_project = None;
         self.sidebar_overlay = false;
@@ -6328,14 +6353,29 @@ impl AppState {
 
     // ----- profile pages ------------------------------------------------------
 
-    /// Open `page` in the right pane, or close it when that page is already open
-    /// (header pill / Me avatar: click again to fold away).
+    /// The one action behind every click on a person or an agent in the chat —
+    /// a sender name, the disc beside a bubble, an @mention chip, the header
+    /// pill, a status-row picture — and the header pill of a group or channel
+    /// ([feedback profile-pane-toggle-mac-2026-10-26], Jacob: "clicking the
+    /// agent or user in the chat should open their user profile right bar.
+    /// Clicking it again should close it"):
+    ///
+    /// - nothing open → `page` opens in the right pane;
+    /// - that same person / agent showing (whichever target opened it,
+    ///   [`ProfilePage::same_subject`]) → the pane closes;
+    /// - someone else showing → `page` replaces it in place (no back stack).
     pub fn toggle_profile(&mut self, page: ProfilePage, cx: &mut Context<Self>) {
-        if self.profile.as_ref() == Some(&page) {
+        if self.profile_shows(&page) {
             self.close_profile(cx);
         } else {
             self.open_profile(page, cx);
         }
+    }
+
+    /// True while the pane's top page is `page`'s subject (so a second click
+    /// on any target for it closes the pane).
+    pub fn profile_shows(&self, page: &ProfilePage) -> bool {
+        self.profile.as_ref().is_some_and(|p| p.same_subject(page))
     }
 
     /// Fill the pane with `page`, forgetting whatever was under it.
@@ -11402,6 +11442,354 @@ mod forward_filter_tests {
 impl search_index::SenderName for AppState {
     fn sender_name(&self, _chat_id: &str, message: &Message) -> String {
         self.viewer_sender_name(message)
+    }
+}
+
+// ----- ⌘F Search-in-chat ([feedback search-in-chat-mac-2026-10-26]) ----------------
+
+/// The open Search-in-chat bar: its chat, what was typed, the pinned sender,
+/// the hits over the loaded rows and the cursor. The pure rules live in
+/// `crate::chat_search`; the view in `ui::chat_search`.
+#[derive(Clone, Debug, Default)]
+pub struct ChatSearch {
+    pub chat_id: Id,
+    /// The field's text as typed.
+    pub typed: String,
+    pub query: chat_search::Query,
+    /// Message ids the query hits, transcript order (oldest first).
+    pub hits: Vec<Id>,
+    /// Index into `hits` of the revealed message.
+    pub current: Option<usize>,
+    /// ‹ on the oldest loaded hit asked the relay for older rows; cleared
+    /// when they land (or when the room has none).
+    pub searching_older: bool,
+    /// The room answered "no older rows": ‹ wraps from now on.
+    pub exhausted: bool,
+    /// How many rows the chat had at the last recompute (a page that brings
+    /// none ends the search upward).
+    pub rows_seen: usize,
+}
+
+/// What the transcript draws for one message while a search is up.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchMarks {
+    /// The folded keyword to mark in the text (empty with a sender-only query).
+    pub needle: String,
+    /// This message is the revealed hit (Find's yellow on its words).
+    pub current: bool,
+}
+
+impl AppState {
+    /// The bar is up for the chat the centre shows.
+    pub fn chat_search_open(&self) -> bool {
+        self.chat_search
+            .as_ref()
+            .is_some_and(|s| Some(&s.chat_id) == self.active_chat_id().as_ref())
+    }
+
+    /// ⌘F: open the bar for the active chat (a bar left on another chat is
+    /// replaced). Returns false with no chat open.
+    pub fn open_chat_search(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(chat_id) = self.active_chat_id() else {
+            return false;
+        };
+        if !self.chat_search_open() {
+            self.chat_search = Some(ChatSearch {
+                chat_id,
+                ..Default::default()
+            });
+        }
+        cx.notify();
+        true
+    }
+
+    /// Esc / ✕: the bar goes, the marks and the revealed row with it.
+    pub fn close_chat_search(&mut self, cx: &mut Context<Self>) {
+        if let Some(search) = self.chat_search.take() {
+            if let Some(cur) = search.current.and_then(|i| search.hits.get(i)) {
+                if self.highlight_message.as_ref() == Some(cur) {
+                    self.highlight_message = None;
+                }
+            }
+            cx.notify();
+        }
+    }
+
+    /// The field changed: new keyword, hits recomputed, cursor on the newest hit.
+    pub fn chat_search_set_text(&mut self, typed: String, cx: &mut Context<Self>) {
+        let Some(search) = self.chat_search.as_mut() else {
+            return;
+        };
+        if search.typed == typed {
+            return;
+        }
+        search.typed = typed;
+        search.exhausted = false;
+        self.chat_search_recompute(true, cx);
+    }
+
+    /// ⇥ or a click on the offered chip: pin that sender, clear the text.
+    pub fn chat_search_pin_sender(&mut self, sender: chat_search::Sender, cx: &mut Context<Self>) {
+        let Some(search) = self.chat_search.as_mut() else {
+            return;
+        };
+        search.query.sender = Some(sender);
+        search.typed.clear();
+        search.exhausted = false;
+        self.chat_search_recompute(true, cx);
+    }
+
+    /// The chip's ✕ (or ⌫ on an empty field): the sender filter goes.
+    pub fn chat_search_unpin_sender(&mut self, cx: &mut Context<Self>) {
+        let Some(search) = self.chat_search.as_mut() else {
+            return;
+        };
+        if search.query.sender.take().is_none() {
+            return;
+        }
+        self.chat_search_recompute(true, cx);
+    }
+
+    /// The sender the typed text names, offered as a chip while none is pinned.
+    pub fn chat_search_offer(&self) -> Option<chat_search::Sender> {
+        let search = self.chat_search.as_ref()?;
+        if search.query.sender.is_some() {
+            return None;
+        }
+        let senders = chat_search::senders(&self.chat_search_rows(&search.chat_id));
+        chat_search::offer_sender(&search.typed, &senders).cloned()
+    }
+
+    /// Enter / › (+1), ⇧Enter / ‹ (−1), ⌘G / ⇧⌘G: move the cursor, reveal the
+    /// hit; ‹ on the oldest loaded hit of a channel pages older rows first.
+    pub fn chat_search_step(&mut self, delta: i32, cx: &mut Context<Self>) {
+        let Some(search) = self.chat_search.as_ref() else {
+            return;
+        };
+        let (chat_id, current, len, exhausted) = (
+            search.chat_id.clone(),
+            search.current,
+            search.hits.len(),
+            search.exhausted,
+        );
+        let may_have_older = !exhausted && self.chat_search_pages(&chat_id);
+        match chat_search::step(current, len, delta, may_have_older) {
+            chat_search::Step::To(i) => {
+                if let Some(search) = self.chat_search.as_mut() {
+                    search.current = Some(i);
+                }
+                self.chat_search_reveal(cx);
+            }
+            chat_search::Step::PageOlder => {
+                if let Some(search) = self.chat_search.as_mut() {
+                    search.searching_older = true;
+                }
+                self.command(ClientCommand::ChannelLoadOlder { room_id: chat_id });
+                cx.notify();
+            }
+            chat_search::Step::Nothing => {}
+        }
+    }
+
+    /// Rows changed in the search's chat (a new message, a channel page):
+    /// hits recomputed, the cursor kept on its message; a page that was asked
+    /// for by ‹ moves on to the next older hit.
+    pub fn chat_search_refresh(&mut self, chat_id: &str, cx: &mut Context<Self>) {
+        let Some(search) = self.chat_search.as_ref() else {
+            return;
+        };
+        if search.chat_id != chat_id {
+            return;
+        }
+        let was_paging = search.searching_older;
+        let oldest_before = search.hits.first().cloned();
+        let rows_before = search.rows_seen;
+        self.chat_search_recompute(false, cx);
+        if !was_paging {
+            return;
+        }
+        let Some(search) = self.chat_search.as_mut() else {
+            return;
+        };
+        let rows_now = search.rows_seen;
+        search.searching_older = false;
+        let older_hit = match &oldest_before {
+            Some(id) => search
+                .hits
+                .iter()
+                .position(|h| h == id)
+                .filter(|p| *p > 0)
+                .map(|p| p - 1),
+            // No hit before the page: the newest of the ones it brought.
+            None => chat_search::initial_cursor(search.hits.len()),
+        };
+        if let Some(i) = older_hit {
+            search.current = Some(i);
+            self.chat_search_reveal(cx);
+        } else if rows_now == rows_before {
+            // The page brought nothing: the room's history is exhausted upward.
+            search.exhausted = true;
+            cx.notify();
+        } else {
+            // Rows came but none hit: keep paging.
+            self.chat_search_step(-1, cx);
+        }
+    }
+
+    /// The room has no older rows: ‹ wraps from now on.
+    pub fn chat_search_history_end(&mut self, room_id: &str, cx: &mut Context<Self>) {
+        if let Some(search) = self.chat_search.as_mut() {
+            if search.chat_id == room_id && search.searching_older {
+                search.searching_older = false;
+                search.exhausted = true;
+                cx.notify();
+            }
+        }
+    }
+
+    /// What the transcript marks on `message_id` while the bar is up.
+    pub fn chat_search_marks(&self, message_id: &str) -> Option<SearchMarks> {
+        let search = self.chat_search.as_ref()?;
+        if !self.chat_search_open() {
+            return None;
+        }
+        let at = search.hits.iter().position(|h| h == message_id)?;
+        Some(SearchMarks {
+            needle: search.query.keyword.clone(),
+            current: search.current == Some(at),
+        })
+    }
+
+    /// "2 of 4" / "No matches" / "" for the bar.
+    pub fn chat_search_count(&self) -> String {
+        self.chat_search
+            .as_ref()
+            .map(|s| chat_search::count_label(&s.query, s.current, s.hits.len()))
+            .unwrap_or_default()
+    }
+
+    /// Can the chat page older rows at all: only server channels fetch
+    /// history from the relay; a chat doc is whole on this Mac.
+    fn chat_search_pages(&self, chat_id: &str) -> bool {
+        self.channel_rows.contains_key(chat_id)
+    }
+
+    fn chat_search_recompute(&mut self, reset_cursor: bool, cx: &mut Context<Self>) {
+        let Some(search) = self.chat_search.as_ref() else {
+            return;
+        };
+        let rows = self.chat_search_rows(&search.chat_id);
+        let query = chat_search::Query::new(&search.typed, search.query.sender.clone());
+        let hits = chat_search::hits(&rows, &query);
+        let was_on = search.current.and_then(|i| search.hits.get(i)).cloned();
+        let current = if reset_cursor {
+            chat_search::initial_cursor(hits.len())
+        } else {
+            chat_search::keep_cursor(&hits, was_on.as_ref())
+        };
+        let moved = current.and_then(|i| hits.get(i)) != was_on.as_ref();
+        let rows_seen = rows.len();
+        if let Some(search) = self.chat_search.as_mut() {
+            search.query = query;
+            search.hits = hits;
+            search.current = current;
+            search.rows_seen = rows_seen;
+        }
+        if moved {
+            self.chat_search_reveal(cx);
+        }
+        cx.notify();
+    }
+
+    /// Scroll to and highlight the current hit through the palette's reveal
+    /// path (`reveal_search_message` → `highlight_message` + `reveal_message`
+    /// → `Transcript::reveal_hit`): one reveal mechanism, not a second.
+    fn chat_search_reveal(&mut self, cx: &mut Context<Self>) {
+        let Some(search) = self.chat_search.as_ref() else {
+            return;
+        };
+        let Some(id) = search.current.and_then(|i| search.hits.get(i)).cloned() else {
+            self.highlight_message = None;
+            cx.notify();
+            return;
+        };
+        self.highlight_message = Some(id.clone());
+        self.reveal_message = Some((search.chat_id.clone(), id));
+        self.reveal_nonce += 1;
+        cx.notify();
+    }
+
+    /// The loaded messages of `chat_id` as the search sees them (system rows
+    /// and wordless job rows left out, like the palette's index).
+    fn chat_search_rows(&self, chat_id: &str) -> Vec<chat_search::Row> {
+        self.messages_of(chat_id)
+            .iter()
+            .filter(|m| m.role != Role::System && !m.hidden)
+            .filter_map(|m| {
+                let text = crate::ui::sidebar::plain(&m.plain_text());
+                let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                if text.is_empty() {
+                    return None;
+                }
+                Some(chat_search::Row {
+                    id: m.id.clone(),
+                    text,
+                    sender: self.sender_identity(chat_id, m),
+                })
+            })
+            .collect()
+    }
+
+    /// Who sent `m`, for the sender chip: display name, handle, picture. An
+    /// agent's reply in its own chat (no handle, `sender` without an agent id)
+    /// is the chat's agent.
+    pub fn sender_identity(&self, chat_id: &str, m: &Message) -> chat_search::Sender {
+        let name = self.viewer_sender_name(m);
+        if self.is_mine(m) {
+            return chat_search::Sender {
+                key: format!("user:{}", self.me_id()),
+                name: self.me_name(),
+                handle: self.me_handle(),
+                avatar_url: None,
+            };
+        }
+        if let Some(h) = m.sender_handle.as_deref().filter(|h| !h.is_empty()) {
+            let person = self.person_by_handle(h);
+            return chat_search::Sender {
+                key: format!("@{h}"),
+                name,
+                handle: h.to_owned(),
+                avatar_url: person
+                    .map(|p| p.avatar_url)
+                    .filter(|u| !u.is_empty())
+                    .or_else(|| m.sender_avatar.clone()),
+            };
+        }
+        let agent = m
+            .sender
+            .strip_prefix("agent:")
+            .or_else(|| m.sender.strip_prefix("project:"))
+            .and_then(|pid| self.project(pid))
+            .or_else(|| {
+                (m.role == Role::Assistant)
+                    .then(|| self.project(&self.space_of_chat(chat_id)))
+                    .flatten()
+                    .filter(|p| !p.is_people())
+            });
+        match agent {
+            Some(p) => chat_search::Sender {
+                key: format!("agent:{}", p.id),
+                name: p.name.clone(),
+                handle: Project::mention_slug(&p.name),
+                avatar_url: m.sender_avatar.clone(),
+            },
+            None => chat_search::Sender {
+                key: m.sender.clone(),
+                name,
+                handle: String::new(),
+                avatar_url: m.sender_avatar.clone(),
+            },
+        }
     }
 }
 
