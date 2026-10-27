@@ -83,43 +83,6 @@ struct SecretToggleRow: View {
     }
 }
 
-/// Chips of agents to pick (`( Research ✓ ) ( Comms )`); they wrap like the
-/// Mac's row, so no agent hides past the edge on a narrow phone or at a large text size.
-struct AgentChips: View {
-    @EnvironmentObject private var model: AppModel
-    @Environment(\.theme) private var theme
-    @Binding var picked: Set<Id>
-    var projects: [Project] { model.projects.filter { !$0.shared } }
-
-    var body: some View {
-        WrapLayout(spacing: 8) {
-            ForEach(projects) { p in
-                let on = picked.contains(p.id)
-                Button {
-                    Haptics.pick()
-                    if on { picked.remove(p.id) } else { picked.insert(p.id) }
-                } label: {
-                    HStack(spacing: 6) {
-                        AgentAvatar(project: p, theme: theme, size: 20, still: true)
-                        Text(p.name).font(theme.font(Theme.small, weight: .medium)).lineLimit(1)
-                        if on { Image(systemName: "checkmark").font(.system(size: 11, weight: .bold)) }
-                    }
-                    .foregroundStyle(on ? theme.onPrimary : theme.text)
-                    .padding(.horizontal, 12)
-                    .frame(height: 34)
-                    .background(Capsule().fill(on ? theme.primary : theme.field))
-                    .overlay(Capsule().strokeBorder(on ? Color.clear : theme.fieldBorder, lineWidth: 1))
-                }
-                .buttonStyle(.plain)
-            }
-            if projects.isEmpty {
-                Text("No agents yet").font(theme.font(Theme.small)).foregroundStyle(theme.muted)
-            }
-        }
-        .padding(.horizontal, 1)
-    }
-}
-
 struct SecretField<Content: View>: View {
     @Environment(\.theme) private var theme
     let label: String
@@ -409,6 +372,10 @@ struct SecretsPage: View {
     private func secretSubtitle(_ s: SecretItem) -> String {
         let agents = s.agents.filter(\.enabled).map(\.name)
         let who = agents.isEmpty ? "no agents" : agents.joined(separator: ", ")
+        // Secret hand-off: "Arbos · given in chat · never used".
+        if let given = s.sourceLabel {
+            return "\(who) · \(given) · \(SecretsText.usage(lastUsedAt: s.lastUsedAt))"
+        }
         return "\(who) · \(SecretsText.usage(lastUsedAt: s.lastUsedAt))"
     }
 
@@ -459,6 +426,10 @@ struct SecretPage: View {
                     SettingsValueRow("Kind", value: s.kindLabel)
                     if s.name != s.env {
                         SettingsValueRow("Name", value: s.name)
+                    }
+                    // Secret hand-off: where it came from ("In chat with Arbos").
+                    if let added = s.addedLabel {
+                        SettingsValueRow("Added", value: added)
                     }
                     if let u = s.username, !u.isEmpty {
                         SettingsValueRow("Username", value: u)
@@ -806,7 +777,7 @@ struct NewSecretSheet: View {
                 SecretTextField(placeholder: SecretsText.notePlaceholder, text: $note, multiline: true, capitalization: .sentences)
             }
             SecretField(label: "Agents") {
-                AgentChips(picked: $picked)
+                AgentPickerField(picked: $picked)
             }
             SecretField(label: "Where it may be used (optional)", hint: "Leave empty to decide the first time an agent uses it.") {
                 SecretTextField(placeholder: "api.stripe.com", text: $hosts, keyboard: .URL)
@@ -1072,7 +1043,7 @@ struct GiveAccessSheet: View {
         SheetFrame(title: "Give access", action: "Save", canSave: !picked.isEmpty, busy: busy, save: { Task { await save() } }) {
             Text("\(secret.env) will be usable by the agents you pick, without them ever seeing it.")
                 .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
-            SecretField(label: "Agents") { AgentChips(picked: $picked) }
+            SecretField(label: "Agents") { AgentPickerField(picked: $picked) }
             SecretField(label: "Note for the agent", hint: SecretsText.accessNoteHint) { SecretTextField(placeholder: "reports only · may spend up to $5 a day", text: $note, capitalization: .sentences) }
         }
         .onAppear {
@@ -1369,7 +1340,7 @@ struct ConnectVaultSheet: View {
                 SecretTextField(placeholder: "ops_••••••••••••••••••••", text: $token, secure: true, mono: true)
                 Text("Stored encrypted. Arbos never shows it again.").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
             }
-            SecretField(label: "Agents that may use this vault") { AgentChips(picked: $picked) }
+            SecretField(label: "Agents that may use this vault") { AgentPickerField(picked: $picked) }
             SecretField(label: "Note", hint: SecretsText.vaultNoteHint) { SecretTextField(placeholder: "read-only · confirm before charging", text: $note, capitalization: .sentences) }
             if let error { Text(error).font(theme.font(Theme.small)).foregroundStyle(theme.danger) }
         }
@@ -1423,7 +1394,7 @@ struct VaultPage: View {
 
     private var vault: ConnectedVault? { model.secrets?.vaults.first { $0.id == vaultId } }
     private var filtered: [[String: Any]] {
-        search.isEmpty ? items : items.filter { (($0["title"] as? String) ?? "").localizedCaseInsensitiveContains(search) }
+        PeoplePicker.titled(items, query: search) { ($0["title"] as? String) ?? "" }
     }
 
     var body: some View {
@@ -1579,7 +1550,7 @@ struct GiveVaultAccessSheet: View {
 
     var body: some View {
         SheetFrame(title: "Give access", action: "Save", canSave: !picked.isEmpty, busy: busy, save: { Task { await save() } }) {
-            SecretField(label: "Agents") { AgentChips(picked: $picked) }
+            SecretField(label: "Agents") { AgentPickerField(picked: $picked) }
             SecretField(label: "Note", hint: SecretsText.vaultNoteHint) { SecretTextField(placeholder: "read-only · confirm before charging", text: $note, capitalization: .sentences) }
         }
         .onAppear { picked = Set(model.secrets?.vaults.first { $0.id == vaultId }?.agents.filter(\.enabled).map(\.projectId) ?? []) }
@@ -1588,8 +1559,13 @@ struct GiveVaultAccessSheet: View {
     private func save() async {
         busy = true
         defer { busy = false }
-        for pid in picked {
+        let before = Set(model.secrets?.vaults.first { $0.id == vaultId }?.agents.filter(\.enabled).map(\.projectId) ?? [])
+        for pid in picked.subtracting(before) {
             _ = try? await model.relay.setVaultAccess(vaultId, projectId: pid, enabled: true, note: note.isEmpty ? nil : note)
+        }
+        // A chip removed with × takes the agent's access away, as on the secret's sheet.
+        for pid in before.subtracting(picked) {
+            _ = try? await model.relay.setVaultAccess(vaultId, projectId: pid, enabled: false, note: nil)
         }
         await model.refreshSecrets()
         dismiss()

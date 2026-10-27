@@ -1,6 +1,9 @@
 //! A small markdown block splitter. One transcript row = one block
-//! (zeron-study §4.1). Inline: `code`, **bold**, *italic*. Enough for agent
-//! replies; swap for pulldown-cmark when tables and links are needed.
+//! (zeron-study §4.1). Inline: `code`, **bold**, *italic*, links, and TeX
+//! math (`$…$`, `\(…\)`; `$$…$$` / `\[…\]` as a block). Enough for agent
+//! replies; swap for pulldown-cmark when more is needed.
+
+use super::math;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Block {
@@ -19,6 +22,19 @@ pub enum Block {
     Table {
         header: Vec<String>,
         rows: Vec<Vec<String>>,
+    },
+    /// Display math on its own line(s): `$$ … $$` or `\[ … \]`. `source` is
+    /// the LaTeX between the delimiters ([feedback math-render-mac-2026-10-26]).
+    Math {
+        source: String,
+    },
+    /// A chart bubble's card ([feedback chart-bubble-mac-2026-10-26]): not markdown, but one
+    /// block of the agent's bubble like a code card. `spec` is the `chart` part's JSON (the
+    /// validated `arbos_core::chart::Chart`), `table` its markdown table (what a copy carries).
+    Chart {
+        part_id: String,
+        spec: String,
+        table: String,
     },
 }
 
@@ -57,6 +73,52 @@ pub fn split_blocks(source: &str) -> Vec<Block> {
                 code.push_str(code_line);
             }
             blocks.push(Block::Code { lang, code });
+            continue;
+        }
+        if let Some((opener, closer)) = display_math_delimiters(trimmed) {
+            let rest = &trimmed.trim_start()[opener.len()..];
+            if let Some(inner) = rest.trim_end().strip_suffix(closer) {
+                if !inner.trim().is_empty() {
+                    flush(&mut paragraph, &mut blocks);
+                    blocks.push(Block::Math {
+                        source: inner.trim().to_string(),
+                    });
+                    continue;
+                }
+            }
+            // `$$` opening a multi-line block: everything up to the closing
+            // line. Never closed, the lines are prose as typed.
+            let mut body: Vec<&str> = Vec::new();
+            if !rest.trim().is_empty() {
+                body.push(rest.trim());
+            }
+            let mut consumed: Vec<&str> = Vec::new();
+            let mut closed = false;
+            while let Some(next) = lines.peek() {
+                let line = next.trim_end();
+                lines.next();
+                if line.trim().is_empty() {
+                    continue;
+                }
+                consumed.push(line);
+                if let Some(inner) = line.trim().strip_suffix(closer) {
+                    if !inner.trim().is_empty() {
+                        body.push(inner.trim());
+                    }
+                    closed = true;
+                    break;
+                }
+                body.push(line.trim());
+            }
+            if closed {
+                flush(&mut paragraph, &mut blocks);
+                blocks.push(Block::Math {
+                    source: body.join("\n"),
+                });
+            } else {
+                paragraph.push(trimmed.trim());
+                paragraph.extend(consumed.iter().map(|l| l.trim()));
+            }
             continue;
         }
         if trimmed.starts_with('#') {
@@ -145,6 +207,18 @@ pub fn split_blocks(source: &str) -> Vec<Block> {
     blocks
 }
 
+/// The opener a display-math line starts with and the closer that ends it.
+fn display_math_delimiters(line: &str) -> Option<(&'static str, &'static str)> {
+    let t = line.trim_start();
+    if t.starts_with("$$") {
+        Some(("$$", "$$"))
+    } else if t.starts_with("\\[") {
+        Some(("\\[", "\\]"))
+    } else {
+        None
+    }
+}
+
 fn is_table_row(line: &str) -> bool {
     let t = line.trim();
     t.starts_with('|') && t.ends_with('|') && t.len() > 2
@@ -187,6 +261,9 @@ pub struct InlineStyle {
     pub bold: bool,
     pub italic: bool,
     pub link: bool,
+    /// Typeset TeX: painted in the math face; `italic` marks its variables,
+    /// `bold` its `\mathbf`.
+    pub math: bool,
 }
 
 /// One inline run: text, style, and the link target when `style.link`. A named link
@@ -256,7 +333,7 @@ pub fn link_hosts(text: &str) -> Vec<String> {
                 header.iter().for_each(|c| push(c));
                 rows.iter().flatten().for_each(|c| push(c));
             }
-            Block::Code { .. } => {}
+            Block::Code { .. } | Block::Math { .. } | Block::Chart { .. } => {}
         }
     }
     out
@@ -303,6 +380,29 @@ fn inline_styled(text: &str) -> Vec<Styled> {
 
     while i < chars.len() {
         let c = chars[i];
+        if c == '\\' && chars.get(i + 1) == Some(&'$') {
+            current.push('$');
+            i += 2;
+            continue;
+        }
+        if let Some((source, end)) = math_at(&chars, i) {
+            push(&mut current, style, &mut spans);
+            for run in math::typeset(&source) {
+                spans.push((
+                    run.text,
+                    InlineStyle {
+                        math: true,
+                        italic: run.style == math::MathStyle::Italic,
+                        bold: run.style == math::MathStyle::Bold,
+                        ..style
+                    },
+                    None,
+                    None,
+                ));
+            }
+            i = end;
+            continue;
+        }
         if c == '[' {
             if let Some(close) = find_from(&chars, i + 1, &[']']) {
                 if close + 1 < chars.len() && chars[close + 1] == '(' {
@@ -423,7 +523,62 @@ fn merge(a: InlineStyle, b: InlineStyle) -> InlineStyle {
         bold: a.bold || b.bold,
         italic: a.italic || b.italic,
         link: a.link || b.link,
+        math: a.math || b.math,
     }
+}
+
+/// An inline math span starting at `chars[i]`: the LaTeX inside and the index
+/// after the closing delimiter. `\( … \)`, `\[ … \]` and `$$ … $$` always;
+/// `$ … $` by Pandoc's rule so prices stay prose: the opening `$` is not
+/// glued to a word and has a non-space right after it, the closing `$` has a
+/// non-space right before it and no digit after it, and the span stays on one
+/// line — "$5 and $10", "US$3" and a lone "$" are text.
+fn math_at(chars: &[char], i: usize) -> Option<(String, usize)> {
+    let inner = |from: usize, to: usize| -> String { chars[from..to].iter().collect() };
+    let find_pair = |from: usize, a: char, b: char| -> Option<usize> {
+        (from..chars.len().saturating_sub(1)).find(|&j| chars[j] == a && chars[j + 1] == b)
+    };
+    if chars[i] == '\\' {
+        let open = *chars.get(i + 1)?;
+        let close = match open {
+            '(' => ')',
+            '[' => ']',
+            _ => return None,
+        };
+        let end = find_pair(i + 2, '\\', close)?;
+        let source = inner(i + 2, end);
+        return (!source.trim().is_empty()).then(|| (source.trim().to_string(), end + 2));
+    }
+    if chars[i] != '$' {
+        return None;
+    }
+    if chars.get(i + 1) == Some(&'$') {
+        let end = find_pair(i + 2, '$', '$')?;
+        let source = inner(i + 2, end);
+        return (!source.trim().is_empty()).then(|| (source.trim().to_string(), end + 2));
+    }
+    if i > 0 && chars[i - 1].is_alphanumeric() {
+        return None;
+    }
+    let first = *chars.get(i + 1)?;
+    if first.is_whitespace() {
+        return None;
+    }
+    let mut j = i + 1;
+    while j < chars.len() {
+        match chars[j] {
+            '\n' => return None,
+            '$' if chars[j - 1] != '\\' => break,
+            _ => j += 1,
+        }
+    }
+    if j >= chars.len() || chars[j - 1].is_whitespace() {
+        return None;
+    }
+    if chars.get(j + 1).is_some_and(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some((inner(i + 1, j), j + 1))
 }
 
 /// Display polish for assistant bubbles already in the doc: insert a missing space
@@ -650,4 +805,105 @@ fn find_from(chars: &[char], from: usize, needles: &[char]) -> Option<usize> {
 
 fn find_pair(chars: &[char], from: usize) -> Option<usize> {
     (from..chars.len().saturating_sub(1)).find(|&i| chars[i] == '*' && chars[i + 1] == '*')
+}
+
+#[cfg(test)]
+mod math_tests {
+    use super::*;
+
+    fn plain(text: &str) -> String {
+        inline_plain(text)
+    }
+
+    fn math_spans(text: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut current = String::new();
+        for span in inline_spans(text) {
+            if span.style.math {
+                current.push_str(&span.text);
+            } else if !current.is_empty() {
+                out.push(std::mem::take(&mut current));
+            }
+        }
+        if !current.is_empty() {
+            out.push(current);
+        }
+        out
+    }
+
+    /// Jacob's bubble-sort reply (2026-10-26): the complexity is typeset, the prose and the
+    /// `swapped` code chip around it survive.
+    #[test]
+    fn big_o_renders_as_math() {
+        let text = "It runs in $O(n^2)$ time in the worst and average cases, and $O(n)$ time when the array is already sorted thanks to the `swapped` flag. Space complexity is $O(1)$.";
+        assert_eq!(math_spans(text), vec!["O(n²)", "O(n)", "O(1)"]);
+        assert_eq!(
+            plain(text),
+            "It runs in O(n²) time in the worst and average cases, and O(n) time when the array is already sorted thanks to the swapped flag. Space complexity is O(1)."
+        );
+        let spans = inline_spans(text);
+        let o = spans.iter().find(|s| s.text == "O").expect("the O run");
+        assert!(o.style.math && o.style.italic, "{o:?}");
+        let n2 = spans.iter().find(|s| s.text == "²)").expect("the ²) run");
+        assert!(n2.style.math && !n2.style.italic, "{n2:?}");
+        assert!(spans.iter().any(|s| s.style.code && s.text == "swapped"));
+    }
+
+    #[test]
+    fn prices_and_lone_dollars_stay_prose() {
+        for text in [
+            "costs $5 and $10",
+            "$5",
+            "US$3 and US$4",
+            "a lone $ sign",
+            "unmatched $x here",
+            "no $ x$ math",
+            "from $5 to $10, then $20",
+        ] {
+            assert!(math_spans(text).is_empty(), "{text}");
+            assert_eq!(plain(text), text);
+        }
+        assert_eq!(plain("escaped \\$5 stays"), "escaped $5 stays");
+        assert_eq!(math_spans("`$x$` in code"), Vec::<String>::new());
+        assert!(inline_spans("`$x$` in code")
+            .iter()
+            .any(|s| s.style.code && s.text == "$x$"));
+    }
+
+    #[test]
+    fn other_delimiters_and_display_blocks() {
+        assert_eq!(math_spans("so \\(x^2\\) and $$y_1$$ too"), vec!["x²", "y₁"]);
+        assert_eq!(plain("so \\(x^2\\) and $$y_1$$ too"), "so x² and y₁ too");
+        assert_eq!(
+            split_blocks("Sum:\n\n$$\n\\sum_{i=1}^{n} i = \\frac{n(n+1)}{2}\n$$\n\nDone."),
+            vec![
+                Block::Paragraph("Sum:".into()),
+                Block::Math {
+                    source: "\\sum_{i=1}^{n} i = \\frac{n(n+1)}{2}".into()
+                },
+                Block::Paragraph("Done.".into()),
+            ]
+        );
+        assert_eq!(
+            split_blocks("$$ E = mc^2 $$"),
+            vec![Block::Math {
+                source: "E = mc^2".into()
+            }]
+        );
+        assert_eq!(
+            split_blocks("\\[\nx^2\n\\]"),
+            vec![Block::Math {
+                source: "x^2".into()
+            }]
+        );
+        // Never closed: prose as typed.
+        assert_eq!(
+            split_blocks("$$\nx^2\n"),
+            vec![Block::Paragraph("$$\nx^2".into())]
+        );
+        assert_eq!(
+            link_hosts("$$ x $$ and [a](https://a.com)"),
+            vec!["a.com".to_string()]
+        );
+    }
 }

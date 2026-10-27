@@ -533,6 +533,9 @@ for u in json.load(sys.stdin):
 # first failure: it is left on its image, it is not pending for this or any later roll, it does not
 # count toward the consecutive-failure stop, and `status` names it until the operator clears it with
 # `arbos-deploy-worker unskip <uid>` (after shrinking /work or raising the relay's limit).
+# Since ARB-339 the relay measures /work BEFORE quiescing and carries it in parts (ceiling 16 GiB,
+# ARBOS_UPGRADE_MAX_WORK_MIB); a refusal arrives as `upgrade.last_refused` with the box untouched
+# (box_outcome → `refused`), and this regex stays for the error-state path of older relays.
 UNCARRYABLE_RE='too large to carry|nothing to carry over'
 skipped_boxes() { [[ -f "$STATE/agentd.skip" ]] && cut -d'|' -f1 "$STATE/agentd.skip" || true; }
 box_fail_reason() {
@@ -665,24 +668,31 @@ upgrade_box() {
     /usr/local/bin/arbosctl --relay "$RELAY_URL" admin upgrade-box "$1" 2>&1 | tr -d '\n' | cut -c1-200
 }
 
-# box_outcome <uid> <target> → ok | error | pending : what the relay reports for the box after its upgrade.
+# box_outcome <uid> <target> [since-ms] → ok | error | pending | refused<TAB><reason> : what the relay reports
+# for the box after its upgrade. `refused` (relay ≥ ARB-339): the relay measured /work BEFORE quiescing the box,
+# said no, and left the box running on its image — `upgrade.last_refused` carries the reason and the time; only a
+# refusal newer than this attempt (since-ms) counts, an older one is history.
 box_outcome() {
   admin_users | python3 -c '
 import sys, json
-uid, target = sys.argv[1], sys.argv[2]
+uid, target, since = sys.argv[1], sys.argv[2], int(sys.argv[3] or 0)
 for u in json.load(sys.stdin):
     if u["id"] == uid:
         m = u.get("machine") or {}
-        if (m.get("upgrade") or {}).get("in_progress"):
+        up = m.get("upgrade") or {}
+        refused = up.get("last_refused") or {}
+        if up.get("in_progress"):
             print("pending")
         elif m.get("state") == "error":
             print("error")
+        elif refused.get("at") and int(refused["at"]) >= since and m.get("snapshot") != target:
+            print("refused\t" + str(refused.get("reason") or "refused")[:200].replace("\n", " "))
         elif m.get("snapshot") == target and m.get("state") == "awake":
             print("ok")
         else:
             print("pending")
         sys.exit(0)
-print("pending")' "$1" "$2" 2>/dev/null || echo pending
+print("pending")' "$1" "$2" "${3:-0}" 2>/dev/null || echo pending
 }
 
 # A roll stops itself after ROLL_MAX_CONSECUTIVE_FAILURES boxes in a row end in `error` (2026-10-25 05:10:
@@ -717,14 +727,24 @@ roll_pass() {
       fi
       if (( go )); then
         busy_counter "$uid" "$target" reset >/dev/null
+        attempt_ms=$(date +%s%3N)
         log "agentd: upgrading box of $uid → $target: $(upgrade_box "$uid")"
         # One at a time: give it up to 4 minutes before the next box.
         outcome=pending
         for _ in $(seq 1 24); do
           sleep 10
-          outcome="$(box_outcome "$uid" "$target")"
+          outcome="$(box_outcome "$uid" "$target" "$attempt_ms")"
           [[ "$outcome" != "pending" ]] && break
         done
+        if [[ "$outcome" == refused* ]]; then
+          # The relay measured first and said no; the box was never quiesced and is still awake on its
+          # image. Same bookkeeping as the uncarryable skip: not pending, not a failure, operator clears.
+          reason="${outcome#refused}"; reason="${reason#"${reason%%[![:space:]]*}"}"
+          skip_box "$uid" "$reason"
+          log "agentd: $uid box_upgrade_skipped — the relay refused the carry before touching the box ($reason); left on its image, not retried; operator: shrink /work or raise ARBOS_UPGRADE_MAX_WORK_MIB, then 'arbos-deploy-worker unskip $uid'"
+          event agentd "$(cat "$STATE/agentd.rolling.sha" 2>/dev/null || echo unknown)" box_upgrade_skipped "$uid: $reason; box untouched, left on its image until the operator clears the skip"
+          continue
+        fi
         if [[ "$outcome" == "error" ]]; then
           reason="$(box_fail_reason "$uid")"
           if [[ "$reason" =~ $UNCARRYABLE_RE ]]; then
@@ -1344,6 +1364,19 @@ selftest() {
   skip_box gh_1 "/work is 3979 MiB; too large"; skip_box gh_1 "again"; skip_box gh_2 "nothing to carry over"
   [[ "$(skipped_boxes | tr '\n' ' ')" == "gh_1 gh_2 " ]] || { echo "selftest: skipped_boxes ($(skipped_boxes | tr '\n' ' '))" >&2; return 1; }
   [[ "$(grep -c . "$STATE/agentd.skip")" == 2 ]] || { echo "selftest: skip_box not idempotent" >&2; return 1; }
+  # box_outcome with the relay's measure-first refusal (ARB-339): a refusal newer than the attempt is
+  # `refused<TAB>reason`; an older one is history (pending); a run in progress wins; a box already on the
+  # target is ok whatever it was refused before.
+  local users='[{"id":"gh_9","machine":{"state":"awake","snapshot":"old","upgrade":{"in_progress":false,"last_refused":{"reason":"/work is 3979 MiB; too large to carry through the relay (limit 16384 MiB)","at":2000,"work_mib":3979}}}}]'
+  admin_users() { echo "$users"; }
+  [[ "$(box_outcome gh_9 new 1000)" == $'refused\t/work is 3979 MiB; too large to carry through the relay (limit 16384 MiB)' ]] || { echo "selftest: box_outcome refused ($(box_outcome gh_9 new 1000))" >&2; return 1; }
+  [[ "$(box_outcome gh_9 new 3000)" == "pending" ]] || { echo "selftest: box_outcome stale refusal must be pending" >&2; return 1; }
+  users='[{"id":"gh_9","machine":{"state":"awake","snapshot":"new","upgrade":{"in_progress":false,"last_refused":{"reason":"x; too large to carry","at":2000}}}}]'
+  [[ "$(box_outcome gh_9 new 1000)" == "ok" ]] || { echo "selftest: box_outcome on target must be ok" >&2; return 1; }
+  users='[{"id":"gh_9","machine":{"state":"waking","snapshot":"old","upgrade":{"in_progress":true,"phase":"measure","last_refused":{"reason":"x; too large to carry","at":2000}}}}]'
+  [[ "$(box_outcome gh_9 new 1000)" == "pending" ]] || { echo "selftest: box_outcome in progress must be pending" >&2; return 1; }
+  local o; o="$(box_outcome gh_9 new 1000)"; o="${o#refused}"; o="${o#"${o%%[![:space:]]*}"}"
+  [[ "$o" == "pending" ]] || { echo "selftest: reason strip" >&2; return 1; }
   echo "selftest ok"
 }
 

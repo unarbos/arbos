@@ -10,6 +10,8 @@ struct RelayError: Error, LocalizedError {
     var message: String
     /// `error.type` from the self-serve relay (token_expired, credits_exhausted, …).
     var type: String? = nil
+    /// `error.detail` when the relay sends one (the avatar routes: the provider's words).
+    var detail: String? = nil
 
     var errorDescription: String? {
         message.isEmpty ? "HTTP \(status)" : "HTTP \(status): \(message)"
@@ -20,7 +22,11 @@ struct RelayError: Error, LocalizedError {
     /// Decode `ApiErrorDto` when the body is the current shape; plain text for older relays.
     static func from(status: Int, body: Data) -> RelayError {
         if let dto = try? JSONDecoder().decode(ApiErrorDto.self, from: body) {
-            return RelayError(status: status, message: dto.error.message, type: dto.error.type)
+            let detail = ((try? JSONSerialization.jsonObject(with: body)) as? [String: Any])
+                .flatMap { $0["error"] as? [String: Any] }
+                .flatMap { $0["detail"] as? String }
+                .flatMap { $0.isEmpty ? nil : $0 }
+            return RelayError(status: status, message: dto.error.message, type: dto.error.type, detail: detail)
         }
         let text = (String(data: body, encoding: .utf8) ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -105,23 +111,26 @@ final class RelayAPI {
         return "ios/\(v) (\(b))"
     }
 
-    func request(_ method: String, _ path: String, body: Any? = nil, auth: Bool = true, headers: [String: String] = [:]) async throws -> (Data, HTTPURLResponse) {
+    /// `timeout`: this one request's limit instead of the session's 30 s (an avatar generation
+    /// gets 90 s so the relay's 75 s budget always answers first).
+    func request(_ method: String, _ path: String, body: Any? = nil, auth: Bool = true, headers: [String: String] = [:], timeout: TimeInterval? = nil) async throws -> (Data, HTTPURLResponse) {
         do {
-            return try await requestOnce(method, path, body: body, auth: auth, headers: headers)
+            return try await requestOnce(method, path, body: body, auth: auth, headers: headers, timeout: timeout)
         } catch let error as RelayError where error.isUnauthorized && auth {
             if let refresher, await refresher() {
-                return try await requestOnce(method, path, body: body, auth: auth, headers: headers)
+                return try await requestOnce(method, path, body: body, auth: auth, headers: headers, timeout: timeout)
             }
             throw error
         }
     }
 
-    private func requestOnce(_ method: String, _ path: String, body: Any?, auth: Bool, headers: [String: String] = [:]) async throws -> (Data, HTTPURLResponse) {
+    private func requestOnce(_ method: String, _ path: String, body: Any?, auth: Bool, headers: [String: String] = [:], timeout: TimeInterval? = nil) async throws -> (Data, HTTPURLResponse) {
         guard let url = URL(string: endpoint.httpUrl + path) else {
             throw RelayError(status: 0, message: "Bad relay URL")
         }
         var req = URLRequest(url: url)
         req.httpMethod = method
+        if let timeout { req.timeoutInterval = timeout }
         if auth {
             req.setValue("Bearer \(token())", forHTTPHeaderField: "Authorization")
         }
@@ -1011,10 +1020,16 @@ final class RelayAPI {
         return body
     }
 
+    /// How long one avatar generation may take on the wire: past the relay's 75 s budget (40 s
+    /// per provider attempt), so the relay's own 504 reaches the sheet before this client gives up
+    /// (Jacob, 2026-10-26: the session's 30 s had cut a slow generation first).
+    static let avatarGenerateTimeout: TimeInterval = 90
+
     private func generateAvatar(path: String, prompt: String) async throws -> String {
-        let v = try await json("POST", path, body: ["prompt": prompt])
+        let (data, _) = try await request("POST", path, body: ["prompt": prompt], timeout: Self.avatarGenerateTimeout)
+        let v = (try? JSONSerialization.jsonObject(with: data)) ?? NSNull()
         guard let d = v as? [String: Any], let key = d["image_key"] as? String, !key.isEmpty else {
-            throw RelayError(status: 0, message: "The relay sent no picture")
+            throw RelayError(status: 0, message: "Couldn't generate the image.", detail: "The relay sent no picture")
         }
         return key
     }

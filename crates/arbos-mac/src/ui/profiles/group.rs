@@ -1,10 +1,12 @@
 //! A group's pane — a people group chat or a project shared with other
 //! humans (redesign 2026-10-20, mockups b–d) on the shared profile pane
 //! (D93): big picture, name, member count, two tabs. **Members** starts with
-//! "Add members" (people and agents alike), then name + handle rows.
-//! **Library** is every image, then every file shared here. The picture takes
-//! a crayon on hover, the name an inline field; no actions row, no presence,
-//! no badges, no Leave (that is the chat list's Delete — Jacob, 2026-10-20).
+//! "Add members" (people and agents) and, on people chats, **Add agent**
+//! (own agents only — [feedback app-01M5WKBR85JVW1KKJH96FWZVK5]), then
+//! name + handle rows. **Library** is every image, then every file shared
+//! here. The picture takes a crayon on hover, the name an inline field; no
+//! actions row, no presence, no badges, no Leave (that is the chat list's
+//! Delete — Jacob, 2026-10-20).
 
 use std::sync::Arc;
 
@@ -15,6 +17,7 @@ use gpui::{
 use crate::app::{AppState, ProfilePage};
 use crate::model::{Person, Project};
 use crate::ui::avatars;
+use crate::ui::blocked;
 use crate::ui::groups;
 use crate::ui::icons::icon;
 use crate::ui::people;
@@ -102,6 +105,11 @@ pub(super) fn page(
         !space.is_guest()
     };
     let armed = shell.member_remove_armed.clone();
+    let blocked_handles: Vec<String> = people
+        .iter()
+        .filter(|p| state.is_blocked(p))
+        .map(|p| p.handle.clone())
+        .collect();
     let content = collect(state, &chats_of(state, &space.id));
 
     // ----- hero: picture with the crayon, name as an inline field ----------------
@@ -158,18 +166,23 @@ pub(super) fn page(
 
     // No share disc on a group (Jacob 2026-10-25, [feedback
     // info-pane-no-share-disc-groups-2026-10-25]: "remove this button from
-    // side bar on group/"): the × alone; Add members stays the first card.
+    // side bar on group/"): the × alone; Add members / Add agent stay the
+    // first card.
     let share: Option<HeroClick> = None;
 
     let body: Vec<Section> = match tab {
         0 => {
             // Mock b: "Add members" is a card of its own above the member list.
-            let mut add = None;
+            // People chats also get "Add agent" — own agents only, one tap
+            // ([feedback app-01M5WKBR85JVW1KKJH96FWZVK5]: the flow was not
+            // discoverable from the chat).
+            let mut add_rows: Vec<gpui::AnyElement> = Vec::new();
             let mut list: Vec<gpui::AnyElement> = Vec::new();
             let sid = space.id.clone();
             let i_own = !space.is_guest();
             if is_people || i_own {
-                add = Some(
+                let sid_members = sid.clone();
+                add_rows.push(
                     kit::row(
                         "profile-add-members",
                         kit::Leading::Glyph("person-plus"),
@@ -183,7 +196,7 @@ pub(super) fn page(
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.surface_2))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        let id = sid.clone();
+                        let id = sid_members.clone();
                         // A people group gets the New group picker aimed at
                         // it; a shared project keeps the one-pick invite sheet.
                         if is_people {
@@ -193,7 +206,30 @@ pub(super) fn page(
                         }
                         let handle = this.people_input.read(cx).focus_handle(cx);
                         window.focus(&handle, cx);
-                    })),
+                    }))
+                    .into_any_element(),
+                );
+            }
+            if is_people {
+                add_rows.push(
+                    kit::row(
+                        "profile-add-agent",
+                        kit::Leading::Glyph("sparkles"),
+                        "Add agent",
+                        Some("One of yours, so everyone here can ask it".into()),
+                        None,
+                        None,
+                        false,
+                        &theme,
+                    )
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.surface_2))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.members_open = false;
+                        this.add_agent_open = true;
+                        cx.notify();
+                    }))
+                    .into_any_element(),
                 );
             }
             for (i, p) in people.iter().enumerate() {
@@ -229,6 +265,22 @@ pub(super) fn page(
                 let handle = p.handle.clone();
                 let sid = space.id.clone();
                 let removable = i_own_group && !is_me;
+                // Blocked ([feedback blocked-state-mac-2026-10-26]): the tag on the row.
+                let is_blocked = !is_me && blocked_handles.iter().any(|h| h == &p.handle);
+                let trailing: Option<gpui::AnyElement> = match (is_blocked, removable) {
+                    (true, true) => Some(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(blocked::tag(&theme))
+                            .child(remove_x(key.clone(), &theme, cx))
+                            .into_any_element(),
+                    ),
+                    (true, false) => Some(blocked::tag(&theme).into_any_element()),
+                    (false, true) => Some(remove_x(key.clone(), &theme, cx).into_any_element()),
+                    (false, false) => None,
+                };
                 list.push(
                     list_row(
                         ElementId::Name(SharedString::from(format!("profile-member-{}", p.handle))),
@@ -237,9 +289,10 @@ pub(super) fn page(
                         title,
                         format!("@{}", p.handle),
                         theme.text_muted,
-                        removable.then(|| remove_x(key.clone(), &theme, cx).into_any_element()),
+                        trailing,
                         &theme,
                     )
+                    .debug_selector(|| format!("profile-member-{}", p.handle))
                     // One group per row: `group_hover` looks a group up by name.
                     .group(SharedString::from(format!("member-row-{key}")))
                     .cursor_pointer()
@@ -390,8 +443,8 @@ pub(super) fn page(
                         .into_any_element()]));
                 }
             }
-            if let Some(row) = add {
-                out.push(Section::Card(vec![row.into_any_element()]));
+            if !add_rows.is_empty() {
+                out.push(Section::Card(add_rows));
             }
             out.push(Section::Card(list));
             out

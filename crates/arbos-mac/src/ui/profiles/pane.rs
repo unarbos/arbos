@@ -146,9 +146,10 @@ fn title_of(page: &ProfilePage, state: &AppState) -> String {
 }
 
 /// Is this page the one open in the right pane (the header pill / server
-/// header ring)?
+/// header ring)? Same subject counts: a person's page opened from a chip is
+/// the DM pill's person too (`ProfilePage::same_subject`).
 pub fn is_open(state: &AppState, page: &ProfilePage) -> bool {
-    state.profile.as_ref() == Some(page)
+    state.profile_shows(page)
 }
 
 fn glyph_tile(glyph: &'static str, theme: &Theme) -> AnyElement {

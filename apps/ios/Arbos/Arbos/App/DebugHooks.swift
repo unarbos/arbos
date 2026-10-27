@@ -38,10 +38,16 @@ enum DebugHooks {
     static var fixtureVault: Bool { value("ARBOS_FIXTURE_VAULT") == "1" }
     /// #1544 rig: the Comms chat ends with a destructive-shell card (four standing rows).
     static var fixtureShellCard: Bool { value("ARBOS_FIXTURE_SHELL_CARD") == "1" }
+    /// Secret hand-off rig: the Comms chat ends with the request card (`offer` / `saved`), the
+    /// "save this" ghost row (`ghost`) or the offer card for a pasted key (`detect`).
+    static var fixtureSecretHandoff: String? { value("ARBOS_FIXTURE_SECRET_HANDOFF") }
     /// With `ARBOS_OPEN_CHAT`: that chat ends with a several-block agent reply (#1389 rigs).
     static var fixtureLongReply: Bool { value("ARBOS_FIXTURE_LONG_REPLY") == "1" }
     /// Presence-row rig (typing-indicator-left-2026-10-23): n agents working in the fixture group.
     static var fixtureWorking: Int { value("ARBOS_FIXTURE_WORKING").flatMap { Int($0) } ?? 0 }
+    /// `ARBOS_FIXTURE_MACHINE=near-limit`: the box report says disk 92 % and memory 88 % used
+    /// (Settings › Machine's warning state on the rig).
+    static var fixtureMachineNearLimit: Bool { value("ARBOS_FIXTURE_MACHINE") == "near-limit" }
     /// Tasks-chip rig (duplex §2.4): the first n of three background jobs open in the opened
     /// agent chat — 1 running with a step, 2 running with no step yet, 3 queued behind a lock.
     static var fixtureJobs: Int { min(3, value("ARBOS_FIXTURE_JOBS").flatMap { Int($0) } ?? 0) }
@@ -110,6 +116,14 @@ enum DebugHooks {
     static var viewerCloseMs: Int? { value("ARBOS_VIEWER_CLOSE_MS").flatMap(Int.init) }
     /// With a Settings page open: scroll to the card with this id (e.g. `people` on a Secret page).
     static var settingsScroll: String? { value("ARBOS_SETTINGS_SCROLL") }
+    /// `ARBOS_RIG_AGENT_PICKED=<name>,<name>`: a Secrets form's agent picker starts with these
+    /// agents as chips ([feedback secrets-agent-picker-ios-2026-10-26] shots).
+    static var agentPickerPicked: [String] {
+        (value("ARBOS_RIG_AGENT_PICKED") ?? "").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
+    /// `ARBOS_RIG_AGENT_PICKER=<query>`: the picker's "Add agent" sheet starts open with that
+    /// query typed (empty = open, nothing typed).
+    static var agentPickerQuery: String? { value("ARBOS_RIG_AGENT_PICKER") }
     /// On a Secret page: open a sheet at once — `people` (Give a person access), `person` (the
     /// first People row's note sheet).
     static var secretSheet: String? { value("ARBOS_SECRET_SHEET") }

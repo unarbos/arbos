@@ -531,6 +531,20 @@ pub fn is_transient_upstream(status: u16) -> bool {
 /// What the person reads when the provider refused their words.
 pub const AVATAR_REFUSED_FRIENDLY: &str = "That prompt was refused — try a different one.";
 
+/// What the person reads when the provider did not answer within the budget.
+pub const AVATAR_TIMEOUT_FRIENDLY: &str = "Couldn't generate the image. The server took too long.";
+
+/// The budget ran out: a 504 with the clear line, the provider's words under `detail`.
+fn avatar_timed_out(project_id: &str, detail: impl Into<String>) -> Response {
+    let detail = detail.into();
+    tracing::warn!(project = %project_id, %detail, "avatar generation timed out");
+    (
+        StatusCode::GATEWAY_TIMEOUT,
+        Json(json!({ "error": { "type": "avatar_timeout", "message": AVATAR_TIMEOUT_FRIENDLY, "detail": detail } })),
+    )
+        .into_response()
+}
+
 /// The refusal: a 422 with the clear line, the provider's words under `detail`, one log line.
 fn avatar_refused(project_id: &str, detail: impl Into<String>) -> Response {
     let detail = detail.into();
@@ -917,25 +931,56 @@ async fn generate_into(state: &AppState, target: AvatarTarget, prompt: &str) -> 
         let mut picked: Option<(String, Value)> = None;
         let mut last_detail = String::from("no model answered");
         let backoff = &state.cfg.avatar_retry_backoff_ms;
+        // Every attempt gets `avatar_attempt_timeout`, the whole generate `avatar_total_timeout`
+        // (less than the apps' request timeout, so the person always gets the relay's answer
+        // and never their own client's "operation timed out").
+        let deadline = t0 + state.cfg.avatar_total_timeout;
+        let mut timed_out = false;
         'models: for candidate in &models {
             // Transient trouble (timeout, 429, 5xx) gets `backoff.len()` more tries on the same
             // model, then the next model; a refused prompt or any other 4xx stops here.
             let mut attempt = 0usize;
             loop {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    timed_out = true;
+                    break 'models;
+                }
+                // The verdict follows the last attempt: a timeout, or whatever it answered.
+                timed_out = false;
                 let sent = state
                     .http
                     .post(&url)
                     .bearer_auth(&key)
+                    .timeout(state.cfg.avatar_attempt_timeout.min(left))
                     .json(&avatar_request(candidate, &prompt))
                     .send()
                     .await;
                 let (status, bytes) = match sent {
                     Ok(r) => {
                         let status = r.status();
-                        (status, r.bytes().await.unwrap_or_default())
+                        let body = tokio::time::timeout(
+                            deadline.saturating_duration_since(Instant::now()),
+                            r.bytes(),
+                        )
+                        .await;
+                        match body {
+                            Ok(b) => (status, b.unwrap_or_default()),
+                            Err(_) => {
+                                last_detail = format!("{candidate}: timed out reading the answer");
+                                timed_out = true;
+                                break 'models;
+                            }
+                        }
                     }
                     Err(e) => {
                         last_detail = format!("{candidate}: {e}");
+                        if e.is_timeout() {
+                            timed_out = true;
+                        }
+                        if deadline.saturating_duration_since(Instant::now()).is_zero() {
+                            break 'models;
+                        }
                         if let Some(wait) = backoff.get(attempt) {
                             tracing::warn!(target = %target.slot, model = %candidate, error = %e, attempt, "avatar provider unreachable; retrying");
                             tokio::time::sleep(std::time::Duration::from_millis(*wait)).await;
@@ -980,6 +1025,9 @@ async fn generate_into(state: &AppState, target: AvatarTarget, prompt: &str) -> 
             }
         }
         let Some((used, parsed)) = picked else {
+            if timed_out {
+                return avatar_timed_out(&target.slot, last_detail);
+            }
             return avatar_unavailable(&target.slot, last_detail);
         };
         model = format!("avatar:{used}");
@@ -1106,6 +1154,22 @@ mod avatar_generate_tests {
                                 "message": format!("The model '{model}' does not exist."),
                                 "type": "image_generation_user_error", "param": "model", "code": "invalid_value" } })),
                         );
+                    }
+                    // A stalled provider: the first `flaky_503` calls hang 30 s (the caller's
+                    // attempt timeout must cut them), the rest answer.
+                    if prompt.contains("slow") {
+                        let stall = {
+                            let mut left = flaky_left.lock().unwrap();
+                            if *left > 0 {
+                                *left -= 1;
+                                true
+                            } else {
+                                false
+                            }
+                        };
+                        if stall {
+                            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                        }
                     }
                     if prompt.contains("forbidden") {
                         return (
@@ -1615,6 +1679,90 @@ mod avatar_generate_tests {
         assert!(is_prompt_refusal(400, body));
         assert!(!is_unknown_model_error(400, body));
         assert!(!is_prompt_refusal(500, body), "a 5xx is never a refusal");
+    }
+
+    /// Jacob's "nuke vampire" (2026-10-26 17:4x UTC): the provider stalled past the apps' 30 s,
+    /// the relay had no timeout, the client gave up and the dropped handler logged nothing. Now
+    /// every attempt has a timeout: one stall then an answer → the picture (one retry); stalls
+    /// past the whole budget → a clean 504 `avatar_timeout` with the plain line, well inside the
+    /// apps' 90 s.
+    #[tokio::test]
+    async fn a_stalled_provider_is_cut_and_retried_then_a_clean_504() {
+        // One stall, then the picture.
+        let (base, seen) = stub_with(&[], 1).await;
+        let mut state = state_against(&base);
+        {
+            let cfg = Arc::get_mut(&mut state.cfg).unwrap();
+            cfg.avatar_retry_backoff_ms = vec![0, 0];
+            cfg.avatar_attempt_timeout = std::time::Duration::from_millis(300);
+            cfg.avatar_total_timeout = std::time::Duration::from_secs(5);
+        }
+        let (dev, project) = funded_agent(&state, 95);
+        let t0 = Instant::now();
+        let r = avatar_generate(
+            State(state.clone()),
+            dev,
+            Path(project.clone()),
+            Json(AvatarGenerateBody {
+                prompt: "a slow sloth".into(),
+            }),
+        )
+        .await;
+        assert_eq!(
+            r.status(),
+            StatusCode::OK,
+            "the retry after the stall lands the picture"
+        );
+        assert_eq!(seen.lock().unwrap().len(), 2);
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(3),
+            "{:?}",
+            t0.elapsed()
+        );
+
+        // Every call stalls: the budget ends it with a 504 and the plain sentence.
+        let (base, seen) = stub_with(&[], 99).await;
+        let mut state = state_against(&base);
+        {
+            let cfg = Arc::get_mut(&mut state.cfg).unwrap();
+            cfg.avatar_retry_backoff_ms = vec![0, 0];
+            cfg.avatar_attempt_timeout = std::time::Duration::from_millis(300);
+            cfg.avatar_total_timeout = std::time::Duration::from_millis(1_000);
+        }
+        let (dev, project) = funded_agent(&state, 96);
+        let t0 = Instant::now();
+        let r = avatar_generate(
+            State(state.clone()),
+            dev,
+            Path(project.clone()),
+            Json(AvatarGenerateBody {
+                prompt: "a slow sloth".into(),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(3),
+            "{:?}",
+            t0.elapsed()
+        );
+        let bytes = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["error"]["type"], "avatar_timeout");
+        assert_eq!(v["error"]["message"], AVATAR_TIMEOUT_FRIENDLY);
+        assert!(v["error"]["detail"].as_str().unwrap().contains("gpt-image"));
+        assert!(
+            seen.lock().unwrap().len() >= 2,
+            "the budget allowed more than one attempt"
+        );
+        assert_eq!(
+            state
+                .db
+                .usage_count_since(&project, "openai-images", "avatar:", 0)
+                .unwrap(),
+            0,
+            "nothing metered"
+        );
     }
 
     /// A transient provider failure (503 / 429 / a dropped connection) gets the backoff retries

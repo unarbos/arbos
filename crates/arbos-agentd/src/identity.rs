@@ -17,6 +17,7 @@ use arbos_core::ids::now_ms;
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
+use serde_json::Value;
 
 /// How many past names the prompt line and the file keep.
 const HISTORY_MAX: usize = 6;
@@ -186,6 +187,85 @@ pub fn project_section(
     )
 }
 
+/// One owner, named live (Hezbola 2026-10-26: "the chat uses two names for the owner"). The
+/// owner is a user id; the name is the relay profile's current one; former display names are
+/// listed so older rows and notes that use them read as the same person, not a second owner.
+pub fn owner_section(owner: &OwnerProfile) -> String {
+    let Some(id) = owner.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+        return String::new();
+    };
+    let name = owner
+        .address_name
+        .as_deref()
+        .or(owner.label_name.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let who = match name {
+        Some(n) => format!("You have exactly one owner: {n} (user id `{id}`)."),
+        None => format!(
+            "You have exactly one owner (user id `{id}`); their display name is not set, so use no name for them."
+        ),
+    };
+    let former: Vec<&str> = owner
+        .former_names
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty() && Some(*s) != name)
+        .collect();
+    let former_line = if former.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " Older messages, notes and memories may show them as {}: the same person, not another owner.",
+            former
+                .iter()
+                .map(|n| format!("\"{n}\""))
+                .collect::<Vec<_>>()
+                .join(" or ")
+        )
+    };
+    format!(
+        "\n## Your owner\n\n{who} Their name comes from their profile and can change; the name on this message is the current one.{former_line} People are identified by user id, never by name or handle.\n"
+    )
+}
+
+/// The owner's profile as the relay's box listing carries it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OwnerProfile {
+    pub id: Option<String>,
+    pub address_name: Option<String>,
+    pub label_name: Option<String>,
+    pub former_names: Vec<String>,
+}
+
+impl OwnerProfile {
+    pub fn from_json(owner: &Value) -> Self {
+        let pick = |k: &str| {
+            owner
+                .get(k)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        };
+        Self {
+            id: pick("id"),
+            address_name: pick("address_name"),
+            label_name: pick("name"),
+            former_names: owner
+                .get("former_names")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,6 +340,22 @@ mod tests {
         let s = project_section(&arbos, "p", "/work/p", "m");
         assert!(s.contains("You are this user's agent in Arbos."));
         assert!(!s.contains("never say \"in Arbos\""));
+    }
+
+    /// Hezbola 2026-10-26: one owner, by id, current name, former names named as the same person.
+    #[test]
+    fn owner_section_names_one_owner_with_the_current_name() {
+        let o = OwnerProfile::from_json(&serde_json::json!({
+            "id": "gh_268993031", "login": "unarbos", "name": "Jacob", "address_name": "Jacob", "former_names": ["Arbos"]
+        }));
+        let s = owner_section(&o);
+        assert!(s.contains("You have exactly one owner: Jacob (user id `gh_268993031`)."));
+        assert!(s.contains("may show them as \"Arbos\": the same person, not another owner"));
+        assert!(s.contains("identified by user id, never by name or handle"));
+        assert!(!s.contains("unarbos"), "the login is never a name");
+        let unnamed = OwnerProfile::from_json(&serde_json::json!({ "id": "gh_1", "login": "x" }));
+        assert!(owner_section(&unnamed).contains("display name is not set, so use no name"));
+        assert_eq!(owner_section(&OwnerProfile::default()), "");
     }
 
     #[test]

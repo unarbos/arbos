@@ -1299,6 +1299,10 @@ pub struct TurnState {
     pub unposted_text: String,
     /// The turn ended with nothing posted and `SendTool::On` posted the leftover prose once.
     pub posted_fallback: bool,
+    /// In a shared chat the model tried to post a bubble that only announced it was staying
+    /// silent ("that question is for X; nothing to add from me"); the guard dropped it, and the
+    /// turn ends as a quiet one (`silence.rs`).
+    pub silence_dropped: bool,
     /// The route's `ack` became a bubble (`new` / `wake`). An `act` ack is working-row status
     /// only, so it does not count as words the user read (duplex step 1 fallback rule).
     pub ack_posted: bool,
@@ -1486,6 +1490,7 @@ impl TurnState {
             send_tool: crate::config::SendTool::Off,
             unposted_text: String::new(),
             posted_fallback: false,
+            silence_dropped: false,
             ack_posted: false,
             web_tool_used: false,
             act_to_job: false,
@@ -1757,8 +1762,12 @@ impl Agent {
             &self.cfg.work_dir.display().to_string(),
             &talking,
         ));
+        s.push_str(&crate::identity::owner_section(
+            &self.people.owner_profile(),
+        ));
         s.push('\n');
         s.push_str(&crate::media::prompt_section(&self.cfg));
+        s.push_str(&crate::chart::prompt_section());
         let instructions = self
             .settings
             .state
@@ -2904,6 +2913,14 @@ impl Agent {
                 user_text = rendered.clone();
             }
         }
+        // Secret hand-off: a pasted key with "save this" goes into the vault before the model
+        // ever sees it; a key without those words gets the offer card and the turn goes on.
+        match crate::handoff::on_user_message(self, chat_id, &user_msg_id, &user_text).await {
+            crate::handoff::Handled::Nothing => {}
+            crate::handoff::Handled::Saved(t) | crate::handoff::Handled::Offered(t) => {
+                user_text = t;
+            }
+        }
         // Memory tree (D77): the walk starts as soon as the words are known and runs beside the
         // rest of the setup; `drive_turn` joins it before the prompt goes to pi.
         let mut memory = if user_text.trim().is_empty() {
@@ -3198,7 +3215,12 @@ impl Agent {
             (Some(ValidRoute::Act { plan }), true) => {
                 let brief = format!(
                     "Continue this task that the project agent started and could not finish within its limits.\n\nUser request: {user_text}\n\nPlan: {plan}\n\nAct so far:\n{}\n\nFinish the task. If what remains is waiting on a background process or job (a loop, a pipeline, a long build), do not wait for it in this session: check its state once, post what is done so far with send_message, then schedule the promised check-ins with routines_create (one-shot `once` triggers with `in_seconds` at the cadence the user was promised, the last one for the final summary; each prompt tells you to check the job and tell the user the outcome) and end. Every promised note must have a routine behind it.",
-                    turn.act_transcript.join("\n").chars().take(2400).collect::<String>()
+                    crate::truncate::clip_marked(
+                        &turn.act_transcript.join("\n"),
+                        2400,
+                        "",
+                        Some(&format!("read_thread {{\"thread_id\": \"{chat_id}\"}} (tool_output entries)")),
+                    )
                 );
                 Some((
                     None,
@@ -4016,6 +4038,7 @@ impl Agent {
             send_tool: self.cfg.send_tool(),
             unposted_text: String::new(),
             posted_fallback: false,
+            silence_dropped: false,
             ack_posted: false,
             web_tool_used: false,
             act_to_job: false,
@@ -4150,7 +4173,7 @@ impl Agent {
                         // placed after the memory block so they are the nearest context.
                         let recap = {
                             let h = host.lock().await;
-                            chat_recap(&h.doc.messages(), user_msg_id, &self.name())
+                            chat_recap(&h.doc.messages(), user_msg_id, &self.name(), chat_id)
                         };
                         let retry_prompt = with_chat_recap(prompt_text, &recap);
                         result = self.run_main_turn(chat_id, host, &retry_prompt).await;
@@ -4240,7 +4263,11 @@ impl Agent {
                 Some(chat_id),
                 "quiet",
                 Some("system"),
-                "stayed quiet: route reply with nothing to say in a shared chat (no row)",
+                if turn.silence_dropped {
+                    "stayed quiet: the silence announcement was dropped in a shared chat (no row)"
+                } else {
+                    "stayed quiet: route reply with nothing to say in a shared chat (no row)"
+                },
                 Some(&json!({ "message_id": assistant_msg_id, "user_message_id": user_msg_id })),
             );
             tracing::info!(
@@ -4563,7 +4590,14 @@ impl Agent {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let raw_trim: String = raw.chars().take(7000).collect();
+        let raw_trim = crate::truncate::clip_marked(
+            raw,
+            7000,
+            "",
+            Some(&format!(
+                "read_thread {{\"thread_id\": \"{subagent_id}\"}} (the worker's own thread)"
+            )),
+        );
         let mut prompt = match job {
             Some(j) => format!(
                 "[Arbos] Job \"{}\" ({}) finished · status {status} · {:.0} s.\n\nThe user originally asked (message id {user_msg_id}): {}\n",
@@ -5701,7 +5735,15 @@ impl Agent {
             "other"
         };
         let title = act_job_title(&turn.ack_text, turn.activity.as_deref(), kind);
-        let transcript: String = turn.act_transcript.join("\n").chars().take(2400).collect();
+        let transcript = crate::truncate::clip_marked(
+            &turn.act_transcript.join("\n"),
+            2400,
+            "",
+            Some(&format!(
+                "read_thread {{\"thread_id\": \"{}\"}} (tool_output entries)",
+                turn.chat_id
+            )),
+        );
         let brief = format!(
             "Continue this task the main agent started and could not finish quickly; the user has already seen a one-line acknowledgement.\n\nUser request: {user_text}\n\nPlan: {plan}\n\nDone so far:\n{transcript}\n\nFinish it and return the answer the user should read. For a comparison or research: each item with its page URL, the compared facts, the sources you used and what could not be checked. Do not repeat the acknowledgement."
         );
@@ -6005,7 +6047,8 @@ impl Agent {
         activity: Option<&str>,
         reply_to: Option<&str>,
     ) -> Result<(), String> {
-        let text = ProseFilter::clean_prose(text.trim());
+        // Output redaction backstop (D19, secret hand-off) before anything else sees it.
+        let text = crate::store::redact(&ProseFilter::clean_prose(text.trim()));
         let text = text.trim();
         if text.is_empty() && activity.is_none() {
             return Err("nothing to send".into());
@@ -6016,6 +6059,17 @@ impl Agent {
         };
         let Some(host) = self.sync.host(&t.chat_id).await else {
             return Err("no room for this chat".into());
+        };
+        // Silence is an outcome, not a message: a bubble that only says the agent is not
+        // answering never reaches a shared chat. The tool answers as if posted, so the model
+        // ends the turn instead of rephrasing the announcement.
+        let text = if self
+            .drop_silence_announcement(t, text, "send_message")
+            .await
+        {
+            ""
+        } else {
+            text
         };
         if !text.is_empty() {
             self.maybe_split_ack(&host, t, true).await;
@@ -6103,7 +6157,9 @@ impl Agent {
             return;
         }
         if t.send_tool == crate::config::SendTool::Off {
-            self.write_text(host, t, &cleaned).await;
+            if !self.drop_silence_announcement(t, &cleaned, "prose").await {
+                self.write_text(host, t, &cleaned).await;
+            }
             return;
         }
         if !t.unposted_text.is_empty() {
@@ -6120,6 +6176,42 @@ impl Agent {
             Some(&json!({ "unposted": true })),
         );
         tracing::info!(chat_id = %t.chat_id, chars = cleaned.chars().count(), "prose outside send_message kept out of the chat");
+    }
+
+    /// A people chat, a project group, or the "Projects ⇄" tab: rooms where staying silent is a
+    /// legitimate outcome of a turn.
+    pub(crate) fn shared_chat(&self, chat_id: &str) -> bool {
+        self.people.is_people_chat(chat_id)
+            || matches!(
+                self.chat_kind(chat_id).as_deref(),
+                Some("group") | Some("projects")
+            )
+    }
+
+    /// Jacob's mention rule, part 2 (2026-10-26): choosing silence is a structured outcome,
+    /// never a chat message. In a shared chat a post that only announces the silence
+    /// ("Addressed to Hezbola; staying silent. Nothing to add from me.") is dropped here, logged
+    /// to T3 (kind `quiet`) and counted (relay timing `silence_announcement_dropped`), and the
+    /// turn ends as a quiet one — the row goes away. Returns true when the text was dropped.
+    async fn drop_silence_announcement(&self, t: &mut TurnState, text: &str, via: &str) -> bool {
+        if !self.shared_chat(&t.chat_id) || !crate::silence::is_silence_announcement(text) {
+            return false;
+        }
+        t.silence_dropped = true;
+        tracing::info!(chat_id = %t.chat_id, via, text = %text.chars().take(200).collect::<String>(), "silence announcement dropped: the agent stays quiet instead");
+        let _ = self.store.t3_append(
+            &t.chat_id,
+            None,
+            Some(&t.chat_id),
+            "quiet",
+            Some("system"),
+            &format!("dropped a silence announcement ({via}): {text}"),
+            Some(&json!({ "message_id": t.assistant_msg_id, "user_message_id": t.user_msg_id, "via": via, "guard": "silence_announcement" })),
+        );
+        let _ = self
+            .post_timing("silence_announcement_dropped", 1, Some(via))
+            .await;
+        true
     }
 
     /// Did this turn put an *answer* in front of the user — a `send_message` bubble or a posted
@@ -6167,6 +6259,12 @@ impl Agent {
             return;
         }
         let text = std::mem::take(&mut t.unposted_text);
+        if self
+            .drop_silence_announcement(t, &text, "fallback prose")
+            .await
+        {
+            return;
+        }
         t.posted_fallback = true;
         tracing::info!(chat_id = %t.chat_id, chars = text.chars().count(), "send tool: leftover prose posted as the fallback bubble");
         self.write_text(host, t, &text).await;
@@ -6189,6 +6287,12 @@ impl Agent {
         if cleaned.trim().is_empty() {
             return;
         }
+        if self
+            .drop_silence_announcement(t, &cleaned, "route.reply (turn end)")
+            .await
+        {
+            return;
+        }
         tracing::info!(chat_id = %t.chat_id, chars = cleaned.chars().count(), "route reply text taken from the call");
         self.write_text(host, t, &cleaned).await;
     }
@@ -6206,9 +6310,12 @@ impl Agent {
             }
             t.text_part_dirty = false;
         }
+        // Output redaction backstop (D19, secret hand-off): a vault value or a known key
+        // shape in the model's prose never reaches the room doc.
+        let delta = crate::store::redact(delta);
         h.doc
-            .append_text(&t.assistant_msg_id, &t.text_part_id, delta);
-        t.streamed_text.push_str(delta);
+            .append_text(&t.assistant_msg_id, &t.text_part_id, &delta);
+        t.streamed_text.push_str(&delta);
     }
 
     // ---- hooks called by arbos-pi-ext ---------------------------------------------------------
@@ -6272,7 +6379,11 @@ impl Agent {
                 if let Some(ValidRoute::Reply { reply: Some(text) }) = &t.route {
                     let text = text.trim().to_owned();
                     let answered = t.route_correcting && (t.has_prose() || Self::posted_result(t));
-                    if !text.is_empty() && !answered {
+                    let dropped = !text.is_empty()
+                        && self
+                            .drop_silence_announcement(t, &text, "route.reply")
+                            .await;
+                    if !text.is_empty() && !answered && !dropped {
                         if t.send_tool == crate::config::SendTool::Off {
                             t.route_reply_text = Some(text);
                         } else {
@@ -6902,10 +7013,11 @@ impl Agent {
             s.push_str(&skills_text);
             s.push_str("\n\n");
         }
-        s.push_str("## Tools\n\nMCP server `arbos`: context_search, context_open, context_around (this Project's memory tree: raw events plus index cards of episodes and threads), history_search, history_read, read_thread, memory_search, memory_read (you may search and read the entire history of this Project), peek, sub_llm, remember/recall, projects_list, send_message (message another agent by name, @handle or id: it lands in that agent's own chat and its reply comes back to you; in a group chat, no `to` = the other agents there), ask_user (optional widget: choice, multi_select, text, date, form), skills_list/skills_read/skills_save (reusable how-tos), draft_message (an outbound email or chat message shown to the user as an approval card; nothing is sent without their click), connectors_list/connector_call (the user's Gmail, Calendar, Slack, GitHub, Harness Comms through the relay; write/send actions need the user's approval), local_devices/local_run/local_read/local_list (the user's own computer through the arbos-local helper; every command and, unless the user allowed reads, every file read needs the user's approval), deliver_file (hand a file you made to the user as a card), generate_image (an image from a prompt, delivered as a card), secrets_list/secrets_request/egress/browser_fill (the owner's secrets: you only ever get a placeholder such as `arbos-secret://STRIPE_KEY/value`, `$STRIPE_KEY` in a shell, or an `op://` reference; send it through `egress` or use it as `$NAME`; never try to read, print, encode or copy a value; a secret with no access → secrets_request and wait for the owner's card; if they deny or pause, stop and say so; logins are typed by browser_fill), routines_list/routines_create/routines_update/routines_delete (cron jobs and one-shot reminders on the relay scheduler), goals_list/goals_create/goals_update/goals_log/goals_delete (long-running objectives across days: plan, status, progress log, check-ins via routines; active goals stay pinned in the working set; autonomy ask|suggest|act), web_search/web_fetch (search the web; read a public page, spec or file as text), submit_feedback (file the user's feedback or bug report for them: captures their screen from their app, or attaches a PNG/JPEG they already provided via image_path; also attaches the recent conversation, tool calls and timings scrubbed of secrets, and returns a reference id; filing is irreversible from the chat — use it when they ask to submit, send or report feedback or a bug and have said what to report; when they only ask to file with no content, ask what to include first — never point them to a menu, settings screen or another channel).\n\n");
+        s.push_str("## Tools\n\nMCP server `arbos`: context_search, context_open, context_around (this Project's memory tree: raw events plus index cards of episodes and threads), history_search, history_read, read_thread, memory_search, memory_read (you may search and read the entire history of this Project), chat_messages (any chat message in full by id, or a page of a chat's history — use it whenever your context shows a [truncated …] or [N earlier messages not shown …] marker; never guess at a cut-off message), peek, sub_llm, remember/recall, projects_list, send_message (message another agent by name, @handle or id: it lands in that agent's own chat and its reply comes back to you; in a group chat, no `to` = the other agents there), ask_user (optional widget: choice, multi_select, text, date, form), skills_list/skills_read/skills_save (reusable how-tos), draft_message (an outbound email or chat message shown to the user as an approval card; nothing is sent without their click), connectors_list/connector_call (the user's Gmail, Calendar, Slack, GitHub, Harness Comms through the relay; write/send actions need the user's approval), local_devices/local_run/local_read/local_list (the user's own computer through the arbos-local helper; every command and, unless the user allowed reads, every file read needs the user's approval), deliver_file (hand a file you made to the user as a card), generate_image (an image from a prompt, delivered as a card), post_chart (a line / area / bar / scatter / pie chart from structured series, drawn natively in the chat), secrets_list/secrets_request/egress/browser_fill (the owner's secrets: you only ever get a placeholder such as `arbos-secret://STRIPE_KEY/value`, `$STRIPE_KEY` in a shell, or an `op://` reference; send it through `egress` or use it as `$NAME`; never try to read, print, encode or copy a value; a secret with no access → secrets_request and wait for the owner's card; if they deny or pause, stop and say so; logins are typed by browser_fill), routines_list/routines_create/routines_update/routines_delete (cron jobs and one-shot reminders on the relay scheduler), goals_list/goals_create/goals_update/goals_log/goals_delete (long-running objectives across days: plan, status, progress log, check-ins via routines; active goals stay pinned in the working set; autonomy ask|suggest|act), web_search/web_fetch (search the web; read a public page, spec or file as text), submit_feedback (file the user's feedback or bug report for them: captures their screen from their app, or attaches a PNG/JPEG they already provided via image_path; also attaches the recent conversation, tool calls and timings scrubbed of secrets, and returns a reference id; filing is irreversible from the chat — use it when they ask to submit, send or report feedback or a bug and have said what to report; when they only ask to file with no content, ask what to include first — never point them to a menu, settings screen or another channel).\n\n");
         s.push_str(WORK_RULES_SECTION);
         s.push_str(RESEARCH_SECTION);
         s.push_str(&crate::media::prompt_section(&self.cfg));
+        s.push_str(&crate::chart::prompt_section());
         s.push_str("## Return contract\n\nEnd your final reply with one fenced ```json block:\n{ \"status\": \"done\" | \"blocked\" | \"partial\" | \"needs_input\", \"summary\": \"<= 5 lines\", \"artifacts\": [ { \"kind\": \"file\" | \"commit\" | \"url\" | \"command\", \"ref\": \"…\", \"note\": \"…\" } ], \"acceptance\": [ { \"criterion\": \"…\", \"met\": true, \"evidence\": \"…\" } ], \"open_items\": [], \"proposed_memory\": [ { \"kind\": \"decision\", \"scope\": \"project\", \"text\": \"…\" } ], \"questions\": [] }\n");
         s
     }
@@ -7973,7 +8085,12 @@ impl Agent {
             },
             address.map(|n| format!("\n{}", n.trim())).unwrap_or_default()
         );
-        let raw_trim: String = raw.chars().take(7000).collect();
+        let raw_trim = crate::truncate::clip_marked(
+            raw,
+            7000,
+            "",
+            Some(&format!("history_search {{\"query\": \"<a phrase from the notes>\", \"thread_id\": \"{chat_id}\"}}")),
+        );
         let user = format!(
             "The user's message: {}\n\nStatus of the work: {status}{}\n\nNotes from the work (for you only):\n<<<\n{}\n>>>",
             if ask.trim().is_empty() { "(see the notes)" } else { ask.trim() },
@@ -8299,16 +8416,20 @@ pub(crate) fn quiet_in_shared_chat(
     model_ok: bool,
     no_error: bool,
 ) -> bool {
+    // A dropped silence announcement (`silence.rs`) is the same outcome: the route's words
+    // were the announcement, nothing else was posted.
+    let route_quiet = empty_reply_route(t)
+        || (t.silence_dropped && matches!(&t.route, Some(ValidRoute::Reply { .. })));
     shared_chat
         && model_ok
         && no_error
         && !t.stopped
         && !t.metrics.route_missing
-        && empty_reply_route(t)
+        && route_quiet
         && t.streamed_text.trim().is_empty()
         && t.ack_text.trim().is_empty()
         && t.progress_texts.iter().all(|p| p.trim().is_empty())
-        && t.metrics.tool_calls == 0
+        && (t.metrics.tool_calls == 0 || t.silence_dropped)
 }
 
 /// How many of this chat's recent rows the fresh-session retry carries, and how much of each.
@@ -8322,6 +8443,7 @@ pub(crate) fn chat_recap(
     rows: &[arbos_core::doc::MessageView],
     current_user_msg_id: &str,
     agent_name: &str,
+    chat_id: &str,
 ) -> String {
     let end = rows
         .iter()
@@ -8347,13 +8469,13 @@ pub(crate) fn chat_recap(
                 }
             }
         };
-        let body: String = text.chars().take(RECAP_ROW_CHARS).collect();
-        let cut = if text.chars().count() > RECAP_ROW_CHARS {
-            "…"
-        } else {
-            ""
-        };
-        lines.push(format!("- {who}: {body}{cut}"));
+        let body = crate::truncate::clip_marked(
+            &text,
+            RECAP_ROW_CHARS,
+            &m.id,
+            Some(&crate::truncate::fetch_message_hint(chat_id, &m.id)),
+        );
+        lines.push(format!("- {who}: {body}"));
     }
     if lines.is_empty() {
         return String::new();
@@ -8854,7 +8976,7 @@ pub(crate) fn job_fallback_prompt(
             brief.trim()
         ));
     }
-    let partial: String = partial.trim().chars().take(4000).collect();
+    let partial = crate::truncate::clip_marked(partial.trim(), 4000, "", None);
     if !partial.is_empty() {
         p.push_str(&format!(
             "\nWhat the last worker had written before it stopped (unverified):\n<<<\n{partial}\n>>>\n"
@@ -8967,10 +9089,13 @@ pub const ROUTER_PROMPT: &str = include_str!("../prompts/router.md");
 /// on 2026-10-24; 25.7 KB after the Grok-parity rules — moment, naming, research delivery —
 /// the same day; 28.2 KB on 2026-10-25 with the jobs section's steer/stop rule (#1692) and the
 /// steer rule — short waits, `[Arbos steer:` is never late — of #1690; 28.7 KB after the table and
-/// link format rule of [feedback markdown-tables-agentd-2026-10-25]). The unit test fails when a
-/// prompt edit crosses it, so growth is a decision, not drift.
+/// link format rule of [feedback markdown-tables-agentd-2026-10-25]; 29.1 KB on 2026-10-27
+/// with the `post_chart` clause of [feedback chart-post-tool-agentd-2026-10-26] on top of the
+/// secrets rewrite of [feedback secret-handoff-agentd-2026-10-26] — measured together at
+/// 29 062 bytes, set once). The unit test fails when a prompt edit crosses it, so growth is a
+/// decision, not drift.
 #[cfg(test)]
-pub const BASE_PROMPT_MAX_BYTES: usize = 28_900;
+pub const BASE_PROMPT_MAX_BYTES: usize = 29_100;
 
 /// The byte-stable part of the main agent's system prompt: core, then routing, then code mode
 /// when it is on. Everything per project (folder, model, instructions, memory) comes after it.
@@ -9672,7 +9797,7 @@ mod tests {
             ),
             row("u3", "user", "Done? What was the last number?"),
         ];
-        let recap = chat_recap(&rows, "u3", "lane-c");
+        let recap = chat_recap(&rows, "u3", "lane-c", "c1");
         assert!(recap.starts_with("[This chat so far, newest last"));
         assert!(recap.contains("- user: Write the numbers 1 to 40"));
         assert!(recap.contains("- you (lane-c): Done: the run stops at 20."));
@@ -9695,7 +9820,7 @@ mod tests {
         assert!(with_chat_recap("Done?", &recap).starts_with("[This chat so far"));
         // Nothing earlier in the chat: the prompt is unchanged.
         assert_eq!(
-            with_chat_recap("hi", &chat_recap(&rows[4..], "u3", "lane-c")),
+            with_chat_recap("hi", &chat_recap(&rows[4..], "u3", "lane-c", "c1")),
             "hi"
         );
         // The router tells the model the same precedence.

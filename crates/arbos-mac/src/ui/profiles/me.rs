@@ -13,7 +13,9 @@ use gpui::{
 
 use crate::app::ProfilePage;
 use crate::model::{now_ms, MachineState};
+use crate::sync::user_error::UserError;
 use crate::ui::devices;
+use crate::ui::error_note;
 use crate::ui::glass;
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
@@ -63,6 +65,7 @@ impl Shell {
         let account_image = account.as_ref().and_then(|a| state.avatar(&a.avatar_url));
         let profile_tab = state.profile_tab;
         let notify_on = state.notifier.enabled;
+        let permission = state.notification_permission();
         let read_receipts = state.read_receipts;
         let secrets_value = if state.secrets.loaded {
             state.secrets.row_value()
@@ -529,7 +532,45 @@ impl Shell {
 
         // ----- Notifications page body -------------------------------------------
         let notifications_body = {
-            let group = settings_group(&theme)
+            // macOS's own answer first: a denial here is why "no banners" — and the
+            // one place to fix it is System Settings, so the row opens it.
+            let system_row = match permission {
+                crate::ui::notify::Permission::Denied => Some(
+                    glass::row("Allowed by macOS".to_string(), &theme)
+                        .child(value("Off".to_string(), &theme))
+                        .child(
+                            link_button(
+                                "notify-system-settings",
+                                "Open System Settings",
+                                false,
+                                &theme,
+                            )
+                            .ml(px(10.0))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.state.update(cx, |s, _| s.open_notification_settings());
+                            })),
+                        ),
+                ),
+                crate::ui::notify::Permission::NotDetermined => Some(
+                    glass::row("Allowed by macOS".to_string(), &theme)
+                        .child(value("Not asked yet".to_string(), &theme))
+                        .child(
+                            link_button("notify-system-allow", "Allow", false, &theme)
+                                .ml(px(10.0))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.state.update(cx, |s, cx| s.allow_notifications(cx));
+                                })),
+                        ),
+                ),
+                crate::ui::notify::Permission::Allowed | crate::ui::notify::Permission::Unknown => {
+                    None
+                }
+            };
+            let mut group = settings_group(&theme);
+            if let Some(row) = system_row {
+                group = group.child(row);
+            }
+            let group = group
                 .child(seg_row(
                     "Notifications",
                     div()
@@ -592,6 +633,30 @@ impl Shell {
 
         // ----- Updates page body -------------------------------------------------
         let updates_body = {
+            // A failed install is the page's note (under the pane header, before the card):
+            // the shared element with Try again (install again) and Details (the log's first
+            // line); the row underneath reads the plain version line.
+            let note = match &update.phase {
+                crate::update::UpdatePhase::Failed { message, .. } => {
+                    let error = UserError::from_text("install the update", message.clone());
+                    Some(error_note::render(
+                        "update-error",
+                        &error,
+                        self.update_error_details_open,
+                        error_note::Style::Inline,
+                        &theme,
+                        error_note::Handlers::new()
+                            .try_again(cx.listener(|this, _, _, cx| {
+                                this.state.update(cx, |s, cx| s.install_update(cx));
+                            }))
+                            .toggle_details(cx.listener(|this, _, _, cx| {
+                                this.update_error_details_open = !this.update_error_details_open;
+                                cx.notify();
+                            })),
+                    ))
+                }
+                _ => None,
+            };
             let mut actions = div().flex().items_center().gap(px(14.0));
             if let Some((id, label, installs)) = update_action {
                 actions = actions.child(link_button(id, label, false, &theme).on_click(
@@ -642,12 +707,12 @@ impl Shell {
                     let status = div()
                         .min_w_0()
                         .text_size(px(TEXT_BODY))
-                        .text_color(if update_failed {
-                            theme.danger
+                        .text_color(theme.text)
+                        .child(if update_failed {
+                            format!("Arbos {}", update.current_version)
                         } else {
-                            theme.text
-                        })
-                        .child(update.status_line());
+                            update.status_line()
+                        });
                     let row = div().min_h(px(44.0)).px(px(16.0)).py(px(10.0));
                     if update_failed {
                         row.flex()
@@ -668,6 +733,7 @@ impl Shell {
                 .flex()
                 .flex_col()
                 .gap(px(22.0))
+                .children(note)
                 .child(group)
                 .child(footnote(
                     if auto_update {
@@ -744,15 +810,23 @@ impl Shell {
             let view = devices_view;
             let armed = self.device_revoke_armed.clone();
             let mut body = div().flex().flex_col().gap(px(22.0));
-            if let Some(why) = view.error.clone().filter(|_| view.items.is_empty()) {
-                body = body
-                    .child(settings_group(&theme).child(
-                        glass::row("Devices", &theme).child(value("Could not load".into(), &theme)),
-                    ))
-                    .child(footnote(
-                        format!("{why}. Pull to try again: reopen Devices."),
-                        &theme,
-                    ));
+            if let Some(err) = view.error.clone().filter(|_| view.items.is_empty()) {
+                // The page's note: under the pane header, before the first card.
+                body = body.child(error_note::render(
+                    "devices-error",
+                    &err,
+                    self.devices_error_details_open,
+                    error_note::Style::Inline,
+                    &theme,
+                    error_note::Handlers::new()
+                        .try_again(cx.listener(|this, _, _, cx| {
+                            this.state.update(cx, |s, cx| s.devices_refresh(cx));
+                        }))
+                        .toggle_details(cx.listener(|this, _, _, cx| {
+                            this.devices_error_details_open = !this.devices_error_details_open;
+                            cx.notify();
+                        })),
+                ));
             } else if !view.loaded && view.items.is_empty() {
                 body = body.child(kit::empty("Loading…", &theme));
             } else if view.items.is_empty() {
@@ -1087,7 +1161,16 @@ impl Shell {
                     "settings-notifications",
                     "bell",
                     SettingsPage::Notifications,
-                    Some(if notify_on { "On" } else { "Off" }.into()),
+                    Some(
+                        if permission == crate::ui::notify::Permission::Denied {
+                            "Off in macOS"
+                        } else if notify_on {
+                            "On"
+                        } else {
+                            "Off"
+                        }
+                        .into(),
+                    ),
                     &theme,
                     cx,
                 )
