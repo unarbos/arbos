@@ -714,6 +714,8 @@ final class AppModel: ObservableObject {
     /// Rooms whose pushes were refused with `not_available` on the live connection.
     /// Cleared by that room's next ACK (not by another room's ACK).
     private var pushRefused: Set<Id> = []
+    /// The sentence shown for each refused room (cleared with the room's next ACK).
+    private var pushRefusalText: [Id: String] = [:]
     /// Rooms with a full re-read scheduled by `requestSnapshot` (one per coalesce window).
     private var snapshotPending: Set<Id> = []
     /// When each room's transcript was last re-read from its doc (`Date` seconds).
@@ -2077,7 +2079,8 @@ final class AppModel: ObservableObject {
             // used to leave people-chat messages stuck at pending opacity.
             guard let self, !isProjectDoc else { return }
             if self.pushRefused.remove(key) != nil {
-                if self.notice?.text == "Messages in this chat are not being delivered" {
+                let text = self.pushRefusalText.removeValue(forKey: key)
+                if let current = self.notice?.text, current == text || current == "Messages in this chat are not being delivered" {
                     self.notice = nil
                 }
             }
@@ -2099,10 +2102,18 @@ final class AppModel: ObservableObject {
         room.onUnavailable = { [weak self] in
             Task { @MainActor in self?.handleRoomUnavailable(key: key) }
         }
-        room.onPushRefused = { [weak self] in
+        room.onPushRefused = { [weak self, weak room] in
             guard let self, !isProjectDoc else { return }
-            if self.pushRefused.insert(key).inserted {
-                self.notice = Notice(text: "Messages in this chat are not being delivered")
+            // The relay's reason, in plain words ([feedback blocked-state-ios-2026-10-26]):
+            // "<name> has blocked you in this chat." / "Couldn't post: you've blocked <name>…" /
+            // the mute line / the generic delivery line. A refusal that names a reason is shown
+            // even while the room already stood refused, so the words follow the relay's.
+            let why = room?.lastRefusal
+            let fresh = self.pushRefused.insert(key).inserted
+            if fresh || why?.reason != nil {
+                let text = why?.sentence ?? BlockedState.refusalSentence(reason: nil, name: nil, handle: nil)
+                self.pushRefusalText[key] = text
+                self.notice = Notice(text: text)
             }
         }
         rooms[key] = room
@@ -2159,6 +2170,7 @@ final class AppModel: ObservableObject {
         roomLinkSince[key] = nil
         unacked[key] = nil
         pushRefused.remove(key)
+        pushRefusalText[key] = nil
         roomCreatedAt[key] = nil
         roomRestoredCursors[key] = nil
         roomUnavailableFailures[key] = nil
@@ -2355,6 +2367,8 @@ final class AppModel: ObservableObject {
             if last.pending { return }
             if last.role == .system { return }
             if let me = myUserId, last.sender == me { return }
+            // Hidden for me (someone I blocked): no dot, no banner.
+            if hidesMessage(last, chatId: chatId) { return }
             // Project-chat echoes from this device use sender "user".
             if peopleChat(chatId) == nil, last.role == .user, last.sender == "user" || last.sender.isEmpty {
                 return
@@ -3977,6 +3991,28 @@ final class AppModel: ObservableObject {
             if let m = c.members.first(where: { !$0.isAgent && $0.handle.caseInsensitiveCompare(handle) == .orderedSame }) { return m.name }
         }
         return directory.first { $0.handle.caseInsensitiveCompare(handle) == .orderedSame }?.name
+    }
+
+    /// The senders whose rows `chat` hides for me ([feedback blocked-state-ios-2026-10-26],
+    /// Jacob 2026-10-26: a group block hides the blocked person's messages from the blocker
+    /// alone): the relay's `blockedSenders` hint plus every member on my block list, as
+    /// `user:<id>`. Empty for a DM (its composer bar says Blocked instead).
+    func hiddenSenders(in chat: PeopleChat) -> Set<String> {
+        guard chat.isGroup else { return [] }
+        var out = Set(chat.blockedSenders)
+        for m in chat.humans where BlockedState.isBlocked(id: m.id, handle: m.handle, in: blocked) {
+            out.insert(m.id.hasPrefix("user:") ? m.id : "user:\(m.id)")
+        }
+        return out
+    }
+
+    /// Tests: the relay's block list as `GET /blocks` would hand it over.
+    func setBlockedForTests(_ list: [Person]) { blocked = list }
+
+    /// Is this message hidden for me — from someone I blocked, in a people group?
+    func hidesMessage(_ m: Message, chatId: Id) -> Bool {
+        guard m.role == .user, let chat = peopleChat(chatId) else { return false }
+        return hiddenSenders(in: chat).contains(m.sender)
     }
 
     /// The one action behind every profile target in a chat — a sender name, the
