@@ -3736,8 +3736,42 @@ pub fn build_rows_hiding(
                 // by design: its status parts feed the presence line and the tasks
                 // drawer, never a bubble — not while it runs, not the "no answer"
                 // stock line when it ends. The job's outcome is the agent's own
-                // reply bubble (or the "Stopped: …" line).
+                // reply bubble (or the "Stopped: …" line). One exception: a file or
+                // picture the worker delivered onto that row (agentd ≤ 0.1.150 put
+                // `deliver_file` there — Jacob's SN120 chart, 2026-10-27, "the chart
+                // is in the card above" over nothing) still shows as its card, so a
+                // posted file is never invisible on a box that has not upgraded.
                 if message.hidden || message.job.is_some() {
+                    for part in &message.parts {
+                        if let Part::Attachment { id, attachment } = part {
+                            let has_thumb = attachment
+                                .blob_ref
+                                .as_deref()
+                                .is_some_and(|k| thumb_keys.contains(k));
+                            rows.push(Row {
+                                version: hash_version(
+                                    &(
+                                        &attachment.name,
+                                        &attachment.title,
+                                        attachment.bytes,
+                                        &attachment.blob_ref,
+                                        has_thumb,
+                                    ),
+                                    false,
+                                ),
+                                id: format!("{}#{}", message.id, id),
+                                message_id: message.id.clone(),
+                                kind: RowKind::Attachment {
+                                    attachment: attachment.clone(),
+                                    part_id: id.clone(),
+                                    mine: false,
+                                    lane: message.sender.starts_with("agent:")
+                                        || message.role == Role::Project,
+                                    forwarded_from: None,
+                                },
+                            });
+                        }
+                    }
                     continue;
                 }
                 if matches!(
@@ -8441,6 +8475,56 @@ mod system_line_tests {
             worker.current_activity().as_deref(),
             Some("Searching for surf schools Santa Teresa")
         );
+    }
+
+    /// Jacob, 2026-10-27 16:05 UTC (Arbonites, Doug agent on agentd 0.1.150): the SN120 chart
+    /// PNG was delivered onto the job's hidden worker row and the client drew nothing — "the
+    /// chart is in the card above" over a different message. A hidden/job row still draws its
+    /// attachment cards; everything else on it (status, text) stays hidden.
+    #[test]
+    fn hidden_job_row_still_shows_its_attachment_card() {
+        let t = 1_700_000_000_000u64;
+        let mut job_row = spawn_row("j1", "job", true, t + 1_000);
+        job_row.hidden = true;
+        job_row.job = serde_json::from_value(serde_json::json!({
+            "id": "01JOB", "title": "Running the program", "kind": "code", "touches": []
+        }))
+        .ok();
+        job_row.parts.push(Part::Attachment {
+            id: "att1".into(),
+            attachment: serde_json::from_value(serde_json::json!({
+                "name": "sn120_price.png", "mime": "image/png", "ref": "7ba1fc21", "bytes": 20260,
+                "kind": "image", "title": "SN120 price"
+            }))
+            .unwrap(),
+        });
+        let messages = [
+            message("user", "user", "plot the subnet 120 price", t),
+            job_row,
+        ];
+        let spoken = HashSet::new();
+        let failed = HashMap::new();
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        let rows = build_rows(
+            &messages,
+            false,
+            speech,
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+        );
+        let cards: Vec<&Row> = rows.iter().filter(|r| r.message_id == "j1").collect();
+        assert_eq!(cards.len(), 1, "exactly the card, nothing else: {rows:?}");
+        assert!(matches!(
+            &cards[0].kind,
+            RowKind::Attachment { attachment, mine: false, .. } if attachment.name == "sn120_price.png"
+        ));
     }
 
     #[test]
