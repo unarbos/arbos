@@ -338,6 +338,37 @@ pub fn push_click(chat_id: String) {
     clicks().lock().unwrap().push(chat_id);
 }
 
+/// The chat was read — here or on another device of the user (clear-on-read): every
+/// notification of that thread leaves Notification Center. Call banners are not touched
+/// (`withdraw_call` owns those). No-op where the platform keeps no delivered list.
+pub fn withdraw_chat(chat_id: &str) {
+    if chat_id.is_empty() {
+        return;
+    }
+    if std::env::var_os("ARBOS_NOTIFY_DRY_RUN").is_some() {
+        eprintln!("notify: withdraw chat {chat_id}");
+    } else {
+        #[cfg(target_os = "macos")]
+        if mac::available() {
+            mac::withdraw_chat(chat_id);
+        }
+    }
+}
+
+/// Which delivered request identifiers a read of `chat_id` withdraws: the chat's message
+/// banners (`chat:<id>:<stamp>`) and nothing else — not another chat's, not a call's.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn withdrawn_ids<'a>(chat_id: &str, ids: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let prefix = format!("chat:{chat_id}:");
+    ids.into_iter()
+        .filter(|id| {
+            id.strip_prefix(&prefix)
+                .is_some_and(|stamp| !stamp.contains(':'))
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
 /// The app's unread badge. `0` clears it. Dock icon on macOS; elsewhere only
 /// remembered (the rail already shows the per-project counts).
 pub fn set_badge(total: usize) {
@@ -830,6 +861,31 @@ mod mac {
             RefCell::new(std::collections::HashMap::new());
     }
 
+    /// Every delivered message banner of `chat_id` (identifiers `chat:<id>:<stamp>`, which
+    /// survive relaunches — the center's list is the source, not an in-memory map) is
+    /// removed. The list arrives on a background queue; the removal is thread-safe.
+    pub fn withdraw_chat(chat_id: &str) {
+        let chat_id = chat_id.to_owned();
+        let handler = RcBlock::new(move |list: NonNull<NSArray<UNNotification>>| {
+            // SAFETY: the center hands a live array to the block.
+            let list = unsafe { list.as_ref() };
+            let ids: Vec<String> = list
+                .iter()
+                .map(|n| n.request().identifier().to_string())
+                .collect();
+            let doomed = super::withdrawn_ids(&chat_id, ids.iter().map(String::as_str));
+            if doomed.is_empty() {
+                return;
+            }
+            let arr: Vec<Retained<NSString>> =
+                doomed.iter().map(|s| NSString::from_str(s)).collect();
+            UNUserNotificationCenter::currentNotificationCenter()
+                .removeDeliveredNotificationsWithIdentifiers(&NSArray::from_retained_slice(&arr));
+        });
+        UNUserNotificationCenter::currentNotificationCenter()
+            .getDeliveredNotificationsWithCompletionHandler(&handler);
+    }
+
     pub fn bundle_id() -> Option<String> {
         NSBundle::mainBundle()
             .bundleIdentifier()
@@ -1100,6 +1156,26 @@ mod tests {
         let other = NotifyEvent::new("arbos", "Arbos", NotifyKind::RoutineRan, "Morning digest");
         assert!(c.offer(ev(NotifyKind::TurnFinished, "a"), 0, OFF).is_some());
         assert!(c.offer(other, 1, OFF).is_some());
+    }
+
+    /// Clear-on-read withdraws exactly the chat's message banners: not another chat's that
+    /// shares a prefix, not a call banner, not a project event.
+    #[test]
+    fn withdraw_picks_only_the_chats_message_banners() {
+        let delivered = [
+            "chat:01ABC:1700000000000",
+            "chat:01ABC:1700000005000",
+            "chat:01ABCD:1700000000000",
+            "chat:01XYZ:1700000000000",
+            "call:c1:01ABC",
+            "event:p1:1700000000000",
+        ];
+        assert_eq!(
+            withdrawn_ids("01ABC", delivered),
+            vec!["chat:01ABC:1700000000000", "chat:01ABC:1700000005000"]
+        );
+        assert!(withdrawn_ids("", delivered).is_empty());
+        assert!(withdrawn_ids("01NOPE", delivered).is_empty());
     }
 
     #[test]
