@@ -42,6 +42,7 @@
     "waitlisted": false
   },
   "privacy": {
+    "allow_dm": "yes",
     "group_add": "anyone"
   },
   "user": {

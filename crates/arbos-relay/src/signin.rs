@@ -773,7 +773,7 @@ fn avatar_file(state: &AppState, user_id: &str) -> std::path::PathBuf {
         .join(format!("{user_id}.jpg"))
 }
 
-/// `PATCH /me {name?, login?, group_add?}`: profile and/or privacy. At least one field required.
+/// `PATCH /me {name?, login?, group_add?, allow_dm?}`: profile and/or privacy. At least one field required.
 #[derive(Deserialize)]
 pub struct PatchMeBody {
     #[serde(default)]
@@ -783,6 +783,9 @@ pub struct PatchMeBody {
     /// Who may add me to groups: `anyone` | `people_i_know` | `nobody`.
     #[serde(default)]
     pub group_add: Option<String>,
+    /// Whether others may start a DM with me: `yes` | `no`.
+    #[serde(default)]
+    pub allow_dm: Option<String>,
 }
 
 fn parse_group_add(raw: &str) -> Option<&'static str> {
@@ -794,12 +797,24 @@ fn parse_group_add(raw: &str) -> Option<&'static str> {
     }
 }
 
+fn parse_allow_dm(raw: &str) -> Option<&'static str> {
+    match raw.trim() {
+        "yes" => Some("yes"),
+        "no" => Some("no"),
+        _ => None,
+    }
+}
+
 fn privacy_dto(state: &AppState, user_id: &str) -> MePrivacyDto {
     MePrivacyDto {
         group_add: state
             .db
             .group_add_policy(user_id)
             .unwrap_or_else(|_| "anyone".into()),
+        allow_dm: state
+            .db
+            .allow_dm_policy(user_id)
+            .unwrap_or_else(|_| "yes".into()),
     }
 }
 
@@ -824,11 +839,15 @@ pub async fn patch_me(
             return api_error(StatusCode::FORBIDDEN, "forbidden", "device token required")
         }
     };
-    if body.name.is_none() && body.login.is_none() && body.group_add.is_none() {
+    if body.name.is_none()
+        && body.login.is_none()
+        && body.group_add.is_none()
+        && body.allow_dm.is_none()
+    {
         return api_error(
             StatusCode::BAD_REQUEST,
             "bad_request",
-            "provide name, login, and/or group_add",
+            "provide name, login, group_add, and/or allow_dm",
         );
     }
 
@@ -881,6 +900,20 @@ pub async fn patch_me(
         },
     };
 
+    let allow_dm = match body.allow_dm.as_deref() {
+        None => None,
+        Some(raw) => match parse_allow_dm(raw) {
+            Some(v) => Some(v),
+            None => {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "bad_allow_dm",
+                    "allow_dm must be yes or no",
+                )
+            }
+        },
+    };
+
     if name.is_some() || login.is_some() {
         if let Err(e) = state
             .db
@@ -895,6 +928,15 @@ pub async fn patch_me(
     }
     if let Some(policy) = group_add {
         if let Err(e) = state.db.set_group_add_policy(&user_id, policy) {
+            return if e.to_string() == "no such user" {
+                api_error(StatusCode::NOT_FOUND, "not_found", "no such user")
+            } else {
+                api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string())
+            };
+        }
+    }
+    if let Some(policy) = allow_dm {
+        if let Err(e) = state.db.set_allow_dm_policy(&user_id, policy) {
             return if e.to_string() == "no such user" {
                 api_error(StatusCode::NOT_FOUND, "not_found", "no such user")
             } else {

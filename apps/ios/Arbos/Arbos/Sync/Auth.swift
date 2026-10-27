@@ -196,12 +196,13 @@ extension RelayAPI {
         return (user, credits, dto.machine, dto.features, dto.privacy)
     }
 
-    /// `PATCH /me {name?, login?, group_add?}` → updated user (display name, handle, and/or privacy).
-    func patchMe(name: String? = nil, login: String? = nil, groupAdd: String? = nil) async throws -> AuthUser {
+    /// `PATCH /me {name?, login?, group_add?, allow_dm?}` → updated user (display name, handle, and/or privacy).
+    func patchMe(name: String? = nil, login: String? = nil, groupAdd: String? = nil, allowDm: String? = nil) async throws -> AuthUser {
         var body: [String: Any] = [:]
         if let name { body["name"] = name }
         if let login { body["login"] = login }
         if let groupAdd { body["group_add"] = groupAdd }
+        if let allowDm { body["allow_dm"] = allowDm }
         let v = try await json("PATCH", AuthEndpoints.me, body: body)
         guard JSONSerialization.isValidJSONObject(v),
               let data = try? JSONSerialization.data(withJSONObject: v),

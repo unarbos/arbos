@@ -64,6 +64,8 @@ pub fn migrate_accounts(c: &Connection) {
         "ALTER TABLE box_history ADD COLUMN archived_at INTEGER",
         // Who may add this person to a people group: anyone | people_i_know | nobody.
         "ALTER TABLE users ADD COLUMN group_add TEXT NOT NULL DEFAULT 'anyone'",
+        // Whether others may start a DM with this person: yes | no.
+        "ALTER TABLE users ADD COLUMN allow_dm TEXT NOT NULL DEFAULT 'yes'",
         // Where `name` came from: `github` (seeded from the profile at first sign-in) or `user`
         // (set through PATCH /me). Only a user-set name is how agents address the person.
         "ALTER TABLE users ADD COLUMN name_source TEXT NOT NULL DEFAULT 'github'",
@@ -438,6 +440,34 @@ impl Db {
         let n = self.with(|c| {
             c.execute(
                 "UPDATE users SET group_add = ?2 WHERE id = ?1",
+                params![user_id, policy],
+            )
+        })?;
+        if n == 0 {
+            return Err(anyhow!("no such user"));
+        }
+        Ok(())
+    }
+
+    /// Whether others may start a DM with this person (`yes` | `no`).
+    /// Missing column / missing row → `yes` (today's open default).
+    pub fn allow_dm_policy(&self, user_id: &str) -> Result<String> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT COALESCE(allow_dm, 'yes') FROM users WHERE id = ?1",
+                params![user_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map(|v| v.unwrap_or_else(|| "yes".into()))
+        })
+    }
+
+    /// `PATCH /me {allow_dm}` — store the direct-message privacy choice.
+    pub fn set_allow_dm_policy(&self, user_id: &str, policy: &str) -> Result<()> {
+        let n = self.with(|c| {
+            c.execute(
+                "UPDATE users SET allow_dm = ?2 WHERE id = ?1",
                 params![user_id, policy],
             )
         })?;

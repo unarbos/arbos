@@ -62,6 +62,25 @@ enum GroupAddPolicy: String, CaseIterable, Identifiable {
     }
 }
 
+/// Whether other people may start a DM with me (`PATCH /me {allow_dm}` / `GET /me` → `privacy`).
+enum AllowDmPolicy: String, CaseIterable, Identifiable {
+    case yes
+    case no
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .yes: return "Yes"
+        case .no: return "No"
+        }
+    }
+    var summary: String {
+        switch self {
+        case .yes: return "DMs on"
+        case .no: return "DMs off"
+        }
+    }
+}
+
 struct Notice: Identifiable, Equatable {
     let id = UUID()
     var text: String
@@ -130,6 +149,10 @@ final class AppModel: ObservableObject {
     /// Who may add me to people groups (`anyone` | `people_i_know` | `nobody`).
     /// Synced from `GET /me` → `privacy.group_add`; written with `PATCH /me`.
     @Published var groupAddPolicy: String = GroupAddPolicy.anyone.rawValue
+
+    /// Whether others may start a DM with me (`yes` | `no`).
+    /// Synced from `GET /me` → `privacy.allow_dm`; written with `PATCH /me`.
+    @Published var allowDmPolicy: String = AllowDmPolicy.yes.rawValue
 
     @Published private(set) var credentials: DeviceCredentials?
     /// Self-serve sign-in (GitHub). `tokens` is the JWT pair; `credentials`
@@ -1258,6 +1281,24 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Settings → Privacy: whether others may start a DM (`PATCH /me {allow_dm}`).
+    @discardableResult
+    func updateAllowDmPolicy(_ policy: AllowDmPolicy) async -> String? {
+        let previous = allowDmPolicy
+        allowDmPolicy = policy.rawValue
+        guard !isFixture else { return nil }
+        do {
+            _ = try await api.patchMe(allowDm: policy.rawValue)
+            return nil
+        } catch let e as RelayError {
+            allowDmPolicy = previous
+            return AuthError.humanize(e.type ?? "", e.message.isEmpty ? "Could not update privacy" : e.message)
+        } catch {
+            allowDmPolicy = previous
+            return error.localizedDescription
+        }
+    }
+
     private func adopt(tokens toks: AuthTokens, user who: AuthUser?, persist: Bool = true) {
         tokens = toks
         if let who { user = who }
@@ -1316,6 +1357,10 @@ final class AppModel: ObservableObject {
             // Who may add me to groups (absent on an older relay = anyone).
             if let policy = privacy?.group_add, GroupAddPolicy(rawValue: policy) != nil {
                 groupAddPolicy = policy
+            }
+            // Whether others may DM me (absent on an older relay = yes).
+            if let policy = privacy?.allow_dm, AllowDmPolicy(rawValue: policy) != nil {
+                allowDmPolicy = policy
             }
             let position = summary.waitlisted ? Int(summary.waitlist_position ?? 1) : nil
             if position != waitlistPosition { waitlistPosition = position }

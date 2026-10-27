@@ -624,12 +624,21 @@ pub struct MeFeaturesDto {
 pub struct MePrivacyDto {
     /// Who may add me to a people group: `anyone` | `people_i_know` | `nobody`.
     pub group_add: String,
+    /// Whether other people may start a direct message with me: `yes` | `no`.
+    /// Absent on an older relay → `yes`.
+    #[serde(default = "default_allow_dm")]
+    pub allow_dm: String,
+}
+
+fn default_allow_dm() -> String {
+    "yes".into()
 }
 
 impl Default for MePrivacyDto {
     fn default() -> Self {
         Self {
             group_add: "anyone".into(),
+            allow_dm: default_allow_dm(),
         }
     }
 }

@@ -140,6 +140,24 @@ fn group_add_forbidden() -> Response {
     )
 }
 
+/// May others start a new DM with `target` under their `allow_dm` privacy?
+fn may_receive_dm(state: &AppState, target: &str) -> bool {
+    state
+        .db
+        .allow_dm_policy(target)
+        .unwrap_or_else(|_| "yes".into())
+        != "no"
+}
+
+/// Opaque "not available" when a DM privacy check fails (same as a block).
+fn dm_forbidden() -> Response {
+    api_error(
+        StatusCode::FORBIDDEN,
+        "not_available",
+        "this person is not available",
+    )
+}
+
 fn normalize_handle(h: &str) -> Option<String> {
     let h = h.trim().trim_start_matches('@').trim();
     let ok = !h.is_empty()
@@ -1034,6 +1052,10 @@ pub async fn dm_create(
             Ok(cm) => Json(chat_json(&state, &cm, &me, &device)).into_response(),
             Err(r) => *r,
         };
+    }
+    // New DMs only — an existing chat still opens when they turned DMs off later.
+    if !may_receive_dm(&state, &other_id) {
+        return dm_forbidden();
     }
     let limit = if young_account(&state, &me) {
         NEW_CHATS_PER_DAY / 2
@@ -5080,6 +5102,58 @@ mod group_add_privacy_tests {
             }),
         )
         .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    }
+}
+
+#[cfg(test)]
+mod allow_dm_privacy_tests {
+    //! A person's `allow_dm` privacy blocks others from opening a *new* DM; an existing DM still
+    //! opens so ongoing chats are not cut off.
+
+    use axum::extract::State;
+    use axum::http::StatusCode;
+    use axum::Json;
+
+    use super::tests_support::person;
+    use super::*;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    #[tokio::test]
+    async fn no_refuses_new_dm_but_keeps_existing() {
+        let state = test_state(AuthMode::Github);
+        let (_alice, alice_dev) = person(&state, 41);
+        let (bob, _) = person(&state, 42);
+        let bob_handle = state.db.user(&bob).unwrap().unwrap().login.unwrap();
+
+        // Open a DM while Bob still allows them.
+        let r = dm_create(
+            State(state.clone()),
+            alice_dev.clone(),
+            Json(DmBody {
+                handle: bob_handle.clone(),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+
+        state.db.set_allow_dm_policy(&bob, "no").unwrap();
+
+        // Existing chat still opens.
+        let r = dm_create(
+            State(state.clone()),
+            alice_dev.clone(),
+            Json(DmBody {
+                handle: bob_handle.clone(),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+
+        // A stranger cannot start a new one.
+        let (_carol, carol_dev) = person(&state, 43);
+        let r = dm_create(State(state), carol_dev, Json(DmBody { handle: bob_handle })).await;
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
     }
 }

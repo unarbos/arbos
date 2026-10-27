@@ -1460,9 +1460,13 @@ public struct MeMachineDto: Codable {
 public struct MePrivacyDto: Codable {
 	/// Who may add me to a people group: `anyone` | `people_i_know` | `nobody`.
 	public let group_add: String
+	/// Whether other people may start a direct message with me: `yes` | `no`.
+	/// Absent on an older relay → treat as `yes`.
+	public let allow_dm: String?
 
-	public init(group_add: String) {
+	public init(group_add: String, allow_dm: String? = nil) {
 		self.group_add = group_add
+		self.allow_dm = allow_dm
 	}
 }
 

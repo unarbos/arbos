@@ -334,7 +334,9 @@ struct SettingsView: View {
     }
 
     private var privacySummary: String {
-        (GroupAddPolicy(rawValue: model.groupAddPolicy) ?? .anyone).summary
+        let groups = (GroupAddPolicy(rawValue: model.groupAddPolicy) ?? .anyone).summary
+        let dms = (AllowDmPolicy(rawValue: model.allowDmPolicy) ?? .yes).summary
+        return "\(groups) · \(dms)"
     }
 
     /// "12.4 MB · 23 chats" from the on-device store (#929).
@@ -1258,7 +1260,7 @@ struct NotificationsPage: View {
     }
 }
 
-/// Who may add me to people groups — stops random spam-group adds.
+/// Who may add me to people groups, and whether others may start a DM.
 struct PrivacyPage: View {
     @EnvironmentObject private var model: AppModel
     @State private var error: String?
@@ -1276,6 +1278,23 @@ struct PrivacyPage: View {
                     ) {
                         Task {
                             if let err = await model.updateGroupAddPolicy(policy) {
+                                error = err
+                            }
+                        }
+                    }
+                }
+            }
+            SettingsGroup(
+                header: "Direct messages",
+                footer: "Controls whether other people can start a direct chat with you. Chats you already have stay open."
+            ) {
+                ForEach(AllowDmPolicy.allCases) { policy in
+                    SettingsChoiceRow(
+                        title: policy.label,
+                        selected: model.allowDmPolicy == policy.rawValue
+                    ) {
+                        Task {
+                            if let err = await model.updateAllowDmPolicy(policy) {
                                 error = err
                             }
                         }
