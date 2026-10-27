@@ -2,10 +2,9 @@ import SwiftUI
 import XCTest
 @testable import Arbos
 
-/// Hardware-keyboard ⌘F opens the Search-in-chat bar ([feedback
-/// iphone-chat-search-cmd-f-2026-10-26], Jacob 2026-10-26). Before this the bar
-/// (#1829) opened only from the header's search disc; no `keyboardShortcut` existed
-/// anywhere in the app.
+/// Hardware-keyboard ⌘F toggles the Search-in-chat bar ([feedback
+/// iphone-chat-search-cmd-f-2026-10-26] opened it; [feedback
+/// iphone-chat-search-cmd-f-toggle-2026-10-27] closes it again, Jacob 2026-10-27).
 final class ChatSearchShortcutTests: XCTestCase {
     func testTheShortcutIsCommandF() {
         XCTAssertEqual(ChatSearchShortcut.key, KeyEquivalent("f"))
@@ -17,11 +16,17 @@ final class ChatSearchShortcutTests: XCTestCase {
         XCTAssertEqual(effect, .init(open: true, focus: true, animate: true))
     }
 
-    func testCommandFOnAnOpenBarRefocusesWithoutClosingOrFlicker() {
+    /// Jacob 2026-10-27: "search should close with command F again" — a toggle,
+    /// the same as the Mac's ⌘F ([feedback iphone-chat-search-cmd-f-toggle-2026-10-27]).
+    func testCommandFOnAnOpenBarClosesIt() {
         let effect = ChatSearchShortcut.apply(open: true)
-        XCTAssertTrue(effect.open, "Find's key never closes the bar — Esc and ✕ do")
-        XCTAssertTrue(effect.focus)
-        XCTAssertFalse(effect.animate, "an open bar must not slide in again")
+        XCTAssertFalse(effect.open, "⌘F on the open bar closes it like ✕ / Esc")
+        XCTAssertFalse(effect.focus, "nothing to focus when closing")
+    }
+
+    func testToggleIsAnInvolution() {
+        XCTAssertTrue(ChatSearchShortcut.apply(open: ChatSearchShortcut.apply(open: false).open).open == false)
+        XCTAssertTrue(ChatSearchShortcut.apply(open: ChatSearchShortcut.apply(open: true).open).open == true)
     }
 
     /// The view wires the shortcut (and Esc) to the bar, not to the toggling disc.
@@ -34,7 +39,8 @@ final class ChatSearchShortcutTests: XCTestCase {
         XCTAssertTrue(
             source.contains(".keyboardShortcut(ChatSearchShortcut.key, modifiers: ChatSearchShortcut.modifiers)"),
             "ChatView must bind ⌘F through ChatSearchShortcut")
-        XCTAssertTrue(source.contains("Button(action: openSearchFromKeyboard)"), "⌘F opens or refocuses, never toggles")
+        XCTAssertTrue(source.contains("Button(action: openSearchFromKeyboard)"), "⌘F toggles the bar")
+        XCTAssertTrue(source.contains("if !effect.open {\n            closeSearch()"), "an open bar closes through closeSearch (✕ / Esc path)")
         XCTAssertTrue(source.contains(".keyboardShortcut(.cancelAction)"), "Esc closes the bar like the Mac's")
     }
 }
