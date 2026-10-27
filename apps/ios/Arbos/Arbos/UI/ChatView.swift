@@ -2010,7 +2010,9 @@ struct ChatSession: View {
     /// by `allowsReplies`.
     private func isMessageRow(_ row: Row) -> Bool {
         switch row.kind {
-        case .system, .question, .error, .forwardHint:
+        // A secret ghost row has nothing to copy, forward or quote; Delete stays off too —
+        // the row is the record that a value went to the vault.
+        case .system, .question, .error, .forwardHint, .secretGhost:
             return false
         case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
             return messageById[row.messageId] != nil
