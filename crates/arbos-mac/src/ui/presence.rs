@@ -10,14 +10,15 @@
 
 use std::sync::Arc;
 
-use gpui::{div, prelude::*, px, AnyElement, App, Div, RenderImage};
+use gpui::{div, prelude::*, px, AnyElement, App, Div, Entity, RenderImage, SharedString};
 
-use crate::app::AppState;
+use crate::app::{AppState, ProfilePage};
 use crate::model::{Message, MessageStatus, Part, Person, Project, Role, StatusKind};
 use crate::ui::avatars;
 use crate::ui::identity;
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
+use crate::ui::profile_target;
 use crate::ui::theme::{Theme, TEXT_SMALL};
 
 /// Round picture size: the avatar column's disc (`transcript::SENDER_DISC` — the
@@ -62,6 +63,9 @@ pub struct Participant {
     pub name: String,
     pub activity: Activity,
     pub picture: AnyElement,
+    /// The profile the picture opens (`ui::profile_target`): the person by
+    /// handle, the agent by project; `None` for a face the chat cannot name.
+    pub page: Option<ProfilePage>,
 }
 
 pub struct Presence {
@@ -183,6 +187,10 @@ pub fn gather(state: &AppState, chat_id: &str, space: &Project, theme: &Theme) -
             name,
             activity: Activity::Typing,
             picture,
+            page: Some(ProfilePage::User {
+                handle,
+                space_id: Some(space.id.clone()),
+            }),
         });
     }
 
@@ -236,11 +244,17 @@ pub fn gather(state: &AppState, chat_id: &str, space: &Project, theme: &Theme) -
                 }
                 seen.push(agent.id.clone());
                 let image = agent.image_key.as_deref().and_then(|url| state.avatar(url));
+                // A face a card answered for opens that agent; one seeded from the
+                // row's own words (`known` false) has no page to open.
+                let page = agent.known.then(|| ProfilePage::Agent {
+                    project_id: agent.id.clone(),
+                });
                 participants.push(Participant {
                     name: agent.name.clone(),
                     activity: Activity::Working,
                     picture: avatars::agent_picture(&agent, image, AVATAR, theme)
                         .into_any_element(),
+                    page,
                 });
             }
         } else {
@@ -251,6 +265,9 @@ pub fn gather(state: &AppState, chat_id: &str, space: &Project, theme: &Theme) -
                 name: agent.name.clone(),
                 activity: Activity::Working,
                 picture: avatars::agent_picture(&agent, image, AVATAR, theme).into_any_element(),
+                page: Some(ProfilePage::Agent {
+                    project_id: space.id.clone(),
+                }),
             });
         }
     }
@@ -271,27 +288,38 @@ pub fn gather(state: &AppState, chat_id: &str, space: &Project, theme: &Theme) -
 /// `transcript::column_row`, so its left edge is the composer's, and floats
 /// it over the transcript's bottom clearance ([`LIFT`]) so it takes no
 /// height of its own.
-pub fn row(presence: Presence, theme: &Theme, cx: &App) -> Div {
-    row_inner(presence, None, None, theme, cx)
+///
+/// `app` is the state the pictures toggle profiles on (`ui::profile_target`:
+/// a click on a face opens that person's or agent's pane, a second click
+/// closes it); `None` draws the pictures inert (previews, tests).
+pub fn row(presence: Presence, app: Option<&Entity<AppState>>, theme: &Theme, cx: &App) -> Div {
+    row_inner(presence, app, None, None, theme, cx)
 }
 
 /// The row with the tasks chip after its line (`ui::tasks`, duplex §2.4):
 /// the box's "· N tasks" suffix leaves the words — the chip says the count —
 /// and the chip sits one row gap after the text, on the line's centre.
-pub fn row_with_chip(presence: Presence, chip: AnyElement, theme: &Theme, cx: &App) -> Div {
-    row_inner(presence, Some(chip), None, theme, cx)
+pub fn row_with_chip(
+    presence: Presence,
+    app: Option<&Entity<AppState>>,
+    chip: AnyElement,
+    theme: &Theme,
+    cx: &App,
+) -> Div {
+    row_inner(presence, app, Some(chip), None, theme, cx)
 }
 
 /// The row with the chip and the words drawn by the caller (`ui::rollout::link`: the
 /// status line as a link to the newest job's rollout while jobs are open).
 pub fn row_with_chip_and_words(
     presence: Presence,
+    app: Option<&Entity<AppState>>,
     chip: AnyElement,
     words: AnyElement,
     theme: &Theme,
     cx: &App,
 ) -> Div {
-    row_inner(presence, Some(chip), Some(words), theme, cx)
+    row_inner(presence, app, Some(chip), Some(words), theme, cx)
 }
 
 /// The words the row draws: the sentence, minus the box's "· N tasks" suffix when a
@@ -307,6 +335,7 @@ pub fn shown_text(presence: &Presence, with_chip: bool) -> String {
 
 fn row_inner(
     presence: Presence,
+    app: Option<&Entity<AppState>>,
     chip: Option<AnyElement>,
     words: Option<AnyElement>,
     theme: &Theme,
@@ -338,6 +367,7 @@ fn row_inner(
         // in the page colour sits just *outside* each one so the overlaps read
         // (newest first on the left, each next one tucked 8 pt in).
         let slot = identity::slot(AVATAR, p.picture)
+            .id(SharedString::from(format!("presence-picture-{i}")))
             .relative()
             .rounded_full()
             .when(total > 1, |el| {
@@ -351,6 +381,12 @@ fn row_inner(
                 )
             })
             .debug_selector(move || format!("presence-picture-{i}"));
+        // The face is a profile target: one click opens that person's or
+        // agent's pane, a second click closes it ([feedback profile-pane-toggle-mac-2026-10-26]).
+        let slot = match (app, p.page) {
+            (Some(app), Some(page)) => profile_target::attach(slot, app, page, &p.name, cx),
+            _ => slot,
+        };
         stack = stack.child(if i == 0 { slot } else { slot.ml(px(-OVERLAP)) });
     }
     if total > MAX_PICTURES {
@@ -455,6 +491,7 @@ mod text_tests {
             name: name.to_string(),
             activity,
             picture: gpui::Empty.into_any_element(),
+            page: None,
         };
         let one = Presence {
             participants: vec![p("Sam Okafor", Activity::Typing)],

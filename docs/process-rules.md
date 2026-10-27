@@ -88,6 +88,49 @@ load 66–167). Rule, for every rig script under `/Users/Shared/arbos-*/` and ev
 - Shared simulators stay shut down when the rig is done (`xcrun simctl shutdown <udid>`): a booted idle
   simulator keeps a dozen daemons runnable.
 
+## ssh to the gate Mac goes through the relay host (2026-10-26 23:40 UTC)
+
+Port 22 on the EC2 Mac (13.217.52.163) is not open to the internet: its security group (`arbos-mobile`) allows ssh
+only from a short list of fixed /32 addresses — the mobile-loop VM and its NAT set, a few named worker VMs, and the
+relay host (204.12.171.6, "arboslife-jump"). Port 443 is public, which is why "443 answers but 22 times out" is the
+symptom. Cloud agent VMs egress from rotating AWS addresses (eight different ones reached the relay host in six
+hours on 2026-10-26), so adding your VM's address is pointless by the next session and opening 22 to all would be
+the wrong fix. pf on the Mac is off and sshd listens on every interface — nothing on the Mac is in the way.
+
+Rule: do not ssh to the Mac directly. Hop through the relay host, which every worker can already reach:
+
+    ssh -o ProxyCommand="ssh -i <relay key> -W %h:%p const@204.12.171.6" -i <mac key> ec2-user@13.217.52.163
+
+(or an equivalent `ProxyJump const@204.12.171.6` in a per-task ssh config under `/tmp`, never `~/.ssh`). The same
+goes for `scp` and for VNC (:5900 is allowlisted the same way): tunnel it over the jump. A worker that needs the
+list widened for a fixed address (a self-hosted machine, not a VM) asks the coordinator; the security group is
+Jacob's and is not edited by workers.
+
+## Two shared command runners on the EC2 Mac: `runner.sh` captures, `ax-runner.sh` clicks (2026-10-27)
+
+No single TCC identity on the Mac has both grants: Terminal (which runs `/Users/Shared/arbos-run/runner.sh`)
+has Screen Recording but Accessibility is denied; `sshd-keygen-wrapper` (which runs `ax-runner.sh`, started
+via `launchctl asuser` from ssh) has Accessibility but no Screen Recording. So a rig step captures in
+`runner.sh` and clicks in the ax-runner: `ax <command…>` queues one command there and returns its output and
+exit code; `axbin/osascript` is a shim on `runner.sh`'s PATH that forwards every `osascript` call the same way.
+
+- Never put `/Users/Shared/arbos-run/axbin` on PATH inside an `ax` command, a `cmd-*.sh` that calls `ax`, or
+  anything that already runs in the ax-runner. 05:53–06:03 Oct 27: a rig's shoot.sh did, the osascript inside
+  the ax-runner resolved to the forwarding shim and queued itself behind itself, and both shared runners were
+  dead for 9 min. Inside an ax command call `/usr/bin/osascript` explicitly. The runner strips axbin from PATH
+  and sets `ARBOS_AX_RUNNER=<pid>`; the shim and `ax` refuse to forward when that variable is set and run the
+  command in place — a guard, not a licence.
+- An ax job is killed after `AX_JOB_MAX_S` (600 s) with rc 124 and a line in `ax-runner.status` and syslog; a
+  caller waits at most `AX_TIMEOUT_S` (600 s) for its result. A click step that needs longer is doing something
+  wrong — split it.
+- GPUI windows (the Arbos Mac app) ignore `System Events click at …` — that is an Accessibility *action*, and GPUI
+  exposes no per-element AX tree, so the click lands nowhere. For a real click use `cgclick` (a CGEvent mouse
+  click; `/Users/Shared/arbos-tools/bin/cgclick`, source `/Users/Shared/arbos-tools/src/cgclick.swift`) through
+  the ax-runner: `ax /Users/Shared/arbos-tools/bin/cgclick <x> <y>`. CGEvent posting needs the same
+  Accessibility grant, which is why it must go through `ax`, never directly from a `runner.sh` command.
+- After a reboot both runners are gone: start `ax-runner.sh` via `sudo launchctl asuser 502 sudo -u arbosgui …`
+  from ssh and `runner.sh` via `open /Users/Shared/arbos-run/start-runner.command` (Terminal identity).
+
 ## Standing rules that this does not change
 
 - One issue per release; a hotfix marker (`[hotfix]`) is for P0s only.

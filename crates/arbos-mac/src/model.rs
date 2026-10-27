@@ -124,6 +124,10 @@ pub struct Project {
     /// owner allowed to message this agent. Empty unless I own it.
     #[serde(default)]
     pub message_grants: Vec<MessageGrant>,
+    /// Members I blocked, as `user:<id>` — the relay's `blockedSenders` hint on a people
+    /// chat ([feedback blocked-state-mac-2026-10-26]): their rows are hidden for me alone.
+    #[serde(default)]
+    pub blocked_senders: Vec<String>,
 }
 
 /// One row of an agent's "Who may message X" card (`message_grants` on the project).
@@ -1285,6 +1289,11 @@ pub struct Attachment {
     /// Caption for the card; the file name when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// The fallback picture of a chart bubble: names the `chart` part of the same message.
+    /// A client that draws the chart hides this attachment; an older one shows the picture
+    /// ([feedback chart-bubble-mac-2026-10-26]).
+    #[serde(default, rename = "chartPart", skip_serializing_if = "Option::is_none")]
+    pub chart_part: Option<String>,
 }
 
 impl Attachment {
@@ -1463,6 +1472,37 @@ pub enum Part {
         /// #1544: the standing choice made on a destructive-shell card (a path class).
         #[serde(default)]
         grant: Option<String>,
+    },
+    /// The row a message becomes when its value moved into the vault (secret hand-off):
+    /// "Secret saved as NAME". Names only — there is no value field.
+    SecretRedacted {
+        id: Id,
+        #[serde(default)]
+        name: String,
+        #[serde(default)]
+        env: String,
+        #[serde(default)]
+        secret_id: String,
+        /// `user:<id>` whose message held the value.
+        #[serde(default)]
+        saved_by: String,
+        /// Project id of the agent that saved it.
+        #[serde(default)]
+        agent: Option<String>,
+    },
+    /// Chart bubble ([feedback chart-bubble-mac-2026-10-26]): the structured chart
+    /// `post_chart` posted. `chart` is the validated `arbos_core::chart::Chart` as JSON,
+    /// `table` its markdown table, `fallback` the PNG attachment part this client hides.
+    Chart {
+        id: Id,
+        #[serde(default)]
+        spec_version: u32,
+        #[serde(default)]
+        chart: serde_json::Value,
+        #[serde(default)]
+        table: String,
+        #[serde(default)]
+        fallback: Option<String>,
     },
     #[serde(other)]
     Unknown,
@@ -2168,6 +2208,14 @@ impl Message {
             })
     }
 
+    /// Does this message carry the `chart` part `part_id`? (Its fallback picture is
+    /// hidden only when the chart it stands in for is really here.)
+    pub fn has_chart_part(&self, part_id: &str) -> bool {
+        self.parts
+            .iter()
+            .any(|p| matches!(p, Part::Chart { id, .. } if id == part_id))
+    }
+
     /// Open `question` parts of this message, newest last.
     pub fn open_questions(&self) -> impl DoubleEndedIterator<Item = &Part> {
         self.parts.iter().filter(|p| {
@@ -2487,9 +2535,42 @@ pub struct Secret {
     /// `refuse | card`: what a non-listed person's ask does (spec §7.7).
     #[serde(default)]
     pub others_ask: String,
+    /// Where it came from: `settings`, or `chat` + the agent it was handed to (secret hand-off).
+    #[serde(default)]
+    pub source: Option<SecretSource>,
+}
+
+/// Where a secret came from (`secret.source`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SecretSource {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub project_name: Option<String>,
+    #[serde(default)]
+    pub chat_id: Option<String>,
 }
 
 impl Secret {
+    /// "given in chat" for a hand-off secret, else nothing (list subtitle).
+    pub fn source_label(&self) -> Option<&'static str> {
+        self.source
+            .as_ref()
+            .filter(|s| s.kind == "chat")
+            .map(|_| "given in chat")
+    }
+
+    /// "In chat with Arbos" — the Secret page's Added row, when it came from a chat.
+    pub fn added_label(&self) -> Option<String> {
+        let s = self.source.as_ref().filter(|s| s.kind == "chat")?;
+        Some(match s.project_name.as_deref().filter(|n| !n.is_empty()) {
+            Some(n) => format!("In chat with {n}"),
+            None => "In chat".to_owned(),
+        })
+    }
+
     pub fn kind_label(&self) -> &'static str {
         match self.kind.as_str() {
             "login" => "Login",

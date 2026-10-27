@@ -20,7 +20,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.6.282"
+version = "0.6.291"
 edition = "2021"
 license = "UNLICENSED"
 publish = false
@@ -38,6 +38,7 @@ uniffi = "=0.32.2"
 
 anyhow = "1"
 thiserror = "2"
+syntect = { version = "5.3", default-features = false, features = ["parsing", "default-syntaxes", "regex-fancy", "dump-load"] }
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 futures = "0.3"

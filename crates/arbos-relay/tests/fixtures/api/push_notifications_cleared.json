@@ -1,0 +1,10 @@
+{
+  "created_at": 1700000000000,
+  "id": "push_notifications_cleared",
+  "kind": "notifications_cleared",
+  "payload": {
+    "badge": 2,
+    "chat_id": "people_dm",
+    "project_id": "people"
+  }
+}

@@ -17,6 +17,8 @@ use serde_json::Value;
 uniffi::setup_scaffolding!();
 
 pub mod avatar;
+pub mod chart;
+pub mod highlight;
 pub mod matrix;
 pub mod search;
 
@@ -100,9 +102,15 @@ pub enum RoomAction {
         code: String,
         message: String,
     },
-    /// A `not_available` push refusal on this connection (`batchId` from the error).
+    /// A `not_available` push refusal on this connection (`batchId` from the error) with the
+    /// relay's `reason` (`blocked_by` / `blocks_member` / `silenced` / `chat_unavailable`)
+    /// and, on a block, the other party.
     PushRefused {
         batch_id: Option<String>,
+        code: String,
+        reason: Option<String>,
+        by_handle: Option<String>,
+        by_name: Option<String>,
     },
     Presence {
         device: Option<String>,
@@ -158,7 +166,19 @@ impl From<ClientAction> for RoomAction {
                 after_ms: after.as_millis() as u64,
             },
             ClientAction::SessionError { code, message } => Self::SessionError { code, message },
-            ClientAction::PushRefused { batch_id } => Self::PushRefused { batch_id },
+            ClientAction::PushRefused {
+                batch_id,
+                code,
+                reason,
+                by_handle,
+                by_name,
+            } => Self::PushRefused {
+                batch_id,
+                code,
+                reason,
+                by_handle,
+                by_name,
+            },
             ClientAction::Presence {
                 device,
                 handle,

@@ -28,7 +28,9 @@ use crate::model::{
 
 use super::doc::ChatDoc;
 use super::user_error::{ErrorClass, UserError};
-use super::{ClientCommand, DraftPicture, PictureSource, PictureTarget, SyncEvent, SyncSource};
+use super::{
+    ClientCommand, DraftPicture, PictureSource, PictureTarget, PushRefusal, SyncEvent, SyncSource,
+};
 use crate::model::{
     new_id, now_ms, ApprovalRisk, ApprovalState, Attachment, AttachmentKind, BoxReport, BoxState,
     BoxWorkspace, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelPlatformState,
@@ -235,6 +237,7 @@ impl SyncSource for FixtureSource {
             emit_servers_hook(&shared);
             let _ = events.send(SyncEvent::Link(Link::Live));
             emit_link_hook(&shared);
+            emit_blocked_hook(&shared);
             emit_failure_hook(&shared);
             emit_typing_hook(&shared);
             emit_working_hook(&shared);
@@ -456,6 +459,24 @@ fn emit_failure_hook(shared: &Arc<Shared>) {
                     let _ = shared.events.send(SyncEvent::PushRefused {
                         chat_id,
                         refused: true,
+                        why: PushRefusal::code("not_available"),
+                    });
+                }
+            }
+            // Rig ([feedback blocked-state-mac-2026-10-26]): the relay refused the push
+            // because of a block — `blocked-by` (Sam blocked me) / `blocks-member` (I
+            // blocked Sam, a DM) — in every chat, so the open one shows the sentence.
+            "blocked-by" | "blocks-member" => {
+                for (chat_id, _) in targets {
+                    let _ = shared.events.send(SyncEvent::PushRefused {
+                        chat_id,
+                        refused: true,
+                        why: PushRefusal {
+                            code: "not_available".into(),
+                            reason: Some(spec.replace('-', "_")),
+                            by_handle: Some("sam".into()),
+                            by_name: Some("Sam Rivera".into()),
+                        },
                     });
                 }
             }
@@ -1217,6 +1238,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     bytes: None,
                     kind: None,
                     title: None,
+                    chart_part: None,
                 })
                 .collect();
             send_user(
@@ -1330,6 +1352,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 bytes: None,
                 kind: Some(AttachmentKind::Audio),
                 title: None,
+                chart_part: None,
             }];
             send_user(
                 shared,
@@ -1872,6 +1895,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 image_url: image_url.clone(),
                 avatar_version: 0,
                 message_grants: Vec::new(),
+                blocked_senders: Vec::new(),
             });
             if let Some(url) = &image_url {
                 emit_avatar(shared, url);
@@ -2099,6 +2123,59 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 },
             });
         }
+        ClientCommand::SecretHandoffSave {
+            chat_id,
+            approval_id,
+            project_id,
+            name,
+            purpose,
+            ..
+        } => {
+            let env = crate::model::secret_env_name(&name);
+            {
+                let mut view = shared.secrets.lock().unwrap();
+                view.secrets.retain(|s| s.env != env);
+                let project_name = shared
+                    .projects
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|p| p.id == project_id)
+                    .map(|p| p.name.clone());
+                view.secrets.push(Secret {
+                    id: new_id(),
+                    name: name.clone(),
+                    env: env.clone(),
+                    kind: "key".into(),
+                    note: purpose.clone(),
+                    hosts: Vec::new(),
+                    ask_every_time: false,
+                    inject_env: false,
+                    expires_at: None,
+                    version: 1,
+                    created_at: now_ms() as i64,
+                    last_used_at: None,
+                    username: None,
+                    vault_name: "Arbos".into(),
+                    agents: vec![fixture_agent(&project_id, "", true, &purpose)],
+                    directors: Vec::new(),
+                    others_ask: "refuse".into(),
+                    source: Some(crate::model::SecretSource {
+                        kind: "chat".into(),
+                        project_id: Some(project_id.clone()),
+                        project_name,
+                        chat_id: Some(chat_id.clone()),
+                    }),
+                });
+                view.secrets.sort_by(|a, b| a.env.cmp(&b.env));
+            }
+            emit_secrets(shared);
+            let _ = shared.events.send(SyncEvent::SecretHandoff {
+                approval_id: approval_id.clone(),
+                result: Ok(env),
+            });
+            decide_approval(shared, chat_id, approval_id, ApprovalState::Approved, None)
+        }
         ClientCommand::SecretAdd { item } => {
             {
                 let mut view = shared.secrets.lock().unwrap();
@@ -2131,6 +2208,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     agents,
                     directors: Vec::new(),
                     others_ask: "refuse".into(),
+                    source: None,
                 });
                 view.secrets.sort_by(|a, b| a.env.cmp(&b.env));
             }
@@ -2768,6 +2846,7 @@ fn seed_secrets() -> SecretsView {
         agents,
         directors: Vec::new(),
         others_ask: "refuse".into(),
+        source: None,
     };
     let mut stripe = secret(
         "STRIPE_KEY",
@@ -2789,6 +2868,27 @@ fn seed_secrets() -> SecretsView {
     // The iPhone fixture's twin: the Stripe key is a real value in the agents' environment,
     // and Sam may ask for it (Samir's row is off).
     stripe.inject_env = true;
+    // Secret hand-off rig: the key was given to Arbos in chat (list "given in chat", page
+    // "Added · In chat with Arbos").
+    if std::env::var("ARBOS_FIXTURE_SECRET_HANDOFF").is_ok() {
+        stripe.inject_env = false;
+        stripe.hosts = Vec::new();
+        stripe.note = "For the refunds report. Read-only until you say otherwise.".into();
+        stripe.last_used_at = None;
+        stripe.created_at = now - 120_000;
+        stripe.agents = vec![fixture_agent(
+            PROJECT_ARBOS,
+            "Arbos",
+            true,
+            "the refunds report",
+        )];
+        stripe.source = Some(crate::model::SecretSource {
+            kind: "chat".into(),
+            project_id: Some(PROJECT_ARBOS.into()),
+            project_name: Some("Arbos".into()),
+            chat_id: Some(CHAT_ARBOS_MAIN.into()),
+        });
+    }
     let dir = directory();
     stripe.directors = vec![
         fixture_person(&dir[0], true, "reports only", Some(120_000)),
@@ -3356,6 +3456,52 @@ async fn wake_machine(shared: &Arc<Shared>) {
 fn emit_projects(shared: &Shared) {
     let projects = shared.projects.lock().unwrap().clone();
     let _ = shared.events.send(SyncEvent::Projects(projects));
+}
+
+/// `ARBOS_FIXTURE_BLOCKED=<handle>[,<handle>…]` (screenshot rig, [feedback
+/// blocked-state-mac-2026-10-26]): those people are on my block list from launch, as the
+/// relay's `GET /blocks` would list them — the Blocked chip / tag, the Unblock confirm and the
+/// DM's "You blocked X" bar can be shot without a second account.
+fn emit_blocked_hook(shared: &Arc<Shared>) {
+    let Ok(spec) = std::env::var("ARBOS_FIXTURE_BLOCKED") else {
+        return;
+    };
+    let handles: Vec<String> = spec
+        .split(',')
+        .map(|h| h.trim().trim_start_matches('@').to_lowercase())
+        .filter(|h| !h.is_empty())
+        .collect();
+    if handles.is_empty() {
+        return;
+    }
+    let people: Vec<Person> = shared
+        .projects
+        .lock()
+        .unwrap()
+        .iter()
+        .flat_map(|p| p.people.iter().cloned())
+        .filter(|p| handles.contains(&p.handle.to_lowercase()))
+        .fold(Vec::new(), |mut acc: Vec<Person>, p| {
+            if !acc.iter().any(|q| q.handle == p.handle) {
+                acc.push(p);
+            }
+            acc
+        });
+    *shared.blocked.lock().unwrap() = people.clone();
+    // The relay's `blockedSenders` hint on every people group that holds them.
+    {
+        let ids: Vec<String> = people.iter().map(|p| format!("user:{}", p.id)).collect();
+        let mut projects = shared.projects.lock().unwrap();
+        for p in projects.iter_mut().filter(|p| p.is_people_group()) {
+            p.blocked_senders = ids
+                .iter()
+                .filter(|id| p.people.iter().any(|m| format!("user:{}", m.id) == **id))
+                .cloned()
+                .collect();
+        }
+    }
+    emit_projects(shared);
+    emit_blocked(shared);
 }
 
 fn emit_blocked(shared: &Shared) {
@@ -4860,6 +5006,7 @@ fn seed_projects() -> Vec<Project> {
             image_url: None,
             avatar_version: 0,
             message_grants: Vec::new(),
+            blocked_senders: Vec::new(),
         },
         Project {
             id: PROJECT_COMMS.into(),
@@ -4896,6 +5043,7 @@ fn seed_projects() -> Vec<Project> {
             image_url: None,
             avatar_version: 0,
             message_grants: Vec::new(),
+            blocked_senders: Vec::new(),
         },
         Project {
             id: PROJECT_ARBOS.into(),
@@ -4932,6 +5080,7 @@ fn seed_projects() -> Vec<Project> {
             image_url: None,
             avatar_version: 0,
             message_grants: Vec::new(),
+            blocked_senders: Vec::new(),
         },
     ]
 }
@@ -5408,6 +5557,7 @@ fn attachment(name: &str, mime: &str, kind: AttachmentKind, title: &str, bytes: 
             bytes: Some(bytes),
             kind: Some(kind),
             title: Some(title.into()),
+            chart_part: None,
         },
     }
 }
@@ -5573,6 +5723,116 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
                     TurnKind::Reply,
                     MessageStatus::Done,
                     vec![text(BUBBLE_SORT_REPLY)],
+                );
+            }
+            _ => {}
+        }
+        // Secret hand-off rig (`ARBOS_FIXTURE_SECRET_HANDOFF=offer|saved|ghost|detect`): the
+        // request card open / saved, the "save this" ghost row, the offer card for a pasted key.
+        let handoff_card = |approval_id: &str,
+                            state: ApprovalState,
+                            payload: Value,
+                            title: &str,
+                            summary: &str| Part::Approval {
+            id: new_id(),
+            approval_id: approval_id.into(),
+            title: title.into(),
+            summary: summary.into(),
+            risk: ApprovalRisk::Credential,
+            payload,
+            state,
+            expires_at: Some(base + 600_000),
+            decided_at: (state != ApprovalState::Pending).then_some(base + 90_000),
+            decided_by: (state != ApprovalState::Pending)
+                .then(|| "user:01J9USER0JACOB000000000000".to_owned()),
+            reason: None,
+            grant: None,
+        };
+        match std::env::var("ARBOS_FIXTURE_SECRET_HANDOFF").as_deref() {
+            Ok(mode @ ("offer" | "saved")) => {
+                s.user("Can I give you a secret? It's the Stripe key for the refunds report.");
+                let state = if mode == "saved" {
+                    ApprovalState::Approved
+                } else {
+                    ApprovalState::Pending
+                };
+                s.assistant(
+                    TurnKind::Act,
+                    MessageStatus::Done,
+                    vec![
+                        text("Yes. Use the box below. It goes straight to your vault, never into this chat."),
+                        handoff_card(
+                            "01J9APPROVAL0SECRETOFFER00",
+                            state,
+                            json!({ "kind": "secret_offer", "name": "STRIPE_KEY", "purpose": "the refunds report",
+                                "agent": "Arbos", "projectId": PROJECT_ARBOS, "chatId": CHAT_ARBOS_MAIN, "answers": [] }),
+                            "Give Arbos a secret",
+                            "the refunds report",
+                        ),
+                    ],
+                );
+                if mode == "saved" {
+                    s.assistant(
+                        TurnKind::Reply,
+                        MessageStatus::Done,
+                        vec![text("Got it. I'll use STRIPE_KEY for the refunds report and keep the value out of this chat.")],
+                    );
+                }
+            }
+            Ok("ghost") => {
+                s.user("Let's do the refunds report next.");
+                s.assistant(
+                    TurnKind::Reply,
+                    MessageStatus::Done,
+                    vec![text("Sure — I need the Stripe key for that.")],
+                );
+                s.user("save this");
+                let id = main
+                    .core
+                    .messages()
+                    .last()
+                    .map(|m| m.id.clone())
+                    .unwrap_or_default();
+                main.core.redact_message_as_secret(
+                    &id,
+                    &arbos_core::doc::SecretRedaction {
+                        secret_id: "01J9SECRET0STRIPE000000000".into(),
+                        name: "STRIPE_KEY".into(),
+                        env: "STRIPE_KEY".into(),
+                        saved_by: "user:01J9USER0JACOB000000000000".into(),
+                        agent: Some(PROJECT_ARBOS.into()),
+                    },
+                );
+                s.assistant(
+                    TurnKind::Reply,
+                    MessageStatus::Done,
+                    vec![text("Saved as STRIPE_KEY and removed from this chat — also from my memory and working context. I can use it; the value stays in your vault. Running the refunds report now.")],
+                );
+            }
+            Ok("detect") => {
+                s.user("Let's do the refunds report next.");
+                s.assistant(
+                    TurnKind::Reply,
+                    MessageStatus::Done,
+                    vec![text("Sure — I need the Stripe key for that.")],
+                );
+                s.user(concat!(
+                    "sk_",
+                    "test_FIXTURE51HxQ9mT3vK2pLnR8wZ4eYc7bD1fG6hJ0kM9nP5qS2tU8vW3xA1"
+                ));
+                s.assistant(
+                    TurnKind::Act,
+                    MessageStatus::Done,
+                    vec![handoff_card(
+                        "01J9APPROVAL0SECRETDETECT0",
+                        ApprovalState::Pending,
+                        json!({ "kind": "secret_detected", "optional": true, "name": "STRIPE_KEY", "agent": "Arbos",
+                            "chatId": CHAT_ARBOS_MAIN, "messageId": "", "answers": [
+                                { "id": "save", "label": "Save as STRIPE_KEY and remove" },
+                                { "id": "deny", "label": "Leave it here" } ] }),
+                        "That looks like a key. Save it to your vault as STRIPE_KEY and remove it from this chat?",
+                        "Nothing is saved until you choose.",
+                    )],
                 );
             }
             _ => {}
@@ -5917,6 +6177,7 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
                 bytes: None,
                 kind: Some(AttachmentKind::Audio),
                 title: None,
+                chart_part: None,
             }],
         );
         s.assistant(
@@ -6112,6 +6373,7 @@ fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
         image_url: None,
         avatar_version: 0,
         message_grants: Vec::new(),
+        blocked_senders: Vec::new(),
     }
 }
 
@@ -6221,6 +6483,7 @@ fn seed_people_projects() -> Vec<Project> {
             image_url: None,
             avatar_version: 0,
             message_grants: Vec::new(),
+            blocked_senders: Vec::new(),
         },
     ]
 }

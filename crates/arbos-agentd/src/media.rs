@@ -20,7 +20,7 @@ const MAX_BYTES: u64 = 60 * 1024 * 1024;
 const DEFAULT_IMAGE_MODEL: &str = "gpt-image-1";
 
 /// One line in the workspace's `.arbos/audit.jsonl` (the file the pi extension and the approval gate write).
-fn audit(agent: &Agent, kind: &str, fields: Value) {
+pub(crate) fn audit(agent: &Agent, kind: &str, fields: Value) {
     let mut entry = json!({ "kind": kind, "at": now_ms() });
     if let (Some(e), Some(f)) = (entry.as_object_mut(), fields.as_object()) {
         for (k, v) in f {
@@ -167,7 +167,7 @@ pub struct Target {
     pub main_turn: bool,
 }
 
-async fn target(a: &Agent, session_id: Option<&str>) -> Option<Target> {
+pub(crate) async fn target(a: &Agent, session_id: Option<&str>) -> Option<Target> {
     let worker_target = |chat_id: &str, row_id: &str, host_doc_ask: Option<String>| Target {
         chat_id: chat_id.to_owned(),
         ask_id: host_doc_ask.or_else(|| Some(row_id.to_owned())),
@@ -217,7 +217,7 @@ async fn row_in_reply_to(a: &Agent, chat_id: &str, row_id: &str) -> Option<Strin
         .map(str::to_owned)
 }
 
-async fn upload(
+pub(crate) async fn upload(
     a: &Arc<Agent>,
     chat_id: &str,
     bytes: Vec<u8>,
@@ -432,7 +432,9 @@ pub async fn deliver(
                 .set_message_fields(&msg_id, &[("replyTo", json!(ask))]);
         }
         if let Some(c) = caption {
-            h.doc.append_text(&msg_id, &text_part, c);
+            // D19 backstop: the caption bypasses write_text, so redact here (#1974 review).
+            h.doc
+                .append_text(&msg_id, &text_part, &crate::store::redact(c));
         }
         if h.doc.add_attachment_part(&msg_id, &attachment).is_none() {
             anyhow::bail!("message {msg_id} not found in chat {}", target.chat_id);

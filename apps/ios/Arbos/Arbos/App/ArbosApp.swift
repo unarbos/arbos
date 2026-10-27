@@ -10,6 +10,8 @@ struct ArbosApp: App {
         WindowGroup {
             RootView()
                 .environmentObject(model)
+                // The code-card grammars load off the main thread at launch.
+                .task { CodeHighlight.warm() }
         }
     }
 }

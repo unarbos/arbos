@@ -943,6 +943,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/box/secrets/{id}/scrub", get(secrets::box_scrub))
         .route("/box/secrets/request", post(secrets::box_request))
+        .route("/box/secrets/from-message", post(secrets::box_from_message))
         .route(
             "/box/secrets/requests/{id}",
             get(secrets::box_request_status),
