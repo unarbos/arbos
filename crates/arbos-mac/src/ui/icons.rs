@@ -150,10 +150,16 @@ const ICONS: &[(&str, &str)] = &[
         "forward",
         "<path d=\"M15 14l5-5-5-5\"/><path d=\"M20 9h-9a6 6 0 0 0-6 6v4\"/>"
     ),
-    // Speech bubble (iPhone `bubble.left`): the quote header of a reply bubble.
+    // Speech bubble (iPhone `bubble.left`): the reply quote header, the message
+    // menu's Reply in DM and the person pane's Message pill. One ellipse (centre
+    // 12,10.5 · radii 8.5 × 6.5: top → right → the tail's root at the lower
+    // left) with the tail's tip at 4.5,20, closed by the arc back up to the top,
+    // so the outline meets itself — the earlier hand-drawn curves ended 1 pt
+    // short of their start and `z` drew a stub there
+    // ([feedback reply-in-dm-icon-2026-10-27]; `tests::no_glyph_closes_with_a_stub`).
     icon!(
         "bubble",
-        "<path d=\"M12 3.5c5 0 9 3.2 9 7.2s-4 7.2-9 7.2c-.9 0-1.8-.1-2.6-.3L5 20v-3.6c-1.3-1.3-2-2.9-2-4.7 0-4 4-7.2 9-7.2z\"/>"
+        "<path d=\"M12 4a8.5 6.5 0 0 1 8.5 6.5 8.5 6.5 0 0 1-11.4 6.1L4.5 20l-.5-7.3A8.5 6.5 0 0 1 12 4z\"/>"
     ),
     icon!("crown", "<path d=\"M4 17h16l1-9-5 3.5L12 5l-4 6.5L3 8z\" fill=\"#000\"/>"),
     icon!("photo", "<rect x=\"3\" y=\"5\" width=\"18\" height=\"14\" rx=\"2\"/><circle cx=\"9\" cy=\"10\" r=\"1.5\" fill=\"#000\"/><path d=\"M21 16l-5-5-8 8\"/>"),
@@ -264,4 +270,346 @@ pub fn icon(name: &str, size: f32, color: Hsla) -> Svg {
         .size(px(size))
         .flex_shrink_0()
         .text_color(color)
+}
+
+/// The icon pack's stroke weight on the 24 grid (the `icon!` header).
+#[cfg(test)]
+pub const STROKE: f32 = 2.0;
+
+/// The drawn body of the glyph `name` — what sits inside the `icon!` header
+/// and `</svg>` — for the lints below.
+#[cfg(test)]
+pub fn body(name: &str) -> Option<&'static str> {
+    let path = format!("icons/{name}.svg");
+    ICONS
+        .iter()
+        .find(|(p, _)| *p == path)
+        .map(|(_, svg)| inner(svg))
+}
+
+#[cfg(test)]
+fn inner(svg: &str) -> &str {
+    let start = svg.find('>').map_or(0, |i| i + 1);
+    let end = svg.rfind("</svg>").unwrap_or(svg.len());
+    &svg[start..end]
+}
+
+/// Icon-pack lint ([feedback reply-in-dm-icon-2026-10-27]): the shape checks
+/// that keep a hand-drawn glyph honest, run over every icon by the tests.
+#[cfg(test)]
+pub mod lint {
+    /// One drawn subpath, walked from its `d` attribute.
+    #[derive(Debug, Default, Clone, PartialEq)]
+    pub struct Walk {
+        /// Every anchor (end point) the path visits, in order.
+        pub anchors: Vec<(f32, f32)>,
+        /// For every `z`: the distance between the pen and the subpath's start
+        /// when it closed. `0` = the curves met; a long gap = a real straight
+        /// closing edge (a triangle's base); a short one = a stub.
+        pub closing_gaps: Vec<f32>,
+    }
+
+    /// Walk an SVG path `d` string (M L H V C S Q T A Z, absolute and
+    /// relative, implicit repeats) and report its anchors and closing gaps.
+    pub fn walk(d: &str) -> Walk {
+        let mut tokens: Vec<String> = Vec::new();
+        let mut number = String::new();
+        let flush = |number: &mut String, tokens: &mut Vec<String>| {
+            if !number.is_empty() {
+                tokens.push(std::mem::take(number));
+            }
+        };
+        for ch in d.chars() {
+            match ch {
+                'a'..='z' | 'A'..='Z' => {
+                    flush(&mut number, &mut tokens);
+                    tokens.push(ch.to_string());
+                }
+                '-' => {
+                    flush(&mut number, &mut tokens);
+                    number.push(ch);
+                }
+                '.' if number.contains('.') => {
+                    flush(&mut number, &mut tokens);
+                    number.push(ch);
+                }
+                '0'..='9' | '.' => number.push(ch),
+                _ => flush(&mut number, &mut tokens),
+            }
+        }
+        flush(&mut number, &mut tokens);
+
+        let mut out = Walk::default();
+        let (mut cur, mut start) = ((0.0f32, 0.0f32), (0.0f32, 0.0f32));
+        let mut cmd = 'M';
+        let mut i = 0;
+        let num = |tokens: &[String], i: &mut usize| -> f32 {
+            let v = tokens.get(*i).and_then(|t| t.parse::<f32>().ok());
+            *i += 1;
+            v.unwrap_or_else(|| panic!("bad path token {:?} in {d:?}", tokens.get(*i - 1)))
+        };
+        while i < tokens.len() {
+            if tokens[i]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic())
+            {
+                cmd = tokens[i].chars().next().unwrap();
+                i += 1;
+            } else if cmd == 'M' {
+                cmd = 'L';
+            } else if cmd == 'm' {
+                cmd = 'l';
+            }
+            let rel = cmd.is_ascii_lowercase();
+            let at = |cur: (f32, f32), x: f32, y: f32| {
+                if rel {
+                    (cur.0 + x, cur.1 + y)
+                } else {
+                    (x, y)
+                }
+            };
+            match cmd.to_ascii_uppercase() {
+                'M' => {
+                    let (x, y) = (num(&tokens, &mut i), num(&tokens, &mut i));
+                    cur = at(cur, x, y);
+                    start = cur;
+                    out.anchors.push(cur);
+                }
+                'L' | 'T' => {
+                    let (x, y) = (num(&tokens, &mut i), num(&tokens, &mut i));
+                    cur = at(cur, x, y);
+                    out.anchors.push(cur);
+                }
+                'H' => {
+                    let x = num(&tokens, &mut i);
+                    cur = (if rel { cur.0 + x } else { x }, cur.1);
+                    out.anchors.push(cur);
+                }
+                'V' => {
+                    let y = num(&tokens, &mut i);
+                    cur = (cur.0, if rel { cur.1 + y } else { y });
+                    out.anchors.push(cur);
+                }
+                'C' | 'S' | 'Q' | 'A' => {
+                    let skip = match cmd.to_ascii_uppercase() {
+                        'C' => 4,
+                        'S' | 'Q' => 2,
+                        _ => 5,
+                    };
+                    for _ in 0..skip {
+                        num(&tokens, &mut i);
+                    }
+                    let (x, y) = (num(&tokens, &mut i), num(&tokens, &mut i));
+                    cur = at(cur, x, y);
+                    out.anchors.push(cur);
+                }
+                'Z' => {
+                    out.closing_gaps
+                        .push(((cur.0 - start.0).powi(2) + (cur.1 - start.1).powi(2)).sqrt());
+                    cur = start;
+                }
+                other => panic!("unknown path command {other:?} in {d:?}"),
+            }
+        }
+        out
+    }
+
+    /// Every `d="…"` attribute in an icon body.
+    pub fn paths(body: &str) -> Vec<&str> {
+        body.split(" d=\"")
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next())
+            .collect()
+    }
+
+    /// A `z` that lands within `stroke / 2` of its start but not on it draws
+    /// a stub shorter than the line is wide: the curves were meant to meet
+    /// and missed. That is the bubble's old defect, and what this guards.
+    pub fn stubs(body: &str, stroke: f32) -> Vec<f32> {
+        paths(body)
+            .into_iter()
+            .flat_map(|d| walk(d).closing_gaps)
+            .filter(|gap| *gap > 0.05 && *gap < stroke)
+            .collect()
+    }
+
+    /// Bounding box of every anchor in the body's paths, rects and circles:
+    /// `(min_x, min_y, max_x, max_y)`.
+    pub fn anchor_box(body: &str) -> (f32, f32, f32, f32) {
+        let mut b = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        let mut take = |x: f32, y: f32| {
+            b = (b.0.min(x), b.1.min(y), b.2.max(x), b.3.max(y));
+        };
+        for d in paths(body) {
+            for (x, y) in walk(d).anchors {
+                take(x, y);
+            }
+        }
+        let attr = |tag: &str, name: &str| -> Option<f32> {
+            tag.split(&format!(" {name}=\""))
+                .nth(1)?
+                .split('"')
+                .next()?
+                .parse()
+                .ok()
+        };
+        for tag in body.split('<').skip(1) {
+            if tag.starts_with("rect") {
+                if let (Some(x), Some(y), Some(w), Some(h)) = (
+                    attr(tag, "x"),
+                    attr(tag, "y"),
+                    attr(tag, "width"),
+                    attr(tag, "height"),
+                ) {
+                    take(x, y);
+                    take(x + w, y + h);
+                }
+            } else if tag.starts_with("circle") {
+                if let (Some(cx), Some(cy), Some(r)) =
+                    (attr(tag, "cx"), attr(tag, "cy"), attr(tag, "r"))
+                {
+                    take(cx - r, cy - r);
+                    take(cx + r, cy + r);
+                }
+            }
+        }
+        b
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn glyph(name: &str) -> &'static str {
+        body(name).unwrap_or_else(|| panic!("no glyph {name:?} in the pack"))
+    }
+
+    /// A closing `z` that lands within a stroke of its start but not on it is
+    /// a stub (the old `bubble` ended 1 pt under where it began). Walks the
+    /// whole pack, so the next hand-drawn glyph with a missed join fails here.
+    #[test]
+    fn no_glyph_closes_with_a_stub() {
+        let broken: Vec<_> = ICONS
+            .iter()
+            .map(|(p, svg)| (*p, lint::stubs(inner(svg), STROKE)))
+            .filter(|(_, stubs)| !stubs.is_empty())
+            .collect();
+        assert!(broken.is_empty(), "stubs in {broken:?}");
+    }
+
+    /// The message menu's glyphs are one set: outline strokes of the pack's
+    /// weight (no `fill`, no `stroke-width` of their own) and one optical size
+    /// (anchors inside the 24 grid's 3…21 band, 13…18 pt across) — Copy,
+    /// Reply, Forward, Reply in DM and Delete read as siblings.
+    #[test]
+    fn message_menu_glyphs_share_one_set_weight_and_size() {
+        let names: Vec<&str> = crate::ui::message_menu::ITEMS
+            .iter()
+            .map(|i| i.glyph())
+            .collect();
+        assert_eq!(names, ["copy", "reply", "forward", "bubble", "trash"]);
+        for name in names {
+            let b = glyph(name);
+            assert!(
+                !b.contains("fill=\"#000\""),
+                "{name}: filled shape in an outline set"
+            );
+            assert!(!b.contains("stroke-width="), "{name}: own stroke weight");
+            assert!(
+                lint::stubs(b, STROKE).is_empty(),
+                "{name}: closing stub {:?}",
+                lint::stubs(b, STROKE)
+            );
+            let (x0, y0, x1, y1) = lint::anchor_box(b);
+            assert!(
+                x0 >= 3.0 && y0 >= 3.0 && x1 <= 21.0 && y1 <= 21.0,
+                "{name}: anchors {:?} leave the 3…21 band",
+                (x0, y0, x1, y1)
+            );
+            let (w, h) = (x1 - x0, y1 - y0);
+            assert!(
+                (13.0..=18.0).contains(&w.max(h)) && w.min(h) >= 12.0,
+                "{name}: {w} × {h} is not the set's optical size"
+            );
+        }
+    }
+
+    /// The bubble: one ellipse plus a tail, meeting at the top — the pen
+    /// returns exactly to its start before `z`, the tail's tip is the lowest
+    /// point and sits left of centre.
+    #[test]
+    fn the_bubble_outline_closes_on_itself_with_a_lower_left_tail() {
+        let b = glyph("bubble");
+        let d = lint::paths(b);
+        assert_eq!(d.len(), 1, "one outline, not several strokes");
+        let walk = lint::walk(d[0]);
+        assert_eq!(walk.closing_gaps, [0.0]);
+        let first = walk.anchors[0];
+        assert_eq!(*walk.anchors.last().unwrap(), first);
+        let tip = walk
+            .anchors
+            .iter()
+            .copied()
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .unwrap();
+        assert!(tip.0 < 12.0 && tip.1 >= 19.0, "tail tip {tip:?}");
+        assert_eq!(first, (12.0, 4.0), "the join is at the top centre");
+        // Every anchor sits on the ellipse or is the tail's tip.
+        for (x, y) in walk.anchors.iter().copied().filter(|a| *a != tip) {
+            let on = ((x - 12.0) / 8.5).powi(2) + ((y - 10.5) / 6.5).powi(2);
+            assert!(
+                (on - 1.0).abs() < 0.02,
+                "({x}, {y}) is off the ellipse: {on}"
+            );
+        }
+    }
+
+    fn near(a: &[(f32, f32)], b: &[(f32, f32)]) -> bool {
+        a.len() == b.len()
+            && a.iter()
+                .zip(b)
+                .all(|(p, q)| (p.0 - q.0).abs() < 1e-4 && (p.1 - q.1).abs() < 1e-4)
+    }
+
+    #[test]
+    fn the_walker_reads_every_command_form() {
+        let w = lint::walk("M1 1h2v2H1V1zm5 5l1 1-1 1Z");
+        assert!(near(
+            &w.anchors,
+            &[
+                (1.0, 1.0),
+                (3.0, 1.0),
+                (3.0, 3.0),
+                (1.0, 3.0),
+                (1.0, 1.0),
+                (6.0, 6.0),
+                (7.0, 7.0),
+                (6.0, 8.0)
+            ]
+        ));
+        // The square returns home; the open chevron closes with a 2-long edge.
+        assert_eq!(w.closing_gaps, [0.0, 2.0]);
+        let arcs = lint::walk("M12 4a8.5 6.5 0 1 1-2.9 12.6A8.5 6.5 0 0 1 12 4z");
+        assert!(near(
+            &arcs.anchors,
+            &[(12.0, 4.0), (9.1, 16.6), (12.0, 4.0)]
+        ));
+        let curves = lint::walk("M0 0c1 1 2 2 3 3s1 1 2 2q1 1 2 2t1 1");
+        assert!(near(
+            &curves.anchors[1..],
+            &[(3.0, 3.0), (5.0, 5.0), (7.0, 7.0), (8.0, 8.0)]
+        ));
+        // `.5.5` is two numbers, as in the pack's hand-written paths.
+        assert!(near(
+            &lint::walk("M.5.5l.5.5").anchors,
+            &[(0.5, 0.5), (1.0, 1.0)]
+        ));
+        // Rects and circles count toward the box.
+        assert_eq!(
+            lint::anchor_box("<rect x=\"9\" y=\"9\" width=\"11\" height=\"11\" rx=\"2\"/><circle cx=\"5\" cy=\"5\" r=\"2\"/>"),
+            (3.0, 3.0, 20.0, 20.0)
+        );
+    }
 }
