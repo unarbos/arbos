@@ -154,12 +154,37 @@ class Lane(threading.Thread):
                 st.setdefault("action_findings", []).append("secrets still paused after machine start (#1664 not effective); the harness lifted the pause")
             rl.relay("PUT", "/me/secrets/settings", {"paused": False})
             time.sleep(act.get("settle_s", 60))
+        elif kind == "rename_owner":
+            # the owner's profile name changes mid-chat (#1908): rows before carry the old label
+            st_me = rl.me()
+            if st.get("owner_old_name") is None:
+                st["owner_old_name"] = ((st_me or {}).get("user") or {}).get("name") or "Long-task eval"
+            code, v = rl.relay("PATCH", "/me", {"name": act["name"]})
+            st["owner_renamed_to"] = act["name"] if code in (200, 204) else None
+            if code not in (200, 204):
+                self.say(f"rename_owner failed: {code} {str(v)[:120]}")
+            time.sleep(act.get("settle_s", 8))
+        elif kind == "restore_owner_name":
+            if st.get("owner_old_name"):
+                rl.relay("PATCH", "/me", {"name": st["owner_old_name"]})
+        elif kind == "named_user_turn":
+            # a scratch user whose profile name differs from the sending device's name: the agent must
+            # address the person (profile), never the device
+            st["named"] = rl.capped_user_turn(act["handle"], None, act["prompt"].replace("{D}", st["D"]), act.get("timeout_s", 240), name=act["name"], device_name=act["device_name"], state_dir="ctl-named", project_name="named-lane", chat_title="address check")
         elif kind == "capped_user_turn":
             # a scratch user with a tiny daily cap; one project; a message that must trip the cap
             st["capped"] = rl.capped_user_turn(act["handle"], act["cap_usd"], act["prompt"].replace("{D}", st["D"]), act.get("timeout_s", 240), second_prompt=act.get("second_prompt"))
         elif kind == "people_dm":
             # a DM between the eval user and a second scratch user, with this lane's agent added
             st["dm_chat"], st["dm_peer_token"] = rl.people_dm_with_agent(act["peer_handle"], self.project)
+            for other in act.get("also_agents") or []:
+                # a second agent in the same people chat (mention-as-object cases, #1926)
+                pid = self.rs["projects"].get(other) or self.rs["projects"].get(other.replace("lane-", ""))
+                if not pid:
+                    self.say(f"also_agents: no project for {other!r} (lanes: {sorted(self.rs['projects'])})")
+                if pid:
+                    rl.relay("POST", f"/chats/{st['dm_chat']}/agents", {"project_id": pid})
+                    st.setdefault("dm_other_agents", {})[other] = pid
             time.sleep(8)
         elif kind == "group_create":
             st["group_chat"] = rl.group_create(self.project, act["with"], act.get("title", "eval group"))
@@ -169,6 +194,7 @@ class Lane(threading.Thread):
             # the named lanes' agents; `chat: "dm"` turns, peer rows and quiet checks run against it
             agents = [self.project] + [rl.ensure_project(n) for n in act.get("with", [])]
             st["dm_chat"], st["dm_peer_token"] = rl.people_group_with_agents(act["peer_handle"], agents, act.get("title", "eval people group"))
+            st["dm_group"] = True  # quiet checks cover every agent in the group, not only this lane's
             time.sleep(8)
         else:
             raise RuntimeError(f"unknown driver action {kind}")
@@ -181,7 +207,7 @@ class Lane(threading.Thread):
         proj_dir = f"/work/{self.project}"
         d_rel = f"lt-{tid}-{tag}"
         D = f"{proj_dir}/{d_rel}"
-        env = {"D": D, "P": proj_dir}
+        env = {"D": D, "P": proj_dir, "WS": self.project, "RUN": tag}
         self.say(f"{tid}: start ({D})")
         t_task0 = time.time()
         usage0 = rl.usage_all(self.project)
@@ -206,7 +232,7 @@ class Lane(threading.Thread):
                 base_prompt = turn["prompt_variants"][sum(map(ord, tag)) % len(turn["prompt_variants"])]
             prompt = base_prompt.replace("{D}", D).replace("{FIXTURES}", FIXTURES).replace("{TAG}", tag_up)
             if turn.get("seed"):
-                code, out = self.box.run_as_ws(self.project, turn["seed"].replace("{D}", D).replace("{P}", proj_dir), env=env, timeout=180)
+                code, out = self.box.run_as_ws(self.project, turn["seed"].replace("{D}", D).replace("{P}", proj_dir).replace("{RUN}", tag), env=env, timeout=180)
                 if "fatal" in out.lower() or (code not in (0, None)):
                     self.say(f"{tid}: seed rc={code}: {out[-200:]}")
             if turn.get("generate"):
@@ -272,12 +298,26 @@ class Lane(threading.Thread):
             if turn.get("expect_no_reply_s"):
                 # a people-chat message not for the agent: it must stay quiet
                 t0 = time.time()
-                rl.ctl("chat", "send", "people", chat_id, prompt, "--timeout", "3", timeout=40)
+                if turn.get("peer"):
+                    rl.people_send_as(task_state["dm_peer_token"], chat_id, prompt.replace("[peer] ", ""))
+                else:
+                    rl.ctl("chat", "send", "people", chat_id, prompt, "--timeout", "3", timeout=40)
                 time.sleep(turn["expect_no_reply_s"])
                 doc = rl.chat_dump("people", chat_id)
-                late = [m for m in doc.get("messages", []) if m.get("role") == "assistant" and (m.get("createdAt") or 0) >= int(t0 * 1000) - 1000 and dr.text_of(m)]
+                mine = f"agent:{self.project}"
+                rows_late = [m for m in doc.get("messages", []) if m.get("role") == "assistant" and (m.get("createdAt") or 0) >= int(t0 * 1000) - 1000 and dr.text_of(m)]
+                # in a people group every agent must stay quiet (respond-gate tasks); in a DM with a second
+                # agent added, only this lane's agent is judged here (the other may be the one addressed)
+                late = rows_late if task_state.get("dm_group") else [m for m in rows_late if (m.get("sender") or mine) == mine]
                 ok = not late
-                turns_out.append({"turn": i, "chat_id": chat_id, "prompt": prompt[:300], "ok": ok, "reasons": [] if ok else [f"the agent answered a message not addressed to it: {dr.text_of(late[0])[:80]!r}"], "ttfr_s": None, "first_status_s": None, "wall_s": turn["expect_no_reply_s"], "timed_out": False, "stalls": 0, "approvals_rejected": [], "routes": [], "tool_calls": 0, "tool_errors": 0, "model_calls": 0, "compactions": 0, "audit_denied": 0, "rubric": None, "truth": {}, "verify_out": "", "reply": "", "excerpt": f"**User (not for the agent):** {prompt}\n\n(agent stayed quiet: {ok})"})
+                reasons_q = [] if ok else [f"{(late[0].get('senderName') or 'the agent')} answered a message not addressed to it: {dr.text_of(late[0])[:80]!r}"]
+                if turn.get("expect_other_agent_reply"):
+                    other_pid = (task_state.get("dm_other_agents") or {}).get(turn["expect_other_agent_reply"])
+                    others = [m for m in rows_late if m.get("sender") == f"agent:{other_pid}"]
+                    if not others:
+                        ok = False
+                        reasons_q.append(f"the addressed agent {turn['expect_other_agent_reply']} did not answer within {turn['expect_no_reply_s']} s")
+                turns_out.append({"turn": i, "chat_id": chat_id, "prompt": prompt[:300], "ok": ok, "reasons": reasons_q, "ttfr_s": None, "first_status_s": None, "wall_s": turn["expect_no_reply_s"], "timed_out": False, "stalls": 0, "approvals_rejected": [], "routes": [], "tool_calls": 0, "tool_errors": 0, "model_calls": 0, "compactions": 0, "audit_denied": 0, "rubric": None, "truth": {}, "verify_out": "", "reply": "", "excerpt": f"**User (not for the agent):** {prompt}\n\n(agent stayed quiet: {ok})"})
                 self.say(f"{tid} quiet turn {i}: {'ok' if ok else 'FAIL'}")
                 continue
             if turn.get("peer"):
@@ -300,7 +340,7 @@ class Lane(threading.Thread):
                 turn_spec = dict(turn, prompt=prompt)
                 for k in ("verify", "show"):
                     if turn_spec.get(k):
-                        turn_spec[k] = turn_spec[k].replace("{D}", D).replace("{P}", proj_dir)
+                        turn_spec[k] = turn_spec[k].replace("{D}", D).replace("{P}", proj_dir).replace("{RUN}", tag)
                 ctx = {"reply": reply, "all_text": reply, "dm": {"reply": reply, "all_text": reply, "tool_parts": 0, "routes": []}, "res": {"ttfr_s": ttfr, "wall_s": round(time.time() - t0, 1), "timed_out": not reply}, "gen_truth": gen_truth, "state": task_state}
                 g = gr.grade_turn(turn_spec, ctx, self.box, self.project, env)
                 turns_out.append({"turn": i, "chat_id": chat_id, "prompt": prompt[:300], "ok": g["ok"], "reasons": g["reasons"], "ttfr_s": ttfr, "first_status_s": None, "wall_s": round(time.time() - t0, 1), "timed_out": not reply, "stalls": 0, "approvals_rejected": [], "routes": [], "tool_calls": 0, "tool_errors": 0, "model_calls": 0, "compactions": 0, "audit_denied": 0, "rubric": g["rubric"], "truth": g["truth"], "verify_out": g["verify_out"], "reply": reply[:1500], "excerpt": f"**Peer:** {text}\n\n**Assistant:** {reply[:900]}"})
@@ -351,7 +391,7 @@ class Lane(threading.Thread):
             turn_spec["prompt"] = prompt
             for k in ("verify", "show"):
                 if turn_spec.get(k):
-                    turn_spec[k] = turn_spec[k].replace("{D}", D).replace("{P}", proj_dir)
+                    turn_spec[k] = turn_spec[k].replace("{D}", D).replace("{P}", proj_dir).replace("{RUN}", tag)
             ctx = {"reply": dm.get("reply") or dm.get("all_text") or "", "all_text": dm.get("all_text"), "dm": dm, "res": res, "gen_truth": gen_truth, "state": task_state}
             for k in ("reply_regex", "reply_regex_not"):
                 if turn_spec.get(k) and task_state.get("old_name"):
@@ -360,12 +400,19 @@ class Lane(threading.Thread):
             if turn.get("reply_from") or turn.get("silent_agents"):
                 # who answered in a shared chat: assistant rows after the send, by sender handle
                 rows = [m for m in (res.get("doc") or {}).get("messages", []) if m.get("role") == "assistant" and (m.get("createdAt") or 0) >= t0_ms - 2000 and dr.text_of(m)]
-                repliers = sorted({(m.get("senderHandle") or "").lower() for m in rows})
+                repliers = sorted({(m.get("senderHandle") or m.get("senderName") or (m.get("sender") or "").split(":")[-1]).lower() for m in rows})
                 g["truth"]["repliers"] = repliers
                 want = (turn.get("reply_from") or "").lower()
                 if want and want not in repliers:
                     g["ok"] = False
                     g["reasons"].append(f"no reply from {want} (repliers: {repliers})")
+                also = (turn.get("also_reply_from") or "").lower()
+                if also and also not in repliers:
+                    g["ok"] = False
+                    g["reasons"].append(f"no reply from {also} (repliers: {repliers})")
+                if turn.get("max_repliers") is not None and len(repliers) > turn["max_repliers"]:
+                    g["ok"] = False
+                    g["reasons"].append(f"{len(repliers)} agents answered ({repliers}); at most {turn['max_repliers']} should")
                 for h in turn.get("silent_agents", []):
                     if h.lower() in repliers:
                         g["ok"] = False
@@ -438,18 +485,26 @@ class Lane(threading.Thread):
         vw_rec = None
         if vw:
             deadline = time.time() + vw["wait_s"]
-            verify = vw["verify"].replace("{D}", D)
+            verify = (vw.get("verify") or "echo PASS").replace("{D}", D)
             out = ""
+            doc = {"messages": []}
             while time.time() < deadline:
                 code, out = self.box.run_as_ws(self.project, verify, env=env, timeout=120)
-                if "PASS" in out:
-                    # the files are there; give the agent's own final note time to land
+                doc = rl.chat_dump(self.project, first_chat)
+                rows = [m for m in doc.get("messages", []) if m.get("role") == "assistant"]
+                text_ok = (not vw.get("text_regex")) or bool(re.search(vw["text_regex"], dr.doc_metrics(rows).get("all_text") or "", re.I | re.S))
+                if "PASS" in out and text_ok and not any(m.get("status") == "streaming" for m in rows):
+                    # the files (and the words, when asked for) are there; let the agent's final note land
                     time.sleep(vw.get("settle_s", 0))
                     break
                 time.sleep(20)
             doc = rl.chat_dump(self.project, first_chat)
             rows = [m for m in doc.get("messages", []) if m.get("role") == "assistant"]
             dm_all = dr.doc_metrics(rows)
+            if vw.get("text_regex") and not re.search(vw["text_regex"], dm_all.get("all_text") or "", re.I | re.S):
+                reasons.append(f"no delivered bubble matches /{vw['text_regex'][:60]}/ within {vw['wait_s']} s")
+            if vw.get("text_regex_not") and re.search(vw["text_regex_not"], dm_all.get("all_text") or "", re.I):
+                reasons.append(f"a delivered bubble matches forbidden /{vw['text_regex_not'][:50]}/")
             vw_rec = {"verify_out": out[-600:], "waited_s": round(vw["wait_s"] - (deadline - time.time()), 1), "progress_rows": dm_all["progress_rows"], "all_text": (dm_all["all_text"] or "")[:4000]}
             (self.out / f"{tid}.final.doc.json").write_text(json.dumps(doc, indent=1))
             if "PASS" not in out:
@@ -498,6 +553,21 @@ class Lane(threading.Thread):
                 reasons.append(f"a sentence appears twice in one bubble: {checks['repeated_sentences'][:2]}")
             if dc.get("no_truncated_reply") and checks["truncated"]:
                 reasons.append(f"a done bubble ends mid-sentence: {checks['truncated'][:2]}")
+            if dc.get("require_part_kind"):
+                # a structured part (e.g. a `chart` from post_chart) must exist in an assistant row of this task
+                want = dc["require_part_kind"]
+                # the post can land a few seconds after the turn's last dump: read the chats again now
+                fresh = []
+                for c in {m.get("chat_id") for m in turns_out if m.get("chat_id")}:
+                    try:
+                        fresh.append(rl.chat_dump(self.project, c))
+                    except Exception:  # noqa: BLE001
+                        pass
+                found = [p for d in (fresh or all_docs) for m in d.get("messages", []) if m.get("role") == "assistant" for p in m.get("parts", []) if p.get("kind") == want]
+                if not found:
+                    reasons.append(f"no assistant row carries a `{want}` part (the tool was not used or its post did not land)")
+                else:
+                    task_state[f"parts_{want}"] = [{k: v for k, v in p.items() if k != "chart"} | ({"series": len((p.get("chart") or {}).get("series") or [])} if want == "chart" else {}) for p in found]
             if dc.get("no_wrong_self_identity"):
                 # a bubble from the renamed agent must never introduce itself by the old name
                 old_name = task_state.get("old_name") or dc.get("old_name")
@@ -526,7 +596,7 @@ class Lane(threading.Thread):
             # and anything the agent installed into the workspace home for it go after grading
             self.box.run_as_ws(self.project, f"rm -rf {D} 2>/dev/null; rm -rf {proj_dir}/.arbos/home/.rustup {proj_dir}/.arbos/home/.cargo 2>/dev/null; true", timeout=120)
         if task.get("cleanup"):
-            self.box.run_as_ws(self.project, task["cleanup"].replace("{D}", D).replace("{P}", proj_dir), env=env, timeout=120)
+            self.box.run_as_ws(self.project, task["cleanup"].replace("{D}", D).replace("{P}", proj_dir).replace("{RUN}", tag), env=env, timeout=120)
         if task.get("cleanup_routines"):
             for r in rl.routines(self.project):
                 if r.get("id"):
@@ -596,7 +666,8 @@ def doc_checks(docs, after_ms=None):
                     texts_after.append(text)
                 # a finished bubble that stops on a comma / dash / mid-word (no closing punctuation,
                 # bracket, quote or code tick) was cut off (#1411)
-                if m.get("status") == "done" and len(text) > 30 and not re.search(r"[.!?…:)\]\"'`*_\d]\s*$|\n\s*[-•*\d].*$|^[\w ,\-]+$|^(\w[\w\- ]*,\s*)+\w[\w\- ]*$", text):
+                # a bubble that ends on a markdown table row (`| … |`) or a code fence is complete
+                if m.get("status") == "done" and len(text) > 30 and not re.search(r"[.!?…:)\]\"'`*_\d|]\s*$|```\s*$|\n\s*[-•*\d].*$|^[\w ,\-]+$|^(\w[\w\- ]*,\s*)+\w[\w\- ]*$", text):
                     truncated.append(text[-60:])
                 sentences = [x.strip() for x in re.split(r"(?<=[.!?])\s+", text) if len(x.strip()) > 25]
                 for x in sentences:
@@ -616,6 +687,8 @@ def main():
     ap.add_argument("--run-id", default=time.strftime("%Y%m%dT%H%M"))
     ap.add_argument("--out", default="")
     ap.add_argument("--dry-run", action="store_true", help="list the tasks per lane and exit")
+    ap.add_argument("--min-headroom-usd", type=float, default=float(os.environ.get("LT_MIN_HEADROOM_USD", "1.0")), help="refuse to start when the relay cap has less headroom than this (#1736 rules)")
+    ap.add_argument("--skip-parity", action="store_true", help="leave the Grok-parity prompts out (the duplex owner runs their own scorecards; they are ~55 %% of a full run's cost)")
     ap.add_argument("--allow-stale-seed", action="store_true", help="run even when the box's pi-ext seed does not match its image commit (#1702)")
     ap.add_argument("--refresh-stale-seed", action="store_true", help="when the seed is stale, re-copy /etc/arbos from the image into the box's persisted /etc and restart it (test box only)")
     args = ap.parse_args()
@@ -624,11 +697,16 @@ def main():
         only = (only or set()) | set(SUBSETS[args.subset])
     lanes = set(args.lanes.split(",")) if args.lanes else None
     tasks = load_tasks(only, lanes)
+    if args.skip_parity:
+        tasks = [t for t in tasks if not t.get("parity")]
     if args.dry_run:
         for ln in LANES:
             print(ln, [t["id"] for t in tasks if t["lane"] == ln])
         return
     rl.ensure_test_user(TEST_HANDLE, "Long-task eval")
+    # every run on its own signed-in device: a refresh token consumed by another process (a waiter,
+    # a check, a crashed run) cannot take the run down mid-way
+    print(f"preflight: device {rl.fresh_device(f'run {args.run_id}')} minted for this run", flush=True)
     m = rl.machine()
     if m.get("state") != "awake":
         print("machine not awake; starting", flush=True)
@@ -650,6 +728,7 @@ def main():
     seed = box.pi_seed(HERE.parent.parent)
     seed_line = lambda s: f"pi-ext seed {'ok' if s['ok'] else 'MISMATCH' if s['ok'] is False else 'unverified'} — {s['reason']} (image {s['image']}, source_sha {str(s.get('source_sha'))[:12]}, tag commit {str(s.get('tag_commit'))[:12]})"  # noqa: E731
     print(f"preflight: {seed_line(seed)}", flush=True)
+    print(f"preflight: relay binary {box.relay_build()}", flush=True)
     if seed["ok"] is False and args.refresh_stale_seed:
         # the persisted /etc of a host-sandbox box keeps the seed of the image that created it (fleet.rs
         # seed_etc runs once); re-copy /etc/arbos from the current image and restart so agentd re-seeds
@@ -673,6 +752,8 @@ def main():
     spent, cap = rl.spent_today()
     if cap and cap - spent < args.budget_usd:
         print(f"WARNING: daily cap headroom ${cap - spent:.2f} < budget ${args.budget_usd}; the relay will stop the agent first", flush=True)
+    if cap and cap - spent < args.min_headroom_usd:
+        raise SystemExit(f"preflight: blocked — lt-eval spent ${spent:.2f} of ${cap:.2f} today, headroom ${cap - spent:.2f} < ${args.min_headroom_usd} (--min-headroom-usd); not a result")
     out_dir = Path(args.out or (HERE / "results" / args.run_id))
     out_dir.mkdir(parents=True, exist_ok=True)
     log = (out_dir / "run.log").open("a")
@@ -690,6 +771,7 @@ def main():
         "image": box.image,
         "agentd": box.agentd_sha(),
         "pi_seed": seed,
+        "relay_build": box.relay_build(),
         "provider": box.provider,
         "user": box.user,
         "projects": projects,
@@ -710,8 +792,25 @@ def main():
         late_lane.start()
         late_lane.join()
         results += late_lane.results
+    # Nothing of the run may keep spending after it: delete every routine on the lane projects. s1 creates
+    # an every-minute ticker that s3 deletes two tasks later — in run 7 s3 was skipped on budget and the
+    # ticker fired a model turn a minute for 14 h, which emptied the day's cap (2026-10-26).
+    swept = 0
+    for ln, pid in run_state["projects"].items():
+        try:
+            for r in rl.routines(pid):
+                if r.get("id"):
+                    rl.delete_routine(pid, r["id"])
+                    swept += 1
+        except Exception as e:  # noqa: BLE001
+            print(f"routine sweep on lane {ln} failed: {e}", flush=True)
+    if swept:
+        print(f"end-of-run sweep: deleted {swept} leftover routine(s)", flush=True)
     spent_end, _ = rl.spent_today()
     meta["ended_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    meta["relay_build_at_end"] = box.relay_build()
+    if meta.get("relay_build") and meta["relay_build_at_end"] != meta["relay_build"]:
+        print(f"NOTE: the relay binary changed during the run: {meta['relay_build']} -> {meta['relay_build_at_end']}; every task reads rows through a client path (arbosctl), so verdicts around the change are suspect", flush=True)
     meta["spent_today_at_end"] = spent_end
     meta["run_cost_usd"] = round(spent_end - spent, 4)
     meta["judge_cost_usd"] = round(sum(r.get("judge_usd") or 0 for r in results), 4)
