@@ -716,16 +716,10 @@ struct HomeView: View {
     private var emptyState: some View {
         VStack(spacing: 10) {
             if let err = model.registryError {
-                Text("Could not reach the relay")
-                    .font(theme.font(Theme.body, weight: .semibold))
-                    .foregroundStyle(theme.text)
-                Text(err)
-                    .font(theme.font(Theme.small))
-                    .foregroundStyle(theme.muted)
-                    .multilineTextAlignment(.center)
-                Button("Try again") { Task { await model.refreshRegistry() } }
-                    .font(theme.font(Theme.small, weight: .semibold))
-                    .foregroundStyle(theme.text)
+                // Home's note where the list would be: the shared element with Try again.
+                ErrorNote(id: "home-registry-error", error: err, detailsOpen: $model.registryErrorDetailsOpen,
+                          onTryAgain: { Task { await model.refreshRegistry() } })
+                    .padding(.horizontal, 16)
             } else if model.link == .connecting && !model.isFixture {
                 ProgressView().tint(theme.muted)
                 Text(slowConnect ? "Still connecting…" : "Loading your agents…")

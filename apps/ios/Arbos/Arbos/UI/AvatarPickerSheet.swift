@@ -71,11 +71,12 @@ final class AvatarSourceState: ObservableObject {
     @Published var prompt = ""
     @Published var generating = false
     @Published var generatedKey: String?
-    /// The failure as one short sentence (the relay's, or ours for a transport error).
-    @Published var errorText: String?
-    /// The raw words behind it — shown only behind the Details disclosure (Jacob, 2026-10-26).
-    @Published var errorDetail: String?
+    /// The last failure, drawn by the shared `ErrorNote` at the top of the sheet's body (Jacob,
+    /// 2026-10-26, [feedback error-messages-ios-2026-10-26]): one sentence, Try again, Details.
+    @Published var error: UserError?
     @Published var detailsOpen = false
+    /// The sentence alone (the older name, read-only).
+    var errorText: String? { error?.sentence }
     /// When the running generation started (the status line counts the seconds).
     @Published var startedAt: Date?
     @Published var photoItem: PhotosPickerItem?
@@ -86,37 +87,31 @@ final class AvatarSourceState: ObservableObject {
         guard !generating else { return }
         generating = true
         startedAt = Date()
-        errorText = nil
-        errorDetail = nil
+        error = nil
         detailsOpen = false
         Task { @MainActor in
             do {
                 generatedKey = try await work()
             } catch {
-                let (sentence, detail) = Self.failureWords(error)
-                errorText = sentence
-                errorDetail = detail
+                self.error = Self.failure(error)
             }
             generating = false
             startedAt = nil
         }
     }
 
-    /// What the sheet says when a generation failed: one short sentence and the raw words for
-    /// Details. A relay answer keeps its own sentence ("Couldn't generate the image. The server
-    /// took too long.", "That prompt was refused — try a different one."); a client-side
-    /// timeout gets the same timeout sentence; anything else "Couldn't reach the server".
+    /// What the sheet says when a generation failed — the shared classifier under the verb
+    /// "generate the image": a relay timeout / refusal keeps its class, a client-side timeout
+    /// reads "The server took too long.", no network "You're offline."; the raw words ride in
+    /// `raw` for Details / Copy, never in the sentence.
+    static func failure(_ error: Error) -> UserError {
+        UserError.classify("generate the image", error)
+    }
+
+    /// The older pair, for callers that still read it: (sentence, raw words).
     static func failureWords(_ error: Error) -> (String, String?) {
-        if let relay = error as? RelayError {
-            let sentence = relay.message.isEmpty ? "Couldn't generate the image." : relay.message
-            let code = relay.type.map { "HTTP \(relay.status) \($0)" } ?? "HTTP \(relay.status)"
-            return (sentence, relay.detail.map { "\(code) — \($0)" } ?? code)
-        }
-        let ns = error as NSError
-        if ns.domain == NSURLErrorDomain && ns.code == NSURLErrorTimedOut {
-            return ("Couldn't generate the image. The server took too long.", error.localizedDescription)
-        }
-        return ("Couldn't reach the server. Check your connection and try again.", error.localizedDescription)
+        let e = failure(error)
+        return (e.sentence, e.raw.isEmpty ? nil : e.raw)
     }
 
     /// Seconds since Generate was pressed, while it runs.
@@ -151,7 +146,7 @@ final class AvatarSourceState: ObservableObject {
         // the 1024 px square through the layer's linear filter.
         uploadPreview = encoded.flatMap(AvatarImageCache.decode) ?? square
         uploadJpeg = encoded
-        errorText = nil
+        error = nil
     }
 }
 
@@ -198,8 +193,9 @@ struct AvatarSourceBody<Preview: View>: View {
     @FocusState private var promptFocused: Bool
 
     private var canGenerate: Bool { !state.prompt.trimmingCharacters(in: .whitespaces).isEmpty && !state.generating }
+    /// The status line never carries a failure (that is the note at the top of the body):
+    /// progress, the keep hint, or the prompt hint.
     private func statusLine(_ now: Date) -> String {
-        if let errorText = state.errorText { return errorText }
         if let s = state.generatingFor(now) { return "Painting a picture — \(s) s" }
         if state.generatedKey != nil { return keepsLine }
         return "A few words about the picture you want."
@@ -239,59 +235,46 @@ struct AvatarSourceBody<Preview: View>: View {
             .disabled(!canGenerate)
             .padding(.top, 12)
             .accessibilityIdentifier("avatar-generate-go")
-            // The preview slot: the picture (dimmed under a spinner while painting), or — after
-            // a failure with Details open — the raw words, clamped to the slot (Jacob,
-            // 2026-10-26: a raw transport error must never run into the footer).
-            if state.detailsOpen, state.errorText != nil {
-                Text(state.errorDetail ?? "No further detail.")
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(AvatarSheetPalette.labelMuted)
-                    .lineLimit(6)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(10)
-                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(AvatarSheetPalette.pillBg))
-                    .padding(.horizontal, 16.5)
-                    .padding(.top, 16)
-                    .accessibilityIdentifier("avatar-generate-detail")
-            } else {
-                preview()
-                    .opacity(state.generating ? 0.4 : 1)
-                    .overlay {
-                        if state.generating {
-                            ProgressView().controlSize(.large).tint(theme.accent)
-                                .accessibilityIdentifier("avatar-generate-spinner")
-                        }
-                    }
-            }
-            // One line, never more; an error gets a Details toggle beside the sentence.
-            TimelineView(.periodic(from: .now, by: 1)) { ctx in
-                HStack(spacing: 8) {
-                    Text(statusLine(ctx.date))
-                        .font(.system(size: 12))
-                        .foregroundStyle(state.errorText == nil ? AvatarSheetPalette.placeholder : theme.danger)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .accessibilityIdentifier("avatar-generate-status")
-                    if state.errorText != nil {
-                        Button { state.detailsOpen.toggle() } label: {
-                            Text(state.detailsOpen ? "Hide details" : "Details")
-                                .font(.system(size: 12))
-                                .foregroundStyle(AvatarSheetPalette.labelMuted)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityIdentifier("avatar-generate-details")
+            // The preview slot: the picture, dimmed under a spinner while painting. A failure is
+            // the shared note at the top of the body (`errorNote`), never anything near the footer.
+            preview()
+                .opacity(state.generating ? 0.4 : 1)
+                .overlay {
+                    if state.generating {
+                        ProgressView().controlSize(.large).tint(theme.accent)
+                            .accessibilityIdentifier("avatar-generate-spinner")
                     }
                 }
-                .padding(.horizontal, 16.5)
-                .padding(.top, 12)
+            // One line, never more.
+            TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                Text(statusLine(ctx.date))
+                    .font(.system(size: 12))
+                    .foregroundStyle(AvatarSheetPalette.placeholder)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .accessibilityIdentifier("avatar-generate-status")
+                    .padding(.horizontal, 16.5)
+                    .padding(.top, 12)
             }
         }
         .frame(maxWidth: .infinity)
     }
 
+    /// The note for the top of a sheet's body (the picker's and the Create sheets'): inset like
+    /// the field, `ErrorNote.gap` under it. Try again re-sends the prompt.
+    @ViewBuilder
+    static func errorNote(_ state: AvatarSourceState, generate: @escaping () -> Void) -> some View {
+        if let error = state.error {
+            ErrorNote(id: "avatar-generate-error", error: error,
+                      detailsOpen: Binding(get: { state.detailsOpen }, set: { state.detailsOpen = $0 }),
+                      onTryAgain: generate)
+                .padding(.horizontal, 16.5)
+                .padding(.bottom, ErrorNote.gap)
+        }
+    }
+
     private var pillLabel: String {
         if state.generating { return "Generating…" }
-        if state.errorText != nil { return "Try again" }
         return state.generatedKey == nil ? "Generate" : "Generate again"
     }
 
@@ -349,7 +332,7 @@ struct AvatarPickerSheet: View {
     private var generating: Bool { source.generating }
     private var errorText: String? {
         get { source.errorText }
-        nonmutating set { source.errorText = newValue }
+        nonmutating set { if newValue == nil { source.error = nil } }
     }
 
     // Grok's dark sheet palette, as the Create sheet has it.
@@ -433,6 +416,10 @@ struct AvatarPickerSheet: View {
         VStack(spacing: 0) {
             bar
             ScrollView(showsIndicators: false) {
+                // The note first (Jacob 2026-10-26): under the bar, before the field; the body
+                // below moves down, the footer never moves.
+                AvatarSourceBody<EmptyView>.errorNote(source, generate: generate)
+                    .padding(.top, tab == .generate ? 12 : 0)
                 switch tab {
                 case .bot: botBody
                 case .generate, .upload:

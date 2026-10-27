@@ -39,6 +39,7 @@ struct QuestionCard: View {
     @State private var offerValue = ""
     @State private var offerShow = false
     @State private var offerSeeded = false
+    @State private var handoffErrorDetailsOpen = false
     @FocusState private var offerFocus: OfferField?
 
     private enum OfferField { case name, value }
@@ -194,12 +195,10 @@ struct QuestionCard: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.leading, 1)
                     .accessibilityIdentifier("secret-offer-foot")
-                if case .failed(let why) = handoff {
-                    Text("\(why) Try again.")
-                        .font(theme.font(Theme.tiny))
-                        .foregroundStyle(theme.danger)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(.leading, 2)
+                if case .failed(let error) = handoff {
+                    // The card's one note (Jacob 2026-10-26); the value was forgotten on Save, so
+                    // there is no Try again — the field above is the retry.
+                    ErrorNote(id: "question-card-error", error: error, detailsOpen: $handoffErrorDetailsOpen)
                 }
             } else if picked.contains("saved") || { if case .saved = handoff { return true }; return false }() {
                 Text("\(agent) can use it. Where it may be used is set the first time it is used. Manage it in Settings → Secrets.")
