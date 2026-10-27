@@ -130,7 +130,7 @@ extension AppModel {
             devices = try await relay.devices()
             devicesError = nil
         } catch {
-            devicesError = (error as? RelayError).map { $0.message.isEmpty ? "HTTP \($0.status)" : $0.message } ?? error.localizedDescription
+            devicesError = UserError.classify("load your devices", error)
         }
         devicesLoaded = true
     }
@@ -144,8 +144,7 @@ extension AppModel {
             do {
                 try await relay.revokeDevice(id)
             } catch {
-                let text = (error as? RelayError).map { $0.message.isEmpty ? "HTTP \($0.status)" : $0.message } ?? error.localizedDescription
-                notice = Notice(text: "Sign out device: \(text)")
+                fail("sign out that device", error)
             }
             await refreshDevices()
         }

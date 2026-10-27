@@ -234,7 +234,7 @@ extension AppModel {
             await startMatrixIfNeeded()
             return true
         } catch {
-            notice = Notice(text: "Could not create the server: \(error.localizedDescription)")
+            fail("create the server", error)
             return false
         }
     }
@@ -249,9 +249,10 @@ extension AppModel {
             return true
         } catch {
             let type = (error as? RelayError)?.type
-            notice = Notice(text: type == "banned" ? "You can't join this server."
-                            : type == "not_found" || (error as? RelayError)?.status == 404 ? "That invite link is not valid."
-                            : "Could not join the server: \(error.localizedDescription)")
+            let said: String? = type == "banned" ? "You can't join this server."
+                : type == "not_found" || (error as? RelayError)?.status == 404 ? "That invite link is not valid."
+                : nil
+            fail(said.map { UserError.refused("join the server", $0) } ?? UserError.classify("join the server", error))
             return false
         }
     }
@@ -266,10 +267,11 @@ extension AppModel {
             return true
         } catch {
             let type = (error as? RelayError)?.type
-            notice = Notice(text: type == "banned" ? "You can't join this server."
-                            : type == "invite_required" ? "This server needs an invite link."
-                            : type == "not_found" || (error as? RelayError)?.status == 404 ? "That server is not available."
-                            : "Could not join the server: \(error.localizedDescription)")
+            let said: String? = type == "banned" ? "You can't join this server."
+                : type == "invite_required" ? "This server needs an invite link."
+                : type == "not_found" || (error as? RelayError)?.status == 404 ? "That server is not available."
+                : nil
+            fail(said.map { UserError.refused("join the server", $0) } ?? UserError.classify("join the server", error))
             return false
         }
     }
@@ -293,7 +295,7 @@ extension AppModel {
             await refreshServers()
             return true
         } catch {
-            notice = Notice(text: "Server picture not saved: \(error.localizedDescription)")
+            fail("save the server picture", error)
             await refreshServers()
             return false
         }
@@ -310,7 +312,7 @@ extension AppModel {
             _ = try await relay.putBlob(projectId: "servers:\(id)", key: key, mime: PictureMaster.mime(jpeg), data: jpeg)
             return await setServerImageKey(id, key: key)
         } catch {
-            notice = Notice(text: "Could not upload the picture: \(error.localizedDescription)")
+            fail("upload the picture", error)
             return false
         }
     }
@@ -324,7 +326,7 @@ extension AppModel {
             await refreshServers()
             return true
         } catch {
-            notice = Notice(text: "Server picture not saved: \(error.localizedDescription)")
+            fail("save the server picture", error)
             await refreshServers()
             return false
         }
@@ -348,7 +350,7 @@ extension AppModel {
             await refreshServers()
             return true
         } catch {
-            notice = Notice(text: "Could not rename the server: \(error.localizedDescription)")
+            fail("rename the server", error)
             await refreshServers()
             return false
         }
@@ -362,7 +364,7 @@ extension AppModel {
             await refreshServer(id)
             return true
         } catch {
-            notice = Notice(text: "Could not update the server: \(error.localizedDescription)")
+            fail("update the server", error)
             await refreshServers()
             return false
         }
@@ -375,7 +377,7 @@ extension AppModel {
             forgetServer(id)
             return true
         } catch {
-            notice = Notice(text: "Could not delete the server: \(error.localizedDescription)")
+            fail("delete the server", error)
             return false
         }
     }
@@ -386,7 +388,7 @@ extension AppModel {
             forgetServer(id)
             return true
         } catch {
-            notice = Notice(text: "Could not leave the server: \(error.localizedDescription)")
+            fail("leave the server", error)
             return false
         }
     }
@@ -416,7 +418,7 @@ extension AppModel {
             await refreshServers()
             return channel(c.id) ?? c
         } catch {
-            notice = Notice(text: "Could not create the channel: \(error.localizedDescription)")
+            fail("create the channel", error)
             return nil
         }
     }
@@ -429,7 +431,7 @@ extension AppModel {
             await refreshServers()
             return true
         } catch {
-            notice = Notice(text: "Could not rename the channel: \(error.localizedDescription)")
+            fail("rename the channel", error)
             return false
         }
     }
@@ -444,7 +446,7 @@ extension AppModel {
         do {
             try await relay.patchChannel(serverId: channel.serverId, channelId: channel.id, topic: topic)
         } catch {
-            notice = Notice(text: "Could not change the topic: \(error.localizedDescription)")
+            fail("change the topic", error)
         }
         await refreshServers()
     }
@@ -463,7 +465,7 @@ extension AppModel {
         do {
             try await relay.patchChannel(serverId: channel.serverId, channelId: channel.id, restricted: restricted)
         } catch {
-            notice = Notice(text: "Could not change who posts: \(error.localizedDescription)")
+            fail("change who posts", error)
         }
         await refreshServers()
     }
@@ -519,7 +521,7 @@ extension AppModel {
         do {
             try await relay.archiveChannel(serverId: channel.serverId, channelId: channel.id, archived: archived)
         } catch {
-            notice = Notice(text: "Could not \(archived ? "archive" : "unarchive") the channel: \(error.localizedDescription)")
+            fail(archived ? "archive the channel" : "unarchive the channel", error)
         }
         await refreshServers()
     }
@@ -535,7 +537,9 @@ extension AppModel {
             await refreshServers()
             return true
         } catch {
-            notice = Notice(text: (error as? RelayError)?.status == 409 ? "#general stays." : "Could not delete the channel: \(error.localizedDescription)")
+            fail((error as? RelayError)?.status == 409
+                 ? UserError.refused("delete the channel", "#general stays.")
+                 : UserError.classify("delete the channel", error))
             return false
         }
     }
@@ -547,7 +551,7 @@ extension AppModel {
         for uid in userIds {
             do { try await relay.addServerMember(serverId: serverId, userId: uid) } catch {
                 ok = false
-                notice = Notice(text: "Could not add them: \(error.localizedDescription)")
+                fail("add them", error)
             }
         }
         await refreshServer(serverId)
@@ -560,7 +564,7 @@ extension AppModel {
             _ = try await relay.createServerInvite(id, expires: expires, maxUses: singleUse ? 1 : nil)
             await refreshServer(id)
         } catch {
-            notice = Notice(text: "Could not make an invite link: \(error.localizedDescription)")
+            fail("make an invite link", error)
         }
     }
 
@@ -570,7 +574,7 @@ extension AppModel {
             servers[si].invites.removeAll { $0.id == inviteId }
         }
         do { try await relay.revokeServerInvite(id, inviteId: inviteId) } catch {
-            notice = Notice(text: "Could not revoke the link: \(error.localizedDescription)")
+            fail("revoke the link", error)
         }
         await refreshServer(id)
     }
@@ -588,7 +592,7 @@ extension AppModel {
             if let i = servers.firstIndex(where: { $0.id == id }) { servers[i].invite = inv }
             return inv
         } catch {
-            notice = Notice(text: "Could not reset the invite link: \(error.localizedDescription)")
+            fail("reset the invite link", error)
             return nil
         }
     }
@@ -597,7 +601,7 @@ extension AppModel {
         do {
             try await relay.setServerMemberRole(serverId: serverId, userId: userId, role: role)
         } catch {
-            notice = Notice(text: "Could not change the role: \(error.localizedDescription)")
+            fail("change the role", error)
         }
         await refreshServer(serverId)
     }
@@ -606,7 +610,7 @@ extension AppModel {
         do {
             try await relay.removeServerMember(serverId: serverId, userId: userId, ban: ban)
         } catch {
-            notice = Notice(text: "Could not remove the member: \(error.localizedDescription)")
+            fail("remove the member", error)
         }
         await refreshServer(serverId)
     }
@@ -774,7 +778,7 @@ extension AppModel {
     func sendChannel(chatId channelId: Id, text: String) {
         guard let c = channel(channelId), let me = user else { return }
         guard let client = matrixClient, let roomId = channelRoomId(c) else {
-            notice = Notice(text: "Not connected to the server yet.")
+            setSendError(channelId, UserError.of("send your message", .offline(deviceOffline: false), "Not connected to the server yet."))
             return
         }
         let messageId = newId()
@@ -791,7 +795,7 @@ extension AppModel {
                 _ = try await client.sendText(roomId: roomId, text: text, localId: messageId)
             } catch {
                 channelRows[channelId]?.removeAll { $0.id == messageId }
-                notice = Notice(text: "Could not send: \(error.localizedDescription)")
+                fail("send your message", error)
             }
         }
     }
