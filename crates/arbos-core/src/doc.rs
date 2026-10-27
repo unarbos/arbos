@@ -5,6 +5,8 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeSet, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use loro::event::DiffEvent;
 pub use loro::VersionVector;
@@ -273,6 +275,25 @@ pub struct ChatDoc {
     live_text: RefCell<HashMap<(String, String), LoroText>>,
     /// Nesting depth for [`Self::transact`]. Only the outermost call commits.
     txn_depth: Cell<u32>,
+    /// Set when a value was removed from this doc's state (a secret redaction or scrub, made
+    /// here or imported): the holder persists at once. Cleared by [`Self::take_history_dirty`].
+    history_dirty: Cell<bool>,
+    /// Sticky twin of `history_dirty`: once a value was removed, every [`Self::snapshot`] this
+    /// doc exports is shallow (state at the frontier, no older ops), so no persisted copy —
+    /// box, relay checkpoint, device store — carries the old text again.
+    shallow_mode: Cell<bool>,
+    /// Set from inside Loro's diff callback when an import (or a local write) stamps a
+    /// message `redactedAt`; folded into the two cells above by [`Self::sync_redaction_flag`].
+    redaction_seen: Arc<AtomicBool>,
+    _redaction_sub: loro::Subscription,
+}
+
+/// Does a diff touch a message's `redactedAt` (a secret redaction arriving)?
+fn diff_marks_redaction(event: &DiffEvent<'_>) -> bool {
+    event.events.iter().any(|d| match &d.diff {
+        loro::event::Diff::Map(m) => m.updated.keys().any(|k| &**k == "redactedAt"),
+        _ => false,
+    })
 }
 
 /// Optional fields for a client user-message write (crdt-sync §6.2).
@@ -490,10 +511,29 @@ impl ChatDoc {
             doc.set_peer_id(peer).expect("peer id");
         }
         doc.set_record_timestamp(record_timestamps);
+        let redaction_seen = Arc::new(AtomicBool::new(false));
+        let seen = redaction_seen.clone();
+        let sub = doc.subscribe_root(Arc::new(move |e: DiffEvent<'_>| {
+            if diff_marks_redaction(&e) {
+                seen.store(true, Ordering::Relaxed);
+            }
+        }));
         Self {
             doc,
             live_text: RefCell::new(HashMap::new()),
             txn_depth: Cell::new(0),
+            history_dirty: Cell::new(false),
+            shallow_mode: Cell::new(false),
+            redaction_seen,
+            _redaction_sub: sub,
+        }
+    }
+
+    /// Fold what the diff callback saw into the flags (called by every reader of them).
+    fn sync_redaction_flag(&self) {
+        if self.redaction_seen.swap(false, Ordering::Relaxed) {
+            self.history_dirty.set(true);
+            self.shallow_mode.set(true);
         }
     }
 
@@ -565,7 +605,9 @@ impl ChatDoc {
             .unwrap_or_default()
     }
 
-    /// Full snapshot after committing pending edits.
+    /// Full snapshot after committing pending edits — or, once a secret was removed from this
+    /// doc ([`Self::redact_message_as_secret`], [`Self::scrub_values`], an imported redaction
+    /// noted through [`Self::note_redactions_in`]), the [`Self::shallow_snapshot`] instead.
     ///
     /// While a [`Self::transact`] is open this returns empty and does not call
     /// Loro `export` (export is a commit barrier and would flush the batch).
@@ -573,8 +615,18 @@ impl ChatDoc {
         if self.txn_depth.get() > 0 {
             return Vec::new();
         }
+        self.sync_redaction_flag();
+        if self.shallow_mode.get() {
+            return self.shallow_snapshot();
+        }
         self.doc.commit();
         self.doc.export(ExportMode::Snapshot).unwrap_or_default()
+    }
+
+    /// Does every snapshot this doc exports drop history (a value was removed)?
+    pub fn is_shallow_mode(&self) -> bool {
+        self.sync_redaction_flag();
+        self.shallow_mode.get()
     }
 
     /// Ops this doc holds that `theirs` (a peer's version vector, e.g. the relay's in
@@ -1838,9 +1890,121 @@ impl ChatDoc {
             }
         }
         if hits > 0 {
+            self.history_dirty.set(true);
+            self.shallow_mode.set(true);
             self.commit_now();
         }
         hits
+    }
+}
+
+/// The part kind a message becomes when its value was moved into the vault: the "Secret
+/// saved as NAME" ghost row. Carries names only — `name`, `env`, `secretId`, `savedBy`
+/// (`user:<id>`), `agent` (project id that saved it) — never a value field.
+pub const SECRET_REDACTED_KIND: &str = "secret_redacted";
+
+/// What a message's parts are replaced with by [`ChatDoc::redact_message_as_secret`].
+#[derive(Debug, Clone, Default)]
+pub struct SecretRedaction {
+    pub secret_id: String,
+    pub name: String,
+    pub env: String,
+    /// `user:<id>` of the person whose message held the value.
+    pub saved_by: String,
+    /// Project id of the agent that saved it, when an agent did.
+    pub agent: Option<String>,
+}
+
+impl ChatDoc {
+    /// Relay write: replace **every** part of a message with one `secret_redacted` part and
+    /// mark the row `redactedAt`. The old text is gone from the live state; the oplog still
+    /// holds it until the holder exports a [`Self::shallow_snapshot`] (the relay does so at
+    /// once; clients and the box do on receipt). Returns false when the id is unknown.
+    pub fn redact_message_as_secret(&self, msg_id: &str, r: &SecretRedaction) -> bool {
+        let Some(map) = self.find_message(msg_id) else {
+            return false;
+        };
+        let Some(parts) = self.parts_of(msg_id) else {
+            return false;
+        };
+        let n = parts.len();
+        if n > 0 && parts.delete(0, n).is_err() {
+            return false;
+        }
+        let Ok(part) = parts.push_container(LoroMap::new()) else {
+            return false;
+        };
+        let _ = part.insert("id", ulid().as_str());
+        let _ = part.insert("kind", SECRET_REDACTED_KIND);
+        let _ = part.insert("name", r.name.as_str());
+        let _ = part.insert("env", r.env.as_str());
+        let _ = part.insert("secretId", r.secret_id.as_str());
+        let _ = part.insert("savedBy", r.saved_by.as_str());
+        if let Some(a) = &r.agent {
+            let _ = part.insert("agent", a.as_str());
+        }
+        let _ = map.insert("redactedAt", now_ms());
+        // Anything cached for streaming on this message is stale now.
+        self.live_text.borrow_mut().retain(|(m, _), _| m != msg_id);
+        self.history_dirty.set(true);
+        self.shallow_mode.set(true);
+        self.commit_now();
+        true
+    }
+
+    /// Importers call this with the message indexes an import touched: a `secret_redacted`
+    /// part among them means the oplog now holds text the state no longer shows.
+    pub fn note_redactions_in(&self, touched: &[usize]) {
+        if self.history_dirty.get() {
+            return;
+        }
+        let msgs = self.messages_list();
+        for &ix in touched {
+            let Some(ValueOrContainer::Container(Container::Map(m))) = msgs.get(ix) else {
+                continue;
+            };
+            if m.get("redactedAt").is_some() {
+                self.history_dirty.set(true);
+                self.shallow_mode.set(true);
+                return;
+            }
+        }
+    }
+
+    /// Was a value removed since the last call? The holder persists a shallow snapshot then.
+    pub fn take_history_dirty(&self) -> bool {
+        self.sync_redaction_flag();
+        self.history_dirty.replace(false)
+    }
+
+    pub fn mark_history_dirty(&self) {
+        self.history_dirty.set(true);
+        self.shallow_mode.set(true);
+    }
+
+    /// Does any message carry a `secret_redacted` part? Holders use this to decide whether
+    /// their persisted snapshot must drop history ([`Self::shallow_snapshot`]).
+    pub fn has_secret_redaction(&self) -> bool {
+        self.messages().iter().any(|m| {
+            m.parts
+                .iter()
+                .any(|p| p.get("kind").and_then(Value::as_str) == Some(SECRET_REDACTED_KIND))
+        })
+    }
+
+    /// Snapshot **without** history before the current frontier: the state as it is now plus
+    /// nothing older. After a redaction this is the only export that no longer contains the
+    /// removed text (a plain [`Self::snapshot`] keeps every past op). Peers import it like any
+    /// snapshot; updates made after this frontier merge as usual. Empty while a transact is open.
+    pub fn shallow_snapshot(&self) -> Vec<u8> {
+        if self.txn_depth.get() > 0 {
+            return Vec::new();
+        }
+        self.doc.commit();
+        let f = self.doc.oplog_frontiers();
+        self.doc
+            .export(ExportMode::shallow_snapshot(&f))
+            .unwrap_or_default()
     }
 }
 
@@ -1884,6 +2048,120 @@ pub fn decode_vv(bytes: &[u8]) -> Option<VersionVector> {
 /// True when every op in `update` is already covered by `vv`. See [`ChatDoc::update_covered_by`].
 pub fn update_covered_by(update: &[u8], vv: &VersionVector) -> bool {
     ChatDoc::update_covered_by(update, vv)
+}
+
+#[cfg(test)]
+mod secret_redaction_tests {
+    use super::*;
+
+    const KEY: &str = concat!(
+        "sk_",
+        "live_51HxQ9mT3vK2pLnR8wZ4eYc7bD1fG6hJ0kM9nP5qS2tU8vW3xA1"
+    );
+
+    fn holds(bytes: &[u8]) -> bool {
+        let needle = KEY.as_bytes();
+        bytes.windows(needle.len()).any(|w| w == needle)
+    }
+
+    #[test]
+    fn redaction_replaces_every_part_and_the_shallow_snapshot_forgets_the_value() {
+        let doc = ChatDoc::new(Some(7), false);
+        doc.append_user_message(
+            "m1",
+            &format!("{KEY} save this"),
+            "dev",
+            &UserMessageOpts::default(),
+        )
+        .unwrap();
+        doc.append_user_message(
+            "m2",
+            "and run the report",
+            "dev",
+            &UserMessageOpts::default(),
+        )
+        .unwrap();
+        assert!(holds(&doc.snapshot()));
+        let ok = doc.redact_message_as_secret(
+            "m1",
+            &SecretRedaction {
+                secret_id: "s1".into(),
+                name: "STRIPE_KEY".into(),
+                env: "STRIPE_KEY".into(),
+                saved_by: "user:u1".into(),
+                agent: Some("p1".into()),
+            },
+        );
+        assert!(ok);
+        assert!(!doc.redact_message_as_secret("nope", &SecretRedaction::default()));
+        let m = doc.message("m1").unwrap();
+        assert_eq!(m.parts.len(), 1);
+        assert_eq!(m.parts[0]["kind"], SECRET_REDACTED_KIND);
+        assert_eq!(m.parts[0]["name"], "STRIPE_KEY");
+        assert_eq!(m.parts[0]["savedBy"], "user:u1");
+        assert!(m.parts[0].get("value").is_none());
+        assert!(m.rest.get("redactedAt").is_some());
+        assert_eq!(m.text(), "");
+        assert_eq!(doc.message("m2").unwrap().text(), "and run the report");
+        assert!(doc.has_secret_redaction());
+        assert!(doc.take_history_dirty());
+        assert!(!doc.take_history_dirty());
+
+        // a plain export still carries the old op; the doc's own snapshot() is shallow from
+        // now on, and a peer loading it sees the ghost row and can keep editing
+        assert!(holds(&doc.doc.export(ExportMode::Snapshot).unwrap()));
+        assert!(doc.is_shallow_mode());
+        assert!(!holds(&doc.snapshot()));
+        let shallow = doc.shallow_snapshot();
+        assert!(!shallow.is_empty() && !holds(&shallow));
+        let peer = ChatDoc::from_snapshot(Some(9), false, &shallow).unwrap();
+        assert_eq!(
+            peer.message("m1").unwrap().parts[0]["kind"],
+            SECRET_REDACTED_KIND
+        );
+        peer.append_user_message("m3", "later", "dev2", &UserMessageOpts::default())
+            .unwrap();
+        assert_eq!(peer.messages().len(), 3);
+    }
+
+    #[test]
+    fn an_importer_notices_a_redaction_in_touched_rows() {
+        let a = ChatDoc::new(Some(1), false);
+        a.append_user_message("m1", KEY, "dev", &UserMessageOpts::default())
+            .unwrap();
+        let mut b = ChatDoc::from_snapshot(Some(2), false, &a.snapshot()).unwrap();
+        a.redact_message_as_secret(
+            "m1",
+            &SecretRedaction {
+                name: "K".into(),
+                ..Default::default()
+            },
+        );
+        let upd = a.export_updates_since(&b.oplog_vv());
+        b.import(&upd).unwrap();
+        assert!(
+            b.take_history_dirty(),
+            "the import itself flagged the redaction"
+        );
+        assert!(b.is_shallow_mode());
+        assert!(
+            !holds(&b.snapshot()),
+            "the importer's own snapshot is shallow too"
+        );
+        // a doc loaded from a snapshot with a ghost row in it exports shallow too: a ghost
+        // anywhere means this room's history must never be re-exported in full
+        let c = ChatDoc::from_snapshot(Some(3), false, &b.snapshot()).unwrap();
+        assert!(c.is_shallow_mode());
+        // the explicit note stays for holders that track touched rows themselves
+        let d = ChatDoc::new(Some(4), false);
+        d.append_user_message("x", "plain", "dev", &UserMessageOpts::default())
+            .unwrap();
+        assert!(!d.is_shallow_mode());
+        d.note_redactions_in(&[0]);
+        assert!(!d.take_history_dirty(), "no redactedAt on that row");
+        d.mark_history_dirty();
+        assert!(d.take_history_dirty() && d.is_shallow_mode());
+    }
 }
 
 #[cfg(test)]
