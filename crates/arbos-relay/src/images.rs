@@ -625,19 +625,22 @@ pub async fn avatar_generate(
     generate_into(&state, target, &body.prompt).await
 }
 
-/// `POST /chats/{id}/avatar/generate {prompt}` — the same for a people group's picture (any human
-/// member, like `PATCH /chats/{id}`); the picture lands in `people:{id}` and "Set avatar" sends
-/// `PATCH /chats/{id} {image_key}`. The member asking pays.
+/// `POST /chats/{id}/avatar/generate {prompt}` — the same for a people group's picture (the
+/// owner and admins, like `PATCH /chats/{id}`); the picture lands in `people:{id}` and "Set
+/// avatar" sends `PATCH /chats/{id} {image_key}`. The admin asking pays.
 pub async fn chat_avatar_generate(
     State(state): State<AppState>,
     principal: Principal,
     axum::extract::Path(chat_id): axum::extract::Path<String>,
     Json(body): Json<AvatarGenerateBody>,
 ) -> Response {
-    let (me, cm) = match crate::people::member_chat(&state, &principal, &chat_id) {
-        Ok(v) => v,
-        Err(r) => return *r,
-    };
+    // Owner / admins only, like `PATCH /chats/{id}`: the generated picture becomes the
+    // group's picture, so the same people decide.
+    let (me, cm) =
+        match crate::people::settings_chat(&state, &principal, &chat_id, &["avatar_generate"]) {
+            Ok(v) => v,
+            Err(r) => return *r,
+        };
     let slot = format!("{}{}", crate::people::PEOPLE_ACL_PREFIX, cm.chat.id);
     let target = AvatarTarget {
         slot: slot.clone(),
@@ -1306,6 +1309,93 @@ mod avatar_generate_tests {
             .as_str()
             .unwrap()
             .contains("does not exist"));
+    }
+
+    /// Group avatar Generate follows `PATCH /chats/{id}`: owner and admins only; a plain
+    /// member, the agent's box and a stranger get 403 and nothing is generated or paid.
+    #[tokio::test]
+    async fn group_generate_is_owner_and_admin_only() {
+        use crate::people::tests_support::project_of;
+        let (base, seen) = stub(&[]).await;
+        let state = state_against(&base);
+        let (owner, owner_dev) = person(&state, 90);
+        let (admin, admin_dev) = person(&state, 91);
+        let (member, member_dev) = person(&state, 92);
+        let (_, stranger_dev) = person(&state, 93);
+        for u in [&owner, &admin, &member] {
+            state.db.grant_credits(u, 5.0, "test", "test").unwrap();
+        }
+        let chat = crate::db_people::PeopleChat {
+            id: arbos_core::ids::ulid(),
+            kind: "group".into(),
+            created_by: owner.clone(),
+            created_at: arbos_core::ids::now_ms(),
+            title: Some("Arbonites".into()),
+            image_key: None,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
+            description: None,
+            allowed_agents: "members_own".into(),
+        };
+        state.db.insert_people_chat(&chat).unwrap();
+        for (uid, role) in [(&owner, "owner"), (&admin, "admin"), (&member, "member")] {
+            state
+                .db
+                .add_member(&chat.id, &format!("user:{uid}"), role, &owner, &json!({}))
+                .unwrap();
+        }
+        let project = project_of(&state, &member, "Scout");
+        state
+            .db
+            .add_member(
+                &chat.id,
+                &format!("agent:{project}"),
+                "agent",
+                &owner,
+                &json!({}),
+            )
+            .unwrap();
+        let call = |who: &Principal| {
+            let state = state.clone();
+            let who = who.clone();
+            let id = chat.id.clone();
+            async move {
+                chat_avatar_generate(
+                    State(state),
+                    who,
+                    Path(id),
+                    Json(AvatarGenerateBody {
+                        prompt: "a cat".into(),
+                    }),
+                )
+                .await
+                .status()
+            }
+        };
+        assert_eq!(call(&member_dev).await, StatusCode::FORBIDDEN);
+        assert_eq!(
+            call(&Principal::Box {
+                user_id: member.clone()
+            })
+            .await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(call(&stranger_dev).await, StatusCode::FORBIDDEN);
+        assert_eq!(call(&Principal::Admin).await, StatusCode::FORBIDDEN);
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "no upstream call for a refusal"
+        );
+        assert_eq!(call(&admin_dev).await, StatusCode::OK);
+        assert_eq!(call(&owner_dev).await, StatusCode::OK);
+        assert_eq!(seen.lock().unwrap().len(), 2);
+        let slot = format!("{}{}", crate::people::PEOPLE_ACL_PREFIX, chat.id);
+        let rows = state.db.audit(&slot, 100).unwrap();
+        assert_eq!(rows.len(), 6);
+        assert!(rows
+            .iter()
+            .all(|r| r["fields"] == json!(["avatar_generate"])));
+        assert_eq!(rows.iter().filter(|r| r["allowed"] == true).count(), 2);
     }
 
     #[tokio::test]

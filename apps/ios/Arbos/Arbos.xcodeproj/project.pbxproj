@@ -7,6 +7,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A1EE00000000000000000008 /* ErrorUILintTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EE00000000000000000007 /* ErrorUILintTests.swift */; };
+		A1EE00000000000000000006 /* UserErrorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EE00000000000000000005 /* UserErrorTests.swift */; };
+		A1EE00000000000000000004 /* ErrorNote.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EE00000000000000000003 /* ErrorNote.swift */; };
+		A1EE00000000000000000002 /* UserError.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EE00000000000000000001 /* UserError.swift */; };
 		A1BB87570AFC8FD22F77F310 /* ArbosApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EF7B8D4ACE5D286ED5271D /* ArbosApp.swift */; };
 		A1B8CC06713710E1DE0950B9 /* DebugHooks.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B4441E009E79A1090EF589 /* DebugHooks.swift */; };
 		A134D74DFA78D38A472BF229 /* Call.swift in Sources */ = {isa = PBXBuildFile; fileRef = A17AB0DF610F874C5BE921E3 /* Call.swift */; };
@@ -83,6 +87,7 @@
 		A1D8800000000000000000C6 /* ServerChannelsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D8800000000000000000C5 /* ServerChannelsView.swift */; };
 		A1DE700000000000000000A2 /* DevicesStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DE700000000000000000A1 /* DevicesStore.swift */; };
 		A1DE700000000000000000B2 /* MentionChips.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DE700000000000000000B1 /* MentionChips.swift */; };
+		A1F7B0000000000000000002 /* BlockedState.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F7B0000000000000000001 /* BlockedState.swift */; };
 		A1F100000000000000000006 /* LinkIcons.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F100000000000000000005 /* LinkIcons.swift */; };
 		A1F10000000000000000000A /* MathText.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F100000000000000000009 /* MathText.swift */; };
 		A1F10000000000000000000E /* CodeHighlight.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F10000000000000000000D /* CodeHighlight.swift */; };
@@ -129,6 +134,7 @@
 		A1C5440000000000000004 /* ShellApprovalCardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C5440000000000000003 /* ShellApprovalCardTests.swift */; };
 		A1BD00000000000000000002 /* NewMessageSheetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BD00000000000000000001 /* NewMessageSheetTests.swift */; };
 		A15A00000000000000000031 /* ProfilePaneStructureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000030 /* ProfilePaneStructureTests.swift */; };
+		A1F7B0000000000000000004 /* BlockedStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F7B0000000000000000003 /* BlockedStateTests.swift */; };
 		A1F7A0000000000000000004 /* ProfileToggleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F7A0000000000000000003 /* ProfileToggleTests.swift */; };
 		A1660000000000000000A031 /* HeaderGlassStructureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1660000000000000000A030 /* HeaderGlassStructureTests.swift */; };
 		A1F6000000000000000000C2 /* ChatSearchShortcut.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F6000000000000000000C1 /* ChatSearchShortcut.swift */; };
@@ -201,6 +207,10 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		A1EE00000000000000000007 /* ErrorUILintTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ErrorUILintTests.swift; sourceTree = "<group>"; };
+		A1EE00000000000000000005 /* UserErrorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserErrorTests.swift; sourceTree = "<group>"; };
+		A1EE00000000000000000003 /* ErrorNote.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ErrorNote.swift; sourceTree = "<group>"; };
+		A1EE00000000000000000001 /* UserError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserError.swift; sourceTree = "<group>"; };
 		A15AA920DF43B1E0D5ECD962 /* Arbos.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Arbos.entitlements; sourceTree = "<group>"; };
 		A1E59E8E49DC7AEE0EE9D0F3 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A1EF7B8D4ACE5D286ED5271D /* ArbosApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArbosApp.swift; sourceTree = "<group>"; };
@@ -278,6 +288,7 @@
 		A1D8800000000000000000C5 /* ServerChannelsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerChannelsView.swift; sourceTree = "<group>"; };
 		A1DE700000000000000000A1 /* DevicesStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevicesStore.swift; sourceTree = "<group>"; };
 		A1DE700000000000000000B1 /* MentionChips.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MentionChips.swift; sourceTree = "<group>"; };
+		A1F7B0000000000000000001 /* BlockedState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlockedState.swift; sourceTree = "<group>"; };
 		A1F100000000000000000005 /* LinkIcons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkIcons.swift; sourceTree = "<group>"; };
 		A1F100000000000000000009 /* MathText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MathText.swift; sourceTree = "<group>"; };
 		A1F10000000000000000000D /* CodeHighlight.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeHighlight.swift; sourceTree = "<group>"; };
@@ -325,6 +336,7 @@
 		A1C5440000000000000003 /* ShellApprovalCardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellApprovalCardTests.swift; sourceTree = "<group>"; };
 		A1BD00000000000000000001 /* NewMessageSheetTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewMessageSheetTests.swift; sourceTree = "<group>"; };
 		A15A00000000000000000030 /* ProfilePaneStructureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfilePaneStructureTests.swift; sourceTree = "<group>"; };
+		A1F7B0000000000000000003 /* BlockedStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlockedStateTests.swift; sourceTree = "<group>"; };
 		A1F7A0000000000000000003 /* ProfileToggleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileToggleTests.swift; sourceTree = "<group>"; };
 		A1660000000000000000A030 /* HeaderGlassStructureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeaderGlassStructureTests.swift; sourceTree = "<group>"; };
 		A1F6000000000000000000C1 /* ChatSearchShortcut.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSearchShortcut.swift; sourceTree = "<group>"; };
@@ -492,6 +504,7 @@
 		A147AADF20080F5AA72B6504 /* Sync */ = {
 			isa = PBXGroup;
 			children = (
+				A1EE00000000000000000001 /* UserError.swift */,
 				A1B646F374BD7AE1F3BE7A4B,
 				A1A8BC5FCD045299B0D7D13D,
 				A1E592B43CC1234959AF2E63,
@@ -505,6 +518,7 @@
 		A1945BC1511DA16E83111311 /* UI */ = {
 			isa = PBXGroup;
 			children = (
+				A1EE00000000000000000003 /* ErrorNote.swift */,
 				A1BB00000000000000000001 /* BackSwipe.swift */,
 				A124D4FA40F4E5025A2B2C9D,
 				A1EE5A7A5FF12E4EF7FE7B27,
@@ -534,6 +548,7 @@
 				A1D8800000000000000000A7 /* AvatarPickerSheet.swift */,
 				A1C1E00000000000000000A1 /* PresenceRow.swift */,
 				A1DE700000000000000000B1 /* MentionChips.swift */,
+				A1F7B0000000000000000001 /* BlockedState.swift */,
 				A1F100000000000000000005 /* LinkIcons.swift */,
 				A1F100000000000000000009 /* MathText.swift */,
 				A1F10000000000000000000D /* CodeHighlight.swift */,
@@ -560,10 +575,13 @@
 		A15A00000000000000000011 /* ArbosTests */ = {
 			isa = PBXGroup;
 			children = (
+				A1EE00000000000000000007 /* ErrorUILintTests.swift */,
+				A1EE00000000000000000005 /* UserErrorTests.swift */,
 				A15A00000000000000000003 /* CoreFixturesTests.swift */,
 				A15A00000000000000000020 /* AddMembersPlanTests.swift */,
 				A15A00000000000000000040 /* MessageDeleteRuleTests.swift */,
 				A15A00000000000000000030 /* ProfilePaneStructureTests.swift */,
+				A1F7B0000000000000000003 /* BlockedStateTests.swift */,
 				A1F7A0000000000000000003 /* ProfileToggleTests.swift */,
 				A1660000000000000000A030 /* HeaderGlassStructureTests.swift */,
 				A1F6000000000000000000C3 /* ChatSearchShortcutTests.swift */,
@@ -799,6 +817,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A1EE00000000000000000004 /* ErrorNote.swift in Sources */,
+				A1EE00000000000000000002 /* UserError.swift in Sources */,
 				A1BB87570AFC8FD22F77F310 /* ArbosApp.swift in Sources */,
 				A1B8CC06713710E1DE0950B9 /* DebugHooks.swift in Sources */,
 				A134D74DFA78D38A472BF229 /* Call.swift in Sources */,
@@ -825,6 +845,7 @@
 				A1D8800000000000000000C6 /* ServerChannelsView.swift in Sources */,
 				A1DE700000000000000000A2 /* DevicesStore.swift in Sources */,
 				A1DE700000000000000000B2 /* MentionChips.swift in Sources */,
+				A1F7B0000000000000000002 /* BlockedState.swift in Sources */,
 				A1F100000000000000000006 /* LinkIcons.swift in Sources */,
 				A1F10000000000000000000A /* MathText.swift in Sources */,
 				A1F10000000000000000000E /* CodeHighlight.swift in Sources */,
@@ -894,11 +915,14 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A1EE00000000000000000008 /* ErrorUILintTests.swift in Sources */,
+				A1EE00000000000000000006 /* UserErrorTests.swift in Sources */,
 				A15A00000000000000000004 /* CoreFixturesTests.swift in Sources */,
 				A15A00000000000000000013 /* ReactionToggleTests.swift in Sources */,
 				A15A00000000000000000021 /* AddMembersPlanTests.swift in Sources */,
 				A15A00000000000000000041 /* MessageDeleteRuleTests.swift in Sources */,
 				A15A00000000000000000031 /* ProfilePaneStructureTests.swift in Sources */,
+				A1F7B0000000000000000004 /* BlockedStateTests.swift in Sources */,
 				A1F7A0000000000000000004 /* ProfileToggleTests.swift in Sources */,
 				A1660000000000000000A031 /* HeaderGlassStructureTests.swift in Sources */,
 				A1F6000000000000000000C4 /* ChatSearchShortcutTests.swift in Sources */,

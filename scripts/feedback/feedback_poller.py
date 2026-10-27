@@ -1450,8 +1450,21 @@ class Loop:
         new commits touch the branch's files, re-gate (status gating; the pool batches it and a green run holds it
         again). A conflict goes to the agent / owner as a merge-main follow-up."""
         aw = st.get("awaiting") or {}
+        if aw.get("conflict"):
+            # "conflict — owner merging main": the owner's resolving push is the way out. Pick it up without waiting
+            # for main to move again, and re-gate it (the resolved tree is new) — still held for Jacob.
+            live = self.gh.branch_head(st["branch"])
+            if live and live != st.get("branch_head"):
+                st["branch_head"] = live
+                aw.update(conflict=False, ready=False, regate_due=True)
+                aw.pop("conflict_noted", None)
+                st["awaiting"] = aw
+                self.store.save_state(fid, st)
+                self.store.event(fid, "awaiting_conflict_resolved", head=live[:8])
+                log(f"[{fid}] held item: owner pushed {live[:8]} after the conflict; re-gates when idle, still awaiting Jacob")
         main_head = self.gh.branch_head("main") or ""
         if not main_head or main_head == aw.get("main_head"):
+            self.regate_awaiting_if_idle(fid, st)
             return
         cmp = self.gh.compare(aw.get("main_head") or main_head, main_head)
         moved_files = {f["filename"] for f in cmp.get("files", [])}
@@ -2199,6 +2212,33 @@ class Loop:
         retries = st.get("gate_retries", 0)
         st["main_conflicts"] = st.get("main_conflicts", 0) + 1
         self.arm_solo_slot(fid, st)
+        if st.get("awaiting") and st.get("status") in ("awaiting_jacob", "gating") and not st.get("approved_by_jacob"):
+            # A held item (release-approval gate) never fails for a conflict: Jacob's per-item yes is still pending and
+            # the branch is his to approve or decline. It stays `awaiting_jacob` as "conflict — owner merging main";
+            # the owner is told once (agent follow-up while retries remain, then the issue), and the next push on the
+            # branch re-gates. 13:37 Oct 27: #1551/#1853/#1888/#1948 fell to `failed` here minutes after being restored.
+            aw = st["awaiting"]
+            aw.update(conflict=True, ready=False)
+            st.update(status="awaiting_jacob", awaiting=aw)
+            self.store.save_state(fid, st)
+            if not aw.get("conflict_noted"):
+                aw["conflict_noted"] = iso()
+                self.store.save_state(fid, st)
+                self.store.event(fid, "awaiting_conflict_held", head=head[:8], retries=retries)
+                who = st.get("handed_off_to") or "owner"
+                self.gh.comment(st["issue"], f"Conflict — owner merging main. `{st['branch']}`@{head[:8]} no longer merges with `main`. {who}: merge "
+                                "`origin/main` into the branch (a merge, never a rebase), resolve, push; the loop re-gates. The branch is kept and "
+                                "the item stays held for Jacob's approval." + (f"\n\n```\n{detail[-2000:]}\n```" if detail else ""))
+                if st.get("agent_id") and not st.get("handed_off_to") and retries < 2:
+                    with contextlib.suppress(HttpError):
+                        self.cursor.followup(st["agent_id"], (
+                            f"Your branch `{st['branch']}` no longer merges cleanly into `main`. Run `git fetch origin main && "
+                            f"git merge origin/main` on the branch, resolve the conflicts with the smallest change, run the checks, "
+                            "and push the merge (no rebase, no force-push). End with the SUMMARY:/PUSHED: lines again."))
+                        st["gate_retries"] = retries + 1
+                        self.store.save_state(fid, st)
+            log(f"[{fid}] held item conflicts with main at {head[:8]}; stays awaiting_jacob (conflict — owner merging main)")
+            return
         if st.get("handed_off_to"):
             st["status"] = "handed_off"
             self.store.save_state(fid, st)
@@ -2389,6 +2429,7 @@ class Loop:
                 pool_first = True
                 self.store.event("_loop", "pool_first_on", by="scheduler", starved_min=int(minutes_between(last_pool, iso())))
                 log(f"Gate: pool-first armed by the scheduler — no pool batch settled since {last_pool[:16]}; the pool runs ahead of solo slots, deferred-fairness and {len(plan)} plan half(ves)")
+        deferred_batch = False
         if not members and not pool_first:
             solo = sorted(((f, st) for f, st in ready if st.get("solo_next")), key=lambda fs: fs[1].get("created") or "")
             if solo:
@@ -2404,8 +2445,17 @@ class Loop:
             # HomeView.swift) for three rounds while the pool kept re-merging the same conflicts.
             deferred = sorted(((f, st) for f, st in ready if (st.get("sibling_conflicts") or 0) >= self.DEFER_AFTER),
                               key=lambda fs: (-(fs[1].get("sibling_conflicts") or 0), fs[1].get("created") or ""))
-            if deferred:
+            # Mirror of #2019 for this lane: a red deferred batch hands over to its own bisect halves. Its members lose
+            # the deferred flag at the red (see the red path), and while the next plan half is a half of a red deferred
+            # batch, no deferred batch forms ahead of it (14:46–15:37 Oct 27: the same batch of 3 re-ran four times,
+            # red each time on one member's old head, and planned eight halves it never let run).
+            own_deferred = any(v.get("deferred") and any(set(h) == set(half) for h in v.get("halves", []))
+                               for v in (cur.get("rust_gate_bisects") or {}).values() for half in plan[:1])
+            if deferred and own_deferred:
+                log("Gate: deferred-fairness stands aside — the next plan half is a red deferred batch's own bisect")
+            elif deferred:
                 members = self.compatible_batch(deferred)
+                deferred_batch = len(members) > 1
                 log(f"Gate: deferred-fairness batch of {len(members)} (bumped ≥ {self.DEFER_AFTER}× for sibling conflicts): " + ", ".join(members))
         pool_batch = False
         if not members and pool_first and plan:
@@ -2430,10 +2480,13 @@ class Loop:
         self.store.save_cursor(cur)
         if members:
             self.rust_gate_start(members)
-            if pool_batch:
+            if pool_batch or deferred_batch:
                 cur = self.store.cursor()
                 if cur.get("rust_gate"):
-                    cur["rust_gate"]["pool_batch"] = True
+                    if pool_batch:
+                        cur["rust_gate"]["pool_batch"] = True
+                    if deferred_batch:
+                        cur["rust_gate"]["deferred_batch"] = True
                     self.store.save_cursor(cur)
                 if pool_first:
                     log(f"Gate: pool-first — the full pool batch of {len(members)} runs now, ahead of plan halves, solo slots and deferred-fairness")
@@ -2904,6 +2957,7 @@ class Loop:
     # Sibling-conflict policy: bumped DEFER_AFTER times → next batches are deferred items only (oldest-deferred
     # first); bumped SIBLING_LIMIT times (so at least two rounds among deferred items) → treated as a main conflict.
     DEFER_AFTER = 2
+    SHIP_CARRIER_GAP_MIN = 15  # a carrying run that did not fail is replaced by its successor within this; the ship clock stays paused
     POOL_STARVED_MIN = 120  # no pool batch merged for this long while plan halves run → pool-first arms itself
     SIBLING_LIMIT = 4
     # Solo slot (operator rule, 2026-10-23 23:34): an item bumped 3× by siblings, or sent to its owner twice for a
@@ -3062,7 +3116,18 @@ class Loop:
         # 2026-10-23 21:09/22:10/22:14, three batches in a row); then no item of one half is batched with an
         # item of the other again. Keyed by the half's members; cleared when a half settles.
         bisects = cur.setdefault("rust_gate_bisects", {})
-        bisects[active["id"]] = {"halves": [sorted(first), sorted(rest)], "green": [], "at": iso()}
+        bisects[active["id"]] = {"halves": [sorted(first), sorted(rest)], "green": [], "at": iso(), "deferred": bool(active.get("deferred_batch"))}
+        if active.get("deferred_batch"):
+            # The deferred items had their fair turn and it was red: drop the deferred flag so the same batch does not
+            # re-form ahead of the halves this red just planned (#2019's rule, for the deferred lane).
+            for fid in order:
+                st = self.store.state(fid)
+                if (st.get("sibling_conflicts") or 0) >= self.DEFER_AFTER:
+                    st["sibling_conflicts_before_red"] = st.get("sibling_conflicts")
+                    st["sibling_conflicts"] = 0
+                    self.store.save_state(fid, st)
+                    self.store.event(fid, "deferred_flag_dropped", run=active["id"], reason="deferred batch red; its bisect halves run next")
+            log(f"Gate: deferred-fairness batch {active['id']} was red; its members' deferred flag is dropped and its bisect halves run next")
         if active.get("pool_batch"):
             # A settled pool batch, red or green, restarts the starvation clock. Only a POOL batch does: at 08:02
             # Oct 27 a red plan half (20261027T073846-12, the pool's own bisect that pool-first had stood aside
@@ -3461,21 +3526,46 @@ class Loop:
         if ios_ok and mac_ok and (st.get("expects_ios") or st.get("expects_ci")):
             self.ship(fid, st)
             return
-        if waited > self.cfg.ship_timeout_min:
-            # The budget is for builds that never happen, not for GitHub's macos runner queue: when the iOS /
-            # Release run that will carry the fix is queued or running, keep waiting (02:55 Oct 22: #1252's iOS run
-            # sat 96 min in the queue and the item was failed although its code was on main and in v0.6.104).
+        # The ship clock pauses while a carrying run exists (coordinator, 2026-10-27 17:32): the budget is for builds
+        # that never happen, not for the single Mac runner's queue. `ship_paused_min` is the time already spent
+        # under a carrier; `ship_pause_started` marks a pause in progress. The clock resumes only when the last
+        # carrier ended in FAILURE — a run cancelled by a newer push is replaced by that push's run, and the gap
+        # before the replacement appears is bridged (13:25 Oct 27: #1978 failed "nothing shipped" four minutes
+        # before the run that carried it to TestFlight 202610271329463223 was created).
+        paused = (st.get("ship_paused_min") or 0) + (minutes_between(st["ship_pause_started"], iso()) if st.get("ship_pause_started") else 0)
+        waited_eff = waited - paused
+        if waited_eff > self.cfg.ship_timeout_min:
             pending = None
             if st.get("expects_ios") and not st.get("ios_done"):
                 pending = self.gh.pending_run_containing("ios.yml", sha, since)
             if pending is None and st.get("expects_ci") and not st.get("release_done"):
                 pending = self.gh.pending_run_containing("release.yml", sha, since) or self.gh.pending_run_containing("ci.yml", sha, since)
             if pending:
+                st["ship_carrier"] = {"id": pending.get("id"), "url": pending["html_url"], "status": pending.get("status"), "seen": iso()}
+                st.setdefault("ship_pause_started", iso())
                 if st.get("ship_wait_noted") != pending["html_url"]:
                     st["ship_wait_noted"] = pending["html_url"]
-                    log(f"[{fid}] ship budget passed but the carrying run is still {pending['status']}: {pending['html_url']}; waiting")
+                    log(f"[{fid}] ship budget passed but the carrying run is still {pending['status']}: {pending['html_url']}; clock paused")
                 self.store.save_state(fid, st)
                 return
+            last = st.get("ship_carrier")
+            if last and st.get("ship_pause_started"):
+                conclusion = None
+                if last.get("id"):
+                    with contextlib.suppress(HttpError):
+                        conclusion = self.gh.repo_api("GET", f"/actions/runs/{last['id']}").get("conclusion")
+                if conclusion != "failure" and minutes_between(last.get("seen") or iso(), iso()) < self.SHIP_CARRIER_GAP_MIN:
+                    # cancelled / superseded / just finished: its replacement (or the adoption) is seconds away
+                    self.store.save_state(fid, st)
+                    return
+                st["ship_paused_min"] = (st.get("ship_paused_min") or 0) + minutes_between(st["ship_pause_started"], iso())
+                st.pop("ship_pause_started", None)
+                self.store.event(fid, "ship_clock_resumed", carrier=last.get("url"), conclusion=conclusion, paused_min=int(st["ship_paused_min"]))
+                log(f"[{fid}] carrying run {last.get('url')} ended ({conclusion}); ship clock resumes with {int(st['ship_paused_min'])} min paused")
+                waited_eff = waited - st["ship_paused_min"]
+                if waited_eff <= self.cfg.ship_timeout_min:
+                    self.store.save_state(fid, st)
+                    return
             if st.get("expects_ios") and st.get("ios_done") and not st.get("testflight_ready_at") and self.adopt_later_testflight(fid, st, sha, since):
                 if mac_ok:
                     self.ship(fid, st)
@@ -3489,7 +3579,9 @@ class Loop:
                 carried = self.gh.later_ios_build(sha, since)
             if carried is None and st.get("expects_ci") and not st.get("release_done"):
                 carried = self.gh.later_release(sha, since)
-            if carried and waited <= self.cfg.ship_timeout_min + 45:
+            if carried and waited_eff <= self.cfg.ship_timeout_min + 45:
+                st["ship_carrier"] = {"id": carried.get("id"), "url": carried["html_url"], "status": "success", "seen": iso()}
+                st.setdefault("ship_pause_started", iso())
                 if st.get("ship_wait_noted") != carried["html_url"]:
                     st["ship_wait_noted"] = carried["html_url"]
                     log(f"[{fid}] ship budget passed but a green carrying run exists: {carried['html_url']}; waiting for the build to be adopted")

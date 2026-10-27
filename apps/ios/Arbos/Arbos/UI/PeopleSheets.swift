@@ -505,7 +505,7 @@ struct CreateEntityView: View {
     @State private var option: AvatarPickerTab = CreateEntityView.initialOption
     @StateObject private var source = AvatarSourceState()
     @State private var creating = false
-    @State private var errorText: String?
+    @State private var localError: UserError?
     @State private var next = false
     @FocusState private var focused: Bool
 
@@ -533,6 +533,19 @@ struct CreateEntityView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+            // The sheet's note (Jacob 2026-10-26): under the header, before the hero — a refused
+            // create, or a failed generation (`source.error`); the body below moves down.
+            if let error = source.error ?? localError {
+                ErrorNote(id: "create-entity-error", error: error,
+                          detailsOpen: Binding(get: { source.detailsOpen }, set: { source.detailsOpen = $0 }),
+                          onTryAgain: source.error != nil ? generate : nil)
+                    .padding(.horizontal, 16.5)
+                    .padding(.top, 12)
+            } else {
+                SheetErrorNote(id: "create-entity-error", onTryAgain: go)
+                    .padding(.horizontal, 16.5)
+                    .padding(.top, 12)
+            }
             // The middle scrolls when the keyboard is up (the footer stays above the keyboard,
             // so the action is always reachable); at rest it is Grok's fixed layout.
             ScrollView(showsIndicators: false) {
@@ -558,12 +571,7 @@ struct CreateEntityView: View {
                                 .padding(.top, 8)
                                 .frame(height: 40, alignment: .top)
                         }
-                        if let errorText {
-                            Text(errorText)
-                                .font(.system(size: 13)).foregroundStyle(theme.danger)
-                                .multilineTextAlignment(.center).padding(.horizontal, 24).padding(.top, 8)
-                        }
-                        AvatarTabPill(tabs: Self.options, tab: $option) { source.errorText = nil }
+                        AvatarTabPill(tabs: Self.options, tab: $option) { source.error = nil }
                             .padding(.top, 246 - 218)
                             .accessibilityIdentifier("create-entity-options")
                         AvatarSourceBody(state: source, tab: option, keepsLine: "Create keeps this one.", uploadsLine: "Create uploads it.", generate: generate) {
@@ -577,6 +585,7 @@ struct CreateEntityView: View {
             .scrollDismissesKeyboard(.interactively)
             footer
         }
+        .claimFailures("create-entity", ["create the server", "create the agent", "create the group"])
         .background(sheetBg.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
         .navigationDestination(isPresented: $next) {
@@ -694,14 +703,12 @@ struct CreateEntityView: View {
             next = true
         case .server:
             creating = true
-            errorText = nil
+            localError = nil
             Task {
                 if await model.createServer(name: clean, leaf: Self.storedLeaf, picture: picture) {
                     onDone()
-                } else {
-                    errorText = model.notice?.text ?? "Could not create the server."
-                    model.notice = nil
                 }
+                // A refusal is the claimed failure drawn by the note above the hero.
                 creating = false
             }
         }
@@ -738,7 +745,13 @@ struct NewGroupView: View {
     @State private var pickedAgents: [Project] = []
     @State private var creating = false
     /// Shown on this screen — the root notice alert sits under the sheet and looks like a silent fail.
-    @State private var errorText: String?
+    @State private var localError: UserError?
+    /// The old string form of that state, kept so a sibling branch written against it
+    /// (`iphone-add-members-2026-10-26`) still compiles in the same integration tree; drawn as a refusal.
+    private var errorText: String? {
+        get { localError?.sentence }
+        nonmutating set { localError = newValue.map { UserError.refused("add members", $0) } }
+    }
 
     private var trimmed: String { query.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "@")) }
 
@@ -838,14 +851,11 @@ struct NewGroupView: View {
             .padding(.horizontal, SheetSearchField.inset).padding(.vertical, 10)
             .onChange(of: query) { _, _ in search() }
 
-            if let errorText {
-                Text(errorText)
-                    .font(theme.font(Theme.small))
-                    .foregroundStyle(theme.danger)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 20)
-                    .padding(.bottom, 8)
-            }
+            // The sheet's note: under the search field, before the list (a refused add, nobody
+            // picked, the relay's reason) — the shared element.
+            SheetErrorNote(id: "people-sheet-error", local: localError)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
@@ -935,28 +945,25 @@ struct NewGroupView: View {
     private func toggle(_ p: Person) {
         guard !isIn(p) else { return }
         if let i = picked.firstIndex(of: p) { picked.remove(at: i) } else { picked.append(p) }
-        errorText = nil
+        localError = nil
     }
 
     private func toggleAgent(_ p: Project) {
         guard !isIn(p) else { return }
         if let i = pickedAgents.firstIndex(where: { $0.id == p.id }) { pickedAgents.remove(at: i) } else { pickedAgents.append(p) }
-        errorText = nil
+        localError = nil
     }
 
     /// Add members: every pick goes to the group — or server, or secret — this picker was opened for.
     private func add() {
         if let secret {
             let new = picked.filter { !isIn($0) }
-            guard !new.isEmpty else { errorText = "Pick someone who is not on the list yet"; return }
+            guard !new.isEmpty else { localError = UserError.refused("add them", "Pick someone who is not on the list yet."); return }
             creating = true
-            errorText = nil
+            localError = nil
             Task {
                 if await model.addSecretPeople(secretId: secret.id, handles: new.map(\.handle)) {
                     onDone()
-                } else {
-                    errorText = model.notice?.text ?? "Could not add them."
-                    model.notice = nil
                 }
                 creating = false
             }
@@ -964,15 +971,12 @@ struct NewGroupView: View {
         }
         if let s = server {
             let new = picked.filter { !isIn($0) }
-            guard !new.isEmpty else { errorText = "Pick someone who is not in the server yet"; return }
+            guard !new.isEmpty else { localError = UserError.refused("add members", "Pick someone who is not in the server yet."); return }
             creating = true
-            errorText = nil
+            localError = nil
             Task {
                 if await model.addServerMembers(serverId: s.id, userIds: new.map(\.id)) {
                     onDone()
-                } else {
-                    errorText = model.notice?.text ?? "Could not add them."
-                    model.notice = nil
                 }
                 creating = false
             }
@@ -980,15 +984,12 @@ struct NewGroupView: View {
         }
         guard let chat = addToChat, canSubmit, !creating else { return }
         let plan = AddMembersPlan.make(chat: chat, meId: model.user?.id, picked: picked, pickedAgents: pickedAgents)
-        guard !plan.isEmpty else { errorText = "Pick someone who is not in the group yet"; return }
+        guard !plan.isEmpty else { localError = UserError.refused("add members", "Pick someone who is not in the group yet."); return }
         creating = true
-        errorText = nil
+        localError = nil
         Task {
             if await model.addMembers(chatId: plan.chatId, handles: plan.handles, agentIds: plan.agentIds) {
                 onDone()
-            } else {
-                errorText = model.notice?.text ?? "Could not add them."
-                model.notice = nil
             }
             creating = false
         }
@@ -1007,15 +1008,11 @@ struct NewGroupView: View {
     private func create() {
         guard canSubmit, !creating else { return }
         creating = true
-        errorText = nil
+        localError = nil
         let agentIds = pickedAgents.map(\.id)
         Task {
             if await model.createGroup(handles: picked.map(\.handle), agentIds: agentIds, title: draft?.title, leaf: draft?.leaf, picture: draft?.picture) {
                 onDone()
-            } else {
-                // Copy onto this screen: RootView's alert is behind the sheet.
-                errorText = model.notice?.text ?? "Could not create the group."
-                model.notice = nil
             }
             creating = false
         }

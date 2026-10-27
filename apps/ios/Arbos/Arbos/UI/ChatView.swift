@@ -213,6 +213,8 @@ struct ChatSession: View {
     private static let memoCancelDistance: CGFloat = 56
 
     @State private var showProfile = false
+    /// Unblock asks first ([feedback blocked-state-ios-2026-10-26]).
+    @State private var confirmUnblock = false
     @State private var showSearch = false
     @State private var searchText = ""
     /// Group chats: pick members to call, or call everyone.
@@ -433,6 +435,7 @@ struct ChatSession: View {
     private var hasInCallBar: Bool {
         calls.isActive && !calls.isPresented && calls.call?.kind == .voice && calls.call?.chatId == chatId
     }
+    @State private var chatNoteDetailsOpen = false
     private var headerExtra: CGFloat { (hasCallBar ? 52 : 0) + (hasInCallBar ? 56 : 0) + (showSearch ? Controls.height + 8 : 0) }
     /// Member chips under the header — off on iPhone (feedback ABDgl8tFlqeUlwP4DihfYhk).
     private var showsMemberChips: Bool { false }
@@ -481,6 +484,12 @@ struct ChatSession: View {
     private var isChannel: Bool { projectId == channelSlot }
     private var channelServer: Server? { channel.flatMap { model.server($0.serverId) } }
     private var counterpart: ChatMember? { people?.counterpart(me: model.user?.id) }
+    /// The DM's other person while they are on my block list ([feedback
+    /// blocked-state-ios-2026-10-26]): the header tag and the composer bar follow it.
+    private var blockedPeer: ChatMember? {
+        guard let people, !people.isGroup || people.kind == "dm", let other = counterpart else { return nil }
+        return BlockedState.isBlocked(id: other.id, handle: other.handle, in: model.blocked) ? other : nil
+    }
     private var messages: [Message] { model.messages(of: chatId) }
     private var needsAnswer: Bool { !isChannel && model.chatNeedsAnswer(chatId) }
     /// True while a turn runs, a subagent hand-off is still open, or right
@@ -653,6 +662,9 @@ struct ChatSession: View {
         // Sender names inside the bubbles: groups and channels only — never a 1:1 chat.
         let multiParty = isChannel || (people?.isGroup ?? false)
         let peopleFlag = isPeople || isChannel
+        // People I blocked: their rows fold into one line for me (groups only; a DM with
+        // them has the composer bar) — [feedback blocked-state-ios-2026-10-26].
+        let hiddenSenders = people.map { model.hiddenSenders(in: $0) } ?? []
 
         // Incremental: same ids and only the last message's content changed (streaming
         // token) — rebuild only the tail. A middle edit (reaction, etc.) falls through.
@@ -671,7 +683,7 @@ struct ChatSession: View {
                 let prev = list.count >= 2 ? list[list.count - 2] : nil
                 let slice = prev.map { [$0, last] } ?? [last]
                 let rebuilt = Transcript.rows(slice, byId: byId, projectId: slot, me: me,
-                                              people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames)
+                                              people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames, hiddenSenders: hiddenSenders)
                 let newTail: [Row]
                 if let prev {
                     let start = rebuilt.firstIndex(where: { $0.messageId == last.id }).map { ix -> Int in
@@ -698,7 +710,7 @@ struct ChatSession: View {
             let prev = list.count >= 2 ? list[list.count - 2] : nil
             let slice = prev.map { [$0, last] } ?? [last]
             let rebuilt = Transcript.rows(slice, byId: byId, projectId: slot, me: me,
-                                          people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames)
+                                          people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames, hiddenSenders: hiddenSenders)
             let newTail: [Row]
             if let prev {
                 let start = rebuilt.firstIndex(where: { $0.messageId == last.id }).map { ix -> Int in
@@ -723,7 +735,7 @@ struct ChatSession: View {
 
         let byId = Transcript.index(list)
         let next = Transcript.rows(list, byId: byId, projectId: slot, me: me,
-                                   people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames)
+                                   people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames, hiddenSenders: hiddenSenders)
         // Rows appended after the last one we had (new messages) join the window, so the
         // oldest row on screen does not fall out of the view tree when a new one lands.
         // History that arrives above it — the first snapshot, a backfill, an older
@@ -774,6 +786,9 @@ struct ChatSession: View {
             VStack(spacing: 8) {
                 header
                 linkPill.padding(.top, -5)
+                // The chat-level note (Jacob 2026-10-26): pinned under the header pill, 16 inset —
+                // the pushes refused for this chat, or the machine in error. One element.
+                chatNote.padding(.horizontal, 16)
                 if let people, showsMemberChips { memberChips(people).padding(.horizontal, 16) }
                 if showSearch {
                     HStack(spacing: 8) {
@@ -835,6 +850,17 @@ struct ChatSession: View {
         .environment(\.composerInset, composerSideInset)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
+                // The composer's note (Jacob 2026-10-26): the last send / attachment / recording
+                // failure in this chat, directly above the composer at its width; Try again
+                // re-sends the newest failed message.
+                if let error = model.sendErrors[chatId] {
+                    ErrorNote(id: "composer-error", error: error,
+                              detailsOpen: Binding(get: { model.sendErrorDetailsOpen.contains(chatId) },
+                                                   set: { if $0 { model.sendErrorDetailsOpen.insert(chatId) } else { model.sendErrorDetailsOpen.remove(chatId) } }),
+                              onTryAgain: { model.retrySendError(chatId) })
+                        .padding(.horizontal, composerSideInset)
+                        .padding(.bottom, 10)
+                }
                 presenceRow
                     .environment(\.composerInset, composerSideInset)
                     .animation(.easeOut(duration: 0.25), value: composerFocused)
@@ -855,6 +881,10 @@ struct ChatSession: View {
                             .frame(maxWidth: .infinity)
                             .frame(height: Theme.composerHeight)
                             .accessibilityIdentifier("group-silenced")
+                    } else if let peer = blockedPeer {
+                        // A DM with someone I blocked has no input ([feedback
+                        // blocked-state-ios-2026-10-26]): "You blocked X · Unblock" in its place.
+                        BlockedComposerBar(name: peer.displayName) { confirmUnblock = true }
                     } else {
                         composer
                     }
@@ -944,6 +974,11 @@ struct ChatSession: View {
                 .environment(\.theme, theme)
             }
         }
+        .confirmationDialog(BlockedState.confirmTitle(handle: blockedPeer?.handle ?? counterpart?.handle ?? ""), isPresented: $confirmUnblock, titleVisibility: .visible) {
+            Button(BlockedState.unblock) {
+                if let peer = blockedPeer, let entry = BlockRow.entry(in: model.blocked, id: peer.id, handle: peer.handle) { model.unblock(entry) }
+            }
+        } message: { Text(BlockedState.confirmNote) }
         .sheet(isPresented: $showProfile) {
             AgentEditSheet(projectId: projectId).environmentObject(model).environment(\.theme, theme)
         }
@@ -1460,6 +1495,8 @@ struct ChatSession: View {
                                     .font(.system(size: Theme.body, weight: .semibold))
                                     .foregroundStyle(theme.text)
                                     .lineLimit(1)
+                                // Blocked ([feedback blocked-state-ios-2026-10-26]): the tag after the name.
+                                if blockedPeer != nil { BlockedTag() }
                             } else {
                                 // Named multi-human group with no picture: title initials.
                                 PersonAvatar(url: nil, handle: people.title, size: Controls.avatar, name: people.title, id: people.id)
@@ -1679,28 +1716,14 @@ struct ChatSession: View {
                         )
                     Color.clear.frame(height: (showsMemberChips ? 104 : 64) + headerExtra).onAppear { scroller = proxy }
                     if let banner = machineBannerText {
-                        // Grok (Mac refs 69/70): a quiet notice, not a red strip — the
-                        // title in the text colour, the reason muted.
-                        // A channel's banner is about its own link, never the machine.
-                        let machineError = !isChannel && model.machine.state == .error
-                        let machineWaking = !isChannel && model.machine.state == .waking
-                        VStack(spacing: 3) {
-                            HStack(spacing: 6) {
-                                if machineWaking { ProgressView().controlSize(.mini).tint(theme.muted) }
-                                if machineError {
-                                    Image(systemName: "desktopcomputer").font(.system(size: 12))
-                                }
-                                Text(machineError ? "Can't reach your machine" : banner)
-                            }
-                            .font(theme.font(Theme.small, weight: machineError ? .semibold : .regular))
-                            .foregroundStyle(machineError ? theme.text : theme.muted)
-                            if machineError {
-                                Text(banner)
-                                    .font(theme.font(Theme.tiny))
-                                    .foregroundStyle(theme.muted)
-                                    .multilineTextAlignment(.center)
-                            }
+                        // Grok (Mac refs 69/70): a quiet line while the machine wakes. The error
+                        // state is the pinned note under the header (`chatNote`).
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.mini).tint(theme.muted)
+                            Text(banner)
                         }
+                        .font(theme.font(Theme.small))
+                        .foregroundStyle(theme.muted)
                         .frame(maxWidth: .infinity)
                         .padding(.bottom, 16)
                     }
@@ -2019,7 +2042,7 @@ struct ChatSession: View {
         switch row.kind {
         // A secret ghost row has nothing to copy, forward or quote; Delete stays off too —
         // the row is the record that a value went to the vault.
-        case .system, .question, .error, .forwardHint, .secretGhost:
+        case .system, .question, .error, .forwardHint, .secretGhost, .hidden:
             return false
         case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
             return messageById[row.messageId] != nil
@@ -2167,16 +2190,39 @@ struct ChatSession: View {
     /// system lines, and each new agent reply (quick ack vs main answer must not
     /// look merged — #1447). Measured on the references.
 
-    /// The machine's notice (waking / can't reach). The link has no line here:
-    /// the header's connection pill is its one place ([feedback connection-pill]).
+    /// The machine's waking line (the scroll's quiet banner). The error state is the pinned
+    /// `chatNote`; the link has no line here: the header's connection pill is its one place.
     private var machineBannerText: String? {
         // A channel lives on the servers' link, not the machine.
         if isChannel { return nil }
         switch model.machine.state {
         case .waking: return "Waking your machine…"
-        case .error: return model.machineDetail ?? (model.machine.alwaysOn ? "Your agents are safe — their machine just can't be reached right now." : "Could not wake your machine")
-        case .awake, .hibernatedLight, .hibernatedDeep, .stoppedByUser:
+        case .error, .awake, .hibernatedLight, .hibernatedDeep, .stoppedByUser:
             return nil
+        }
+    }
+
+    /// The chat-level failure, when there is one: the room's pushes refused
+    /// (`not_available`, cleared by the room's next ACK) first, else the machine in error.
+    private var chatLevelError: UserError? {
+        if model.pushRefused.contains(chatId) {
+            let why = model.pushRefusalText[chatId] ?? "Messages in this chat aren't being delivered right now. We'll keep trying."
+            return UserError(verb: "", class: .refused(message: why), raw: "the relay refused the push: not_available")
+        }
+        if !isChannel, model.machine.state == .error {
+            let detail = model.machineDetail ?? "machine state: error"
+            return UserError(verb: "", class: .refused(message: "Can't reach your machine. Your agents are safe — it just can't be reached right now."),
+                             raw: detail)
+        }
+        return nil
+    }
+
+    @ViewBuilder private var chatNote: some View {
+        if let error = chatLevelError {
+            ErrorNote(id: model.pushRefused.contains(chatId) ? "delivery-error" : "machine-error",
+                      error: error,
+                      detailsOpen: $chatNoteDetailsOpen,
+                      onTryAgain: model.pushRefused.contains(chatId) ? nil : { model.startMachine() })
         }
     }
 
@@ -2346,7 +2392,7 @@ struct ChatSession: View {
     /// that quotes the ask to that job.
     private func steerJob(_ job: Job) {
         guard let askId = job.askMessageId, let ask = messageById[askId] ?? messages.first(where: { $0.id == askId }) else {
-            model.notice = Notice(text: "That task's request is not in this chat any more.")
+            model.failRefused("steer the task", "That task's request is not in this chat any more.")
             return
         }
         showTasks = false
@@ -3510,6 +3556,7 @@ private struct ComposerField: View {
                 if memoCancelArmed {
                     Text("Release to cancel")
                         .font(theme.font(Theme.small))
+                        // error-ui: exception status-mark
                         .foregroundStyle(theme.danger)
                         .frame(maxWidth: .infinity, alignment: .center)
                 } else if memoHoldActive && memoDragX < -12 {
