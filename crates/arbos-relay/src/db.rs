@@ -188,6 +188,39 @@ CREATE INDEX IF NOT EXISTS vault_requests_project ON vault_requests(project_id, 
 CREATE TABLE IF NOT EXISTS project_forks (
   project_id TEXT PRIMARY KEY, source_project_id TEXT NOT NULL, created_at INTEGER NOT NULL
 );
+-- Agent-hosted sites (arbos.life/<prefix>/<app>/, #2060). The prefix is fixed per user on the
+-- first publish; sites carry the live manifest; versions keep every published manifest; pending
+-- rows are begin→commit sessions; events are the audit trail; quotas override the defaults.
+CREATE TABLE IF NOT EXISTS site_prefixes (
+  user_id TEXT PRIMARY KEY, prefix TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sites (
+  user_id TEXT NOT NULL, app TEXT NOT NULL, prefix TEXT NOT NULL, status TEXT NOT NULL,
+  version INTEGER NOT NULL, manifest TEXT NOT NULL, bytes INTEGER NOT NULL, files INTEGER NOT NULL,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, published_at INTEGER,
+  edge_synced_at INTEGER, takedown_reason TEXT, takedown_by TEXT,
+  PRIMARY KEY (user_id, app)
+);
+CREATE TABLE IF NOT EXISTS site_versions (
+  user_id TEXT NOT NULL, app TEXT NOT NULL, version INTEGER NOT NULL, manifest TEXT NOT NULL,
+  bytes INTEGER NOT NULL, files INTEGER NOT NULL, created_at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, app, version)
+);
+CREATE TABLE IF NOT EXISTS site_pending (
+  user_id TEXT NOT NULL, app TEXT NOT NULL, files TEXT NOT NULL, created_at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, app)
+);
+CREATE TABLE IF NOT EXISTS site_blobs (
+  sha256 TEXT PRIMARY KEY, size INTEGER NOT NULL, created_at INTEGER NOT NULL, edge_pushed_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS site_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, user_id TEXT NOT NULL, app TEXT NOT NULL,
+  kind TEXT NOT NULL, actor TEXT NOT NULL, version INTEGER, bytes INTEGER, files INTEGER, detail TEXT
+);
+CREATE INDEX IF NOT EXISTS site_events_at ON site_events(at);
+CREATE TABLE IF NOT EXISTS site_quotas (
+  user_id TEXT PRIMARY KEY, max_sites INTEGER, max_bytes INTEGER, publish_blocked INTEGER NOT NULL DEFAULT 0
+);
 "#;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -513,6 +546,9 @@ impl Db {
         );
         let _ = c.execute("ALTER TABLE chats ADD COLUMN closed_at INTEGER", []);
         let _ = c.execute("ALTER TABLE box_agentd ADD COLUMN seed_sha TEXT", []);
+        // Agent sites: an explicit prefix move keeps the old name answering 301 for 30 days.
+        let _ = c.execute("ALTER TABLE site_prefixes ADD COLUMN moved_from TEXT", []);
+        let _ = c.execute("ALTER TABLE site_prefixes ADD COLUMN moved_at INTEGER", []);
         let _ = c.execute("ALTER TABLE projects ADD COLUMN avatar TEXT", []);
         let _ = c.execute("ALTER TABLE projects ADD COLUMN deleted_at INTEGER", []);
         let _ = c.execute("ALTER TABLE projects ADD COLUMN avatar_color TEXT", []);

@@ -5,7 +5,7 @@
 //! local_run, local_read, local_list, deliver_file, generate_image, post_chart, send_message, vault_list,
 //! vault_request, egress, browser_fill, routines_list, routines_create, routines_update,
 //! routines_delete, goals_list, goals_create, goals_update, goals_log, goals_delete,
-//! web_search, web_fetch, submit_feedback.
+//! web_search, web_fetch, submit_feedback, publish_site, unpublish_site, list_sites.
 //!
 //! Sessions authenticate with a role-bound bearer token (main vs subagent, `Config::
 //! mcp_token_for_role`); tools that speak to other Projects are refused to subagents (D69).
@@ -84,6 +84,7 @@ fn tools() -> Value {
         a.extend(crate::vault::tool_specs());
         a.extend(crate::routines::tool_specs());
         a.extend(crate::goals::tool_specs());
+        a.extend(crate::sites::tool_specs());
         a.extend(crate::web::tool_specs());
         a.extend(crate::feedback::tool_specs());
         a.extend(crate::disk::tool_specs());
@@ -811,6 +812,9 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
         "web_search" => crate::web::web_search(a, args, &chat_for_scratch).await,
         "web_fetch" => crate::web::web_fetch(a, args, &chat_for_scratch).await,
         "submit_feedback" => crate::feedback::submit_feedback(a, args, &chat_for_scratch).await,
+        "publish_site" => crate::sites::publish_site(a, args).await,
+        "unpublish_site" => crate::sites::unpublish_site(a, args).await,
+        "list_sites" => crate::sites::list_sites(a).await,
         "free_space" => crate::disk::free_space_tool(a, args).await,
         "browser_fill" => crate::vault::browser_fill(a, args, &chat_for_scratch).await,
         "routines_list" | "routines_create" | "routines_update" | "routines_delete" => {
