@@ -3382,6 +3382,7 @@ impl Shell {
                         let (jobs, open) = crate::ui::tasks::for_chat(self.state.read(cx), &id);
                         crate::ui::tasks::presence_row(
                             p,
+                            &self.state,
                             id,
                             jobs,
                             open,
@@ -3391,7 +3392,7 @@ impl Shell {
                             cx,
                         )
                     }
-                    None => crate::ui::presence::row(p, &theme, cx),
+                    None => crate::ui::presence::row(p, Some(&self.state), &theme, cx),
                 };
                 div()
                     .absolute()
