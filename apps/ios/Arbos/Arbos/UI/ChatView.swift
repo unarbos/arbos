@@ -225,9 +225,12 @@ struct ChatSession: View {
     @FocusState private var searchFocused: Bool
     @ObservedObject private var calls = CallManager.shared
     /// iMessage-style: drag the transcript left to peek message times (0…`RowView.timeRevealWidth`).
+    /// Driven by the transcript's one swipe recognizer (`TranscriptSwipeHost`).
     @State private var timeReveal: CGFloat = 0
-    /// Once the pan is more horizontal-left than vertical, lock so scroll does not steal it.
-    @State private var timeRevealLocked = false
+    /// The reply swipe in progress: which row follows the finger and how far (same recognizer).
+    @State private var replySwipe = ReplySwipe()
+    /// Row frames in the transcript space, for the recognizer's row-by-location lookup.
+    @State private var rowFrames = RowFrameIndex()
     /// Long-press → Forward: the text to send and who wrote it (Forward sheet).
     @State private var pendingForward: PendingForward?
     /// The tasks sheet (duplex §2.4): open while the user looks at the agent's jobs.
@@ -1715,45 +1718,36 @@ struct ChatSession: View {
         .accessibilityAction { jumpToLatest() }
     }
 
-    /// Drag left on the transcript to peek each bubble's send time (iMessage).
-    /// Locks only after the pan is clearly horizontal-left so vertical scroll stays free.
-    /// Skips (and undoes) when a nested table is scrolling sideways
+    /// The transcript's swipe recognizer (`TranscriptSwipeHost`): the reply swipe on a row and
+    /// the iMessage time peek, both decided on the first points so a vertical pan is the
+    /// scroll view's alone. A nested table scrolling sideways undoes a peek in progress
     /// ([feedback ACQD4mUCTPxH7z3Y7YO8Vjw]).
-    private var timeRevealGesture: some Gesture {
-        DragGesture(minimumDistance: 12, coordinateSpace: .local)
-            .onChanged { value in
-                if NestedHorizontalScroll.claiming {
-                    if timeRevealLocked || timeReveal != 0 {
-                        timeRevealLocked = false
-                        var t = Transaction()
-                        t.disablesAnimations = true
-                        withTransaction(t) { timeReveal = 0 }
-                    }
-                    return
-                }
-                let dx = value.translation.width
-                let dy = value.translation.height
-                if !timeRevealLocked {
-                    guard abs(dx) + abs(dy) >= 12 else { return }
-                    // Vertical scroll or swipe-right-to-back: do not steal the gesture.
-                    guard dx < 0, abs(dx) > abs(dy) * 1.15 else { return }
-                    timeRevealLocked = true
-                }
-                // iMessage feel: 1:1 up to the reveal width, then rubber-band
-                // (a fifth of the excess, at most 24 pt) instead of a hard stop.
-                let raw = max(0, -dx)
-                let w = RowView.timeRevealWidth
-                let reveal = raw <= w ? raw : w + min(24, (raw - w) * 0.2)
-                var t = Transaction()
-                t.disablesAnimations = true
-                withTransaction(t) { timeReveal = reveal }
+    private func handleTranscriptSwipe(_ event: TranscriptSwipeEvent) {
+        var still = Transaction()
+        still.disablesAnimations = true
+        switch event {
+        case .replyChanged(let row, let dx):
+            let reveal = BubbleSwipe.reveal(for: dx)
+            let armed = BubbleSwipe.triggers(reveal: reveal)
+            if armed, !replySwipe.armed { Haptics.pick() }
+            withTransaction(still) { replySwipe = ReplySwipe(rowId: row, reveal: reveal, armed: armed) }
+        case .replyEnded(let row, let fire):
+            withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) { replySwipe = ReplySwipe() }
+            if fire, let target = windowedRows.first(where: { $0.id == row }) { beginReply(to: target) }
+        case .timeChanged(let dx):
+            if NestedHorizontalScroll.claiming {
+                if timeReveal != 0 { withTransaction(still) { timeReveal = 0 } }
+                return
             }
-            .onEnded { _ in
-                timeRevealLocked = false
-                withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
-                    timeReveal = 0
-                }
-            }
+            // iMessage feel: 1:1 up to the reveal width, then rubber-band
+            // (a fifth of the excess, at most 24 pt) instead of a hard stop.
+            let raw = max(0, -dx)
+            let w = RowView.timeRevealWidth
+            let reveal = raw <= w ? raw : w + min(24, (raw - w) * 0.2)
+            withTransaction(still) { timeReveal = reveal }
+        case .timeEnded:
+            withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) { timeReveal = 0 }
+        }
     }
 
     // MARK: Transcript
@@ -1776,6 +1770,11 @@ struct ChatSession: View {
                             }
                         )
                     Color.clear.frame(height: (showsMemberChips ? 104 : 64) + headerExtra).onAppear { scroller = proxy }
+                    #if DEBUG
+                    if DebugHooks.perfTouch {
+                        ScrollPerfProbe().frame(height: 0)
+                    }
+                    #endif
                     if let banner = machineBannerText {
                         // Grok (Mac refs 69/70): a quiet line while the machine wakes. The error
                         // state is the pinned note under the header (`chatNote`).
@@ -1819,12 +1818,13 @@ struct ChatSession: View {
                         chatId: chatId,
                         width: width,
                         timeReveal: timeReveal,
+                        replySwipe: replySwipe,
+                        rowFrames: rowFrames,
                         highlightedMessage: highlightedMessage,
                         rowsCount: rows.count,
                         messagesCount: messages.count,
                         canReply: { isMessageRow($0) },
                         onQuoteTap: { revealQuoted($0) },
-                        onReply: { beginReply(to: $0) },
                         onMenu: { runMessageMenu($0, row: $1) },
                         actionsRowId: actionsRow?.id,
                         onLongPress: { row in openActions(row) }
@@ -1838,6 +1838,14 @@ struct ChatSession: View {
                     Color.clear.frame(height: Theme.transcriptTail).id("bottom")
                 }
                 .padding(.horizontal, 16)
+                // The rows report their frames in this space; the one swipe recognizer for
+                // reply (right, on a row) and time peek (left) lives on the scroll view.
+                .coordinateSpace(name: TranscriptSpace.name)
+                .background {
+                    if ChatGestures.replySwipe || ChatGestures.timeReveal {
+                        TranscriptSwipeHost(frames: rowFrames, onEvent: handleTranscriptSwipe)
+                    }
+                }
                 // The avatar column follows the `+` as the composer inset animates with the keyboard.
                 .animation(.easeOut(duration: 0.25), value: composerFocused)
                 // Short threads: fill the viewport and pin rows to the bottom so
@@ -1853,8 +1861,6 @@ struct ChatSession: View {
             }
             .defaultScrollAnchor(.bottom)
             .scrollDismissesKeyboard(.interactively)
-            // Drag left → reveal message times (iMessage). simultaneous so vertical scroll still works.
-            .simultaneousGesture(timeRevealGesture)
             // Tap empty chat chrome to dismiss the keyboard and free the transcript.
             .onTapGesture {
                 composerFocused = false
@@ -3334,13 +3340,15 @@ private struct TranscriptRows: View, Equatable {
     let chatId: Id
     let width: CGFloat
     let timeReveal: CGFloat
+    /// The reply swipe in progress (one row follows the finger).
+    let replySwipe: ReplySwipe
+    /// Row frames the rows write on layout (not compared: a class, same instance for the chat).
+    let rowFrames: RowFrameIndex
     let highlightedMessage: Id?
     let rowsCount: Int
     let messagesCount: Int
     let canReply: (Row) -> Bool
     let onQuoteTap: (Quote) -> Void
-    /// Swipe right on a message bubble (`BubbleSwipe`) → the composer's reply quote.
-    let onReply: (Row) -> Void
     let onMenu: (MessageMenuItem, Row) -> Void
     /// The bubble whose long-press actions are open (it alone reports its frame).
     let actionsRowId: String?
@@ -3355,6 +3363,7 @@ private struct TranscriptRows: View, Equatable {
             && lhs.chatId == rhs.chatId
             && lhs.width == rhs.width
             && lhs.timeReveal == rhs.timeReveal
+            && lhs.replySwipe == rhs.replySwipe
             && lhs.highlightedMessage == rhs.highlightedMessage
             && lhs.mentions.stamp == rhs.mentions.stamp
         #if DEBUG
@@ -3380,9 +3389,18 @@ private struct TranscriptRows: View, Equatable {
                     people: people, timeReveal: timeReveal,
                     onQuoteTap: onQuoteTap,
                     highlighted: highlightedMessage == row.messageId,
-                    onReply: reply ? { onReply(row) } : nil,
+                    canReply: reply,
+                    replyDrag: replySwipe.rowId == row.id ? replySwipe.reveal : 0,
+                    replyArmed: replySwipe.rowId == row.id && replySwipe.armed,
                     mentions: mentions)
                 .equatable()
+                // Where this row is, for the swipe recognizer's row-by-location lookup. The
+                // transcript space scrolls with the content, so this fires on layout, not per
+                // scroll frame; the index is a plain class, so no view is invalidated.
+                .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(TranscriptSpace.name)) } action: { frame in
+                    rowFrames.set(row.id, frame: frame, canReply: reply)
+                }
+                .onDisappear { rowFrames.remove(row.id) }
                 .padding(.top, row.id == firstId ? 0 : row.gapBefore)
                 .id(row.id)
                 .onAppear {
