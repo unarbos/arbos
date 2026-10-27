@@ -9,11 +9,12 @@
 //! ([feedback app-01M5WKBR85JVW1KKJH96FWZVK5]). No Add members here —
 //! adding people starts in groups.
 
-use gpui::{prelude::*, Context, Div, ElementId, SharedString, Stateful};
+use gpui::{div, prelude::*, px, Context, Div, ElementId, SharedString, Stateful};
 
 use crate::app::ProfilePage;
 use crate::model::{Person, Project};
 use crate::ui::avatars;
+use crate::ui::blocked;
 use crate::ui::groups;
 use crate::ui::people;
 use crate::ui::shell::Shell;
@@ -39,6 +40,8 @@ pub(crate) fn block_row_label(blocked: bool) -> &'static str {
 /// The hero's Message pill: its element id / debug selector and label.
 pub(crate) const MESSAGE_ID: &str = "profile-message";
 pub(crate) const MESSAGE_LABEL: &str = "Message";
+/// The hero's Unblock pill once I blocked them ([feedback blocked-state-mac-2026-10-26]).
+pub(crate) const UNBLOCK_ID: &str = "profile-unblock-pill";
 
 /// Does this person's pane carry the Message pill? Not on my own pane and
 /// not once I blocked them (the relay refuses the DM either way; the other
@@ -132,13 +135,34 @@ pub(super) fn page(
     // same path as the New Message sheet (`AppState::start_dm` finds the
     // existing people space first, else `POST /chats/dm` and selects it when
     // the registry lists it).
-    let action = shows_message(me, blocked).then(|| {
-        let handle = person.handle.clone();
-        kit::pill_button(MESSAGE_ID, "bubble", MESSAGE_LABEL, &theme)
-            .on_click(cx.listener(move |this, _, _, cx| {
-                let handle = handle.clone();
-                this.state.update(cx, |s, cx| s.start_dm(handle, cx));
-            }))
+    // Blocked ([feedback blocked-state-mac-2026-10-26]): the hero says so — a Blocked chip
+    // under the @handle — and its one action is Unblock (the confirm takes the footer row's
+    // place); otherwise the Message pill.
+    let action = if blocked && !me {
+        let target = person.clone();
+        Some(
+            kit::pill_button(UNBLOCK_ID, "nosign", blocked::UNBLOCK_LABEL, &theme)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.arm_unblock(target.clone(), cx);
+                }))
+                .into_any_element(),
+        )
+    } else {
+        shows_message(me, blocked).then(|| {
+            let handle = person.handle.clone();
+            kit::pill_button(MESSAGE_ID, "bubble", MESSAGE_LABEL, &theme)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let handle = handle.clone();
+                    this.state.update(cx, |s, cx| s.start_dm(handle, cx));
+                }))
+                .into_any_element()
+        })
+    };
+    // The chip rides in the hero's under-the-subtitle slot (`editor`), above the pill.
+    let chip = blocked.then(|| {
+        div()
+            .pt(px(2.0))
+            .child(blocked::chip(&theme))
             .into_any_element()
     });
     let hero = Hero {
@@ -149,7 +173,7 @@ pub(super) fn page(
         subtitle_color: theme.text_muted,
         subtitle_click: None,
         subtitle_element: None,
-        editor: None,
+        editor: chip,
         action,
     };
 
@@ -226,24 +250,33 @@ pub(super) fn page(
         .into_any_element()]));
     }
     if !me {
-        let row = if blocked {
+        let target = person.clone();
+        let row = if blocked && shell.unblock_armed_for(&person) {
+            // Unblock asked for: the confirm in the row's place.
+            let (cancel, go) = blocked::confirm_buttons("profile-unblock", &theme);
+            blocked::confirm(
+                "profile-unblock",
+                &person.handle,
+                cancel.on_click(cx.listener(|this, _, _, cx| this.cancel_unblock(cx))),
+                go.on_click(cx.listener(|this, _, _, cx| this.confirm_unblock(cx))),
+                &theme,
+            )
+            .into_any_element()
+        } else if blocked {
             kit::action_row("profile-block", block_row_label(true), theme.accent, &theme)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.arm_unblock(target.clone(), cx);
+                }))
+                .into_any_element()
         } else {
             kit::danger_row("profile-block", block_row_label(false), &theme)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let handle = target.handle.clone();
+                    this.state.update(cx, |s, cx| s.block_user(handle, cx));
+                }))
+                .into_any_element()
         };
-        let target = person.clone();
-        footer.push(Section::Card(vec![row
-            .on_click(cx.listener(move |this, _, _, cx| {
-                let target = target.clone();
-                this.state.update(cx, |s, cx| {
-                    if s.is_blocked(&target) {
-                        s.unblock_user(&target, cx);
-                    } else {
-                        s.block_user(target.handle.clone(), cx);
-                    }
-                });
-            }))
-            .into_any_element()]));
+        footer.push(Section::Card(vec![row]));
     }
 
     Some(pane::render(
