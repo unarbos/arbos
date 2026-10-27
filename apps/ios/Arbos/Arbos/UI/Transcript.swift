@@ -1172,6 +1172,10 @@ struct RowView: View, Equatable {
     let row: Row
     let chatId: Id
     let width: CGFloat
+    /// A people chat (DM / group / channel): bubbles take `Theme.peopleBubbleInset`
+    /// off the screen instead of the agent chat's `Theme.bubbleInset`
+    /// ([feedback chat-density-ios-2026-10-26]).
+    var people: Bool = false
     /// How far the transcript has been dragged left to reveal iMessage-style times (0…`timeRevealWidth`).
     var timeReveal: CGFloat = 0
     /// A tap on a reply bubble's quote header: the chat scrolls to this message id.
@@ -1207,6 +1211,7 @@ struct RowView: View, Equatable {
             && lhs.highlighted == rhs.highlighted
             && lhs.mentions.stamp == rhs.mentions.stamp
             && lhs.composerInset == rhs.composerInset
+            && lhs.people == rhs.people
             && lhs.theme == rhs.theme
         #if DEBUG
         PerfCounters.bump(same ? "rowEqTrue" : "rowEqFalse")
@@ -1214,7 +1219,13 @@ struct RowView: View, Equatable {
         return same
     }
 
-    private var maxBubble: CGFloat { max(200, width - Theme.bubbleInset) }
+    /// The widest a bubble on this row may be: the screen minus the chat kind's inset
+    /// (`Theme.bubbleInset(people:)`); an incoming people-chat bubble also loses the lane.
+    private var maxBubble: CGFloat { Self.maxBubble(width: width, people: people) }
+
+    static func maxBubble(width: CGFloat, people: Bool) -> CGFloat {
+        max(200, width - Theme.bubbleInset(people: people))
+    }
 
     private var reportsGreetingFrame: Bool {
         model.firstLogin != nil && model.messages(of: chatId).first(where: { $0.greeting })?.id == row.messageId
