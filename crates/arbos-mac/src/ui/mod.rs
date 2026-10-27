@@ -46,6 +46,7 @@ pub mod profiles;
 pub mod rail;
 pub mod reactions;
 pub mod routines;
+pub mod secret_card;
 pub mod secrets;
 pub mod select;
 pub mod servers;
