@@ -347,6 +347,7 @@ impl BoxConfig {
             mcp_port: base + 1,
             hook_port: base + 2,
             proxy_port: base + 3,
+            sites_port: base + 4,
             browser_stream_port: 9223 + index,
             decision_model: slot("decision_model", &talking),
             decision_cfg: decision_cfg_of(&models),
@@ -427,6 +428,8 @@ pub struct Config {
     pub mcp_port: u16,
     pub hook_port: u16,
     pub proxy_port: u16,
+    /// Loopback preview of `sites/<app>/` with the edge's rules (#2060).
+    pub sites_port: u16,
     /// agent-browser's JPEG stream port for this workspace (9223 + index); one browser per workspace.
     pub browser_stream_port: u16,
     pub talking_model: String,
@@ -583,6 +586,11 @@ impl Config {
             (
                 "AGENT_BROWSER_STREAM_PORT".into(),
                 self.browser_stream_port.to_string(),
+            ),
+            // Loopback preview of `sites/<app>/` with the edge's serving rules (#2060).
+            (
+                "ARBOS_SITES_PREVIEW_URL".into(),
+                format!("http://127.0.0.1:{}/sites/", self.sites_port),
             ),
         ]
     }
