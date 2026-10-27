@@ -18,7 +18,12 @@ STALL_S = 90
 
 
 def text_of(row):
-    return "\n".join(p.get("text", "") for p in row.get("parts", []) if p.get("kind") == "text").strip()
+    """What the user reads in a row: its text parts, plus the question of an `ask_user` card (the agent's
+    words when it stops to ask — d1 on 0.1.141 answered "clean up" with a question card and no text)."""
+    parts = row.get("parts", [])
+    out = [p.get("text", "") for p in parts if p.get("kind") == "text"]
+    out += [f"[asks] {p.get('question') or p.get('text') or ''}" for p in parts if p.get("kind") == "question" and (p.get("question") or p.get("text"))]
+    return "\n".join(out).strip()
 
 
 def rows_after(doc, user_msg_id):
