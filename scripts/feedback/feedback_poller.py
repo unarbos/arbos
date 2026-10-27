@@ -213,6 +213,7 @@ class Config:
     public_group_id: str
     agent_timeout_min: int
     ship_timeout_min: int
+    operator: str  # the one identity whose gate-next pins stand (FEEDBACK_OPERATOR); other pins need [hotfix] + P0
     ios_gate_ssh: str
     ios_gate_key: str
     ios_gate_timeout_s: int
@@ -305,6 +306,7 @@ class Config:
             rust_gate_ssh=env.get("RUST_GATE_SSH", env.get("IOS_GATE_SSH", "")),
             rust_gate_timeout_s=int(env.get("RUST_GATE_TIMEOUT_S", "3600")),
             ship_timeout_min=int(env.get("FEEDBACK_SHIP_TIMEOUT_MIN", "90")),
+            operator=env.get("FEEDBACK_OPERATOR", "bc-7eefe9bf"),
         )
 
 
@@ -2319,6 +2321,26 @@ class Loop:
             out.append((fid, st))
         return out
 
+    def pin_allowed(self, fid: str, st: dict) -> bool:
+        """The operator's pins stand. Any other pin stands only for a [hotfix] head on a P0-labelled issue; the
+        answer is cached per head so the check costs two API calls once, not every tick."""
+        if st.get("pinned_by") == self.cfg.operator:
+            return True
+        head = st.get("branch_head") or ""
+        cache = st.get("pin_check") or {}
+        if cache.get("head") == head:
+            return bool(cache.get("ok"))
+        ok = False
+        try:
+            msg = self.gh.commit(head)["commit"]["message"] if head else ""
+            labels = {l["name"] for l in self.gh.issue(st["issue"]).get("labels", [])} if st.get("issue") else set()
+            ok = "[hotfix]" in msg.lower() and "P0" in labels
+        except (HttpError, KeyError):
+            ok = False
+        st["pin_check"] = {"head": head, "ok": ok, "at": iso()}
+        self.store.save_state(fid, st)
+        return ok
+
     def rust_gate_tick(self) -> None:
         """Batch mode for the Rust gate, split in two halves that run at the same time:
         every ready branch is merged with current main into one integration branch `gate/<run>` on GitHub
@@ -2400,6 +2422,22 @@ class Loop:
         # Pinned items (operator gate-next, owner priority) always form the next batch, on their own, ahead of the
         # pool AND ahead of bisect / conflict-retry plan halves — the pin survives a conflict → owner-merges-main
         # → re-push cycle (00:58 Oct 22: #1241 was merged third behind a retry half and hit a sibling conflict).
+        # Pins are the operator's (coordinator 2026-10-27 18:00: a worker pinned two ordinary Jacob-owner items). The CLI
+        # runs under the shared host account, so identity cannot be enforced there; a pin whose `pinned_by` is not the
+        # operator stands only when the head commit carries [hotfix] AND the issue is labelled P0 — otherwise it is
+        # logged and cleared here, and the item keeps gating at normal priority.
+        for fid, st in ready:
+            if st.get("gate_pinned") and not self.pin_allowed(fid, st):
+                st["gate_pinned"] = False
+                self.store.save_state(fid, st)
+                plan = [h for h in plan if set(h) != {fid}]
+                cur["rust_gate_plan"] = plan
+                self.store.save_cursor(cur)
+                self.store.event(fid, "pin_cleared", by="scheduler", pinned_by=st.get("pinned_by"), reason="not the operator's pin and not a [hotfix] + P0 item")
+                log(f"[{fid}] gate-next pin by {st.get('pinned_by') or 'unknown'} cleared — pins are the operator's unless the head is [hotfix] and the issue is P0")
+                with contextlib.suppress(HttpError):
+                    if st.get("issue"):
+                        self.gh.comment(st["issue"], f"Gate pin cleared: `gate-next` is the operator's call (pinned by {st.get('pinned_by') or 'a worker'}); a worker's pin stands only for a `[hotfix]` commit on a P0-labelled issue. The item keeps its normal place in the pool.")
         members: dict[str, str] = {fid: st["branch_head"] for fid, st in ready if st.get("gate_pinned")}
         if not members:
             bounced = self.release_bounced_pins()
@@ -5210,6 +5248,9 @@ def main(argv: list[str]) -> int:
         # Jacob's servers UI #1241/#1242 ahead of the queue). --abort drops the active run first so they start
         # on the next tick instead of after it settles. Other ready items follow in later batches.
         args = argv[2:]
+        by_arg = ""
+        if "--by" in args and args.index("--by") + 1 < len(args):
+            i = args.index("--by"); by_arg = args[i + 1]; args = args[:i] + args[i + 2:]
         then_ids = args[args.index("--then") + 1:] if "--then" in args else []
         ids = [a for a in (args[:args.index("--then")] if "--then" in args else args) if not a.startswith("--")]
         then_ids = [a for a in then_ids if not a.startswith("--")]
@@ -5222,7 +5263,11 @@ def main(argv: list[str]) -> int:
                 return 2
             into[fid] = st["branch_head"]
             st["gate_pinned"] = True  # stays ahead of the pool until it merges, through conflict/re-push cycles
+            st["pinned_by"] = os.environ.get("ARBOS_OPERATOR") or by_arg or "unknown"
+            st["pinned_at"] = iso()
             loop.store.save_state(fid, st)
+            if st["pinned_by"] != cfg.operator:
+                print(f"{fid}: note — pins are the operator's ({cfg.operator}); this pin by {st['pinned_by']} stands only if the head carries [hotfix] and the issue is P0, else the scheduler clears it")
         batches = [heads] + ([then_heads] if then_heads else [])
         with (cfg.state_dir / ".lock").open("w") as lock:
             try:
