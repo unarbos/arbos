@@ -113,6 +113,19 @@ struct SecretItem: Identifiable, Equatable {
     var directors: [SecretDirector]
     /// `refuse | card`: what a non-listed person's ask does (spec §7.7).
     var othersAsk: String
+    /// Where it came from: `settings`, or `chat` + the agent it was handed to (secret hand-off).
+    var sourceKind: String = "settings"
+    var sourceProjectName: String? = nil
+
+    /// "given in chat" for a hand-off secret, else nil (list subtitle).
+    var sourceLabel: String? { sourceKind == "chat" ? "given in chat" : nil }
+
+    /// "In chat with Arbos" — the Secret page's Added row, when it came from a chat.
+    var addedLabel: String? {
+        guard sourceKind == "chat" else { return nil }
+        if let n = sourceProjectName, !n.isEmpty { return "In chat with \(n)" }
+        return "In chat"
+    }
 
     var kindLabel: String {
         switch kind {
@@ -143,6 +156,8 @@ struct SecretItem: Identifiable, Equatable {
         let people = dto.people ?? []
         self.directors = (people.isEmpty ? dto.directors : people).map(SecretDirector.init(dto:))
         self.othersAsk = dto.others_ask ?? "refuse"
+        self.sourceKind = dto.source?.kind ?? "settings"
+        self.sourceProjectName = dto.source?.project_name
     }
 
     /// Reduced project-page secret (`ProjectSecretSummaryDto`) with empty agents/directors.
