@@ -141,6 +141,17 @@ def iso(t: dt.datetime | None = None) -> str:
     return (t or utcnow()).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# Files that make the iPhone build (the gate's iOS half) relevant. `packages/ArbosFFI/**` is the typeshare-generated
+# Swift package every iOS and Mac target compiles: 2026-10-27 04:23 an agentd branch regenerated RelayTypes.swift
+# (PushEvent.messageRedacted) with the iOS half skipped, and every iOS half after it failed on an inexhaustive
+# switch in AppModel.swift until the handler branch landed. The client-core crates feed the same package.
+IOS_PATH_PREFIXES = ("apps/ios/", "packages/ArbosFFI/", "crates/arbos-core/", "crates/arbos-client/", "crates/arbos-ffi/")
+
+
+def touches_ios(files: list[str] | None) -> bool:
+    return any(f.startswith(IOS_PATH_PREFIXES) or f == ".github/workflows/ios.yml" for f in files or [])
+
+
 def parse_iso(s: str) -> dt.datetime:
     s = s.strip()
     if s.endswith("Z"):
@@ -1977,7 +1988,7 @@ class Loop:
                                     seen.append(f["filename"])
                     files = seen
                 st.update(status="gating", branch=branch, branch_head=head, files=files,
-                          expects_ios=any(f.startswith(("apps/ios/", "crates/arbos-core/", "crates/arbos-client/", "crates/arbos-ffi/")) or f == ".github/workflows/ios.yml" for f in files),
+                          expects_ios=touches_ios(files),
                           expects_rust=bool(self.rust_crates(files)),
                           expects_ci=any(not f.startswith("apps/ios/") for f in files),
                           agent_summary=self.summary_line(result))
@@ -2003,7 +2014,7 @@ class Loop:
         files = [f["filename"] for f in self.gh.commit(commit["sha"]).get("files", [])]
         st.update(status="pushed", commit=commit["sha"], commit_url=commit["html_url"],
                   commit_message=commit["commit"]["message"].splitlines()[0], pushed_at=iso(), files=files,
-                  expects_ios=any(f.startswith("apps/ios/") or f == ".github/workflows/ios.yml" for f in files),
+                  expects_ios=touches_ios(files),
                   expects_ci=any(not f.startswith("apps/ios/") for f in files))
         self.store.save_state(fid, st)
         self.store.event(fid, "pushed", commit=commit["sha"], files=files)
@@ -2122,7 +2133,7 @@ class Loop:
             return recorded
         files = self.branch_files(fid, cmp) or st.get("files") or []
         st.update(branch_head=head, files=files,
-                  expects_ios=any(f.startswith(("apps/ios/", "crates/arbos-core/", "crates/arbos-client/", "crates/arbos-ffi/")) or f == ".github/workflows/ios.yml" for f in files),
+                  expects_ios=touches_ios(files),
                   expects_rust=bool(self.rust_crates(files)),
                   expects_ci=any(not f.startswith("apps/ios/") for f in files))
         self.store.save_state(fid, st)
@@ -2333,7 +2344,7 @@ class Loop:
             cur.pop("rust_gate_tree", None)
             tfiles = [f["filename"] for c in self.gh.compare(tree["base"], tree["tree"]).get("commits", []) for f in self.gh.commit(c["sha"]).get("files", [])]
             tree.update(started=iso(), warm=False, needs_mac=True, linux="pending", mac="pending", mac_started=None, land_tree=True,
-                        needs_ios=any(f.startswith("apps/ios/") for f in tfiles), ios="pending" if any(f.startswith("apps/ios/") for f in tfiles) else "skipped")
+                        needs_ios=touches_ios(tfiles), ios="pending" if touches_ios(tfiles) else "skipped")
             cur["rust_gate"] = tree
             self.store.save_cursor(cur)
             log(f"Rust gate {tree['id']}: integration tree {tree['tree'][:8]} with {len(tree['members'])} fixes (CI on {tree['branch']}; Mac release build)")
@@ -2598,7 +2609,7 @@ class Loop:
             files += self.store.state(fid).get("files") or []
         crates = self.rust_crates(files)
         mac = "arbos-mac" in crates or crates == ["workspace"]
-        ios = any(f.startswith("apps/ios/") or f == ".github/workflows/ios.yml" for f in files)
+        ios = touches_ios(files)
         linux = any(not f.startswith("apps/ios/") for f in files)  # ci.yml ignores apps/ios-only pushes
         cur = self.store.cursor()
         cur["rust_gate"] = {"id": run_id, "branch": branch, "base": base, "tree": tree, "members": {fid: members[fid] for fid in merged},
@@ -2863,7 +2874,7 @@ class Loop:
             files = [f["filename"] for f in self.gh.commit(fix["sha"]).get("files", [])]
             st.update(status="pushed", commit=fix["sha"], commit_url=fix["html_url"], commit_message=fix["commit"]["message"].splitlines()[0],
                       pushed_at=iso(), merge_sha=merged["sha"], merge_url=merged["html_url"], commit_date=merged["commit"]["committer"]["date"],
-                      files=files, expects_ios=any(f.startswith("apps/ios/") for f in files), expects_ci=any(not f.startswith("apps/ios/") for f in files),
+                      files=files, expects_ios=touches_ios(files), expects_ci=any(not f.startswith("apps/ios/") for f in files),
                       rust_gate={"head": members.get(fid), "ok": True, "verdict": "ok", "at": iso(), "run": active["id"], "batch": len(members),
                                  "linux_run": active.get("linux_run"), "mac": active["mac"], "tree": tree})
             for k in ("branch_head", "gated_head"):
@@ -3205,7 +3216,7 @@ class Loop:
         if not st.get("expects_ios") and not st.get("expects_ci"):
             # Nothing to wait for would mean a silent 90-min timeout; derive the expectations from the commit.
             files = st.get("files") or [f["filename"] for f in self.gh.commit(sha).get("files", [])]
-            st.update(files=files, expects_ios=any(f.startswith("apps/ios/") for f in files),
+            st.update(files=files, expects_ios=touches_ios(files),
                       expects_ci=any(not f.startswith("apps/ios/") for f in files))
             self.store.save_state(fid, st)
         if not st.get("commit_date"):
@@ -4246,7 +4257,7 @@ class Loop:
                                         seen.append(f["filename"])
                         files = seen
                     st.update(status="gating", branch=f"feedback/{fid}", branch_head=head, files=files,
-                              expects_ios=any(f.startswith("apps/ios/") or f == ".github/workflows/ios.yml" for f in files),
+                              expects_ios=touches_ios(files),
                               expects_rust=bool(self.rust_crates(files)),
                               expects_ci=any(not f.startswith("apps/ios/") for f in files),
                               agent_summary=f"handed-off fix by {st.get('handed_off_to')}")
@@ -4267,7 +4278,7 @@ class Loop:
             st.update(status="pushed", commit=commit["sha"], commit_url=commit["html_url"],
                       commit_message=commit["commit"]["message"].splitlines()[0], pushed_at=iso(), files=files,
                       commit_date=commit["commit"]["committer"]["date"],
-                      expects_ios=any(f.startswith("apps/ios/") for f in files),
+                      expects_ios=touches_ios(files),
                       expects_ci=any(not f.startswith("apps/ios/") for f in files))
             self.store.save_state(fid, st)
             self.store.event(fid, "handoff_landed", commit=commit["sha"], files=files)
