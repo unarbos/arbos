@@ -3278,6 +3278,7 @@ impl Render for Composer {
         // (`shell::file_drop_target`), not this field alone.
         let field_base = div()
             .id("composer-field")
+            .debug_selector(|| "composer-field".into())
             .flex_1()
             .min_w_0()
             .rounded(px(field_radius))
