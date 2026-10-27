@@ -1298,15 +1298,27 @@ fn start_store_flusher(shared: &Arc<Shared>) {
                     if doc.core.doc.oplog_frontiers().is_empty() {
                         continue;
                     }
-                    doc.core.doc.export(loro::ExportMode::Snapshot)
+                    // Through the core: once a secret redaction reached this room the
+                    // snapshot is shallow (no history), so the store never keeps the old text.
+                    let shallow = doc.core.is_shallow_mode();
+                    let bytes = doc.core.snapshot();
+                    if bytes.is_empty() {
+                        Err(shallow)
+                    } else {
+                        Ok((bytes, shallow))
+                    }
                 };
                 match snapshot {
-                    Ok(bytes) => {
+                    Ok((bytes, shallow)) => {
                         shared.with_store(|s| {
-                            s.save_doc(&key, &project_id, &room_chat, cursor, &bytes)
+                            s.save_doc(&key, &project_id, &room_chat, cursor, &bytes);
+                            if shallow {
+                                s.flush_after_redaction();
+                            }
                         });
                     }
-                    Err(err) => eprintln!("store: export {key}: {err}"),
+                    // An open transact: the export waits for the next tick.
+                    Err(_) => continue,
                 }
             }
             since_caps += 1;
@@ -7298,6 +7310,52 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     shared.fail("change the shell approvals", &err);
                 }
                 refresh_shell_grants(&shared, &project_id).await;
+            });
+        }
+        ClientCommand::SecretHandoffSave {
+            chat_id,
+            approval_id,
+            project_id,
+            name,
+            value,
+            purpose,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let body = json!({ "name": name, "kind": "key", "value": value, "note": purpose,
+                    "agents": [{ "project_id": project_id, "note": purpose }],
+                    "source": { "kind": "chat", "project_id": project_id, "chat_id": chat_id } });
+                drop(value);
+                let result = match shared.post_json("/secrets", body).await {
+                    Ok(v) => match serde_json::from_value::<SecretEnvelopeDto>(v) {
+                        Ok(e) => {
+                            // Answer the card with the reference: the box's waiting tool
+                            // gets `{ id, name, env }` and nothing else.
+                            let docs = shared.docs.lock().unwrap();
+                            if let Some(doc) = docs.get(&chat_id) {
+                                let device = shared.device_id();
+                                let payload = json!({ "approvalId": approval_id,
+                                    "secret": { "id": e.secret.id, "name": e.secret.name, "env": e.secret.env } });
+                                doc.core.transact(|d| {
+                                    d.push_command("approve", payload, &device);
+                                });
+                            }
+                            Ok(e.secret.env)
+                        }
+                        Err(_) => Err(UserError::of(
+                            "save the secret",
+                            ErrorClass::Server,
+                            "bad secret reply",
+                        )),
+                    },
+                    // The shared error note (ARB-416) draws it on the card.
+                    Err(err) => Err(UserError::classify("save the secret", &err)),
+                };
+                let _ = shared.events.send(SyncEvent::SecretHandoff {
+                    approval_id,
+                    result,
+                });
+                refresh_secrets(&shared).await;
             });
         }
         ClientCommand::SecretAdd { item } => {

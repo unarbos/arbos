@@ -34,6 +34,7 @@ use crate::ui::mention::{self, Mentions};
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::profile_target;
+use crate::ui::secret_card::SecretOfferCard;
 use crate::ui::select::{BubbleAt, BubbleSelectable, LinkIcons, Selectable, Span, TextSelection};
 use crate::ui::theme::{
     Theme, BUBBLE_PAD_X, BUBBLE_PAD_Y, BUBBLE_RADIUS, CHAT_BODY, CHAT_LINE_HEIGHT, COLUMN_MARGIN,
@@ -456,6 +457,10 @@ pub enum RowKind {
         /// Bubble menu → Forward: "Forwarded from <name>" header above the
         /// text (feedback app-01M5MXRZ7609S70P9S9P2RZDDF).
         forwarded_from: Option<String>,
+        /// Secret hand-off: the message's value moved into the vault and the row is the
+        /// "Secret saved as NAME" ghost — muted fill, key glyph, no text to select or copy.
+        /// The secret's name.
+        ghost: Option<String>,
     },
     Markdown {
         block: Block,
@@ -689,6 +694,8 @@ pub struct Transcript {
     veils: HashMap<String, Veil>,
     /// One stateful card per typed question, keyed by question id; dropped with its row.
     cards: HashMap<String, Entity<QuestionCard>>,
+    /// Secret hand-off request cards by approval id (the masked-field card keeps state).
+    secret_cards: HashMap<String, Entity<SecretOfferCard>>,
     pinned_to_bottom: bool,
     /// When ↓ last landed on the newest page from far away: drives the
     /// [`JUMP_ARRIVE_MS`] settle of the list (rise + fade), then cleared.
@@ -772,6 +779,7 @@ impl Transcript {
             pane_open: false,
             veils: HashMap::new(),
             cards: HashMap::new(),
+            secret_cards: HashMap::new(),
             pinned_to_bottom: true,
             arrived_at: None,
             rows_laid_out: 0,
@@ -2200,6 +2208,7 @@ impl Transcript {
                 delivery,
                 quote,
                 forwarded_from,
+                ghost,
             } => {
                 // My bubble is dark in both appearances: white text, a
                 // stronger highlight than the soft one on the grey bubbles.
@@ -2220,14 +2229,17 @@ impl Transcript {
                 // Triple-backtick fences render as code cards (same as agent
                 // replies); other text stays plain so "# heading" is still literal.
                 // Bare `http(s)://…` URLs are still accented and clickable.
-                let body = user_message_body(
-                    &row.id,
-                    &text,
-                    text_color,
-                    &theme,
-                    &bubble_selectable,
-                    &self.code_copy(cx),
-                );
+                let body = match &ghost {
+                    Some(name) => secret_ghost_body(name, from.as_ref(), &theme),
+                    None => user_message_body(
+                        &row.id,
+                        &text,
+                        text_color,
+                        &theme,
+                        &bubble_selectable,
+                        &self.code_copy(cx),
+                    ),
+                };
                 // Someone else's bubble in a group / channel: their name inside
                 // it (their colour); the time is hover-only; my own bubble carries
                 // its sent/seen label in the footer.
@@ -2285,7 +2297,16 @@ impl Transcript {
                         name_el,
                         quote_header.map(|q| q.into_any_element()),
                         body,
-                    ));
+                    ))
+                    // The ghost: the surface fill with a hairline, muted ink — a row that
+                    // says a value was here, not a message to read.
+                    .when(ghost.is_some(), |b| {
+                        b.bg(theme.surface_2)
+                            .border_1()
+                            .border_color(theme.border_strong)
+                            .text_color(theme.text_muted)
+                            .debug_selector(|| "secret-ghost".into())
+                    });
                 if let Some(person) = from {
                     // Someone else: left-aligned, their avatar beside the bubble on
                     // the avatar column. A small coloured left-edge sliver marks a
@@ -2688,6 +2709,48 @@ impl Transcript {
             }
             RowKind::Approval { mut view, lane } => {
                 let chat_id = self.chat_id.clone().unwrap_or_default();
+                // Secret hand-off request card: a stateful card with the masked field.
+                if view.payload.get("kind").and_then(serde_json::Value::as_str)
+                    == Some("secret_offer")
+                {
+                    let project_id = view
+                        .payload
+                        .get("projectId")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                        .or_else(|| {
+                            self.state
+                                .read(cx)
+                                .project_of_chat(&chat_id)
+                                .map(|p| p.id.clone())
+                        })
+                        .unwrap_or_default();
+                    let suggested = view
+                        .payload
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("")
+                        .to_owned();
+                    let state = self.state.clone();
+                    let approval_id = view.approval_id.clone();
+                    let card = self
+                        .secret_cards
+                        .entry(approval_id.clone())
+                        .or_insert_with(|| {
+                            cx.new(|cx| {
+                                SecretOfferCard::new(
+                                    state,
+                                    chat_id.clone(),
+                                    approval_id,
+                                    project_id,
+                                    &suggested,
+                                    cx,
+                                )
+                            })
+                        })
+                        .clone();
+                    return card_row(card, lane).into_any_element();
+                }
                 // #1544: the standing rows name the agent ("Always allow Doug in /tmp").
                 view.agent = self
                     .state
@@ -3474,9 +3537,22 @@ pub fn build_rows_with_cache(
         let rows_before_message = rows.len();
         match message.role {
             Role::User => {
+                // Secret hand-off: a redacted row carries one `secret_redacted` part and no
+                // text; it draws as the ghost bubble ("Secret saved as NAME").
+                let ghost = message.parts.iter().find_map(|p| match p {
+                    Part::SecretRedacted { name, env, .. } => Some(if name.is_empty() {
+                        env.clone()
+                    } else {
+                        name.clone()
+                    }),
+                    _ => None,
+                });
                 // `@handle` → `@Display Name` so the chip shows the name and a copy
                 // carries it (mention chips, Oct 23).
-                let text = mentions.display(&message.plain_text());
+                let text = match &ghost {
+                    Some(name) => format!("Secret saved as {name}"),
+                    None => mentions.display(&message.plain_text()),
+                };
                 let attachment_parts: Vec<(String, Attachment)> = message
                     .parts
                     .iter()
@@ -3587,6 +3663,7 @@ pub fn build_rows_with_cache(
                                 &quote,
                                 delivery,
                                 &forwarded_from,
+                                &ghost,
                             ),
                             false,
                         ),
@@ -3601,6 +3678,7 @@ pub fn build_rows_with_cache(
                             delivery,
                             quote,
                             forwarded_from,
+                            ghost,
                         },
                     });
                 }
@@ -3995,6 +4073,7 @@ pub fn build_rows_with_cache(
                         | Part::File { .. }
                         | Part::Browser { .. }
                         | Part::Skills { .. }
+                        | Part::SecretRedacted { .. }
                         | Part::Unknown => {}
                     }
                 }
@@ -4496,6 +4575,33 @@ fn slice_starts_at(chars: &[char], at: usize, needle: &str) -> bool {
 
 /// User / people-chat bubble body: plain prose, or prose mixed with fenced
 /// ``` code cards when the message contains triple backticks.
+/// Secret hand-off ghost row body: key glyph, "Secret saved as **NAME**" (another person's
+/// row: "<Name> saved a secret as **NAME**"). Nothing here is the value.
+fn secret_ghost_body(name: &str, from: Option<&Person>, theme: &Theme) -> AnyElement {
+    let lead = match from {
+        Some(p) => format!("{} saved a secret as ", p.display_name()),
+        None => "Secret saved as ".to_owned(),
+    };
+    div()
+        .flex()
+        .items_center()
+        .gap(px(7.0))
+        .child(icon("key", 13.0, theme.text_muted))
+        .child(
+            div()
+                .flex()
+                .items_baseline()
+                .child(div().text_color(theme.text_muted).child(lead))
+                .child(
+                    div()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child(name.to_owned()),
+                ),
+        )
+        .into_any_element()
+}
+
 fn user_message_body(
     row_id: &str,
     text: &str,
@@ -7227,6 +7333,68 @@ mod transcript_smoke_tests {
         (rt, state, transcript)
     }
 
+    /// Secret hand-off (2026-10-26): the request card (`secret_offer`, a stateful card with
+    /// two inputs) and the ghost row both draw headless, and the card carries the suggested
+    /// name into its Name field with nothing in the Value field.
+    #[gpui::test]
+    fn secret_offer_card_and_ghost_row_draw(cx: &mut TestAppContext) {
+        let t = 1_700_000_000_000u64;
+        let card: Message = serde_json::from_value(serde_json::json!({
+            "id": "m2", "chatId": "c1", "role": "assistant", "sender": "agent", "status": "done",
+            "createdAt": t + 2_000,
+            "parts": [
+                { "id": "p1", "kind": "text", "text": "Yes. Use the box below." },
+                { "id": "p2", "kind": "approval", "approvalId": "ap-offer", "title": "Give Arbos a secret",
+                  "summary": "the refunds report", "risk": "credential", "state": "pending",
+                  "payload": { "kind": "secret_offer", "name": "STRIPE_KEY", "purpose": "the refunds report",
+                               "agent": "Arbos", "projectId": "p1", "chatId": "c1", "answers": [] } }
+            ],
+        }))
+        .expect("card row");
+        let ghost: Message = serde_json::from_value(serde_json::json!({
+            "id": "m3", "chatId": "c1", "role": "user", "sender": "user", "status": "done",
+            "createdAt": t + 4_000, "redactedAt": t + 5_000,
+            "parts": [{ "id": "p3", "kind": "secret_redacted", "name": "STRIPE_KEY", "env": "STRIPE_KEY",
+                        "secretId": "s1", "savedBy": "user:me" }],
+        }))
+        .expect("ghost row");
+        let (_rt, _state, transcript) = mount_with(
+            cx,
+            vec![
+                message("m1", "user", "Can I give you a secret?", t),
+                card,
+                ghost,
+            ],
+        );
+        let (_view, vcx) = cx.add_window_view(|_, _| Host {
+            transcript: transcript.clone(),
+        });
+        vcx.run_until_parked();
+        assert!(
+            vcx.debug_bounds("chat-column").is_some(),
+            "the transcript draws"
+        );
+        assert!(
+            vcx.debug_bounds("secret-offer-card").is_some(),
+            "the request card is on screen"
+        );
+        assert!(
+            vcx.debug_bounds("secret-offer-save").is_some(),
+            "the Save to vault row is on screen"
+        );
+        assert!(
+            vcx.debug_bounds("secret-ghost").is_some(),
+            "the ghost row draws in the user's slot"
+        );
+        transcript.read_with(cx, |t, cx| {
+            let card = t.secret_cards.get("ap-offer").expect("card entity cached");
+            card.read_with(cx, |c, cx| {
+                assert_eq!(c.name_input.read(cx).text(), "STRIPE_KEY");
+                assert!(c.value_input.read(cx).text().is_empty());
+            });
+        });
+    }
+
     /// 2026-10-26, Mac 0.6.268: a row the code did not expect aborted the app at every
     /// launch (a panic on the main thread unwinds into AppKit → `abort()`). A sync event whose
     /// apply panics is skipped with a notice, the state keeps every other row, and the
@@ -8548,6 +8716,116 @@ mod system_line_tests {
         );
         assert!(names_senders(None, None, true), "channel");
         assert!(!names_senders(None, None, false), "nothing open");
+    }
+}
+
+#[cfg(test)]
+mod secret_handoff_rows_tests {
+    //! Secret hand-off (Jacob 2026-10-26): a redacted user message draws as the ghost row
+    //! "Secret saved as NAME" — mine on the right, another person's on the left under their
+    //! name — and never as a text bubble; the row carries no value.
+    use std::collections::{HashMap, HashSet};
+
+    use super::*;
+    use crate::model::Message;
+
+    fn redacted(sender: &str, name: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": format!("m-{at}"),
+            "chatId": "chat_testing",
+            "role": "user",
+            "sender": sender,
+            "senderHandle": if sender.starts_with("user:") { "jacob" } else { "" },
+            "senderName": if sender.starts_with("user:") { "Jacob Steeves" } else { "" },
+            "status": "done",
+            "createdAt": at,
+            "redactedAt": at + 5_000,
+            "parts": [{ "id": format!("p-{at}"), "kind": "secret_redacted", "name": name, "env": name,
+                "secretId": "s1", "savedBy": sender, "agent": "p1" }],
+        }))
+        .expect("message")
+    }
+
+    fn rows_of(messages: &[Message], me: &str) -> Vec<Row> {
+        let spoken = HashSet::new();
+        let failed = HashMap::new();
+        build_rows(
+            messages,
+            false,
+            SpeechRows {
+                enabled: false,
+                spoken: &spoken,
+                failed: &failed,
+                voice_mode: false,
+            },
+            me,
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+        )
+    }
+
+    #[test]
+    fn my_redacted_message_is_the_ghost_row_on_my_side() {
+        let t = 1_700_000_000_000u64;
+        let rows = rows_of(&[redacted("user:gh_me", "STRIPE_KEY", t)], "gh_me");
+        let user: Vec<_> = rows
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::User {
+                    text, ghost, from, ..
+                } => Some((text.clone(), ghost.clone(), from.is_some())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            user,
+            [(
+                "Secret saved as STRIPE_KEY".to_string(),
+                Some("STRIPE_KEY".to_string()),
+                false
+            )]
+        );
+    }
+
+    #[test]
+    fn another_members_redacted_message_keeps_their_lane_and_names_them() {
+        let t = 1_700_000_000_000u64;
+        let rows = rows_of(&[redacted("user:gh_jacob", "STRIPE_KEY", t)], "gh_me");
+        let row = rows
+            .iter()
+            .find_map(|r| match &r.kind {
+                RowKind::User { ghost, from, .. } => Some((ghost.clone(), from.clone())),
+                _ => None,
+            })
+            .expect("a user row");
+        assert_eq!(row.0.as_deref(), Some("STRIPE_KEY"));
+        let from = row.1.expect("the other person's lane");
+        assert_eq!(from.display_name(), "Jacob Steeves");
+    }
+
+    #[test]
+    fn the_part_decodes_with_names_only_and_an_older_build_ignores_it() {
+        let m = redacted("user:gh_me", "STRIPE_KEY", 1);
+        assert!(m.plain_text().is_empty(), "nothing to copy or search");
+        match &m.parts[0] {
+            Part::SecretRedacted {
+                name,
+                env,
+                secret_id,
+                saved_by,
+                agent,
+                ..
+            } => {
+                assert_eq!((name.as_str(), env.as_str()), ("STRIPE_KEY", "STRIPE_KEY"));
+                assert_eq!(secret_id, "s1");
+                assert_eq!(saved_by, "user:gh_me");
+                assert_eq!(agent.as_deref(), Some("p1"));
+            }
+            other => panic!("{other:?}"),
+        }
+        let v = serde_json::to_value(&m.parts[0]).unwrap();
+        assert!(v.get("value").is_none());
     }
 }
 
