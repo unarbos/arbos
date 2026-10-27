@@ -372,6 +372,10 @@ struct SecretsPage: View {
     private func secretSubtitle(_ s: SecretItem) -> String {
         let agents = s.agents.filter(\.enabled).map(\.name)
         let who = agents.isEmpty ? "no agents" : agents.joined(separator: ", ")
+        // Secret hand-off: "Arbos · given in chat · never used".
+        if let given = s.sourceLabel {
+            return "\(who) · \(given) · \(SecretsText.usage(lastUsedAt: s.lastUsedAt))"
+        }
         return "\(who) · \(SecretsText.usage(lastUsedAt: s.lastUsedAt))"
     }
 
@@ -422,6 +426,10 @@ struct SecretPage: View {
                     SettingsValueRow("Kind", value: s.kindLabel)
                     if s.name != s.env {
                         SettingsValueRow("Name", value: s.name)
+                    }
+                    // Secret hand-off: where it came from ("In chat with Arbos").
+                    if let added = s.addedLabel {
+                        SettingsValueRow("Added", value: added)
                     }
                     if let u = s.username, !u.isEmpty {
                         SettingsValueRow("Username", value: u)
