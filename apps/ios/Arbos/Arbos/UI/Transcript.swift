@@ -237,7 +237,11 @@ enum Transcript {
             // a lone "Today 5:45 PM" in a blank chat.
             var chunk: [Row] = []
             let streaming = message.isStreaming
-            let dateBreak = message.createdAt > 0 && (lastAt == 0 || message.createdAt - lastAt > 3_600_000)
+            // One centred day stamp per calendar day (above the first message of that
+            // day) — not after every hour gap, which put a second "Today …" mid-chat
+            // when earlier same-day messages were already on screen
+            // ([feedback app-01M5YZYPN1B8RBJYKC6AXWJ7RW]).
+            let dateBreak = message.createdAt > 0 && (lastAt == 0 || !Self.sameCalendarDay(message.createdAt, lastAt))
             // People-chat agent replies always name the sender (#1447): two answers in a
             // row from the same agent must not look like one run.
             let agentInPeople = people && (message.role == .assistant || message.role == .project)
@@ -524,7 +528,7 @@ enum Transcript {
                }) {
                 chunk[ix].replyCount = count
             }
-            // Date separators when the gap is over an hour (Grok: "Today 8:00 AM").
+            // Date separator above the first visible message of each calendar day.
             if dateBreak {
                 rows.append(Row(id: "\(message.id)#date", messageId: message.id, role: .system,
                                 kind: .system(icon: nil, text: dateLabel(message.createdAt), avatarProject: nil),
@@ -762,6 +766,14 @@ enum Transcript {
             return date.formatted(.dateTime.weekday(.wide)) + " \(time)"
         }
         return date.formatted(date: .abbreviated, time: .shortened)
+    }
+
+    /// True when both millisecond timestamps fall on the same local calendar day.
+    static func sameCalendarDay(_ a: Int64, _ b: Int64) -> Bool {
+        let cal = Calendar.current
+        let da = Date(timeIntervalSince1970: Double(a) / 1000)
+        let db = Date(timeIntervalSince1970: Double(b) / 1000)
+        return cal.isDate(da, inSameDayAs: db)
     }
 }
 
