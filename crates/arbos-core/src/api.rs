@@ -1114,6 +1114,19 @@ pub struct SecretDirectorDto {
     pub created_from: Option<String>,
 }
 
+/// Where a secret came from: `settings` (the New secret form) or `chat` (handed to an agent in
+/// a chat — the request card or "save this"). Names and ids only.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SecretSourceDto {
+    /// `settings | chat`.
+    pub kind: String,
+    /// The agent it was given to, when `chat`.
+    pub project_id: Option<String>,
+    pub project_name: Option<String>,
+    pub chat_id: Option<String>,
+}
+
 /// Secret as clients see it (`secret_json`). Never carries a secret value.
 #[typeshare]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1150,6 +1163,9 @@ pub struct SecretDto {
     /// `refuse | card`: what a non-listed person's ask does (absent = refuse).
     #[serde(default)]
     pub others_ask: Option<String>,
+    /// Where it came from (absent on an older relay = settings).
+    #[serde(default)]
+    pub source: Option<SecretSourceDto>,
 }
 
 /// Target block on a secret request.
@@ -1766,6 +1782,20 @@ pub struct SecretRequestPushPayloadDto {
     pub vault_id: Option<String>,
 }
 
+/// `message_redacted` payload: a message's value moved into the vault and the row became the
+/// "Secret saved as NAME" ghost. Devices drop the old text from search and notifications and
+/// persist a shallow snapshot of the room. Names only.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MessageRedactedPayloadDto {
+    pub chat_id: String,
+    /// Absent for a people chat.
+    pub project_id: Option<String>,
+    pub message_id: String,
+    pub secret_id: String,
+    pub name: String,
+}
+
 /// `secrets_paused` payload.
 #[typeshare]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1862,6 +1892,8 @@ pub enum PushEventDto {
     PeopleInviteAccepted(PeopleInviteAcceptedPayloadDto),
     #[serde(rename = "feedback_capture")]
     FeedbackCapture(FeedbackCapturePayloadDto),
+    #[serde(rename = "message_redacted")]
+    MessageRedacted(MessageRedactedPayloadDto),
     #[serde(rename = "server_member_removed")]
     ServerMemberRemoved(ServerMemberRemovedPayloadDto),
     #[serde(rename = "server_member_joined")]
