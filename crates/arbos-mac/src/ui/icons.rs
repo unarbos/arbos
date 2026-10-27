@@ -156,6 +156,12 @@ const ICONS: &[(&str, &str)] = &[
     icon!("crown", "<path d=\"M4 17h16l1-9-5 3.5L12 5l-4 6.5L3 8z\" fill=\"#000\"/>"),
     icon!("photo", "<rect x=\"3\" y=\"5\" width=\"18\" height=\"14\" rx=\"2\"/><circle cx=\"9\" cy=\"10\" r=\"1.5\" fill=\"#000\"/><path d=\"M21 16l-5-5-8 8\"/>"),
     icon!("arrow-down", "<path d=\"M12 5v14M5 12l7 7 7-7\" stroke-width=\"2.6\"/>"),
+    // Chart cards: Save PNG (arrow into a tray) and Expand (arrows out of the corners).
+    icon!(
+        "download",
+        "<path d=\"M12 4v11M7.5 10.5L12 15l4.5-4.5\"/><path d=\"M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2\"/>"
+    ),
+    icon!("expand", "<path d=\"M14 4h6v6M10 20H4v-6M20 4l-7 7M4 20l7-7\"/>"),
     // Grok Bot's update disc glyph (SF `icloud.and.arrow.down`): a cloud open
     // at the bottom — 8 pt dome, 3 pt lobes, straight sides — with the arrow
     // coming out of it. Traced pixel for pixel from the 72 px disc in Jacob's

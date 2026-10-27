@@ -4423,6 +4423,7 @@ async fn upload_voice_memo(shared: &Shared, blob_slot: &str, wav: Arc<Vec<u8>>) 
             bytes: None,
             kind: Some(AttachmentKind::Audio),
             title: None,
+            chart_part: None,
         },
     }
 }
