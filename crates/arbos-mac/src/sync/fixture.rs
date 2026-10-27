@@ -3746,6 +3746,10 @@ const LIMA_REPLY: &[&str] = &[
 
 /// The reply to "Read the latest from the New York post" (agent Bubble, 2026-10-25, Jacob's
 /// screenshot): seven linked headlines as bullets, then one line of prose.
+/// Jacob's 2026-10-27 bubble (Mac v0.6.296): the URL wrapped as `https:/` | `/treatment-…`
+/// and would not open ([feedback link-click-mac-2026-10-27]).
+const LINK_REPLY: &str = "https://treatment-perfume-marble-tournaments.trycloudflare.com/jacob/competitors.html\n\nI checked it from outside and it loads. No zip or file card needed.";
+
 const NYPOST_REPLY: &str = "- [Syringe attack: lawyer claims mistaken identity](https://nypost.com/2026/10/25/us-news/syringe-attack-lawyer-claims-mistaken-identity/)\n- [Arrest story: a second Jewish victim minutes earlier](https://nypost.com/2026/10/25/us-news/arrest-story-second-jewish-victim-minutes-earlier/)\n- [Ex-NYPD cop charged in a George Washington Bridge killing, free on $1M bail](https://nypost.com/2026/10/25/us-news/ex-nypd-cop-charged-in-gw-bridge-killing-free-on-1m-bail/)\n- [Thomas Markle home search, child pornography, Philippine official’s comment](https://nypost.com/2026/10/25/world-news/thomas-markle-home-search-philippine-official-comment/)\n- [Musk says SpaceX cut Ukraine’s Starlink access](https://nypost.com/2026/10/25/business/musk-says-spacex-cut-ukraines-starlink-access/)\n- [Giants beat the Texans in overtime in J. J. McCarthy’s first start](https://nypost.com/2026/10/25/sports/giants-beat-texans-in-overtime-mccarthy-first-start/)\n- [McCarthy’s wife after that win](https://nypost.com/2026/10/25/sports/mccarthys-wife-after-that-win/)\n\nNo times or bylines were on the page text I read. Want one of these opened?";
 
 /// The reply to "write bubble sort in python" from Jacob's 2026-10-26 10:50 Mac screenshot,
@@ -5748,6 +5752,12 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
                     MessageStatus::Done,
                     vec![text(NYPOST_REPLY)],
                 );
+            }
+            // `ARBOS_FIXTURE_REPLY=link`: Jacob's competitors-page turn — a bare URL
+            // long enough to wrap, then a line of prose ([feedback link-click-mac-2026-10-27]).
+            Ok("link") => {
+                s.user("Where is the competitors page?");
+                s.assistant(TurnKind::Reply, MessageStatus::Done, vec![text(LINK_REPLY)]);
             }
             // `ARBOS_FIXTURE_REPLY=math`: Jacob's bubble-sort turn — a Python code card,
             // then prose with inline `$O(n^2)$` math ([feedback math-render-mac-2026-10-26]).
