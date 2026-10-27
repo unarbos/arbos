@@ -219,15 +219,27 @@ FEATURE_KEYS=(ARBOS_FEATURE_VAULT_CONNECT)
 # Unset = the relay's defaults (16 GiB ceiling, 256 MiB parts, 4 attempts, rebuildable trees carried).
 #   ARBOS_UPGRADE_MAX_WORK_MIB / ARBOS_UPGRADE_PART_MIB / ARBOS_UPGRADE_ATTEMPTS / ARBOS_UPGRADE_SKIP_REBUILDABLE=1
 UPGRADE_KEYS=(ARBOS_UPGRADE_MAX_WORK_MIB ARBOS_UPGRADE_PART_MIB ARBOS_UPGRADE_ATTEMPTS ARBOS_UPGRADE_SKIP_REBUILDABLE)
+# Agent-hosted sites (#2060): the relay pushes published snapshots to the Cloudflare R2 bucket
+# the edge Worker serves from. Endpoint from the vault config item, S3 keys from the account-wide
+# R2 key pair ("Cloudflare R2 — S3 access key ID / secret key, account-wide, no IP lock").
+# ARBOS_SITES_SCHEME (subdomain|path|two-level), ARBOS_SITES_DOMAIN, ARBOS_SITES_PUBLISH and
+# ARBOS_SITES_ABUSE_EMAIL are operator switches kept from the env file. Without the R2 keys the
+# relay accepts publishes but reports them as not live.
+SITES_KEYS=(ARBOS_SITES_R2_BUCKET ARBOS_SITES_R2_ENDPOINT ARBOS_SITES_R2_ACCESS_KEY_ID ARBOS_SITES_R2_SECRET_ACCESS_KEY
+  ARBOS_SITES_SCHEME ARBOS_SITES_DOMAIN ARBOS_SITES_PUBLISH ARBOS_SITES_ABUSE_EMAIL)
 if command -v op >/dev/null 2>&1 && [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
   for k in "${MATRIX_KEYS[@]:1}"; do
     [[ -n "${!k:-}" ]] || printf -v "$k" '%s' "$(opread "op://Arbos/Arbos Matrix/$k")"
   done
+  : "${ARBOS_SITES_R2_ENDPOINT:=$(opread 'op://Arbos/skikpa5qypq44rdm7tsm74dfea/credential' | tr -d '[:space:]')}"
+  : "${ARBOS_SITES_R2_ACCESS_KEY_ID:=$(opread 'op://Arbos/5zos64ftkkhow3yd2ualigad44/credential' | tr -d '[:space:]')}"
+  : "${ARBOS_SITES_R2_SECRET_ACCESS_KEY:=$(opread 'op://Arbos/s6gnhchuq3xhzji34tn5aukhsm/credential' | tr -d '[:space:]')}"
+  : "${ARBOS_SITES_R2_BUCKET:=arbos-sites}"
 fi
 # keep values already in the env file when nothing new was supplied
 if [[ -f "$ENV_FILE" ]]; then
   keep() { local k=$1; [[ -n "${!k:-}" ]] || printf -v "$k" '%s' "$(sed -n "s/^$k=//p" "$ENV_FILE" | head -1)"; }
-  for k in OPENROUTER_API_KEY OPENAI_API_KEY DAYTONA_API_KEY ARBOS_RELAY_ADMIN_TOKEN ARBOS_RELAY_KEY ARBOS_JWT_KEY ARBOS_GITHUB_CLIENT_ID ARBOS_GITHUB_CLIENT_SECRET ARBOS_DAYTONA_SNAPSHOT LIVEKIT_URL LIVEKIT_API_KEY LIVEKIT_API_SECRET ARBOS_AUTH_REDIRECTS "${MATRIX_KEYS[@]}" "${FLEET_KEYS[@]}" "${FEATURE_KEYS[@]}" "${UPGRADE_KEYS[@]}" "${APNS_KEYS[@]}"; do keep "$k"; done
+  for k in OPENROUTER_API_KEY OPENAI_API_KEY DAYTONA_API_KEY ARBOS_RELAY_ADMIN_TOKEN ARBOS_RELAY_KEY ARBOS_JWT_KEY ARBOS_GITHUB_CLIENT_ID ARBOS_GITHUB_CLIENT_SECRET ARBOS_DAYTONA_SNAPSHOT LIVEKIT_URL LIVEKIT_API_KEY LIVEKIT_API_SECRET ARBOS_AUTH_REDIRECTS "${MATRIX_KEYS[@]}" "${FLEET_KEYS[@]}" "${FEATURE_KEYS[@]}" "${UPGRADE_KEYS[@]}" "${SITES_KEYS[@]}" "${APNS_KEYS[@]}"; do keep "$k"; done
 fi
 # A kept APNS_KEY_P8 path whose file is gone is no key at all; the relay would log an error and run with push off.
 if [[ -n "${APNS_KEY_P8:-}" && "$APNS_KEY_P8" != *"-----BEGIN"* && ! -r "$APNS_KEY_P8" ]]; then
@@ -292,6 +304,10 @@ for k in "${FEATURE_KEYS[@]}"; do
 done
 # Box upgrade carry knobs: only the keys that have a value; unset means the relay default.
 for k in "${UPGRADE_KEYS[@]}"; do
+  [[ -z "${!k:-}" ]] || printf '%s=%s\n' "$k" "${!k}" >> "$ENV_FILE"
+done
+# Agent sites: only the keys that have a value.
+for k in "${SITES_KEYS[@]}"; do
   [[ -z "${!k:-}" ]] || printf '%s=%s\n' "$k" "${!k}" >> "$ENV_FILE"
 done
 # APNs: only when the key exists (all three required by the relay; APNS_TOPIC optional).
@@ -384,10 +400,37 @@ if [[ -f "$WWW_DIR/Caddyfile" ]] && ! cmp -s "$REPO_DIR/scripts/deploy/Caddyfile
   cp -a "$WWW_DIR/Caddyfile" "$WWW_DIR/Caddyfile.bak-$(date -u +%Y%m%dT%H%M%SZ)"
 fi
 install -d -m 0755 /etc/arbos/sites.d   # per-service vhosts (scripts/deploy/livekit); the glob import tolerates an empty dir
+# DNS-01 for the arbos.life vhost (#2060): the zone DNS token goes to /etc/arbos/www.env (root:www
+# 0640) and the arbos-www.service drop-in points at it. Kept from the existing file when the vault
+# is not reachable; the Caddyfile refers to {env.CLOUDFLARE_DNS_API_TOKEN}, so an empty value only
+# means renewals of arbos.life fail (Caddy keeps serving the stored certificate meanwhile).
+WWW_ENV=/etc/arbos/www.env
+if command -v op >/dev/null 2>&1 && [[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
+  : "${CLOUDFLARE_DNS_API_TOKEN:=$(opread 'op://Arbos/azzmcdsl6wfcirvusnm557choy/credential' | tr -d '[:space:]')}"
+fi
+if [[ -z "${CLOUDFLARE_DNS_API_TOKEN:-}" && -f "$WWW_ENV" ]]; then
+  CLOUDFLARE_DNS_API_TOKEN=$(sed -n 's/^CLOUDFLARE_DNS_API_TOKEN=//p' "$WWW_ENV" | head -1)
+fi
+if [[ -n "${CLOUDFLARE_DNS_API_TOKEN:-}" ]]; then
+  (umask 077; printf 'CLOUDFLARE_DNS_API_TOKEN=%s\n' "$CLOUDFLARE_DNS_API_TOKEN" > "$WWW_ENV")
+  chown "root:$WWW_USER" "$WWW_ENV"; chmod 0640 "$WWW_ENV"
+else
+  echo "WARNING: no CLOUDFLARE_DNS_API_TOKEN; arbos.life certificate renewals (DNS-01) will fail"
+fi
+install -d -m 0755 /etc/systemd/system/arbos-www.service.d
+cat > /etc/systemd/system/arbos-www.service.d/env.conf <<EOF
+[Service]
+EnvironmentFile=-$WWW_ENV
+EOF
+systemctl daemon-reload
 sed -e "s#@WWW_DIR@#$WWW_DIR#g" -e "s#@RELAY_LISTEN@#$LISTEN#g" "$REPO_DIR/scripts/deploy/Caddyfile" > "$WWW_DIR/Caddyfile"
 chown "$WWW_USER:$WWW_USER" "$WWW_DIR/Caddyfile"
 CADDY_BIN="$WWW_DIR/bin/caddy"; [[ -x "$CADDY_BIN" ]] || CADDY_BIN=$(command -v caddy)
-"$CADDY_BIN" validate --config "$WWW_DIR/Caddyfile" --adapter caddyfile >/dev/null
+# The cloudflare DNS module refuses an empty token at provision time, so validation needs the
+# value in its environment (the service gets it from the drop-in); a placeholder keeps a tokenless
+# validate meaningful for everything else in the file.
+CLOUDFLARE_DNS_API_TOKEN="${CLOUDFLARE_DNS_API_TOKEN:-validate-only-placeholder}" \
+  "$CADDY_BIN" validate --config "$WWW_DIR/Caddyfile" --adapter caddyfile >/dev/null
 if systemctl is-active --quiet arbos-www.service; then systemctl reload arbos-www.service || systemctl restart arbos-www.service; else systemctl restart arbos-www.service; fi
 # refresh timer for the Mac download redirect
 cat > /etc/systemd/system/arbos-refresh-mac-download.service <<'EOF'
