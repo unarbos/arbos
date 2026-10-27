@@ -133,13 +133,18 @@ fn recent_group_context(
     participants: &[Value],
     host_name: &str,
     max: usize,
+    chat_id: &str,
 ) -> Vec<Value> {
-    let mut out = Vec::new();
+    let reply_to = messages
+        .iter()
+        .find(|m| m.id == current_id)
+        .and_then(|m| str_field(&m.rest, "replyTo"));
+    let mut lines = Vec::new();
     for m in messages {
         if m.id == current_id {
             break;
         }
-        let text: String = m.text().split_whitespace().collect::<Vec<_>>().join(" ");
+        let text = m.text();
         if text.trim().is_empty() {
             continue;
         }
@@ -156,12 +161,14 @@ fn recent_group_context(
                 }),
             _ => continue,
         };
-        out.push(json!({ "from": from, "text": text.chars().take(500).collect::<String>() }));
+        lines.push(crate::truncate::WindowLine {
+            id: m.id.clone(),
+            from,
+            text,
+            full: reply_to.as_deref() == Some(m.id.as_str()),
+        });
     }
-    if out.len() > max {
-        out.drain(0..out.len() - max);
-    }
-    out
+    crate::truncate::build_window(chat_id, lines, max).0
 }
 
 impl Agent {
@@ -308,16 +315,21 @@ impl Agent {
         let recent = recent_project_messages(&messages, user_msg_id);
         if !recent.is_empty() {
             prelude.push_str("Said in the group since your last turn:\n");
-            for m in recent.iter().rev().take(PRELUDE_RECENT_MAX).rev() {
-                let who = str_field(&m.rest, "senderName")
-                    .or_else(|| str_field(&m.rest, "sender"))
-                    .unwrap_or_else(|| "Project".into());
-                let text: String = m.text().split_whitespace().collect::<Vec<_>>().join(" ");
-                prelude.push_str(&format!(
-                    "- {who}: {}\n",
-                    text.chars().take(600).collect::<String>()
-                ));
-            }
+            let lines: Vec<crate::truncate::WindowLine> = recent
+                .iter()
+                .map(|m| crate::truncate::WindowLine {
+                    id: m.id.clone(),
+                    from: str_field(&m.rest, "senderName")
+                        .or_else(|| str_field(&m.rest, "sender"))
+                        .unwrap_or_else(|| "Project".into()),
+                    text: m.text(),
+                    full: false,
+                })
+                .collect();
+            let (window, _) = crate::truncate::build_window(chat_id, lines, PRELUDE_RECENT_MAX);
+            prelude.push_str(&crate::truncate::render_window(&window));
+            prelude.push_str(&crate::truncate::window_note(chat_id));
+            prelude.push('\n');
         }
         prelude.push('\n');
         let is_user = msg.role == "user" && from == "user";
@@ -328,6 +340,7 @@ impl Agent {
             &participants,
             &self.name(),
             PRELUDE_RECENT_MAX,
+            chat_id,
         );
         Some(GroupTurn {
             host_project_id: me,
@@ -451,6 +464,7 @@ impl Agent {
                         .unwrap_or("")
                         .to_owned(),
                     host: id == gt.host_project_id,
+                    mentioned_as: None,
                 })
             })
             .collect();

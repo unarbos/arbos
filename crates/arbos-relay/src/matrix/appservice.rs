@@ -276,6 +276,23 @@ pub struct ReadsBody {
     pub on: bool,
 }
 
+/// `POST /admin/matrix/pushers` — register the relay as push gateway on every live device of
+/// every user with a Matrix identity (one-time backfill for devices minted before channel
+/// pushes existed; new devices register at `GET /me/matrix`). Answers how many users were queued.
+pub async fn backfill_pushers(State(state): State<AppState>, principal: Principal) -> Response {
+    if let Err(r) = admin_only(&principal) {
+        return *r;
+    }
+    let users = match state.db.matrix_device_users() {
+        Ok(u) => u,
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    };
+    for u in &users {
+        state.matrix.pushers(&state, u, true);
+    }
+    Json(json!({ "queued_users": users.len() })).into_response()
+}
+
 /// `PUT /admin/matrix/reads/{user_id} {on}` — the per-user read flip (stage B). Takes effect on
 /// the user's next request; rollback is the same call with `on: false`.
 pub async fn set_reads(
@@ -289,7 +306,9 @@ pub async fn set_reads(
     }
     match state.db.set_matrix_reads(&user_id, b.on) {
         Ok(true) => {
-            state.matrix.pushers(&state, &user_id, b.on);
+            // Pushers stay registered either way since channel pushes ride on them (reads.rs);
+            // a flip off only changes what `on_notify` does with a mirrored chat.
+            state.matrix.pushers(&state, &user_id, true);
             Json(json!({ "user_id": user_id, "matrix_reads": b.on, "mode": state.matrix.cfg.mode.as_str() }))
                 .into_response()
         }

@@ -307,6 +307,7 @@ struct MentionTextView: UIViewRepresentable {
         view.textContainer.lineFragmentPadding = 0
         view.keyboardDismissMode = .interactive
         view.adjustsFontForContentSizeCategory = false
+        view.accessibilityIdentifier = "composer-field"
         view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         view.setContentHuggingPriority(.defaultLow, for: .horizontal)
         let coordinator = context.coordinator

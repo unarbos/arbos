@@ -49,6 +49,11 @@ pub struct Candidate {
     pub role: String,
     /// Hosts the group (project groups) — shown to the model, not a rule.
     pub host: bool,
+    /// How `message` @mentions this agent, when it does: `addressed` (vocative), `object`
+    /// (the thing a request to someone else is about: "with @x", "about @x", "to @x"), or
+    /// `referenced` (named mid-sentence). An @mention is a consideration signal, not an
+    /// obligation; the decision reads this instead of treating every mention as a question.
+    pub mentioned_as: Option<&'static str>,
 }
 
 /// The message and its room, as the decision sees it.
@@ -97,9 +102,11 @@ impl ResponderDecision {
     }
 }
 
+/// Whitespace-collapsed and capped, with a marker when cut (the decision model cannot fetch,
+/// so the marker only says how much is missing).
 fn clip(s: &str, max: usize) -> String {
     let s: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    s.chars().take(max).collect()
+    crate::truncate::clip_marked(&s, max, "", None)
 }
 
 /// A short hash of the exact inputs, so a logged decision can be matched to its state.
@@ -132,6 +139,9 @@ pub fn jev_state(room: &Room) -> Value {
             if c.host {
                 a.insert("hosts_this_group".into(), json!(true));
             }
+            if let Some(m) = c.mentioned_as {
+                a.insert("mentioned_as".into(), json!(m));
+            }
             Value::Object(a)
         })
         .collect();
@@ -161,14 +171,21 @@ pub fn jev_state(room: &Room) -> Value {
 /// One `noul` question per candidate, phrased with the agent's name so the criteria are specific.
 pub fn jev_questions(room: &Room) -> Value {
     let mut q = Map::new();
+    // Only when `message` @mentions someone: the clause moves unmentioned cases otherwise.
+    let any_mentioned = room.candidates.iter().any(|c| c.mentioned_as.is_some());
     for (i, c) in room.candidates.iter().enumerate() {
         let name = &c.name;
+        let mention_clause = if any_mentioned {
+            format!(" An @mention is a consideration signal, not an obligation: `mentioned_as` on an agent says how `message` names it — `addressed` means spoken to; `object` means only talked about as the thing a request to someone else is about (\"@other, can you talk with {name}?\", \"send it to {name}\"), which by itself is not a question for {name}.")
+        } else {
+            String::new()
+        };
         q.insert(
             question_id(i),
             json!({
                 "type": "noul",
                 "instructions": format!(
-                    "Should the agent \"{name}\" reply to `message`? Several agents may reply to one message; judge {name} on its own, from its name and role in `agents`, from `people` (the humans in the room, when listed), from `recent_messages`, and from who `message` is from and what it asks. Prefer false when `message` is for humans or people rather than agents — including short name pings and call invites between people — staying quiet means no reply at all, not a reply that says you will stay quiet. Prefer false for {name} when `message` is only a cancel/hold/stop of work another agent just announced — only that agent should reply, not a pile of \"Understood\"."
+                    "Should the agent \"{name}\" reply to `message`? Several agents may reply to one message; judge {name} on its own, from its name and role in `agents`, from `people` (the humans in the room, when listed), from `recent_messages`, and from who `message` is from and what it asks. Prefer false when `message` is for humans or people rather than agents — including short name pings and call invites between people — staying quiet means no reply at all, not a reply that says you will stay quiet. Prefer false for {name} when `message` is only a cancel/hold/stop of work another agent just announced — only that agent should reply, not a pile of \"Understood\".{mention_clause}"
                 ),
                 "criteria": {
                     "true": format!(
@@ -212,6 +229,7 @@ pub fn llm_user(room: &Room) -> String {
                 "name": c.name,
                 "role": if c.role.trim().is_empty() { Value::Null } else { json!(clip(&c.role, 600)) },
                 "host": c.host,
+                "mentioned_as": c.mentioned_as,
             })
         })
         .collect();

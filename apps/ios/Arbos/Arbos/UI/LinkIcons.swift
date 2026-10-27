@@ -98,7 +98,7 @@ final class LinkIcons: ObservableObject {
             case .paragraph(let t), .heading(_, let t): scan(t)
             case .bullets(let items), .numbered(let items): items.forEach(scan)
             case .table(let header, let rows): header.forEach(scan); rows.forEach { $0.forEach(scan) }
-            case .code: break
+            case .code, .math, .chart: break
             }
         }
         return out

@@ -36,6 +36,9 @@ extension AppModel {
     /// ungrouped; `GlobalSearch.arrange` orders them for the list.
     func globalSearchEntries(query q: String) -> [GlobalSearch.Entry] {
         var out: [GlobalSearch.Entry] = []
+        if !q.isEmpty {
+            out.append(contentsOf: GlobalSearch.settingsEntries(query: q, agents: searchAgentRows()))
+        }
         let me = user?.id
         var seenHandles: Set<String> = []
 
@@ -244,7 +247,48 @@ extension AppModel {
             return ChatMedia.items(messages: messages(of: chatId), slot: slot, model: self).first { $0.id == itemId }
         case .link(let url):
             UIApplication.shared.open(url)
+        case .setting(let route):
+            open(settingsRoute: route)
         }
         return nil
+    }
+
+    /// My owned agents as the Settings rows need them: the open chat's agent
+    /// first, then by activity ([feedback search-settings-ios-2026-10-26]).
+    func searchAgentRows() -> [GlobalSearch.AgentRow] {
+        var current: Id?
+        if case .chat(_, let pid)? = path.last { current = pid }
+        let owned = projects.filter { !$0.shared && !isArchived($0.id) }
+        let activity: (Project) -> Int64 = { p in self.chats(of: p.id).map(\.lastMessageAt).max() ?? 0 }
+        let ordered = owned.sorted { a, b in
+            if (a.id == current) != (b.id == current) { return a.id == current }
+            return activity(a) > activity(b)
+        }
+        return ordered.map { p in
+            GlobalSearch.AgentRow(projectId: p.id, name: p.name, model: p.shortModel, reasoning: p.effort.label,
+                                  voice: p.voice.flatMap { id in voiceCatalog?.voices.first { $0.id == id }?.name ?? id.capitalized } ?? "Default")
+        }
+    }
+
+    /// A Settings row tapped in search: Settings lands on the page (the
+    /// `ARBOS_SETTINGS_PAGE` word `SettingsView(landing:)` understands), the
+    /// feedback sheet opens, or the agent's chat opens with its pane on the
+    /// setting's picker.
+    func open(settingsRoute route: GlobalSearch.SettingsRoute) {
+        switch route {
+        case .page(let page):
+            pendingSettingsLanding = page.rawValue
+        case .profile:
+            pendingSettingsLanding = "profile"
+        case .feedback:
+            FeedbackCenter.shared.open(screen: "search")
+        case .agent(let projectId, let setting):
+            guard let p = project(projectId) else { return }
+            open(project: p)
+            pendingAgentSetting = setting
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.showProfile(.agent(projectId: projectId))
+            }
+        }
     }
 }

@@ -275,6 +275,8 @@ final class SharedSearchTests: XCTestCase {
         ("Model/HomeSearch.swift", "static func titled<T>(", ["EntitySearch.filter("]),
         // Secrets: a vault's items by title.
         ("UI/SecretsViews.swift", "private var filtered: [[String: Any]]", ["PeoplePicker.titled("]),
+        // Secrets: the agent picker (New secret, Connect 1Password, Give access on a secret / a vault).
+        ("UI/AgentPicker.swift", "static func candidates(_ projects:", ["PeoplePicker.agents("]),
         // @mention completion.
         ("UI/MentionComposer.swift", "static func candidates(query:", ["EntitySearch.match("]),
         // Forward-to chat picker.

@@ -679,16 +679,8 @@ struct CreateEntityView: View {
     private func generate() {
         let text = source.prompt.trimmingCharacters(in: .whitespaces)
         guard !text.isEmpty, !source.generating else { return }
-        source.generating = true
-        source.errorText = nil
-        Task {
-            do {
-                source.generatedKey = try await model.generateDraftAvatar(prompt: text)
-            } catch {
-                source.errorText = error.localizedDescription
-            }
-            source.generating = false
-        }
+        let model = model
+        source.run { try await model.generateDraftAvatar(prompt: text) }
     }
 
     private func go() {

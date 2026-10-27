@@ -50,7 +50,10 @@ use super::dto::{
     transcript_text, voices_from_dto,
 };
 use super::store::{self, Store};
-use super::{ClientCommand, DraftPicture, PictureSource, PictureTarget, SyncEvent, SyncSource};
+use super::user_error::{ErrorClass, Fault, UserError};
+use super::{
+    ClientCommand, DraftPicture, PictureSource, PictureTarget, PushRefusal, SyncEvent, SyncSource,
+};
 use crate::model::{
     new_id, now_ms, trace_rows, AccountView, Attachment, AttachmentKind, BoxReport, BoxState, Call,
     CallEnded, CallLeft, CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView,
@@ -72,21 +75,33 @@ pub(crate) struct RelayError {
     pub status: u16,
     pub kind: String,
     pub message: String,
+    /// `error.detail` when the relay sends one (the avatar routes: the provider's words).
+    pub detail: Option<String>,
 }
 
 impl RelayError {
     pub(crate) fn from_body(status: reqwest::StatusCode, body: &str) -> Self {
         if let Ok(dto) = serde_json::from_str::<ApiErrorDto>(body) {
+            let detail = serde_json::from_str::<Value>(body)
+                .ok()
+                .and_then(|v| {
+                    v.pointer("/error/detail")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .filter(|d| !d.is_empty());
             Self {
                 status: status.as_u16(),
                 kind: dto.error.type_,
                 message: dto.error.message,
+                detail,
             }
         } else {
             Self {
                 status: status.as_u16(),
                 kind: String::new(),
                 message: body.trim().to_owned(),
+                detail: None,
             }
         }
     }
@@ -329,7 +344,7 @@ impl Shared {
         let previous = self.creds.read().unwrap().clone();
         let creds = credentials_from_token(&dto, &self.http_url, previous.as_ref(), now_ms());
         if let Err(err) = credentials::store(&creds) {
-            self.notice(format!("Token saved in memory only: {err:#}"));
+            self.fail("save your sign-in to the keychain", &err);
         }
         *self.creds.write().unwrap() = Some(creds.clone());
         Ok(creds)
@@ -484,10 +499,24 @@ impl Shared {
             .unwrap_or_else(|| "mac:unpaired".into())
     }
 
-    /// A short toast for something the user just asked for and did not get (a save, an upload,
-    /// a rename). Never for background work — that is [`Self::diagnostic`].
+    /// A short toast for something that worked or a plain status ("Forwarded to Studio",
+    /// "Token replaced."). Never a failure: that is [`Self::fail`]. Never for background work —
+    /// that is [`Self::diagnostic`].
     fn notice(&self, text: impl Into<String>) {
         let _ = self.events.send(SyncEvent::Notice(text.into()));
+    }
+
+    /// Something the user asked for did not happen: `verb` is what they tried ("save the
+    /// secret"), `fault` the error / status / words. Classified by `user_error` and drawn by
+    /// `ui::error_note` (an error toast, or the surface that owns the action). Never a raw
+    /// error string — `error_ui_lint` pins it.
+    fn fail<'a>(&self, verb: &str, fault: impl Into<Fault<'a>>) {
+        self.fail_with(fault.into().classify(verb));
+    }
+
+    /// A failure already classified by the caller.
+    fn fail_with(&self, error: UserError) {
+        let _ = self.events.send(SyncEvent::Failure { error, retry: None });
     }
 
     /// An app error the user did not cause and cannot act on (a thumbnail that did not load, a
@@ -628,17 +657,29 @@ impl Shared {
     }
 
     async fn post_json(self: &Arc<Self>, path: &str, body: Value) -> Result<Value> {
+        self.post_json_timeout(path, body, None).await
+    }
+
+    /// `post_json` with its own request timeout (the client's default is 30 s; an avatar
+    /// generation is given 90 s so the relay's 75 s budget always answers first).
+    async fn post_json_timeout(
+        self: &Arc<Self>,
+        path: &str,
+        body: Value,
+        timeout: Option<Duration>,
+    ) -> Result<Value> {
         let mut refreshed = false;
         loop {
             let token = self.token();
-            let resp = self
+            let mut req = self
                 .http
                 .post(format!("{}{}", self.http_url, path))
                 .bearer_auth(&token)
-                .json(&body)
-                .send()
-                .await
-                .with_context(|| format!("POST {path}"))?;
+                .json(&body);
+            if let Some(t) = timeout {
+                req = req.timeout(t);
+            }
+            let resp = req.send().await.with_context(|| format!("POST {path}"))?;
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             if !status.is_success() {
@@ -1253,15 +1294,27 @@ fn start_store_flusher(shared: &Arc<Shared>) {
                     if doc.core.doc.oplog_frontiers().is_empty() {
                         continue;
                     }
-                    doc.core.doc.export(loro::ExportMode::Snapshot)
+                    // Through the core: once a secret redaction reached this room the
+                    // snapshot is shallow (no history), so the store never keeps the old text.
+                    let shallow = doc.core.is_shallow_mode();
+                    let bytes = doc.core.snapshot();
+                    if bytes.is_empty() {
+                        Err(shallow)
+                    } else {
+                        Ok((bytes, shallow))
+                    }
                 };
                 match snapshot {
-                    Ok(bytes) => {
+                    Ok((bytes, shallow)) => {
                         shared.with_store(|s| {
-                            s.save_doc(&key, &project_id, &room_chat, cursor, &bytes)
+                            s.save_doc(&key, &project_id, &room_chat, cursor, &bytes);
+                            if shallow {
+                                s.flush_after_redaction();
+                            }
                         });
                     }
-                    Err(err) => eprintln!("store: export {key}: {err}"),
+                    // An open transact: the export waits for the next tick.
+                    Err(_) => continue,
                 }
             }
             since_caps += 1;
@@ -1310,7 +1363,11 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
             | PushEventDto::PeopleAgentAdded(_)
             | PushEventDto::PeopleAgentRemoved(_)
             | PushEventDto::PeopleProjectShared(_) => refresh = true,
-            PushEventDto::PeopleMessage(payload) if !shared.is_people(&payload.chat_id) => {
+            // A people chat we do not list yet: refresh. An agent's reply in a project chat
+            // (`project_id` set) is already on the doc socket; nothing to fetch.
+            PushEventDto::PeopleMessage(payload)
+                if payload.project_id.is_none() && !shared.is_people(&payload.chat_id) =>
+            {
                 refresh = true
             }
             PushEventDto::CallStarted(payload) => {
@@ -1365,6 +1422,33 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
                         version: payload.version.clone(),
                     });
                 }
+            }
+            // I read this chat on another device: not unread here either (the relay holds the
+            // one cursor), and the app drops its banners for it.
+            PushEventDto::NotificationsCleared(payload) => {
+                let chat_id = payload.chat_id.clone();
+                if chat_id.is_empty() {
+                    continue;
+                }
+                if let Some(c) = shared
+                    .chats
+                    .lock()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|c| c.id == chat_id)
+                {
+                    c.unread = false;
+                    c.unread_count = 0;
+                }
+                shared
+                    .local_read_at
+                    .lock()
+                    .unwrap()
+                    .insert(chat_id.clone(), now_ms() as i64);
+                let _ = shared.events.send(SyncEvent::NotificationsCleared {
+                    chat_id,
+                    badge: payload.badge.max(0) as u64,
+                });
             }
             PushEventDto::FeedbackCapture(payload) => {
                 if !payload.request_id.is_empty() {
@@ -1433,7 +1517,9 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
                 let _ = shared.events.send(SyncEvent::Projects(snapshot));
                 refresh = true;
             }
-            PushEventDto::PeopleMessage(_)
+            // Channel banners: own item (the Mac also sees the room through its Matrix sync).
+            PushEventDto::ChannelMessage(_)
+            | PushEventDto::PeopleMessage(_)
             | PushEventDto::PeopleChatDeleted(_)
             | PushEventDto::ProjectMemberRemoved(_)
             | PushEventDto::PeopleInviteAccepted(_)
@@ -1441,6 +1527,7 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
             | PushEventDto::SecretRequest(_)
             | PushEventDto::SecretsPaused(_)
             | PushEventDto::SecretExpiring(_)
+            | PushEventDto::MessageRedacted(_)
             | PushEventDto::CallMissed(_) => {}
         }
     }
@@ -1583,19 +1670,13 @@ fn parse_server(v: Value) -> Result<ServerInfo> {
 /// sheet and the banner get plain words; the full chain goes to the log and — unlike background
 /// polls — to a diagnostic even when the cause is a timeout, so a "timed out" nobody can
 /// reproduce still leaves a signature (Jacob, 2026-10-23 14:34 UTC).
-fn server_error(shared: &Arc<Shared>, err: &anyhow::Error) {
+fn server_error(shared: &Arc<Shared>, verb: &str, err: &anyhow::Error) {
     let chain = format!("{err:#}");
     log::warn!(target: "arbos_mac::relay", "server action failed: {chain}");
-    let text = if err.downcast_ref::<RelayError>().is_some() {
-        people_error(err)
-    } else if diagnostics::is_transient(&chain) {
-        "The relay did not answer in time. Check your connection and try again.".to_string()
-    } else {
-        people_error(err)
-    };
     shared.diagnostic_always("server-action", chain);
-    let _ = shared.events.send(SyncEvent::ServerError(text.clone()));
-    shared.notice(text);
+    let _ = shared
+        .events
+        .send(SyncEvent::ServerError(UserError::classify(verb, err)));
 }
 
 /// The invite code from what the user pasted: a bare code or an `/s/{code}` link.
@@ -1670,7 +1751,7 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                             )));
                         refresh_servers_list(&shared).await;
                     }
-                    Err(err) => server_error(&shared, &err),
+                    Err(err) => server_error(&shared, "create the server", &err),
                 }
             });
         }
@@ -1691,7 +1772,7 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                             )));
                         refresh_servers_list(&shared).await;
                     }
-                    Err(err) => server_error(&shared, &err),
+                    Err(err) => server_error(&shared, "join the server", &err),
                 }
             });
         }
@@ -1728,7 +1809,7 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                                 &shared, server,
                             )));
                     }
-                    Err(err) => server_error(&shared, &err),
+                    Err(err) => server_error(&shared, "rename the server", &err),
                 }
             });
         }
@@ -1761,7 +1842,7 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                 };
                 match result {
                     Ok(()) => refresh_servers_list(&shared).await,
-                    Err(err) => server_error(&shared, &err),
+                    Err(err) => server_error(&shared, "delete the server", &err),
                 }
             });
         }
@@ -1771,7 +1852,7 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             tokio::spawn(async move {
                 match shared.post_json(&path, json!({})).await {
                     Ok(_) => refresh_servers_list(&shared).await,
-                    Err(err) => server_error(&shared, &err),
+                    Err(err) => server_error(&shared, "leave the server", &err),
                 }
             });
         }
@@ -1786,7 +1867,7 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             tokio::spawn(async move {
                 let path = format!("/servers/{server_id}/invites");
                 if let Err(err) = shared.post_json(&path, body).await {
-                    server_error(&shared, &err);
+                    server_error(&shared, "make the invite", &err);
                     return;
                 }
                 fetch_server_detail(&shared, &server_id).await;
@@ -1801,7 +1882,7 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             let path = format!("/servers/{server_id}/invites/{invite_id}");
             tokio::spawn(async move {
                 if let Err(err) = shared.delete(&path).await {
-                    server_error(&shared, &err);
+                    server_error(&shared, "revoke the invite", &err);
                     return;
                 }
                 fetch_server_detail(&shared, &server_id).await;
@@ -1818,7 +1899,7 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             let role = role.clone();
             tokio::spawn(async move {
                 if let Err(err) = shared.put_json(&path, json!({ "role": role })).await {
-                    server_error(&shared, &err);
+                    server_error(&shared, "change their role", &err);
                     return;
                 }
                 fetch_server_detail(&shared, &server_id).await;
@@ -1838,7 +1919,7 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             };
             tokio::spawn(async move {
                 if let Err(err) = shared.delete(&path).await {
-                    server_error(&shared, &err);
+                    server_error(&shared, "remove them", &err);
                     return;
                 }
                 fetch_server_detail(&shared, &server_id).await;
@@ -1855,7 +1936,7 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             tokio::spawn(async move {
                 let path = format!("/servers/{server_id}/channels");
                 if let Err(err) = shared.post_json(&path, body).await {
-                    server_error(&shared, &err);
+                    server_error(&shared, "create the channel", &err);
                     return;
                 }
                 fetch_server_detail(&shared, &server_id).await;
@@ -1883,7 +1964,7 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             }
             tokio::spawn(async move {
                 if let Err(err) = shared.patch_json(&path, Value::Object(body)).await {
-                    server_error(&shared, &err);
+                    server_error(&shared, "save the channel", &err);
                     return;
                 }
                 fetch_server_detail(&shared, &server_id).await;
@@ -1898,7 +1979,7 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             let path = format!("/servers/{server_id}/channels/{channel_id}");
             tokio::spawn(async move {
                 if let Err(err) = shared.delete(&path).await {
-                    server_error(&shared, &err);
+                    server_error(&shared, "delete the channel", &err);
                     return;
                 }
                 fetch_server_detail(&shared, &server_id).await;
@@ -1923,7 +2004,7 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                     .into_iter()
                     .find_map(Result::err);
                 if let Some(err) = first_err {
-                    server_error(&shared, &err);
+                    server_error(&shared, "add members", &err);
                 }
                 fetch_server_detail(&shared, &server_id).await;
             });
@@ -1939,7 +2020,7 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             let body = json!({ "archived": archived });
             tokio::spawn(async move {
                 if let Err(err) = shared.post_json(&path, body).await {
-                    server_error(&shared, &err);
+                    server_error(&shared, "archive the channel", &err);
                     return;
                 }
                 fetch_server_detail(&shared, &server_id).await;
@@ -1978,7 +2059,9 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                             .events
                             .send(SyncEvent::MatrixTimeline { room_id, rows });
                     }
-                    Ok(None) => {}
+                    Ok(None) => {
+                        let _ = shared.events.send(SyncEvent::ChannelHistoryEnd { room_id });
+                    }
                     Err(MatrixError::NoRoom(_)) => {}
                     Err(err) => shared.diagnostic("channel-history", err.to_string()),
                 }
@@ -2004,11 +2087,10 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                     None => Err("Servers are not connected".to_string()),
                 };
                 if let Err(error) = result {
-                    shared.notice(format!("Message not sent: {error}"));
                     let _ = shared.events.send(SyncEvent::ChannelSendFailed {
                         room_id,
                         local_id,
-                        error,
+                        error: UserError::from_text("send your message", error),
                     });
                 }
             });
@@ -2074,7 +2156,7 @@ async fn fetch_avatar(shared: Arc<Shared>, url: String) {
                     bytes: Arc::new(master.bytes),
                 });
             }
-            Ok(Err(err)) => shared.notice(format!("Picture: {err:#}")),
+            Ok(Err(err)) => shared.fail("read the picture", &err),
             Err(_) => {}
         }
         return;
@@ -2186,18 +2268,28 @@ fn parse_call(v: &Value) -> Option<Call> {
         .filter(|c| !c.call_id.is_empty())
 }
 
-fn call_error(err: &anyhow::Error) -> String {
+fn call_error(verb: &str, err: &anyhow::Error) -> UserError {
     let text = people_error(err);
-    if text.contains("calls_off") || text.contains("HTTP 503") {
-        "Calls are not available on this relay yet.".into()
+    let said = if text.contains("calls_off") || text.contains("HTTP 503") {
+        Some("Calls are not available on this relay yet.")
     } else if text.contains("call_ended") || text.contains("HTTP 410") {
-        "That call has ended.".into()
+        Some("That call has ended.")
     } else if text.contains("call_full") || text.contains("HTTP 409") {
-        "The call is full (16 people).".into()
+        Some("The call is full (16 people).")
     } else if text.contains("HTTP 404") {
-        "Calls are not available on this relay yet.".into()
+        Some("Calls are not available on this relay yet.")
     } else {
-        text
+        None
+    };
+    match said {
+        Some(why) => UserError::of(
+            verb,
+            ErrorClass::Refused {
+                message: Some(why.to_owned()),
+            },
+            format!("{err:#}"),
+        ),
+        None => UserError::classify(verb, err),
     }
 }
 
@@ -3448,22 +3540,35 @@ async fn perform_room_actions(
                         let _ = shared.events.send(SyncEvent::PushRefused {
                             chat_id: room_chat.to_string(),
                             refused: false,
+                            why: PushRefusal::default(),
                         });
                     }
                 }
-                RoomAction::PushRefused { batch_id: _ } => {
-                    if room_chat != PROJECT_DOC_CHAT_ID
-                        && shared
-                            .push_refused
-                            .lock()
-                            .unwrap()
-                            .insert(room_chat.to_string())
-                    {
-                        // One notice per refusal stretch; the room link stays live.
-                        shared.notice("Messages in this chat are not being delivered");
+                RoomAction::PushRefused {
+                    batch_id: _,
+                    code,
+                    reason,
+                    by_handle,
+                    by_name,
+                } => {
+                    // The chat-level note draws it (`PushRefused`); the room link stays live.
+                    // A refusal with a reason is sent even while the room already stands
+                    // refused, so the note can name the block the moment the relay does.
+                    let fresh = shared
+                        .push_refused
+                        .lock()
+                        .unwrap()
+                        .insert(room_chat.to_string());
+                    if room_chat != PROJECT_DOC_CHAT_ID && (fresh || reason.is_some()) {
                         let _ = shared.events.send(SyncEvent::PushRefused {
                             chat_id: room_chat.to_string(),
                             refused: true,
+                            why: PushRefusal {
+                                code,
+                                reason,
+                                by_handle,
+                                by_name,
+                            },
                         });
                     }
                 }
@@ -3664,7 +3769,7 @@ fn send_wake(shared: &Arc<Shared>, project_id: &str, reason: &'static str) {
             .post_json(&format!("/projects/{project_id}/wake"), json!({}))
             .await
         {
-            shared.notice(format!("Wake failed: {err:#}"));
+            shared.fail("wake the machine", &err);
             set_project_state(
                 &shared,
                 &project_id,
@@ -3701,6 +3806,31 @@ fn picture_url(shared: &Shared, target: &PictureTarget, key: Option<&str>) -> Op
     ))
 }
 
+/// How long one avatar generation may take on the wire: past the relay's 75 s budget (40 s per
+/// provider attempt), so the relay's own 504 reaches the sheet before this client gives up.
+const AVATAR_GENERATE_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// What the picker says when a generation failed, as the shared [`UserError`] (Jacob,
+/// 2026-10-26: `POST …/avatar/generate: error sending request … operation timed out` had been
+/// shown verbatim across the footer). A relay without the own-slot route yet (#1789 not
+/// deployed) says so instead of a 404.
+fn generate_failure(target: &PictureTarget, err: &anyhow::Error) -> UserError {
+    if let Some(e) = err.downcast_ref::<RelayError>() {
+        if *target == PictureTarget::Draft && e.status == 404 {
+            return UserError::of(
+                "generate the image",
+                ErrorClass::Refused {
+                    message: Some(
+                        "Generate is not on this relay yet; upload a picture instead.".into(),
+                    ),
+                },
+                format!("{err:#}"),
+            );
+        }
+    }
+    UserError::classify("generate the image", err)
+}
+
 /// The answer to `PUT /me/avatar` (a JPEG body or `{image_key}`): the new `user` lands in the
 /// store and `/me` is re-read so every surface shows the picture; a failure is a notice.
 async fn my_avatar_saved(shared: &Arc<Shared>, put: Result<reqwest::Response, reqwest::Error>) {
@@ -3727,9 +3857,9 @@ async fn my_avatar_saved(shared: &Arc<Shared>, put: Result<reqwest::Response, re
                         .map(str::to_owned)
                 })
                 .unwrap_or_else(|| format!("HTTP {status}"));
-            shared.notice(format!("Picture not saved: {detail}"));
+            shared.fail("save the picture", &detail);
         }
-        Err(err) => shared.notice(format!("Picture not saved: {err}")),
+        Err(err) => shared.fail("save the picture", &err),
     }
 }
 
@@ -3749,7 +3879,7 @@ async fn adopt_draft_picture(
             match tokio::task::spawn_blocking(move || picture_master(&path)).await {
                 Ok(Ok(m)) => m,
                 Ok(Err(err)) => {
-                    shared.notice(format!("Picture not uploaded: {err:#}"));
+                    shared.fail("upload the picture", &err);
                     return false;
                 }
                 Err(_) => return false,
@@ -3766,16 +3896,16 @@ async fn adopt_draft_picture(
                         bytes: b.to_vec(),
                     },
                     Err(err) => {
-                        shared.notice(format!("Generated picture not copied: {err}"));
+                        shared.fail("keep the generated picture", &err);
                         return false;
                     }
                 },
                 Ok(r) => {
-                    shared.notice(format!("Generated picture not copied: HTTP {}", r.status()));
+                    shared.fail("keep the generated picture", r.status());
                     return false;
                 }
                 Err(err) => {
-                    shared.notice(format!("Generated picture not copied: {err}"));
+                    shared.fail("keep the generated picture", &err);
                     return false;
                 }
             }
@@ -3793,11 +3923,11 @@ async fn adopt_draft_picture(
     match put {
         Ok(r) if r.status().is_success() => {}
         Ok(r) => {
-            shared.notice(format!("Picture upload failed: HTTP {}", r.status()));
+            shared.fail("upload the picture", r.status());
             return false;
         }
         Err(err) => {
-            shared.notice(format!("Picture upload failed: {err}"));
+            shared.fail("upload the picture", &err);
             return false;
         }
     }
@@ -3807,7 +3937,7 @@ async fn adopt_draft_picture(
     {
         Ok(_) => true,
         Err(err) => {
-            shared.notice(format!("Picture not saved: {}", people_error(&err)));
+            shared.fail("save the picture", &err);
             false
         }
     }
@@ -4007,7 +4137,7 @@ fn outgoing_paths(paths: Vec<PathBuf>) -> Vec<Outgoing> {
 }
 
 /// NewChat POST failed (or the body did not decode): drop the mint, notify, mark queued sends failed.
-fn fail_pending_new_chat(shared: &Shared, local_id: &str, notice: String) {
+fn fail_pending_new_chat(shared: &Shared, local_id: &str, error: UserError) {
     shared.chats.lock().unwrap().retain(|c| c.id != local_id);
     let queued = shared
         .pending_new_chats
@@ -4015,12 +4145,14 @@ fn fail_pending_new_chat(shared: &Shared, local_id: &str, notice: String) {
         .unwrap()
         .remove(local_id)
         .unwrap_or_default();
-    shared.notice(notice.clone());
+    if queued.is_empty() {
+        shared.fail_with(error.clone());
+    }
     for q in queued {
         let _ = shared.events.send(SyncEvent::MessageSendFailed {
             chat_id: local_id.to_owned(),
             message_id: q.message_id,
-            error: notice.clone(),
+            error: error.clone(),
         });
     }
 }
@@ -4060,8 +4192,7 @@ async fn send_message(
                 return;
             }
         }
-        let error = "chat is not ready".to_string();
-        shared.notice(format!("Message not sent: {error}"));
+        let error = UserError::from_text("send your message", "chat is not ready");
         let _ = shared.events.send(SyncEvent::MessageSendFailed {
             chat_id,
             message_id,
@@ -4128,17 +4259,17 @@ async fn send_message(
                 match put {
                     Ok(r) if r.status().is_success() => Some(key),
                     Ok(r) => {
-                        shared.notice(format!("Attachment upload failed: HTTP {}", r.status()));
+                        shared.fail("upload the attachment", r.status());
                         None
                     }
                     Err(err) => {
-                        shared.notice(format!("Attachment upload failed: {err}"));
+                        shared.fail("upload the attachment", &err);
                         None
                     }
                 }
             }
             Err(err) => {
-                shared.notice(err);
+                shared.fail(&format!("attach {name}"), &err);
                 None
             }
         };
@@ -4173,8 +4304,7 @@ async fn send_message(
             // Room torn down between the early check and now — fail visibly.
             drop(docs);
             shared.unacked.lock().unwrap().remove(&message_id);
-            let error = "chat is not ready".to_string();
-            shared.notice(format!("Message not sent: {error}"));
+            let error = UserError::from_text("send your message", "chat is not ready");
             let _ = shared.events.send(SyncEvent::MessageSendFailed {
                 chat_id,
                 message_id,
@@ -4306,11 +4436,11 @@ async fn upload_voice_memo(shared: &Shared, blob_slot: &str, wav: Arc<Vec<u8>>) 
     let blob_ref = match put {
         Ok(r) if r.status().is_success() => Some(key),
         Ok(r) => {
-            shared.notice(format!("Voice memo upload failed: HTTP {}", r.status()));
+            shared.fail("upload the voice memo", r.status());
             None
         }
         Err(err) => {
-            shared.notice(format!("Voice memo upload failed: {err}"));
+            shared.fail("upload the voice memo", &err);
             None
         }
     };
@@ -4323,6 +4453,7 @@ async fn upload_voice_memo(shared: &Shared, blob_slot: &str, wav: Arc<Vec<u8>>) 
             bytes: None,
             kind: Some(AttachmentKind::Audio),
             title: None,
+            chart_part: None,
         },
     }
 }
@@ -4519,15 +4650,22 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             Ok(d) => d,
                             Err(_) => {
                                 let _ = shared.events.send(SyncEvent::PairingFailed(
-                                    "relay returned no token".into(),
+                                    UserError::from_text(
+                                        "pair this Mac",
+                                        "relay returned no token",
+                                    ),
                                 ));
                                 return;
                             }
                         };
                         if dto.device_token.is_empty() {
-                            let _ = shared
-                                .events
-                                .send(SyncEvent::PairingFailed("relay returned no token".into()));
+                            let _ =
+                                shared
+                                    .events
+                                    .send(SyncEvent::PairingFailed(UserError::from_text(
+                                        "pair this Mac",
+                                        "relay returned no token",
+                                    )));
                             return;
                         }
                         let creds = DeviceCredentials {
@@ -4543,7 +4681,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             user: None,
                         };
                         if let Err(err) = credentials::store(&creds) {
-                            shared.notice(format!("Token saved in memory only: {err:#}"));
+                            shared.fail("save your sign-in to the keychain", &err);
                         }
                         *shared.creds.write().unwrap() = Some(creds.clone());
                         let _ = shared.events.send(SyncEvent::Paired {
@@ -4554,7 +4692,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     Err(err) => {
                         let _ = shared
                             .events
-                            .send(SyncEvent::PairingFailed(format!("{err:#}")));
+                            .send(SyncEvent::PairingFailed(UserError::classify(
+                                "pair this Mac",
+                                &err,
+                            )));
                     }
                 }
             });
@@ -4606,7 +4747,9 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     Err(err) => {
                         let _ = shared
                             .events
-                            .send(SyncEvent::PairingFailed(format!("{err:#}")));
+                            .send(SyncEvent::PairingFailed(UserError::classify(
+                                "sign in", &err,
+                            )));
                     }
                 }
             });
@@ -4703,7 +4846,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     Err(err) => {
                         let _ = shared
                             .events
-                            .send(SyncEvent::PeopleError(people_error(&err)));
+                            .send(SyncEvent::PeopleError(UserError::classify("search", &err)));
                     }
                 }
             });
@@ -4723,7 +4866,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     Err(err) => {
                         let _ = shared
                             .events
-                            .send(SyncEvent::PeopleError(people_error(&err)));
+                            .send(SyncEvent::PeopleError(UserError::classify(
+                                "start the chat",
+                                &err,
+                            )));
                     }
                 }
             });
@@ -4795,10 +4941,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                                 )
                                 .await
                             {
-                                shared.notice(format!(
-                                    "Group created, but adding an agent failed: {}",
-                                    people_error(&err)
-                                ));
+                                shared.fail("add the agent to the new group", &err);
                             }
                         }
                         if let Err(err) = refresh_registry(&shared).await {
@@ -4816,7 +4959,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     Err(err) => {
                         let _ = shared
                             .events
-                            .send(SyncEvent::PeopleError(people_error(&err)));
+                            .send(SyncEvent::PeopleError(UserError::classify(
+                                "create the group",
+                                &err,
+                            )));
                     }
                 }
             });
@@ -4847,7 +4993,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     Err(err) => {
                         let _ = shared
                             .events
-                            .send(SyncEvent::PeopleError(people_error(&err)));
+                            .send(SyncEvent::PeopleError(UserError::classify(
+                                "add the agent",
+                                &err,
+                            )));
                     }
                 }
             });
@@ -4864,7 +5013,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 {
                     let _ = shared
                         .events
-                        .send(SyncEvent::PeopleError(people_error(&err)));
+                        .send(SyncEvent::PeopleError(UserError::classify(
+                            "remove the agent",
+                            &err,
+                        )));
                 }
                 let _ = refresh_registry(&shared).await;
             });
@@ -4898,7 +5050,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         shared.diagnostic("refresh", format!("{err:#}"));
                     }
                     if let Err(err) = batch {
-                        shared.notice(format!("Could not add members: {}", people_error(&err)));
+                        shared.fail("add members", &err);
                     }
                     return;
                 }
@@ -4932,7 +5084,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     shared.diagnostic("refresh", format!("{err:#}"));
                 }
                 if let Some(why) = failed {
-                    shared.notice(format!("Could not add {why}"));
+                    shared.fail("add them", &why);
                 }
             });
         }
@@ -4945,7 +5097,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 {
                     let _ = shared
                         .events
-                        .send(SyncEvent::PeopleError(people_error(&err)));
+                        .send(SyncEvent::PeopleError(UserError::classify(
+                            "remove them",
+                            &err,
+                        )));
                 }
                 let _ = refresh_registry(&shared).await;
             });
@@ -4959,7 +5114,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 {
                     let _ = shared
                         .events
-                        .send(SyncEvent::PeopleError(people_error(&err)));
+                        .send(SyncEvent::PeopleError(UserError::classify(
+                            "leave the group",
+                            &err,
+                        )));
                 }
                 shared.people.lock().unwrap().remove(&chat_id);
                 shared.with_store(|s| s.delete_doc(&chat_id));
@@ -4986,7 +5144,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             if call.call_id.is_empty() {
                                 let _ = shared.events.send(SyncEvent::CallError {
                                     chat_id,
-                                    message: "The relay answered without a call.".into(),
+                                    error: UserError::from_text(
+                                        "start the call",
+                                        "The relay answered without a call.",
+                                    ),
                                 });
                             } else {
                                 // 201 `{call, joined: false, reachable}` = I started it
@@ -5013,14 +5174,17 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         Err(_) => {
                             let _ = shared.events.send(SyncEvent::CallError {
                                 chat_id,
-                                message: "The relay answered without a call.".into(),
+                                error: UserError::from_text(
+                                    "start the call",
+                                    "The relay answered without a call.",
+                                ),
                             });
                         }
                     },
                     Err(err) => {
                         let _ = shared.events.send(SyncEvent::CallError {
                             chat_id,
-                            message: call_error(&err),
+                            error: call_error("start the call", &err),
                         });
                     }
                 }
@@ -5047,7 +5211,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     Err(err) => {
                         let _ = shared.events.send(SyncEvent::CallError {
                             chat_id: String::new(),
-                            message: call_error(&err),
+                            error: call_error("join the call", &err),
                         });
                     }
                 }
@@ -5092,7 +5256,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             }));
                         }
                     }
-                    Err(err) => shared.notice(format!("Leave call: {}", call_error(&err))),
+                    Err(err) => shared.fail("leave the call", &err),
                 }
             });
         }
@@ -5146,7 +5310,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     Err(err) => {
                         let _ = shared
                             .events
-                            .send(SyncEvent::PeopleError(people_error(&err)));
+                            .send(SyncEvent::PeopleError(UserError::classify(
+                                "block them",
+                                &err,
+                            )));
                     }
                 }
             });
@@ -5161,7 +5328,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     Err(err) => {
                         let _ = shared
                             .events
-                            .send(SyncEvent::PeopleError(people_error(&err)));
+                            .send(SyncEvent::PeopleError(UserError::classify(
+                                "unblock them",
+                                &err,
+                            )));
                     }
                 }
                 refresh_blocks(&shared).await;
@@ -5183,7 +5353,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     Err(err) => {
                         let _ = shared
                             .events
-                            .send(SyncEvent::PeopleError(people_error(&err)));
+                            .send(SyncEvent::PeopleError(UserError::classify(
+                                "invite them",
+                                &err,
+                            )));
                     }
                 }
             });
@@ -5208,7 +5381,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     Err(err) => {
                         let _ = shared
                             .events
-                            .send(SyncEvent::PeopleError(people_error(&err)));
+                            .send(SyncEvent::PeopleError(UserError::classify(
+                                "give access",
+                                &err,
+                            )));
                     }
                 }
             });
@@ -5225,7 +5401,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 {
                     let _ = shared
                         .events
-                        .send(SyncEvent::PeopleError(people_error(&err)));
+                        .send(SyncEvent::PeopleError(UserError::classify(
+                            "remove the access",
+                            &err,
+                        )));
                 }
                 let _ = refresh_registry(&shared).await;
             });
@@ -5242,7 +5421,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 {
                     let _ = shared
                         .events
-                        .send(SyncEvent::PeopleError(people_error(&err)));
+                        .send(SyncEvent::PeopleError(UserError::classify(
+                            "remove them",
+                            &err,
+                        )));
                 }
                 let _ = refresh_registry(&shared).await;
             });
@@ -5455,13 +5637,17 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .delete(&format!("/room/{room}/messages/{message_id}"))
                     .await
                 {
-                    let why = match err.downcast_ref::<RelayError>() {
-                        Some(e) if e.status == 403 => {
-                            "You can only delete your own messages.".to_owned()
-                        }
-                        _ => format!("Could not delete the message: {}", people_error(&err)),
+                    let error = match err.downcast_ref::<RelayError>() {
+                        Some(e) if e.status == 403 => UserError::of(
+                            "delete the message",
+                            ErrorClass::Refused {
+                                message: Some("You can only delete your own messages.".into()),
+                            },
+                            format!("{err:#}"),
+                        ),
+                        _ => UserError::classify("delete the message", &err),
                     };
-                    shared.notice(why);
+                    shared.fail_with(error);
                 }
             });
         }
@@ -5534,7 +5720,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .patch_json(&format!("/chats/{chat_id}"), json!({ "title": title }))
                     .await
                 {
-                    shared.notice(format!("Group name not saved: {}", people_error(&err)));
+                    shared.fail("rename the group", &err);
                 }
             });
         }
@@ -5559,7 +5745,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     "image_key": "",
                 });
                 if let Err(err) = shared.patch_json(&format!("/chats/{chat_id}"), body).await {
-                    shared.notice(format!("Group picture not saved: {}", people_error(&err)));
+                    shared.fail("save the group picture", &err);
                 }
             });
         }
@@ -5572,11 +5758,11 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 {
                     Ok(Ok(m)) => m,
                     Ok(Err(err)) => {
-                        shared.notice(format!("Group picture: {err:#}"));
+                        shared.fail("save the group picture", &err);
                         return;
                     }
                     Err(err) => {
-                        shared.notice(format!("Group picture: {err}"));
+                        shared.fail("save the group picture", err.to_string());
                         return;
                     }
                 };
@@ -5595,11 +5781,11 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 match put {
                     Ok(r) if r.status().is_success() => {}
                     Ok(r) => {
-                        shared.notice(format!("Group picture upload failed: HTTP {}", r.status()));
+                        shared.fail("upload the group picture", r.status());
                         return;
                     }
                     Err(err) => {
-                        shared.notice(format!("Group picture upload failed: {err}"));
+                        shared.fail("upload the group picture", &err);
                         return;
                     }
                 }
@@ -5628,7 +5814,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         }
                     }
                     Err(err) => {
-                        shared.notice(format!("Group picture not saved: {}", people_error(&err)));
+                        shared.fail("save the group picture", &err);
                     }
                 }
             });
@@ -5668,7 +5854,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     )
                     .await
                 {
-                    shared.notice(format!("Rename: {err:#}"));
+                    shared.fail("rename the chat", &err);
                 }
             });
         }
@@ -5720,7 +5906,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                                 fail_pending_new_chat(
                                     &shared,
                                     &local_id,
-                                    "Relay returned no chat".into(),
+                                    UserError::from_text(
+                                        "start the chat",
+                                        "Relay returned no chat",
+                                    ),
                                 );
                                 return;
                             }
@@ -5766,7 +5955,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         fail_pending_new_chat(
                             &shared,
                             &local_id,
-                            format!("New chat failed: {err:#}"),
+                            UserError::classify("start the chat", &err),
                         );
                     }
                 }
@@ -5795,7 +5984,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                                     target: "arbos_mac::relay",
                                     "CreateChatResponseDto (fork): {err}"
                                 );
-                                shared.notice("Relay returned no chat");
+                                shared.fail("fork the chat", "Relay returned no chat");
                                 return;
                             }
                         };
@@ -5807,7 +5996,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             chat,
                         });
                     }
-                    Err(err) => shared.notice(format!("Fork failed: {err:#}")),
+                    Err(err) => shared.fail("fork the chat", &err),
                 }
             });
         }
@@ -5852,7 +6041,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     Err(err) => {
                         // Older relay without §9c: the Mac keeps its local archive.
                         if !err.to_string().contains("HTTP 404") {
-                            shared.notice(format!("Archive: {}", people_error(&err)));
+                            shared.fail("archive the chat", &err);
                         }
                     }
                 }
@@ -5917,7 +6106,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         // An older relay (no D92 columns) ignores unknown fields and answers
                         // 200; a 404 means no such project. Anything else is worth a line.
                         if !err.to_string().contains("HTTP 404") {
-                            shared.notice(format!("Leaf not saved: {}", people_error(&err)));
+                            shared.fail("save the picture", &err);
                         }
                     }
                 }
@@ -5936,7 +6125,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         {
                             Ok(Ok(m)) => m,
                             Ok(Err(err)) => {
-                                shared.notice(format!("Picture not uploaded: {err:#}"));
+                                shared.fail("upload the picture", &err);
                                 return;
                             }
                             Err(_) => return,
@@ -5953,12 +6142,11 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         match put {
                             Ok(r) if r.status().is_success() => key,
                             Ok(r) => {
-                                shared
-                                    .notice(format!("Picture upload failed: HTTP {}", r.status()));
+                                shared.fail("upload the picture", r.status());
                                 return;
                             }
                             Err(err) => {
-                                shared.notice(format!("Picture upload failed: {err}"));
+                                shared.fail("upload the picture", &err);
                                 return;
                             }
                         }
@@ -5996,7 +6184,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         let _ = shared.events.send(SyncEvent::Projects(snapshot));
                     }
                     Err(err) => {
-                        shared.notice(format!("Picture not saved: {}", people_error(&err)));
+                        shared.fail("save the picture", &err);
                     }
                 }
             });
@@ -6011,7 +6199,13 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     // The Create sheet: into my own slot (#1789's route); copied on Create.
                     PictureTarget::Draft | PictureTarget::Me(_) => "/me/avatar/generate".to_owned(),
                 };
-                let result = shared.post_json(&path, json!({ "prompt": prompt })).await;
+                let result = shared
+                    .post_json_timeout(
+                        &path,
+                        json!({ "prompt": prompt }),
+                        Some(AVATAR_GENERATE_TIMEOUT),
+                    )
+                    .await;
                 let event = match result {
                     Ok(v) => {
                         let key = v
@@ -6029,21 +6223,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                                 target,
                                 image_key: None,
                                 url: None,
-                                error: Some("The relay sent no picture".to_owned()),
+                                error: Some(UserError::from_text(
+                                    "generate the image",
+                                    "The relay sent no picture",
+                                )),
                             },
                         }
                     }
                     Err(err) => {
-                        // A relay without the own-slot route yet (#1789 not deployed): say so
-                        // instead of "HTTP 404".
-                        let error = if target == PictureTarget::Draft
-                            && err.to_string().contains("HTTP 404")
-                        {
-                            "Generate is not on this relay yet; upload a picture instead."
-                                .to_owned()
-                        } else {
-                            people_error(&err)
-                        };
+                        let error = generate_failure(&target, &err);
                         SyncEvent::ImageGenerated {
                             target,
                             image_key: None,
@@ -6081,7 +6269,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         }
                     }
                     Err(err) => {
-                        shared.notice(format!("Group picture not saved: {}", people_error(&err)));
+                        shared.fail("save the group picture", &err);
                     }
                 }
             });
@@ -6099,7 +6287,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         {
                             Ok(Ok(m)) => m,
                             Ok(Err(err)) => {
-                                shared.notice(format!("Picture not uploaded: {err:#}"));
+                                shared.fail("upload the picture", &err);
                                 return;
                             }
                             Err(_) => return,
@@ -6119,12 +6307,11 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         match put {
                             Ok(r) if r.status().is_success() => key,
                             Ok(r) => {
-                                shared
-                                    .notice(format!("Picture upload failed: HTTP {}", r.status()));
+                                shared.fail("upload the picture", r.status());
                                 return;
                             }
                             Err(err) => {
-                                shared.notice(format!("Picture upload failed: {err}"));
+                                shared.fail("upload the picture", &err);
                                 return;
                             }
                         }
@@ -6139,7 +6326,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 {
                     Ok(_) => refresh_servers_list(&shared).await,
                     Err(err) => {
-                        shared.notice(format!("Server picture not saved: {}", people_error(&err)));
+                        shared.fail("save the server picture", &err);
                     }
                 }
             });
@@ -6158,7 +6345,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 {
                     Ok(_) => refresh_servers_list(&shared).await,
                     Err(err) => {
-                        shared.notice(format!("Server picture not saved: {}", people_error(&err)));
+                        shared.fail("save the server picture", &err);
                     }
                 }
             });
@@ -6172,11 +6359,11 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 {
                     Ok(Ok(m)) => m,
                     Ok(Err(err)) => {
-                        shared.notice(format!("Picture: {err:#}"));
+                        shared.fail("save your picture", &err);
                         return;
                     }
                     Err(err) => {
-                        shared.notice(format!("Picture: {err}"));
+                        shared.fail("save your picture", err.to_string());
                         return;
                     }
                 };
@@ -6242,8 +6429,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         }
                         refresh_me(&shared).await;
                     }
-                    Ok(r) => shared.notice(format!("Picture not removed: HTTP {}", r.status())),
-                    Err(err) => shared.notice(format!("Picture not removed: {err}")),
+                    Ok(r) => shared.fail("remove your picture", r.status()),
+                    Err(err) => shared.fail("remove your picture", &err),
                 }
             });
         }
@@ -6263,25 +6450,26 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         refresh_me(&shared).await;
                     }
                     Err(err) => {
-                        let human = if let Some(e) = err.downcast_ref::<RelayError>() {
-                            match e.kind.as_str() {
-                                "handle_taken" => "That handle is already taken.".to_string(),
-                                "bad_handle" => {
-                                    "Handle must be 1–39 letters, numbers, or hyphens.".to_string()
-                                }
-                                _ => format!(
-                                    "Profile: {}",
-                                    if e.message.is_empty() {
-                                        format!("HTTP {}", e.status)
-                                    } else {
-                                        e.message.clone()
+                        let said =
+                            err.downcast_ref::<RelayError>()
+                                .and_then(|e| match e.kind.as_str() {
+                                    "handle_taken" => Some("That handle is already taken."),
+                                    "bad_handle" => {
+                                        Some("Handle must be 1–39 letters, numbers, or hyphens.")
                                     }
-                                ),
-                            }
-                        } else {
-                            format!("Profile: {err:#}")
+                                    _ => None,
+                                });
+                        let error = match said {
+                            Some(why) => UserError::of(
+                                "save your profile",
+                                ErrorClass::Refused {
+                                    message: Some(why.to_owned()),
+                                },
+                                format!("{err:#}"),
+                            ),
+                            None => UserError::classify("save your profile", &err),
                         };
-                        shared.notice(human);
+                        shared.fail_with(error);
                         refresh_me(&shared).await;
                     }
                 }
@@ -6309,7 +6497,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     )
                     .await
                 {
-                    shared.notice(format!("Description: {err:#}"));
+                    shared.fail("save the description", &err);
                 }
             });
         }
@@ -6337,7 +6525,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .patch_json(&format!("/projects/{project_id}"), json!({ "name": name }))
                     .await
                 {
-                    shared.notice(format!("Rename: {err:#}"));
+                    shared.fail("rename the agent", &err);
                 }
             });
         }
@@ -6367,7 +6555,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 {
                     // Older relay: the Mac keeps its local state until the next refresh.
                     if !err.to_string().contains("HTTP 404") {
-                        shared.notice(format!("Archive: {}", people_error(&err)));
+                        shared.fail("archive the chat", &err);
                     }
                 }
             });
@@ -6394,7 +6582,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     )
                     .await
                 {
-                    shared.notice(format!("Mute: {err:#}"));
+                    shared.fail("change the mute setting", &err);
                 }
             });
         }
@@ -6447,21 +6635,21 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         Ok(r) if r.status().is_success() => match r.bytes().await {
                             Ok(bytes) => {
                                 if let Err(err) = tokio::fs::write(&path, &bytes).await {
-                                    shared.notice(format!("Voice sample: {err}"));
+                                    shared.fail("play the voice sample", &err);
                                     return;
                                 }
                             }
                             Err(err) => {
-                                shared.notice(format!("Voice sample: {err}"));
+                                shared.fail("play the voice sample", &err);
                                 return;
                             }
                         },
                         Ok(r) => {
-                            shared.notice(format!("Voice sample: HTTP {}", r.status()));
+                            shared.fail("play the voice sample", r.status());
                             return;
                         }
                         Err(err) => {
-                            shared.notice(format!("Voice sample: {err}"));
+                            shared.fail("play the voice sample", &err);
                             return;
                         }
                     }
@@ -6487,7 +6675,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .await
                 {
                     Ok(_) => {}
-                    Err(err) => shared.notice(format!("Voice not saved: {}", people_error(&err))),
+                    Err(err) => shared.fail("save the voice", &err),
                 }
             });
         }
@@ -6512,9 +6700,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .await
                 {
                     Ok(_) => {}
-                    Err(err) => {
-                        shared.notice(format!("Camera vision not saved: {}", people_error(&err)))
-                    }
+                    Err(err) => shared.fail("save the camera setting", &err),
                 }
             });
         }
@@ -6559,8 +6745,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .await;
                 match resp {
                     Ok(r) if r.status().is_success() => {}
-                    Ok(r) => shared.notice(format!("Model change not saved: HTTP {}", r.status())),
-                    Err(err) => shared.notice(format!("Model change not saved: {err}")),
+                    Ok(r) => shared.fail("change the model", r.status()),
+                    Err(err) => shared.fail("change the model", &err),
                 }
             });
         }
@@ -6616,7 +6802,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             shared.diagnostic("refresh", format!("{err:#}"));
                         }
                     }
-                    Err(err) => shared.notice(format!("New project failed: {err:#}")),
+                    Err(err) => shared.fail("create the agent", &err),
                 }
             });
         }
@@ -6624,7 +6810,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let shared = shared.clone();
             tokio::spawn(async move {
                 if let Err(err) = shared.delete(&format!("/projects/{project_id}")).await {
-                    shared.notice(format!("Delete failed: {}", people_error(&err)));
+                    shared.fail("delete the agent", &err);
                 }
                 if let Err(err) = refresh_registry(&shared).await {
                     shared.diagnostic("refresh", format!("{err:#}"));
@@ -6637,7 +6823,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 if let Err(err) = shared.delete(&format!("/chats/{chat_id}")).await {
                     let _ = shared
                         .events
-                        .send(SyncEvent::PeopleError(people_error(&err)));
+                        .send(SyncEvent::PeopleError(UserError::classify(
+                            "delete the chat",
+                            &err,
+                        )));
                 }
                 shared.people.lock().unwrap().remove(&chat_id);
                 shared.with_store(|s| s.delete_doc(&chat_id));
@@ -6654,7 +6843,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .delete(&format!("/projects/{project_id}/chats/{chat_id}"))
                     .await
                 {
-                    shared.notice(format!("Delete chat failed: {}", people_error(&err)));
+                    shared.fail("delete the chat", &err);
                 }
                 if let Err(err) = refresh_registry(&shared).await {
                     shared.diagnostic("refresh", format!("{err:#}"));
@@ -6671,7 +6860,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     Some("Restarting your machine…".into()),
                 );
                 if let Err(err) = shared.post_json("/machine/stop", json!({})).await {
-                    shared.notice(format!("Machine restart: {err:#}"));
+                    shared.fail("restart the machine", &err);
                 }
                 match shared.post_json("/machine/start", json!({})).await {
                     Ok(v) => {
@@ -6679,7 +6868,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             set_machine_from_reply(&shared, &dto);
                         }
                     }
-                    Err(err) => shared.notice(format!("Machine restart: {err:#}")),
+                    Err(err) => shared.fail("restart the machine", &err),
                 }
                 refresh_machine(&shared).await;
             });
@@ -6708,7 +6897,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             set_machine_from_reply(&shared, &dto);
                         }
                     }
-                    Err(err) => shared.notice(format!("Machine {verb}: {err:#}")),
+                    Err(err) => shared.fail(&format!("{verb} the machine"), &err),
                 }
                 refresh_machine(&shared).await;
             });
@@ -6745,7 +6934,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             match tokio::fs::write(&path, &bytes).await {
                                 Ok(()) => Some(path),
                                 Err(err) => {
-                                    shared.notice(format!("Could not save: {err}"));
+                                    shared.fail("save the file", &err);
                                     None
                                 }
                             }
@@ -6760,8 +6949,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             saved_to,
                         });
                     }
-                    Ok(r) => shared.notice(format!("Blob {key}: HTTP {}", r.status())),
-                    Err(err) => shared.notice(format!("Blob {key}: {err}")),
+                    Ok(r) => shared.fail("download the file", r.status()),
+                    Err(err) => shared.fail("download the file", &err),
                 }
             });
         }
@@ -6853,14 +7042,14 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             Ok(()) => {
                                 let _ = shared.events.send(SyncEvent::AttachmentSaved { path });
                             }
-                            Err(err) => shared.notice(format!("Could not save {name}: {err}")),
+                            Err(err) => shared.fail(&format!("save {name}"), &err),
                         }
                     }
                     Err(err) => {
                         // Raw "Download …: HTTP 403" sat in the chat like a message. Keep a
                         // short dismissible toast; the status detail goes to diagnostics.
                         shared.diagnostic("download", format!("{name}: {err}"));
-                        shared.notice(format!("Couldn't download {name}"));
+                        shared.fail(&format!("download {name}"), &err);
                     }
                 }
             });
@@ -6880,12 +7069,12 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         let path = dir.join(safe_name(&name));
                         match tokio::fs::write(&path, &bytes).await {
                             Ok(()) => crate::ui::attachments::open_with_system(&path, quick_look),
-                            Err(err) => shared.notice(format!("Could not open {name}: {err}")),
+                            Err(err) => shared.fail(&format!("open {name}"), &err),
                         }
                     }
                     Err(err) => {
                         shared.diagnostic("open", format!("{name}: {err}"));
-                        shared.notice(format!("Couldn't open {name}"));
+                        shared.fail(&format!("open {name}"), &err);
                     }
                 }
                 let _ = shared.events.send(SyncEvent::AttachmentOpened { key });
@@ -6925,11 +7114,14 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                                 if c.status == "connected" {
                                     shared.notice(format!("{provider} connected."));
                                 } else {
-                                    shared.notice(format!(
-                                        "{provider}: {} {}",
-                                        c.status,
-                                        c.last_error.as_deref().unwrap_or("")
-                                    ));
+                                    shared.fail(
+                                        &format!("connect {provider}"),
+                                        format!(
+                                            "{} {}",
+                                            c.status,
+                                            c.last_error.as_deref().unwrap_or("")
+                                        ),
+                                    );
                                 }
                             }
                             Ok(_) => {}
@@ -6941,7 +7133,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             refresh_connectors(&shared).await;
                         }
                     }
-                    Err(err) => shared.notice(format!("Connect {provider}: {err:#}")),
+                    Err(err) => shared.fail(&format!("connect {provider}"), &err),
                 }
             });
         }
@@ -6956,8 +7148,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .await;
                 match resp {
                     Ok(r) if r.status().is_success() => {}
-                    Ok(r) => shared.notice(format!("Disconnect: HTTP {}", r.status())),
-                    Err(err) => shared.notice(format!("Disconnect: {err}")),
+                    Ok(r) => shared.fail("disconnect it", r.status()),
+                    Err(err) => shared.fail("disconnect it", &err),
                 }
                 refresh_connectors(&shared).await;
             });
@@ -6978,7 +7170,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let shared = shared.clone();
             tokio::spawn(async move {
                 if let Err(err) = shared.delete(&format!("/auth/devices/{id}")).await {
-                    shared.notice(format!("Sign out device: {}", relay_message(&err)));
+                    shared.fail("sign out that device", &err);
                 }
                 refresh_devices(&shared).await;
             });
@@ -7005,9 +7197,55 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .delete(&format!("/projects/{project_id}/shell-grants/{grant_id}"))
                     .await
                 {
-                    shared.notice(format!("Shell approvals: {}", relay_message(&err)));
+                    shared.fail("change the shell approvals", &err);
                 }
                 refresh_shell_grants(&shared, &project_id).await;
+            });
+        }
+        ClientCommand::SecretHandoffSave {
+            chat_id,
+            approval_id,
+            project_id,
+            name,
+            value,
+            purpose,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let body = json!({ "name": name, "kind": "key", "value": value, "note": purpose,
+                    "agents": [{ "project_id": project_id, "note": purpose }],
+                    "source": { "kind": "chat", "project_id": project_id, "chat_id": chat_id } });
+                drop(value);
+                let result = match shared.post_json("/secrets", body).await {
+                    Ok(v) => match serde_json::from_value::<SecretEnvelopeDto>(v) {
+                        Ok(e) => {
+                            // Answer the card with the reference: the box's waiting tool
+                            // gets `{ id, name, env }` and nothing else.
+                            let docs = shared.docs.lock().unwrap();
+                            if let Some(doc) = docs.get(&chat_id) {
+                                let device = shared.device_id();
+                                let payload = json!({ "approvalId": approval_id,
+                                    "secret": { "id": e.secret.id, "name": e.secret.name, "env": e.secret.env } });
+                                doc.core.transact(|d| {
+                                    d.push_command("approve", payload, &device);
+                                });
+                            }
+                            Ok(e.secret.env)
+                        }
+                        Err(_) => Err(UserError::of(
+                            "save the secret",
+                            ErrorClass::Server,
+                            "bad secret reply",
+                        )),
+                    },
+                    // The shared error note (ARB-416) draws it on the card.
+                    Err(err) => Err(UserError::classify("save the secret", &err)),
+                };
+                let _ = shared.events.send(SyncEvent::SecretHandoff {
+                    approval_id,
+                    result,
+                });
+                refresh_secrets(&shared).await;
             });
         }
         ClientCommand::SecretAdd { item } => {
@@ -7034,7 +7272,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             .unwrap_or_else(|| item.name.clone());
                         shared.notice(format!("Secrets: saved {env}."));
                     }
-                    Err(err) => shared.notice(format!("Secrets: {}", relay_message(&err))),
+                    Err(err) => shared.fail("save the secret", &err),
                 }
                 refresh_secrets(&shared).await;
             });
@@ -7043,7 +7281,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let shared = shared.clone();
             tokio::spawn(async move {
                 if let Err(err) = shared.patch_json(&format!("/secrets/{id}"), body).await {
-                    shared.notice(format!("Secrets: {}", relay_message(&err)));
+                    shared.fail("save the secret", &err);
                 }
                 refresh_secrets(&shared).await;
             });
@@ -7055,7 +7293,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     Ok(_) => shared.notice(
                         "Secrets: value replaced. The old one works for 24 hours.".to_string(),
                     ),
-                    Err(err) => shared.notice(format!("Secrets: {}", relay_message(&err))),
+                    Err(err) => shared.fail("replace the value", &err),
                 }
                 refresh_secrets(&shared).await;
             });
@@ -7064,7 +7302,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let shared = shared.clone();
             tokio::spawn(async move {
                 if let Err(err) = shared.delete(&format!("/secrets/{id}")).await {
-                    shared.notice(format!("Delete secret: {}", relay_message(&err)));
+                    shared.fail("delete the secret", &err);
                 }
                 refresh_secrets(&shared).await;
             });
@@ -7085,7 +7323,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .put_json(&format!("/secrets/{id}/access/{project_id}"), body)
                     .await
                 {
-                    shared.notice(format!("Secrets: {}", relay_message(&err)));
+                    shared.fail("change who may use it", &err);
                 }
                 refresh_secrets(&shared).await;
                 refresh_project_secrets(&shared, &project_id).await;
@@ -7098,7 +7336,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .post_json(&format!("/secrets/{id}/revoke-all"), json!({}))
                     .await
                 {
-                    shared.notice(format!("Secrets: {}", relay_message(&err)));
+                    shared.fail("revoke the access", &err);
                 }
                 refresh_secrets(&shared).await;
             });
@@ -7119,7 +7357,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .put_json(&format!("/secrets/{id}/people/{user_id}"), body)
                     .await
                 {
-                    shared.notice(format!("Secrets: {}", relay_message(&err)));
+                    shared.fail("change that person's access", &err);
                 }
                 refresh_secrets(&shared).await;
             });
@@ -7135,7 +7373,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         )
                         .await
                     {
-                        shared.notice(format!("Secrets: @{handle}: {}", relay_message(&err)));
+                        shared.fail(&format!("add @{handle}"), &err);
                     }
                 }
                 refresh_secrets(&shared).await;
@@ -7148,7 +7386,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .delete(&format!("/secrets/{id}/people/{user_id}"))
                     .await
                 {
-                    shared.notice(format!("Secrets: {}", relay_message(&err)));
+                    shared.fail("remove that person", &err);
                 }
                 refresh_secrets(&shared).await;
             });
@@ -7160,7 +7398,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .put_json("/me/secrets/settings", json!({ "paused": paused }))
                     .await
                 {
-                    shared.notice(format!("Secrets: {}", relay_message(&err)));
+                    shared.fail("change the pause", &err);
                 }
                 refresh_secrets(&shared).await;
             });
@@ -7195,7 +7433,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             _ => format!("{agent} may use {name}."),
                         });
                     }
-                    Err(err) => shared.notice(format!("Secrets: {}", relay_message(&err))),
+                    Err(err) => shared.fail("answer the request", &err),
                 }
                 refresh_secrets(&shared).await;
             });
@@ -7219,14 +7457,25 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     }
                     Err(err) => {
                         let text = format!("{err:#}");
-                        shared.notice(if text.contains("bad_token") {
-                            "That token didn't work. Check it was copied whole.".to_string()
+                        let said = if text.contains("bad_token") {
+                            Some("That token didn't work. Check it was copied whole.")
                         } else if text.contains("no_vaults") {
-                            "This token can read no vaults.".to_string()
-                        } else if text.contains("rate_limited") {
-                            "1Password rate limit reached — try again later.".to_string()
+                            Some("This token can read no vaults.")
                         } else {
-                            format!("Connect 1Password: {}", relay_message(&err))
+                            None
+                        };
+                        shared.fail_with(match said {
+                            Some(why) => UserError::of(
+                                "connect 1Password",
+                                ErrorClass::Refused {
+                                    message: Some(why.to_owned()),
+                                },
+                                text,
+                            ),
+                            None if text.contains("rate_limited") => {
+                                UserError::of("connect 1Password", ErrorClass::RateLimited, text)
+                            }
+                            None => UserError::classify("connect 1Password", &err),
                         });
                     }
                 }
@@ -7247,7 +7496,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     )
                     .await
                 {
-                    shared.notice(format!("Secrets: {}", relay_message(&err)));
+                    shared.fail("change the vault access", &err);
                 }
                 refresh_secrets(&shared).await;
                 refresh_project_secrets(&shared, &project_id).await;
@@ -7263,7 +7512,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     )
                     .await
                 {
-                    shared.notice(format!("Secrets: {}", relay_message(&err)));
+                    shared.fail("save the item name", &err);
                 }
                 refresh_secrets(&shared).await;
             });
@@ -7278,10 +7527,18 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     Ok(_) => shared.notice("Token replaced.".to_string()),
                     Err(err) => {
                         let text = format!("{err:#}");
-                        shared.notice(if text.contains("bad_token") {
-                            "That token didn't work. Check it was copied whole.".to_string()
+                        shared.fail_with(if text.contains("bad_token") {
+                            UserError::of(
+                                "replace the token",
+                                ErrorClass::Refused {
+                                    message: Some(
+                                        "That token didn't work. Check it was copied whole.".into(),
+                                    ),
+                                },
+                                text,
+                            )
                         } else {
-                            format!("Replace token: {}", relay_message(&err))
+                            UserError::classify("replace the token", &err)
                         });
                     }
                 }
@@ -7292,7 +7549,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let shared = shared.clone();
             tokio::spawn(async move {
                 if let Err(err) = shared.delete(&format!("/vaults/{id}")).await {
-                    shared.notice(format!("Disconnect: {}", relay_message(&err)));
+                    shared.fail("disconnect the vault", &err);
                 }
                 refresh_secrets(&shared).await;
             });
@@ -7321,8 +7578,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .await;
                 match resp {
                     Ok(r) if r.status().is_success() => {}
-                    Ok(r) => shared.notice(format!("This Mac: HTTP {}", r.status())),
-                    Err(err) => shared.notice(format!("This Mac: {err}")),
+                    Ok(r) => shared.fail("change the setting for this Mac", r.status()),
+                    Err(err) => shared.fail("change the setting for this Mac", &err),
                 }
                 refresh_local(&shared).await;
             });
@@ -7338,8 +7595,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .await;
                 match resp {
                     Ok(r) if r.status().is_success() => {}
-                    Ok(r) => shared.notice(format!("Forget helper: HTTP {}", r.status())),
-                    Err(err) => shared.notice(format!("Forget helper: {err}")),
+                    Ok(r) => shared.fail("forget the helper on this Mac", r.status()),
+                    Err(err) => shared.fail("forget the helper on this Mac", &err),
                 }
                 refresh_local(&shared).await;
             });
@@ -7362,7 +7619,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .await
                 {
                     Ok(_) => refresh_routines(&shared, &project_id).await,
-                    Err(err) => shared.notice(format!("Routine not created: {err:#}")),
+                    Err(err) => shared.fail("create the routine", &err),
                 }
             });
         }
@@ -7385,8 +7642,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .await;
                 match resp {
                     Ok(r) if r.status().is_success() => {}
-                    Ok(r) => shared.notice(format!("Routine not updated: HTTP {}", r.status())),
-                    Err(err) => shared.notice(format!("Routine not updated: {err}")),
+                    Ok(r) => shared.fail("update the routine", r.status()),
+                    Err(err) => shared.fail("update the routine", &err),
                 }
                 refresh_routines(&shared, &project_id).await;
             });
@@ -7404,7 +7661,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     )
                     .await
                 {
-                    shared.notice(format!("Run now failed: {err:#}"));
+                    shared.fail("run the routine", &err);
                 }
                 refresh_routine_runs(&shared, &project_id, &routine_id).await;
                 refresh_routines(&shared, &project_id).await;
@@ -7436,8 +7693,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .await;
                 match resp {
                     Ok(r) if r.status().is_success() => {}
-                    Ok(r) => shared.notice(format!("Routine not deleted: HTTP {}", r.status())),
-                    Err(err) => shared.notice(format!("Routine not deleted: {err}")),
+                    Ok(r) => shared.fail("delete the routine", r.status()),
+                    Err(err) => shared.fail("delete the routine", &err),
                 }
                 refresh_routines(&shared, &project_id).await;
             });
@@ -7476,7 +7733,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 };
                 match resp {
                     Ok(_) => shared.notice(format!("Skill \"{}\" saved", skill.name)),
-                    Err(err) => shared.notice(format!("Skill not saved: {err:#}")),
+                    Err(err) => shared.fail("save the skill", &err),
                 }
                 refresh_skills(&shared).await;
             });
@@ -7492,8 +7749,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .await;
                 match r {
                     Ok(r) if r.status().is_success() || r.status().as_u16() == 404 => {}
-                    Ok(r) => shared.notice(format!("Delete skill: HTTP {}", r.status())),
-                    Err(err) => shared.notice(format!("Delete skill: {err}")),
+                    Ok(r) => shared.fail("delete the skill", r.status()),
+                    Err(err) => shared.fail("delete the skill", &err),
                 }
                 refresh_skills(&shared).await;
             });
@@ -7518,7 +7775,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .await
                 {
                     Ok(_) => refresh_channels(&shared).await,
-                    Err(err) => shared.notice(format!("Pairing code: {err:#}")),
+                    Err(err) => shared.fail("get a pairing code", &err),
                 }
             });
         }
@@ -7533,8 +7790,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .await;
                 match resp {
                     Ok(r) if r.status().is_success() => {}
-                    Ok(r) => shared.notice(format!("Unbind: HTTP {}", r.status())),
-                    Err(err) => shared.notice(format!("Unbind: {err}")),
+                    Ok(r) => shared.fail("unbind the channel", r.status()),
+                    Err(err) => shared.fail("unbind the channel", &err),
                 }
                 refresh_channels(&shared).await;
             });
@@ -7818,18 +8075,6 @@ async fn refresh_connectors(shared: &Arc<Shared>) {
     }
 }
 
-/// The relay's `error.message` out of an HTTP error, else the whole chain.
-fn relay_message(err: &anyhow::Error) -> String {
-    if let Some(e) = err.downcast_ref::<RelayError>() {
-        return if e.message.is_empty() {
-            format!("HTTP {}", e.status)
-        } else {
-            e.message.clone()
-        };
-    }
-    format!("{err:#}")
-}
-
 /// Settings → Secrets: `GET /secrets` + `GET /secrets/requests` → one view (D83). Never values.
 async fn refresh_secrets(shared: &Arc<Shared>) {
     let (overview, requests) = tokio::join!(
@@ -7840,7 +8085,7 @@ async fn refresh_secrets(shared: &Arc<Shared>) {
         (Ok(o), Ok(r)) => (o, r),
         (Err(err), _) | (_, Err(err)) => {
             if !format!("{err:#}").contains("HTTP 404") {
-                shared.notice(format!("Secrets: {}", relay_message(&err)));
+                shared.fail("load your secrets", &err);
             }
             return;
         }
@@ -7859,9 +8104,10 @@ async fn refresh_secrets(shared: &Arc<Shared>) {
 /// Settings → Devices (`GET /auth/devices`): the list, or why it could not be read.
 async fn refresh_devices(shared: &Arc<Shared>) {
     let result = match shared.get_json("/auth/devices").await {
-        Ok(value) => serde_json::from_value::<Vec<crate::model::DeviceView>>(value)
-            .map_err(|e| format!("unexpected reply: {e}")),
-        Err(err) => Err(relay_message(&err)),
+        Ok(value) => serde_json::from_value::<Vec<crate::model::DeviceView>>(value).map_err(|e| {
+            UserError::from_text("load your devices", format!("unexpected reply: {e}"))
+        }),
+        Err(err) => Err(UserError::classify("load your devices", &err)),
     };
     let _ = shared.events.send(SyncEvent::Devices(result));
 }
@@ -7882,7 +8128,7 @@ async fn refresh_project_secrets(shared: &Arc<Shared>, project_id: &str) {
         }
         Err(err) => {
             if !format!("{err:#}").contains("HTTP 404") {
-                shared.notice(format!("Secrets: {}", relay_message(&err)));
+                shared.fail("load the agent's secrets", &err);
             }
         }
     }
@@ -7906,7 +8152,7 @@ async fn refresh_shell_grants(shared: &Arc<Shared>, project_id: &str) {
         }
         Err(err) => {
             if !format!("{err:#}").contains("HTTP 404") {
-                shared.notice(format!("Shell approvals: {}", relay_message(&err)));
+                shared.fail("load the shell approvals", &err);
             }
         }
     }
@@ -8018,6 +8264,53 @@ impl Drop for Room {
 }
 
 #[cfg(test)]
+mod generate_failure_tests {
+    //! Jacob, 2026-10-26: the picker shows one short sentence, the raw words only as detail.
+    use super::*;
+
+    #[test]
+    fn a_relay_answer_keeps_its_sentence_and_detail() {
+        let err = RelayError::from_body(
+            reqwest::StatusCode::GATEWAY_TIMEOUT,
+            r#"{"error":{"type":"avatar_timeout","message":"Couldn't generate the image. The server took too long.","detail":"gpt-image-1-mini: operation timed out"}}"#,
+        );
+        assert_eq!(
+            err.detail.as_deref(),
+            Some("gpt-image-1-mini: operation timed out")
+        );
+        let e = generate_failure(&PictureTarget::Me("gh_1".into()), &anyhow::Error::from(err));
+        assert_eq!(
+            e.sentence(),
+            "Couldn't generate the image. The server took too long."
+        );
+        assert!(e.raw.contains("gpt-image-1-mini: operation timed out"));
+    }
+
+    #[test]
+    fn a_transport_timeout_is_the_plain_sentence_with_the_raw_words_as_detail() {
+        let raw = anyhow::anyhow!("error sending request for url (https://relay.arbos.life/projects/x/avatar/generate): operation timed out")
+            .context("POST /projects/x/avatar/generate");
+        let e = generate_failure(&PictureTarget::Agent("x".into()), &raw);
+        assert_eq!(
+            e.sentence(),
+            "Couldn't generate the image. The server took too long."
+        );
+        assert!(e.copy_text().contains("operation timed out"));
+        let other = anyhow::anyhow!("dns error").context("POST /projects/x/avatar/generate");
+        let e = generate_failure(&PictureTarget::Agent("x".into()), &other);
+        assert_eq!(e.sentence(), "Couldn't generate the image. You're offline.");
+        let draft = generate_failure(
+            &PictureTarget::Draft,
+            &anyhow::Error::from(RelayError::from_body(reqwest::StatusCode::NOT_FOUND, "")),
+        );
+        assert_eq!(
+            draft.sentence(),
+            "Couldn't generate the image. Generate is not on this relay yet; upload a picture instead."
+        );
+    }
+}
+
+#[cfg(test)]
 mod link_fault_tests {
     use super::*;
     use std::io::{Error as IoError, ErrorKind as K};
@@ -8066,6 +8359,7 @@ mod link_fault_tests {
             status: 503,
             kind: String::new(),
             message: "bad gateway".into(),
+            detail: None,
         };
         assert_eq!(
             link_fault(&anyhow::Error::from(relay)),
@@ -8093,6 +8387,7 @@ mod link_fault_tests {
             status: 404,
             kind: "not_found".into(),
             message: String::new(),
+            detail: None,
         };
         assert_eq!(
             link_fault(&anyhow::Error::from(relay)),

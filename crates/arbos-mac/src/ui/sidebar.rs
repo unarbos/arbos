@@ -203,7 +203,7 @@ pub(crate) fn footer_row_frame() -> gpui::Stateful<Div> {
 }
 
 /// One control of the top strip, left to right.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum StripControl {
     /// The round search button: opens the command palette.
     Search,
@@ -314,7 +314,40 @@ impl ListFilter {
             ListFilter::Servers => "No servers yet",
         }
     }
+
+    /// The segment persists with the sidebar state (`<config>/sidebar_filter`,
+    /// the label in lower case) so the rail reopens on the segment it was
+    /// left on ([feedback mac-sidebar-rail-2026-10-26]). The rig's
+    /// `ARBOS_SIDEBAR_FILTER` wins over the file.
+    pub(crate) fn load() -> Self {
+        if let Some(f) = std::env::var("ARBOS_SIDEBAR_FILTER")
+            .ok()
+            .and_then(|v| Self::parse(&v))
+        {
+            return f;
+        }
+        Self::load_from(&crate::sync::credentials::config_dir())
+    }
+
+    pub(crate) fn save(self) {
+        self.save_to(&crate::sync::credentials::config_dir());
+    }
+
+    /// A missing or unknown value means All (today's default).
+    pub(crate) fn load_from(dir: &std::path::Path) -> Self {
+        std::fs::read_to_string(dir.join(FILTER_FILE))
+            .ok()
+            .and_then(|s| Self::parse(&s))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn save_to(self, dir: &std::path::Path) {
+        let _ = std::fs::create_dir_all(dir);
+        let _ = std::fs::write(dir.join(FILTER_FILE), self.label().to_ascii_lowercase());
+    }
 }
+
+const FILTER_FILE: &str = "sidebar_filter";
 
 /// Newest message with prose across a space's chats (archived ones too — the
 /// history is still there), for the preview line.
@@ -325,7 +358,8 @@ fn latest<'a>(state: &'a AppState, space: &Project) -> Option<&'a Message> {
             .messages_of(&chat.id)
             .iter()
             .rev()
-            .find(|m| !m.plain_text().trim().is_empty())
+            // A row hidden for me (someone I blocked) never previews.
+            .find(|m| !m.plain_text().trim().is_empty() && !state.hides_message(&chat.id, m))
         {
             if best.map(|b| m.created_at > b.created_at).unwrap_or(true) {
                 best = Some(m);
@@ -354,6 +388,12 @@ pub fn plain(s: &str) -> String {
         t = t.replace(mark, "");
     }
     t.trim().to_string()
+}
+
+/// `preview` for the headless tests.
+#[cfg(test)]
+pub(crate) fn preview_for_tests(state: &AppState, space: &Project) -> String {
+    preview(state, space)
 }
 
 fn preview(state: &AppState, space: &Project) -> String {
@@ -454,111 +494,169 @@ pub fn machine_dot(state: MachineState, theme: &Theme) -> gpui::Hsla {
     }
 }
 
-struct RowView {
-    space: Project,
-    selected: bool,
-    streaming: bool,
-    unread: bool,
-    typing: bool,
-    preview: String,
-    time: String,
-    person_image: Option<Arc<RenderImage>>,
-    guests: people::PeopleWithAvatars,
-    avatar_state: avatars::AvatarState,
+/// My picture with the machine dot — the footer's 36 pt disc, drawn the same
+/// at the foot of the expanded list and of the collapsed rail.
+pub(crate) fn account_avatar(
+    shell: &Shell,
+    machine: MachineState,
+    theme: &Theme,
+    cx: &Context<Shell>,
+) -> Div {
+    let state = shell.state.read(cx);
+    let picture = match state.account.as_ref() {
+        Some(a) => {
+            let person = crate::model::Person {
+                id: a.id.clone(),
+                handle: if a.login.is_empty() {
+                    a.name.clone()
+                } else {
+                    a.login.clone()
+                },
+                name: Some(a.name.clone()),
+                avatar_url: a.avatar_url.clone(),
+                status: String::new(),
+                role: String::new(),
+                last_seen_at: None,
+                online: false,
+                avatar_color_index: None,
+            };
+            people::avatar(state.avatar(&a.avatar_url), &person, FOOTER_AVATAR, theme)
+        }
+        None => div()
+            .size(px(FOOTER_AVATAR))
+            .rounded_full()
+            .bg(theme.surface_2)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(icon("person", FOOTER_AVATAR / 2.0, theme.text)),
+    };
+    div()
+        .relative()
+        .size(px(FOOTER_AVATAR))
+        .flex_shrink_0()
+        .debug_selector(|| "sidebar-account-avatar".into())
+        .child(picture)
+        .child(
+            div()
+                .absolute()
+                .right(px(-FOOTER_DOT_OVERHANG))
+                .bottom(px(-FOOTER_DOT_OVERHANG))
+                .size(px(FOOTER_DOT_RING))
+                .rounded_full()
+                .bg(theme.sidebar)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .size(px(FOOTER_DOT))
+                        .rounded_full()
+                        .bg(Theme::with_alpha(
+                            machine_dot(machine, theme),
+                            if machine == MachineState::Waking {
+                                0.4 + 0.6 * PulseClock::phase(cx, 1100)
+                            } else {
+                                1.0
+                            },
+                        )),
+                ),
+        )
+}
+
+pub(crate) struct RowView {
+    pub(crate) space: Project,
+    pub(crate) selected: bool,
+    pub(crate) streaming: bool,
+    pub(crate) unread: bool,
+    pub(crate) typing: bool,
+    pub(crate) preview: String,
+    pub(crate) time: String,
+    pub(crate) person_image: Option<Arc<RenderImage>>,
+    pub(crate) guests: people::PeopleWithAvatars,
+    pub(crate) avatar_state: avatars::AvatarState,
 }
 
 /// A server in the chat list (D88 rule 1): the same row as a group — disc, name, preview,
 /// time, unread dot — sorted among the chats by last activity.
-struct ServerRowView {
-    server: ServerInfo,
-    selected: bool,
-    unread: bool,
-    preview: String,
-    time: String,
+pub(crate) struct ServerRowView {
+    pub(crate) server: ServerInfo,
+    pub(crate) selected: bool,
+    pub(crate) unread: bool,
+    pub(crate) preview: String,
+    pub(crate) time: String,
 }
 
 /// One entry of the left list, chats and servers interleaved.
-enum ListEntry {
+pub(crate) enum ListEntry {
     Chat(Box<RowView>),
     Server(Box<ServerRowView>),
 }
 
-/// "#general · Sam: hi" for a server row: its newest channel's last line.
-fn server_preview(state: &AppState, server: &ServerInfo) -> String {
-    let newest = state
-        .matrix_snapshot
-        .channels
-        .iter()
-        .filter(|c| c.server_id == server.id && c.last_ts > 0)
-        .max_by_key(|c| c.last_ts);
-    match newest {
-        Some(c) => format!("{} · {}", c.name, channel_last_line(c)),
-        None => state
-            .space_row(server)
-            .map(|s| s.last_text.clone())
-            .filter(|t| !t.is_empty())
-            .unwrap_or_else(|| "No messages yet".into()),
+impl ListEntry {
+    /// The row's stable key: the space id or the server id.
+    pub(crate) fn id(&self) -> &Id {
+        match self {
+            ListEntry::Chat(r) => &r.space.id,
+            ListEntry::Server(r) => &r.server.id,
+        }
+    }
+
+    pub(crate) fn selected(&self) -> bool {
+        match self {
+            ListEntry::Chat(r) => r.selected,
+            ListEntry::Server(r) => r.selected,
+        }
+    }
+
+    pub(crate) fn unread(&self) -> bool {
+        match self {
+            ListEntry::Chat(r) => r.unread,
+            ListEntry::Server(r) => r.unread,
+        }
+    }
+
+    pub(crate) fn typing(&self) -> bool {
+        match self {
+            ListEntry::Chat(r) => r.typing,
+            ListEntry::Server(_) => false,
+        }
+    }
+
+    /// The name the rail's hover tip shows.
+    pub(crate) fn name(&self) -> String {
+        match self {
+            ListEntry::Chat(r) => row_name(&r.space),
+            ListEntry::Server(r) => r.server.name.clone(),
+        }
+    }
+
+    /// The row's picture at `size` — the same builders the expanded rows use
+    /// (one resolver for every surface, #1912).
+    pub(crate) fn picture(
+        &self,
+        shell: &Shell,
+        size: f32,
+        theme: &Theme,
+        cx: &Context<Shell>,
+    ) -> Div {
+        match self {
+            ListEntry::Chat(r) => chat_picture(r, shell, size, theme, cx),
+            ListEntry::Server(r) => {
+                server_row_picture(&r.server, shell.state.read(cx), size, theme)
+            }
+        }
     }
 }
 
-/// "Sam: hi" for a channel row.
-fn channel_last_line(row: &arbos_matrix::ChannelRow) -> String {
-    let line = plain(row.last_text.lines().next().unwrap_or_default());
-    if row.last_sender_name.is_empty() {
-        line
-    } else {
-        format!("{}: {line}", row.last_sender_name)
-    }
-}
-
-/// Sort key of a row: the kind of hit (always `Title` now that the list is
-/// not text-filtered), newest activity first.
-type RowKey = (search::HitKind, std::cmp::Reverse<u64>);
-
-/// The chats list's top and bottom fade (Jacob likes it, Oct 23). The band
-/// sits under the strip's bottom edge: the scroll box is pulled up by the band
-/// and the list pads by the same amount, so at rest the first row starts where
-/// the fade ends and only rows that scroll under the strip cross it (the pane
-/// rule from #1365 / #1424). The bottom band stays over the list's end.
-pub const LIST_FADE_BAND: f32 = 14.0;
-
-/// The wrapper is a flex column: the list inside keeps `flex_1 / min_h_0`, so
-/// it stays bounded and scrolls. (#1497's first try used a block div here —
-/// the list took its content height and painted through the account row,
-/// #1528; `row_bounds_tests` pins this.)
-pub(crate) fn faded_list(list: impl IntoElement) -> gpui::AnyElement {
-    div()
-        .flex()
-        .flex_col()
-        .flex_1()
-        .min_h_0()
-        .mt(px(-LIST_FADE_BAND))
-        .debug_selector(|| "sidebar-list-frame".into())
-        .child(edge_faded(LIST_FADE_BAND, true, true, list))
-        .into_any_element()
-}
-
-pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
-    let theme = Theme::of(cx).clone();
+/// The chat list's entries under the current filter, newest activity first —
+/// shared by the expanded list and the collapsed rail so both show the same
+/// rows in the same order.
+pub(crate) fn list_entries(shell: &Shell, cx: &Context<Shell>) -> Vec<ListEntry> {
     let state = shell.state.read(cx);
     let selected = state.selected_project.clone();
-    let machine = state.machine.shown_state();
-    let sidebar_width = state.sidebar_width;
-    // Inside a server the left pane shows its channels (D88 rule 2).
-    let open_server = state.open_server_info().cloned();
-    let open_server_admin = open_server.as_ref().is_some_and(ServerInfo::can_admin);
-    let waitlist_position = state.machine.waitlist_position;
-
-    // Sidebar archive (Jacob 2026-10-23): archived spaces leave the list and
-    // sit behind the "Hidden chats · N" footer; the command palette still
-    // finds them. The list itself is never filtered by text any more
-    // ([feedback search-palette-2026-10-24]): every row is a plain `Title`
-    // hit, ordered by activity.
     let hidden_mode = shell.hidden_open;
-    let hidden_count = state.archived_space_count();
     let shows = |archived: bool| hidden_mode == archived;
-    // The All · Agents · People · Servers segment scopes the list, like the
-    // iPhone home ([feedback sidebar-strip-filter-2026-10-24]).
     let filter = shell.list_filter;
     let mut rows: Vec<(RowKey, ListEntry)> = Vec::new();
     for s in state.servers.iter() {
@@ -632,6 +730,175 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         ));
     }
     rows.sort_by_key(|(key, _)| *key);
+    rows.into_iter().map(|(_, e)| e).collect()
+}
+
+/// A chat row's title: the group's title, the DM partner's display name, the
+/// agent's name (matches iOS PeopleRow).
+fn row_name(space: &Project) -> String {
+    if space.is_people_group() {
+        space.name.clone()
+    } else if space.is_people() {
+        space
+            .person()
+            .map(|p| p.display_name())
+            .unwrap_or_else(|| space.name.clone())
+    } else {
+        space.name.clone()
+    }
+}
+
+/// A chat row's picture at `size`: the initials disc for an agent or a group,
+/// the person's photo for a DM (with a tiny agent badge when one of my agents
+/// sits in it), shared guests stacked at the corner.
+fn chat_picture(
+    row: &RowView,
+    shell: &Shell,
+    size: f32,
+    theme: &Theme,
+    cx: &Context<Shell>,
+) -> Div {
+    let space = &row.space;
+    if let Some(person) = space
+        .person()
+        .filter(|_| space.is_people() && !space.is_people_group())
+    {
+        let mut pic = div()
+            .relative()
+            .size(px(size))
+            .flex_shrink_0()
+            .child(people::avatar(
+                row.person_image.clone(),
+                person,
+                size,
+                theme,
+            ));
+        if let Some(agent) = space.agents.first() {
+            // The agent's picture through the shared identity (#1592): the one its bubbles,
+            // the presence row and the member list show — uploaded picture included.
+            let state = shell.state.read(cx);
+            let a = avatars::member_identity(Some(space), &state.projects, agent);
+            let image = a.image_key.as_deref().and_then(|url| state.avatar(url));
+            pic = pic.child(
+                div()
+                    .absolute()
+                    .right(px(-3.0))
+                    .bottom(px(-3.0))
+                    .p(px(2.0))
+                    .rounded_full()
+                    .bg(theme.bg)
+                    .child(avatars::agent_picture(&a, image, size / 2.0, theme)),
+            );
+        }
+        return pic;
+    }
+    let mut pic = div()
+        .relative()
+        .size(px(size))
+        .flex_shrink_0()
+        .child(groups::picture(space, shell.state.read(cx), size, theme));
+    if !row.guests.is_empty() {
+        pic = pic.child(
+            div()
+                .absolute()
+                .right(px(-4.0))
+                .bottom(px(-2.0))
+                .child(people::avatar_stack(&row.guests, 16.0, 2, theme)),
+        );
+    }
+    pic
+}
+
+/// "#general · Sam: hi" for a server row: its newest channel's last line.
+fn server_preview(state: &AppState, server: &ServerInfo) -> String {
+    let newest = state
+        .matrix_snapshot
+        .channels
+        .iter()
+        .filter(|c| c.server_id == server.id && c.last_ts > 0)
+        .max_by_key(|c| c.last_ts);
+    match newest {
+        Some(c) => format!("{} · {}", c.name, channel_last_line(c)),
+        None => state
+            .space_row(server)
+            .map(|s| s.last_text.clone())
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| "No messages yet".into()),
+    }
+}
+
+/// "Sam: hi" for a channel row.
+fn channel_last_line(row: &arbos_matrix::ChannelRow) -> String {
+    let line = plain(row.last_text.lines().next().unwrap_or_default());
+    if row.last_sender_name.is_empty() {
+        line
+    } else {
+        format!("{}: {line}", row.last_sender_name)
+    }
+}
+
+/// Sort key of a row: the kind of hit (always `Title` now that the list is
+/// not text-filtered), newest activity first.
+type RowKey = (search::HitKind, std::cmp::Reverse<u64>);
+
+/// The chats list's top and bottom fade (Jacob likes it, Oct 23). The band
+/// sits under the strip's bottom edge: the scroll box is pulled up by the band
+/// and the list pads by the same amount, so at rest the first row starts where
+/// the fade ends and only rows that scroll under the strip cross it (the pane
+/// rule from #1365 / #1424). The bottom band stays over the list's end.
+pub const LIST_FADE_BAND: f32 = 14.0;
+
+/// The wrapper is a flex column: the list inside keeps `flex_1 / min_h_0`, so
+/// it stays bounded and scrolls. (#1497's first try used a block div here —
+/// the list took its content height and painted through the account row,
+/// #1528; `row_bounds_tests` pins this.)
+pub(crate) fn faded_list(list: impl IntoElement) -> gpui::AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .mt(px(-LIST_FADE_BAND))
+        .debug_selector(|| "sidebar-list-frame".into())
+        .child(edge_faded(LIST_FADE_BAND, true, true, list))
+        .into_any_element()
+}
+
+/// The expanded chat list — today's layout, unchanged by the rail
+/// ([feedback mac-sidebar-rail-2026-10-26]: "do not change the expanded
+/// sidebar").
+pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
+    render_with(shell, false, cx)
+}
+
+/// `hide_morphing`: while the collapse / open slide runs, the strip's discs,
+/// the rows' pictures, the selected row's fill and my footer picture are drawn
+/// by `ui::rail`'s overlay on their way between the two layouts — here they
+/// keep their layout slot but are not painted (`invisible`), so nothing shows
+/// twice. Their resting bounds are recorded into `Shell::morph` every frame
+/// they are painted, which is what the overlay interpolates from.
+pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<Shell>) -> Div {
+    let theme = Theme::of(cx).clone();
+    let rows = list_entries(shell, cx);
+    let snap = shell.morph.clone();
+    let state = shell.state.read(cx);
+    let machine = state.machine.shown_state();
+    let sidebar_width = state.sidebar_width;
+    // Inside a server the left pane shows its channels (D88 rule 2).
+    let open_server = state.open_server_info().cloned();
+    let open_server_admin = open_server.as_ref().is_some_and(ServerInfo::can_admin);
+    let waitlist_position = state.machine.waitlist_position;
+
+    // Sidebar archive (Jacob 2026-10-23): archived spaces leave the list and
+    // sit behind the "Hidden chats · N" footer; the command palette still
+    // finds them. The list itself is never filtered by text any more
+    // ([feedback search-palette-2026-10-24]): every row is a plain `Title`
+    // hit, ordered by activity.
+    let hidden_mode = shell.hidden_open;
+    let hidden_count = state.archived_space_count();
+    // The All · Agents · People · Servers segment scopes the list, like the
+    // iPhone home ([feedback sidebar-strip-filter-2026-10-24]).
+    let filter = shell.list_filter;
     let empty = state.projects.is_empty() && state.servers.is_empty();
     let link_connecting = state.link == crate::model::Link::Connecting;
     if machine == MachineState::Waking {
@@ -649,7 +916,20 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         let (glyph, size) = control.glyph();
         debug_assert_eq!(control.size(), crate::ui::theme::CONTROL);
         glass::control_disc(id, glyph, size, theme)
+            .when(hide_morphing, |el| el.opacity(0.0))
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+    };
+    // The disc's resting bounds for the rail morph (`ui::rail`).
+    let recorded = |control: StripControl, disc: gpui::Stateful<Div>| {
+        let snap = snap.clone();
+        div()
+            .flex_shrink_0()
+            .on_children_prepainted(move |bounds, _, _| {
+                if let Some(b) = bounds.first() {
+                    snap.borrow_mut().discs.insert(control, *b);
+                }
+            })
+            .child(disc)
     };
     let collapse = |cx: &mut Context<Shell>| {
         round("sidebar-collapse", StripControl::Collapse, &theme)
@@ -708,9 +988,9 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .when(open_server.is_some(), |el| el.child(div().flex_1()));
     for control in controls {
         strip = match control {
-            StripControl::Search => strip.child(search_button(cx)),
-            StripControl::New => strip.child(plus(cx)),
-            StripControl::Collapse => strip.child(collapse(cx)),
+            StripControl::Search => strip.child(recorded(control, search_button(cx))),
+            StripControl::New => strip.child(recorded(control, plus(cx))),
+            StripControl::Collapse => strip.child(recorded(control, collapse(cx))),
         };
     }
     let strip = strip.window_drag();
@@ -759,6 +1039,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
                     this.menu_open = false;
                     this.row_menu = None;
                     this.list_filter = f;
+                    f.save();
                     cx.notify();
                 }))
         }));
@@ -901,11 +1182,29 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
             );
         }
     }
-    for (_, entry) in rows {
-        list = match entry {
-            ListEntry::Chat(row) => list.child(render_row(*row, shell, &theme, cx)),
-            ListEntry::Server(row) => list.child(render_server_row(*row, shell, &theme, cx)),
+    for entry in rows {
+        // The row's card bounds feed the rail morph (the selected card shrinks
+        // into its 54 pt tile).
+        let snap_card = snap.clone();
+        let card_id = entry.id().clone();
+        let row = match entry {
+            ListEntry::Chat(row) => {
+                render_row(*row, shell, hide_morphing, &theme, cx).into_any_element()
+            }
+            ListEntry::Server(row) => {
+                render_server_row(*row, shell, hide_morphing, &theme, cx).into_any_element()
+            }
         };
+        list = list.child(
+            div()
+                .flex_shrink_0()
+                .on_children_prepainted(move |bounds, _, _| {
+                    if let Some(b) = bounds.first() {
+                        snap_card.borrow_mut().cards.insert(card_id.clone(), *b);
+                    }
+                })
+                .child(row),
+        );
     }
     if !hidden_mode && hidden_count > 0 {
         // Grok Bot's footer: muted "Hidden chats · N ›" under the list.
@@ -936,114 +1235,67 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     }
 
     // ----- bottom: the footer — my avatar + name, and the update disc when one is due --
-    let (who, person_for_avatar, account_image) = {
-        let s = shell.state.read(cx);
-        match s.account.clone() {
-            Some(a) => {
-                let who = if a.name.trim().is_empty() {
-                    if a.login.is_empty() {
-                        "Signed in".to_string()
-                    } else {
-                        format!("@{}", a.login)
-                    }
+    let who = shell.state.read(cx).account.as_ref().map_or_else(
+        || "Settings".to_string(),
+        |a| {
+            if a.name.trim().is_empty() {
+                if a.login.is_empty() {
+                    "Signed in".to_string()
                 } else {
-                    a.name.clone()
-                };
-                let person = crate::model::Person {
-                    id: a.id.clone(),
-                    handle: if a.login.is_empty() {
-                        who.clone()
-                    } else {
-                        a.login.clone()
-                    },
-                    name: Some(a.name.clone()),
-                    avatar_url: a.avatar_url.clone(),
-                    status: String::new(),
-                    role: String::new(),
-                    last_seen_at: None,
-                    online: false,
-                    avatar_color_index: None,
-                };
-                let img = s.avatar(&a.avatar_url);
-                (who, Some(person), img)
+                    format!("@{}", a.login)
+                }
+            } else {
+                a.name.clone()
             }
-            None => ("Settings".to_string(), None, None),
-        }
-    };
+        },
+    );
     // Grok Bot's footer avatar: 36 pt at x 13, 12 above the bottom edge
     // ([feedback footer-avatar-grok-size-2026-10-24]; the constants above).
-    let account_row =
-        footer_row_frame()
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
-            .child(
-                div()
-                    .relative()
-                    .size(px(FOOTER_AVATAR))
-                    .flex_shrink_0()
-                    .debug_selector(|| "sidebar-account-avatar".into())
-                    .child(match &person_for_avatar {
-                        Some(p) => people::avatar(account_image, p, FOOTER_AVATAR, &theme),
-                        None => div()
-                            .size(px(FOOTER_AVATAR))
-                            .rounded_full()
-                            .bg(theme.surface_2)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(icon("person", FOOTER_AVATAR / 2.0, theme.text)),
-                    })
-                    .child(
-                        div()
-                            .absolute()
-                            .right(px(-FOOTER_DOT_OVERHANG))
-                            .bottom(px(-FOOTER_DOT_OVERHANG))
-                            .size(px(FOOTER_DOT_RING))
-                            .rounded_full()
-                            .bg(theme.sidebar)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(div().size(px(FOOTER_DOT)).rounded_full().bg(
-                                Theme::with_alpha(
-                                    machine_dot(machine, &theme),
-                                    if machine == MachineState::Waking {
-                                        0.4 + 0.6 * PulseClock::phase(cx, 1100)
-                                    } else {
-                                        1.0
-                                    },
-                                ),
-                            )),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(TEXT_SMALL + 1.0))
-                    .text_color(theme.text)
-                    .child(who),
-            )
-            // My avatar opens my profile and every setting in the right pane
-            // (three-pane rule, mockup g); a second click folds it away.
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
-                    cx.stop_propagation();
-                    this.menu_open = false;
-                    let open = this.state.read(cx).profile == Some(crate::app::ProfilePage::Me);
-                    if open {
-                        this.close_profile(window, cx);
-                    } else {
-                        this.state.update(cx, |s, cx| {
-                            s.open_profile(crate::app::ProfilePage::Me, cx);
-                            s.set_profile_tab(1, cx);
-                        });
+    let snap_footer = snap.clone();
+    let account_row = footer_row_frame()
+        .cursor_pointer()
+        .hover(|s| s.bg(theme.surface_2))
+        .child(
+            div()
+                .flex_shrink_0()
+                .on_children_prepainted(move |bounds, _, _| {
+                    if let Some(b) = bounds.first() {
+                        snap_footer.borrow_mut().footer = Some(*b);
                     }
-                    cx.notify();
-                }),
-            );
+                })
+                .child(
+                    account_avatar(shell, machine, &theme, cx)
+                        .when(hide_morphing, |el| el.opacity(0.0)),
+                ),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(px(TEXT_SMALL + 1.0))
+                .text_color(theme.text)
+                .child(who),
+        )
+        // My avatar opens my profile and every setting in the right pane
+        // (three-pane rule, mockup g); a second click folds it away.
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(|this, _, window, cx| {
+                cx.stop_propagation();
+                this.menu_open = false;
+                let open = this.state.read(cx).profile == Some(crate::app::ProfilePage::Me);
+                if open {
+                    this.close_profile(window, cx);
+                } else {
+                    this.state.update(cx, |s, cx| {
+                        s.open_profile(crate::app::ProfilePage::Me, cx);
+                        s.set_profile_tab(1, cx);
+                    });
+                }
+                cx.notify();
+            }),
+        );
 
     // Drag handle on the right edge: a slim hit target (col-resize cursor) that
     // lets the user make the chat list slimmer or wider
@@ -1154,9 +1406,23 @@ pub fn server_row_picture(server: &ServerInfo, state: &AppState, size: f32, them
 fn render_server_row(
     row: ServerRowView,
     shell: &Shell,
+    hide_morphing: bool,
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> gpui::Stateful<Div> {
+    let picture = recorded_picture(
+        shell,
+        &row.server.id,
+        hide_morphing,
+        ListEntry::Server(Box::new(ServerRowView {
+            server: row.server.clone(),
+            selected: row.selected,
+            unread: row.unread,
+            preview: String::new(),
+            time: String::new(),
+        }))
+        .picture(shell, AVATAR_ROW, theme, cx),
+    );
     let ServerRowView {
         server,
         selected,
@@ -1164,7 +1430,6 @@ fn render_server_row(
         preview,
         time,
     } = row;
-    let picture = server_row_picture(&server, shell.state.read(cx), AVATAR_ROW, theme);
     let id: Id = server.id.clone();
     let menu_id: Id = server.id.clone();
     let ctrl_menu_id: Id = server.id.clone();
@@ -1179,7 +1444,7 @@ fn render_server_row(
         .px(px(12.0))
         .py(px(11.0))
         .rounded(px(PANEL_RADIUS - 4.0))
-        .bg(if selected {
+        .bg(if selected && !hide_morphing {
             theme.surface_2
         } else {
             gpui::transparent_black()
@@ -1230,13 +1495,7 @@ fn render_server_row(
                 cx.notify();
             }),
         )
-        .child(
-            div()
-                .relative()
-                .size(px(AVATAR_ROW))
-                .flex_shrink_0()
-                .child(picture),
-        )
+        .child(picture)
         .child(
             div()
                 .flex()
@@ -1640,12 +1899,37 @@ pub fn channel_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     )
 }
 
+/// A row's picture wrapped for the rail morph: its resting bounds are recorded
+/// under the row's id every frame it is painted; while the morph runs the
+/// overlay paints it instead (`invisible` keeps the slot).
+fn recorded_picture(shell: &Shell, id: &Id, hide_morphing: bool, picture: Div) -> Div {
+    let snap = shell.morph.clone();
+    let id = id.clone();
+    div()
+        .flex_shrink_0()
+        .on_children_prepainted(move |bounds, _, _| {
+            if let Some(b) = bounds.first() {
+                snap.borrow_mut().rows.insert(id.clone(), *b);
+            }
+        })
+        .child(picture.when(hide_morphing, |el| el.opacity(0.0)))
+}
+
 fn render_row(
     row: RowView,
     shell: &Shell,
+    hide_morphing: bool,
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> impl IntoElement {
+    // The picture: the initials disc for an agent or a group, the person's
+    // photo for a DM (with a tiny agent badge when one of my agents sits in it).
+    let picture = recorded_picture(
+        shell,
+        &row.space.id,
+        hide_morphing,
+        chat_picture(&row, shell, AVATAR_ROW, theme, cx),
+    );
     let RowView {
         space,
         selected,
@@ -1654,8 +1938,8 @@ fn render_row(
         typing,
         preview,
         time,
-        person_image,
-        guests,
+        person_image: _,
+        guests: _,
         avatar_state,
     } = row;
     let id: Id = space.id.clone();
@@ -1673,70 +1957,9 @@ fn render_row(
     }
     let phase = PulseClock::phase(cx, 900);
 
-    // The picture: the initials disc for an agent or a group, the person's
-    // photo for a DM (with a tiny agent badge when one of my agents sits in it).
-    let picture: Div = if let Some(person) = space
-        .person()
-        .filter(|_| space.is_people() && !space.is_people_group())
-    {
-        let mut pic = div()
-            .relative()
-            .size(px(AVATAR_ROW))
-            .flex_shrink_0()
-            .child(people::avatar(person_image, person, AVATAR_ROW, theme));
-        if let Some(agent) = space.agents.first() {
-            // The agent's picture through the shared identity (#1592): the one its bubbles,
-            // the presence row and the member list show — uploaded picture included.
-            let state = shell.state.read(cx);
-            let a = avatars::member_identity(Some(&space), &state.projects, agent);
-            let image = a.image_key.as_deref().and_then(|url| state.avatar(url));
-            pic = pic.child(
-                div()
-                    .absolute()
-                    .right(px(-3.0))
-                    .bottom(px(-3.0))
-                    .p(px(2.0))
-                    .rounded_full()
-                    .bg(theme.bg)
-                    .child(avatars::agent_picture(&a, image, 18.0, theme)),
-            );
-        }
-        pic
-    } else {
-        let mut pic = div()
-            .relative()
-            .size(px(AVATAR_ROW))
-            .flex_shrink_0()
-            .child(groups::picture(
-                &space,
-                shell.state.read(cx),
-                AVATAR_ROW,
-                theme,
-            ));
-        if !guests.is_empty() {
-            pic = pic.child(
-                div()
-                    .absolute()
-                    .right(px(-4.0))
-                    .bottom(px(-2.0))
-                    .child(people::avatar_stack(&guests, 16.0, 2, theme)),
-            );
-        }
-        pic
-    };
-
     // Groups: the chat title (custom or member handles from the relay),
     // matching iOS PeopleRow. DMs: the other person's display name.
-    let name = if space.is_people_group() {
-        space.name.clone()
-    } else if space.is_people() {
-        space
-            .person()
-            .map(|p| p.display_name())
-            .unwrap_or_else(|| space.name.clone())
-    } else {
-        space.name.clone()
-    };
+    let name = row_name(&space);
     // A group row reads like an agent row: name and preview, no member count.
     let handle = space
         .person()
@@ -1759,7 +1982,7 @@ fn render_row(
         .px(px(12.0))
         .py(px(11.0))
         .rounded(px(PANEL_RADIUS - 4.0))
-        .bg(if selected {
+        .bg(if selected && !hide_morphing {
             theme.surface_2
         } else {
             gpui::transparent_black()
@@ -2605,6 +2828,31 @@ mod strip_tests {
             shared,
             ..Project::default()
         }
+    }
+
+    /// The segment persists beside the collapsed state, so a rail left on
+    /// Servers reopens on Servers ([feedback mac-sidebar-rail-2026-10-26]).
+    #[test]
+    fn the_filter_is_restored_from_the_config_dir() {
+        let dir = std::env::temp_dir().join(format!("arbos-rail-filter-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            ListFilter::load_from(&dir),
+            ListFilter::All,
+            "nothing saved → All"
+        );
+        for f in ListFilter::ALL {
+            f.save_to(&dir);
+            assert_eq!(ListFilter::load_from(&dir), f);
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.join("sidebar_filter")).unwrap(),
+            "servers",
+            "the label in lower case, the rig's spelling"
+        );
+        std::fs::write(dir.join("sidebar_filter"), "nope").unwrap();
+        assert_eq!(ListFilter::load_from(&dir), ListFilter::All);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn people(kind: SpaceKind) -> Project {

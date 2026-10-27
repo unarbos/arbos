@@ -106,9 +106,19 @@ pub enum RoomAction {
     /// `rate_limited` stays Live (no this action); `not_available` refuses pushes with no redial
     /// and also emits [`RoomAction::PushRefused`].
     SessionError { code: String, message: String },
-    /// A `not_available` refusal for a push on this connection (`batchId` from the error header).
-    /// Host: keep the room link live; show a per-chat notice. Cleared by the next [`RoomAction::Ack`].
-    PushRefused { batch_id: Option<String> },
+    /// A `not_available` refusal for a push on this connection (`batchId` from the error
+    /// header). Host: keep the room link live; show a per-chat notice. Cleared by the next
+    /// [`RoomAction::Ack`]. Since [feedback blocked-state-relay-2026-10-26] the frame also says
+    /// why — `reason` (`blocked_by` / `blocks_member` / `silenced` / `chat_unavailable`) and,
+    /// on a block, the other party (`by_handle`, `by_name`) — so the notice can name them; the
+    /// code itself never changes, so older clients read it as before.
+    PushRefused {
+        batch_id: Option<String>,
+        code: String,
+        reason: Option<String>,
+        by_handle: Option<String>,
+        by_name: Option<String>,
+    },
     /// Another device's presence / call / typing (host maps to UI events).
     /// `header` is the full inbound PRESENCE header (Swift reads `user` / `at`).
     Presence {
@@ -670,6 +680,10 @@ impl RoomSession {
             }
             self.push(RoomAction::PushRefused {
                 batch_id: header.batch_id,
+                code: header.code.clone(),
+                reason: header.reason,
+                by_handle: header.by_handle,
+                by_name: header.by_name,
             });
             self.push(RoomAction::SessionError {
                 code: header.code,
@@ -1681,7 +1695,12 @@ mod tests {
             .any(|a| matches!(a, RoomAction::ScheduleReconnect { .. })));
         assert!(actions.iter().any(|a| matches!(
             a,
-            RoomAction::PushRefused { batch_id: Some(id) } if id == "b1"
+            RoomAction::PushRefused {
+                batch_id: Some(id),
+                code,
+                reason: None,
+                ..
+            } if id == "b1" && code == "not_available"
         )));
         assert!(actions.iter().any(|a| matches!(
             a,
@@ -1742,6 +1761,46 @@ mod tests {
             .collect();
         assert_eq!(pushes.len(), 1);
         assert_eq!(pushes[0].payload.as_ref(), b"now");
+    }
+
+    /// A block refusal ([feedback blocked-state-relay-2026-10-26]) is still `not_available`
+    /// on the wire (live, no redial, pending kept) and hands the host the reason and the
+    /// other party for its sentence.
+    #[test]
+    fn a_block_refusal_stays_not_available_and_names_the_other_party() {
+        let mut s = RoomSession::new("dev:me", "proj/chat", 0, Vec::new());
+        s.on_open(1_000);
+        let _ = s.drain_actions();
+        s.on_frame(&state_frame(0, Vec::new()));
+        let _ = s.drain_actions();
+        s.on_frame(&rows_done(0));
+        let _ = s.drain_actions();
+
+        s.on_frame(&error_frame(
+            "not_available",
+            "someone in this chat has blocked you",
+            json!({ "batchId": "b1", "reason": "blocked_by", "byHandle": "sami", "byName": "Sami Kassab" }),
+        ));
+        let actions = s.drain_actions();
+        assert!(s.is_live());
+        assert!(s.push_refused);
+        assert!(!actions
+            .iter()
+            .any(|a| matches!(a, RoomAction::ScheduleReconnect { .. })));
+        assert!(actions.iter().any(|a| matches!(
+            a,
+            RoomAction::PushRefused {
+                batch_id: Some(id),
+                code,
+                reason: Some(reason),
+                by_handle: Some(handle),
+                by_name: Some(name),
+            } if id == "b1" && code == "not_available" && reason == "blocked_by" && handle == "sami" && name == "Sami Kassab"
+        )));
+        s.on_local_commit(b"held".to_vec());
+        let after = s.drain_actions();
+        assert!(take_sends(&after).iter().all(|f| f.ty != FrameType::Push));
+        assert_eq!(s.pending().len(), 1);
     }
 
     #[test]
