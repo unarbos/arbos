@@ -2431,6 +2431,11 @@ class Loop:
             self.rust_gate_mac_start(cur)
             return
         plan = cur.get("rust_gate_plan") or []
+        # Leading plan halves with no ready member left (merged, parked, pinned-and-landed) are stale: drop them first,
+        # or a tagged collapsed batch behind them is not seen and pool-first would run the whole pool instead.
+        ready_ids = {f for f, _ in ready}
+        while plan and not (set(plan[0]) & ready_ids):
+            plan.pop(0)
         # Pinned items (operator gate-next, owner priority) always form the next batch, on their own, ahead of the
         # pool AND ahead of bisect / conflict-retry plan halves — the pin survives a conflict → owner-merges-main
         # → re-push cycle (00:58 Oct 22: #1241 was merged third behind a retry half and hit a sibling conflict).
@@ -2471,7 +2476,9 @@ class Loop:
         # well (08:02–09:19 Oct 27: five solo slots and a deferred batch back to back, no plan half in between),
         # so the arm no longer waits for a plan half to exist.
         last_pool = cur.get("last_pool_batch_at") or cur.get("pool_first_armed_from") or ""
-        if not pool_first and pool_has_items and not members:
+        # Pins do not block the arm and do not reset the clock (20:22 Oct 27: two P0 pins sat on the gate from 19:59 and
+        # the arm, due 20:03, never fired — the pool was 33 deep). Pins still run first; the pool follows them.
+        if not pool_first and pool_has_items:
             if not last_pool:
                 cur["pool_first_armed_from"] = iso()
             elif minutes_between(last_pool, iso()) >= self.POOL_STARVED_MIN:
@@ -2508,6 +2515,16 @@ class Loop:
                 deferred_batch = len(members) > 1
                 log(f"Gate: deferred-fairness batch of {len(members)} (bumped ≥ {self.DEFER_AFTER}× for sibling conflicts): " + ", ".join(members))
         pool_batch = False
+        pool_plan = False
+        if not members and pool_first and plan and sorted(plan[0]) in (cur.get("pool_plan_batches") or []):
+            # A planned batch tagged as the pool's (the leftovers a culprit collapse re-merged, #2119): under pool-first
+            # it runs as a pool batch — it settles the clock — but does not end pool-first, so the rest of the pool
+            # runs right after it instead of waiting for the next arm.
+            half = plan.pop(0)
+            cur["pool_plan_batches"] = [b for b in cur.get("pool_plan_batches") or [] if b != sorted(half)]
+            members = self.compatible_batch([(f, st) for f, st in ready if f in half])
+            pool_batch = pool_plan = bool(members)
+            log(f"Gate: pool-first — the collapsed pool batch of {len(members)} runs now; the rest of the pool follows")
         if not members and pool_first and plan:
             # A plan half that came from a red pool batch is the pool's own bisect: never pre-empt it.
             own = any(set(h) == set(half) for v in (cur.get("rust_gate_bisects") or {}).values() for h in v.get("halves", []) for half in plan[:1])
@@ -2535,6 +2552,8 @@ class Loop:
                 if cur.get("rust_gate"):
                     if pool_batch:
                         cur["rust_gate"]["pool_batch"] = True
+                    if pool_plan:
+                        cur["rust_gate"]["pool_plan"] = True
                     if deferred_batch:
                         cur["rust_gate"]["deferred_batch"] = True
                     self.store.save_cursor(cur)
@@ -3090,6 +3109,7 @@ class Loop:
         new_plan = [h for h in plan if h not in leftovers]
         new_plan.insert(first_at, merged)
         cur["rust_gate_plan"] = new_plan
+        cur["pool_plan_batches"] = (cur.get("pool_plan_batches") or []) + [sorted(merged)]
         for run in lineage:
             bisects.pop(run, None)
         self.store.save_cursor(cur)
@@ -3169,10 +3189,12 @@ class Loop:
             if active.get("pool_batch"):
                 cur["last_pool_batch_at"] = iso()
                 cur.pop("pool_first_armed_from", None)
-            if active.get("pool_batch") and cur.get("pool_first"):
+            if active.get("pool_batch") and cur.get("pool_first") and not active.get("pool_plan"):
                 cur.pop("pool_first", None)
                 self.store.event("_loop", "pool_first_cleared", run=active["id"], members=len(order))
                 log(f"Gate: pool-first satisfied by {active['id']} ({len(order)} member(s) green); normal ordering resumes")
+            elif active.get("pool_plan") and cur.get("pool_first"):
+                log(f"Gate: collapsed pool batch {active['id']} green; pool-first stays armed for the rest of the pool")
             self.store.save_cursor(cur)
             self.note_green_half(active)
             with contextlib.suppress(Exception):
