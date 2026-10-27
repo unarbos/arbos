@@ -1299,18 +1299,26 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             }
             let _ = shared.events.send(SyncEvent::AttachmentOpened { key });
         }
-        ClientCommand::ForwardText {
+        ClientCommand::ForwardMessage {
             chat_id,
             message_id,
             text,
+            attachments,
+            charts,
             forwarded_from,
+            ..
         } => {
+            // No blob store to copy between: the row lands with the same keys,
+            // so its pictures are already cached. A chart travels as its
+            // fallback picture here (the fixture doc writer has no chart parts).
+            let mut attachments = attachments;
+            attachments.extend(charts.into_iter().filter_map(|c| c.fallback));
             send_user(
                 shared,
                 chat_id,
                 message_id,
                 text,
-                Vec::new(),
+                attachments,
                 None,
                 Some(forwarded_from),
                 None,
@@ -6858,6 +6866,25 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
     }
     insert_message_via_core(&group, &deck);
     insert_message_via_core(&group, &ask);
+    // Scout's photo (Jacob, 2026-10-27, [feedback forward-attachments-mac-2026-10-27]): an
+    // agent's picture-only message in a group right before its words — it must carry the
+    // same disc and name as the bubble under it.
+    let mut agent_picture = human_message(GROUP_LAUNCH, &sam(), "", base + 358_000);
+    agent_picture.role = Role::Assistant;
+    agent_picture.sender = format!("agent:{PROJECT_ARBOS}");
+    agent_picture.sender_name = Some("Arbos".into());
+    agent_picture.sender_handle = Some("arbos".into());
+    agent_picture.sender_avatar = None;
+    agent_picture.asked_by_handle = Some("sam".into());
+    agent_picture.owner_handle = Some(ME_HANDLE.into());
+    agent_picture.parts = vec![attachment(
+        "slide-04-signups.png",
+        "image/png",
+        AttachmentKind::Image,
+        "Slide 4 · signups",
+        212_000,
+    )];
+    insert_message_via_core(&group, &agent_picture);
     let mut agent = human_message(GROUP_LAUNCH, &sam(), "", base + 360_000);
     agent.role = Role::Assistant;
     agent.sender = format!("agent:{PROJECT_ARBOS}");
@@ -8274,6 +8301,7 @@ mod seed_parity_tests {
         ("01J9GROUPLAUNCH00000000000", &[
             "User Done user:gh_457 name=Some(\"Samir Haddad\") h=Some(\"samir\") asked=None turn=None wa=false [text] hidden=[] text=93 r=0 dt=0 ct=Some(0)",
             "User Done user:gh_456 name=Some(\"Sam Rivera\") h=Some(\"sam\") asked=None turn=None wa=false [text] hidden=[] text=71 r=0 dt=30000 ct=Some(0)",
+            "Assistant Done agent:01J9ARBOS00000000000000000 name=Some(\"Arbos\") h=Some(\"arbos\") asked=Some(\"sam\") turn=None wa=false [attachment:Slide 4 · signups:Some(212000):Image] hidden=[] text=0 r=0 dt=58000 ct=Some(0)",
             "Assistant Done agent:01J9ARBOS00000000000000000 name=Some(\"Arbos\") h=Some(\"arbos\") asked=Some(\"sam\") turn=None wa=false [text] hidden=[] text=96 r=0 dt=60000 ct=Some(0)",
             "User Done user:gh_457 name=Some(\"Samir Haddad\") h=Some(\"samir\") asked=None turn=None wa=false [attachment:Slide 4 · signups:Some(212000):Image,attachment:Launch dashboard:Some(348000):Image,attachment:Launch day, the team:Some(1204000):Image,attachment:Signup funnel:Some(156000):Image,attachment:Press kit v3:Some(1840000):Pdf,attachment:Launch teaser:Some(6420000):Video,text] hidden=[] text=54 r=0 dt=80000 ct=Some(0)",
             "User Done user:gh_457 name=Some(\"Samir Haddad\") h=Some(\"samir\") asked=None turn=None wa=false [text] hidden=[] text=112 r=0 dt=90000 ct=Some(0)",

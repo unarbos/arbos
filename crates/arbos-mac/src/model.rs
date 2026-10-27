@@ -2,6 +2,8 @@
 //! `crdt-sync.md` §6). No GPUI, no Loro: the sync layer fills these in, the
 //! views only read them.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
 pub use arbos_core::doc::ReplyRef;
@@ -2090,6 +2092,103 @@ pub struct Message {
 /// The reaction capsule's set, in Grok Bot's order (the iPhone's
 /// `MessageReaction.palette`); any other emoji comes from the system picker.
 pub const REACTION_PALETTE: [&str; 5] = ["😂", "👍", "👎", "❤️", "🎉"];
+
+/// What a message says and shows, as one thing — the accessor Forward, Copy and any
+/// other "take this message" action read, so they all see the same parts
+/// ([feedback forward-attachments-mac-2026-10-27]): the prose, every attachment that is
+/// on the relay (a chart's fallback picture excluded), and every chart with its fallback.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MessageBody {
+    pub text: String,
+    pub attachments: Vec<Attachment>,
+    pub charts: Vec<ChartBody>,
+}
+
+/// A chart bubble as a message carries it: the `chart` part plus its fallback picture
+/// when the message has one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChartBody {
+    /// Always a `Part::Chart`.
+    pub chart: Part,
+    pub fallback: Option<Attachment>,
+}
+
+/// An attachment the relay holds (not a `local:` key still uploading).
+fn on_relay(a: &Attachment) -> bool {
+    a.blob_ref
+        .as_deref()
+        .is_some_and(|k| !k.is_empty() && !k.starts_with("local:"))
+}
+
+impl Message {
+    /// The message's body, in part order; `None` when there is nothing to take —
+    /// no words, no attachment on the relay, no chart. A picture-only message has a
+    /// body like any other.
+    pub fn body(&self) -> Option<MessageBody> {
+        let text = self.plain_text().trim().to_owned();
+        let chart_fallbacks: HashSet<&str> = self
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                Part::Chart {
+                    fallback: Some(f), ..
+                } => Some(f.as_str()),
+                _ => None,
+            })
+            .collect();
+        let attachments: Vec<Attachment> = self
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                Part::Attachment { id, attachment }
+                    if !chart_fallbacks.contains(id.as_str()) && on_relay(attachment) =>
+                {
+                    Some(attachment.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        let charts: Vec<ChartBody> = self
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                Part::Chart { fallback, .. } => {
+                    let fallback = fallback.as_deref().and_then(|f| {
+                        self.parts.iter().find_map(|q| match q {
+                            Part::Attachment { id, attachment }
+                                if id == f && on_relay(attachment) =>
+                            {
+                                Some(attachment.clone())
+                            }
+                            _ => None,
+                        })
+                    });
+                    Some(ChartBody {
+                        chart: p.clone(),
+                        fallback,
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+        (!text.is_empty() || !attachments.is_empty() || !charts.is_empty()).then_some(MessageBody {
+            text,
+            attachments,
+            charts,
+        })
+    }
+
+    /// Does the message hold an attachment whose upload has not finished (a `local:` key)?
+    pub fn has_uploading_attachment(&self) -> bool {
+        self.parts.iter().any(|p| match p {
+            Part::Attachment { attachment, .. } => attachment
+                .blob_ref
+                .as_deref()
+                .is_some_and(|k| k.starts_with("local:")),
+            _ => false,
+        })
+    }
+}
 
 impl Message {
     /// Reactions as `(emoji, senders)`, palette order first, then the rest

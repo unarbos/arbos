@@ -24,9 +24,9 @@ use crate::model::{
 use crate::model::{
     new_id, now_ms, Attachment, AttachmentKind, BoxReport, BoxState, ChannelSel, ChannelsView,
     Chat, ChatKind, ConnectorsView, DevicesView, Effort, Id, Job, JobRollout, Link, LinkState,
-    LocalView, Machine, Message, MessageStatus, NewSecret, Part, Project, ProjectDocView,
-    ProjectSecrets, QuestionState, ReplyRef, Role, Routine, RoutineRun, RoutineTrigger,
-    SecretDirector, SecretScope, SecretsView, ServerInfo, Skill, StatusKind,
+    LocalView, Machine, Message, MessageBody, MessageStatus, NewSecret, Part, Project,
+    ProjectDocView, ProjectSecrets, QuestionState, ReplyRef, Role, Routine, RoutineRun,
+    RoutineTrigger, SecretDirector, SecretScope, SecretsView, ServerInfo, Skill, StatusKind,
 };
 use crate::palette;
 use crate::search;
@@ -397,7 +397,7 @@ pub struct ForwardTarget {
     pub last_activity: u64,
 }
 
-/// Bubble menu → Forward (feedback app-01M5MXRZ7609S70P9S9P2RZDDF): the text
+/// Bubble menu → Forward (feedback app-01M5MXRZ7609S70P9S9P2RZDDF): the
 /// message the open picker will send on, and who wrote it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ForwardMessage {
@@ -405,6 +405,57 @@ pub struct ForwardMessage {
     pub message_id: Id,
     /// The original sender's display name ("Forwarded from <by>").
     pub by: String,
+}
+
+/// The parts the optimistic row in the destination draws before the relay
+/// echoes the real one: the same blob keys (their thumbnails are cached), the
+/// chart parts with their fallback pictures, then the text
+/// ([feedback forward-attachments-mac-2026-10-27]).
+pub fn forward_optimistic_parts(body: &MessageBody) -> Vec<Part> {
+    let mut parts: Vec<Part> = body
+        .attachments
+        .iter()
+        .map(|a| Part::Attachment {
+            id: new_id(),
+            attachment: a.clone(),
+        })
+        .collect();
+    for c in &body.charts {
+        let Part::Chart {
+            spec_version,
+            chart,
+            table,
+            ..
+        } = &c.chart
+        else {
+            continue;
+        };
+        let chart_id = new_id();
+        let fallback_id = c.fallback.as_ref().map(|a| {
+            let id = new_id();
+            let mut attachment = a.clone();
+            attachment.chart_part = Some(chart_id.clone());
+            parts.push(Part::Attachment {
+                id: id.clone(),
+                attachment,
+            });
+            id
+        });
+        parts.push(Part::Chart {
+            id: chart_id,
+            spec_version: *spec_version,
+            chart: chart.clone(),
+            table: table.clone(),
+            fallback: fallback_id,
+        });
+    }
+    if !body.text.is_empty() {
+        parts.push(Part::Text {
+            id: new_id(),
+            text: body.text.clone(),
+        });
+    }
+    parts
 }
 
 /// The text line a forwarded attachment travels with (every client renders
@@ -7408,12 +7459,26 @@ impl AppState {
         else {
             return;
         };
-        if message.plain_text().trim().is_empty() {
-            self.push_notice("Nothing to forward");
+        // Words, pictures, files, charts — any of them is enough; a picture still
+        // uploading is not on the relay yet, so there is nothing to copy.
+        if message.body().is_none() {
+            self.push_notice(if message.has_uploading_attachment() {
+                "Still uploading — try again in a moment"
+            } else {
+                "Nothing to forward"
+            });
             cx.notify();
             return;
         }
-        let by = self.forward_sender_name(message);
+        // Forwarding a forwarded message keeps the original author (Telegram), not
+        // whoever forwarded it last.
+        let by = message
+            .forwarded_from
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.forward_sender_name(message));
         self.forward_message = Some(ForwardMessage {
             chat_id,
             message_id,
@@ -7428,28 +7493,29 @@ impl AppState {
         }
     }
 
-    /// Forward the picked message's text to `target` as a new message of mine
-    /// there (no reply quote), carrying `forwardedFrom: <name>` so every client
-    /// draws the "Forwarded from <name>" header on the bubble.
+    /// Forward the picked message to `target` as a new message of mine there
+    /// (no reply quote): its text, its pictures / files / videos (each blob
+    /// copied into the destination's slot by the source) and its charts, all
+    /// carrying `forwardedFrom: <name>` so every client draws the "Forwarded
+    /// from <name>" header on the bubble
+    /// ([feedback forward-attachments-mac-2026-10-27]: the image and its
+    /// caption used to arrive as the caption alone).
     pub fn forward_message_to(&mut self, target: ForwardTarget, cx: &mut Context<Self>) {
         let Some(source) = self.forward_message.take() else {
             return;
         };
-        let Some(text) = self
+        let Some(payload) = self
             .messages
             .get(&source.chat_id)
             .and_then(|ms| ms.iter().find(|m| m.id == source.message_id))
-            .map(|m| m.plain_text().trim().to_owned())
-            .filter(|t| !t.is_empty())
+            .and_then(Message::body)
         else {
             cx.notify();
             return;
         };
+        let from_slot = self.space_of_chat(&source.chat_id);
         let message_id = new_id();
-        let parts = vec![Part::Text {
-            id: new_id(),
-            text: text.clone(),
-        }];
+        let parts = forward_optimistic_parts(&payload);
         self.messages
             .entry(target.chat_id.clone())
             .or_default()
@@ -7498,10 +7564,13 @@ impl AppState {
                 hidden_parts: Vec::new(),
                 greeting: false,
             });
-        self.command(ClientCommand::ForwardText {
+        self.command(ClientCommand::ForwardMessage {
             chat_id: target.chat_id.clone(),
             message_id,
-            text,
+            from_slot,
+            text: payload.text,
+            attachments: payload.attachments,
+            charts: payload.charts,
             forwarded_from: source.by,
         });
         self.push_notice(format!("Forwarded to {}", target.name));
