@@ -165,6 +165,9 @@ fn main() {
             )
             .expect("open main window");
         reapply_window_background(cx);
+        // The desktop behind the window, for the adaptive Glass washes
+        // ([feedback mac-glass-adaptive-2026-10-26]); samples only on Glass.
+        crate::ui::backdrop::start(window.into(), cx);
         // Notification clicks and foreground banners (macOS); no-op elsewhere.
         crate::ui::notify::init();
         let _ = window.update(cx, |_, _, cx| cx.activate(true));

@@ -315,10 +315,16 @@ pub fn row(label: impl Into<SharedString>, theme: &Theme) -> Div {
 /// Apple-style icon tile for settings rows: 30 px rounded square, muted
 /// monochrome fill, white glyph (D80).
 pub fn icon_tile(glyph: &str, theme: &Theme) -> Div {
+    icon_tile_sized(glyph, 30.0, theme)
+}
+
+/// The settings tile at another size (the palette's 24 pt row picture);
+/// radius and glyph scale with it.
+pub fn icon_tile_sized(glyph: &str, size: f32, theme: &Theme) -> Div {
     div()
-        .size(px(30.0))
+        .size(px(size))
         .flex_shrink_0()
-        .rounded(px(7.5))
+        .rounded(px(size * 0.25))
         .bg(match theme.appearance {
             crate::ui::theme::Appearance::Dark => gpui::Hsla::from(gpui::rgb(0x5c5c60)),
             crate::ui::theme::Appearance::Light => gpui::Hsla::from(gpui::rgb(0x6e6e73)),
@@ -326,7 +332,7 @@ pub fn icon_tile(glyph: &str, theme: &Theme) -> Div {
         .flex()
         .items_center()
         .justify_center()
-        .child(icon(glyph, 15.0, gpui::white()))
+        .child(icon(glyph, size * 0.5, gpui::white()))
 }
 
 /// Segmented choice inside a row: `[Dark] Light`.

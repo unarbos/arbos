@@ -1517,7 +1517,9 @@ async fn poll_me_pushes(shared: &Arc<Shared>) {
                 let _ = shared.events.send(SyncEvent::Projects(snapshot));
                 refresh = true;
             }
-            PushEventDto::PeopleMessage(_)
+            // Channel banners: own item (the Mac also sees the room through its Matrix sync).
+            PushEventDto::ChannelMessage(_)
+            | PushEventDto::PeopleMessage(_)
             | PushEventDto::PeopleChatDeleted(_)
             | PushEventDto::ProjectMemberRemoved(_)
             | PushEventDto::PeopleInviteAccepted(_)
