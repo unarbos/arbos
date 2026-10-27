@@ -17,6 +17,10 @@ struct PresenceParticipant: Identifiable {
     let name: String
     let activity: PresenceActivity
     let picture: AnyView
+    /// The profile the picture opens (`ProfileToggle`, [feedback
+    /// profile-pane-toggle-ios-2026-10-26]): the person or the agent; `nil`
+    /// for a face the chat cannot name, which stays inert.
+    var target: ProfileTarget? = nil
 }
 
 /// The row's words, shared with the tests. Same rules as the Mac
@@ -68,6 +72,10 @@ struct PresenceRow: View {
     var onTasks: (() -> Void)? = nil
     /// Job tabs: a tap on the words opens the newest job's tab (the chip keeps the list).
     var onWords: (() -> Void)? = nil
+    /// A tap on a picture: the one profile action (`AppModel.toggleProfile`); the
+    /// label beside it says what the tap does ("Open Sam's profile" / "Close profile").
+    var onPicture: ((ProfileTarget) -> Void)? = nil
+    var pictureShowing: ((ProfileTarget) -> Bool)? = nil
 
     /// Round picture size: Grok's status-row picture ([feedback
     /// iphone-composer-grok-parity-2026-10-25]: 76 px — smaller than the `+` disc, no
@@ -115,6 +123,19 @@ struct PresenceRow: View {
         Circle().strokeBorder(theme.bg, lineWidth: 1).padding(-1)
     }
 
+    /// The face as a profile target when the row can name it and the chat
+    /// handed over the action; a plain picture otherwise.
+    @ViewBuilder
+    private func picture(_ p: PresenceParticipant) -> some View {
+        if let target = p.target, let onPicture {
+            Button { onPicture(target) } label: { p.picture }
+                .buttonStyle(.plain)
+                .accessibilityLabel(ProfileToggle.label(name: p.name, showing: pictureShowing?(target) ?? false))
+        } else {
+            p.picture
+        }
+    }
+
     private var shown: [PresenceParticipant] { Array(participants.prefix(Self.maxPictures)) }
     private var more: Int { max(0, participants.count - Self.maxPictures) }
 
@@ -124,7 +145,7 @@ struct PresenceRow: View {
                 // The picture is the bubble picture's exact box; with several, a ring in
                 // the page colour sits just *outside* each one so the overlaps read.
                 ForEach(shown) { p in
-                    p.picture
+                    picture(p)
                         .frame(width: Self.avatar, height: Self.avatar)
                         .clipShape(Circle())
                         .overlay { if participants.count > 1 { ring } }
