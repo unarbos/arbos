@@ -710,6 +710,7 @@ fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl
     let new_tab = state.can_new_tab();
     let active = state.active_tab.get(&space.id).cloned();
     let tabs: Vec<Chat> = state.visible_tabs(&space.id).into_iter().cloned().collect();
+    let agent_images = crate::ui::avatars::project_images(state);
     let mut previous: Vec<Chat> = state
         .archived_tabs(&space.id)
         .into_iter()
@@ -788,7 +789,7 @@ fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl
             list = list.child(row);
             continue;
         }
-        if let Some(glyphs) = groups::tab_glyphs(&chat, &projects, &theme) {
+        if let Some(glyphs) = groups::tab_glyphs(&chat, &projects, &agent_images, &theme) {
             row = row.child(glyphs);
         }
         // A job tab (`jobtabs`): the job's glyph before the title — the spinner while it

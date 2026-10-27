@@ -783,6 +783,10 @@ final class AppModel: ObservableObject {
     var isPaired: Bool { credentials != nil }
     var relayUrl: String { api.endpoint.httpUrl }
 
+    /// The model the avatar views resolve through (`AgentAvatar.shown`): the app has one; a
+    /// test's model becomes current while it exists.
+    private(set) weak static var current: AppModel?
+
     init() {
         LaunchClock.mark("app-init")
         // Drop the retired SessionRoom TestFlight switch so it does not linger.
@@ -843,6 +847,7 @@ final class AppModel: ObservableObject {
             adopt(tokens: toks, user: who, persist: false)
         }
         #endif
+        AppModel.current = self
         Task { await probeAuthMode() }
         PushManager.shared.visibleChatId = { [weak self] in
             guard let self, self.appActive else { return nil }
@@ -1272,7 +1277,9 @@ final class AppModel: ObservableObject {
         credentials = DeviceCredentials(relayUrl: toks.relayUrl, deviceId: toks.deviceId, deviceToken: toks.accessToken)
         if !wasPaired {
             // A sign-in through the browser (not a token refresh): a possible first login.
-            if who != nil { beginFirstLogin() }
+            // Rig (Debug): `ARBOS_SKIP_FIRST_LOGIN=1` lands on the lists at once — a shot of an
+            // existing account on a simulator whose test box has no agentd to greet it.
+            if who != nil, !DebugHooks.skipFirstLogin { beginFirstLogin() }
             startAfterPairing()
         }
     }
