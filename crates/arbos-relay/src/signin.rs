@@ -818,8 +818,8 @@ pub async fn patch_me(
     principal: Principal,
     Json(body): Json<PatchMeBody>,
 ) -> Response {
-    let user_id = match &principal {
-        Principal::Device { user_id, .. } => user_id.clone(),
+    let (user_id, device_id) = match &principal {
+        Principal::Device { user_id, id, .. } => (user_id.clone(), id.clone()),
         Principal::Box { .. } | Principal::Admin => {
             return api_error(StatusCode::FORBIDDEN, "forbidden", "device token required")
         }
@@ -882,6 +882,16 @@ pub async fn patch_me(
     };
 
     if name.is_some() || login.is_some() {
+        // Who renamed whom, on record: a display name that comes back after a rename
+        // ("Const" on gh_32490803, three times by 2026-10-26) must be traceable to the
+        // device that wrote it.
+        tracing::info!(
+            user = %user_id,
+            device = %device_id,
+            name = ?name,
+            login = ?login,
+            "profile updated"
+        );
         if let Err(e) = state
             .db
             .set_user_profile(&user_id, name.as_deref(), login.as_deref())

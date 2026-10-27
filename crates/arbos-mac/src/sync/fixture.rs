@@ -6578,6 +6578,7 @@ fn human_message(chat_id: &str, who: &Person, text: &str, at: u64) -> Message {
         subagent_id: None,
         subagent_name: None,
         handoff_messages: None,
+        notice: None,
         worker: false,
         job: None,
         hidden: false,
