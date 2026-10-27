@@ -3060,6 +3060,42 @@ class Loop:
         self.store.event(fid, "rust_gate", head=head, verdict="conflict", run=run_id)
         self.conflict_followup(fid, st, detail)
 
+    def collapse_after_culprit(self, culprit: str) -> None:
+        """A single-item red named the culprit (coordinator 2026-10-27 19:40). Every untested half left in the plan
+        from the same bisect lineage was green together with the rest before the culprit was pulled out: run them
+        as ONE batch again instead of one half per 25-min run. The lineage's bisect records are dropped (their
+        both-halves-green pairing would be meaningless now)."""
+        cur = self.store.cursor()
+        bisects = cur.get("rust_gate_bisects") or {}
+        # climb from the culprit's own split to the root of its lineage
+        members = [culprit]
+        lineage = []
+        while True:
+            parent = next((run for run, rec in bisects.items() if sorted(members) in (rec.get("halves") or [])), None)
+            if not parent:
+                break
+            lineage.append(parent)
+            members = sorted(bisects[parent]["halves"][0] + bisects[parent]["halves"][1])
+        if not lineage:
+            return
+        root = set(members) - {culprit}
+        plan = cur.get("rust_gate_plan") or []
+        leftovers = [h for h in plan if h and set(h) <= root]
+        if len(leftovers) < 2:
+            return
+        merged: dict = {}
+        for h in leftovers:
+            merged.update(h)
+        first_at = plan.index(leftovers[0])
+        new_plan = [h for h in plan if h not in leftovers]
+        new_plan.insert(first_at, merged)
+        cur["rust_gate_plan"] = new_plan
+        for run in lineage:
+            bisects.pop(run, None)
+        self.store.save_cursor(cur)
+        self.store.event("_loop", "bisect_collapsed", culprit=culprit, halves=len(leftovers), members=len(merged), root_run=lineage[-1])
+        log(f"Gate: culprit {culprit} identified — {len(leftovers)} leftover halves of {lineage[-1]} collapse into one batch of {len(merged)}")
+
     def note_green_half(self, active: dict) -> None:
         """A green run whose members are one half of a bisected red run: when the other half is green too, the
         two halves are mutually incompatible (each builds alone, not together). Every member of one half gets
@@ -3156,12 +3192,28 @@ class Loop:
                 st["rust_gate"] = {"head": members[fid], "ok": False, "verdict": "fail", "at": iso(), "tail": diagnostics[-3000:], "run": active["id"]}
                 self.store.event(fid, "rust_gate", head=members[fid], verdict="fail", run=active["id"])
                 self.gate_followup(fid, st, "rust", diagnostics)
+            self.collapse_after_culprit(fid)
             return
         half = len(order) // 2
         first = {fid: members[fid] for fid in order[:half]}
         rest = {fid: members[fid] for fid in order[half:]}
         cur = self.store.cursor()
-        cur["rust_gate_plan"] = [first, rest] + (cur.get("rust_gate_plan") or [])
+        # Complement first (coordinator 2026-10-27 19:40): the parent's other half has not run and carries no
+        # known red, so it goes before the two new halves of this red one; depth-first on the red lineage ran
+        # the morning pool down to single items at ~25 min each while the untested complement waited.
+        plan = cur.get("rust_gate_plan") or []
+        sibling = None
+        for rec in (cur.get("rust_gate_bisects") or {}).values():
+            hs = rec.get("halves") or []
+            if sorted(order) in hs:
+                other = hs[1 - hs.index(sorted(order))]
+                sibling = next((i for i, h in enumerate(plan) if sorted(h) == other), None)
+                break
+        if sibling is None:
+            cur["rust_gate_plan"] = [first, rest] + plan
+        else:
+            cur["rust_gate_plan"] = plan[:sibling + 1] + [first, rest] + plan[sibling + 1:]
+            log(f"Rust gate {active['id']}: its untested complement half runs first, then the two new halves")
         # Remember the split: when BOTH halves pass on their own the red was a semantic conflict between the
         # halves (each compiles alone, not together — E0063 on a struct literal one branch adds a field to,
         # 2026-10-23 21:09/22:10/22:14, three batches in a row); then no item of one half is batched with an
