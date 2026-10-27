@@ -2353,6 +2353,22 @@ class Loop:
         # the deferred-fairness batch do NOT jump the pool; bisect / plan halves still finish first; pins (Jacob
         # P0 / live regression only) stay ahead. Cleared by itself once a pool batch merges something.
         pool_first = bool(cur.get("pool_first"))
+        # Pool starvation arms pool-first by itself (coordinator 2026-10-27 02:17: no pool batch since 22:15 —
+        # pins, then two plan halves that went red and bisected, then a re-gate push, took every slot for 4 h).
+        # Before: pool-first was an operator switch and still let plan halves go first, so even when armed it
+        # did not help against a long bisect chain. Now: when the pool has items and no pool batch has merged
+        # for POOL_STARVED_MIN, pool-first arms itself; and while it is set the full pool batch runs AHEAD of
+        # bisect / plan halves too (pins stay ahead of everything). It clears when a pool batch settles green.
+        pool_has_items = any(not st.get("gate_pinned") and not st.get("solo_next") for _, st in ready)
+        last_pool = cur.get("last_pool_batch_at") or cur.get("pool_first_armed_from") or ""
+        if not pool_first and pool_has_items and not members and plan:
+            if not last_pool:
+                cur["pool_first_armed_from"] = iso()
+            elif minutes_between(last_pool, iso()) >= self.POOL_STARVED_MIN:
+                cur["pool_first"] = iso()
+                pool_first = True
+                self.store.event("_loop", "pool_first_on", by="scheduler", starved_min=int(minutes_between(last_pool, iso())))
+                log(f"Gate: pool-first armed by the scheduler — no pool batch since {last_pool[:16]}; the pool runs ahead of {len(plan)} plan half(ves)")
         if not members and not pool_first:
             solo = sorted(((f, st) for f, st in ready if st.get("solo_next")), key=lambda fs: fs[1].get("created") or "")
             if solo:
@@ -2371,12 +2387,16 @@ class Loop:
             if deferred:
                 members = self.compatible_batch(deferred)
                 log(f"Gate: deferred-fairness batch of {len(members)} (bumped ≥ {self.DEFER_AFTER}× for sibling conflicts): " + ", ".join(members))
+        pool_batch = False
+        if not members and pool_first:
+            # Pool-first: the whole pool (plan-half members included — they are pool items too) runs now.
+            members = self.compatible_batch(list(ready))
+            pool_batch = bool(members)
         while plan and not members:
             half = plan.pop(0)
             # Match by item, gate at its CURRENT head: a bisected item whose owner pushed a repair meanwhile keeps
             # its place in the queue instead of dropping to the back.
             members = self.compatible_batch([(f, st) for f, st in ready if f in half])
-        pool_batch = False
         if not members:
             members = self.compatible_batch(list(ready))
             pool_batch = bool(members)
@@ -2390,7 +2410,7 @@ class Loop:
                     cur["rust_gate"]["pool_batch"] = True
                     self.store.save_cursor(cur)
                 if pool_first:
-                    log(f"Gate: pool-first — the full pool batch of {len(members)} runs now; solo slots and deferred-fairness wait behind it")
+                    log(f"Gate: pool-first — the full pool batch of {len(members)} runs now, ahead of plan halves, solo slots and deferred-fairness")
             return
         main_head = self.gh.branch_head("main")
         if main_head and cur.get("rust_gate_warm") != main_head and self.rust_gate_mac("start-batch", f"warm-{main_head[:8]}", main_head, "1") is not None:
@@ -2858,6 +2878,7 @@ class Loop:
     # Sibling-conflict policy: bumped DEFER_AFTER times → next batches are deferred items only (oldest-deferred
     # first); bumped SIBLING_LIMIT times (so at least two rounds among deferred items) → treated as a main conflict.
     DEFER_AFTER = 2
+    POOL_STARVED_MIN = 120  # no pool batch merged for this long while plan halves run → pool-first arms itself
     SIBLING_LIMIT = 4
     # Solo slot (operator rule, 2026-10-23 23:34): an item bumped 3× by siblings, or sent to its owner twice for a
     # main conflict caused by pool landings, runs ALONE in the slot right after the current run once its owner
@@ -2978,6 +2999,9 @@ class Loop:
                     log(f"[{fid}] merge after the Rust gate failed: {e}")
             cur = self.store.cursor()
             cur["rust_gate_warm"] = active["tree"] if active["mac"] == "ok" else None
+            if active.get("pool_batch"):
+                cur["last_pool_batch_at"] = iso()
+                cur.pop("pool_first_armed_from", None)
             if active.get("pool_batch") and cur.get("pool_first"):
                 cur.pop("pool_first", None)
                 self.store.event("_loop", "pool_first_cleared", run=active["id"], members=len(order))
