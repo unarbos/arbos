@@ -27,6 +27,7 @@ use crate::model::{
 };
 
 use super::doc::ChatDoc;
+use super::user_error::{ErrorClass, UserError};
 use super::{ClientCommand, DraftPicture, PictureSource, PictureTarget, SyncEvent, SyncSource};
 use crate::model::{
     new_id, now_ms, ApprovalRisk, ApprovalState, Attachment, AttachmentKind, BoxReport, BoxState,
@@ -234,6 +235,7 @@ impl SyncSource for FixtureSource {
             emit_servers_hook(&shared);
             let _ = events.send(SyncEvent::Link(Link::Live));
             emit_link_hook(&shared);
+            emit_failure_hook(&shared);
             emit_typing_hook(&shared);
             emit_working_hook(&shared);
             emit_jobs_hook(&shared);
@@ -382,6 +384,104 @@ fn emit_link_hook(shared: &Arc<Shared>) {
                 key,
                 state: LinkState::Live,
             });
+        }
+    });
+}
+
+/// Screenshot rig for the shared error element ([feedback error-messages-mac-2026-10-26]):
+/// `ARBOS_RIG_FAILURE=toast|composer|delivery|machine|secrets|people` raises that surface's
+/// note 1.5 s after start (so the opened chat / pane is up): `toast` = an error toast (a
+/// download that timed out, with Try again); `composer` = the opened chat's last own message
+/// refused, offline; `delivery` = that chat's pushes refused; `machine` = the machine in error;
+/// `secrets` = a 502 on Save (claimed by the open Secrets form); `people` = a refused search.
+fn emit_failure_hook(shared: &Arc<Shared>) {
+    let Ok(spec) = std::env::var("ARBOS_RIG_FAILURE") else {
+        return;
+    };
+    let spec = spec.trim().to_owned();
+    let shared = shared.clone();
+    tokio::spawn(async move {
+        sleep(Duration::from_millis(1500)).await;
+        // Every chat gets the note (the rig does not know which one is open).
+        let targets: Vec<(Id, Option<Id>)> = {
+            let chats: Vec<Id> = shared
+                .chats
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|c| c.id.clone())
+                .collect();
+            let docs = shared.docs.lock().unwrap();
+            chats
+                .into_iter()
+                .map(|id| {
+                    let mine = docs.get(&id).and_then(|d| {
+                        d.read_all()
+                            .into_iter()
+                            .rev()
+                            .find(|m| m.role == crate::model::Role::User)
+                            .map(|m| m.id.clone())
+                    });
+                    (id, mine)
+                })
+                .collect()
+        };
+        match spec.as_str() {
+            "toast" => {
+                let raw = anyhow::anyhow!(
+                    "error sending request for url (https://relay.arbos.life/blobs/x/report-q3.pdf): operation timed out"
+                )
+                .context("GET /blobs/01M5N1WSR91G8CJKNYXKJESK7X/report-q3.pdf");
+                let _ = shared.events.send(SyncEvent::Failure {
+                    error: UserError::classify("download report-q3.pdf", &raw),
+                    retry: Some(Box::new(ClientCommand::DevicesRefresh)),
+                });
+                let _ = shared
+                    .events
+                    .send(SyncEvent::Notice("Forwarded to Studio".into()));
+            }
+            "composer" => {
+                for (chat_id, last_mine) in targets {
+                    let raw = anyhow::anyhow!("dns error: failed to lookup address information")
+                        .context("POST /chats/01M5N1WSR91G8CJKNYXKJESK7X/messages");
+                    let _ = shared.events.send(SyncEvent::MessageSendFailed {
+                        chat_id,
+                        message_id: last_mine.unwrap_or_default(),
+                        error: UserError::classify("send your message", &raw),
+                    });
+                }
+            }
+            "delivery" => {
+                for (chat_id, _) in targets {
+                    let _ = shared.events.send(SyncEvent::PushRefused {
+                        chat_id,
+                        refused: true,
+                    });
+                }
+            }
+            "machine" => {
+                {
+                    let mut m = shared.machine.lock().unwrap();
+                    m.state = MachineState::Error;
+                    m.detail =
+                        Some("GET /machine: HTTP 503 from the relay (upstream unreachable)".into());
+                }
+                emit_machine(&shared);
+            }
+            "secrets" => {
+                let _ = shared.events.send(SyncEvent::Failure {
+                    error: UserError::from_status("save the secret", 502, Some("Bad Gateway")),
+                    retry: None,
+                });
+            }
+            "people" => {
+                let raw = anyhow::anyhow!("error sending request for url (https://relay.arbos.life/users): operation timed out")
+                    .context("GET /users");
+                let _ = shared
+                    .events
+                    .send(SyncEvent::PeopleError(UserError::classify("search", &raw)));
+            }
+            _ => {}
         }
     });
 }
@@ -1169,9 +1269,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             match std::fs::write(&path, &bytes) {
                 Ok(()) => crate::ui::attachments::open_with_system(&path, quick_look),
                 Err(err) => {
-                    let _ = shared
-                        .events
-                        .send(SyncEvent::Notice(format!("Could not open {name}: {err}")));
+                    let _ = shared.events.send(SyncEvent::Failure {
+                        error: UserError::from_text(format!("open {name}"), err.to_string()),
+                        retry: None,
+                    });
                 }
             }
             let _ = shared.events.send(SyncEvent::AttachmentOpened { key });
@@ -1865,9 +1966,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     let _ = shared.events.send(SyncEvent::AttachmentSaved { path });
                 }
                 Err(err) => {
-                    let _ = shared
-                        .events
-                        .send(SyncEvent::Notice(format!("Could not save {name}: {err}")));
+                    let _ = shared.events.send(SyncEvent::Failure {
+                        error: UserError::from_text(format!("save {name}"), err.to_string()),
+                        retry: None,
+                    });
                 }
             }
         }
@@ -6811,6 +6913,17 @@ fn emit_people_seed(shared: &Shared) {
     emit_avatar(shared, &me().avatar_url);
 }
 
+/// The fixture's directory has no such GitHub user: the relay's own words, as a refusal.
+fn no_such_user(verb: &str, handle: &str) -> UserError {
+    UserError::of(
+        verb,
+        ErrorClass::Refused {
+            message: Some(format!("No GitHub user named @{handle}.")),
+        },
+        "fixture",
+    )
+}
+
 fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
     match cmd {
         ClientCommand::SearchPeople { query } => {
@@ -6843,9 +6956,13 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
         ClientCommand::StartDm { handle } => {
             let handle = handle.trim().trim_start_matches('@').to_lowercase();
             if handle == ME_HANDLE {
-                let _ = shared
-                    .events
-                    .send(SyncEvent::PeopleError("That is you.".into()));
+                let _ = shared.events.send(SyncEvent::PeopleError(UserError::of(
+                    "start the chat",
+                    ErrorClass::Refused {
+                        message: Some("That is you.".into()),
+                    },
+                    "fixture",
+                )));
                 return true;
             }
             let existing = shared
@@ -6860,8 +6977,9 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                 return true;
             }
             let Some(other) = directory().into_iter().find(|p| p.handle == handle) else {
-                let _ = shared.events.send(SyncEvent::PeopleError(format!(
-                    "No GitHub user named @{handle}."
+                let _ = shared.events.send(SyncEvent::PeopleError(no_such_user(
+                    "start the chat",
+                    &handle,
                 )));
                 return true;
             };
@@ -6913,8 +7031,9 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                     continue;
                 }
                 let Some(other) = directory().into_iter().find(|p| p.handle == handle) else {
-                    let _ = shared.events.send(SyncEvent::PeopleError(format!(
-                        "No GitHub user named @{handle}."
+                    let _ = shared.events.send(SyncEvent::PeopleError(no_such_user(
+                        "create the group",
+                        &handle,
                     )));
                     return true;
                 };
@@ -6953,9 +7072,13 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             };
             // People, agents, or both — never nobody (the relay's rule).
             if members.is_empty() && agents.is_empty() {
-                let _ = shared.events.send(SyncEvent::PeopleError(
-                    "Pick at least one person or agent".into(),
-                ));
+                let _ = shared.events.send(SyncEvent::PeopleError(UserError::of(
+                    "create the group",
+                    ErrorClass::Refused {
+                        message: Some("Pick at least one person or agent".into()),
+                    },
+                    "fixture",
+                )));
                 return true;
             }
             let id = new_id();
@@ -7225,9 +7348,9 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                     let handle = grantee.trim_start_matches('@').to_lowercase();
                     let Some(other) = directory().into_iter().find(|p| p.handle == handle) else {
                         drop(projects);
-                        let _ = shared.events.send(SyncEvent::PeopleError(format!(
-                            "No GitHub user named @{handle}."
-                        )));
+                        let _ = shared
+                            .events
+                            .send(SyncEvent::PeopleError(no_such_user("give access", &handle)));
                         return true;
                     };
                     p.message_grants.push(crate::model::MessageGrant {
@@ -7264,9 +7387,9 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
         ClientCommand::InviteToProject { project_id, handle } => {
             let handle = handle.trim().trim_start_matches('@').to_lowercase();
             let Some(other) = directory().into_iter().find(|p| p.handle == handle) else {
-                let _ = shared.events.send(SyncEvent::PeopleError(format!(
-                    "No GitHub user named @{handle}."
-                )));
+                let _ = shared
+                    .events
+                    .send(SyncEvent::PeopleError(no_such_user("invite them", &handle)));
                 return true;
             };
             {
@@ -7445,8 +7568,11 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                         target,
                         image_key: None,
                         url: None,
-                        error: Some("Couldn't generate the image. The server took too long.".into()),
-                        detail: Some("HTTP 504 avatar_timeout — gpt-image-1-mini: operation timed out after 40 s (attempt 2 of 2); relay budget 75 s".into()),
+                        error: Some(UserError::of(
+                            "generate the image",
+                            ErrorClass::Timeout,
+                            "HTTP 504 avatar_timeout — gpt-image-1-mini: operation timed out after 40 s (attempt 2 of 2); relay budget 75 s",
+                        )),
                     });
                     return;
                 }
@@ -7456,7 +7582,6 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                     image_key: Some(key),
                     url: Some(url),
                     error: None,
-                    detail: None,
                 });
             });
             true
@@ -8015,7 +8140,7 @@ mod create_group_tests {
                 match rx.recv().await {
                     Some(SyncEvent::Projects(p)) => latest = p,
                     Some(SyncEvent::PeopleGroupCreated { chat_id }) => return (latest, chat_id),
-                    Some(SyncEvent::PeopleError(e)) => panic!("create failed: {e}"),
+                    Some(SyncEvent::PeopleError(e)) => panic!("create failed: {}", e.sentence()),
                     Some(_) => continue,
                     None => panic!("source ended"),
                 }
@@ -8110,6 +8235,10 @@ mod create_group_tests {
         })
         .await
         .expect("a PeopleError");
-        assert!(err.contains("person or agent"), "{err}");
+        assert!(
+            err.sentence().contains("person or agent"),
+            "{}",
+            err.sentence()
+        );
     }
 }

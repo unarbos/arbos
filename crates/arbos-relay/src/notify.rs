@@ -5,7 +5,8 @@
 //! one `chat_events` row (deduplicated by `(chat, message_id)`), which drives unread counts and
 //! one APNs alert per recipient device — never the sender's own devices, never a device whose
 //! presence says that chat is on screen. Reading a chat anywhere pushes the new badge to the
-//! user's other devices.
+//! user's other devices and a `notifications_cleared` row on their `/me/pushes` queue, so they
+//! drop the chat's banners ([`clear_on_read`]).
 //!
 //! Endpoints: `POST/DELETE /devices/{id}/push`, `GET /me/unread`, `POST /chats/{id}/notify`
 //! (people chats), `POST /projects/{project}/chats/{chat}/notify`; `PUT /chats/{id}/read` (in
@@ -383,6 +384,24 @@ pub async fn announce_with(
         _ => brief(text),
     };
     let title = chat_title(state, chat);
+    // An agent's reply reaches the apps' in-app banner path (`/me/pushes` → local
+    // notification; what a phone gets while push is off or while it is open on another chat)
+    // only from here: a device's own row queues it in `people::on_room_push`, a box's row does
+    // not, and until 2026-10-26 nothing queued it for agents at all — an @doug-agent answer in
+    // a group never showed on the iPhone while a like on a bubble did.
+    let inapp = (sender.kind == "agent").then(|| {
+        let room = arbos_core::wire::room_name(chat.project_label(), &chat.chat_id);
+        let (head, _) = state.db.room_activity(&room).unwrap_or((0, 0));
+        arbos_core::api::PushEventDto::PeopleMessage(arbos_core::api::PeopleMessagePayloadDto {
+            chat_id: chat.chat_id.clone(),
+            from: format!("agent:{}", sender.id),
+            from_handle: sender.handle.clone(),
+            seq: head + 1,
+            sender: sender.dto(),
+            project_id: chat.project_id.clone(),
+            text: Some(body.clone()),
+        })
+    });
     for user in recipients(state, chat) {
         if sender.user_id.as_deref() == Some(user.as_str()) {
             continue;
@@ -392,17 +411,17 @@ pub async fn announce_with(
             // Queued after the message job for this chat, so the receipt lands on it.
             state.matrix.read(state, &chat.chat_id, &user);
         }
-        if !state.push.is_on() {
-            continue;
-        }
         // Archived = hidden on purpose: no banner, no badge (unread excludes it too).
-        if state
+        let archived = state
             .db
             .chat_archived_at(&user, &chat.chat_id)
             .ok()
             .flatten()
-            .is_some()
-        {
+            .is_some();
+        if let (Some(event), false) = (&inapp, archived) {
+            let _ = state.db.push_user_event(&user, event, Some(&chat.chat_id));
+        }
+        if !state.push.is_on() || archived {
             continue;
         }
         // Stage B: a flipped user's alerts come from the Matrix push gateway instead.
@@ -489,6 +508,55 @@ pub async fn alert_device(
         ),
     };
     deliver(state, &t, out).await;
+}
+
+/// Kind of the clear-on-read row on `/me/pushes`.
+pub const CLEAR_KIND: &str = "notifications_cleared";
+
+/// The user read `chat` on `except_device`: their other devices drop the banners they still
+/// show for it and move their badge to the new unread total. The clear rides on `/me/pushes`
+/// (one pending row per chat per device, newest badge wins; undelivered `people_message` rows
+/// for the chat go with it so a device that has not drained yet never posts a banner for what
+/// was already read). Returns the devices told. Same design as Fluxer's clear job, written
+/// for this relay's queue; the silent APNs form of the same event belongs on the push
+/// provider once it exists.
+pub async fn clear_on_read(
+    state: &AppState,
+    user_id: &str,
+    except_device: &str,
+    chat: &ChatRef,
+) -> Vec<String> {
+    let badge = crate::matrix::reads::unread_total(state, user_id).await;
+    let event = arbos_core::api::PushEventDto::NotificationsCleared(
+        arbos_core::api::NotificationsClearedPayloadDto {
+            chat_id: chat.chat_id.clone(),
+            project_id: chat.project_label().to_owned(),
+            badge,
+        },
+    );
+    let (kind, payload) = event.kind_and_payload();
+    debug_assert_eq!(kind, CLEAR_KIND);
+    match state
+        .db
+        .queue_chat_clear(user_id, except_device, &chat.chat_id, &kind, &payload)
+    {
+        Ok(devices) => {
+            if !devices.is_empty() {
+                tracing::debug!(
+                    user = %user_id,
+                    chat = %chat.chat_id,
+                    devices = devices.len(),
+                    badge,
+                    "clear-on-read queued"
+                );
+            }
+            devices
+        }
+        Err(e) => {
+            tracing::warn!(user = %user_id, chat = %chat.chat_id, error = %e, "clear-on-read not queued");
+            Vec::new()
+        }
+    }
 }
 
 /// The user read something somewhere: every other device gets the new badge count.
@@ -1160,6 +1228,158 @@ mod tests {
         assert_ne!(badge.device_token, bob_tok);
         assert_eq!(badge.payload, json!({ "aps": { "badge": 1 } }));
         assert_eq!(state.db.unread_total(&bob).expect("total"), 1);
+    }
+
+    /// Clear on read: reading a chat on one device queues one `notifications_cleared` row for
+    /// each other device of the same user — never the reader's own, never another person's —
+    /// with the chat and the unread total after the read; an undelivered `people_message` for
+    /// that chat on those devices is dropped with it; reads before the device drains keep one
+    /// pending clear per chat, carrying the newest badge.
+    #[tokio::test]
+    async fn reading_on_one_device_clears_the_chat_on_the_others() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, bob_phone) = person(&state, 2);
+        let bob_mac = second_device(&state, &bob);
+        let dm_chat = dm(&state, &alice, &bob);
+        let other = dm(&state, &alice, &bob);
+        let alice_s = Sender::user(&state, &alice);
+
+        // Alice writes in both chats; her row in the DM queues the in-app banner for Bob.
+        assert!(crate::people::on_room_push(&state, &alice_dev, &dm_chat).is_ok());
+        announce(&state, &ChatRef::people(&dm_chat), &alice_s, "d1", "one").await;
+        announce(&state, &ChatRef::people(&other), &alice_s, "o1", "two").await;
+        assert_eq!(state.db.unread_total(&bob).expect("unread"), 2);
+
+        let read = |dev: Principal, chat: String, seq: i64| {
+            let state = state.clone();
+            async move {
+                let r = crate::people::chat_read(
+                    State(state),
+                    dev,
+                    Path(chat),
+                    Json(crate::people::ReadBody { seq }),
+                )
+                .await;
+                assert_eq!(r.status(), StatusCode::NO_CONTENT);
+            }
+        };
+        // Bob reads the DM on his phone, then the other chat, then the DM again — all before
+        // his Mac polls.
+        read(bob_phone.clone(), dm_chat.clone(), 1).await;
+        read(bob_phone.clone(), other.clone(), 1).await;
+        read(bob_phone.clone(), dm_chat.clone(), 2).await;
+        assert_eq!(state.db.unread_total(&bob).expect("unread"), 0);
+
+        let mac = state
+            .db
+            .take_user_pushes(&device_id(&bob_mac))
+            .expect("mac");
+        assert!(
+            mac.iter()
+                .all(|(_, k, p, _)| !(k == "people_message" && p["chat_id"] == dm_chat)),
+            "the Mac never posts a banner for a message Bob already read: {mac:?}"
+        );
+        let clears: Vec<&Value> = mac
+            .iter()
+            .filter(|(_, k, _, _)| k == CLEAR_KIND)
+            .map(|(_, _, p, _)| p)
+            .collect();
+        assert_eq!(clears.len(), 2, "one pending clear per chat: {clears:?}");
+        let for_dm = clears.iter().find(|p| p["chat_id"] == dm_chat).expect("dm");
+        let for_other = clears
+            .iter()
+            .find(|p| p["chat_id"] == other)
+            .expect("other");
+        assert_eq!(for_dm["project_id"], "people");
+        assert_eq!(
+            for_dm["badge"], 0,
+            "the newest badge wins over the first read's 1"
+        );
+        assert_eq!(for_other["badge"], 0);
+
+        // The reading device already knows; Alice is not told about Bob's reads.
+        let phone = state
+            .db
+            .take_user_pushes(&device_id(&bob_phone))
+            .expect("phone");
+        assert!(phone.iter().any(|(_, k, _, _)| k == "people_message"));
+        assert!(phone.iter().all(|(_, k, _, _)| k != CLEAR_KIND));
+        let alice_rows = state
+            .db
+            .take_user_pushes(&device_id(&alice_dev))
+            .expect("alice");
+        assert!(alice_rows.iter().all(|(_, k, _, _)| k != CLEAR_KIND));
+
+        // The Mac has drained: the next read queues a fresh clear with the badge of that moment.
+        announce(&state, &ChatRef::people(&other), &alice_s, "o2", "three").await;
+        announce(&state, &ChatRef::people(&dm_chat), &alice_s, "d2", "four").await;
+        read(bob_phone.clone(), dm_chat.clone(), 3).await;
+        let mac = state
+            .db
+            .take_user_pushes(&device_id(&bob_mac))
+            .expect("mac");
+        let clears: Vec<&Value> = mac
+            .iter()
+            .filter(|(_, k, _, _)| k == CLEAR_KIND)
+            .map(|(_, _, p, _)| p)
+            .collect();
+        assert_eq!(clears.len(), 1);
+        assert_eq!(clears[0]["chat_id"], dm_chat);
+        assert_eq!(clears[0]["badge"], 1, "the other chat is still unread");
+
+        // A project chat (agent reply, Bob as guest) clears the same way, labelled with the
+        // project id.
+        let project_id = project_of(&state, &alice, "Research");
+        state
+            .db
+            .add_project_member(&project_id, &bob, &alice)
+            .expect("guest");
+        let chat_id = ulid();
+        state
+            .db
+            .insert_chat(&crate::db::Chat {
+                id: chat_id.clone(),
+                project_id: project_id.clone(),
+                title: "Plan".into(),
+                is_pinned: false,
+                position: 0,
+                created_at: now_ms(),
+                doc_epoch: 1,
+                kind: "chat".into(),
+                participants: Vec::new(),
+                forked_from: None,
+            })
+            .expect("chat");
+        let project: Project = state.db.project(&project_id).expect("p").expect("p");
+        let agent = Sender::agent(&state, &project);
+        announce(
+            &state,
+            &ChatRef::project(&project_id, &chat_id),
+            &agent,
+            "a1",
+            "Here is the plan.",
+        )
+        .await;
+        read(bob_mac.clone(), chat_id.clone(), 1).await;
+        let phone = state
+            .db
+            .take_user_pushes(&device_id(&bob_phone))
+            .expect("phone");
+        let clear = phone
+            .iter()
+            .find(|(_, k, _, _)| k == CLEAR_KIND)
+            .map(|(_, _, p, _)| p)
+            .expect("project clear");
+        assert_eq!(clear["chat_id"], chat_id);
+        assert_eq!(clear["project_id"], project_id);
+        assert_eq!(clear["badge"], 1, "the DM's d2 is still unread");
+        assert!(
+            phone
+                .iter()
+                .all(|(_, k, p, _)| !(k == "people_message" && p["chat_id"] == chat_id)),
+            "the agent's in-app banner for the read chat is dropped too"
+        );
     }
 
     #[test]

@@ -590,6 +590,12 @@ final class CoreFixturesTests: XCTestCase {
         XCTAssertEqual(a.avatar_version, 1_700_000_000_000)
         XCTAssertEqual(a.image_key, "avatar-1700000000000.jpg")
 
+        let cleared = try XCTUnwrap(PushItem.parse(try apiFixtureJSON("push_notifications_cleared.json")))
+        guard case .notificationsCleared(let n) = cleared.event else { return XCTFail("notifications_cleared") }
+        XCTAssertEqual(n.chat_id, "people_dm")
+        XCTAssertEqual(n.project_id, "people")
+        XCTAssertEqual(n.badge, 2)
+
         XCTAssertNil(PushItem.parse(try apiFixtureJSON("push_unknown_kind.json")))
         XCTAssertNil(PushItem.parse([
             "id": "bad", "created_at": 1, "kind": "not_a_real_push_kind", "payload": ["x": 1],
@@ -720,6 +726,41 @@ final class CoreFixturesTests: XCTestCase {
         XCTAssertEqual(AppModel.unreadBadgeLabel(7), "7")
         XCTAssertEqual(AppModel.unreadBadgeLabel(99), "99")
         XCTAssertEqual(AppModel.unreadBadgeLabel(140), "99+")
+    }
+
+    /// Clear on read (ARB-444): a `notifications_cleared` push from another device of mine
+    /// takes one chat out of the badge arithmetic — its remote count and its live-row flag —
+    /// and leaves every other chat's count alone; the badge then follows the smaller of the
+    /// relay's total and the local sum, since each can only be stale-high.
+    func testClearOnReadBadgeArithmetic() {
+        let hidden: (String) -> Bool = { $0 == "hidden-plain" }
+        var remote = ["dm": 2, "group": 1, "hidden-plain": 4]
+        var flagged: Set<String> = ["dm", "live-only"]
+        // Before: 2 + 1 (+ 0 for the hidden chat) + 1 for the chat only a live row flagged.
+        XCTAssertEqual(AppModel.badgeTotal(remote: remote, flagged: flagged, hidden: hidden), 4)
+
+        // The Mac read the DM: its count and flag go, nothing else moves.
+        AppModel.clearingChat("dm", remote: &remote, flagged: &flagged)
+        XCTAssertEqual(remote["dm"], 0)
+        XCTAssertEqual(remote["group"], 1)
+        XCTAssertFalse(flagged.contains("dm"))
+        XCTAssertTrue(flagged.contains("live-only"))
+        XCTAssertEqual(AppModel.badgeTotal(remote: remote, flagged: flagged, hidden: hidden), 2)
+
+        // A clear for a chat the relay never counted here only drops its flag.
+        AppModel.clearingChat("live-only", remote: &remote, flagged: &flagged)
+        XCTAssertNil(remote["live-only"])
+        XCTAssertEqual(AppModel.badgeTotal(remote: remote, flagged: flagged, hidden: hidden), 1)
+
+        // Badge after the clear: relay total wins when a local flag is stale …
+        XCTAssertEqual(AppModel.badgeAfterClear(relayTotal: 1, localTotal: 2), 1)
+        // … the local sum wins when this device's own read has not reached the relay yet
+        // (or the relay counts a hidden plain chat the badge never shows) …
+        XCTAssertEqual(AppModel.badgeAfterClear(relayTotal: 5, localTotal: 1), 1)
+        // … they agree when both are current, and nothing goes below zero.
+        XCTAssertEqual(AppModel.badgeAfterClear(relayTotal: 0, localTotal: 0), 0)
+        XCTAssertEqual(AppModel.badgeAfterClear(relayTotal: -1, localTotal: 3), 3)
+        XCTAssertEqual(AppModel.badgeAfterClear(relayTotal: 2, localTotal: -4), 0)
     }
 
     /// Mark-read PUT: skip same value, send after the window, delay inside it.

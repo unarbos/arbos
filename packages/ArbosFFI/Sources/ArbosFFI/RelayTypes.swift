@@ -1528,6 +1528,23 @@ public struct ModelListDto: Codable {
 	}
 }
 
+/// `notifications_cleared` payload: the user read `chat_id` on one of their devices
+/// (`PUT /chats/{id}/read`), so every other device drops the banners it still shows for that
+/// chat and sets its app badge to `badge` — the user's unread total across chats after the
+/// read (Fluxer-style clear-on-read, carried on `/me/pushes` today and as a silent push when
+/// APNs is live). `project_id` is `people` for DMs and groups, else the agent's project.
+public struct NotificationsClearedPayloadDto: Codable {
+	public let chat_id: String
+	public let project_id: String
+	public let badge: Int64
+
+	public init(chat_id: String, project_id: String, badge: Int64) {
+		self.chat_id = chat_id
+		self.project_id = project_id
+		self.badge = badge
+	}
+}
+
 /// `POST /pair` success body.
 public struct PairResponseDto: Codable {
 	public let device_id: String
@@ -1706,13 +1723,22 @@ public struct PeopleMessagePayloadDto: Codable {
 	public let from_handle: String
 	public let seq: Int64
 	public let sender: SenderDto
+	/// The project id for an agent's reply in a project chat; absent (`people`) for DMs and
+	/// people groups. Agents' announcements queue this push since 2026-10-26 (before, only a
+	/// device's own row did, so an agent reply never showed an in-app banner).
+	public let project_id: String?
+	/// The announced message's first line, when the sender announced one (agents do; a
+	/// device's row-level push has none and the banner says "New message").
+	public let text: String?
 
-	public init(chat_id: String, from: String, from_handle: String, seq: Int64, sender: SenderDto) {
+	public init(chat_id: String, from: String, from_handle: String, seq: Int64, sender: SenderDto, project_id: String?, text: String?) {
 		self.chat_id = chat_id
 		self.from = from
 		self.from_handle = from_handle
 		self.seq = seq
 		self.sender = sender
+		self.project_id = project_id
+		self.text = text
 	}
 }
 
@@ -2645,6 +2671,7 @@ public enum PushEventDto: Codable {
 	case secretExpiring(SecretExpiringPayloadDto)
 	case profileUpdated(ProfileUpdatedPayloadDto)
 	case agentProfileUpdated(AgentProfileUpdatedPayloadDto)
+	case notificationsCleared(NotificationsClearedPayloadDto)
 
 	enum CodingKeys: String, CodingKey, Codable {
 		case peopleMessage = "people_message",
@@ -2674,7 +2701,8 @@ public enum PushEventDto: Codable {
 			secretsPaused = "secrets_paused",
 			secretExpiring = "secret_expiring",
 			profileUpdated = "profile_updated",
-			agentProfileUpdated = "agent_profile_updated"
+			agentProfileUpdated = "agent_profile_updated",
+			notificationsCleared = "notifications_cleared"
 	}
 
 	private enum ContainerCodingKeys: String, CodingKey {
@@ -2825,6 +2853,11 @@ public enum PushEventDto: Codable {
 					self = .agentProfileUpdated(content)
 					return
 				}
+			case .notificationsCleared:
+				if let content = try? container.decode(NotificationsClearedPayloadDto.self, forKey: .payload) {
+					self = .notificationsCleared(content)
+					return
+				}
 			}
 		}
 		throw DecodingError.typeMismatch(PushEventDto.self, DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "Wrong type for PushEventDto"))
@@ -2916,6 +2949,9 @@ public enum PushEventDto: Codable {
 			try container.encode(content, forKey: .payload)
 		case .agentProfileUpdated(let content):
 			try container.encode(CodingKeys.agentProfileUpdated, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .notificationsCleared(let content):
+			try container.encode(CodingKeys.notificationsCleared, forKey: .kind)
 			try container.encode(content, forKey: .payload)
 		}
 	}

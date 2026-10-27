@@ -24,6 +24,7 @@ use crate::ui::icons::icon;
 use crate::ui::identity;
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
+use crate::ui::profile_target;
 use crate::ui::shell::Shell;
 use crate::ui::sidebar::{self, machine_dot};
 use crate::ui::theme::{
@@ -54,7 +55,11 @@ pub fn render(
     // The pill wears a blue ring while its right pane is open (mockups b, f;
     // parity review 2026-10-20).
     let pane_open = match state.profile.as_ref() {
-        Some(ProfilePage::User { space_id, .. }) => space_id.as_deref() == Some(space.id.as_str()),
+        // The DM's person, whichever target opened them (a chip's page has no space).
+        Some(ProfilePage::User { handle, .. }) => space
+            .person()
+            .filter(|_| is_people && !space.is_people_group())
+            .is_some_and(|p| p.handle.eq_ignore_ascii_case(handle)),
         Some(ProfilePage::Group { space_id }) => space_id == &space.id,
         Some(ProfilePage::Agent { project_id }) => project_id == &space.id,
         Some(ProfilePage::Me)
@@ -98,26 +103,27 @@ pub fn render(
         .filter(|_| is_people && !space.is_people_group())
     {
         let image = state.avatar(&person.avatar_url);
-        let handle = person.handle.clone();
-        let sid = space.id.clone();
-        name_part(
-            people::avatar(image, person, AVATAR_HEADER, &theme),
-            name_label(person.display_name(), &theme).into_any_element(),
-            &theme,
-        )
-        .on_click(cx.listener(move |this, _, _, cx| {
+        let page = ProfilePage::User {
+            handle: person.handle.clone(),
+            space_id: Some(space.id.clone()),
+        };
+        // The DM pill is a profile target too (`ui::profile_target`): the
+        // person's pane opens, a second click — here or on their name in a
+        // bubble — closes it.
+        let part = profile_target::mark(
+            name_part(
+                people::avatar(image, person, AVATAR_HEADER, &theme),
+                name_label(person.display_name(), &theme).into_any_element(),
+                &theme,
+            ),
+            &person.display_name(),
+            state.profile_shows(&page),
+        );
+        part.on_click(cx.listener(move |this, _, _, cx| {
             this.members_open = false;
             this.add_agent_open = false;
-            let (handle, sid) = (handle.clone(), sid.clone());
-            this.state.update(cx, |s, cx| {
-                s.toggle_profile(
-                    ProfilePage::User {
-                        handle,
-                        space_id: Some(sid),
-                    },
-                    cx,
-                )
-            });
+            let page = page.clone();
+            this.state.update(cx, |s, cx| s.toggle_profile(page, cx));
         }))
     } else if space.is_people_group() {
         let sid = space.id.clone();
@@ -161,16 +167,30 @@ pub fn render(
         } else {
             name_label(space.name.clone(), &theme).into_any_element()
         };
-        // D92 amendment: the picture built before the clock takes `cx`.
-        let picture_disc = groups::picture(space, state, AVATAR_HEADER, &theme);
-        if avatar_state != avatars::AvatarState::Idle {
-            PulseClock::request(cx);
-        }
         // A project with other people: the group pane; my own agent: its
         // profile. Double-click the name to rename (owned agents only) — so
         // a single click opens the page only after the double-click window
         // (#1068).
         let groupish = space.is_groupish();
+        // The agent pill is a profile target (`ui::profile_target`): its
+        // click goes through `open_from_name` → `AppState::toggle_profile`
+        // after the double-click window, so it opens, closes and swaps like
+        // the agent's name in a bubble; the label and hand are the shared ones.
+        let page = if groupish {
+            ProfilePage::Group {
+                space_id: space.id.clone(),
+            }
+        } else {
+            ProfilePage::Agent {
+                project_id: space.id.clone(),
+            }
+        };
+        let showing = state.profile_shows(&page);
+        // D92 amendment: the picture built before the clock takes `cx`.
+        let picture_disc = groups::picture(space, state, AVATAR_HEADER, &theme);
+        if avatar_state != avatars::AvatarState::Idle {
+            PulseClock::request(cx);
+        }
         // The machine dot hangs off the disc's corner, inside the slot's box.
         let picture = div()
             .relative()
@@ -195,8 +215,9 @@ pub fn render(
                             .bg(machine_dot(machine, &theme)),
                     ),
             );
-        name_part(picture, name_el, &theme).on_click(cx.listener(
-            move |this, event: &gpui::ClickEvent, window, cx| {
+        let part = profile_target::mark(name_part(picture, name_el, &theme), &space.name, showing);
+        part.on_click(
+            cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                 this.members_open = false;
                 this.add_agent_open = false;
                 let p = pid.clone();
@@ -207,8 +228,8 @@ pub fn render(
                 } else {
                     this.name_clicked(p, groupish, cx);
                 }
-            },
-        ))
+            }),
+        )
     };
     pill = pill.child(name_part);
 
@@ -1374,6 +1395,59 @@ mod glass_tests {
             let matte = glass::header_style(&Theme::with(appearance, Surface::Matte));
             assert_eq!(glass, matte, "{appearance:?}: the same glass on Matte");
         }
+    }
+
+    /// [feedback mac-header-pill-see-through-2026-10-26]: the dark pill is
+    /// see-through — a thin fill and a light blur, so the transcript shows
+    /// through it and it is read as glass by its rim (Grok Bot's pill over a
+    /// black page is ≈ +12/255 lighter than the page) — while white text on
+    /// it keeps ≥ 4.5:1 over the brightest backdrop the pill ever sits on
+    /// (the chat column's 85 % page wash over a white desktop, ≈ `#373737`).
+    #[test]
+    fn the_dark_pill_is_see_through_and_its_text_still_reads() {
+        let theme = Theme::with(Appearance::Dark, Surface::Glass);
+        let style = glass::header_style(&theme);
+        assert!(
+            style.fill.a <= 0.35,
+            "a thin fill, the list shows through: {}",
+            style.fill.a
+        );
+        // Through a function so clippy does not fold the comparison away.
+        let blur = std::hint::black_box(glass::HEADER_BLUR);
+        assert!(blur <= 6.0, "a light blur keeps the text behind legible");
+        assert!(style.rim.a >= 0.25, "the rim carries the shape");
+        let lum = |c: gpui::Hsla| {
+            let rgb = c.to_rgb();
+            let ch = |v: f32| {
+                if v <= 0.039_28 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * ch(rgb.r) + 0.7152 * ch(rgb.g) + 0.0722 * ch(rgb.b)
+        };
+        let over = |top: gpui::Hsla, under: gpui::Hsla| {
+            let (t, u) = (top.to_rgb(), under.to_rgb());
+            gpui::Rgba {
+                r: t.a * t.r + (1.0 - t.a) * u.r,
+                g: t.a * t.g + (1.0 - t.a) * u.g,
+                b: t.a * t.b + (1.0 - t.a) * u.b,
+                a: 1.0,
+            }
+            .into()
+        };
+        for backdrop in [theme.bg, gpui::rgb(0x373737).into()] {
+            let pill = over(style.fill, backdrop);
+            let contrast = (lum(theme.text) + 0.05) / (lum(pill) + 0.05);
+            assert!(contrast >= 4.5, "white on the pill: {contrast:.2}:1");
+        }
+        // Over the flat Matte page the pill is a step above it, not a plate.
+        let lift = (over(style.fill, theme.bg).to_rgb().r - theme.bg.to_rgb().r) * 255.0;
+        assert!(
+            (6.0..=24.0).contains(&lift),
+            "pill lift over its page: {lift:.1}/255"
+        );
     }
 
     struct GlassBar {

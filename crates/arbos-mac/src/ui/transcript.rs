@@ -23,6 +23,7 @@ use crate::ui::approve::{approval_card, ApprovalView};
 use crate::ui::attachments;
 use crate::ui::avatars;
 use crate::ui::cards;
+use crate::ui::chat_search;
 use crate::ui::frost::edge_faded;
 use crate::ui::icons::icon;
 use crate::ui::markdown::{
@@ -32,6 +33,7 @@ use crate::ui::math;
 use crate::ui::mention::{self, Mentions};
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
+use crate::ui::profile_target;
 use crate::ui::select::{BubbleAt, BubbleSelectable, LinkIcons, Selectable, Span, TextSelection};
 use crate::ui::theme::{
     Theme, BUBBLE_PAD_X, BUBBLE_PAD_Y, BUBBLE_RADIUS, CHAT_BODY, CHAT_LINE_HEIGHT, COLUMN_MARGIN,
@@ -1903,6 +1905,7 @@ impl Transcript {
     ) -> Stateful<Div> {
         div()
             .id(SharedString::from(format!("{row_id}#who")))
+            .debug_selector(|| format!("who#{row_id}"))
             .flex()
             .items_center()
             .gap(px(6.0))
@@ -1976,22 +1979,22 @@ impl Transcript {
             .map(|a| avatars::agent_accent(&a.seed, a.color_index, a.leaf.0, a.leaf.1, theme));
         // Group / channel: the agent's name inside its first bubble, in its
         // colour, with the `agent` tag; the time only appears in the hover rail.
+        // The name and the disc are profile targets: one click opens the
+        // agent's pane, a second closes it (`ui::profile_target`).
         let name_el = match (&identity, agent_accent) {
             (Some(a), Some(color)) if named => {
-                let open_state = self.state.clone();
                 let pid = a.project_id.clone();
+                let name = a.name.clone();
                 Some(
                     self.sender_name_label(row_id, a.name.clone(), color, true)
                         .when_some(pid, |el, pid| {
-                            el.cursor_pointer().on_click(move |_, _, cx| {
-                                let pid = pid.clone();
-                                open_state.update(cx, |s, cx| {
-                                    s.push_profile(
-                                        crate::app::ProfilePage::Agent { project_id: pid },
-                                        cx,
-                                    )
-                                });
-                            })
+                            profile_target::attach(
+                                el,
+                                &self.state,
+                                crate::app::ProfilePage::Agent { project_id: pid },
+                                &name,
+                                cx,
+                            )
                         })
                         .into_any_element(),
                 )
@@ -2066,23 +2069,21 @@ impl Transcript {
         // the last block; earlier blocks keep the lane free (mocks a/f).
         let disc = lane.as_deref().map(|seed| {
             if last {
-                // The disc opens the agent's profile, pushed over the group's pane.
-                let (_, _, _, agent_pid) = self.agent_identity(seed, "Agent", cx);
-                let open_state = self.state.clone();
+                // The disc is the same profile target as the name.
+                let (agent_name, _, _, agent_pid) = self.agent_identity(seed, "Agent", cx);
                 div()
                     .id(SharedString::from(format!("{row_id}#disc")))
+                    .debug_selector(|| format!("disc#{row_id}"))
                     .flex_shrink_0()
                     .child(self.agent_disc(seed, cx))
                     .when_some(agent_pid, |el, pid| {
-                        el.cursor_pointer().on_click(move |_, _, cx| {
-                            let pid = pid.clone();
-                            open_state.update(cx, |s, cx| {
-                                s.push_profile(
-                                    crate::app::ProfilePage::Agent { project_id: pid },
-                                    cx,
-                                )
-                            });
-                        })
+                        profile_target::attach(
+                            el,
+                            &self.state,
+                            crate::app::ProfilePage::Agent { project_id: pid },
+                            &agent_name,
+                            cx,
+                        )
                     })
                     .into_any_element()
             } else {
@@ -2145,6 +2146,12 @@ impl Transcript {
         let selectable = Selectable::new(&self.selection, theme.accent_soft, cx)
             .with_mentions(self.mentions.clone(), theme.accent)
             .with_link_icons(self.link_icons.clone(), link_icon_placeholder(&theme))
+            // ⌘F Search-in-chat: this message's hit words get their marks.
+            .with_marks(chat_search::marks_for(
+                self.state.read(cx),
+                &row.message_id,
+                &theme,
+            ))
             .ordered(self.message_order(ix));
         let inner: AnyElement = match row.kind {
             RowKind::User {
@@ -2197,33 +2204,29 @@ impl Transcript {
                     }
                     None => (None, None),
                 };
-                let open_person = |this: &Self, person: &Person, cx: &Context<Self>| {
-                    let open_state = this.state.clone();
-                    let handle = person.handle.clone();
+                // The name and the disc are one profile target (`ui::profile_target`):
+                // a click opens the person's pane, a second one closes it.
+                let person_page = |this: &Self, person: &Person, cx: &Context<Self>| {
                     let sid = this.chat_id.as_ref().and_then(|c| {
                         this.state.read(cx).chats.iter().find_map(|(pid, tabs)| {
                             tabs.iter().any(|t| &t.id == c).then(|| pid.clone())
                         })
                     });
-                    move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
-                        let (handle, sid) = (handle.clone(), sid.clone());
-                        open_state.update(cx, |s, cx| {
-                            s.push_profile(
-                                crate::app::ProfilePage::User {
-                                    handle,
-                                    space_id: sid,
-                                },
-                                cx,
-                            )
-                        });
+                    crate::app::ProfilePage::User {
+                        handle: person.handle.clone(),
+                        space_id: sid,
                     }
                 };
                 let name_el = match (&from, color) {
                     (Some(person), Some(color)) if named => Some(
-                        self.sender_name_label(&row.id, person.display_name(), color, false)
-                            .cursor_pointer()
-                            .on_click(open_person(self, person, cx))
-                            .into_any_element(),
+                        profile_target::attach(
+                            self.sender_name_label(&row.id, person.display_name(), color, false),
+                            &self.state,
+                            person_page(self, person, cx),
+                            &person.display_name(),
+                            cx,
+                        )
+                        .into_any_element(),
                     ),
                     _ => None,
                 };
@@ -2271,13 +2274,23 @@ impl Transcript {
                                 .pl(px(AVATAR_COLUMN_INSET))
                                 .gap(px(SENDER_DISC_GAP))
                                 .child(
-                                    // The disc opens the same profile as the name.
-                                    div()
-                                        .id(SharedString::from(format!("{}#disc", row.id)))
-                                        .flex_shrink_0()
-                                        .cursor_pointer()
-                                        .child(people::avatar(image, &person, SENDER_DISC, &theme))
-                                        .on_click(open_person(self, &person, cx)),
+                                    // The disc is the same profile target as the name.
+                                    profile_target::attach(
+                                        div()
+                                            .id(SharedString::from(format!("{}#disc", row.id)))
+                                            .debug_selector(|| format!("disc#{}", row.id))
+                                            .flex_shrink_0()
+                                            .child(people::avatar(
+                                                image,
+                                                &person,
+                                                SENDER_DISC,
+                                                &theme,
+                                            )),
+                                        &self.state,
+                                        person_page(self, &person, cx),
+                                        &person.display_name(),
+                                        cx,
+                                    ),
                                 )
                                 .child(
                                     div()
@@ -3164,20 +3177,18 @@ fn pending_glyph(theme: &Theme) -> Div {
         .child(icon("hourglass", 12.0, theme.text_muted))
 }
 
-/// The mark beside a bubble the relay refused: red glyph + "Retry", always
-/// visible, outside the bubble on its outer edge. [`Transcript::failed_retry`]
-/// makes it clickable.
+/// The mark beside a bubble the relay refused: the red glyph, always visible, outside the
+/// bubble on its outer edge (Jacob's own-bubble rule). The words and Try again are the
+/// composer's note ([feedback error-messages-mac-2026-10-26]); [`Transcript::failed_retry`]
+/// still makes the mark itself clickable.
 fn failed_glyph(theme: &Theme) -> Div {
     div()
         .flex_shrink_0()
         .flex()
         .items_center()
-        .gap(px(4.0))
-        .text_size(px(TEXT_TINY))
-        .text_color(theme.danger)
         .debug_selector(|| "own-bubble-failed-glyph".into())
+        // error-ui: exception failed-bubble-mark (the glyph is the mark, not a message)
         .child(icon("exclamation", RAIL_GLYPH, theme.danger))
-        .child("Retry")
 }
 
 /// A text block that is really machine output (a JSON object/array) is not
@@ -4801,7 +4812,25 @@ pub enum CopyPillState {
     Copied,
 }
 
-/// Fenced ``` block: lang label, Copy, mono body on `code_bg` (Grok's code card).
+/// The code card's mono text size, line height and glyph advance (JetBrains
+/// Mono / Menlo at 12.5 pt: 0.6 em). The advance places the indent guides
+/// (`docs/mac-design-rules.md` § Code cards).
+pub const CODE_TEXT: f32 = 12.5;
+pub const CODE_LINE_HEIGHT: f32 = 18.0;
+pub const CODE_GLYPH_ADVANCE: f32 = 7.5;
+/// Body insets; the right inset leaves room for the copy button.
+pub const CODE_PAD_X: f32 = 10.0;
+pub const CODE_PAD_Y: f32 = 10.0;
+pub const CODE_PAD_RIGHT: f32 = 40.0;
+/// The copy button: a bordered square in the card's top-right corner.
+pub const CODE_COPY_SIZE: f32 = 24.0;
+pub const CODE_COPY_INSET: f32 = 8.0;
+
+/// Fenced ``` block as Grok Bot's code card ([feedback
+/// code-highlighting-mac-2026-10-26]): no header row, a copy icon floating
+/// top-right, the mono body coloured by `arbos_core::highlight` (keywords,
+/// function names, strings, numbers, comments in italic), 1 px indent guides,
+/// and long lines scrolling sideways inside the card.
 #[allow(clippy::too_many_arguments)]
 fn code_fence_card(
     row_id: &str,
@@ -4815,32 +4844,6 @@ fn code_fence_card(
     now: Instant,
     copy: &CodeCopy,
 ) -> AnyElement {
-    let mut card = div()
-        .flex()
-        .flex_col()
-        .w_full()
-        .rounded(px(8.0))
-        .bg(theme.code_bg)
-        .border_1()
-        .border_color(theme.border);
-    card = card.child(
-        div()
-            .flex()
-            .justify_between()
-            .items_center()
-            .px(px(10.0))
-            .py(px(4.0))
-            .border_b_1()
-            .border_color(theme.border)
-            .text_size(px(11.0))
-            .text_color(theme.text_faint)
-            .child(if lang.is_empty() {
-                "code".to_string()
-            } else {
-                lang.to_string()
-            })
-            .child(copy_pill(row_id, code, theme, copy)),
-    );
     let mono = gpui::Font {
         family: theme.font_mono.into(),
         features: Default::default(),
@@ -4848,45 +4851,153 @@ fn code_fence_card(
         weight: FontWeight::NORMAL,
         style: gpui::FontStyle::Normal,
     };
-    let runs = vec![TextRun {
-        len: code.len(),
-        font: mono,
-        color,
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    }];
+    let tokens = arbos_core::highlight::highlight(lang, code);
+    let runs = code_runs(code, &tokens, &mono, color, theme);
     let runs = match veil {
         Some(v) => apply_veil(runs, &v.spans(now), 0),
         None => runs,
     };
+    let guides = indent_guides(code);
+    let body = div()
+        .flex_shrink_0()
+        .min_w_full()
+        .relative()
+        .debug_selector(|| "code-body".into())
+        .pl(px(CODE_PAD_X))
+        .pr(px(CODE_PAD_RIGHT))
+        .py(px(CODE_PAD_Y))
+        .text_size(px(CODE_TEXT))
+        .line_height(px(CODE_LINE_HEIGHT))
+        .whitespace_nowrap()
+        .children(guides.into_iter().map(|(line, x)| {
+            div()
+                .absolute()
+                .left(px(CODE_PAD_X + x))
+                .top(px(CODE_PAD_Y + line as f32 * CODE_LINE_HEIGHT))
+                .w(px(1.0))
+                .h(px(CODE_LINE_HEIGHT))
+                .bg(theme.code_guide)
+                .debug_selector(move || format!("code-guide-{line}"))
+        }))
+        .child(bubble.text(at, code.to_string(), runs));
     // Long lines (a fenced table, a wide log line) keep their columns and
     // scroll sideways instead of wrapping into an unreadable stack.
-    card = card.child(
-        sideways_scroll(
-            div()
-                .id(SharedString::from(format!("{row_id}#code")))
-                .w_full(),
+    div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .relative()
+        .rounded(px(10.0))
+        .bg(theme.code_bg)
+        .border_1()
+        .border_color(theme.border)
+        .child(
+            sideways_scroll(
+                div()
+                    .id(SharedString::from(format!("{row_id}#code")))
+                    .w_full(),
+            )
+            .child(body),
         )
         .child(
             div()
-                .flex_shrink_0()
-                .min_w_full()
-                .debug_selector(|| "code-body".into())
-                .px(px(10.0))
-                .py(px(8.0))
-                .text_size(px(12.5))
-                .line_height(px(18.0))
-                .whitespace_nowrap()
-                .child(bubble.text(at, code.to_string(), runs)),
-        ),
-    );
-    card.into_any_element()
+                .absolute()
+                .top(px(CODE_COPY_INSET))
+                .right(px(CODE_COPY_INSET))
+                .child(copy_pill(row_id, code, theme, copy)),
+        )
+        .into_any_element()
 }
 
-/// The code card's Copy pill (Grok's code header): the label is the hit
-/// target. It answers the pointer — hover, a pressed tint while the button is
-/// down — and reads "✓ Copied" for [`CODE_COPY_FEEDBACK_MS`] after a click.
+/// The code's styled runs: one per highlight token, mono, the theme's colour
+/// for the token's kind, comments italic. Plain (no tokens) → one run in `color`.
+fn code_runs(
+    code: &str,
+    tokens: &[arbos_core::highlight::Token],
+    mono: &gpui::Font,
+    color: gpui::Hsla,
+    theme: &Theme,
+) -> Vec<TextRun> {
+    use arbos_core::highlight::TokenKind;
+    let run = |len: usize, color: gpui::Hsla, italic: bool| TextRun {
+        len,
+        font: gpui::Font {
+            style: if italic {
+                gpui::FontStyle::Italic
+            } else {
+                gpui::FontStyle::Normal
+            },
+            ..mono.clone()
+        },
+        color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    if tokens.is_empty() {
+        return vec![run(code.len(), color, false)];
+    }
+    let mut runs = Vec::with_capacity(tokens.len());
+    let mut pos = 0usize;
+    for t in tokens {
+        if t.start > pos {
+            runs.push(run(t.start - pos, color, false));
+        }
+        if t.end > t.start {
+            let tone = if t.kind == TokenKind::Plain {
+                color
+            } else {
+                theme.code_color(t.kind)
+            };
+            runs.push(run(t.end - t.start, tone, t.kind == TokenKind::Comment));
+        }
+        pos = pos.max(t.end);
+    }
+    if pos < code.len() {
+        runs.push(run(code.len() - pos, color, false));
+    }
+    runs
+}
+
+/// Where the indent guides go: `(line, x)` in points from the body's left
+/// inset, one per completed indent step on every non-blank line, a little past
+/// the middle of the step (Grok: column 2.6 of a 4-space step). The step is the
+/// block's smallest indent (tabs count 4), at least 2.
+pub fn indent_guides(code: &str) -> Vec<(usize, f32)> {
+    let indent_of = |line: &str| -> usize {
+        line.chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .map(|c| if c == '\t' { 4 } else { 1 })
+            .sum()
+    };
+    let unit = code
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(indent_of)
+        .filter(|n| *n > 0)
+        .min()
+        .unwrap_or(4)
+        .max(2);
+    let mut out = Vec::new();
+    for (li, line) in code.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let indent = indent_of(line);
+        for k in 0..indent / unit {
+            out.push((
+                li,
+                (k * unit) as f32 * CODE_GLYPH_ADVANCE + 0.65 * unit as f32 * CODE_GLYPH_ADVANCE,
+            ));
+        }
+    }
+    out
+}
+
+/// The code card's copy button: Grok's bordered square with the copy glyph,
+/// top-right in the card. It answers the pointer — hover, a pressed tint while
+/// the button is down — and shows a check in the online colour for
+/// [`CODE_COPY_FEEDBACK_MS`] after a click (`#copy-check`).
 fn copy_pill(row_id: &str, code: &str, theme: &Theme, copy: &CodeCopy) -> AnyElement {
     let id = SharedString::from(format!("{row_id}#copy"));
     let rig = rig_copy_pill();
@@ -4902,24 +5013,33 @@ fn copy_pill(row_id: &str, code: &str, theme: &Theme, copy: &CodeCopy) -> AnyEle
     let source = code.to_string();
     let on_copy = copy.on_copy.clone();
     let pill_id = id.clone();
+    // The rest tint is transparent: the card's own colour shows through, so the
+    // square reads as part of the card and still covers the code under it.
+    let base = if bg.a == 0.0 { theme.code_bg } else { bg };
     div()
         .id(id)
         .debug_selector(move || format!("{row_id}#copy-pill"))
+        .size(px(CODE_COPY_SIZE))
         .flex()
         .items_center()
-        .gap(px(3.0))
-        .px(px(6.0))
-        .py(px(2.0))
-        .rounded(px(5.0))
+        .justify_center()
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(theme.border)
         .cursor_pointer()
-        .bg(bg)
+        .bg(base)
         .text_color(fg)
         .when(!copied, |el| {
             el.hover(move |s| s.bg(hover_bg).text_color(hover_fg))
                 .active(move |s| s.bg(down_bg).text_color(down_fg))
         })
-        .when(copied, |el| el.child(icon("check", 11.0, fg)))
-        .child(if copied { "Copied" } else { "Copy" })
+        .child(if copied {
+            div()
+                .debug_selector(|| "copy-check".into())
+                .child(icon("check", 13.0, fg))
+        } else {
+            div().child(icon("copy", 13.0, fg))
+        })
         .on_click(move |_, window, cx| {
             if let Some(on_copy) = &on_copy {
                 on_copy(pill_id.clone(), source.clone(), window, cx);
@@ -5514,15 +5634,103 @@ mod selection_tests {
                 "and reads Copy again after the window"
             );
         });
-        // "✓ Copied" is wider than "Copy": the swap really painted.
+        // The square stays a square; the glyph swapped to the check.
         let pill = vcx
             .debug_bounds("m1#t.0#copy-pill")
             .expect("pill still drawn");
+        assert_eq!(pill.size.width, before);
+        assert_eq!(pill.size.width, px(CODE_COPY_SIZE));
+        assert_eq!(pill.size.height, px(CODE_COPY_SIZE));
         assert!(
-            pill.size.width > before + px(10.0),
-            "{} vs {before}",
-            pill.size.width
+            vcx.debug_bounds("copy-check").is_some(),
+            "the check glyph painted after the click"
         );
+    }
+
+    /// Jacob's bubble-sort card ([feedback code-highlighting-mac-2026-10-26]):
+    /// the runs carry the theme's six colours, comments italic, and the guides
+    /// sit one per indent step on the indented lines only.
+    #[test]
+    fn the_code_card_paints_grok_colours_and_indent_guides() {
+        use arbos_core::highlight::{highlight, TokenKind};
+        let code = "def bubble_sort(arr):\n    n = len(arr)\n    for i in range(n):\n        swapped = False\n\n        # If no two elements swapped\n        if not swapped:\n            break\n    return arr";
+        let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+        let mono = sans_font(&theme);
+        let tokens = highlight("python", code);
+        let runs = code_runs(code, &tokens, &mono, theme.text, &theme);
+        assert_eq!(runs.iter().map(|r| r.len).sum::<usize>(), code.len());
+        let run_at = |needle: &str| {
+            let at = code.find(needle).unwrap();
+            let mut pos = 0;
+            runs.iter()
+                .find(|r| {
+                    let here = pos;
+                    pos += r.len;
+                    here <= at && at < pos
+                })
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(run_at("def").color, theme.code_keyword);
+        assert_eq!(run_at("bubble_sort").color, theme.code_function);
+        assert_eq!(run_at("len").color, theme.code_function);
+        assert_eq!(run_at("False").color, theme.code_keyword);
+        assert_eq!(run_at("# If").color, theme.code_comment);
+        assert_eq!(run_at("# If").font.style, gpui::FontStyle::Italic);
+        assert_eq!(
+            run_at("arr)").color,
+            theme.text,
+            "plain text keeps the body colour"
+        );
+        assert_eq!(run_at("def").font.style, gpui::FontStyle::Normal);
+        assert_eq!(theme.code_color(TokenKind::Number), theme.code_number);
+        // Six distinct colours in both themes, and the themes differ.
+        for theme in [
+            Theme::dark(crate::ui::theme::Surface::Matte),
+            Theme::light(crate::ui::theme::Surface::Matte),
+        ] {
+            let palette = [
+                theme.code_plain,
+                theme.code_keyword,
+                theme.code_function,
+                theme.code_string,
+                theme.code_number,
+                theme.code_comment,
+            ];
+            for (i, a) in palette.iter().enumerate() {
+                for b in &palette[i + 1..] {
+                    assert_ne!(a, b);
+                }
+            }
+            assert!(
+                theme.code_guide.a > 0.05 && theme.code_guide.a < 0.1,
+                "faint guide"
+            );
+        }
+        assert_ne!(
+            Theme::dark(crate::ui::theme::Surface::Matte).code_keyword,
+            Theme::light(crate::ui::theme::Surface::Matte).code_keyword
+        );
+        // Guides: none on `def` (indent 0) and the blank line; one on the 4-space
+        // lines, two on the 8-space ones, three at 12; x a little past mid-step.
+        let guides = indent_guides(code);
+        let per_line = |line: usize| guides.iter().filter(|(l, _)| *l == line).count();
+        assert_eq!(per_line(0), 0);
+        assert_eq!(per_line(1), 1);
+        assert_eq!(per_line(3), 2);
+        assert_eq!(per_line(4), 0, "blank line");
+        assert_eq!(per_line(7), 3);
+        assert_eq!(per_line(8), 1);
+        let first = guides.iter().find(|(l, _)| *l == 1).unwrap().1;
+        assert!((first - 2.6 * CODE_GLYPH_ADVANCE).abs() < 0.01, "{first}");
+        let second = guides.iter().filter(|(l, _)| *l == 3).nth(1).unwrap().1;
+        assert!((second - 6.6 * CODE_GLYPH_ADVANCE).abs() < 0.01, "{second}");
+        // Two-space code steps every two columns.
+        let two = indent_guides("a:\n  b:\n    c");
+        assert_eq!(two.iter().filter(|(l, _)| *l == 2).count(), 2);
+        // Plain prose block: no tokens, one run.
+        let plain = code_runs("hello", &[], &mono, theme.text, &theme);
+        assert_eq!(plain.len(), 1);
     }
 
     #[test]
@@ -5681,6 +5889,7 @@ mod layout_tests {
                         .size(px(presence::AVATAR))
                         .rounded_full()
                         .into_any_element(),
+                    page: None,
                 })
                 .collect();
             let presence = presence::Presence {
@@ -5688,7 +5897,7 @@ mod layout_tests {
                 detail: None,
                 queued: false,
             };
-            let row_over_pill = presence::row(presence, &theme, cx).into_any_element();
+            let row_over_pill = presence::row(presence, None, &theme, cx).into_any_element();
             // A question / approval card, framed by the real `card_row`: in an agent chat (no
             // lane) and in a people chat (lane) — a card that wants more than any pane has.
             let card = |sel: &'static str| {

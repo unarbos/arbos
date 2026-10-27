@@ -923,6 +923,7 @@ mod tests {
             jwt_key: Arc::new(crypto::RelayKey::derive("test-key").subkey("jwt")),
             download_cache: Arc::new(Mutex::new(None)),
             upgrading: Arc::new(Mutex::new(HashMap::new())),
+            upgrade_refused: Arc::new(Mutex::new(HashMap::new())),
             local_conns: Arc::new(Mutex::new(HashMap::new())),
             refresh_grace: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             push: Arc::new(crate::apns::Pusher::Capture(tokio::sync::Mutex::new(

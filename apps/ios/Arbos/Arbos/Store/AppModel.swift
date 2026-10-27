@@ -862,6 +862,13 @@ final class AppModel: ObservableObject {
                 if category == PushManager.callCategory || event == "started" || event == "ended" || event == "missed" {
                     CallManager.shared.handleCallAlert(info)
                 }
+                // Silent clear-on-read push (`type: clear`, the APNs form of
+                // `notifications_cleared`): same effect as the /me/pushes row, but it also
+                // reaches a backgrounded phone.
+                if (info["type"] as? String) == "clear", let cid = info["chat_id"] as? String, !cid.isEmpty {
+                    let badge = (info["badge"] as? NSNumber)?.int64Value ?? -1
+                    self?.applyRemoteClear(chatId: cid, relayTotal: badge)
+                }
                 await self?.refreshPeople(); await self?.refreshUnread()
             }
         }
@@ -1115,21 +1122,10 @@ final class AppModel: ObservableObject {
     var unreadTotal: Int {
         // Hidden plain chats (D78: not the agent's one chat) never badge.
         if !unreadCounts.isEmpty {
-            var total = 0
-            for (id, value) in unreadCounts {
-                if isHiddenChat(id) || badgesIgnores(id) { continue }
-                total += value
-            }
-            // Live Loro rows can mark unread before /me/unread has the event.
-            for id in peopleUnread where !isHiddenChat(id) && !badgesIgnores(id) && (unreadCounts[id] ?? 0) == 0 {
-                total += 1
-            }
-            for list in chats.values {
-                for c in list where c.unread && !isHiddenChat(c.id) && !badgesIgnores(c.id) && (unreadCounts[c.id] ?? 0) == 0 {
-                    total += 1
-                }
-            }
-            return total
+            let flagged = peopleUnread.union(chats.values.flatMap { $0 }.filter { $0.unread }.map(\.id))
+            return Self.badgeTotal(remote: unreadCounts, flagged: flagged, hidden: {
+                self.isHiddenChat($0) || self.badgesIgnores($0)
+            })
         }
         let people = peopleChats.reduce(0) { $0 + (isPeopleChatMuted($1.id) ? 0 : unreadCount(for: $1)) }
         let projects = chats.values.flatMap { $0 }.filter { $0.unread && !isHiddenChat($0.id) }.count
@@ -1139,6 +1135,33 @@ final class AppModel: ObservableObject {
     /// Muted people chats and channels do not contribute to the app badge.
     private func badgesIgnores(_ chatId: String) -> Bool {
         isPeopleChatMuted(chatId) || mutedChannelIds.contains(chatId)
+    }
+
+    /// The app badge from the relay's per-chat counts (`GET /me/unread`) plus one for every
+    /// chat a live row flagged before `/me/unread` caught up; hidden chats never count.
+    nonisolated static func badgeTotal(remote: [String: Int], flagged: Set<String>, hidden: (String) -> Bool) -> Int {
+        var total = remote.reduce(0) { $0 + (hidden($1.key) ? 0 : $1.value) }
+        for id in flagged where !hidden(id) && (remote[id] ?? 0) == 0 {
+            total += 1
+        }
+        return total
+    }
+
+    /// A clear from another device (`notifications_cleared`) applied to the local unread
+    /// picture: the chat's remote count and local flag go, every other chat keeps its count.
+    nonisolated static func clearingChat(_ chatId: String, remote: inout [String: Int], flagged: inout Set<String>) {
+        if remote[chatId] != nil { remote[chatId] = 0 }
+        flagged.remove(chatId)
+    }
+
+    /// The badge right after a clear: the smaller of the relay's total (every chat, the read
+    /// one at 0 — what its `/me/unread` would say) and the local sum. Each side can only be
+    /// too high: the local sum when a live row lit a flag `/me/unread` has not confirmed, the
+    /// relay's when this device read a chat moments ago and its throttled `PUT /read` is
+    /// still pending, or for hidden plain chats (D78) the relay counts and the badge never
+    /// shows. A total the relay did not send (negative) falls back to the local sum.
+    nonisolated static func badgeAfterClear(relayTotal: Int64, localTotal: Int) -> Int {
+        relayTotal >= 0 ? Int(min(relayTotal, Int64(max(0, localTotal)))) : max(0, localTotal)
     }
 
     /// Unread rows of one agent chat for its dot: none for a hidden plain chat.
@@ -3303,6 +3326,31 @@ final class AppModel: ObservableObject {
         )
     }
 
+    /// `notifications_cleared`: I read this chat on another device. The thread's delivered
+    /// notifications leave Notification Center, the chat stops being unread here (no `PUT
+    /// /read` — the relay already has the cursor), and the badge drops to the relay's total
+    /// (`/me/unread` re-syncs the per-chat counts on the next poll).
+    func applyRemoteClear(chatId: Id, relayTotal: Int64) {
+        PushManager.shared.clearDelivered(chatId: chatId)
+        var remote = unreadCounts
+        var flagged = peopleUnread
+        Self.clearingChat(chatId, remote: &remote, flagged: &flagged)
+        unreadCounts = remote
+        peopleUnread = flagged
+        if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+            peopleChats[i].unread = false
+            peopleChats[i].readSeq = max(peopleChats[i].readSeq, peopleChats[i].headSeq)
+        }
+        for (pid, list) in chats {
+            if let i = list.firstIndex(where: { $0.id == chatId }), list[i].unread {
+                var updated = list
+                updated[i].unread = false
+                chats[pid] = updated
+            }
+        }
+        PushManager.shared.setBadge(Self.badgeAfterClear(relayTotal: relayTotal, localTotal: unreadTotal))
+    }
+
     func addAgent(chatId: String, projectId: Id) {
         showMembershipNotice(chatId: chatId, names: projects.filter { $0.id == projectId }.map(\.name))
         Task {
@@ -3900,14 +3948,41 @@ final class AppModel: ObservableObject {
         return directory.first { $0.handle.caseInsensitiveCompare(handle) == .orderedSame }?.name
     }
 
-    func openPersonProfile(handle: String, avatarUrl: String?, chatId: String) {
-        if let m = peopleChat(chatId)?.members.first(where: { $0.handle == handle && !$0.isAgent }) {
-            showProfile(.user(ProfilePerson(m)))
-        } else if let p = directory.first(where: { $0.handle == handle }) {
-            showProfile(.user(ProfilePerson(p)))
-        } else {
-            showProfile(.user(ProfilePerson(id: handle, handle: handle, name: nil, avatarUrl: avatarUrl)))
+    /// The one action behind every profile target in a chat — a sender name, the
+    /// avatar beside a bubble, an @mention chip, the header pill, a status-row
+    /// picture ([feedback profile-pane-toggle-ios-2026-10-26], `ProfileToggle`):
+    /// open the sheet on `target`; dismiss it when that same person or agent is
+    /// already up, whichever target opened it; swap it in place for someone else.
+    func toggleProfile(_ target: ProfileTarget) {
+        guard let next = ProfileToggle.next(showing: profilePath.last ?? profile, tapped: target) else {
+            profilePath = []
+            profile = nil
+            return
         }
+        profilePath = []
+        profile = next
+    }
+
+    /// True while the sheet's top page is `target`'s subject (the label then
+    /// says "Close profile").
+    func profileShows(_ target: ProfileTarget) -> Bool {
+        (profilePath.last ?? profile)?.sameSubject(as: target) ?? false
+    }
+
+    /// The page a sender's handle opens: the chat's member, else the directory
+    /// entry, else a bare person from the row's own fields.
+    func personTarget(handle: String, avatarUrl: String?, chatId: String) -> ProfileTarget {
+        if let m = peopleChat(chatId)?.members.first(where: { $0.handle == handle && !$0.isAgent }) {
+            return .user(ProfilePerson(m))
+        } else if let p = directory.first(where: { $0.handle == handle }) {
+            return .user(ProfilePerson(p))
+        } else {
+            return .user(ProfilePerson(id: handle, handle: handle, name: nil, avatarUrl: avatarUrl))
+        }
+    }
+
+    func openPersonProfile(handle: String, avatarUrl: String?, chatId: String) {
+        toggleProfile(personTarget(handle: handle, avatarUrl: avatarUrl, chatId: chatId))
     }
 
     /// An agent that is not in my project list: the project carried by a
@@ -4200,6 +4275,8 @@ final class AppModel: ObservableObject {
                 applyRemoteArchive(spaceId: payload.space_id, kind: payload.kind, archived: payload.archived_at != nil)
             case .peopleChatDeleted, .peopleInviteAccepted, .machineReady:
                 break
+            case .notificationsCleared(let payload):
+                applyRemoteClear(chatId: payload.chat_id, relayTotal: payload.badge)
             }
         }
         if needChats { await refreshPeople() }

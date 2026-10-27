@@ -91,7 +91,9 @@ launch() {
   # nice: the gate shares the 8 cores with the arbosgui Actions runner (Mac release + TestFlight builds).
   # Both at once put the box at load 88–280 (2026-10-25 19:0x). The gate yields CPU to the release jobs:
   # a gate verdict a few minutes later costs nothing, a Mac release or TF build a few minutes later does.
-  (trap '' HUP; exec nice -n 12 bash "$0" _run "$id" "$@") >"$log" 2>&1 </dev/null &
+  # CARGO_BUILD_JOBS=4: the release job on the same box builds with 4 too (release.yml); two -j8 builds
+  # plus a rig's simulator boot put the 8-core Mac at load 263 on 2026-10-26 and ssh timed out.
+  (trap '' HUP; export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"; exec nice -n 12 bash "$0" _run "$id" "$@") >"$log" 2>&1 </dev/null &
   echo "$!" >"$runs/$id.pid"
   disown
   set +m

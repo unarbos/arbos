@@ -543,6 +543,16 @@ pub struct Theme {
     pub danger: Hsla,
     pub danger_soft: Hsla,
     pub code_bg: Hsla,
+    /// Code-card token palette — Grok Bot's six code colours, sampled from
+    /// Jacob's 2026-10-26 reference ([`code_color`]; `docs/mac-design-rules.md`
+    /// § Code cards). `code_guide` is the indent guide, `code_plain` the text.
+    pub code_plain: Hsla,
+    pub code_keyword: Hsla,
+    pub code_function: Hsla,
+    pub code_string: Hsla,
+    pub code_number: Hsla,
+    pub code_comment: Hsla,
+    pub code_guide: Hsla,
     pub font_sans: &'static str,
     pub font_mono: &'static str,
     /// The serif face typeset math is painted in (KaTeX's look in Grok Bot).
@@ -596,6 +606,13 @@ impl Theme {
             danger: hex(0xff453a),
             danger_soft: hex_a(0xff453a, 0.14),
             code_bg: hex_a(0x000000, 0.28),
+            code_plain: hex(0xd6d6dd),
+            code_keyword: hex(0x95d0cd),
+            code_function: hex(0xe6b387),
+            code_string: hex(0xd898d8),
+            code_number: hex(0xf1c972),
+            code_comment: hex(0x626262),
+            code_guide: hex_a(0xffffff, 0.07),
             font_sans: Self::sans_family(),
             font_mono: Self::mono_family(),
             font_math: Self::math_family(),
@@ -645,6 +662,13 @@ impl Theme {
             danger: hex(0xd7332a),
             danger_soft: hex_a(0xd7332a, 0.10),
             code_bg: hex_a(0x000000, 0.06),
+            code_plain: hex(0x1f1f23),
+            code_keyword: hex(0x1f7f7a),
+            code_function: hex(0xb8641a),
+            code_string: hex(0xa63fa4),
+            code_number: hex(0x9a6f00),
+            code_comment: hex(0x8c8c8c),
+            code_guide: hex_a(0x000000, 0.09),
             font_sans: Self::sans_family(),
             font_mono: Self::mono_family(),
             font_math: Self::math_family(),
@@ -823,29 +847,43 @@ impl Theme {
     /// The chat header's glass ([feedback mac-header-glass-2026-10-25], Jacob
     /// 2026-10-25; the iPhone's `HeaderGlassBackground`): what the name pill
     /// and the header disc are filled with — on Glass and on Matte alike
-    /// ([feedback mac-header-pill-glass-matte-2026-10-26]). Dark: white at
-    /// 12 % over a 50 % dark underlay (one composited colour: GPUI quads take
-    /// one fill); over the flat Matte `bg` that reads as a frosted plate two
-    /// steps lighter, like Grok Bot's pill over its black transcript. Light:
-    /// white at 60 % — over the bright beach backdrop of Jacob's shots white
-    /// text measures 6.6:1 on it (`docs/glass-surface-directions.md`, B), and
-    /// over the flat Matte `#fcfcfc` the blurred list under it (the backdrop
-    /// blur composites ≈ 20 % darker than its source, Metal and wgpu alike)
-    /// lands the pill near the `#ededed` of the solid pill it replaces.
+    /// ([feedback mac-header-pill-glass-matte-2026-10-26]).
+    ///
+    /// Dark: `#3b3f45` at **30 %** ([feedback
+    /// mac-header-pill-see-through-2026-10-26]; was 56 %). Jacob's 14:15 CR
+    /// shot of v0.6.275 still read as "opaque dark gray": a 56 % plate over
+    /// the flat `bg` is two steps lighter with nothing behind it, and a 16 pt
+    /// blur turned whatever scrolled under it to mush. Grok Bot's pill over
+    /// its black transcript (Jacob's reference) is only ≈ +12/255 lighter than
+    /// the page — the glass is read from its rim and from the text that
+    /// passes under it. At 30 % the pill sits ≈ +13 over `#141414`, and the
+    /// text behind stays legible through the lighter blur
+    /// (`glass::HEADER_BLUR`). White text keeps ≥ 4.5:1 on it: the pill always
+    /// lies over the chat column, which is the page colour on Matte and the
+    /// 85 % page wash on Glass ([feedback mac-glass-contrast-2026-10-26]), so
+    /// its backdrop is never brighter than ≈ `#373737`.
+    ///
+    /// Light: white at 60 % — over the bright beach backdrop of Jacob's shots
+    /// white text measures 6.6:1 on it (`docs/glass-surface-directions.md`,
+    /// B), and over the flat Matte `#fcfcfc` the blurred list under it (the
+    /// backdrop blur composites ≈ 20 % darker than its source, Metal and wgpu
+    /// alike) lands the pill near the `#ededed` of the solid pill it replaced.
+    /// Unchanged here: light-theme changes need Jacob's shots first.
     pub fn header_glass(&self) -> Hsla {
         if self.is_light() {
             hex_a(0xffffff, 0.60)
         } else {
-            hex_a(0x3b3f45, 0.56)
+            hex_a(0x3b3f45, 0.30)
         }
     }
 
-    /// The 1 pt light rim around a header control on Glass.
+    /// The 1 pt light rim around a header control on Glass. Dark went 18 % →
+    /// 30 % with the thinner fill: like Grok's, the pill's shape is its rim.
     pub fn header_glass_rim(&self) -> Hsla {
         if self.is_light() {
             hex_a(0x000000, 0.10)
         } else {
-            hex_a(0xffffff, 0.18)
+            hex_a(0xffffff, 0.30)
         }
     }
 
@@ -854,7 +892,7 @@ impl Theme {
         if self.is_light() {
             hex_a(0xffffff, 0.90)
         } else {
-            hex_a(0xffffff, 0.30)
+            hex_a(0xffffff, 0.45)
         }
     }
 
@@ -884,6 +922,19 @@ impl Theme {
 
     pub fn plate_highlight(&self) -> Hsla {
         self.header_glass_highlight()
+    }
+
+    /// The colour a code token paints in (`code_comment` is also italic).
+    pub fn code_color(&self, kind: arbos_core::highlight::TokenKind) -> Hsla {
+        use arbos_core::highlight::TokenKind;
+        match kind {
+            TokenKind::Plain => self.code_plain,
+            TokenKind::Keyword => self.code_keyword,
+            TokenKind::Function => self.code_function,
+            TokenKind::String => self.code_string,
+            TokenKind::Number => self.code_number,
+            TokenKind::Comment => self.code_comment,
+        }
     }
 
     pub fn with_alpha(mut c: Hsla, a: f32) -> Hsla {
