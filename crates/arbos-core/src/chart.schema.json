@@ -1,0 +1,59 @@
+{
+  "type": "object",
+  "description": "A chart the apps draw natively (interactive, themed). Caps: 8 series; 500 points per series and 2000 in total; 100 categories; pie 12 slices and one series; 12 annotations; the whole object under 32 KB.",
+  "required": ["kind", "series"],
+  "additionalProperties": false,
+  "properties": {
+    "kind": { "type": "string", "enum": ["line", "area", "bar", "scatter", "pie"] },
+    "title": { "type": "string", "maxLength": 80 },
+    "subtitle": { "type": "string", "maxLength": 120, "description": "Source, sample size, period: the muted line under the title." },
+    "series": {
+      "type": "array", "minItems": 1, "maxItems": 8,
+      "items": {
+        "type": "object", "required": ["name"], "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "maxLength": 40 },
+          "points": { "type": "array", "maxItems": 500, "description": "line | area | scatter: [x, y] pairs. x is a number, or an ISO-8601 date / date-time string (then x.scale is time). y null = a gap.",
+            "items": { "type": "array", "minItems": 2, "maxItems": 2, "prefixItems": [{ "type": ["number", "string"] }, { "type": ["number", "null"] }] } },
+          "values": { "type": "array", "maxItems": 100, "description": "bar | pie: one value per category, in order. null = no bar.", "items": { "type": ["number", "null"] } },
+          "color": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$", "description": "Optional. Omit for the theme palette; a given colour is kept as-is in both themes." },
+          "style": { "type": "string", "enum": ["solid", "dashed", "dotted"], "description": "line | area" },
+          "axis": { "type": "string", "enum": ["left", "right"], "description": "right = a second value axis (its unit from y2)." }
+        }
+      }
+    },
+    "categories": { "type": "array", "maxItems": 100, "items": { "type": "string", "maxLength": 40 }, "description": "bar | pie: the category (bar) or slice labels; each series then gives `values`, one per category." },
+    "x": { "$ref": "#/$defs/axis" },
+    "y": { "$ref": "#/$defs/axis" },
+    "y2": { "$ref": "#/$defs/axis" },
+    "stacked": { "type": "boolean", "description": "bar | area: stack the series instead of grouping them." },
+    "legend": { "type": "string", "enum": ["auto", "top", "bottom", "none"], "description": "auto = shown when there is more than one series." },
+    "annotations": {
+      "type": "array", "maxItems": 12,
+      "items": {
+        "type": "object", "required": ["type"], "additionalProperties": false,
+        "properties": {
+          "type": { "type": "string", "enum": ["vline", "hline", "point", "band"] },
+          "x": { "type": ["number", "string"], "description": "vline · point" },
+          "y": { "type": "number", "description": "hline · point" },
+          "from": { "type": ["number", "string"], "description": "band: start x" },
+          "to": { "type": ["number", "string"], "description": "band: end x" },
+          "label": { "type": "string", "maxLength": 40 }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "axis": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "label": { "type": "string", "maxLength": 40 },
+        "unit": { "type": "string", "maxLength": 12, "description": "Shown on ticks and in the readout: %, ms, $, GB …" },
+        "scale": { "type": "string", "enum": ["linear", "log", "time", "category"] },
+        "min": { "type": "number" },
+        "max": { "type": "number" },
+        "format": { "type": "string", "enum": ["auto", "integer", "number", "percent", "compact", "currency", "duration"], "description": "percent expects 0–100 values; compact = 1.2k / 3.4M; duration = seconds." }
+      }
+    }
+  }
+}
