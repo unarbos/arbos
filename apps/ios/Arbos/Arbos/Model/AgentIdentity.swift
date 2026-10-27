@@ -161,15 +161,15 @@ extension AppModel {
         return out
     }
 
-    /// The newest facts the model knows for an agent: the highest stamp; among equal stamps a
-    /// copy with the picture beats one without (the same state, so the pictureless one is a
-    /// lossy copy — a roster row restored from disk without it — never a reset: a reset moves
-    /// the stamp); then the first copy (my record). The core resolver applies the same rule.
+    /// The newest facts the model knows for an agent: the highest stamp wins; among equal
+    /// stamps the first copy (my record, then the rosters in list order). The stamp is the only
+    /// truth — never "the one with a picture": that guess made a stale picture beat a reset
+    /// whose stamp tied (Jacob, 2026-10-26). The relay stamps every row, so two differing
+    /// states cannot share a stamp any more.
     func newestAgentAvatar(_ projectId: Id) -> AgentAvatarFacts? {
         agentAvatarCopies(projectId).reduce(nil) { best, c in
             guard let b = best else { return c }
-            if c.version > b.version || (c.version == b.version && c.imageKey != nil && b.imageKey == nil) { return c }
-            return b
+            return c.version > b.version ? c : b
         }
     }
 

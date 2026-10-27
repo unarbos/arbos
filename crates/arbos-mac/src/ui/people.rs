@@ -62,9 +62,15 @@ pub fn avatar(image: Option<Arc<RenderImage>>, person: &Person, size: f32, theme
     }
 }
 
-/// A shared agent's avatar: its initials disc (D79).
-pub fn agent_glyph(agent: &AgentMember, size: f32, theme: &Theme) -> Div {
-    crate::ui::avatars::agent_member(agent, size, theme)
+/// A shared agent's avatar, through the resolver (its picture, else its leaf).
+pub fn agent_glyph(
+    state: &AppState,
+    chat: Option<&Project>,
+    agent: &AgentMember,
+    size: f32,
+    theme: &Theme,
+) -> Div {
+    crate::ui::avatars::member_picture(state, chat, agent, size, theme)
 }
 
 /// The "New Message" sheet (iPhone / Telegram layout): Cancel · title, a
@@ -1122,7 +1128,7 @@ pub fn members_popover(
                         .rounded(px(6.0))
                         .cursor_pointer()
                         .hover(|st| st.bg(theme.surface_2))
-                        .child(agent_glyph(a, 22.0, &theme))
+                        .child(agent_glyph(s, Some(space), a, 22.0, &theme))
                         .on_click({
                             let pid = a.project_id.clone();
                             cx.listener(move |this, _, _, cx| {
