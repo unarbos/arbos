@@ -26,5 +26,5 @@
       "title": "eval here"
     }
   ],
-  "regression": "collective address in a people/agent group (people.rs text_addresses_agents_collectively)"
+  "regression": "collective address in a project group (the respond judge's `all agents` verdict, responders.rs)"
 }
