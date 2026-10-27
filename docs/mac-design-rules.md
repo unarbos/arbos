@@ -442,6 +442,36 @@ media) centre the rail on their own row as before.
 Code: `transcript.rs` `HoverFade::set(key, row, …)`, `rail_centre()`,
 `hover_rail_frame()`; pinned by `rail_tests`.
 
+## Menus
+
+### One icon set per menu (Jacob 2026-10-27, [feedback reply-in-dm-icon-2026-10-27])
+
+**Every glyph in a menu comes from the app's own icon pack (`ui/icons.rs`) at
+the pack's metrics — the 24 grid, 2 pt round strokes, drawn into the 3…21
+band, 13…18 pt across — and a menu's rows share one size (`glass::menu_row`
+paints 15 pt).** No glyph is pasted in from another set, re-weighted or
+re-scaled for one row, and no hand-drawn path ships with a curve that misses
+its start: the message menu's Reply in DM bubble did (its outline ended 1 pt
+under where it began and `z` drew a stub at the top), so it read as broken
+beside Copy · Reply · Forward · Delete.
+
+| Item | Rule | Where |
+|---|---|---|
+| Set | one pack, one header: `fill="none"`, `stroke-width="2"`, round caps and joins; a filled mark or a per-glyph `stroke-width` is another set and does not go in a menu | `icons::ICONS`, the `icon!` header |
+| Size | the menu row paints every glyph at **15**; a glyph is drawn to fill 13…18 of the grid so all read as one optical size (Copy 15 × 16, Reply 15 × 15, Forward 15 × 15, bubble 16.5 × 16, Delete 16 × 17) | `glass::menu_row`, `icons::lint::anchor_box` |
+| Shape | an outline closes on itself: a `z` either lands on its start or draws a real edge (≥ the stroke); a gap in between is a stub and fails the build | `icons::lint::stubs`, `icons::tests::no_glyph_closes_with_a_stub` |
+| Bubble | `bubble` = SF `bubble.left`'s shape in the pack's metrics: one ellipse (centre 12,10.5 · 8.5 × 6.5) with the tail's tip at 4.5,20, both arcs meeting at the top centre; the same glyph draws the reply-quote header (12), the message menu (15) and the person pane's Message pill (17) | `icons.rs` `bubble` |
+| iPhone | the system SF Symbols (`bubble.left`, `arrowshape.turn.up.left`, …) — never a hand-drawn copy | `MessageMenu.swift`, `ProfilePages.swift` |
+
+Pinned by `icons::tests::{no_glyph_closes_with_a_stub,
+message_menu_glyphs_share_one_set_weight_and_size,
+the_bubble_outline_closes_on_itself_with_a_lower_left_tail}`. The walker
+(`icons::lint::walk`) reads a path's `d` string, so the lint runs on Linux CI
+with no rasteriser. Rig: `ARBOS_RIG_MESSAGE_MENU=<x>,<y>` +
+`ARBOS_RIG_MESSAGE_MENU_FROM=someone` opens the menu on another person's
+newest row; `/Users/Shared/arbos-tools/bin/cgclick x y right` is a real
+right-click.
+
 ## Mac bubble text selection (Jacob 2026-10-24, [feedback bubble-selection-2026-10-24])
 
 **A press on bubble text starts a selection, whichever way the pointer then
