@@ -1198,7 +1198,8 @@ struct HiddenChatsView: View {
     }
 
     static func peoplePreview(_ c: PeopleChat, in model: AppModel) -> String {
-        guard let m = model.messages(of: c.id).last(where: { !$0.voice && !$0.plainText.isEmpty }) else {
+        // A row hidden for me (someone I blocked) never previews.
+        guard let m = model.messages(of: c.id).last(where: { !$0.voice && !$0.plainText.isEmpty && !model.hidesMessage($0, chatId: c.id) }) else {
             return c.pending ? "Invited · opens when they sign in" : "Say hi"
         }
         let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
