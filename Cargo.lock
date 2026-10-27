@@ -384,6 +384,7 @@ dependencies = [
  "loro",
  "rand 0.8.8",
  "regex-lite",
+ "resvg",
  "serde",
  "serde_json",
  "sha2 0.10.9",

@@ -25,3 +25,8 @@ regex-lite.workspace = true
 # The shared search matcher folds diacritics (NFD, combining marks dropped).
 unicode-normalization = "0.1"
 syntect.workspace = true
+# PNG fallback for chart bubbles (agentd only; the apps draw charts natively).
+resvg = { version = "0.46", default-features = false, features = ["text"], optional = true }
+
+[features]
+chart-png = ["dep:resvg"]
