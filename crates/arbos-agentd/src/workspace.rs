@@ -19,7 +19,7 @@ use crate::config::{BoxConfig, Config};
 use crate::isolation::Isolation;
 use crate::store::Store;
 use crate::sync::{Incoming, SyncHub};
-use crate::{hooks, http, mcp};
+use crate::{hooks, http, mcp, sites};
 
 /// Subagents running at once across the whole box (4 per workspace, see `agent.rs`).
 pub const BOX_MAX_SUBAGENTS: usize = 8;
@@ -170,6 +170,9 @@ impl Supervisor {
         let stub_l = tokio::net::TcpListener::bind(("127.0.0.1", cfg.proxy_port))
             .await
             .context("bind proxy stub port")?;
+        let sites_l = tokio::net::TcpListener::bind(("127.0.0.1", cfg.sites_port))
+            .await
+            .context("bind sites preview port")?;
         let mut tasks = Vec::new();
         let (hook_app, mcp_app, stub_app) = (
             hooks::router(agent.clone()),
@@ -184,6 +187,10 @@ impl Supervisor {
         }));
         tasks.push(tokio::spawn(async move {
             axum::serve(stub_l, stub_app).await.ok();
+        }));
+        let sites_app = sites::preview_router(agent.clone());
+        tasks.push(tokio::spawn(async move {
+            axum::serve(sites_l, sites_app).await.ok();
         }));
 
         let mut forks: Vec<(String, String)> = Vec::new();
