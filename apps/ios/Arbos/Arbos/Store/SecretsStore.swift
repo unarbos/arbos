@@ -47,6 +47,25 @@ extension AppModel {
 
     /// Run one secrets call; refresh the overview after; surface the relay's message on failure.
     /// Returns the error text (nil on success) so sheets can show it inline too.
+    /// The infinitive the note reads for a Secrets / goals action's label.
+    static func secretsVerb(_ what: String) -> String {
+        switch what {
+        case "Save": return "save the secret"
+        case "Delete secret": return "delete the secret"
+        case "Disconnect": return "disconnect the vault"
+        case "Give access": return "give access"
+        case "Remove director": return "remove the director"
+        case "Remove from all agents": return "remove it from the agents"
+        case "Replace token": return "replace the token"
+        case "Scrub from context": return "scrub it from the context"
+        case "Turn off": return "turn it off"
+        case "Create goal": return "create the goal"
+        case "Delete goal": return "delete the goal"
+        case "Save goal": return "save the goal"
+        default: return what.prefix(1).lowercased() + what.dropFirst()
+        }
+    }
+
     @discardableResult
     func secretsAction(_ what: String, refreshProject: Id? = nil, _ body: @escaping () async throws -> Void) async -> String? {
         guard !secretsBusy else { return "Busy" }
@@ -58,9 +77,9 @@ extension AppModel {
             if let p = refreshProject { await refreshProjectSecrets(p) }
             return nil
         } catch {
-            let text = (error as? RelayError).map { $0.message.isEmpty ? "HTTP \($0.status)" : $0.message } ?? error.localizedDescription
-            notice = Notice(text: "\(what): \(text)")
-            return text
+            let failure = UserError.classify(Self.secretsVerb(what), error)
+            fail(failure)
+            return failure.sentence
         }
     }
 
@@ -232,9 +251,9 @@ extension AppModel {
             await refreshGoals()
             return nil
         } catch {
-            let text = (error as? RelayError).map { $0.message.isEmpty ? "HTTP \($0.status)" : $0.message } ?? error.localizedDescription
-            notice = Notice(text: "\(what): \(text)")
-            return text
+            let failure = UserError.classify(Self.secretsVerb(what), error)
+            fail(failure)
+            return failure.sentence
         }
     }
 
