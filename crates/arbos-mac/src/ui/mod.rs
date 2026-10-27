@@ -5,6 +5,7 @@ pub mod avatar_picker;
 #[cfg(test)]
 mod avatar_upload_preview_tests;
 pub mod avatars;
+pub mod blocked;
 pub mod callview;
 pub mod cards;
 pub mod channels;
