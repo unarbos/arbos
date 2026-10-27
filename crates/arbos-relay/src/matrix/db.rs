@@ -486,6 +486,15 @@ impl Db {
         })
     }
 
+    /// Every user that has at least one device with a Matrix identity (pusher backfill).
+    pub fn matrix_device_users(&self) -> Result<Vec<String>> {
+        self.with(|c| {
+            let mut st = c.prepare("SELECT DISTINCT user_id FROM matrix_devices")?;
+            let rows = st.query_map([], |r| r.get(0))?;
+            rows.collect()
+        })
+    }
+
     pub fn matrix_insert_device(
         &self,
         device_id: &str,
