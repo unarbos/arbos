@@ -54,6 +54,7 @@ mod room_health;
 mod rooms;
 mod routines;
 mod secrets;
+mod settings_audit;
 mod shell_grants;
 mod signin;
 mod sites;
