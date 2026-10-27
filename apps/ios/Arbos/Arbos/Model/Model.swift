@@ -999,6 +999,59 @@ struct ReplyRef: Equatable, Hashable {
     }
 }
 
+/// The facts behind a membership system line (relay `notices::Notice`).
+struct MembershipNotice: Equatable {
+    struct Subject: Equatable {
+        /// `user` or `agent`.
+        var kind: String
+        var id: String
+    }
+
+    /// `added` | `removed` | `left` | `joined`.
+    var kind: String
+    /// User id of the person who acted.
+    var actor: String
+    var subjects: [Subject]
+
+    init(kind: String, actor: String, subjects: [Subject]) {
+        self.kind = kind
+        self.actor = actor
+        self.subjects = subjects
+    }
+
+    init?(row: Any?) {
+        guard let m = row as? [String: Any],
+              let kind = m["kind"] as? String, !kind.isEmpty,
+              let actor = m["actor"] as? String, !actor.isEmpty else { return nil }
+        self.kind = kind
+        self.actor = actor
+        subjects = ((m["subjects"] as? [Any]) ?? []).compactMap { raw in
+            guard let s = raw as? [String: Any],
+                  let k = s["kind"] as? String, let id = s["id"] as? String, !id.isEmpty else { return nil }
+            return Subject(kind: k, id: id)
+        }
+    }
+
+    /// The line worded from `nameOf(kind, id)` — the live roster name of a `user` / `agent`.
+    /// nil when anyone named is unknown here (a person who left, a deleted agent): the caller
+    /// then shows the row's stored words.
+    func text(nameOf: (String, String) -> String?) -> String? {
+        guard let who = nameOf("user", actor) else { return nil }
+        var names: [String] = []
+        for s in subjects {
+            guard let n = nameOf(s.kind, s.id) else { return nil }
+            names.append(n)
+        }
+        switch kind {
+        case "added": return names.isEmpty ? nil : "\(who) added \(OptimisticNotice.joinNames(names))"
+        case "removed": return names.isEmpty ? nil : "\(who) removed \(OptimisticNotice.joinNames(names))"
+        case "left": return "\(who) left"
+        case "joined": return "\(who) joined"
+        default: return nil
+        }
+    }
+}
+
 struct Message: Identifiable, Equatable {
     var id: Id
     var chatId: Id
@@ -1063,6 +1116,10 @@ struct Message: Identifiable, Equatable {
     var greeting: Bool = false
     /// Emoji reactions on this message (`reactions` map in the chat doc). Multiple emojis allowed.
     var reactions: [MessageReaction] = []
+    /// A membership line's facts (relay `notices::Notice`): actor and subjects by id, so the
+    /// line is worded from the live roster and a rename applies to old lines too ("Const
+    /// added Aureum" → "Jacob added Aureum", 2026-10-26). nil on rows older than the field.
+    var notice: MembershipNotice? = nil
 
     var isStreaming: Bool { status == .streaming }
 
@@ -1235,7 +1292,8 @@ enum DocJSON {
             activity: str(m["activity"]).flatMap { $0.isEmpty ? nil : $0 },
             voice: bool(m["voice"]) || str(m["source"]) == "voice",
             greeting: bool(m["greeting"]),
-            reactions: reactions(m["reactions"])
+            reactions: reactions(m["reactions"]),
+            notice: MembershipNotice(row: m["notice"])
         )
     }
 
