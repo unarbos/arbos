@@ -3,6 +3,7 @@
   "avatar_leaf": null,
   "avatar_leaf_color": null,
   "created_at": 1700000000000,
+  "allowed_agents": "members_own",
   "created_by": "gh_101",
   "head_seq": 0,
   "id": "people_dm",

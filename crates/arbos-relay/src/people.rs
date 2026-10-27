@@ -567,6 +567,7 @@ pub fn people_chat_dto(
             .map(str::trim)
             .filter(|t| !t.is_empty())
             .map(str::to_owned),
+        allowed_agents: normalize_allowed_agents(&cm.chat.allowed_agents).to_owned(),
         pending,
         members,
         banned,
@@ -929,6 +930,7 @@ pub async fn chats_create_group(
             .map(str::trim)
             .filter(|t| !t.is_empty())
             .map(|t| t.chars().take(200).collect()),
+        allowed_agents: "members_own".into(),
     };
     if let Err(e) = state.db.insert_people_chat(&chat) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
@@ -1054,6 +1056,7 @@ pub async fn dm_create(
         avatar_leaf: None,
         avatar_leaf_color: None,
         description: None,
+        allowed_agents: "members_own".into(),
     };
     if let Err(e) = state.db.insert_people_chat(&chat) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
@@ -1145,6 +1148,9 @@ pub struct PatchChatBody {
     /// Optional about text. Empty string clears it.
     #[serde(default)]
     pub description: Option<String>,
+    /// Owner/admin: which agents may be added — `members_own` | `admins_own` | `none`.
+    #[serde(default)]
+    pub allowed_agents: Option<String>,
 }
 
 /// `None` = untouched, `Some(None)` = clear, `Some(Some((leaf, colour)))` = set.
@@ -1176,9 +1182,9 @@ fn safe_image_key(k: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == ':')
 }
 
-/// `PATCH /chats/{id} {"title"?, "image_key"?, "description"?}` — any human member can
-/// name the group, set an optional picture (uploaded first via `PUT /blob/people:{id}/…`),
-/// and set an optional description.
+/// `PATCH /chats/{id} {"title"?, "image_key"?, "description"?, "allowed_agents"?}` — any
+/// human member can name the group, set a picture, and set a description; only
+/// owners/admins change which agents may be added.
 pub async fn chat_patch(
     State(state): State<AppState>,
     principal: Principal,
@@ -1193,8 +1199,33 @@ pub async fn chat_patch(
         Ok(l) => l,
         Err((st, msg)) => return api_error(st, "bad_leaf", msg),
     };
-    if b.title.is_none() && b.image_key.is_none() && leaf.is_none() && b.description.is_none() {
+    let allowed_agents = match b.allowed_agents.as_deref() {
+        None => None,
+        Some(raw) => match parse_allowed_agents(raw) {
+            Some(p) => Some(p),
+            None => {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "bad_allowed_agents",
+                    "allowed_agents must be members_own, admins_own, or none",
+                );
+            }
+        },
+    };
+    if b.title.is_none()
+        && b.image_key.is_none()
+        && leaf.is_none()
+        && b.description.is_none()
+        && allowed_agents.is_none()
+    {
         return Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response();
+    }
+    if allowed_agents.is_some() && !can_manage_members(&cm, &me) {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "Only owners and admins can change which agents may be added",
+        );
     }
     let title = b.title.as_ref().map(|t| {
         let trimmed = t.trim();
@@ -1243,6 +1274,11 @@ pub async fn chat_patch(
             .update_people_chat_profile(&id, title_ref, image_ref, leaf, description_ref)
     {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+    }
+    if let Some(policy) = allowed_agents {
+        if let Err(e) = state.db.set_allowed_agents(&id, policy) {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+        }
     }
     // Other members, and this user's other devices (e.g. Mac), refresh the list.
     let event = PushEventDto::PeopleChatUpdated(PeopleChatUpdatedPayloadDto {
@@ -1562,8 +1598,9 @@ pub struct AddAgentBody {
     pub project_id: String,
 }
 
-/// `POST /chats/{id}/agents {"project_id"}` — any member adds their OWN Project's agent. The
-/// owner's box is told (push) and woken so the agent joins the room.
+/// `POST /chats/{id}/agents {"project_id"}` — a member adds their OWN Project's agent when
+/// the group's `allowed_agents` policy permits it. The owner's box is told (push) and woken
+/// so the agent joins the room.
 pub async fn agent_add(
     State(state): State<AppState>,
     principal: Principal,
@@ -1574,6 +1611,9 @@ pub async fn agent_add(
         Ok(v) => v,
         Err(r) => return *r,
     };
+    if let Some(r) = agents_add_forbidden(&cm, &me) {
+        return r;
+    }
     let project = match own_project(&state, &me, &b.project_id) {
         Ok(p) => p,
         Err(r) => return *r,
@@ -1920,6 +1960,11 @@ pub async fn member_add(
         }
         agents.push(project);
     }
+    if !agents.is_empty() {
+        if let Some(r) = agents_add_forbidden(&cm, &me) {
+            return r;
+        }
+    }
     if people.is_empty() && agents.is_empty() {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -2003,6 +2048,41 @@ fn can_manage_members(cm: &ChatWithMembers, me: &str) -> bool {
     cm.members
         .iter()
         .any(|m| m.user_id() == Some(me) && (m.role == "owner" || m.role == "admin"))
+}
+
+/// `members_own` | `admins_own` | `none` — unknown values fall back to the open default.
+fn normalize_allowed_agents(raw: &str) -> &'static str {
+    match raw.trim() {
+        "admins_own" => "admins_own",
+        "none" => "none",
+        _ => "members_own",
+    }
+}
+
+fn parse_allowed_agents(raw: &str) -> Option<&'static str> {
+    match raw.trim() {
+        "members_own" => Some("members_own"),
+        "admins_own" => Some("admins_own"),
+        "none" => Some("none"),
+        _ => None,
+    }
+}
+
+/// Refuse adding an agent when the group's admin policy blocks it.
+fn agents_add_forbidden(cm: &ChatWithMembers, me: &str) -> Option<Response> {
+    match normalize_allowed_agents(&cm.chat.allowed_agents) {
+        "none" => Some(api_error(
+            StatusCode::FORBIDDEN,
+            "agents_not_allowed",
+            "This group does not allow agents",
+        )),
+        "admins_own" if !can_manage_members(cm, me) => Some(api_error(
+            StatusCode::FORBIDDEN,
+            "admins_only",
+            "Only owners and admins can add agents to this group",
+        )),
+        _ => None,
+    }
 }
 
 /// My role in the chat, if I am a live human member.
@@ -2895,6 +2975,7 @@ pub async fn invite_create(
                     avatar_leaf: None,
                     avatar_leaf_color: None,
                     description: None,
+                    allowed_agents: "members_own".into(),
                 };
                 if let Err(e) = state.db.insert_people_chat(&chat) {
                     return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
@@ -3784,6 +3865,7 @@ mod block_refusal_tests {
             avatar_leaf: None,
             avatar_leaf_color: None,
             description: None,
+            allowed_agents: "members_own".into(),
         };
         state.db.insert_people_chat(&chat).expect("chat");
         for u in members {
@@ -5210,6 +5292,7 @@ pub(crate) mod tests_support {
             avatar_leaf: None,
             avatar_leaf_color: None,
             description: None,
+            allowed_agents: "members_own".into(),
         };
         state.db.insert_people_chat(&chat).expect("chat");
         for u in [a, b] {
@@ -5316,6 +5399,7 @@ mod picture_tests {
                 avatar_leaf: None,
                 avatar_leaf_color: None,
                 description: None,
+                allowed_agents: None,
             }),
         )
         .await

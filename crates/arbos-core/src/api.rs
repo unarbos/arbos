@@ -286,6 +286,10 @@ pub struct ChatMemberDto {
     pub settings: Option<Value>,
 }
 
+fn default_allowed_agents() -> String {
+    "members_own".into()
+}
+
 /// People chat (`people::chat_json`).
 #[typeshare]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -309,6 +313,10 @@ pub struct PeopleChatDto {
     /// Optional about text for a people group (≤200 chars). Absent or empty = none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Group admin policy for which agents may be added:
+    /// `members_own` (default) | `admins_own` | `none`.
+    #[serde(default = "default_allowed_agents")]
+    pub allowed_agents: String,
     pub pending: bool,
     pub members: Vec<ChatMemberDto>,
     /// Banned people (owner/admin with mute-ban rights); empty for everyone else.

@@ -821,6 +821,7 @@ mod tests {
             avatar_leaf: None,
             avatar_leaf_color: None,
             description: None,
+            allowed_agents: "members_own".into(),
         };
         state.db.insert_people_chat(&chat).unwrap();
         state

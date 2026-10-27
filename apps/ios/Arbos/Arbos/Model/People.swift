@@ -233,6 +233,31 @@ enum ChatMuteDuration: CaseIterable, Identifiable {
     }
 }
 
+/// Which agents may be added to a people group (`PATCH /chats/{id} {allowed_agents}`).
+enum AllowedAgentsPolicy: String, CaseIterable, Identifiable {
+    /// Any member may add their own agent (default).
+    case membersOwn = "members_own"
+    /// Only owners and admins may add their own agent.
+    case adminsOwn = "admins_own"
+    /// No agents may be added.
+    case none
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .membersOwn: return "Members' agents"
+        case .adminsOwn: return "Admins' agents"
+        case .none: return "No agents"
+        }
+    }
+    var summary: String {
+        switch self {
+        case .membersOwn: return "Anyone's own agents"
+        case .adminsOwn: return "Admins' own agents"
+        case .none: return "No agents"
+        }
+    }
+}
+
 struct PeopleChat: Identifiable, Equatable {
     var id: String
     var kind: String
@@ -253,6 +278,8 @@ struct PeopleChat: Identifiable, Equatable {
     var isNeutralAvatar: Bool { LeafArt.isNeutral(avatarLeaf) }
     /// Optional about text for a people group (≤200 chars).
     var description: String = ""
+    /// Group admin policy: which agents may be added (`members_own` | `admins_own` | `none`).
+    var allowedAgents: String = AllowedAgentsPolicy.membersOwn.rawValue
     var pending: Bool
     var members: [ChatMember]
     var headSeq: Int64
@@ -310,6 +337,8 @@ extension PeopleChat {
         self.avatarLeaf = dto.avatar_leaf.map(Int.init)
         self.avatarLeafColor = dto.avatar_leaf_color.map(Int.init)
         self.description = dto.description?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.allowedAgents = AllowedAgentsPolicy(rawValue: dto.allowed_agents ?? "")?.rawValue
+            ?? AllowedAgentsPolicy.membersOwn.rawValue
         self.pending = dto.pending
         self.members = dto.members.map { ChatMember(dto: $0) }
         self.headSeq = dto.head_seq

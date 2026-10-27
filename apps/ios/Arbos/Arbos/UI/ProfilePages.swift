@@ -1494,6 +1494,38 @@ struct GroupProfileView: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Group activity")))
         }
+        // Owners/admins: which kinds of agents may be added to this people group.
+        if projectId == nil, people?.isGroup == true, canManageMembers {
+            let policy = AllowedAgentsPolicy(rawValue: people?.allowedAgents ?? "") ?? .membersOwn
+            list.append(AnyView(
+                Menu {
+                    ForEach(AllowedAgentsPolicy.allCases) { option in
+                        Button {
+                            Task {
+                                _ = await model.patchPeopleChat(
+                                    chatId, allowedAgents: option.rawValue
+                                )
+                            }
+                        } label: {
+                            if option == policy {
+                                Label(option.label, systemImage: "checkmark")
+                            } else {
+                                Text(option.label)
+                            }
+                        }
+                    }
+                } label: {
+                    PaneRow(
+                        title: "Agents",
+                        subtitle: "Which agents members may add",
+                        value: policy.label,
+                        chevron: true
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Agents, \(policy.label)")
+            ))
+        }
         list += rows.map { r in AnyView(memberRow(r)) }
         var out: [PaneSection] = [.card(list, separatorInset: PaneKit.separatorInset(.glyph("")))]
         if !bannedRows.isEmpty {

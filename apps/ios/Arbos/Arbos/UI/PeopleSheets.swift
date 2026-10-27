@@ -745,8 +745,24 @@ struct NewGroupView: View {
     /// Own agents only (same as Members → Add agent); shared ones cannot be re-shared here.
     /// Empty query hides archived agents; a search finds them again — archived agents still
     /// exist and can join groups unless deleted (home archive is hide-only).
+    /// Honour the group's admin `allowed_agents` policy when adding to an existing chat.
     private var agentCandidates: [Project] {
         if addToServer != nil || addToSecret != nil { return [] }
+        if let chat = addToChat {
+            let policy = AllowedAgentsPolicy(rawValue: chat.allowedAgents) ?? .membersOwn
+            switch policy {
+            case .none:
+                return []
+            case .adminsOwn:
+                let role = chat.myRole
+                let isAdmin = role == "owner" || role == "admin"
+                    || chat.humans.first(where: { $0.id == model.user?.id })?.role == "owner"
+                    || chat.humans.first(where: { $0.id == model.user?.id })?.role == "admin"
+                if !isAdmin { return [] }
+            case .membersOwn:
+                break
+            }
+        }
         let base = model.projects.filter { !$0.shared && (trimmed.isEmpty ? !model.isArchived($0.id) : true) }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         return PeoplePicker.agents(base, query: trimmed)

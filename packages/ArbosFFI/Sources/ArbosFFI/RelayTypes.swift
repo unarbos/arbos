@@ -1640,6 +1640,9 @@ public struct PeopleChatDto: Codable {
 	public let avatar_leaf_color: Int64?
 	/// Optional about text for a people group (≤200 chars). Absent or empty = none.
 	public let description: String?
+	/// Group admin policy for which agents may be added:
+	/// `members_own` (default) | `admins_own` | `none`.
+	public let allowed_agents: String?
 	public let pending: Bool
 	public let members: [ChatMemberDto]
 	/// Banned people (owner/admin with mute-ban rights); empty for everyone else.
@@ -1657,7 +1660,7 @@ public struct PeopleChatDto: Codable {
 	public let lock_state: String
 	public let me: ChatMeDto
 
-	public init(id: String, archived_at: Int64?, kind: String, created_by: String, created_at: Int64, title: String, image_key: String?, avatar_leaf: Int64?, avatar_leaf_color: Int64?, description: String?, pending: Bool, members: [ChatMemberDto], banned: [ChatMemberDto]?, room: String, head_seq: Int64, last_activity_at: Int64, read_seq: Int64, unread: Bool, blocked_senders: [String]?, lock_state: String, me: ChatMeDto) {
+	public init(id: String, archived_at: Int64?, kind: String, created_by: String, created_at: Int64, title: String, image_key: String?, avatar_leaf: Int64?, avatar_leaf_color: Int64?, description: String?, allowed_agents: String?, pending: Bool, members: [ChatMemberDto], banned: [ChatMemberDto]?, room: String, head_seq: Int64, last_activity_at: Int64, read_seq: Int64, unread: Bool, blocked_senders: [String]?, lock_state: String, me: ChatMeDto) {
 		self.id = id
 		self.archived_at = archived_at
 		self.kind = kind
@@ -1668,6 +1671,7 @@ public struct PeopleChatDto: Codable {
 		self.avatar_leaf = avatar_leaf
 		self.avatar_leaf_color = avatar_leaf_color
 		self.description = description
+		self.allowed_agents = allowed_agents
 		self.pending = pending
 		self.members = members
 		self.banned = banned

@@ -3331,8 +3331,18 @@ final class AppModel: ObservableObject {
                 if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i] = chat }
             } catch {
                 withdrawOptimisticNotices(chatId: chatId)
-                notice = Notice(text: (error as? RelayError)?.type == "own_project_only" ? "You can only add your own agents." : "Add agent failed: \(error.localizedDescription)")
+                notice = Notice(text: Self.agentAddFailure((error as? RelayError)?.type, fallback: error.localizedDescription))
             }
+        }
+    }
+
+    /// Shared copy for `addAgent` / `addMembers` when the group policy or own-project rule blocks an agent.
+    private static func agentAddFailure(_ type: String?, fallback: String) -> String {
+        switch type {
+        case "own_project_only": return "You can only add your own agents."
+        case "agents_not_allowed": return "This group does not allow agents."
+        case "admins_only": return "Only owners and admins can add agents to this group."
+        default: return "Add agent failed: \(fallback)"
         }
     }
 
@@ -3475,7 +3485,9 @@ final class AppModel: ObservableObject {
                 let chat = try await api.addAgent(chatId: chatId, projectId: projectId)
                 if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i] = chat }
             } catch {
-                failure = failure ?? ((error as? RelayError)?.type == "own_project_only" ? "You can only add your own agents."
+                let type = (error as? RelayError)?.type
+                failure = failure ?? (type == "own_project_only" || type == "agents_not_allowed" || type == "admins_only"
+                                      ? Self.agentAddFailure(type, fallback: error.localizedDescription)
                                       : "Could not add the agent: \(error.localizedDescription)")
             }
         }
@@ -3617,9 +3629,9 @@ final class AppModel: ObservableObject {
     }
 
     /// Rename a people group and/or set its picture blob key or description (`PATCH /chats/{id}`).
-    func patchPeopleChat(_ chatId: String, title: String? = nil, imageKey: String? = nil, description: String? = nil) async -> Bool {
+    func patchPeopleChat(_ chatId: String, title: String? = nil, imageKey: String? = nil, description: String? = nil, allowedAgents: String? = nil) async -> Bool {
         do {
-            let chat = try await api.patchPeopleChat(chatId, title: title, imageKey: imageKey, description: description)
+            let chat = try await api.patchPeopleChat(chatId, title: title, imageKey: imageKey, description: description, allowedAgents: allowedAgents)
             if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
                 peopleChats[i] = chat
             } else {
@@ -3627,7 +3639,10 @@ final class AppModel: ObservableObject {
             }
             return true
         } catch {
-            notice = Notice(text: "Could not update group: \(error.localizedDescription)")
+            let e = error as? RelayError
+            notice = Notice(text: e?.type == "forbidden"
+                ? "Only owners and admins can change which agents may be added."
+                : "Could not update group: \(error.localizedDescription)")
             return false
         }
     }
