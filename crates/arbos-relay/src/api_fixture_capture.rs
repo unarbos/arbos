@@ -971,6 +971,14 @@ fn push_fixture_events() -> Vec<(&'static str, PushEventDto)> {
                 image_key: Some("avatar-1700000000000.jpg".into()),
             }),
         ),
+        (
+            "push_notifications_cleared.json",
+            PushEventDto::NotificationsCleared(arbos_core::api::NotificationsClearedPayloadDto {
+                chat_id: "people_dm".into(),
+                project_id: "people".into(),
+                badge: 2,
+            }),
+        ),
     ]
 }
 
