@@ -1299,7 +1299,7 @@ pub async fn chat_read(
         Err(r) => return *r,
     };
     let is_people = state.db.people_chat(&id).ok().flatten().is_some();
-    if is_people {
+    let chat_ref = if is_people {
         if let Err(r) = member_chat(&state, &principal, &id) {
             return *r;
         }
@@ -1309,6 +1309,7 @@ pub async fn chat_read(
         {
             return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
         }
+        crate::notify::ChatRef::people(&id)
     } else {
         // A project chat (own or shared): the same call marks it read for unread counts.
         let Ok(Some(project_id)) = state.db.chat_project_id(&id) else {
@@ -1317,7 +1318,8 @@ pub async fn chat_read(
         if !state.allows(&principal, &project_id) {
             return api_error(StatusCode::FORBIDDEN, "not_member", "not your chat");
         }
-    }
+        crate::notify::ChatRef::project(&project_id, &id)
+    };
     if let Err(e) = state
         .db
         .mark_chat_read(&me, &id)
@@ -1326,7 +1328,11 @@ pub async fn chat_read(
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
     state.matrix.read(&state, &id, &me);
-    crate::notify::badge_refresh(&state, &me, &device_of(&principal)).await;
+    // Read here = cleared everywhere else: the other devices drop the chat's banners and
+    // take the new badge (`/me/pushes` now; the APNs badge alert while push is on).
+    let device = device_of(&principal);
+    crate::notify::clear_on_read(&state, &me, &device, &chat_ref).await;
+    crate::notify::badge_refresh(&state, &me, &device).await;
     StatusCode::NO_CONTENT.into_response()
 }
 

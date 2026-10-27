@@ -750,6 +750,43 @@ impl Db {
         })
     }
 
+    /// Clear-on-read fan-out, queue form: for every live device of the user except
+    /// `except_device` (the one that read), drop the undelivered `people_message` rows for
+    /// `chat_id` — a device that has not drained yet must not post a banner for something
+    /// already read — and any pending clear for the chat, then queue one `kind` row carrying
+    /// `payload`. At most one clear per chat per device is pending, always with the newest
+    /// badge. Returns the ids of the devices told.
+    pub fn queue_chat_clear(
+        &self,
+        user_id: &str,
+        except_device: &str,
+        chat_id: &str,
+        kind: &str,
+        payload: &Value,
+    ) -> Result<Vec<String>> {
+        let now = now_ms();
+        let body = payload.to_string();
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT id FROM devices WHERE user_id = ?1 AND revoked_at IS NULL AND id != ?2",
+            )?;
+            let devices: Vec<String> = st
+                .query_map(params![user_id, except_device], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            for d in &devices {
+                c.execute(
+                    "DELETE FROM user_pushes WHERE device_id = ?1 AND chat_id = ?2 AND delivered_at IS NULL AND kind IN ('people_message', ?3)",
+                    params![d, chat_id, kind],
+                )?;
+                c.execute(
+                    "INSERT INTO user_pushes(user_id, device_id, kind, payload, chat_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![user_id, d, kind, body, chat_id, now],
+                )?;
+            }
+            Ok(devices)
+        })
+    }
+
     pub fn take_user_pushes(&self, device_id: &str) -> Result<Vec<(i64, String, Value, i64)>> {
         self.with(|c| {
             let mut st = c.prepare(

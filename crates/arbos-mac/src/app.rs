@@ -2483,6 +2483,29 @@ impl AppState {
                 }
                 cx.notify();
             }
+            SyncEvent::NotificationsCleared { chat_id, badge } => {
+                // I read it on another device: its banners go, the dot clears, the Dock
+                // badge follows. The relay's total is the truth for what this Mac cannot
+                // see yet (`/me/unread` confirms on the next refresh).
+                notify::withdraw_chat(&chat_id);
+                if let Some(c) = self
+                    .chats
+                    .values_mut()
+                    .flat_map(|v| v.iter_mut())
+                    .find(|c| c.id == chat_id)
+                {
+                    c.unread = false;
+                    c.unread_count = 0;
+                }
+                let local: usize = self
+                    .chats
+                    .values()
+                    .flat_map(|v| v.iter())
+                    .map(Chat::missed_count)
+                    .sum();
+                notify::set_badge(local.min(badge as usize));
+                cx.notify();
+            }
             SyncEvent::ChatSnapshot {
                 chat_id,
                 mut messages,
@@ -3762,6 +3785,8 @@ impl AppState {
             chat.unread_count = 0;
         }
         self.sync_badge();
+        // Reading it here clears its banners here too (the relay tells the other devices).
+        notify::withdraw_chat(&chat_id);
         // A job tab is client-side (`jobtabs`): nothing for the relay to open or mark.
         if !crate::jobtabs::is_job_chat(&chat_id) {
             self.command(ClientCommand::MarkRead {

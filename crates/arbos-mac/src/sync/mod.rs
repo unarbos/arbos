@@ -150,6 +150,13 @@ pub enum SyncEvent {
         chat_id: Id,
         archived_at: Option<u64>,
     },
+    /// `notifications_cleared` push: I read `chat_id` on another device. This Mac drops the
+    /// chat's delivered banners, stops showing it unread and re-badges; `badge` is the relay's
+    /// unread total after that read.
+    NotificationsCleared {
+        chat_id: Id,
+        badge: u64,
+    },
     /// `space_archived` push: another device archived / unarchived a sidebar
     /// space (an agent or a server) for me.
     SpaceArchived {
