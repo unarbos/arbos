@@ -367,10 +367,14 @@ struct ChatSession: View {
         return ProfileToggle.label(name: who, showing: model.profileShows(headerTarget))
     }
 
-    /// Hardware ⌘F ([feedback iphone-chat-search-cmd-f-2026-10-26]): open the bar, or
-    /// put the cursor back in it when it is already up. Never closes it.
+    /// Hardware ⌘F toggles the bar ([feedback iphone-chat-search-cmd-f-toggle-2026-10-27]):
+    /// closed → open and focus the field; open → close it like ✕ / Esc.
     private func openSearchFromKeyboard() {
         let effect = ChatSearchShortcut.apply(open: showSearch)
+        if !effect.open {
+            closeSearch()
+            return
+        }
         if effect.animate {
             withAnimation(.easeOut(duration: 0.18)) { showSearch = effect.open }
         } else {
