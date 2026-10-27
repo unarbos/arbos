@@ -1285,6 +1285,11 @@ pub struct Attachment {
     /// Caption for the card; the file name when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// The fallback picture of a chart bubble: names the `chart` part of the same message.
+    /// A client that draws the chart hides this attachment; an older one shows the picture
+    /// ([feedback chart-bubble-mac-2026-10-26]).
+    #[serde(default, rename = "chartPart", skip_serializing_if = "Option::is_none")]
+    pub chart_part: Option<String>,
 }
 
 impl Attachment {
@@ -1463,6 +1468,20 @@ pub enum Part {
         /// #1544: the standing choice made on a destructive-shell card (a path class).
         #[serde(default)]
         grant: Option<String>,
+    },
+    /// Chart bubble ([feedback chart-bubble-mac-2026-10-26]): the structured chart
+    /// `post_chart` posted. `chart` is the validated `arbos_core::chart::Chart` as JSON,
+    /// `table` its markdown table, `fallback` the PNG attachment part this client hides.
+    Chart {
+        id: Id,
+        #[serde(default)]
+        spec_version: u32,
+        #[serde(default)]
+        chart: serde_json::Value,
+        #[serde(default)]
+        table: String,
+        #[serde(default)]
+        fallback: Option<String>,
     },
     #[serde(other)]
     Unknown,
@@ -2166,6 +2185,14 @@ impl Message {
                 }
                 _ => None,
             })
+    }
+
+    /// Does this message carry the `chart` part `part_id`? (Its fallback picture is
+    /// hidden only when the chart it stands in for is really here.)
+    pub fn has_chart_part(&self, part_id: &str) -> bool {
+        self.parts
+            .iter()
+            .any(|p| matches!(p, Part::Chart { id, .. } if id == part_id))
     }
 
     /// Open `question` parts of this message, newest last.
