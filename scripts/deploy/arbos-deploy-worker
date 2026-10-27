@@ -191,7 +191,9 @@ paths_of() {
     # /usr/local/bin/arbos-refresh-mac-download), the site sync and the OAuth secret watch.
     relay) echo "crates/arbos-relay crates/arbos-core crates/arbosctl scripts/deploy/relay-server.sh scripts/deploy/Caddyfile scripts/deploy/refresh-mac-download.sh scripts/deploy/arbos-refresh-mac-download.path scripts/deploy/site-sync.sh scripts/deploy/oauth-secret-watch.sh" ;;
     voice) echo "voice" ;;
-    agentd) echo "crates/arbos-agentd image harness" ;;
+    # agentd compiles arbos-core in (Cargo.toml: arbos-core with chart-png); a core-only merge is
+    # an agentd change too (f5ca65887 and #2025 produced no image, 2026-10-27).
+    agentd) echo "crates/arbos-agentd crates/arbos-core image harness" ;;
   esac
 }
 
