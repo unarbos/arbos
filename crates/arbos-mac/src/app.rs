@@ -356,6 +356,7 @@ impl ViewerItem {
                 bytes: None,
                 kind: Some(AttachmentKind::Image),
                 title: None,
+                chart_part: None,
             },
             by: name.to_owned(),
             when: 0,
@@ -643,6 +644,9 @@ pub struct AppState {
     /// The media viewer (feedback media-viewer-2026-10-23): a chat's media as
     /// an album, opened from an attachment card or the Library grid.
     pub media_viewer: Option<MediaViewer>,
+    /// The expanded chart overlay ([feedback chart-bubble-mac-2026-10-26]).
+    pub chart_viewer: Option<crate::ui::chart_viewer::ChartViewer>,
+    pub chart_viewer_generation: u64,
     /// Bumped on every open so the shell focuses the viewer once per opening.
     pub media_viewer_generation: u64,
     /// Bubble menu → Forward: the message the "Forward to" picker is open for.
@@ -1098,6 +1102,8 @@ impl AppState {
             details_open: None,
             media_viewer: None,
             media_viewer_generation: 0,
+            chart_viewer: None,
+            chart_viewer_generation: 0,
             forward_message: None,
             new_project_open: false,
             show_details: false,
@@ -4230,6 +4236,7 @@ impl AppState {
                     bytes: Some(data.len() as u64),
                     kind: None,
                     title: None,
+                    chart_part: None,
                 };
                 if probe.is_image() {
                     if let Some((image, trimmed)) = decode_image_pair(&data) {
@@ -4255,6 +4262,7 @@ impl AppState {
                     bytes,
                     kind: None,
                     title: None,
+                    chart_part: None,
                 },
             });
         }
@@ -4268,6 +4276,7 @@ impl AppState {
                     bytes: None,
                     kind: Some(AttachmentKind::Audio),
                     title: None,
+                    chart_part: None,
                 },
             });
         }
