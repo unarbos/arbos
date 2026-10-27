@@ -540,20 +540,40 @@ extension AppModel {
     /// `ARBOS_FIXTURE_WORKING=n` — the next agents too. Goes through the real parser.
     func fixtureBoxReport() -> BoxReport {
         let working = Set(["fx-comms"] + projects.dropFirst().prefix(max(0, DebugHooks.fixtureWorking - 1)).map(\.id))
-        let workspaces: [[String: Any]] = projects.filter { $0.id != peopleSlot }.map { p in
-            var turn: [String: Any] = ["running": working.contains(p.id)]
-            if working.contains(p.id) {
+        let nearLimit = DebugHooks.fixtureMachineNearLimit
+        let workspaces: [[String: Any]] = projects.filter { $0.id != peopleSlot }.enumerated().map { i, p in
+            let on = working.contains(p.id)
+            var turn: [String: Any] = ["running": on]
+            if on {
                 turn["current"] = ["elapsed_ms": p.id == "fx-comms" ? 42_000 : 128_000, "tool_calls": p.id == "fx-comms" ? 7 : 3]
             }
-            return ["project_id": p.id, "name": p.name, "healthy": true, "turn": turn]
+            // Settings › Machine's per-agent breakdown: a share per workspace, the busy ones
+            // biggest ([feedback machine-page-ios-2026-10-26]).
+            let usage: [String: Any] = on
+                ? ["cpu_pct": p.id == "fx-comms" ? 61.0 : 9.0, "mem_mb": p.id == "fx-comms" ? 1900 : 1100, "pids": 40, "disk_mb": p.id == "fx-comms" ? 2300 : 900]
+                : ["cpu_pct": 0.0, "mem_mb": 200 + 50 * i, "pids": 12, "disk_mb": i == 1 ? 1600 : 100 + 150 * i]
+            return ["project_id": p.id, "name": p.name, "healthy": true, "turn": turn,
+                    "jobs_running": on && p.id == "fx-comms" ? 1 : 0, "usage": usage]
         }
+        // `ARBOS_FIXTURE_MACHINE=near-limit`: disk 92 % and memory 88 % used, CPU 71 %.
+        let (diskAvail, memUsed, cpuPct, rx, tx, rxToday, txToday): (Int, Int, Double, Double, Double, Int, Int) = nearLimit
+            ? (819, 7209, 71.0, 4_800_000, 300_000, 6_100_000_000, 300_000_000)
+            : (6861, 2867, 23.0, 1_200_000, 80_000, 2_000_000_000, 100_000_000)
         let debug: [String: Any] = [
             "relay": ["state": "awake", "awake_for_s": 5 * 3600 + 12 * 60, "provider": "gvisor",
                       "agentd": ["image": "arbos-agent-0.1.7"]],
             "box": ["reachable": true, "state": [
-                "uptime_s": 5 * 3600 + 12 * 60, "load": [0.42, 0.38, 0.35],
-                "memory_mb": ["total": 8192, "available": 5325],
-                "disk": ["total_mb": 10240, "available_mb": 6861],
+                "uptime_s": 5 * 3600 + 12 * 60, "load": [38.5, 36.9, 32.1], "load_scope": "host",
+                "memory_mb": ["total": 8192, "available": 8192 - memUsed, "source": "cgroup"],
+                "disk": ["total_mb": 10240, "available_mb": diskAvail],
+                "resources": [
+                    "sampled_at": nowMs(), "load_scope": "host",
+                    "cpu": ["cores": 4.0, "pct": cpuPct, "source": "cgroup"],
+                    "memory": ["total_mb": 8192, "used_mb": memUsed, "source": "cgroup"],
+                    "disk": ["total_mb": 10240, "used_mb": 10240 - diskAvail, "available_mb": diskAvail,
+                             "inodes_total": 131_072, "inodes_avail": nearLimit ? 1_200 : 93_000],
+                    "net": ["rx_bps": rx, "tx_bps": tx, "rx_bytes_today": rxToday, "tx_bytes_today": txToday],
+                ],
                 "workspaces": workspaces,
             ]],
         ]
