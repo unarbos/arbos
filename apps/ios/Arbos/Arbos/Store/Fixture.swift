@@ -272,7 +272,7 @@ extension AppModel {
             messages["fx-group-launch", default: []].append(reply)
         }
         if let rows = DebugHooks.fixtureLongRows, rows > 0 {
-            messages["fx-group-launch"] = Self.longGroupTranscript(rows: rows, before: now - 4 * 3_600_000)
+            messages["fx-group-launch"] = Self.longGroupTranscript(rows: rows, before: now - 4 * 3_600_000, rich: DebugHooks.fixtureLongRich)
                 + (messages["fx-group-launch"] ?? [])
         }
         // `ARBOS_FIXTURE_DOC=<path>`: the fixture group becomes a real chat doc (a Loro
@@ -1004,7 +1004,12 @@ extension AppModel {
     /// every seventh, a relay membership line every fortieth (#1386), an image or file
     /// every twenty-fifth, a date break every three hundredth. Deterministic, so two
     /// launches render the same rows. Ends `before`; rows sit 40 s apart.
-    nonisolated static func longGroupTranscript(rows: Int, before: Int64) -> [Message] {
+    ///
+    /// `rich` (`ARBOS_FIXTURE_LONG_RICH=1`, the scroll rig's Arbonites shape): a code card
+    /// every thirteenth row, a chart bubble every seventeenth, an @mention on every fifth
+    /// prose row, one or two reactions on every fourth row, and the picture rows carry a
+    /// generated picture (`fixture-long-<n>`) instead of the empty placeholder.
+    nonisolated static func longGroupTranscript(rows: Int, before: Int64, rich: Bool = false) -> [Message] {
         let chat = "fx-group-launch"
         let people: [(sender: String, handle: String, name: String)] = [
             ("user:fx-u3", "mira-k", "Mira Kaplan"), ("user:fx-u4", "sam", "Sam Okafor"),
@@ -1025,6 +1030,24 @@ extension AppModel {
             "## Launch day timeline\n\n1. 09:30 final smoke on TestFlight\n2. 10:00 call\n3. 12:00 embargo lifts, post goes out\n4. 13:00 watch the relay dashboard\n\nCode to flip the flag: `arbosctl admin flags set launch on`.",
             "| Step | Owner | State |\n| --- | --- | --- |\n| Hero asset | Mira | done |\n| Pricing copy | Sam | review |\n| Relay deploy | Jacob | queued |",
         ]
+        let codeCards = [
+            "Here is the fix for the inset bug:\n\n```swift\nfunc composerInset(for keyboard: CGFloat) -> CGFloat {\n    guard keyboard > 0 else { return Theme.composerRest }\n    return keyboard + Theme.composerLift\n}\n```\n\nThe safe-area change lands in the next build.",
+            "Relay side, the 1012 close path:\n\n```rust\nasync fn drain(rooms: &Rooms, budget: Duration) -> usize {\n    let deadline = Instant::now() + budget;\n    let mut closed = 0;\n    for room in rooms.iter() {\n        closed += room.close_all(CloseCode::ServiceRestart).await;\n        if Instant::now() > deadline { break; }\n    }\n    closed\n}\n```",
+            "Smoke it with:\n\n```bash\ncurl -sS https://relay.arbos.life/healthz | jq '.uptime_s, .rooms'\n```",
+        ]
+        let chartSpecs = [
+            #"{"kind":"line","title":"Signups per hour","subtitle":"launch day","series":[{"name":"Web","points":[[9,12],[10,48],[11,140],[12,310],[13,260],[14,190]]},{"name":"iPhone","points":[[9,4],[10,21],[11,66],[12,180],[13,150],[14,120]]}],"x":{"label":"Hour"},"y":{"label":"Signups","min":0,"max":350}}"#,
+            #"{"kind":"bar","title":"Relay latency p95","subtitle":"ms per region","series":[{"name":"p95","points":[[1,84],[2,120],[3,96],[4,210]]}],"x":{"label":"Region"},"y":{"label":"ms","unit":"ms","min":0,"max":250}}"#,
+        ]
+        let chartTables = [
+            "| Hour | Web | iPhone |\n| --- | --- | --- |\n| 9 | 12 | 4 |\n| 10 | 48 | 21 |\n| 11 | 140 | 66 |\n| 12 | 310 | 180 |",
+            "| Region | p95 (ms) |\n| --- | --- |\n| us-east | 84 |\n| eu-west | 120 |\n| ap-south | 96 |\n| sa-east | 210 |",
+        ]
+        let mentionLines = [
+            "@sam can you take the pricing table? @mira-k has the hero.",
+            "cc @jacob — the relay dashboard shows two reconnect bursts since 10:00.",
+            "@unconst the TestFlight build from last night fixed the handle field for me.",
+        ]
         var out: [Message] = []
         out.reserveCapacity(rows)
         let start = before - Int64(rows) * 40_000
@@ -1033,6 +1056,23 @@ extension AppModel {
             var at = start + Int64(i) * 40_000
             if i > 0, i % 300 == 0 { at += 2 * 3_600_000 }
             let ts = at
+            if rich, i % 13 == 12 {
+                out.append(Message(id: id, chatId: chat, role: .assistant, sender: "agent:fx-comms", status: .done, turn: .reply, decision: "reply",
+                                   subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: ts, completedAt: ts + 3_000,
+                                   pending: false, parts: [.text(id: "\(id)-t", text: codeCards[(i / 13) % codeCards.count])], hiddenCount: 0,
+                                   senderHandle: "comms", senderName: "Comms"))
+                continue
+            }
+            if rich, i % 17 == 16 {
+                let k = (i / 17) % chartSpecs.count
+                out.append(Message(id: id, chatId: chat, role: .assistant, sender: "agent:fx-comms", status: .done, turn: .reply, decision: "reply",
+                                   subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: ts, completedAt: ts + 3_000,
+                                   pending: false,
+                                   parts: [.text(id: "\(id)-t", text: k == 0 ? "Signups by the hour since the embargo lifted:" : "Relay p95 by region, last hour:"),
+                                           .chart(id: "\(id)-c", specVersion: 1, spec: chartSpecs[k], table: chartTables[k], fallback: nil)],
+                                   hiddenCount: 0, senderHandle: "comms", senderName: "Comms"))
+                continue
+            }
             if i % 40 == 39 {
                 // What the relay writes on a membership change (#1349 / #1386).
                 let who = people[i % people.count]
@@ -1051,18 +1091,28 @@ extension AppModel {
             let who = people[(i / 3) % people.count]
             if i % 25 == 24 {
                 let image = i % 50 == 24
-                let a = image ? Attachment(name: "IMG_\(1000 + i).jpg", mime: "image/jpeg", blobRef: nil, kind: "image")
+                // Rich: a real generated picture (decoded like a relay blob); plain: the placeholder glyph.
+                let a = image ? Attachment(name: rich ? "photo-\(i).png" : "IMG_\(1000 + i).jpg", mime: rich ? "image/png" : "image/jpeg",
+                                           blobRef: rich ? "fixture-long-\(i)" : nil, kind: "image")
                               : Attachment(name: "launch-notes-\(i).pdf", mime: "application/pdf", blobRef: nil)
                 out.append(Message(id: id, chatId: chat, role: .user, sender: who.sender, status: .done, turn: nil, decision: nil, subagentId: nil,
                                    subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: ts, completedAt: nil, pending: false,
                                    parts: [.attachment(id: "\(id)-a", attachment: a)], hiddenCount: 0, senderHandle: who.handle, senderName: who.name))
                 continue
             }
+            let text = rich && i % 5 == 0 ? mentionLines[(i / 5) % mentionLines.count] : lines[i % lines.count]
             var m = Message(id: id, chatId: chat, role: .user, sender: who.sender, status: .done, turn: nil, decision: nil, subagentId: nil,
                             subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: ts, completedAt: nil, pending: false,
-                            parts: [.text(id: "\(id)-t", text: lines[i % lines.count])], hiddenCount: 0, senderHandle: who.handle, senderName: who.name)
+                            parts: [.text(id: "\(id)-t", text: text)], hiddenCount: 0, senderHandle: who.handle, senderName: who.name)
             if i % 10 == 5, i >= 5 { m.replyTo = "long-\(i - 5)" }
             out.append(m)
+        }
+        if rich {
+            for j in out.indices {
+                guard let n = Int(out[j].id.dropFirst("long-".count)), n % 4 == 3 else { continue }
+                out[j].reactions = [MessageReaction(emoji: "👍🏽", senders: ["user:fx-u3", "user:fx-u4"])]
+                if n % 8 == 7 { out[j].reactions.append(MessageReaction(emoji: "🔥", senders: ["user:gh_32490803"])) }
+            }
         }
         return out
     }
