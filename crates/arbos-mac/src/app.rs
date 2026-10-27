@@ -644,6 +644,8 @@ pub struct AppState {
     /// Chat-list column width (pt). Dragged on the right edge; persisted in
     /// `<config>/sidebar_width` ([feedback app-01M5MJ9Y91W9ZET71KTCE7PS65]).
     pub sidebar_width: f32,
+    /// The running edge drag's state (`ui::sidebar_fit::EdgeDrag`).
+    pub sidebar_edge_drag: crate::ui::sidebar_fit::EdgeDrag,
     /// Below [`NARROW_WINDOW`](crate::ui::theme::NARROW_WINDOW) the sidebar
     /// auto-hides; the header toggle (or ⌘B) floats it over the chat instead.
     pub sidebar_overlay: bool,
@@ -1106,6 +1108,7 @@ impl AppState {
             relay_link: (LinkState::Live, 0),
             rail_collapsed: crate::ui::theme::SidebarCollapsed::load(),
             sidebar_width: crate::ui::theme::SidebarWidth::load(),
+            sidebar_edge_drag: crate::ui::sidebar_fit::EdgeDrag::default(),
             sidebar_overlay: false,
             details_open: None,
             media_viewer: None,
@@ -6361,6 +6364,49 @@ impl AppState {
             crate::ui::theme::SidebarCollapsed::save(self.rail_collapsed);
         }
         cx.notify();
+    }
+
+    /// A drag of the column's right edge begins (expanded or rail): a fresh
+    /// gesture, so a width restored from the rail by an earlier drag no
+    /// longer holds the handle ([feedback sidebar-narrow-wrap-2026-10-27]).
+    pub fn begin_sidebar_edge_drag(&mut self) {
+        self.sidebar_edge_drag = crate::ui::sidebar_fit::EdgeDrag::begin(
+            (!self.rail_collapsed).then_some(self.sidebar_width),
+        );
+    }
+
+    /// Each move of that drag: the pointer's x is the width asked for. Past
+    /// the snap point the column collapses to the rail (the saved width is
+    /// kept); from the rail, crossing the snap width restores that width,
+    /// and the handle follows the pointer again once it passes it
+    /// (`ui::sidebar_fit::EdgeDrag`). The rail flip animates like the toggle.
+    pub fn drag_sidebar_edge(&mut self, x: f32, cx: &mut Context<Self>) {
+        use crate::ui::sidebar_fit::EdgeTarget;
+        match self
+            .sidebar_edge_drag
+            .target(x, self.rail_collapsed, self.sidebar_width)
+        {
+            EdgeTarget::Rail { keep } => {
+                if !self.rail_collapsed {
+                    self.rail_collapsed = true;
+                    self.sidebar_overlay = false;
+                    crate::ui::theme::SidebarCollapsed::save(true);
+                    // The width to come back to is the one the drag began
+                    // from, not the minimum the handle passed on the way.
+                    self.set_sidebar_width(keep, cx);
+                    cx.notify();
+                }
+            }
+            EdgeTarget::Expanded(width) => {
+                if self.rail_collapsed {
+                    self.rail_collapsed = false;
+                    crate::ui::theme::SidebarCollapsed::save(false);
+                    cx.notify();
+                }
+                self.set_sidebar_width(width, cx);
+            }
+            EdgeTarget::Hold => {}
+        }
     }
 
     /// Drag on the chat-list column's right edge: set width and persist it.

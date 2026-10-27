@@ -16,6 +16,7 @@ use crate::ui::composer::ComposerInput;
 use crate::ui::error_note;
 use crate::ui::frost::{frosted, MENU_BLUR};
 use crate::ui::glass;
+use crate::ui::highlight;
 use crate::ui::icons::icon;
 use crate::ui::profiles::kit;
 use crate::ui::theme::{Theme, PANEL_RADIUS, RAIL_WIDTH};
@@ -156,10 +157,12 @@ impl ConnectorsPanel {
                     .font_weight(FontWeight::SEMIBOLD)
             })
             .when(!primary, |el| {
-                el.text_color(theme.text_muted)
-                    .border_1()
-                    .border_color(theme.border)
-                    .hover(|s| s.bg(theme.surface_2))
+                highlight::button(
+                    el.text_color(theme.text_muted)
+                        .border_1()
+                        .border_color(theme.border),
+                    theme,
+                )
             })
             .child(label)
     }
@@ -463,18 +466,20 @@ impl ConnectorsPanel {
             .text_size(px(11.5))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(fg)
-            .bg(if on {
-                Theme::with_alpha(theme.online, 0.14)
-            } else {
-                theme.field
-            })
             .border_1()
             .border_color(if on {
                 Theme::with_alpha(theme.online, 0.35)
             } else {
                 theme.field_border
             })
-            .hover(|s| s.bg(theme.surface_2))
+            .map(|el| {
+                let base = if on {
+                    Theme::with_alpha(theme.online, 0.14)
+                } else {
+                    theme.field
+                };
+                highlight::washed(el, base, theme)
+            })
             .when(check, |el| el.child(icon("check", 11.0, fg)))
             .child(label)
     }
