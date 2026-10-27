@@ -213,6 +213,8 @@ struct ChatSession: View {
     private static let memoCancelDistance: CGFloat = 56
 
     @State private var showProfile = false
+    /// Unblock asks first ([feedback blocked-state-ios-2026-10-26]).
+    @State private var confirmUnblock = false
     @State private var showSearch = false
     @State private var searchText = ""
     /// Group chats: pick members to call, or call everyone.
@@ -481,6 +483,12 @@ struct ChatSession: View {
     private var isChannel: Bool { projectId == channelSlot }
     private var channelServer: Server? { channel.flatMap { model.server($0.serverId) } }
     private var counterpart: ChatMember? { people?.counterpart(me: model.user?.id) }
+    /// The DM's other person while they are on my block list ([feedback
+    /// blocked-state-ios-2026-10-26]): the header tag and the composer bar follow it.
+    private var blockedPeer: ChatMember? {
+        guard let people, !people.isGroup || people.kind == "dm", let other = counterpart else { return nil }
+        return BlockedState.isBlocked(id: other.id, handle: other.handle, in: model.blocked) ? other : nil
+    }
     private var messages: [Message] { model.messages(of: chatId) }
     private var needsAnswer: Bool { !isChannel && model.chatNeedsAnswer(chatId) }
     /// True while a turn runs, a subagent hand-off is still open, or right
@@ -653,6 +661,9 @@ struct ChatSession: View {
         // Sender names inside the bubbles: groups and channels only — never a 1:1 chat.
         let multiParty = isChannel || (people?.isGroup ?? false)
         let peopleFlag = isPeople || isChannel
+        // People I blocked: their rows fold into one line for me (groups only; a DM with
+        // them has the composer bar) — [feedback blocked-state-ios-2026-10-26].
+        let hiddenSenders = people.map { model.hiddenSenders(in: $0) } ?? []
 
         // Incremental: same ids and only the last message's content changed (streaming
         // token) — rebuild only the tail. A middle edit (reaction, etc.) falls through.
@@ -671,7 +682,7 @@ struct ChatSession: View {
                 let prev = list.count >= 2 ? list[list.count - 2] : nil
                 let slice = prev.map { [$0, last] } ?? [last]
                 let rebuilt = Transcript.rows(slice, byId: byId, projectId: slot, me: me,
-                                              people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames)
+                                              people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames, hiddenSenders: hiddenSenders)
                 let newTail: [Row]
                 if let prev {
                     let start = rebuilt.firstIndex(where: { $0.messageId == last.id }).map { ix -> Int in
@@ -698,7 +709,7 @@ struct ChatSession: View {
             let prev = list.count >= 2 ? list[list.count - 2] : nil
             let slice = prev.map { [$0, last] } ?? [last]
             let rebuilt = Transcript.rows(slice, byId: byId, projectId: slot, me: me,
-                                          people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames)
+                                          people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames, hiddenSenders: hiddenSenders)
             let newTail: [Row]
             if let prev {
                 let start = rebuilt.firstIndex(where: { $0.messageId == last.id }).map { ix -> Int in
@@ -723,7 +734,7 @@ struct ChatSession: View {
 
         let byId = Transcript.index(list)
         let next = Transcript.rows(list, byId: byId, projectId: slot, me: me,
-                                   people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames)
+                                   people: peopleFlag, agentNames: agentNames, multiParty: multiParty, memberNames: memberNames, hiddenSenders: hiddenSenders)
         // Rows appended after the last one we had (new messages) join the window, so the
         // oldest row on screen does not fall out of the view tree when a new one lands.
         // History that arrives above it — the first snapshot, a backfill, an older
@@ -855,6 +866,10 @@ struct ChatSession: View {
                             .frame(maxWidth: .infinity)
                             .frame(height: Theme.composerHeight)
                             .accessibilityIdentifier("group-silenced")
+                    } else if let peer = blockedPeer {
+                        // A DM with someone I blocked has no input ([feedback
+                        // blocked-state-ios-2026-10-26]): "You blocked X · Unblock" in its place.
+                        BlockedComposerBar(name: peer.displayName) { confirmUnblock = true }
                     } else {
                         composer
                     }
@@ -944,6 +959,11 @@ struct ChatSession: View {
                 .environment(\.theme, theme)
             }
         }
+        .confirmationDialog(BlockedState.confirmTitle(handle: blockedPeer?.handle ?? counterpart?.handle ?? ""), isPresented: $confirmUnblock, titleVisibility: .visible) {
+            Button(BlockedState.unblock) {
+                if let peer = blockedPeer, let entry = BlockRow.entry(in: model.blocked, id: peer.id, handle: peer.handle) { model.unblock(entry) }
+            }
+        } message: { Text(BlockedState.confirmNote) }
         .sheet(isPresented: $showProfile) {
             AgentEditSheet(projectId: projectId).environmentObject(model).environment(\.theme, theme)
         }
@@ -1460,6 +1480,8 @@ struct ChatSession: View {
                                     .font(.system(size: Theme.body, weight: .semibold))
                                     .foregroundStyle(theme.text)
                                     .lineLimit(1)
+                                // Blocked ([feedback blocked-state-ios-2026-10-26]): the tag after the name.
+                                if blockedPeer != nil { BlockedTag() }
                             } else {
                                 // Named multi-human group with no picture: title initials.
                                 PersonAvatar(url: nil, handle: people.title, size: Controls.avatar, name: people.title, id: people.id)
@@ -2019,7 +2041,7 @@ struct ChatSession: View {
         switch row.kind {
         // A secret ghost row has nothing to copy, forward or quote; Delete stays off too —
         // the row is the record that a value went to the vault.
-        case .system, .question, .error, .forwardHint, .secretGhost:
+        case .system, .question, .error, .forwardHint, .secretGhost, .hidden:
             return false
         case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
             return messageById[row.messageId] != nil

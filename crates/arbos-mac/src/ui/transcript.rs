@@ -113,6 +113,35 @@ pub const ASSISTANT_MAX_WIDTH: f32 = 560.0;
 pub fn assistant_cap(slot_width: f32) -> f32 {
     (slot_width - ASSISTANT_RIGHT_GAP).min(ASSISTANT_MAX_WIDTH)
 }
+/// My own bubble's share of the column in an agent chat (parity it.36): the
+/// right edge on the composer's, at most 72 % of the column.
+pub const OWN_BUBBLE_FRACTION: f32 = 0.72;
+/// People chats — DM, group, channel, a project with people in it — take
+/// more of the width on both sides (Jacob, 2026-10-26, [feedback
+/// chat-density-mac-2026-10-26]: "use more of the screen both ways, left and
+/// right per chat bubble"): my bubble may reach 80 % of the column from the
+/// right, an incoming bubble (a person's or an agent's) 80 % of the slot after
+/// the sender lane from the left. The 20 % that stays free on the far side
+/// keeps a bubble reading as mine / theirs, and leaves the hover rail its
+/// room. Grok's 560 pt ceiling stays an agent-chat rule: Grok has no group
+/// chats to measure, and a group bubble should not be narrower than a
+/// person's beside it (560 vs 655 at the 960 column before this).
+pub const PEOPLE_BUBBLE_FRACTION: f32 = 0.80;
+/// The share of its parent my own bubble may take.
+pub fn own_bubble_fraction(people: bool) -> f32 {
+    if people {
+        PEOPLE_BUBBLE_FRACTION
+    } else {
+        OWN_BUBBLE_FRACTION
+    }
+}
+/// The widest an incoming bubble in a people chat can be in a slot
+/// `slot_width` wide (the row after the sender lane) — what [`people_slot`]
+/// draws, for the layout tests.
+#[cfg(test)]
+pub(crate) fn people_cap(slot_width: f32) -> f32 {
+    slot_width * PEOPLE_BUBBLE_FRACTION
+}
 /// A new time stamp line whenever messages are this far apart.
 const STAMP_GAP_MS: u64 = 60 * 60 * 1000;
 /// Vertical rhythm measured from Grok Bot's Mac app (parity it.36, 2 px/pt):
@@ -730,6 +759,9 @@ pub struct Transcript {
     /// The open chat names its senders (group / channel, [`names_senders`]):
     /// others' bubbles carry the name inside and the time after the text.
     multi_party: bool,
+    /// The open chat is a people chat (DM / group / channel / shared project):
+    /// bubbles take [`PEOPLE_BUBBLE_FRACTION`] of their side ([`own_bubble_fraction`]).
+    people: bool,
     /// Message whose hover copy glyph is showing a checkmark, and when it started.
     copied_feedback: Option<(Id, Instant)>,
     /// The code card Copy pill reading "Copied" right now (its id, when).
@@ -822,6 +854,7 @@ impl Transcript {
             selection,
             turn_starts: HashSet::new(),
             multi_party: false,
+            people: false,
             copied_feedback: None,
             code_copied: None,
             rig_select: std::env::var("ARBOS_RIG_SELECT").ok().map(|spec| {
@@ -1354,6 +1387,11 @@ impl Transcript {
             state.active_chat(),
             state.selected_channel.is_some(),
         );
+        let people = people_chat(
+            state.selected(),
+            state.active_chat(),
+            state.selected_channel.is_some(),
+        );
         self.chat_id = chat_id;
         // People I blocked: their rows fold into one hidden line for me (the relay's
         // `blockedSenders` hint, else my block list by id) — groups only; a DM with them has
@@ -1374,6 +1412,7 @@ impl Transcript {
             &hidden_senders,
         );
         self.multi_party = multi_party;
+        self.people = people;
         // A sender change opens the turn gap. So does every new assistant /
         // project message — consecutive replies from the same agent (quick ack
         // then the answer, or two answers in a row) must not read as one bubble
@@ -2180,7 +2219,7 @@ impl Transcript {
                 el.pl(px(AVATAR_COLUMN_INSET)).gap(px(SENDER_DISC_GAP))
             })
             .children(disc)
-            .child(assistant_slot(bubble))
+            .child(incoming_slot(bubble, lane.is_some()))
             .into_any_element()
     }
 
@@ -2321,7 +2360,13 @@ impl Transcript {
                         &row.message_id,
                         cx,
                     )
-                    .max_w(relative_width(0.72))
+                    // Someone else's bubble takes the people share of the lane beside
+                    // the disc; mine takes its share of the column (people chats wider).
+                    .max_w(relative_width(if from.is_some() {
+                        PEOPLE_BUBBLE_FRACTION
+                    } else {
+                        own_bubble_fraction(self.people)
+                    }))
                     .px(px(BUBBLE_PAD_X))
                     .py(px(BUBBLE_PAD_Y))
                     .rounded(px(BUBBLE_RADIUS))
@@ -2986,17 +3031,50 @@ fn assistant_slot(bubble: impl IntoElement) -> Div {
         )
 }
 
+/// Where an incoming bubble goes in a people-chat row: the rest of the row
+/// after the sender lane, the bubble at most [`PEOPLE_BUBBLE_FRACTION`] of it
+/// ([`people_cap`]). The hover rail, absolute at the bubble's right edge,
+/// lands in the free 20 %.
+fn people_slot(bubble: impl IntoElement) -> Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .debug_selector(|| "chat-bubble-slot".into())
+        .child(
+            div()
+                .w_full()
+                .max_w(relative_width(PEOPLE_BUBBLE_FRACTION))
+                .min_w_0()
+                .flex()
+                .items_center()
+                .debug_selector(|| "chat-bubble-cap".into())
+                .child(bubble),
+        )
+}
+
+/// The slot an incoming bubble sits in: the people slot when the row carries
+/// a sender lane, Grok's agent slot otherwise.
+fn incoming_slot(bubble: impl IntoElement, lane: bool) -> Div {
+    if lane {
+        people_slot(bubble)
+    } else {
+        assistant_slot(bubble)
+    }
+}
+
 /// A question / approval card is a transcript row like a bubble (#1374, #1440 follow-up): the
 /// same left edge as an incoming bubble — after the sender's avatar lane in a people chat — and
-/// the same cap width (`assistant_slot`). The lane is left empty: the card belongs to the
-/// agent's run and the disc already sits on its bubble.
+/// the same cap width (`assistant_slot`, or the people slot after a lane). The lane is left
+/// empty: the card belongs to the agent's run and the disc already sits on its bubble.
 pub fn card_row(card: impl IntoElement, lane: bool) -> Div {
     div()
         .w_full()
         .flex()
         .when(lane, |el| el.pl(px(SENDER_LANE)))
         .debug_selector(|| "chat-card-row".into())
-        .child(assistant_slot(card))
+        .child(incoming_slot(card, lane))
 }
 
 fn relative_width(fraction: f32) -> gpui::DefiniteLength {
@@ -3338,7 +3416,7 @@ fn hover_time(time: Option<String>, opacity: f32, theme: &Theme) -> Option<Div> 
 
 /// My own bubble at its delivery opacity (see [`Delivery::opacity`]). Applied
 /// to the bubble itself, never a wrapper: the bubble's cap is
-/// `relative_width(0.72)` of its parent, and a wrapper that is itself
+/// `relative_width(own_bubble_fraction(..))` of its parent, and a wrapper that is itself
 /// content-sized shrinks that cap (v0.6.223 wrapped own bubbles a word early).
 fn own_bubble<E: Styled>(bubble: E, delivery: Delivery) -> E {
     bubble.opacity(delivery.opacity())
@@ -5485,6 +5563,24 @@ pub fn names_senders(space: Option<&Project>, chat: Option<&Chat>, channel: bool
     }
 }
 
+/// Whether the open chat is a people chat — one whose bubbles carry a sender
+/// disc on the avatar column: a DM (with or without agents), a group, a
+/// server channel, or a project with other people in it. A 1:1 agent chat is
+/// not; its bubbles keep Grok's agent-chat widths ([`assistant_cap`],
+/// [`OWN_BUBBLE_FRACTION`]).
+pub fn people_chat(space: Option<&Project>, chat: Option<&Chat>, channel: bool) -> bool {
+    if channel {
+        return true;
+    }
+    let Some(space) = space else {
+        return false;
+    };
+    match space.kind {
+        SpaceKind::Group | SpaceKind::Dm => true,
+        SpaceKind::Project => names_senders(Some(space), chat, false),
+    }
+}
+
 #[cfg(test)]
 mod selection_tests {
     //! The bubble's plain text is one string through every block (#1389):
@@ -6387,14 +6483,68 @@ mod layout_tests {
                 "pane {pane}: people card left {pcx} vs people bubble left {}",
                 e.people_bubble_left
             );
-            // The lane's slot is the column minus the avatar lane; the same
-            // cap rule applies to it (gap, at most Grok's ceiling).
-            let people_cap = assistant_cap(e.column_width - SENDER_LANE);
+            // The lane's slot is the column minus the avatar lane; a card there
+            // takes the people share of it, like an incoming bubble
+            // ([feedback chat-density-mac-2026-10-26]).
+            let cap = people_cap(e.column_width - SENDER_LANE);
             assert!(
-                pcw <= people_cap + 0.5,
-                "pane {pane}: people card width {pcw} over the lane cap {people_cap}"
+                (pcw - cap).abs() <= 1.0,
+                "pane {pane}: people card width {pcw} vs the lane cap {cap}"
             );
         }
+    }
+
+    /// Jacob, 2026-10-26 ([feedback chat-density-mac-2026-10-26]): in people
+    /// chats the bubbles use more of the width on both sides. An incoming
+    /// bubble (person or agent) fills 80 % of the slot after the sender lane
+    /// and leaves 20 % free on the right; my own bubble fills 80 % of the
+    /// column from the right and leaves 20 % free on the left — so both still
+    /// read as left / right. The agent chat keeps Grok's numbers: the 560 pt
+    /// ceiling for the agent, 72 % for me.
+    #[gpui::test]
+    fn people_chat_bubbles_take_four_fifths_of_their_side(cx: &mut TestAppContext) {
+        assert_eq!(PEOPLE_BUBBLE_FRACTION, 0.80);
+        assert_eq!(OWN_BUBBLE_FRACTION, 0.72);
+        assert_eq!(own_bubble_fraction(true), PEOPLE_BUBBLE_FRACTION);
+        assert_eq!(own_bubble_fraction(false), OWN_BUBBLE_FRACTION);
+        for pane in [REFERENCE_PANE, GROK_REF_57_PANE, 1400.0] {
+            let e = measure(cx, pane);
+            let column = e.column_width;
+            let slot = column - SENDER_LANE;
+            // The people card is the incoming bubble's frame (same slot, same cap).
+            let (pcx, pcw): (f32, f32) = (
+                e.people_card.origin.x.into(),
+                e.people_card.size.width.into(),
+            );
+            let right_free = e.column_left + column - (pcx + pcw);
+            assert!(
+                (pcw - 0.80 * slot).abs() <= 1.0,
+                "pane {pane}: incoming bubble {pcw} vs 80 % of the slot {}",
+                0.80 * slot
+            );
+            assert!(
+                (right_free - 0.20 * slot).abs() <= 1.0,
+                "pane {pane}: {right_free} free on the right of an incoming bubble (20 % of the slot = {})",
+                0.20 * slot
+            );
+            // The agent chat's bubble (no lane) is untouched: Grok's cap.
+            assert!(
+                (e.bubble_width - assistant_cap(column)).abs() <= 1.0,
+                "pane {pane}: agent-chat bubble {} vs Grok cap {}",
+                e.bubble_width,
+                assistant_cap(column)
+            );
+        }
+        // Reference window (852 pt column): incoming 641.6 wide from 66, ending
+        // 160 before the column's right edge (was 560 → 242 free); mine 681.6
+        // from the right, 170 free on the left (was 613 → 239). One share at
+        // every width: below a 750 pt column an agent's group bubble is
+        // narrower than Grok's 560 agent-chat ceiling (517 at ref 57's 696),
+        // a person's beside it is wider than its old 72 % everywhere.
+        let column = REFERENCE_PANE - 2.0 * COMPOSER_MARGIN;
+        assert!((people_cap(column - SENDER_LANE) - 641.6).abs() < 0.01);
+        assert!((column * own_bubble_fraction(true) - 681.6).abs() < 0.01);
+        assert!((column * own_bubble_fraction(false) - 613.44).abs() < 0.01);
     }
 
     #[gpui::test]
@@ -6744,7 +6894,7 @@ mod layout_tests {
                         .gap(px(SENDER_DISC_GAP))
                         .child(div().size(px(SENDER_DISC)).flex_shrink_0())
                 })
-                .child(assistant_slot(bubble))
+                .child(incoming_slot(bubble, self.lane))
                 .into_any_element();
             div()
                 .w(px(REFERENCE_PANE))
@@ -6780,7 +6930,11 @@ mod layout_tests {
             let tw: f32 = text.size.width.into();
             let tx: f32 = text.origin.x.into();
             let bx: f32 = bubble.origin.x.into();
-            let cap: f32 = assistant_cap(slot.size.width.into());
+            let cap: f32 = if lane {
+                people_cap(slot.size.width.into())
+            } else {
+                assistant_cap(slot.size.width.into())
+            };
             assert!(
                 qw < 120.0 && bw > qw + 200.0,
                 "lane={lane}: bubble {bw} pt is as narrow as its quote ({qw} pt)"
@@ -6893,7 +7047,7 @@ mod layout_tests {
                         .pl(px(AVATAR_COLUMN_INSET))
                         .gap(px(SENDER_DISC_GAP))
                         .child(div().size(px(SENDER_DISC)).flex_shrink_0())
-                        .child(assistant_slot(bubble))
+                        .child(incoming_slot(bubble, true))
                 }
                 Who::Mine | Who::Other => {
                     let body = user_message_body(
@@ -6905,9 +7059,14 @@ mod layout_tests {
                         &CodeCopy::default(),
                     );
                     let other = matches!(self.who, Who::Other);
+                    // Another person's bubble: a people chat; mine: an agent chat here.
                     let bubble = div()
                         .debug_selector(|| "test-bubble".into())
-                        .max_w(relative_width(0.72))
+                        .max_w(relative_width(if other {
+                            PEOPLE_BUBBLE_FRACTION
+                        } else {
+                            own_bubble_fraction(false)
+                        }))
                         .px(px(BUBBLE_PAD_X))
                         .py(px(BUBBLE_PAD_Y))
                         .child(sender_bubble_column(
@@ -6958,20 +7117,26 @@ mod layout_tests {
         }
     }
 
-    /// The cap a [`BubbleRow`] bubble may reach: the slot minus Grok's gap
-    /// for an agent; 72 % of the bubble's parent (the row, or the lane beside
-    /// the disc) for people — `relative_width(0.72)` is relative to the parent.
+    /// The cap a [`BubbleRow`] bubble may reach: the people share of the slot
+    /// for an agent in a group (it has a lane); 72 % of the row for my own
+    /// bubble in an agent chat; the people share of the lane beside the disc
+    /// for another person — `relative_width` is relative to the parent.
     fn bubble_cap(vcx: &mut gpui::VisualTestContext, who: Who) -> f32 {
         match who {
             Who::Agent => {
                 let slot = vcx.debug_bounds("chat-bubble-slot").expect("slot drawn");
-                assistant_cap(slot.size.width.into())
+                people_cap(slot.size.width.into())
             }
             Who::Mine | Who::Other => {
                 let parent = vcx
                     .debug_bounds("test-bubble-parent")
                     .expect("bubble parent drawn");
-                f32::from(parent.size.width) * 0.72
+                let share = if matches!(who, Who::Other) {
+                    PEOPLE_BUBBLE_FRACTION
+                } else {
+                    own_bubble_fraction(false)
+                };
+                f32::from(parent.size.width) * share
             }
         }
     }
@@ -8761,6 +8926,23 @@ mod system_line_tests {
         );
         assert!(names_senders(None, None, true), "channel");
         assert!(!names_senders(None, None, false), "nothing open");
+        // People chats take the wider bubble share ([feedback
+        // chat-density-mac-2026-10-26]): every chat with a sender disc, the
+        // 1:1 DM included; never the 1:1 agent chat.
+        assert!(
+            people_chat(Some(&dm), None, false),
+            "1:1 DM is a people chat"
+        );
+        assert!(people_chat(Some(&dm_with_agent), None, false));
+        assert!(people_chat(Some(&group), None, false));
+        assert!(people_chat(Some(&shared), None, false));
+        assert!(people_chat(Some(&agent), Some(&agent_group), false));
+        assert!(people_chat(None, None, true), "channel");
+        assert!(
+            !people_chat(Some(&agent), None, false),
+            "me ↔ agent keeps Grok's widths"
+        );
+        assert!(!people_chat(None, None, false));
     }
 }
 
