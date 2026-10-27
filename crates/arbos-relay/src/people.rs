@@ -1358,7 +1358,12 @@ pub async fn chat_leave(
     // Only a group keeps a chat for the others to read; a DM just ends.
     if cm.chat.kind == "group" {
         let line = notices::left_line(&notices::person_name(&state, &me));
-        if let Err(e) = notices::post_people_notice(&state, &id, &line).await {
+        let n = notices::Notice {
+            kind: "left",
+            actor: me.clone(),
+            subjects: vec![],
+        };
+        if let Err(e) = notices::post_people_notice(&state, &id, &line, n).await {
             tracing::warn!(chat = %id, error = %e, "membership notice not written");
         }
     }
@@ -1605,7 +1610,12 @@ pub async fn agent_add(
         std::slice::from_ref(&project.name),
     );
     if let Some(line) = line {
-        if let Err(e) = notices::post_people_notice(&state, &id, &line).await {
+        let n = notices::Notice {
+            kind: "added",
+            actor: me.clone(),
+            subjects: vec![notices::subject_agent(&project.id)],
+        };
+        if let Err(e) = notices::post_people_notice(&state, &id, &line, n).await {
             tracing::warn!(chat = %id, error = %e, "membership notice not written");
         }
     }
@@ -1804,7 +1814,12 @@ pub async fn agent_remove(
         &[notices::agent_name(&state, &project_id)],
     );
     if let Some(line) = line {
-        if let Err(e) = notices::post_people_notice(&state, &id, &line).await {
+        let n = notices::Notice {
+            kind: "removed",
+            actor: me.clone(),
+            subjects: vec![notices::subject_agent(&project_id)],
+        };
+        if let Err(e) = notices::post_people_notice(&state, &id, &line, n).await {
             tracing::warn!(chat = %id, error = %e, "membership notice not written");
         }
     }
@@ -1928,6 +1943,7 @@ pub async fn member_add(
         );
     }
     let mut names: Vec<String> = Vec::new();
+    let mut subjects: Vec<serde_json::Value> = Vec::new();
     for other in &people {
         let other_id = other.id.clone();
         if state
@@ -1965,6 +1981,7 @@ pub async fn member_add(
         notify_members(&state, &cm, &me, &event);
         tracing::info!(chat = %id, user = %other_id, %me, "person added to a people chat");
         names.push(notices::person_name(&state, &other_id));
+        subjects.push(notices::subject_user(&other_id));
     }
     for project in &agents {
         if let Err(e) = state.db.add_member(
@@ -1977,6 +1994,7 @@ pub async fn member_add(
             return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
         }
         names.push(project.name.clone());
+        subjects.push(notices::subject_agent(&project.id));
     }
     if cm.chat.kind == "dm" {
         let _ = state.db.set_people_chat_kind(&id, "group");
@@ -1984,7 +2002,12 @@ pub async fn member_add(
     // Notice row first (ARB-393), then the slower follow-up work: box wakes, agent pushes
     // and the Matrix mirror.
     if let Some(line) = notices::added_line(&notices::person_name(&state, &me), &names) {
-        if let Err(e) = notices::post_people_notice(&state, &id, &line).await {
+        let n = notices::Notice {
+            kind: "added",
+            actor: me.clone(),
+            subjects,
+        };
+        if let Err(e) = notices::post_people_notice(&state, &id, &line, n).await {
             tracing::warn!(chat = %id, error = %e, "membership notice not written");
         }
     }
@@ -2141,7 +2164,12 @@ pub async fn member_remove(
         &[notices::person_name(&state, &user_id)],
     );
     if let Some(line) = line {
-        if let Err(e) = notices::post_people_notice(&state, &id, &line).await {
+        let n = notices::Notice {
+            kind: "removed",
+            actor: me.clone(),
+            subjects: vec![notices::subject_user(&user_id)],
+        };
+        if let Err(e) = notices::post_people_notice(&state, &id, &line, n).await {
             tracing::warn!(chat = %id, error = %e, "membership notice not written");
         }
     }
@@ -2657,6 +2685,10 @@ pub struct ChatSettingsBody {
     /// Archive (hide) this chat for me on every device; `false` brings it back (D78).
     #[serde(default)]
     pub archived: Option<bool>,
+    /// Notification level for me in this chat: `all` | `mentions` | `none` | `inherit`
+    /// (the account default, `PUT /me/notifications`). Any chat kind.
+    #[serde(default)]
+    pub notifications: Option<String>,
 }
 
 /// Flip the archive state for the caller and tell their other devices (`chat_archived`).
@@ -2691,7 +2723,9 @@ fn apply_archive(
     Ok(at)
 }
 
-/// `PUT /chats/{id}/settings {"read_receipts"?, "muted"?}` — my own settings for this chat.
+/// `PUT /chats/{id}/settings {"read_receipts"?, "muted"?, "archived"?, "notifications"?}` — my
+/// own settings for this chat. The answer carries `notifications` (the level set here, or
+/// `inherit`).
 /// Receipts themselves travel in the room (Presence frames `{seen: <message id>}`); clients of
 /// a member with `read_receipts: false` simply do not send them, and others do not show theirs
 /// to that member.
@@ -2717,7 +2751,7 @@ pub async fn chat_settings(
             return api_error(
                 StatusCode::BAD_REQUEST,
                 "bad_request",
-                "only archived applies to a project chat",
+                "only archived and notifications apply to a project chat",
             );
         }
         if let Some(a) = b.archived {
@@ -2725,8 +2759,15 @@ pub async fn chat_settings(
                 return *r;
             }
         }
+        if let Err(r) = apply_notify_level(&state, &me, &id, b.notifications.as_deref()) {
+            return *r;
+        }
         return match state.db.chat(&project_id, &id) {
-            Ok(Some(c)) => Json(crate::api::chat_json_for(&state, &c, Some(&me))).into_response(),
+            Ok(Some(c)) => {
+                let mut v = crate::api::chat_json_for(&state, &c, Some(&me));
+                v["notifications"] = json!(notify_level_of(&state, &me, &id));
+                Json(v).into_response()
+            }
             Ok(None) => api_error(StatusCode::NOT_FOUND, "not_found", "no such chat"),
             Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
         };
@@ -2759,10 +2800,54 @@ pub async fn chat_settings(
             return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
         }
     }
+    if let Err(r) = apply_notify_level(&state, &me, &id, b.notifications.as_deref()) {
+        return *r;
+    }
     match load_chat(&state, &id) {
-        Ok(cm) => Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response(),
+        Ok(cm) => {
+            let mut v = chat_json(&state, &cm, &me, &device_of(&principal));
+            v["notifications"] = json!(notify_level_of(&state, &me, &id));
+            Json(v).into_response()
+        }
         Err(r) => *r,
     }
+}
+
+/// Store the caller's notification level for a chat when the body names one.
+fn apply_notify_level(
+    state: &AppState,
+    me: &str,
+    chat_id: &str,
+    level: Option<&str>,
+) -> Result<(), Box<Response>> {
+    let Some(word) = level else {
+        return Ok(());
+    };
+    let Some(level) = crate::push::eligibility::Level::parse(word) else {
+        return Err(Box::new(api_error(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "notifications must be all, mentions, none or inherit",
+        )));
+    };
+    state
+        .db
+        .set_chat_notify_level(me, chat_id, level)
+        .map_err(|e| {
+            Box::new(api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db",
+                e.to_string(),
+            ))
+        })
+}
+
+fn notify_level_of(state: &AppState, me: &str, chat_id: &str) -> &'static str {
+    state
+        .db
+        .chat_notify_level(me, chat_id)
+        .unwrap_or(crate::push::eligibility::Level::Inherit)
+        .as_str()
 }
 
 // ---- invite links (people who are not on Arbos yet) -----------------------------------------
@@ -3257,7 +3342,12 @@ pub async fn group_join(
     notify_members(&state, &cm, &me, &event);
     state.matrix.touch_chat(&state, &inv.chat_id, None);
     let line = format!("{} joined", notices::person_name(&state, &me));
-    if let Err(e) = notices::post_people_notice(&state, &inv.chat_id, &line).await {
+    let n = notices::Notice {
+        kind: "joined",
+        actor: me.clone(),
+        subjects: vec![],
+    };
+    if let Err(e) = notices::post_people_notice(&state, &inv.chat_id, &line, n).await {
         tracing::warn!(chat = %inv.chat_id, error = %e, "join notice not written");
     }
     match load_chat(&state, &inv.chat_id) {
@@ -3497,6 +3587,53 @@ fn block_in_the_way(state: &AppState, user_id: &str, cm: &ChatWithMembers) -> Op
 /// Called on every row a device pushes into `people/<chat>`: rate limit, block check, a
 /// coalesced `people_message` push to the other people in the chat. Returns the users whose
 /// boxes host an agent of this chat, so the caller can wake them.
+/// May this person write into this chat at all? A DM partner's block either way, or an admin
+/// silence, says no. Shared by the room push and `/chats/{id}/notify` (#2012), so the
+/// announcement path is never looser than the row path.
+fn sender_allowed(
+    state: &AppState,
+    user_id: &str,
+    cm: &ChatWithMembers,
+) -> Result<(), PushRefused> {
+    if let Some(r) = block_in_the_way(state, user_id, cm) {
+        return Err(r);
+    }
+    // Admin mute from posting: silenced members cannot send into the room.
+    if cm
+        .members
+        .iter()
+        .any(|m| m.user_id() == Some(user_id) && membership_is_silenced(m))
+    {
+        return Err(PushRefused::Silenced);
+    }
+    Ok(())
+}
+
+/// [`sender_allowed`] for a principal: devices are gated as their person, boxes (agents) pass,
+/// a chat that does not load is `NotAvailable`. One `warn!` per refusal, like the room push.
+pub fn sender_gate(
+    state: &AppState,
+    principal: &Principal,
+    chat_id: &str,
+) -> Result<(), PushRefused> {
+    let Principal::Device { user_id, .. } = principal else {
+        return Ok(());
+    };
+    let Ok(cm) = load_chat(state, chat_id) else {
+        return Err(PushRefused::NotAvailable);
+    };
+    sender_allowed(state, user_id, &cm).inspect_err(|r| {
+        tracing::warn!(
+            user = %user_id,
+            chat = %chat_id,
+            code = r.code(),
+            reason = r.reason().unwrap_or("-"),
+            by = r.other_party().map(|(h, _)| h).unwrap_or("-"),
+            "people notify refused"
+        );
+    })
+}
+
 pub fn on_room_push(
     state: &AppState,
     principal: &Principal,
@@ -3521,16 +3658,8 @@ pub fn on_room_push(
         return refused(PushRefused::NotAvailable);
     };
     let humans = human_user_ids(&cm);
-    if let Some(r) = block_in_the_way(state, user_id, &cm) {
+    if let Err(r) = sender_allowed(state, user_id, &cm) {
         return refused(r);
-    }
-    // Admin mute from posting: silenced members cannot send into the room.
-    if cm
-        .members
-        .iter()
-        .any(|m| m.user_id() == Some(user_id.as_str()) && membership_is_silenced(m))
-    {
-        return refused(PushRefused::Silenced);
     }
     let limit = if young_account(state, user_id) {
         MSGS_PER_MIN / 2
@@ -3559,9 +3688,15 @@ pub fn on_room_push(
         project_id: None,
         text: None,
     });
+    let chat_ref = crate::notify::ChatRef::people(chat_id);
     for other in humans.iter().filter(|u| *u != user_id) {
         // A member who blocked the sender hears nothing of this row (hidden for them alone).
         if state.db.blocks(other, user_id).unwrap_or(false) {
+            continue;
+        }
+        // Level `none` (or the old mute): no in-app banner either. Mentions cannot be judged
+        // here (no text yet); the announcement path handles mentions-only chats.
+        if crate::push::eligibility::silenced_by_level(state, other, &chat_ref) {
             continue;
         }
         // Archived for them: hidden on purpose, no notification (D78).
@@ -3767,39 +3902,11 @@ mod block_refusal_tests {
 
     use arbos_core::ids::ulid;
 
-    use super::tests_support::{dm, person};
+    use super::tests_support::{dm, group, person};
     use super::*;
     use crate::notify::{notify_people_chat, NotifyBody};
     use crate::state::test_support::test_state;
     use crate::state::AuthMode;
-
-    fn group(state: &AppState, members: &[&str]) -> String {
-        let chat = PeopleChat {
-            id: ulid(),
-            kind: "group".into(),
-            created_by: members[0].to_owned(),
-            created_at: now_ms(),
-            title: Some("Arbonites".into()),
-            image_key: None,
-            avatar_leaf: None,
-            avatar_leaf_color: None,
-            description: None,
-        };
-        state.db.insert_people_chat(&chat).expect("chat");
-        for u in members {
-            state
-                .db
-                .add_member(
-                    &chat.id,
-                    &format!("user:{u}"),
-                    "owner",
-                    members[0],
-                    &json!({}),
-                )
-                .expect("member");
-        }
-        chat.id
-    }
 
     fn pushes_of(state: &AppState, dev: &Principal) -> Vec<String> {
         state
@@ -3823,6 +3930,7 @@ mod block_refusal_tests {
                 reply_ref: None,
                 kind: None,
                 voice_text: None,
+                mentions: Vec::new(),
             }),
         )
         .await;
@@ -4738,6 +4846,7 @@ mod read_cursor_tests {
                 reply_ref: None,
                 kind: None,
                 voice_text: None,
+                mentions: Vec::new(),
             }),
         )
         .await;
@@ -5197,6 +5306,35 @@ pub(crate) mod tests_support {
                 user_id: user.id,
             },
         )
+    }
+
+    /// A people group ("Arbonites") of these humans; the first is the owner.
+    pub fn group(state: &AppState, members: &[&str]) -> String {
+        let chat = PeopleChat {
+            id: ulid(),
+            kind: "group".into(),
+            created_by: members[0].to_owned(),
+            created_at: now_ms(),
+            title: Some("Arbonites".into()),
+            image_key: None,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
+            description: None,
+        };
+        state.db.insert_people_chat(&chat).expect("chat");
+        for u in members {
+            state
+                .db
+                .add_member(
+                    &chat.id,
+                    &format!("user:{u}"),
+                    "owner",
+                    members[0],
+                    &json!({}),
+                )
+                .expect("member");
+        }
+        chat.id
     }
 
     pub fn dm(state: &AppState, a: &str, b: &str) -> String {

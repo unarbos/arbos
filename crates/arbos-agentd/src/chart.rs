@@ -195,6 +195,7 @@ pub async fn post(
             anyhow::bail!("the chart row did not read back from the chat doc");
         }
     }
+    a.note_posted(&target.chat_id, &msg_id).await;
     if target.main_turn {
         if let Some(t) = a.turn.lock().await.as_mut() {
             t.attachments_posted.push(msg_id.clone());
