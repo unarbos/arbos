@@ -18,7 +18,7 @@ use crate::image_picker;
 use crate::model::{now_ms, CallKind, MachineState, Person};
 use crate::sign_in;
 use crate::sync::user_error::{ErrorClass, UserError};
-use crate::sync::PictureSource;
+use crate::sync::{ClientCommand, PictureSource};
 use crate::ui::avatar_picker;
 use crate::ui::avatars::{self, leaf, LeafPick};
 use crate::ui::blocked;
@@ -46,6 +46,7 @@ use crate::ui::onboarding;
 use crate::ui::palette;
 use crate::ui::people;
 use crate::ui::profiles;
+use crate::ui::profiles::machine;
 use crate::ui::rail;
 use crate::ui::reactions;
 use crate::ui::routines::{RoutinesEvent, RoutinesPanel};
@@ -136,6 +137,21 @@ pub(crate) enum SettingsPage {
 }
 
 impl SettingsPage {
+    /// The pages my pane's Settings list shows today (`profiles/me.rs`, in
+    /// its order); the search index must find each of them
+    /// ([feedback search-settings-mac-2026-10-26], `palette::tests`).
+    #[cfg(test)]
+    pub(crate) const LISTED: [SettingsPage; 8] = [
+        SettingsPage::Appearance,
+        SettingsPage::Notifications,
+        SettingsPage::Secrets,
+        SettingsPage::Devices,
+        SettingsPage::ThisMac,
+        SettingsPage::Machine,
+        SettingsPage::Updates,
+        SettingsPage::About,
+    ];
+
     pub(crate) fn title(self) -> &'static str {
         match self {
             SettingsPage::Root => "Settings",
@@ -421,6 +437,11 @@ pub struct Shell {
     /// Rig: `ARBOS_OPEN_SETTINGS=bottom` — my pane opens scrolled to its end
     /// (Sign out) each time it fills the pane.
     settings_open_at_bottom: bool,
+    /// Settings › Machine: the per-agent breakdown is unfolded (folds when the page goes).
+    pub(crate) machine_breakdown_open: bool,
+    /// Settings › Machine: a `GET /machine/debug` poll loop is running (`machine::POLL_MS`);
+    /// the loop stops itself when the page is no longer shown.
+    machine_polling: bool,
     /// Rig: `ARBOS_PROFILE_SCROLL=bottom` — a freshly opened agent pane starts scrolled to
     /// its end (Permissions · Profile sit below the fold on the 1440×900 rig display).
     profile_open_at_bottom: bool,
@@ -1155,6 +1176,8 @@ impl Shell {
             agent_pick_reveal: false,
             // `ARBOS_OPEN_SETTINGS_BOTTOM=1` does the same for any Settings page (a Secret
             // page's People / Activity cards sit below the fold on the rig).
+            machine_breakdown_open: false,
+            machine_polling: false,
             settings_open_at_bottom: open_settings.as_deref() == Some("bottom")
                 || std::env::var("ARBOS_OPEN_SETTINGS_BOTTOM").is_ok_and(|v| v == "1"),
             profile_open_at_bottom: std::env::var("ARBOS_PROFILE_SCROLL")
@@ -1408,6 +1431,94 @@ impl Shell {
             SettingsPage::Secrets => self.secrets.update(cx, |p, cx| p.hide(cx)),
         }
         self.settings_page = SettingsPage::Root;
+    }
+
+    // ----- Settings › Machine ([feedback machine-page-mac-2026-10-26]) ----------------
+
+    /// Is the Machine page what the pane shows right now?
+    fn machine_page_shown(&self, cx: &App) -> bool {
+        self.settings_page == SettingsPage::Machine
+            && self.state.read(cx).profile == Some(ProfilePage::Me)
+    }
+
+    /// Called from the Machine page's render: fetch now and keep fetching every
+    /// `machine::POLL_MS` while the page is shown. The loop ends itself the first tick the page
+    /// is gone (back, close, Escape, another page, the rig's launch state included).
+    pub(crate) fn ensure_machine_poll(&mut self, cx: &mut Context<Self>) {
+        if machine::poll_step(self.machine_polling, true) != machine::PollStep::Start {
+            return;
+        }
+        self.machine_polling = true;
+        // The first fetch happens inside the task (this is called from a render), then one
+        // every `POLL_MS`.
+        cx.spawn(async move |this, cx| loop {
+            let keep = this.update(cx, |this, cx| {
+                let on_page = this.machine_page_shown(cx);
+                match machine::poll_step(this.machine_polling, on_page) {
+                    machine::PollStep::Tick => {
+                        this.state
+                            .update(cx, |s, _| s.command(ClientCommand::MachineDebugRefresh));
+                        true
+                    }
+                    machine::PollStep::Stop | machine::PollStep::Idle => {
+                        this.machine_polling = false;
+                        this.machine_breakdown_open = false;
+                        false
+                    }
+                    machine::PollStep::Start => unreachable!("the loop is the poll"),
+                }
+            });
+            if !keep.unwrap_or(false) {
+                break;
+            }
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(machine::POLL_MS))
+                .await;
+        })
+        .detach();
+    }
+
+    pub(crate) fn toggle_machine_breakdown(&mut self, cx: &mut Context<Self>) {
+        self.machine_breakdown_open = !self.machine_breakdown_open;
+        cx.notify();
+    }
+
+    /// "Request a bigger machine": a request to Jacob through the feedback sheet, as the
+    /// Credits page's top-up (a Daytona snapshot carries a fixed spec; the resize is manual).
+    pub(crate) fn request_bigger_machine(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let spec = self.state.read(cx).machine.spec.clone();
+        self.open_feedback(window, cx);
+        self.feedback.update(cx, |sheet, cx| {
+            sheet.note.update(cx, |note, cx| {
+                if note.text().trim().is_empty() {
+                    let now = spec.map(|s| format!(" (now {s})")).unwrap_or_default();
+                    note.set_text(format!("Bigger machine request{now}: "), cx);
+                }
+            });
+        });
+    }
+
+    /// "Ask <agent> to free space": that agent's chat with the ask in the composer, ready to
+    /// send (agentd's disk gate answers "free space" itself, #1641).
+    pub(crate) fn ask_agent_to_free_space(
+        &mut self,
+        project_id: crate::model::Id,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.update(cx, |s, cx| {
+            s.select_project(project_id, cx);
+            s.close_profile(cx);
+        });
+        self.hide_settings_page(cx);
+        self.composer.update(cx, |c, cx| {
+            if c.input.read(cx).text().trim().is_empty() {
+                c.input
+                    .update(cx, |i, cx| i.set_text(machine::FREE_SPACE_ASK.into(), cx));
+            }
+        });
+        Composer::focus(&self.composer, window, cx);
+        cx.notify();
     }
 
     /// The pane's `‹` on a pushed page: back to the Settings list.
@@ -2641,8 +2752,60 @@ impl Shell {
     ) {
         self.close_palette(window, cx);
         self.hidden_open = false;
-        self.state
-            .update(cx, |s, cx| s.open_palette_target(target, cx));
+        match target {
+            crate::palette::Target::Setting(setting) => self.open_setting(setting, window, cx),
+            other => self
+                .state
+                .update(cx, |s, cx| s.open_palette_target(other, cx)),
+        }
+    }
+
+    /// A Settings row picked in the palette ([feedback
+    /// search-settings-mac-2026-10-26]): my pane straight on that page, the
+    /// Secrets panel on its form, the feedback sheet, my Profile tab, or an
+    /// owned agent's pane with the setting row dropped down.
+    pub(crate) fn open_setting(
+        &mut self,
+        setting: crate::palette::SettingTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::palette::SettingTarget;
+        match setting {
+            SettingTarget::Page(page) => self.open_settings_page(page, window, cx),
+            SettingTarget::SecretsNew => {
+                self.open_settings_page(SettingsPage::Secrets, window, cx);
+                self.secrets.update(cx, |p, cx| p.show_add(cx));
+            }
+            SettingTarget::SecretsConnect => {
+                self.open_settings_page(SettingsPage::Secrets, window, cx);
+                self.secrets.update(cx, |p, cx| p.show_connect(cx));
+            }
+            SettingTarget::Feedback => self.open_feedback(window, cx),
+            SettingTarget::Profile => {
+                self.hide_settings_page(cx);
+                self.settings_page = SettingsPage::Root;
+                self.state.update(cx, |s, cx| {
+                    if s.profile != Some(ProfilePage::Me) {
+                        s.open_profile(ProfilePage::Me, cx);
+                    }
+                    s.set_profile_tab(0, cx);
+                });
+                cx.notify();
+            }
+            SettingTarget::Agent { project_id, pick } => {
+                self.hide_settings_page(cx);
+                self.settings_page = SettingsPage::Root;
+                self.state.update(cx, |s, cx| {
+                    s.open_server = None;
+                    s.select_project(project_id.clone(), cx);
+                    s.open_profile(ProfilePage::Agent { project_id }, cx);
+                    s.set_profile_tab(0, cx);
+                    s.set_agent_pick(Some(pick), cx);
+                });
+                cx.notify();
+            }
+        }
     }
 
     /// Escape stops a recording memo (keeping its transcript), then closes
@@ -4828,6 +4991,9 @@ impl Render for Shell {
             }
             if page == ProfilePage::Me && !self.settings_page_alive(cx) {
                 self.settings_page = SettingsPage::Root;
+            }
+            if page == ProfilePage::Me && self.settings_page == SettingsPage::Machine {
+                self.ensure_machine_poll(cx);
             }
             let pane_width = self.pane_width(&page);
             match (profiles::pane(&page, self, cx), frame.pane_sliding) {

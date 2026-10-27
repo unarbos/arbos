@@ -453,6 +453,7 @@ pub async fn deliver(
             anyhow::bail!("the attachment row did not read back from the chat doc");
         }
     }
+    a.note_posted(&target.chat_id, &msg_id).await;
     if target.main_turn {
         if let Some(t) = a.turn.lock().await.as_mut() {
             t.attachments_posted.push(msg_id.clone());
@@ -749,6 +750,54 @@ mod tests {
         let row = h.doc.message(&id).unwrap();
         assert_eq!(row.rest["inReplyTo"], json!("m-busy"));
         assert_eq!(attachment_parts(&row).len(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// #2025: with nothing read back in the chat, a bubble that claims a post is refused with the
+    /// correction; after a real delivery the same bubble goes through.
+    #[tokio::test]
+    async fn a_posted_claim_needs_a_read_back_row() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATATTACH0000000004";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        {
+            let h = host.lock().await;
+            h.doc
+                .append_user_message(
+                    "m-busy",
+                    "post the chart",
+                    "dev-mac",
+                    &arbos_core::doc::UserMessageOpts::default(),
+                )
+                .unwrap();
+        }
+        let _busy = agent.test_hold_turn(chat).await;
+        let r = agent
+            .hook_send_message(
+                "Correction: the chart is posted. The chat service then confirmed it.",
+                None,
+                None,
+            )
+            .await;
+        assert!(r.is_err(), "claim with no read-back must be refused");
+        assert!(r.unwrap_err().contains("Not sent"));
+        assert!(agent
+            .hook_send_message(
+                "The chart did not confirm as posted; the card above needs your approval.",
+                None,
+                None
+            )
+            .await
+            .is_ok());
+        let dir = out_dir(&agent.cfg);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("chart.png"), b"\x89PNG\r\n\x1a\nfake").unwrap();
+        let v = deliver_file(&agent, &json!({ "path": "out/chart.png" })).await;
+        assert!(v.get("isError").is_none(), "{v}");
+        assert!(agent
+            .hook_send_message("The chart is posted above as a picture.", None, None)
+            .await
+            .is_ok());
         let _ = std::fs::remove_dir_all(root);
     }
 
