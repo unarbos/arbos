@@ -985,7 +985,7 @@ extension AppModel {
         guard let url = blobURL(projectId: item.slot, key: ref) else { return }
         Task { @MainActor in
             guard let (data, _) = await MediaFetch.data(url, headers: authHeaders) else {
-                notice = Notice(text: "Couldn't forward \(item.name)")
+                fail(UserError.fromText("forward \(item.name)", "the file could not be fetched"))
                 return
             }
             let pending = PendingAttachment(name: item.name, mime: item.mime, data: data)
