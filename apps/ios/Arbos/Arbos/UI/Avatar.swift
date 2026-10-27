@@ -63,18 +63,32 @@ struct AgentAvatar: View {
     var idle: Bool = false
     @State private var gust = 0
 
+    /// Jacob's rule (2026-10-26): every surface draws an agent through ONE resolver, keyed by
+    /// agent id and avatar version — never the copy it happened to be handed. The caller's
+    /// `project` names the agent (id, name, machine dot); what is drawn comes from the model's
+    /// newest copy (`AppModel.newestAgentAvatar`): a stale record or roster copy on some screen
+    /// (the mention table's raw `model.projects` entry, a roster row's `project`) can no longer
+    /// show a different picture than the row next to it.
+    private var shown: Project {
+        guard let model = AppModel.current, let facts = model.newestAgentAvatar(project.id) else { return project }
+        var p = project
+        p.imageKey = facts.imageKey
+        p.avatarLeaf = facts.avatarLeaf
+        p.avatarLeafColor = facts.avatarLeafColor
+        p.avatarVersion = facts.version
+        p.imageURL = model.agentPictureURL(id: project.id, imageKey: facts.imageKey, version: facts.version)
+        return p
+    }
+
     var body: some View {
+        let project = shown
         ZStack(alignment: .bottomTrailing) {
             if let url = project.imageURL, !url.isEmpty {
-                // D92 amendment: the uploaded / generated picture wins over the leaf.
+                // D92 amendment: the uploaded / generated picture wins over the leaf. While the
+                // picture loads the disc is the neutral initial — never the leaf, which would
+                // read as "the agent's avatar changed" for a moment (Jacob, 2026-10-26).
                 AgentPicture(url: url, size: size) {
-                    if LeafArt.isNeutral(project.avatarLeaf) {
-                        NeutralAvatar(name: project.name, size: size)
-                    } else if flag.on {
-                        LeafAvatar(pick: LeafArt.pick(project), size: size)
-                    } else {
-                        Circle().fill(theme.field)
-                    }
+                    NeutralAvatar(name: project.name, size: size)
                 }
             } else if LeafArt.isNeutral(project.avatarLeaf) {
                 // Jacob, 2026-10-25: created with no leaf — the name's initial on a neutral disc.

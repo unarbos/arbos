@@ -95,7 +95,7 @@ pub(super) fn page(
                 if p.is_people() {
                     groups::picture(p, state, kit::AVATAR, &theme).into_any_element()
                 } else {
-                    avatars::project(p, kit::AVATAR, &theme).into_any_element()
+                    avatars::project_in(state, p, kit::AVATAR, &theme).into_any_element()
                 }
             })
             .collect();
