@@ -90,6 +90,18 @@ fn render_note(quoted: &MessageView, replying: &MessageView, me: &Me<'_>) -> Str
     )
 }
 
+/// The quoted row is one of this agent's own: `sender: agent` (solo chat) or
+/// `agent:<my project>` (shared chat), on an assistant / project row.
+pub fn quoted_is_mine(quoted: &MessageView, me: &Me<'_>) -> bool {
+    let sender = quoted
+        .rest
+        .get("sender")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    matches!(quoted.role.as_str(), "assistant" | "project")
+        && (sender == "agent" || sender.is_empty() || sender == format!("agent:{}", me.project_id))
+}
+
 /// "your earlier message", "Jacob's message", "@ops's message" (another agent), …
 fn quoted_author(quoted: &MessageView, replying: &MessageView, me: &Me<'_>) -> String {
     let sender = quoted
