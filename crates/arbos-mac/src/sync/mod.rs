@@ -38,6 +38,72 @@ use crate::model::{
     ProjectSecrets, Routine, RoutineRun, RoutineTrigger, SecretsView, Skill,
 };
 
+/// Why the relay refused a people-room push ([feedback blocked-state-relay-2026-10-26]):
+/// the frame's `code`, its `reason`, and — on a block — which way it runs and who the other
+/// party is.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PushRefusal {
+    /// The wire code (`not_available`); empty when cleared.
+    pub code: String,
+    /// `blocked_by` (they blocked me) / `blocks_member` (I blocked them) / `silenced` /
+    /// `chat_unavailable`; `None` from a relay that predates the field.
+    pub reason: Option<String>,
+    pub by_handle: Option<String>,
+    pub by_name: Option<String>,
+}
+
+impl PushRefusal {
+    pub fn code(code: &str) -> Self {
+        Self {
+            code: code.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    /// The other party's display name, else `@handle`, else nothing.
+    pub fn who(&self) -> Option<String> {
+        self.by_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                self.by_handle
+                    .as_deref()
+                    .filter(|h| !h.is_empty())
+                    .map(|h| format!("@{h}"))
+            })
+    }
+
+    /// The person to unblock, when the sentence says "Unblock to post".
+    pub fn unblock_handle(&self) -> Option<&str> {
+        (self.reason.as_deref() == Some("blocks_member"))
+            .then_some(self.by_handle.as_deref())
+            .flatten()
+            .filter(|h| !h.is_empty())
+    }
+
+    /// The plain sentence the chat-level note shows (Jacob 2026-10-26): who stands in the
+    /// way and what to do; the generic line for anything else.
+    pub fn sentence(&self) -> String {
+        match (self.reason.as_deref(), self.who()) {
+            (Some("blocked_by"), Some(who)) => format!("{who} has blocked you in this chat."),
+            (Some("blocked_by"), None) => "Someone in this chat has blocked you.".to_string(),
+            (Some("blocks_member"), Some(who)) => format!(
+                "Couldn't post: you've blocked {who}, who is in this chat. Unblock to post."
+            ),
+            (Some("blocks_member"), None) => {
+                "Couldn't post: you've blocked someone in this chat. Unblock to post.".to_string()
+            }
+            (Some("silenced"), _) => {
+                "You're muted in this chat, so your messages aren't being delivered.".to_string()
+            }
+            _ => "Messages in this chat aren't being delivered right now. We'll keep trying."
+                .to_string(),
+        }
+    }
+}
+
 /// Something the source learned; the UI applies it to its mirror.
 #[derive(Clone, Debug)]
 pub enum SyncEvent {
@@ -150,6 +216,13 @@ pub enum SyncEvent {
         chat_id: Id,
         archived_at: Option<u64>,
     },
+    /// `notifications_cleared` push: I read `chat_id` on another device. This Mac drops the
+    /// chat's delivered banners, stops showing it unread and re-badges; `badge` is the relay's
+    /// unread total after that read.
+    NotificationsCleared {
+        chat_id: Id,
+        badge: u64,
+    },
     /// `space_archived` push: another device archived / unarchived a sidebar
     /// space (an agent or a server) for me.
     SpaceArchived {
@@ -166,6 +239,11 @@ pub enum SyncEvent {
     FeedbackCapture {
         request_id: String,
         expires_at: Option<i64>,
+    },
+    /// Secret hand-off: the card's save finished — `Ok(env)` or the error for the shared note.
+    SecretHandoff {
+        approval_id: String,
+        result: Result<String, super::sync::user_error::UserError>,
     },
     /// `GET /voices`: the call voices an agent can use, and the default's id.
     Voices {
@@ -290,11 +368,12 @@ pub enum SyncEvent {
         error: UserError,
         retry: Option<Box<ClientCommand>>,
     },
-    /// A room's pushes were refused (`not_available`) or an ACK cleared that refusal.
-    /// `refused: true` → show one notice and keep a per-room flag; `false` → clear both.
+    /// A room's pushes were refused (`not_available` / `blocked`) or an ACK cleared that
+    /// refusal. `refused: true` → the chat-level note draws `why`; `false` → clear it.
     PushRefused {
         chat_id: Id,
         refused: bool,
+        why: PushRefusal,
     },
     /// Settings → Connectors: catalog + connected accounts (F1).
     Connectors(ConnectorsView),
@@ -381,6 +460,11 @@ pub enum SyncEvent {
     MatrixTimeline {
         room_id: String,
         rows: Vec<MessageRow>,
+    },
+    /// D88: a `ChannelLoadOlder` found nothing above — the room's history is
+    /// whole on this Mac (the Search-in-chat bar stops paging and wraps).
+    ChannelHistoryEnd {
+        room_id: String,
     },
     /// D88: homeserver connection state.
     MatrixConnection {
@@ -936,6 +1020,17 @@ pub enum ClientCommand {
         project_id: Id,
         grant_id: String,
     },
+    /// Secret hand-off request card: the value goes from this device to `POST /secrets`
+    /// (source `chat`, the agent granted), then the card is answered with the saved secret's
+    /// name and id — never the value — so the agent learns only the name.
+    SecretHandoffSave {
+        chat_id: Id,
+        approval_id: String,
+        project_id: Id,
+        name: String,
+        value: String,
+        purpose: String,
+    },
     /// Add a secret; the value goes to the relay once.
     SecretAdd {
         item: NewSecret,
@@ -1438,5 +1533,71 @@ mod collective_tests {
         assert!(!text_has_at_token("mail a@here.com", "here"));
         assert!(!text_has_at_token("@agents-2", "agents"));
         assert!(is_collective("Here") && is_collective("agents") && !is_collective("sam"));
+    }
+}
+
+#[cfg(test)]
+mod push_refusal_tests {
+    //! The chat-level note's words for a refused push ([feedback blocked-state-relay-2026-10-26]).
+    use super::PushRefusal;
+
+    fn blocked(reason: &str, name: Option<&str>) -> PushRefusal {
+        PushRefusal {
+            code: "not_available".into(),
+            reason: Some(reason.into()),
+            by_handle: Some("sam".into()),
+            by_name: name.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn the_sentence_names_who_stands_in_the_way() {
+        assert_eq!(
+            blocked("blocked_by", Some("Sam Rivera")).sentence(),
+            "Sam Rivera has blocked you in this chat."
+        );
+        assert_eq!(
+            blocked("blocked_by", None).sentence(),
+            "@sam has blocked you in this chat."
+        );
+        assert_eq!(
+            blocked("blocks_member", Some("Sam Rivera")).sentence(),
+            "Couldn't post: you've blocked Sam Rivera, who is in this chat. Unblock to post."
+        );
+        assert_eq!(
+            PushRefusal {
+                code: "not_available".into(),
+                reason: Some("silenced".into()),
+                ..Default::default()
+            }
+            .sentence(),
+            "You're muted in this chat, so your messages aren't being delivered."
+        );
+    }
+
+    #[test]
+    fn an_old_relay_without_a_reason_keeps_the_generic_line() {
+        for why in [
+            PushRefusal::code("not_available"),
+            PushRefusal {
+                code: "not_available".into(),
+                reason: Some("chat_unavailable".into()),
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(
+                why.sentence(),
+                "Messages in this chat aren't being delivered right now. We'll keep trying."
+            );
+        }
+        assert_eq!(
+            PushRefusal {
+                reason: Some("blocked_by".into()),
+                by_handle: Some(String::new()),
+                ..Default::default()
+            }
+            .sentence(),
+            "Someone in this chat has blocked you."
+        );
     }
 }

@@ -254,7 +254,7 @@ struct AgentProfileView: View {
                 ScrollView {
                     if let project {
                         VStack(spacing: 18) {
-                            Color.clear.frame(height: 80)
+                            Color.clear.frame(height: PaneKit.pageTop)
                             ProfilePane(
                                 hero: hero(project),
                                 tabs: PaneKinds.agent,
@@ -277,7 +277,7 @@ struct AgentProfileView: View {
                     }
                 }
             }
-            ProfileTopBar {
+            ProfileTopBar(screen: .agentPage) {
                 if editingLabel {
                     Button("Done") { commitLabel() }
                         .font(theme.font(Theme.body, weight: .semibold))
@@ -322,6 +322,18 @@ struct AgentProfileView: View {
             if let t = DebugHooks.panelTab, PaneKinds.agent.contains(t) { tab = t }
             if isMine, DebugHooks.show == "agentvoice" {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { showVoice = true }
+            }
+            // A search result for the agent's Model / Reasoning / Voice row
+            // ([feedback search-settings-ios-2026-10-26]): the pane opens with that picker up.
+            if isMine, let setting = model.pendingAgentSetting {
+                model.pendingAgentSetting = nil
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                    switch setting {
+                    case .model: showModel = true
+                    case .reasoning: showReasoning = true
+                    case .voice: showVoice = true
+                    }
+                }
             }
             if isMine, DebugHooks.show == "agentlabel" {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { startLabelEdit() }
@@ -572,7 +584,13 @@ struct AgentProfileView: View {
                 var rows: [AnyView] = []
                 if let disk = AgentPane.freeOf(available: r.diskAvailableMb, total: r.diskTotalMb) { rows.append(AnyView(PaneRow(title: "Disk", value: disk))) }
                 if let mem = AgentPane.freeOf(available: r.memAvailableMb, total: r.memTotalMb) { rows.append(AnyView(PaneRow(title: "Memory", value: mem))) }
-                if let load = r.load1m { rows.append(AnyView(PaneRow(title: "Load", value: String(format: "%.2f", load)))) }
+                // CPU share from the box's cgroup (agentd ≥ 0.6.277); the load average is the host's
+                // inside Daytona (`loadIsHost`), drawn only when it is really the box's and no CPU exists.
+                if let cpu = r.cpuPct {
+                    rows.append(AnyView(PaneRow(title: "CPU", value: "\(Int(cpu.rounded())) %")))
+                } else if let load = r.load1m, !r.loadIsHost {
+                    rows.append(AnyView(PaneRow(title: "Load", value: String(format: "%.2f", load))))
+                }
                 if let up = r.uptimeS { rows.append(AnyView(PaneRow(title: "Up for", value: AgentPane.durationS(up)))) }
                 out.append(.card(rows))
             case .running:

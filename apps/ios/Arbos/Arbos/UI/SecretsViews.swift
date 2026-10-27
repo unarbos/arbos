@@ -264,6 +264,9 @@ struct ActivityRows: View {
 struct SecretsPage: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
+    /// The form or page to open on arrival: `connect`, `new-secret`, `vault`,
+    /// `secret:<ENV>` — a search result's page or the rig's `ARBOS_SETTINGS_PAGE`.
+    var landing: String? = DebugHooks.settingsPage
     @State private var showAdd = false
     @State private var showConnect = false
     /// Rig: `ARBOS_SETTINGS_PAGE=secret:<ENV>` pushes that secret's page once the list arrives.
@@ -336,18 +339,18 @@ struct SecretsPage: View {
         }
         .task {
             await model.refreshSecrets()
-            if let env = DebugHooks.settingsPage?.stripping(prefix: "secret:"),
+            if let env = landing?.stripping(prefix: "secret:"),
                let s = model.secrets?.secrets.first(where: { $0.env == env }) {
                 rigSecretId = s.id
                 showRigSecret = true
             }
-            // Rig: `ARBOS_SETTINGS_PAGE=vault` opens the first connected vault; `connect` the Connect sheet.
-            if DebugHooks.settingsPage == "vault", let v = model.secrets?.vaults.first {
+            // `vault` opens the first connected vault; `connect` the Connect sheet; `new-secret` the form.
+            if landing == "vault", let v = model.secrets?.vaults.first {
                 rigVaultId = v.id
                 showRigVault = true
             }
-            if DebugHooks.settingsPage == "connect" { showConnect = true }
-            if DebugHooks.settingsPage == "new-secret" { showAdd = true }
+            if landing == "connect" { showConnect = true }
+            if landing == "new-secret" { showAdd = true }
         }
         .navigationDestination(isPresented: $showRigSecret) {
             if let id = rigSecretId { SecretPage(secretId: id) }
@@ -372,6 +375,10 @@ struct SecretsPage: View {
     private func secretSubtitle(_ s: SecretItem) -> String {
         let agents = s.agents.filter(\.enabled).map(\.name)
         let who = agents.isEmpty ? "no agents" : agents.joined(separator: ", ")
+        // Secret hand-off: "Arbos · given in chat · never used".
+        if let given = s.sourceLabel {
+            return "\(who) · \(given) · \(SecretsText.usage(lastUsedAt: s.lastUsedAt))"
+        }
         return "\(who) · \(SecretsText.usage(lastUsedAt: s.lastUsedAt))"
     }
 
@@ -422,6 +429,10 @@ struct SecretPage: View {
                     SettingsValueRow("Kind", value: s.kindLabel)
                     if s.name != s.env {
                         SettingsValueRow("Name", value: s.name)
+                    }
+                    // Secret hand-off: where it came from ("In chat with Arbos").
+                    if let added = s.addedLabel {
+                        SettingsValueRow("Added", value: added)
                     }
                     if let u = s.username, !u.isEmpty {
                         SettingsValueRow("Username", value: u)
