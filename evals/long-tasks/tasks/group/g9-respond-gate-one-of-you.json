@@ -1,35 +1,36 @@
 {
-  "id": "g9-respond-gate-one-of-you",
-  "lane": "a",
-  "category": "group",
-  "title": "'any of you agents, …' gets exactly one taker; a reply quoting an agent without a question is silence",
-  "turns": [
-    {
-      "prompt": "any of you agents: what is the capital of Portugal? One of you, one line.",
-      "chat": "dm",
-      "reply_regex": "Lisbon",
-      "timeout_s": 200,
-      "rubric": {
-        "criteria": "Exactly ONE agent answered (Lisbon). Fail if both lane-a and lane-b answered, or if an agent posted that it is staying quiet / leaving it to the other.",
-        "min": 3
-      }
-    },
-    {
-      "prompt": "meow",
-      "chat": "dm",
-      "expect_no_reply_s": 45,
-      "timeout_s": 60
-    }
-  ],
-  "setup_actions": [
-    {
-      "kind": "people_group",
-      "peer_handle": "lt-peer",
-      "with": [
-        "lane-b"
-      ],
-      "title": "eval respond gate one of you"
-    }
-  ],
-  "regression": "Arbonites 2026-10-27 17:16: 'To any of the available agents, i got a challenge for you' was taken by three agents ('just wanted one agent to do it'); the judge's `any one agent` verdict picks the best-scored single agent."
+ "id": "g9-respond-gate-one-of-you",
+ "lane": "a",
+ "category": "group",
+ "title": "'any of you agents, …' gets exactly one taker; a reply quoting an agent without a question is silence",
+ "turns": [
+  {
+   "prompt": "any of you agents: what is the capital of Portugal? One of you, one line.",
+   "chat": "dm",
+   "reply_regex": "Lisbon",
+   "timeout_s": 200,
+   "rubric": {
+    "criteria": "The reply text shown is every agent bubble joined. Exactly ONE agent answered (one 'Lisbon' line). Fail if two Lisbon lines appear (both lane-a and lane-b answered), or if an agent posted that it is staying quiet / leaving it to the other.",
+    "min": 3
+   },
+   "max_repliers": 1
+  },
+  {
+   "prompt": "meow",
+   "chat": "dm",
+   "expect_no_reply_s": 45,
+   "timeout_s": 60
+  }
+ ],
+ "setup_actions": [
+  {
+   "kind": "people_group",
+   "peer_handle": "lt-peer",
+   "with": [
+    "lane-b"
+   ],
+   "title": "eval respond gate one of you"
+  }
+ ],
+ "regression": "Arbonites 2026-10-27 17:16: 'To any of the available agents, i got a challenge for you' was taken by three agents ('just wanted one agent to do it'); the judge's `any one agent` verdict picks the best-scored single agent."
 }
