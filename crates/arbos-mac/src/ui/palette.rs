@@ -27,6 +27,7 @@ use crate::palette::{arrange, flatten, shortcut_label, Cursor, Entry, Kind, Sect
 use crate::search;
 use crate::ui::glass;
 use crate::ui::groups;
+use crate::ui::highlight;
 use crate::ui::icons::icon;
 use crate::ui::modal;
 use crate::ui::people;
@@ -351,8 +352,7 @@ fn row(
         .gap(px(AVATAR_GAP))
         .cursor_pointer()
         .debug_selector(move || format!("palette-row-{index}"))
-        .when(selected, |el| el.bg(theme.surface_2))
-        .hover(|s| s.bg(theme.surface_2))
+        .map(|el| highlight::row(el, selected, highlight::Shape::Own, theme))
         .child(picture(shell, entry, theme, cx))
         .child(
             div()
@@ -626,7 +626,9 @@ mod tests {
                         .items_center()
                         .gap(px(AVATAR_GAP))
                         .debug_selector(move || sel.into())
-                        .when(i == self.selected, |el| el.bg(theme.surface_2))
+                        .when(i == self.selected, |el| {
+                            el.bg(highlight::fills(&theme).selected)
+                        })
                         .child(div().size(px(AVATAR)).rounded_full().bg(theme.surface_2))
                         .child(div().flex_1().child(format!("Row {i}")));
                     if let Some(label) = shortcut_label(i) {

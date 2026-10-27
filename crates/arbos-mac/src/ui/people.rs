@@ -17,6 +17,7 @@ use crate::ui::error_note;
 use crate::ui::frost::{frosted, MENU_BLUR};
 use crate::ui::glass;
 use crate::ui::groups::project_color;
+use crate::ui::highlight::{self, Shape};
 use crate::ui::icons::icon;
 use crate::ui::identity;
 use crate::ui::profiles::kit;
@@ -207,7 +208,7 @@ pub fn new_chat_sheet(
                 .px(px(ROW_PADDING_X))
                 .py(px(10.0))
                 .cursor_pointer()
-                .hover(|st| st.bg(theme.surface_2))
+                .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), &theme))
                 .child(
                     glass::circle("new-agent-glyph", ROW_GLYPH, &theme)
                         .child(icon("sparkles", 17.0, theme.text)),
@@ -246,7 +247,7 @@ pub fn new_chat_sheet(
                 .px(px(ROW_PADDING_X))
                 .py(px(10.0))
                 .cursor_pointer()
-                .hover(|st| st.bg(theme.surface_2))
+                .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), &theme))
                 .child(
                     glass::circle("new-group-glyph", ROW_GLYPH, &theme)
                         .child(icon("people", 17.0, theme.text)),
@@ -295,7 +296,7 @@ pub fn new_chat_sheet(
                         .px(px(ROW_PADDING_X))
                         .py(px(10.0))
                         .cursor_pointer()
-                        .hover(|st| st.bg(theme.surface_2))
+                        .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), &theme))
                         .child(
                             glass::circle(
                                 ElementId::Name(SharedString::from(format!("{id}-glyph"))),
@@ -387,7 +388,7 @@ pub fn new_chat_sheet(
                     .relative()
                     .when(i + 1 < count, |el| el.child(kit::hairline_below(&theme)))
                     .cursor_pointer()
-                    .hover(|st| st.bg(theme.surface_2))
+                    .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), &theme))
                     .child(avatar(image, &person, ROW_GLYPH, &theme))
                     .child(
                         div()
@@ -668,9 +669,8 @@ fn new_group_body(
                     .relative()
                     .when(i + 1 < count, |el| el.child(kit::hairline_below(theme)))
                     .when(already, |el| el.opacity(0.5))
-                    .when(!already, |el| {
-                        el.cursor_pointer().hover(|st| st.bg(theme.surface_2))
-                    })
+                    .map(|el| highlight::row(el, selected, Shape::Nested(PANEL_RADIUS), theme))
+                    .when(!already, |el| el.cursor_pointer())
                     .child(avatars::project_with(
                         images.get(&project.id).cloned(),
                         project,
@@ -770,9 +770,8 @@ fn new_group_body(
                 .relative()
                 .when(i + 1 < count, |el| el.child(kit::hairline_below(theme)))
                 .when(already, |el| el.opacity(0.5))
-                .when(!already, |el| {
-                    el.cursor_pointer().hover(|st| st.bg(theme.surface_2))
-                })
+                .map(|el| highlight::row(el, selected, Shape::Nested(PANEL_RADIUS), theme))
+                .when(!already, |el| el.cursor_pointer())
                 .child(avatar(image.clone(), person, 40.0, theme))
                 .child(
                     div()
@@ -998,7 +997,7 @@ pub fn members_popover(
                 theme.text_muted
             })
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .map(|el| highlight::button(el, theme))
             .child(label)
     };
     // Me first.
@@ -1051,7 +1050,7 @@ pub fn members_popover(
                         .gap(px(8.0))
                         .rounded(px(6.0))
                         .cursor_pointer()
-                        .hover(|st| st.bg(theme.surface_2))
+                        .map(|el| highlight::row(el, false, Shape::Own, &theme))
                         .child(avatar(image, p, 22.0, &theme))
                         .child(
                             div()
@@ -1127,7 +1126,7 @@ pub fn members_popover(
                         ))))
                         .rounded(px(6.0))
                         .cursor_pointer()
-                        .hover(|st| st.bg(theme.surface_2))
+                        .map(|el| highlight::row(el, false, Shape::Own, &theme))
                         .child(agent_glyph(s, Some(space), a, 22.0, &theme))
                         .on_click({
                             let pid = a.project_id.clone();
@@ -1339,7 +1338,7 @@ pub fn project_members_popover(
                         .gap(px(8.0))
                         .rounded(px(6.0))
                         .cursor_pointer()
-                        .hover(|st| st.bg(theme.surface_2))
+                        .map(|el| highlight::row(el, false, Shape::Own, &theme))
                         .child(avatar(image, p, 22.0, &theme))
                         .child(
                             div()
@@ -1383,7 +1382,7 @@ pub fn project_members_popover(
                             // error-ui: exception destructive-action (Remove, not a message)
                             .text_color(theme.danger)
                             .cursor_pointer()
-                            .hover(|st| st.bg(theme.surface_2))
+                            .map(|el| highlight::button(el, &theme))
                             .child("Remove")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.members_open = false;

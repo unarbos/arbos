@@ -845,6 +845,7 @@ pub fn card_header(
                 .justify_center()
                 .rounded(px(5.0))
                 .cursor_pointer()
+                // hover-fill: exception card-option
                 .hover(|s| s.bg(palette.highlight))
                 .child(icon("xmark", 13.0, palette.close))
                 .on_click(move |e, window, cx| on_close(e, window, cx)),
@@ -900,6 +901,7 @@ pub fn option_row(
             el.bg(palette.highlight)
         })
         .when(clickable, |el| {
+            // hover-fill: exception card-option
             el.cursor_pointer().hover(|s| s.bg(palette.highlight))
         })
         .when_some(badge, |el, letter| {
