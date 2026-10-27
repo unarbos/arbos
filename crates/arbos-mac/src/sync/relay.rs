@@ -51,7 +51,9 @@ use super::dto::{
 };
 use super::store::{self, Store};
 use super::user_error::{ErrorClass, Fault, UserError};
-use super::{ClientCommand, DraftPicture, PictureSource, PictureTarget, SyncEvent, SyncSource};
+use super::{
+    ClientCommand, DraftPicture, PictureSource, PictureTarget, PushRefusal, SyncEvent, SyncSource,
+};
 use crate::model::{
     new_id, now_ms, trace_rows, AccountView, Attachment, AttachmentKind, BoxReport, BoxState, Call,
     CallEnded, CallLeft, CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView,
@@ -3536,21 +3538,35 @@ async fn perform_room_actions(
                         let _ = shared.events.send(SyncEvent::PushRefused {
                             chat_id: room_chat.to_string(),
                             refused: false,
+                            why: PushRefusal::default(),
                         });
                     }
                 }
-                RoomAction::PushRefused { batch_id: _ } => {
-                    if room_chat != PROJECT_DOC_CHAT_ID
-                        && shared
-                            .push_refused
-                            .lock()
-                            .unwrap()
-                            .insert(room_chat.to_string())
-                    {
-                        // The chat-level note draws it (`PushRefused`); the room link stays live.
+                RoomAction::PushRefused {
+                    batch_id: _,
+                    code,
+                    reason,
+                    by_handle,
+                    by_name,
+                } => {
+                    // The chat-level note draws it (`PushRefused`); the room link stays live.
+                    // A refusal with a reason is sent even while the room already stands
+                    // refused, so the note can name the block the moment the relay does.
+                    let fresh = shared
+                        .push_refused
+                        .lock()
+                        .unwrap()
+                        .insert(room_chat.to_string());
+                    if room_chat != PROJECT_DOC_CHAT_ID && (fresh || reason.is_some()) {
                         let _ = shared.events.send(SyncEvent::PushRefused {
                             chat_id: room_chat.to_string(),
                             refused: true,
+                            why: PushRefusal {
+                                code,
+                                reason,
+                                by_handle,
+                                by_name,
+                            },
                         });
                     }
                 }

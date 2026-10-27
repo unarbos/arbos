@@ -358,7 +358,8 @@ fn latest<'a>(state: &'a AppState, space: &Project) -> Option<&'a Message> {
             .messages_of(&chat.id)
             .iter()
             .rev()
-            .find(|m| !m.plain_text().trim().is_empty())
+            // A row hidden for me (someone I blocked) never previews.
+            .find(|m| !m.plain_text().trim().is_empty() && !state.hides_message(&chat.id, m))
         {
             if best.map(|b| m.created_at > b.created_at).unwrap_or(true) {
                 best = Some(m);
@@ -387,6 +388,12 @@ pub fn plain(s: &str) -> String {
         t = t.replace(mark, "");
     }
     t.trim().to_string()
+}
+
+/// `preview` for the headless tests.
+#[cfg(test)]
+pub(crate) fn preview_for_tests(state: &AppState, space: &Project) -> String {
+    preview(state, space)
 }
 
 fn preview(state: &AppState, space: &Project) -> String {

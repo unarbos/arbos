@@ -504,6 +504,16 @@ pub enum RowKind {
     Stamp {
         label: String,
     },
+    /// A run of messages from someone I blocked, folded into one muted line ("3 messages
+    /// hidden because you blocked @sam · Unblock") — the blocker alone sees this; everyone
+    /// else sees the messages ([feedback blocked-state-mac-2026-10-26], Jacob 2026-10-26).
+    Hidden {
+        count: usize,
+        /// The sender key (`user:<id>`) and what the row knows of them.
+        sender: String,
+        handle: String,
+        name: Option<String>,
+    },
     /// Emoji reaction chips under a bubble (iPhone parity): `(emoji, senders)`.
     Reactions {
         reactions: Vec<(String, Vec<String>)>,
@@ -670,6 +680,11 @@ pub enum TranscriptEvent {
     Reply {
         chat_id: Id,
         message_id: Id,
+    },
+    /// The hidden-run line's Unblock link ([feedback blocked-state-mac-2026-10-26]): the
+    /// shell opens its Unblock confirm for this person.
+    Unblock {
+        person: Person,
     },
 }
 
@@ -1318,7 +1333,15 @@ impl Transcript {
             state.selected_channel.is_some(),
         );
         self.chat_id = chat_id;
-        let new_rows = build_rows(
+        // People I blocked: their rows fold into one hidden line for me (the relay's
+        // `blockedSenders` hint, else my block list by id) — groups only; a DM with them has
+        // the composer bar instead ([feedback blocked-state-mac-2026-10-26]).
+        let hidden_senders: HashSet<String> = state
+            .selected()
+            .filter(|p| p.is_people_group())
+            .map(|p| state.hidden_senders_in(p))
+            .unwrap_or_default();
+        let new_rows = build_rows_hiding(
             &messages,
             show_details,
             speech,
@@ -1326,6 +1349,7 @@ impl Transcript {
             &thumb_keys,
             &self.mentions,
             multi_party,
+            &hidden_senders,
         );
         self.multi_party = multi_party;
         // A sender change opens the turn gap. So does every new assistant /
@@ -2474,6 +2498,38 @@ impl Transcript {
                     cx,
                 )
             }
+            RowKind::Hidden {
+                count,
+                sender: _,
+                handle,
+                name,
+            } => {
+                let who = name
+                    .filter(|n| !n.trim().is_empty())
+                    .unwrap_or_else(|| format!("@{handle}"));
+                let person = Person {
+                    handle: handle.clone(),
+                    ..Person::default()
+                };
+                let hidden_person = self
+                    .state
+                    .read(cx)
+                    .person_by_handle(&handle)
+                    .unwrap_or(person);
+                let (line, unblock) = crate::ui::blocked::hidden_row(&row.id, count, &who, &theme);
+                div()
+                    .w_full()
+                    .flex()
+                    .justify_center()
+                    .pt(px(STAMP_PAD_TOP))
+                    .pb(px(STAMP_PAD_BOTTOM))
+                    .child(line.child(unblock.on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(TranscriptEvent::Unblock {
+                            person: hidden_person.clone(),
+                        });
+                    }))))
+                    .into_any_element()
+            }
             RowKind::Stamp { label } => div()
                 .w_full()
                 .flex()
@@ -3309,6 +3365,7 @@ fn is_json_block(block: &Block) -> bool {
 /// `names_senders` landed from a parallel feedback; keep it a plain arg
 /// rather than a one-off options struct.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub fn build_rows(
     messages: &[Message],
     show_details: bool,
@@ -3317,6 +3374,31 @@ pub fn build_rows(
     thumb_keys: &HashSet<&str>,
     mentions: &Mentions,
     names_senders: bool,
+) -> Vec<Row> {
+    build_rows_hiding(
+        messages,
+        show_details,
+        speech,
+        me_id,
+        thumb_keys,
+        mentions,
+        names_senders,
+        &HashSet::new(),
+    )
+}
+
+/// [`build_rows`] with the senders I blocked (`user:<id>` keys): their messages fold into
+/// one [`RowKind::Hidden`] line per run instead of bubbles, and carry no date stamp.
+#[allow(clippy::too_many_arguments)]
+pub fn build_rows_hiding(
+    messages: &[Message],
+    show_details: bool,
+    speech: SpeechRows<'_>,
+    me_id: &str,
+    thumb_keys: &HashSet<&str>,
+    mentions: &Mentions,
+    names_senders: bool,
+    hidden_senders: &HashSet<String>,
 ) -> Vec<Row> {
     let mine = |m: &Message| {
         m.sender == "user" || m.sender.is_empty() || m.sender == format!("user:{me_id}")
@@ -3347,6 +3429,35 @@ pub fn build_rows(
             &mut last_stamp_at,
             &mut prev_sender,
         );
+        // Someone I blocked: fold the run into one hidden line, no bubble, no stamp.
+        if message.role == Role::User && hidden_senders.contains(&message.sender) {
+            match rows.last_mut() {
+                Some(Row {
+                    kind: RowKind::Hidden { count, sender, .. },
+                    version,
+                    ..
+                }) if *sender == message.sender => {
+                    *count += 1;
+                    *version = version.wrapping_add(1);
+                }
+                _ => rows.push(Row {
+                    version: hash_version(&message.id, false),
+                    id: format!("{}#hidden", message.id),
+                    message_id: message.id.clone(),
+                    kind: RowKind::Hidden {
+                        count: 1,
+                        sender: message.sender.clone(),
+                        handle: message
+                            .sender_handle
+                            .clone()
+                            .unwrap_or_else(|| "someone".into()),
+                        name: message.sender_name.clone(),
+                    },
+                }),
+            }
+            prev_sender = None;
+            continue;
+        }
         let streaming = message.is_streaming();
         if message.created_at > 0 && message.created_at.saturating_sub(last_stamp_at) > STAMP_GAP_MS
         {
