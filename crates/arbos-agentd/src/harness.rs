@@ -12,7 +12,7 @@ use serde_json::Value;
 use tokio::sync::{broadcast, Mutex};
 
 use arbos_core::route::Harness;
-use arbos_core::rpc::{AssistantEvent, Command as RpcCommand, Event};
+use arbos_core::rpc::{AssistantEvent, Command as RpcCommand, Event, StreamingBehavior};
 
 use crate::config::Config;
 use crate::rpc_child::RpcChild;
@@ -467,7 +467,8 @@ impl HarnessAdapter for PrimeAdapter {
         c.call_ok(RpcCommand::Prompt {
             id: c.next_id("p"),
             message: text.to_owned(),
-            streaming_behavior: None,
+            // A worker that is still finishing a run queues the brief instead of refusing it (#2073).
+            streaming_behavior: Some(StreamingBehavior::FollowUp),
             images: Vec::new(),
         })
         .await
@@ -756,7 +757,8 @@ impl HarnessAdapter for PiAdapter {
         c.call_ok(RpcCommand::Prompt {
             id: c.next_id("p"),
             message: text.to_owned(),
-            streaming_behavior: None,
+            // A worker that is still finishing a run queues the brief instead of refusing it (#2073).
+            streaming_behavior: Some(StreamingBehavior::FollowUp),
             images: Vec::new(),
         })
         .await
