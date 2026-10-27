@@ -494,9 +494,12 @@ struct Attachment: Codable, Equatable {
     var kind: String? = nil
     /// Size on the relay, when the producer knew it (the file card's "PDF · 1.8 MB").
     var bytes: Int64? = nil
+    /// The fallback picture of a chart bubble: names the `chart` part of the same message.
+    /// A client that draws the chart hides this attachment ([feedback chart-bubble-ios-2026-10-26]).
+    var chartPart: String? = nil
 
     enum CodingKeys: String, CodingKey {
-        case name, mime, kind, bytes
+        case name, mime, kind, bytes, chartPart
         case blobRef = "ref"
     }
 
@@ -599,6 +602,10 @@ enum Part: Equatable {
     case status(id: Id, code: StatusKind, message: String)
     case question(id: Id, question: Question)
     case subagentResult(id: Id)
+    /// Chart bubble ([feedback chart-bubble-ios-2026-10-26]): the structured chart `post_chart`
+    /// posted. `spec` is the validated `arbos_core::chart::Chart` as JSON (what the FFI reads),
+    /// `table` its markdown table, `fallback` the PNG attachment part this client hides.
+    case chart(id: Id, specVersion: Int, spec: String, table: String, fallback: String?)
     /// Secret hand-off: the message's value moved into the vault; the row is the ghost
     /// "Secret saved as NAME". Names only — there is no value field.
     case secretRedacted(id: Id, name: String, savedBy: String, agent: String?)
@@ -608,7 +615,7 @@ enum Part: Equatable {
         switch self {
         case .text(let id, _), .reasoning(let id), .tool(let id, _, _), .attachment(let id, _),
              .error(let id, _, _), .status(let id, _, _), .question(let id, _), .subagentResult(let id),
-             .secretRedacted(let id, _, _, _), .unknown(let id):
+             .chart(let id, _, _, _, _), .secretRedacted(let id, _, _, _), .unknown(let id):
             return id
         }
     }
@@ -1057,6 +1064,12 @@ struct Message: Identifiable, Equatable {
 
     var isStreaming: Bool { status == .streaming }
 
+    /// Does this message carry the `chart` part `partId`? (Its fallback picture is hidden only
+    /// when the chart it stands in for is really here.)
+    func hasChartPart(_ partId: String) -> Bool {
+        parts.contains { if case .chart(let id, _, _, _, _) = $0 { return id == partId } else { return false } }
+    }
+
     var plainText: String {
         parts.compactMap(\.textValue).joined(separator: "\n")
     }
@@ -1283,8 +1296,24 @@ enum DocJSON {
                     mime: str(a["mime"]) ?? "application/octet-stream",
                     blobRef: str(a["ref"]),
                     kind: str(a["kind"]).flatMap { $0 == "attachment" ? nil : $0 },
-                    bytes: (a["bytes"] as? NSNumber)?.int64Value
+                    bytes: (a["bytes"] as? NSNumber)?.int64Value,
+                    chartPart: str(a["chartPart"])
                 )
+            )
+        case "chart":
+            // The spec travels as JSON text: the core parses and lays it out through the FFI.
+            let spec: String = {
+                guard let obj = pm["chart"], JSONSerialization.isValidJSONObject(obj),
+                      let data = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys]),
+                      let text = String(data: data, encoding: .utf8) else { return "" }
+                return text
+            }()
+            return .chart(
+                id: id,
+                specVersion: (pm["specVersion"] as? NSNumber)?.intValue ?? 0,
+                spec: spec,
+                table: str(pm["table"]) ?? "",
+                fallback: str(pm["fallback"])
             )
         case "error":
             return .error(id: id, code: str(pm["code"]) ?? "error", message: str(pm["message"]) ?? "")
