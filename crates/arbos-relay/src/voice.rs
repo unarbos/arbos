@@ -1675,6 +1675,7 @@ mod inbox_tests {
             reply_ref: None,
             kind: kind.map(str::to_owned),
             voice_text: voice_text.map(str::to_owned),
+            mentions: Vec::new(),
         }
     }
 

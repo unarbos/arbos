@@ -34,6 +34,7 @@ use crate::ui::mention::{self, Mentions};
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::profile_target;
+use crate::ui::secret_card::SecretOfferCard;
 use crate::ui::select::{BubbleAt, BubbleSelectable, LinkIcons, Selectable, Span, TextSelection};
 use crate::ui::theme::{
     Theme, BUBBLE_PAD_X, BUBBLE_PAD_Y, BUBBLE_RADIUS, CHAT_BODY, CHAT_LINE_HEIGHT, COLUMN_MARGIN,
@@ -351,6 +352,7 @@ pub fn one_line(text: &str) -> String {
                 .chain(rows.into_iter().flatten())
                 .collect(),
             Block::Math { source } => vec![math::plain(&source)],
+            Block::Chart { spec, .. } => vec![crate::ui::chart_card::one_line_title(&spec)],
         };
         for piece in pieces {
             // Spans are joined before splitting so "`site/launch/`;" stays one
@@ -455,6 +457,10 @@ pub enum RowKind {
         /// Bubble menu → Forward: "Forwarded from <name>" header above the
         /// text (feedback app-01M5MXRZ7609S70P9S9P2RZDDF).
         forwarded_from: Option<String>,
+        /// Secret hand-off: the message's value moved into the vault and the row is the
+        /// "Secret saved as NAME" ghost — muted fill, key glyph, no text to select or copy.
+        /// The secret's name.
+        ghost: Option<String>,
     },
     Markdown {
         block: Block,
@@ -497,6 +503,16 @@ pub enum RowKind {
     /// Centered muted time line ("Today 9:39 PM").
     Stamp {
         label: String,
+    },
+    /// A run of messages from someone I blocked, folded into one muted line ("3 messages
+    /// hidden because you blocked @sam · Unblock") — the blocker alone sees this; everyone
+    /// else sees the messages ([feedback blocked-state-mac-2026-10-26], Jacob 2026-10-26).
+    Hidden {
+        count: usize,
+        /// The sender key (`user:<id>`) and what the row knows of them.
+        sender: String,
+        handle: String,
+        name: Option<String>,
     },
     /// Emoji reaction chips under a bubble (iPhone parity): `(emoji, senders)`.
     Reactions {
@@ -665,6 +681,11 @@ pub enum TranscriptEvent {
         chat_id: Id,
         message_id: Id,
     },
+    /// The hidden-run line's Unblock link ([feedback blocked-state-mac-2026-10-26]): the
+    /// shell opens its Unblock confirm for this person.
+    Unblock {
+        person: Person,
+    },
 }
 
 impl gpui::EventEmitter<TranscriptEvent> for Transcript {}
@@ -685,6 +706,8 @@ pub struct Transcript {
     veils: HashMap<String, Veil>,
     /// One stateful card per typed question, keyed by question id; dropped with its row.
     cards: HashMap<String, Entity<QuestionCard>>,
+    /// Secret hand-off request cards by approval id (the masked-field card keeps state).
+    secret_cards: HashMap<String, Entity<SecretOfferCard>>,
     pinned_to_bottom: bool,
     /// When ↓ last landed on the newest page from far away: drives the
     /// [`JUMP_ARRIVE_MS`] settle of the list (rise + fade), then cleared.
@@ -767,6 +790,7 @@ impl Transcript {
             pane_open: false,
             veils: HashMap::new(),
             cards: HashMap::new(),
+            secret_cards: HashMap::new(),
             pinned_to_bottom: true,
             arrived_at: None,
             rows_laid_out: 0,
@@ -1309,7 +1333,15 @@ impl Transcript {
             state.selected_channel.is_some(),
         );
         self.chat_id = chat_id;
-        let new_rows = build_rows(
+        // People I blocked: their rows fold into one hidden line for me (the relay's
+        // `blockedSenders` hint, else my block list by id) — groups only; a DM with them has
+        // the composer bar instead ([feedback blocked-state-mac-2026-10-26]).
+        let hidden_senders: HashSet<String> = state
+            .selected()
+            .filter(|p| p.is_people_group())
+            .map(|p| state.hidden_senders_in(p))
+            .unwrap_or_default();
+        let new_rows = build_rows_hiding(
             &messages,
             show_details,
             speech,
@@ -1317,6 +1349,7 @@ impl Transcript {
             &thumb_keys,
             &self.mentions,
             multi_party,
+            &hidden_senders,
         );
         self.multi_party = multi_party;
         // A sender change opens the turn gap. So does every new assistant /
@@ -1507,10 +1540,36 @@ impl Transcript {
     /// The code cards' Copy wiring for this frame.
     fn code_copy(&self, cx: &Context<Self>) -> CodeCopy {
         let this = cx.entity().downgrade();
+        let hover = this.clone();
+        let save_state = self.state.clone();
+        let expand_state = self.state.clone();
+        let chat_id = self.chat_id.clone();
         CodeCopy {
             copied: copied_pill(&self.code_copied, Instant::now()),
             on_copy: Some(Rc::new(move |id, code, _, cx| {
                 let _ = this.update(cx, |t, cx| t.copy_code(id, code, cx));
+            })),
+            chart: Some(Rc::new(crate::ui::chart_card::ChartUi {
+                on_hover: Rc::new(move |_, cx| {
+                    let _ = hover.update(cx, |_, cx| cx.notify());
+                }),
+                on_save: Rc::new(move |spec, title, _, cx| {
+                    crate::ui::chart_card::save_png(&spec, &title, &save_state, cx);
+                }),
+                on_expand: Rc::new(move |part_id, spec, _, cx| {
+                    expand_state.update(cx, |s, cx| {
+                        s.open_chart_viewer(
+                            crate::ui::chart_viewer::ChartViewer {
+                                chat_id: chat_id.clone(),
+                                part_id,
+                                spec,
+                                data_view: false,
+                                copied_at: None,
+                            },
+                            cx,
+                        )
+                    });
+                }),
             })),
         }
     }
@@ -2163,6 +2222,7 @@ impl Transcript {
                 delivery,
                 quote,
                 forwarded_from,
+                ghost,
             } => {
                 // My bubble is dark in both appearances: white text, a
                 // stronger highlight than the soft one on the grey bubbles.
@@ -2183,14 +2243,17 @@ impl Transcript {
                 // Triple-backtick fences render as code cards (same as agent
                 // replies); other text stays plain so "# heading" is still literal.
                 // Bare `http(s)://…` URLs are still accented and clickable.
-                let body = user_message_body(
-                    &row.id,
-                    &text,
-                    text_color,
-                    &theme,
-                    &bubble_selectable,
-                    &self.code_copy(cx),
-                );
+                let body = match &ghost {
+                    Some(name) => secret_ghost_body(name, from.as_ref(), &theme),
+                    None => user_message_body(
+                        &row.id,
+                        &text,
+                        text_color,
+                        &theme,
+                        &bubble_selectable,
+                        &self.code_copy(cx),
+                    ),
+                };
                 // Someone else's bubble in a group / channel: their name inside
                 // it (their colour); the time is hover-only; my own bubble carries
                 // its sent/seen label in the footer.
@@ -2248,7 +2311,16 @@ impl Transcript {
                         name_el,
                         quote_header.map(|q| q.into_any_element()),
                         body,
-                    ));
+                    ))
+                    // The ghost: the surface fill with a hairline, muted ink — a row that
+                    // says a value was here, not a message to read.
+                    .when(ghost.is_some(), |b| {
+                        b.bg(theme.surface_2)
+                            .border_1()
+                            .border_color(theme.border_strong)
+                            .text_color(theme.text_muted)
+                            .debug_selector(|| "secret-ghost".into())
+                    });
                 if let Some(person) = from {
                     // Someone else: left-aligned, their avatar beside the bubble on
                     // the avatar column. A small coloured left-edge sliver marks a
@@ -2429,6 +2501,38 @@ impl Transcript {
                     window,
                     cx,
                 )
+            }
+            RowKind::Hidden {
+                count,
+                sender: _,
+                handle,
+                name,
+            } => {
+                let who = name
+                    .filter(|n| !n.trim().is_empty())
+                    .unwrap_or_else(|| format!("@{handle}"));
+                let person = Person {
+                    handle: handle.clone(),
+                    ..Person::default()
+                };
+                let hidden_person = self
+                    .state
+                    .read(cx)
+                    .person_by_handle(&handle)
+                    .unwrap_or(person);
+                let (line, unblock) = crate::ui::blocked::hidden_row(&row.id, count, &who, &theme);
+                div()
+                    .w_full()
+                    .flex()
+                    .justify_center()
+                    .pt(px(STAMP_PAD_TOP))
+                    .pb(px(STAMP_PAD_BOTTOM))
+                    .child(line.child(unblock.on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(TranscriptEvent::Unblock {
+                            person: hidden_person.clone(),
+                        });
+                    }))))
+                    .into_any_element()
             }
             RowKind::Stamp { label } => div()
                 .w_full()
@@ -2651,6 +2755,48 @@ impl Transcript {
             }
             RowKind::Approval { mut view, lane } => {
                 let chat_id = self.chat_id.clone().unwrap_or_default();
+                // Secret hand-off request card: a stateful card with the masked field.
+                if view.payload.get("kind").and_then(serde_json::Value::as_str)
+                    == Some("secret_offer")
+                {
+                    let project_id = view
+                        .payload
+                        .get("projectId")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                        .or_else(|| {
+                            self.state
+                                .read(cx)
+                                .project_of_chat(&chat_id)
+                                .map(|p| p.id.clone())
+                        })
+                        .unwrap_or_default();
+                    let suggested = view
+                        .payload
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("")
+                        .to_owned();
+                    let state = self.state.clone();
+                    let approval_id = view.approval_id.clone();
+                    let card = self
+                        .secret_cards
+                        .entry(approval_id.clone())
+                        .or_insert_with(|| {
+                            cx.new(|cx| {
+                                SecretOfferCard::new(
+                                    state,
+                                    chat_id.clone(),
+                                    approval_id,
+                                    project_id,
+                                    &suggested,
+                                    cx,
+                                )
+                            })
+                        })
+                        .clone();
+                    return card_row(card, lane).into_any_element();
+                }
                 // #1544: the standing rows name the agent ("Always allow Doug in /tmp").
                 view.agent = self
                     .state
@@ -3004,6 +3150,7 @@ fn block_text_len(block: &Block) -> usize {
                 + rows.iter().flatten().map(|s| s.len() + 1).sum::<usize>()
         }
         Block::Math { source } => source.len(),
+        Block::Chart { table, .. } => table.len(),
     }
 }
 
@@ -3204,7 +3351,8 @@ fn is_json_block(block: &Block) -> bool {
         | Block::Bullets(_)
         | Block::Numbered(_)
         | Block::Table { .. }
-        | Block::Math { .. } => return false,
+        | Block::Math { .. }
+        | Block::Chart { .. } => return false,
     };
     let t = text.trim();
     (t.starts_with('{') || t.starts_with('['))
@@ -3221,6 +3369,7 @@ fn is_json_block(block: &Block) -> bool {
 /// `names_senders` landed from a parallel feedback; keep it a plain arg
 /// rather than a one-off options struct.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub fn build_rows(
     messages: &[Message],
     show_details: bool,
@@ -3229,6 +3378,31 @@ pub fn build_rows(
     thumb_keys: &HashSet<&str>,
     mentions: &Mentions,
     names_senders: bool,
+) -> Vec<Row> {
+    build_rows_hiding(
+        messages,
+        show_details,
+        speech,
+        me_id,
+        thumb_keys,
+        mentions,
+        names_senders,
+        &HashSet::new(),
+    )
+}
+
+/// [`build_rows`] with the senders I blocked (`user:<id>` keys): their messages fold into
+/// one [`RowKind::Hidden`] line per run instead of bubbles, and carry no date stamp.
+#[allow(clippy::too_many_arguments)]
+pub fn build_rows_hiding(
+    messages: &[Message],
+    show_details: bool,
+    speech: SpeechRows<'_>,
+    me_id: &str,
+    thumb_keys: &HashSet<&str>,
+    mentions: &Mentions,
+    names_senders: bool,
+    hidden_senders: &HashSet<String>,
 ) -> Vec<Row> {
     let mine = |m: &Message| {
         m.sender == "user" || m.sender.is_empty() || m.sender == format!("user:{me_id}")
@@ -3259,6 +3433,35 @@ pub fn build_rows(
             &mut last_stamp_at,
             &mut prev_sender,
         );
+        // Someone I blocked: fold the run into one hidden line, no bubble, no stamp.
+        if message.role == Role::User && hidden_senders.contains(&message.sender) {
+            match rows.last_mut() {
+                Some(Row {
+                    kind: RowKind::Hidden { count, sender, .. },
+                    version,
+                    ..
+                }) if *sender == message.sender => {
+                    *count += 1;
+                    *version = version.wrapping_add(1);
+                }
+                _ => rows.push(Row {
+                    version: hash_version(&message.id, false),
+                    id: format!("{}#hidden", message.id),
+                    message_id: message.id.clone(),
+                    kind: RowKind::Hidden {
+                        count: 1,
+                        sender: message.sender.clone(),
+                        handle: message
+                            .sender_handle
+                            .clone()
+                            .unwrap_or_else(|| "someone".into()),
+                        name: message.sender_name.clone(),
+                    },
+                }),
+            }
+            prev_sender = None;
+            continue;
+        }
         let streaming = message.is_streaming();
         if message.created_at > 0 && message.created_at.saturating_sub(last_stamp_at) > STAMP_GAP_MS
         {
@@ -3275,9 +3478,22 @@ pub fn build_rows(
         let rows_before_message = rows.len();
         match message.role {
             Role::User => {
+                // Secret hand-off: a redacted row carries one `secret_redacted` part and no
+                // text; it draws as the ghost bubble ("Secret saved as NAME").
+                let ghost = message.parts.iter().find_map(|p| match p {
+                    Part::SecretRedacted { name, env, .. } => Some(if name.is_empty() {
+                        env.clone()
+                    } else {
+                        name.clone()
+                    }),
+                    _ => None,
+                });
                 // `@handle` → `@Display Name` so the chip shows the name and a copy
                 // carries it (mention chips, Oct 23).
-                let text = mentions.display(&message.plain_text());
+                let text = match &ghost {
+                    Some(name) => format!("Secret saved as {name}"),
+                    None => mentions.display(&message.plain_text()),
+                };
                 let attachment_parts: Vec<(String, Attachment)> = message
                     .parts
                     .iter()
@@ -3388,6 +3604,7 @@ pub fn build_rows(
                                 &quote,
                                 delivery,
                                 &forwarded_from,
+                                &ghost,
                             ),
                             false,
                         ),
@@ -3402,6 +3619,7 @@ pub fn build_rows(
                             delivery,
                             quote,
                             forwarded_from,
+                            ghost,
                         },
                     });
                 }
@@ -3415,7 +3633,14 @@ pub fn build_rows(
                 // Doug", #1349): one centred muted line, never a bubble. Like a
                 // date stamp it breaks the sender run — the next bubble names its
                 // sender again (Telegram / Grok Bot).
-                let text = message.plain_text();
+                // A membership line is worded from its `notice` facts and the live
+                // roster, so the actor reads by their current name; the stored words
+                // are the fallback when someone named is no longer known here.
+                let text = message
+                    .notice
+                    .as_ref()
+                    .and_then(|n| n.text(|kind, id| mentions.name_of(kind, id)))
+                    .unwrap_or_else(|| message.plain_text());
                 let line = text.lines().next().unwrap_or_default().trim().to_string();
                 if !line.is_empty() {
                     rows.push(Row {
@@ -3542,6 +3767,11 @@ pub fn build_rows(
                         _ => None,
                     })
                     .collect();
+                let chart_parts = message
+                    .parts
+                    .iter()
+                    .filter(|p| matches!(p, Part::Chart { .. }))
+                    .count();
                 let total_blocks: usize = polished
                     .iter()
                     .map(|(_, text)| {
@@ -3550,7 +3780,8 @@ pub fn build_rows(
                             .filter(|b| !is_json_block(b))
                             .count()
                     })
-                    .sum();
+                    .sum::<usize>()
+                    + chart_parts;
                 let fill = total_blocks > 1;
                 // Every block of every text part is one bubble for selection.
                 let bubble_blocks: Vec<Block> = polished
@@ -3617,6 +3848,50 @@ pub fn build_rows(
                                 block_ix += 1;
                             }
                         }
+                        // A chart bubble's card: one block of the bubble, like a code card
+                        // ([feedback chart-bubble-mac-2026-10-26]).
+                        Part::Chart {
+                            id, chart, table, ..
+                        } => {
+                            had_prose = true;
+                            let first = block_ix == 0;
+                            let last = block_ix + 1 == total_blocks;
+                            let block = Block::Chart {
+                                part_id: id.clone(),
+                                spec: chart.to_string(),
+                                table: table.clone(),
+                            };
+                            let bubble = BubbleText::single(block_plain(&block, false));
+                            let named = sender_named && first;
+                            rows.push(Row {
+                                version: hash_version(
+                                    &(&block, first, last, fill, &reply_quote, named),
+                                    false,
+                                ),
+                                id: format!("{}#{}", message.id, id),
+                                message_id: message.id.clone(),
+                                kind: RowKind::Markdown {
+                                    block,
+                                    live: false,
+                                    bubble,
+                                    first,
+                                    last,
+                                    fill,
+                                    time: clock_label(message.created_at),
+                                    lane: lane.clone(),
+                                    quote: if first { reply_quote.clone() } else { None },
+                                    named,
+                                },
+                            });
+                            block_ix += 1;
+                        }
+                        // The chart's fallback picture: an older app shows it, this one
+                        // draws the chart instead.
+                        Part::Attachment { attachment, .. }
+                            if attachment
+                                .chart_part
+                                .as_deref()
+                                .is_some_and(|cp| message.has_chart_part(cp)) => {}
                         Part::Attachment { id, attachment } => {
                             let has_thumb = attachment
                                 .blob_ref
@@ -3746,6 +4021,7 @@ pub fn build_rows(
                         | Part::File { .. }
                         | Part::Browser { .. }
                         | Part::Skills { .. }
+                        | Part::SecretRedacted { .. }
                         | Part::Unknown => {}
                     }
                 }
@@ -4067,6 +4343,8 @@ fn block_segments(block: &Block, literal: bool) -> Vec<Segment> {
                 math::plain(source)
             },
         )],
+        // A copy of the bubble carries the chart's data as its markdown table.
+        Block::Chart { table, .. } => vec![seg(String::new(), table.clone())],
     }
 }
 
@@ -4225,6 +4503,33 @@ fn slice_starts_at(chars: &[char], at: usize, needle: &str) -> bool {
 
 /// User / people-chat bubble body: plain prose, or prose mixed with fenced
 /// ``` code cards when the message contains triple backticks.
+/// Secret hand-off ghost row body: key glyph, "Secret saved as **NAME**" (another person's
+/// row: "<Name> saved a secret as **NAME**"). Nothing here is the value.
+fn secret_ghost_body(name: &str, from: Option<&Person>, theme: &Theme) -> AnyElement {
+    let lead = match from {
+        Some(p) => format!("{} saved a secret as ", p.display_name()),
+        None => "Secret saved as ".to_owned(),
+    };
+    div()
+        .flex()
+        .items_center()
+        .gap(px(7.0))
+        .child(icon("key", 13.0, theme.text_muted))
+        .child(
+            div()
+                .flex()
+                .items_baseline()
+                .child(div().text_color(theme.text_muted).child(lead))
+                .child(
+                    div()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child(name.to_owned()),
+                ),
+        )
+        .into_any_element()
+}
+
 fn user_message_body(
     row_id: &str,
     text: &str,
@@ -4267,7 +4572,8 @@ fn user_message_body(
             | Block::Bullets(_)
             | Block::Numbered(_)
             | Block::Table { .. }
-            | Block::Math { .. } => col.child(plain_text(
+            | Block::Math { .. }
+            | Block::Chart { .. } => col.child(plain_text(
                 &block_plain(block, true),
                 color,
                 theme,
@@ -4644,6 +4950,9 @@ fn render_block(
         Block::Code { lang, code } => code_fence_card(
             row_id, lang, code, theme.text, theme, bubble, starts[0], veil, now, copy,
         ),
+        Block::Chart { part_id, spec, .. } => {
+            crate::ui::chart_card::card(row_id, part_id, spec, theme, copy)
+        }
         // Display math: typeset, a size up, centred on its own line (KaTeX's
         // display mode in Grok Bot).
         Block::Math { source } => {
@@ -4760,6 +5069,9 @@ pub struct CodeCopy {
     pub copied: Option<SharedString>,
     #[allow(clippy::type_complexity)]
     pub on_copy: Option<Rc<dyn Fn(SharedString, String, &mut Window, &mut App)>>,
+    /// The chart cards' actions (hover repaint, Save PNG, Expand); Copy data goes through
+    /// `on_copy` with the card's own square id ([feedback chart-bubble-mac-2026-10-26]).
+    pub chart: Option<Rc<crate::ui::chart_card::ChartUi>>,
 }
 
 /// How long the Copy pill reads "Copied" (Jacob: ~1.5 s).
@@ -5578,6 +5890,7 @@ mod selection_tests {
                         cx.notify();
                     });
                 })),
+                chart: None,
             };
             div().w(px(600.0)).child(render_block(
                 "m1#t.0",
@@ -6948,6 +7261,68 @@ mod transcript_smoke_tests {
         (rt, state, transcript)
     }
 
+    /// Secret hand-off (2026-10-26): the request card (`secret_offer`, a stateful card with
+    /// two inputs) and the ghost row both draw headless, and the card carries the suggested
+    /// name into its Name field with nothing in the Value field.
+    #[gpui::test]
+    fn secret_offer_card_and_ghost_row_draw(cx: &mut TestAppContext) {
+        let t = 1_700_000_000_000u64;
+        let card: Message = serde_json::from_value(serde_json::json!({
+            "id": "m2", "chatId": "c1", "role": "assistant", "sender": "agent", "status": "done",
+            "createdAt": t + 2_000,
+            "parts": [
+                { "id": "p1", "kind": "text", "text": "Yes. Use the box below." },
+                { "id": "p2", "kind": "approval", "approvalId": "ap-offer", "title": "Give Arbos a secret",
+                  "summary": "the refunds report", "risk": "credential", "state": "pending",
+                  "payload": { "kind": "secret_offer", "name": "STRIPE_KEY", "purpose": "the refunds report",
+                               "agent": "Arbos", "projectId": "p1", "chatId": "c1", "answers": [] } }
+            ],
+        }))
+        .expect("card row");
+        let ghost: Message = serde_json::from_value(serde_json::json!({
+            "id": "m3", "chatId": "c1", "role": "user", "sender": "user", "status": "done",
+            "createdAt": t + 4_000, "redactedAt": t + 5_000,
+            "parts": [{ "id": "p3", "kind": "secret_redacted", "name": "STRIPE_KEY", "env": "STRIPE_KEY",
+                        "secretId": "s1", "savedBy": "user:me" }],
+        }))
+        .expect("ghost row");
+        let (_rt, _state, transcript) = mount_with(
+            cx,
+            vec![
+                message("m1", "user", "Can I give you a secret?", t),
+                card,
+                ghost,
+            ],
+        );
+        let (_view, vcx) = cx.add_window_view(|_, _| Host {
+            transcript: transcript.clone(),
+        });
+        vcx.run_until_parked();
+        assert!(
+            vcx.debug_bounds("chat-column").is_some(),
+            "the transcript draws"
+        );
+        assert!(
+            vcx.debug_bounds("secret-offer-card").is_some(),
+            "the request card is on screen"
+        );
+        assert!(
+            vcx.debug_bounds("secret-offer-save").is_some(),
+            "the Save to vault row is on screen"
+        );
+        assert!(
+            vcx.debug_bounds("secret-ghost").is_some(),
+            "the ghost row draws in the user's slot"
+        );
+        transcript.read_with(cx, |t, cx| {
+            let card = t.secret_cards.get("ap-offer").expect("card entity cached");
+            card.read_with(cx, |c, cx| {
+                assert_eq!(c.name_input.read(cx).text(), "STRIPE_KEY");
+                assert!(c.value_input.read(cx).text().is_empty());
+            });
+        });
+    }
+
     /// 2026-10-26, Mac 0.6.268: a row the code did not expect aborted the app at every
     /// launch (a panic on the main thread unwinds into AppKit → `abort()`). A sync event whose
     /// apply panics is skipped with a notice, the state keeps every other row, and the
@@ -8273,6 +8648,116 @@ mod system_line_tests {
 }
 
 #[cfg(test)]
+mod secret_handoff_rows_tests {
+    //! Secret hand-off (Jacob 2026-10-26): a redacted user message draws as the ghost row
+    //! "Secret saved as NAME" — mine on the right, another person's on the left under their
+    //! name — and never as a text bubble; the row carries no value.
+    use std::collections::{HashMap, HashSet};
+
+    use super::*;
+    use crate::model::Message;
+
+    fn redacted(sender: &str, name: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": format!("m-{at}"),
+            "chatId": "chat_testing",
+            "role": "user",
+            "sender": sender,
+            "senderHandle": if sender.starts_with("user:") { "jacob" } else { "" },
+            "senderName": if sender.starts_with("user:") { "Jacob Steeves" } else { "" },
+            "status": "done",
+            "createdAt": at,
+            "redactedAt": at + 5_000,
+            "parts": [{ "id": format!("p-{at}"), "kind": "secret_redacted", "name": name, "env": name,
+                "secretId": "s1", "savedBy": sender, "agent": "p1" }],
+        }))
+        .expect("message")
+    }
+
+    fn rows_of(messages: &[Message], me: &str) -> Vec<Row> {
+        let spoken = HashSet::new();
+        let failed = HashMap::new();
+        build_rows(
+            messages,
+            false,
+            SpeechRows {
+                enabled: false,
+                spoken: &spoken,
+                failed: &failed,
+                voice_mode: false,
+            },
+            me,
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+        )
+    }
+
+    #[test]
+    fn my_redacted_message_is_the_ghost_row_on_my_side() {
+        let t = 1_700_000_000_000u64;
+        let rows = rows_of(&[redacted("user:gh_me", "STRIPE_KEY", t)], "gh_me");
+        let user: Vec<_> = rows
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::User {
+                    text, ghost, from, ..
+                } => Some((text.clone(), ghost.clone(), from.is_some())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            user,
+            [(
+                "Secret saved as STRIPE_KEY".to_string(),
+                Some("STRIPE_KEY".to_string()),
+                false
+            )]
+        );
+    }
+
+    #[test]
+    fn another_members_redacted_message_keeps_their_lane_and_names_them() {
+        let t = 1_700_000_000_000u64;
+        let rows = rows_of(&[redacted("user:gh_jacob", "STRIPE_KEY", t)], "gh_me");
+        let row = rows
+            .iter()
+            .find_map(|r| match &r.kind {
+                RowKind::User { ghost, from, .. } => Some((ghost.clone(), from.clone())),
+                _ => None,
+            })
+            .expect("a user row");
+        assert_eq!(row.0.as_deref(), Some("STRIPE_KEY"));
+        let from = row.1.expect("the other person's lane");
+        assert_eq!(from.display_name(), "Jacob Steeves");
+    }
+
+    #[test]
+    fn the_part_decodes_with_names_only_and_an_older_build_ignores_it() {
+        let m = redacted("user:gh_me", "STRIPE_KEY", 1);
+        assert!(m.plain_text().is_empty(), "nothing to copy or search");
+        match &m.parts[0] {
+            Part::SecretRedacted {
+                name,
+                env,
+                secret_id,
+                saved_by,
+                agent,
+                ..
+            } => {
+                assert_eq!((name.as_str(), env.as_str()), ("STRIPE_KEY", "STRIPE_KEY"));
+                assert_eq!(secret_id, "s1");
+                assert_eq!(saved_by, "user:gh_me");
+                assert_eq!(agent.as_deref(), Some("p1"));
+            }
+            other => panic!("{other:?}"),
+        }
+        let v = serde_json::to_value(&m.parts[0]).unwrap();
+        assert!(v.get("value").is_none());
+    }
+}
+
+#[cfg(test)]
 mod presence_rows_tests {
     //! [feedback typing-indicator-left-2026-10-23]: who is working lives in the
     //! presence row over the composer, so the transcript never doubles it — no
@@ -9250,5 +9735,313 @@ mod crash_probe_tests {
         }
         assert!(vcx.debug_bounds("chat-column").is_some());
         drop(rt);
+    }
+}
+
+/// Chart bubbles ([feedback chart-bubble-mac-2026-10-26]): the `chart` part is one block of
+/// the agent's bubble (the code card's frame, title, legend, plot, the three icon squares);
+/// its fallback picture is hidden; Copy data puts the TSV on the clipboard.
+#[cfg(test)]
+mod chart_tests {
+    use super::*;
+    use crate::ui::chart_card::{ICON_SQUARE, PLOT_HEIGHT};
+
+    const SPEC: &str = r#"{"kind":"line","title":"Eval score over runs","subtitle":"memory-pack eval","series":[{"name":"Affine 2","points":[[1,66.2],[2,70.4],[3,79.6],[4,83.4]]},{"name":"Baseline","points":[[1,70.1],[2,70.6],[3,71.1],[4,71.2]]}],"x":{"label":"Run"},"y":{"label":"Pass rate","unit":"%","min":60,"max":90}}"#;
+
+    fn chart_message(fallback_points_at: &str) -> Message {
+        let spec: serde_json::Value = serde_json::from_str(SPEC).unwrap();
+        serde_json::from_value(serde_json::json!({
+            "id": "m2",
+            "chatId": "c1",
+            "role": "assistant",
+            "sender": "box:1",
+            "status": "done",
+            "createdAt": 1_700_000_002_000u64,
+            "inReplyTo": "m1",
+            "parts": [
+                { "id": "t", "kind": "text", "text": "Affine 2 passed the baseline at run 2." },
+                { "id": "a", "kind": "attachment", "attachment": { "name": "eval.png", "mime": "image/png", "ref": "blob-1", "bytes": 55_000, "kind": "image", "title": "Eval score over runs", "chartPart": fallback_points_at } },
+                { "id": "c", "kind": "chart", "specVersion": 1, "chart": spec, "table": "| Run | Affine 2 (%) | Baseline (%) |\n| --- | --- | --- |\n| 1 | 66.2 | 70.1 |", "fallback": "a" }
+            ],
+        }))
+        .expect("message")
+    }
+
+    fn rows_of(m: Message) -> Vec<Row> {
+        let spoken = HashSet::new();
+        let failed = HashMap::new();
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        build_rows(
+            &[m],
+            false,
+            speech,
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+        )
+    }
+
+    #[test]
+    fn the_part_parses_with_its_camel_case_fields() {
+        let m = chart_message("c");
+        let Part::Chart {
+            id,
+            spec_version,
+            chart,
+            table,
+            fallback,
+        } = &m.parts[2]
+        else {
+            panic!("chart part")
+        };
+        assert_eq!(id, "c");
+        assert_eq!(*spec_version, 1);
+        assert_eq!(chart["kind"], "line");
+        assert!(table.starts_with("| Run |"));
+        assert_eq!(fallback.as_deref(), Some("a"));
+        let Part::Attachment { attachment, .. } = &m.parts[1] else {
+            panic!("attachment part")
+        };
+        assert_eq!(attachment.chart_part.as_deref(), Some("c"));
+        assert!(m.has_chart_part("c") && !m.has_chart_part("zz"));
+    }
+
+    #[test]
+    fn a_chart_part_is_the_bubbles_last_block_and_hides_its_picture() {
+        let rows = rows_of(chart_message("c"));
+        let kinds: Vec<String> = rows
+            .iter()
+            .map(|r| match &r.kind {
+                RowKind::Markdown {
+                    block, first, last, ..
+                } => format!(
+                    "{}:{}{}",
+                    match block {
+                        Block::Chart { .. } => "chart",
+                        Block::Paragraph(_) => "para",
+                        _ => "other",
+                    },
+                    if *first { "F" } else { "" },
+                    if *last { "L" } else { "" }
+                ),
+                RowKind::Attachment { .. } => "attachment".into(),
+                _ => "misc".into(),
+            })
+            .filter(|k| k != "misc")
+            .collect();
+        assert_eq!(kinds, ["para:F", "chart:L"], "{kinds:?}");
+        let chart_row = rows
+            .iter()
+            .find(|r| {
+                matches!(
+                    r.kind,
+                    RowKind::Markdown {
+                        block: Block::Chart { .. },
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        assert_eq!(chart_row.id, "m2#c");
+        if let RowKind::Markdown {
+            block: Block::Chart { table, spec, .. },
+            bubble,
+            ..
+        } = &chart_row.kind
+        {
+            assert!(spec.contains("\"kind\":\"line\""));
+            assert_eq!(
+                bubble.text.as_ref(),
+                table.as_str(),
+                "a copy carries the table"
+            );
+        }
+
+        // The picture stands in for a chart that is not in this message: it stays a picture.
+        let rows = rows_of(chart_message("elsewhere"));
+        assert!(rows
+            .iter()
+            .any(|r| matches!(r.kind, RowKind::Attachment { .. })));
+        assert_eq!(
+            rows.iter()
+                .filter(|r| matches!(
+                    r.kind,
+                    RowKind::Markdown {
+                        block: Block::Chart { .. },
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn one_line_and_plain_text_name_the_chart() {
+        let block = Block::Chart {
+            part_id: "c".into(),
+            spec: SPEC.into(),
+            table: "| a |\n| --- |\n| 1 |".into(),
+        };
+        assert_eq!(block_plain(&block, false), "| a |\n| --- |\n| 1 |");
+        assert!(!is_json_block(&block));
+        assert_eq!(block_segments(&block, false).len(), 1);
+    }
+
+    struct ChartHost {
+        selection: Entity<TextSelection>,
+        code_copied: Option<(SharedString, Instant)>,
+        saved: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+        expanded: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    }
+
+    impl gpui::Render for ChartHost {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+            let block = Block::Chart {
+                part_id: "c".into(),
+                spec: SPEC.into(),
+                table: String::new(),
+            };
+            let selectable = Selectable::new(&self.selection, theme.accent_soft, cx);
+            let bubble = selectable.bubble("m2#text", String::new());
+            let this = cx.entity().downgrade();
+            let saved = self.saved.clone();
+            let expanded = self.expanded.clone();
+            let copy = CodeCopy {
+                copied: copied_pill(&self.code_copied, Instant::now()),
+                on_copy: Some(Rc::new(move |id, text, _, cx| {
+                    let _ = this.update(cx, |v, cx| {
+                        copy_code_to_clipboard(&mut v.code_copied, id, text, cx);
+                        cx.notify();
+                    });
+                })),
+                chart: Some(Rc::new(crate::ui::chart_card::ChartUi {
+                    on_hover: Rc::new(|_, _| {}),
+                    on_save: Rc::new(move |spec, title, _, _| {
+                        saved.borrow_mut().push(format!("{title}:{}", spec.len()))
+                    }),
+                    on_expand: Rc::new(move |part_id, _, _, _| expanded.borrow_mut().push(part_id)),
+                })),
+            };
+            div()
+                .w(px(536.0))
+                .debug_selector(|| "chart-host".into())
+                .child(render_block(
+                    "m2#c",
+                    &block,
+                    0,
+                    None,
+                    Instant::now(),
+                    &theme,
+                    &bubble,
+                    &copy,
+                ))
+        }
+    }
+
+    #[gpui::test]
+    fn the_card_draws_its_parts_and_the_squares_act(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let theme = crate::ui::theme::Theme::for_pref(
+                crate::ui::theme::AppearancePref::Dark,
+                crate::ui::theme::Surface::Matte,
+                cx,
+            );
+            cx.set_global(theme);
+        });
+        let saved = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let expanded = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let (view, vcx) = cx.add_window_view(|_, cx| ChartHost {
+            selection: cx.new(TextSelection::new),
+            code_copied: None,
+            saved: saved.clone(),
+            expanded: expanded.clone(),
+        });
+        vcx.run_until_parked();
+        let host = vcx.debug_bounds("chart-host").expect("host");
+        let card = vcx.debug_bounds("chart-card").expect("card drawn");
+        assert_eq!(
+            card.size.width, host.size.width,
+            "the card fills the bubble"
+        );
+        vcx.debug_bounds("chart-title").expect("title");
+        vcx.debug_bounds("chart-legend")
+            .expect("legend: two series");
+        let plot = vcx.debug_bounds("m2#c#chart-plot").expect("plot");
+        assert_eq!(plot.size.height, px(PLOT_HEIGHT));
+        assert!(
+            plot.origin.y > card.origin.y + px(40.0),
+            "under the title and legend"
+        );
+        let copy = vcx.debug_bounds("m2#c#chart-copy").expect("copy square");
+        let save = vcx.debug_bounds("m2#c#chart-save").expect("save square");
+        let expand = vcx
+            .debug_bounds("m2#c#chart-expand")
+            .expect("expand square");
+        for b in [&copy, &save, &expand] {
+            assert_eq!(b.size.width, px(ICON_SQUARE));
+            assert_eq!(b.size.height, px(ICON_SQUARE));
+        }
+        assert!(copy.origin.x < save.origin.x && save.origin.x < expand.origin.x);
+        assert!(
+            (expand.origin.x + expand.size.width - (card.origin.x + card.size.width)).abs()
+                <= px(9.0),
+            "inset 8 pt from the card's right edge: {:?} vs {:?}",
+            expand,
+            card
+        );
+        assert!(
+            (expand.origin.y - card.origin.y).abs() <= px(9.0),
+            "and from its top"
+        );
+
+        vcx.simulate_click(copy.center(), gpui::Modifiers::default());
+        vcx.run_until_parked();
+        let clipboard = vcx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
+        let text = clipboard.expect("TSV on the clipboard");
+        assert_eq!(
+            text.lines().next().unwrap(),
+            "Run\tAffine 2 (%)\tBaseline (%)"
+        );
+        assert_eq!(text.lines().nth(4).unwrap(), "4\t83.4\t71.2");
+        view.read_with(vcx, |v, _| {
+            assert_eq!(
+                copied_pill(&v.code_copied, Instant::now()).as_deref(),
+                Some("m2#c#chart-copy"),
+                "the square shows the check"
+            );
+        });
+        vcx.simulate_click(save.center(), gpui::Modifiers::default());
+        vcx.simulate_click(expand.center(), gpui::Modifiers::default());
+        vcx.run_until_parked();
+        assert_eq!(
+            saved.borrow().as_slice(),
+            [format!("Eval score over runs:{}", SPEC.len())]
+        );
+        assert_eq!(expanded.borrow().as_slice(), ["c"]);
+    }
+
+    #[test]
+    fn the_viewer_state_opens_switches_and_closes() {
+        let v = crate::ui::chart_viewer::ChartViewer {
+            chat_id: Some("c1".into()),
+            part_id: "c".into(),
+            spec: SPEC.into(),
+            data_view: false,
+            copied_at: None,
+        };
+        assert!(!v.copied_now());
+        let mut v2 = v.clone();
+        v2.copied_at = Some(now_ms());
+        assert!(v2.copied_now());
+        v2.copied_at = Some(now_ms() - crate::ui::chart_viewer::COPIED_MS - 1);
+        assert!(!v2.copied_now());
     }
 }

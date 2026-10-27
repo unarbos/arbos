@@ -68,6 +68,7 @@ CLI:  feedback_poller.py [run] | status | testers | set-cursor <ISO-8601>
       | leadtime [since-ISO] | memtree-cost [YYYY-MM-DD]   (audit numbers; memtree-cost asks GET /admin/usage/memory-tree, else relay.db as root)
       | gate-tree <sha-or-branch> <fid>…   (gate a hand-prepared integration tree as one run and land it whole)
       | gate-abort   (drop the active gate run without verdicts; every ready branch re-batches at its current head)
+      | park <id> <note…>   (hand a gating item back to its owner at the head the red run judged; a newer push re-gates by itself)
       | gate-next <fid>… [--then <fid>…] [--abort]   (pin: these items gate next and alone; while a pinned item is with its owner nothing else merges)
       | gate-unpin <fid>…   | unfail <fid>…   (a failed item whose fix is on main goes back to pushed)
 """
@@ -91,6 +92,7 @@ import struct
 import sys
 import tempfile
 import time
+import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -107,6 +109,10 @@ CURSOR_API = "https://api.cursor.com/v1"
 GITHUB_API = "https://api.github.com"
 ASSET_RELEASE_TAG = "feedback-screenshots"
 RELAY_DEPLOYED_SHA_FILE = "/etc/arbos/relay.deployed-sha"  # written by scripts/deploy/relay-server.sh
+# Written by the deploy worker when an image has rolled to every real box it does not skip; the skip list names
+# the boxes left on their old image (box|reason|since). World-readable, root-owned.
+AGENTD_DEPLOYED_SHA_FILE = "/var/lib/arbos-deploy/agentd.deployed-sha"
+AGENTD_SKIP_FILE = "/var/lib/arbos-deploy/agentd.skip"
 INSTALL_SIGNAL_SINCE = "2026-10-19T22:00:00Z"  # relay records X-Arbos-Client versions since then (D85)
 DEPLOY_HOOK = "/usr/local/bin/arbos-deploy-hook"  # CD worker's hook: `<relay|agentd|voice> <sha>`, idempotent, debounced; called directly (no sudo)
 DEPLOY_QUEUE = os.environ.get("ARBOS_DEPLOY_QUEUE", "/var/lib/arbos-feedback/deploy-requests")  # the hook's queue: one file per kind
@@ -139,6 +145,17 @@ def utcnow() -> dt.datetime:
 
 def iso(t: dt.datetime | None = None) -> str:
     return (t or utcnow()).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# Files that make the iPhone build (the gate's iOS half) relevant. `packages/ArbosFFI/**` is the typeshare-generated
+# Swift package every iOS and Mac target compiles: 2026-10-27 04:23 an agentd branch regenerated RelayTypes.swift
+# (PushEvent.messageRedacted) with the iOS half skipped, and every iOS half after it failed on an inexhaustive
+# switch in AppModel.swift until the handler branch landed. The client-core crates feed the same package.
+IOS_PATH_PREFIXES = ("apps/ios/", "packages/ArbosFFI/", "crates/arbos-core/", "crates/arbos-client/", "crates/arbos-ffi/")
+
+
+def touches_ios(files: list[str] | None) -> bool:
+    return any(f.startswith(IOS_PATH_PREFIXES) or f == ".github/workflows/ios.yml" for f in files or [])
 
 
 def parse_iso(s: str) -> dt.datetime:
@@ -1977,7 +1994,7 @@ class Loop:
                                     seen.append(f["filename"])
                     files = seen
                 st.update(status="gating", branch=branch, branch_head=head, files=files,
-                          expects_ios=any(f.startswith(("apps/ios/", "crates/arbos-core/", "crates/arbos-client/", "crates/arbos-ffi/")) or f == ".github/workflows/ios.yml" for f in files),
+                          expects_ios=touches_ios(files),
                           expects_rust=bool(self.rust_crates(files)),
                           expects_ci=any(not f.startswith("apps/ios/") for f in files),
                           agent_summary=self.summary_line(result))
@@ -2003,7 +2020,7 @@ class Loop:
         files = [f["filename"] for f in self.gh.commit(commit["sha"]).get("files", [])]
         st.update(status="pushed", commit=commit["sha"], commit_url=commit["html_url"],
                   commit_message=commit["commit"]["message"].splitlines()[0], pushed_at=iso(), files=files,
-                  expects_ios=any(f.startswith("apps/ios/") or f == ".github/workflows/ios.yml" for f in files),
+                  expects_ios=touches_ios(files),
                   expects_ci=any(not f.startswith("apps/ios/") for f in files))
         self.store.save_state(fid, st)
         self.store.event(fid, "pushed", commit=commit["sha"], files=files)
@@ -2122,7 +2139,7 @@ class Loop:
             return recorded
         files = self.branch_files(fid, cmp) or st.get("files") or []
         st.update(branch_head=head, files=files,
-                  expects_ios=any(f.startswith(("apps/ios/", "crates/arbos-core/", "crates/arbos-client/", "crates/arbos-ffi/")) or f == ".github/workflows/ios.yml" for f in files),
+                  expects_ios=touches_ios(files),
                   expects_rust=bool(self.rust_crates(files)),
                   expects_ci=any(not f.startswith("apps/ios/") for f in files))
         self.store.save_state(fid, st)
@@ -2333,7 +2350,7 @@ class Loop:
             cur.pop("rust_gate_tree", None)
             tfiles = [f["filename"] for c in self.gh.compare(tree["base"], tree["tree"]).get("commits", []) for f in self.gh.commit(c["sha"]).get("files", [])]
             tree.update(started=iso(), warm=False, needs_mac=True, linux="pending", mac="pending", mac_started=None, land_tree=True,
-                        needs_ios=any(f.startswith("apps/ios/") for f in tfiles), ios="pending" if any(f.startswith("apps/ios/") for f in tfiles) else "skipped")
+                        needs_ios=touches_ios(tfiles), ios="pending" if touches_ios(tfiles) else "skipped")
             cur["rust_gate"] = tree
             self.store.save_cursor(cur)
             log(f"Rust gate {tree['id']}: integration tree {tree['tree'][:8]} with {len(tree['members'])} fixes (CI on {tree['branch']}; Mac release build)")
@@ -2360,15 +2377,18 @@ class Loop:
         # for POOL_STARVED_MIN, pool-first arms itself; and while it is set the full pool batch runs AHEAD of
         # bisect / plan halves too (pins stay ahead of everything). It clears when a pool batch settles green.
         pool_has_items = any(not st.get("gate_pinned") and not st.get("solo_next") for _, st in ready)
+        # The starvation clock is the last SETTLED pool batch (green or red). Solo slots alone starve the pool as
+        # well (08:02–09:19 Oct 27: five solo slots and a deferred batch back to back, no plan half in between),
+        # so the arm no longer waits for a plan half to exist.
         last_pool = cur.get("last_pool_batch_at") or cur.get("pool_first_armed_from") or ""
-        if not pool_first and pool_has_items and not members and plan:
+        if not pool_first and pool_has_items and not members:
             if not last_pool:
                 cur["pool_first_armed_from"] = iso()
             elif minutes_between(last_pool, iso()) >= self.POOL_STARVED_MIN:
                 cur["pool_first"] = iso()
                 pool_first = True
                 self.store.event("_loop", "pool_first_on", by="scheduler", starved_min=int(minutes_between(last_pool, iso())))
-                log(f"Gate: pool-first armed by the scheduler — no pool batch since {last_pool[:16]}; the pool runs ahead of {len(plan)} plan half(ves)")
+                log(f"Gate: pool-first armed by the scheduler — no pool batch settled since {last_pool[:16]}; the pool runs ahead of solo slots, deferred-fairness and {len(plan)} plan half(ves)")
         if not members and not pool_first:
             solo = sorted(((f, st) for f, st in ready if st.get("solo_next")), key=lambda fs: fs[1].get("created") or "")
             if solo:
@@ -2598,7 +2618,7 @@ class Loop:
             files += self.store.state(fid).get("files") or []
         crates = self.rust_crates(files)
         mac = "arbos-mac" in crates or crates == ["workspace"]
-        ios = any(f.startswith("apps/ios/") or f == ".github/workflows/ios.yml" for f in files)
+        ios = touches_ios(files)
         linux = any(not f.startswith("apps/ios/") for f in files)  # ci.yml ignores apps/ios-only pushes
         cur = self.store.cursor()
         cur["rust_gate"] = {"id": run_id, "branch": branch, "base": base, "tree": tree, "members": {fid: members[fid] for fid in merged},
@@ -2863,7 +2883,7 @@ class Loop:
             files = [f["filename"] for f in self.gh.commit(fix["sha"]).get("files", [])]
             st.update(status="pushed", commit=fix["sha"], commit_url=fix["html_url"], commit_message=fix["commit"]["message"].splitlines()[0],
                       pushed_at=iso(), merge_sha=merged["sha"], merge_url=merged["html_url"], commit_date=merged["commit"]["committer"]["date"],
-                      files=files, expects_ios=any(f.startswith("apps/ios/") for f in files), expects_ci=any(not f.startswith("apps/ios/") for f in files),
+                      files=files, expects_ios=touches_ios(files), expects_ci=any(not f.startswith("apps/ios/") for f in files),
                       rust_gate={"head": members.get(fid), "ok": True, "verdict": "ok", "at": iso(), "run": active["id"], "batch": len(members),
                                  "linux_run": active.get("linux_run"), "mac": active["mac"], "tree": tree})
             for k in ("branch_head", "gated_head"):
@@ -3043,20 +3063,32 @@ class Loop:
         # item of the other again. Keyed by the half's members; cleared when a half settles.
         bisects = cur.setdefault("rust_gate_bisects", {})
         bisects[active["id"]] = {"halves": [sorted(first), sorted(rest)], "green": [], "at": iso()}
-        if cur.get("pool_first"):
-            # #2014 regression (03:04–03:35 Oct 27): pool-first re-assembled the full pool every tick and the
-            # halves it had just planned never ran (five identical red runs). A red pool batch hands over to
-            # its own bisect: pool-first is cleared here; it re-arms by itself if the pool starves again.
-            cur.pop("pool_first", None)
+        if active.get("pool_batch"):
+            # A settled pool batch, red or green, restarts the starvation clock. Only a POOL batch does: at 08:02
+            # Oct 27 a red plan half (20261027T073846-12, the pool's own bisect that pool-first had stood aside
+            # for) cleared the arm and reset the clock here, so solo slots and a deferred batch took every run
+            # until 09:19 and the pool waited 3.5 h for a turn it had been promised after 2 h.
             cur["last_pool_batch_at"] = iso()
-            self.store.event("_loop", "pool_first_cleared", run=active["id"], members=len(order), reason="red; bisecting")
-            log(f"Gate: pool-first cleared — pool batch {active['id']} was red; its bisect halves run next")
+            if cur.get("pool_first"):
+                # #2014 regression (03:04–03:35 Oct 27): pool-first re-assembled the full pool every tick and the
+                # halves it had just planned never ran (five identical red runs). A red pool batch hands over to
+                # its own bisect: pool-first is cleared here; it re-arms by itself if the pool starves again.
+                cur.pop("pool_first", None)
+                self.store.event("_loop", "pool_first_cleared", run=active["id"], members=len(order), reason="red; bisecting")
+                log(f"Gate: pool-first cleared — pool batch {active['id']} was red; its bisect halves run next")
         for old_id in [k for k, v in bisects.items() if minutes_between(v.get("at") or iso(), iso()) > 24 * 60]:
             bisects.pop(old_id, None)
         self.store.save_cursor(cur)
         log(f"Rust gate {active['id']} red with {len(order)} branches: bisecting into {len(first)} + {len(rest)}")
         for fid in order:
             self.store.event(fid, "rust_gate_bisect", run=active["id"], members=len(order))
+            # The head this red run judged, per member: a park (operator) must point gated_head at THIS head, not at
+            # whatever the branch shows when the park lands — a push in between is otherwise swallowed (#1995
+            # 08:32 push / 08:35 park; #1962/#1963 09:01 push / 09:55 park, 2026-10-27).
+            st = self.store.state(fid)
+            if st.get("branch_head") == members[fid] or st.get("status") == "gating":
+                st["last_red"] = {"head": members[fid], "run": active["id"], "at": iso()}
+                self.store.save_state(fid, st)
 
     def ios_gate(self, branch: str, head: str) -> tuple[bool, str]:
         """ssh to the gate Mac and run ios-gate.sh <branch> <sha>; (ok, output)."""
@@ -3205,7 +3237,7 @@ class Loop:
         if not st.get("expects_ios") and not st.get("expects_ci"):
             # Nothing to wait for would mean a silent 90-min timeout; derive the expectations from the commit.
             files = st.get("files") or [f["filename"] for f in self.gh.commit(sha).get("files", [])]
-            st.update(files=files, expects_ios=any(f.startswith("apps/ios/") for f in files),
+            st.update(files=files, expects_ios=touches_ios(files),
                       expects_ci=any(not f.startswith("apps/ios/") for f in files))
             self.store.save_state(fid, st)
         if not st.get("commit_date"):
@@ -3480,17 +3512,86 @@ class Loop:
             return True
         return any(DEVICE_ONLY_FILES.search(f or "") for f in st.get("files") or [])
 
-    @staticmethod
-    def deploy_kinds(files: list[str]) -> list[str]:
-        """Every service outside the app builds that must be redeployed before this fix is live:
-        the voice pod (`voice/**`), the sandbox image (agentd), the relay."""
+    # Non-Rust inputs of each deployable, by path prefix. The Rust inputs are the workspace crates its binary is
+    # built from, read from the Cargo manifests (`deploy_crate_dirs`).
+    DEPLOY_PATH_PREFIXES = {"voice": ("voice/",), "agentd": ("image/", "harness/"), "relay": ()}
+    DEPLOY_ROOT_CRATES = {"agentd": "arbos-agentd", "relay": "arbos-relay"}
+    DEPLOY_GRAPH_TTL_MIN = 6 * 60
+
+    def manifest(self, path: str) -> dict:
+        blob = self.gh.repo_api("GET", f"/contents/{urllib.parse.quote(path)}?ref=main")
+        return tomllib.loads(base64.b64decode(blob["content"]).decode())
+
+    def read_workspace_graph(self) -> dict[str, list[str]]:
+        """kind → directory prefixes of the root crate and every workspace crate it depends on, transitively —
+        normal and build dependencies, not dev — the set `cargo metadata` resolves for that binary. Read from
+        main's manifests through the API: the relay host has no cargo and the poller has no checkout."""
+        root = self.manifest("Cargo.toml")
+        members = [m for m in (root.get("workspace") or {}).get("members") or [] if "*" not in m]
+        manifests = {m: self.manifest(f"{m}/Cargo.toml") for m in members}
+        dir_of = {(man.get("package") or {}).get("name"): m for m, man in manifests.items()}
+        dir_of.pop(None, None)
+        deps_of: dict[str, set[str]] = {}
+        for m, man in manifests.items():
+            name = (man.get("package") or {}).get("name")
+            if not name:
+                continue
+            tables = [man.get(s) or {} for s in ("dependencies", "build-dependencies")]
+            tables += [t.get(s) or {} for t in (man.get("target") or {}).values() for s in ("dependencies", "build-dependencies")]
+            found: set[str] = set()
+            for table in tables:
+                for dep, spec in table.items():
+                    crate = spec.get("package", dep) if isinstance(spec, dict) else dep  # `core = { package = "arbos-core" }`
+                    if crate in dir_of:
+                        found.add(crate)
+            deps_of[name] = found
+        out: dict[str, list[str]] = {}
+        for kind, root_crate in self.DEPLOY_ROOT_CRATES.items():
+            if root_crate not in dir_of:
+                raise RuntimeError(f"{root_crate} is not a workspace member")
+            seen, todo = {root_crate}, [root_crate]
+            while todo:
+                for d in deps_of.get(todo.pop(), ()):
+                    if d not in seen:
+                        seen.add(d)
+                        todo.append(d)
+            out[kind] = sorted(f"{dir_of[c]}/" for c in seen)
+        return out
+
+    def deploy_crate_dirs(self, refresh: bool = False) -> dict[str, list[str]]:
+        """The workspace graph, cached in the cursor for DEPLOY_GRAPH_TTL_MIN and re-read early when a landed
+        item touched a Cargo.toml. Until 2026-10-27 the agentd list was three fixed prefixes (`crates/arbos-agentd/
+        image/ harness/`), so a fix in arbos-core — compiled into agentd and the relay — was called shipped with no
+        image roll: 56 such items in the week before, 35 of them live on no box when their issue was closed (#2031).
+        Unreadable manifests keep the cached graph, or fall back to the root crates alone."""
+        cur = self.store.cursor()
+        cached = cur.get("deploy_graph") or {}
+        if not refresh and cached.get("dirs") and minutes_between(cached.get("at") or "", iso()) < self.DEPLOY_GRAPH_TTL_MIN:
+            return cached["dirs"]
+        try:
+            dirs = self.read_workspace_graph()
+        except Exception as e:  # noqa: BLE001
+            log(f"deploy graph: manifests unreadable ({str(e)[:160]}); " + ("keeping the cached graph" if cached.get("dirs") else "root crates only"))
+            return cached.get("dirs") or {k: [f"crates/{v}/"] for k, v in self.DEPLOY_ROOT_CRATES.items()}
+        if dirs != cached.get("dirs"):
+            self.store.event("_loop", "deploy_graph", dirs=dirs)
+            log("deploy graph: " + "; ".join(f"{k} ← {' '.join(v)}" for k, v in dirs.items()))
+        cur = self.store.cursor()
+        cur["deploy_graph"] = {"at": iso(), "dirs": dirs}
+        self.store.save_cursor(cur)
+        return dirs
+
+    def deploy_kinds(self, files: list[str]) -> list[str]:
+        """Every service outside the app builds that must be redeployed before this fix is live: the voice pod
+        (`voice/**`), the sandbox image (agentd: its crates, `image/`, `harness/`), the relay (its crates).
+        "Shipped" means the fix is in the running artifact, so a change to any crate a binary is built from
+        counts for that binary (coordinator, 2026-10-27 09:57)."""
+        dirs = self.deploy_crate_dirs(refresh=any(f.endswith("Cargo.toml") for f in files))
         kinds = []
-        if any(f.startswith("voice/") for f in files):
-            kinds.append("voice")
-        if any(f.startswith(("crates/arbos-agentd/", "image/", "harness/")) for f in files):
-            kinds.append("agentd")  # anything baked into the sandbox image rolls with it
-        if any(f.startswith("crates/arbos-relay/") for f in files):
-            kinds.append("relay")
+        for kind in ("voice", "agentd", "relay"):
+            prefixes = tuple(self.DEPLOY_PATH_PREFIXES.get(kind, ())) + tuple(dirs.get(kind) or ())
+            if prefixes and any(f.startswith(prefixes) for f in files):
+                kinds.append(kind)
         return kinds
 
     DEPLOY_WHERE = {"voice": "the voice pod (voice-calls worker deploys it)", "agentd": "the sandbox image (next image roll)",
@@ -4232,7 +4333,10 @@ class Loop:
                 self.store.save_state(fid, st)
                 self.store.event(fid, "confirmation_hold_over")
             head = refs.get(f"feedback/{fid}")
-            if head and head != st.get("gated_head"):
+            # A parked item compares against the head the gate judged (`parked_head`, set by the park from
+            # `last_red`), not against the head the park happened to see: a push recorded before the park is a new
+            # head too and re-registers (2026-10-27: #1995, #1962/#1963 sat handed_off with their fix pushed).
+            if head and head != (st.get("parked_head") or st.get("gated_head")):
                 cmp = self.gh.compare("main", head)
                 tagged = any(f"[feedback {fid}]" in c["commit"]["message"] for c in cmp.get("commits", []))
                 if cmp.get("status") in ("ahead", "diverged") and tagged:
@@ -4245,8 +4349,9 @@ class Loop:
                                     if f["filename"] not in seen:
                                         seen.append(f["filename"])
                         files = seen
+                    st.pop("parked_head", None)
                     st.update(status="gating", branch=f"feedback/{fid}", branch_head=head, files=files,
-                              expects_ios=any(f.startswith("apps/ios/") or f == ".github/workflows/ios.yml" for f in files),
+                              expects_ios=touches_ios(files),
                               expects_rust=bool(self.rust_crates(files)),
                               expects_ci=any(not f.startswith("apps/ios/") for f in files),
                               agent_summary=f"handed-off fix by {st.get('handed_off_to')}")
@@ -4267,7 +4372,7 @@ class Loop:
             st.update(status="pushed", commit=commit["sha"], commit_url=commit["html_url"],
                       commit_message=commit["commit"]["message"].splitlines()[0], pushed_at=iso(), files=files,
                       commit_date=commit["commit"]["committer"]["date"],
-                      expects_ios=any(f.startswith("apps/ios/") for f in files),
+                      expects_ios=touches_ios(files),
                       expects_ci=any(not f.startswith("apps/ios/") for f in files))
             self.store.save_state(fid, st)
             self.store.event(fid, "handoff_landed", commit=commit["sha"], files=files)
@@ -4379,6 +4484,21 @@ class Loop:
         else:
             agentd_shas = sorted({b["sha"] for b in agentd.get("boxes") or [] if b.get("sha") and b.get("state", "awake") == "awake"}
                                  or set(agentd.get("shas") or []))
+        # The deploy worker's record wins when it exists: it is written once the image has rolled to every real
+        # box the worker does not skip. A skipped box (uncarryable through the relay, #1941 — Jacob's
+        # gh_268993031 since 2026-10-26 17:27) stays on its old image on purpose and must not hold every fix
+        # at landed-not-shipped (ten items sat there 06:48–10:xx Oct 27); it is named on the issue instead.
+        fleet_sha, skipped = "", []
+        with contextlib.suppress(OSError):
+            fleet_sha = Path(AGENTD_DEPLOYED_SHA_FILE).read_text().strip()
+        with contextlib.suppress(OSError):
+            skipped = [line.split("|") for line in Path(AGENTD_SKIP_FILE).read_text().splitlines() if line.strip()]
+        if fleet_sha:
+            agentd_shas = [fleet_sha]
+        skipped_note = ""
+        if skipped:
+            names = ", ".join(f"{s[0]} ({s[1].split(';')[0].strip()})" if len(s) > 1 else s[0] for s in skipped)
+            skipped_note = f" — except the box(es) the deploy worker skips, still on their old image until carried by hand: {names}"
         relay_sha = ""
         with contextlib.suppress(OSError):
             relay_sha = Path(RELAY_DEPLOYED_SHA_FILE).read_text().strip()
@@ -4401,11 +4521,14 @@ class Loop:
                 if shas and contained and all(contained):
                     real = agentd.get("real_min_sha") is not None
                     awake_boxes = [b for b in agentd.get("boxes") or [] if b.get("state", "awake") == "awake" and not (real and b.get("test"))]
-                    images = sorted({b.get("image", "?") for b in awake_boxes}) or ["?"]
+                    images = sorted({b.get("image", "?") for b in awake_boxes if not fleet_sha or b.get("sha") == fleet_sha}
+                                    or {b.get("image", "?") for b in awake_boxes}) or ["?"]
+                    on_fleet = sum(1 for b in awake_boxes if b.get("sha") == fleet_sha) if fleet_sha else 0
                     where = ("the voice pod" if kind == "voice" else "the relay" if kind == "relay"
-                             else f"all {(agentd.get('real_awake') if real else agentd.get('awake')) or len(shas)} awake "
+                             else f"all {on_fleet or (agentd.get('real_awake') if real else agentd.get('awake')) or len(shas)} awake "
                                   f"{'real-user ' if real else ''}boxes (image {'/'.join(images)})")
-                    done_notes.append(f"{where} runs {shas[0][:8]}" + ("" if len(shas) == 1 else f" (+{len(shas) - 1} sha)"))
+                    done_notes.append(f"{where} runs {shas[0][:8]}" + ("" if len(shas) == 1 else f" (+{len(shas) - 1} sha)")
+                                      + (skipped_note if kind == "agentd" and fleet_sha else ""))
                 else:
                     still.append(kind)
             if still != kinds:
@@ -5050,6 +5173,28 @@ def main(argv: list[str]) -> int:
                     loop.gh.comment(st["issue"], f"Not a failure after all: the fix `{st['commit'][:8]}` is on `main`; the build that carries it was still in the runner queue ({why.rstrip('.')}). Back to tracking the builds.")
                     loop.gh.set_labels(st["issue"], [], ["needs-human"])
             print(f"{fid}: back to pushed")
+        return 0
+    if cmd == "park":
+        # `park <id> <note…>`: hand a gating item back to its owner after a red the gate pinned on it. gated_head and
+        # parked_head are the head the RED run judged (`last_red`, or the item's own failing verdict) — never the
+        # live head: a push recorded between the red and the park stayed invisible when the park copied branch_head
+        # (#1995 08:32/08:35, #1962/#1963 09:01/09:55, 2026-10-27). The follower re-registers any other head, so a
+        # push already made re-gates on the next tick; a pin is released.
+        if len(argv) < 4:
+            print("park <id> <note…>")
+            return 2
+        fid, note = argv[2], " ".join(argv[3:])
+        st = loop.store.state(fid)
+        if not st or st.get("status") != "gating":
+            print(f"{fid}: not gating ({(st or {}).get('status')})")
+            return 2
+        rg = st.get("rust_gate") or {}
+        red = (st.get("last_red") or {}).get("head") or (rg.get("head") if rg.get("verdict") in ("fail", "conflict") else None) or st.get("branch_head")
+        st.update(status="handed_off", gated_head=red, parked_head=red, gate_pinned=False)
+        loop.store.save_state(fid, st)
+        loop.store.event(fid, "parked_by_operator", head=red, live_head=st.get("branch_head"), note=note[:400])
+        later = st.get("branch_head") != red
+        print(f"{fid}: parked at the red head {red[:9]}" + (f"; live head {st['branch_head'][:9]} is newer and re-registers on the next tick" if later else ""))
         return 0
     if cmd == "approval-gate":
         # Standing rule: the gate is always on. `approval-gate on [--allow a,b]` widens the allow list;

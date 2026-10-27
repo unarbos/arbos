@@ -501,7 +501,9 @@ impl Db {
         }
         let c = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
         c.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;",
+            // secure_delete: rows a shallow checkpoint replaces (secret hand-off) leave no old
+            // bytes behind in the file.
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON;",
         )?;
         c.execute_batch(SCHEMA)?;
         // Forward-only, additive migrations (D50).
@@ -583,6 +585,8 @@ impl Db {
         c.execute_batch(crate::db_people::PEOPLE_SCHEMA)?;
         Self::migrate_mono_avatar_defaults(&c)?;
         c.execute_batch(crate::db_push::PUSH_SCHEMA)?;
+        c.execute_batch(crate::push::store::OUTBOX_SCHEMA)?;
+        c.execute_batch(crate::push::eligibility::LEVEL_SCHEMA)?;
         c.execute_batch(crate::db_calls::CALLS_SCHEMA)?;
         crate::db_calls::migrate_calls(&c);
         c.execute_batch(crate::db_voice::VOICE_SCHEMA)?;
@@ -859,6 +863,17 @@ impl Db {
     }
 
     // ---- projects and chats -------------------------------------------------------------------
+
+    /// Admin: a project's daily cap in USD, or the unlimited sentinel.
+    pub fn set_project_spend_cap(&self, id: &str, cap: f64) -> Result<bool> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE projects SET spend_cap_daily = ?2 WHERE id = ?1",
+                params![id, cap],
+            )
+            .map(|n| n > 0)
+        })
+    }
 
     pub fn insert_project(&self, p: &Project) -> Result<()> {
         self.with(|c| {
@@ -1656,6 +1671,15 @@ impl Db {
                 Ok(Row { seq: r.get(0)?, device: r.get(1)?, batch_id: r.get(2)?, bytes: r.get(3)? })
             })?;
             rows.collect()
+        })
+    }
+
+    /// After rows were replaced for a redaction: fold the WAL into the main file and truncate
+    /// it, so the pages that held the old bytes are gone from disk as well.
+    pub fn flush_after_scrub(&self) -> Result<()> {
+        self.with(|c| {
+            c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+            Ok(())
         })
     }
 

@@ -127,8 +127,9 @@ struct ServerChannelsView: View {
     var body: some View {
         ZStack(alignment: .top) {
             theme.bg.ignoresSafeArea()
+            ScrollViewReader { proxy in
             List {
-                Color.clear.frame(height: 66)
+                Color.clear.frame(height: HomeChrome.barOnlyListTop)
                     .listRowInsets(EdgeInsets())
                     .listRowSeparator(.hidden)
                     .listRowBackground(Color.clear)
@@ -178,6 +179,9 @@ struct ServerChannelsView: View {
             .scrollContentBackground(.hidden)
             .background(theme.bg)
             .refreshable { await model.refreshServers() }
+            .rigListScroll(proxy, ids: server?.liveChannels.map(\.id) ?? [])
+            }
+            ListTopFade(screen: .serverChannels)
             header
         }
         // Custom back chevron; swipe right (edge pop or anywhere) goes back to Home —

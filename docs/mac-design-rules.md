@@ -355,7 +355,8 @@ At the then 876 pt column the bubble was 560 = 64 % of it; since
 [feedback mac-sidebar-rail-2026-10-26] the column is Grok's 960 (`COMPOSER_WIDTH`
 904 + the two 28 pt circles), so the bubble is 58 % of the column as in Grok
 (matching the absolute width is what reads as "the same bubble" side by side). Question / approval cards share the slot and the cap
-(#1374 / #1440); my own bubbles keep their 72 % rule.
+(#1374 / #1440); my own bubbles keep their 72 % rule. Agent 1:1 chats only:
+people chats take 80 % of their side (§ "Chat density in people chats").
 
 Code: `transcript.rs` `ASSISTANT_MAX_WIDTH`, `assistant_cap()`, the inner
 `chat-bubble-cap` frame of `assistant_slot()`; `onboarding::bubble_target`
@@ -618,6 +619,67 @@ A new screen declares itself there.
 | `primaryCTA` | 50 pt filled capsules (Sign in, Pair, Create) | primary buttons, `primary` fill, no rim |
 | `textAreas` | feedback note / description areas, 18 pt corners | free-form, grow |
 
+## Chat density in people chats: Discord-size pictures, wider bubbles (Jacob 2026-10-26, [feedback chat-density-ios-2026-10-26], Mac [feedback chat-density-mac-2026-10-26])
+
+Jacob (17:54 CR, iPhone Arbonites group): "In chats the pfp chat bubble takes
+up too much space. Go for Discord standard size and use more of the screen both
+ways, left and right per chat bubble. So reduce the empty space on the left and
+right." Discord's message avatar is **40 pt in a 72 pt gutter** (desktop, cozy:
+avatar at 16, content at 72, 48 free on the right) and **32 pt on mobile**.
+The rule covers **people chats** — DM, group, server channel, a project with
+people in it: every chat whose bubbles carry a sender disc. The 1:1 agent chat
+keeps its Grok-measured widths (screen − 76 on iPhone; the 560 pt ceiling and
+my 72 % on Mac): Grok has no group chats to measure, so people chats follow
+Discord's density instead.
+
+### iPhone (402 pt screen, 3 px/pt; the list pads 16 each side)
+
+| Item | Rule (pt) | Was | Code |
+| --- | --- | --- | --- |
+| Sender disc | **36** — Discord's size (between its 40 desktop and 32 mobile); centred on the composer's `+` as before, so its left edge sits **6 inside the `+`** = the status picture's edge (`presenceAvatarOffset`): one left edge for every picture in the chat | 42 | `Theme.memberAvatar` |
+| Disc → bubble | **10** (= `Controls.gap`, the `+` → field gap) | 13 | `Theme.memberAvatarGap` |
+| Disc / bubble body from the screen | keyboard up **24–60 / 70**; down **37–73 / 83** (the column follows the `+`, whose inset is Grok's 18 / 31) | 21–63 / 76; 34–76 / 89 | `Theme.avatarColumnInset`, `memberLane` |
+| Far-side margin | **32** on both sides: my bubble's left edge never passes 32 from the screen, an incoming bubble's right edge never passes 402 − 32 | 60 | `Theme.bubbleOppositeMargin`, `peopleBubbleInset` = 16 + 32 |
+| My bubble cap | **354** (right edge 16, as Grok) | 326 | `RowView.maxBubble(width:people:)` |
+| Incoming bubble cap | **300** keyboard up / **287** down (354 − lane); runs to 370 | 253 → 342 | same, minus `memberLane` |
+| Question cards, pictures with a lane | the incoming cap; a photo + caption bubble stays ≤ 280 (#1840) | — | `QuestionCard`, `ImageBubble` |
+| Status row, composer `+`, system notices ("Const added Aureum") | unchanged: the `+` is Grok's; the status picture (25⅓, 6 inside the `+`) now shares the disc's left edge; notices stay centred | — | `PresenceRow`, `.system` |
+
+Pinned by `ArbosTests/ChatDensityMetricsTests` (disc, gap, column, caps,
+far margin, agent-chat numbers untouched) and `PresenceRowTests`.
+
+Not moved, on purpose: the composer's side inset (Grok's 31 keyboard down /
+18 up, #1841) — it is the left gutter with the keyboard down; moving the disc
+off the `+` would break Jacob's avatar-column rule, moving the `+` would break
+Grok parity. If the keyboard-down gutter still reads wide, that inset is the
+lever, and it needs a Grok keyboard-down reference first.
+
+### Mac
+
+The Mac column is already denser than Discord's: a **28 pt disc** (= the `+`,
+Jacob's column rule) in a **50 pt gutter** (disc 8 inside the pill's edge, 14 to
+the body, the body on the composer's text start — `transcript::SENDER_LANE`)
+against Discord's 40 in 72. Disc, gap and the 16 pt column margin (Grok's
+composer edge, #1374) stay. The widths move:
+
+| Item | Rule | Was | Code |
+| --- | --- | --- | --- |
+| Incoming bubble in a people chat (a person's or an agent's), cards after a lane | **80 % of the slot** after the sender lane; 20 % stays free on the right | person 72 % of the slot; agent `min(slot − 84, 560)` | `transcript::PEOPLE_BUBBLE_FRACTION`, `people_cap`, `people_slot` |
+| My bubble in a people chat | **80 % of the column** from the right; 20 % free on the left | 72 % | `own_bubble_fraction(true)` |
+| Agent 1:1 chat | unchanged — agent `min(slot − 84, 560)`, mine 72 % | — | `assistant_cap`, `OWN_BUBBLE_FRACTION` |
+| Reference window (1180 wide, 296 sidebar → 852 column) | incoming 66 → 708 (641.6 wide, 160 free); mine 682 wide (170 free on the left) | incoming agent 560 (242 free), person 577; mine 613 (239 free) | — |
+| Grok's 960 column | incoming 728 wide (182 free), mine 768 (192 free) | agent 560 (350 free), person 655; mine 691 | — |
+
+One share at every width: below a 750 pt column an agent's group bubble is
+narrower than Grok's 560 agent-chat ceiling (517 at ref 57's 696 column); a
+person's beside it is wider than its old 72 % everywhere, and the two are now
+the same width. The hover rail lives in the free 20 %. Pinned by
+`transcript::layout_tests::people_chat_bubbles_take_four_fifths_of_their_side`,
+`cards_share_the_bubbles_left_edge_and_cap`, `bubbles_stay_inside_the_column_and_wrap_their_text`
+and the `people_chat` rule in `names_senders_follows_the_chat_kind`. Record:
+project store `internal/feedback-loop/chat-density-2026-10-26.md`, shots in
+`media/feedback/chat-density/`.
+
 ## Glass surface: readable content, translucent chrome (Jacob 2026-10-26, [feedback mac-glass-contrast-2026-10-26])
 
 Jacob (09:55 CR): "the glass appearance is broken on the mac." Reproduced on
@@ -634,16 +696,14 @@ this is the correctness of the existing surface):
 
 | Layer | Rule | Code |
 | --- | --- | --- |
-| Window material | A real AppKit semantic material with its tint intact, installed once under GPUI's content view; its `appearance` follows the theme (dark material under a dark theme, whatever macOS is set to), so an appearance switch re-tones it and never drops it. Default `Sidebar` (Finder's). GPUI's own background is `Transparent` on Glass so the two do not stack. | `ui::vibrancy` (`BackdropPlan`, `apply`), `Theme::window_background_for`, `GlassMaterial` (`ARBOS_GLASS_MATERIAL=…` for the rig) |
+| Window material | A real system material, installed once under GPUI's content view; its `appearance` follows the theme (dark material under a dark theme, whatever macOS is set to), so an appearance switch re-tones it and never drops it. **macOS 26: Liquid Glass (`NSGlassEffectView`), adaptive by design; before 26: AppKit's under-window material with its tint intact** (Jacob 2026-10-26 15:12, [feedback mac-glass-adaptive-2026-10-26]; #1922 had used `Sidebar`). GPUI's own background is `Transparent` on Glass so the two do not stack. | `ui::vibrancy` (`BackdropPlan`, `apply`, `liquid_available`), `GlassMaterial` (`ARBOS_GLASS_MATERIAL=liquid|sidebar|underwindow|…|none` for the rig) |
 | Opacity slider | Still 0 … 100 %, floor **0 %** (#1425). It sets the shell wash only; legibility never depends on it. | `GlassOpacity`, `Theme::shell()` |
-| Chat column | Page-colour wash at **0.85** on both appearances (dark `bg`, light white; light had it since 2026-10-21). Body text ≥ 4.5:1 and muted ≥ 3:1 over white / black / mid grey at every slider value, counting the app's paint alone. | `CHAT_WASH_ALPHA`, `Theme::chat_wash()` / `pane()` |
-| Sidebar | Tint **0.60** both appearances (dark was 0.35): names ≥ 4.5:1 over any desktop by the app's paint alone; previews lean on the material below the default Opacity. | `CHROME_TINT_ALPHA`, `Theme::chrome()` |
-| Floating cards | Menus, sheets, pickers at **0.85** (dark was 0.50, light 0.72) with the header's 1 pt rim and top highlight on Glass. | `FROST_TINT_ALPHA`, `Theme::card()`, `glass::plate` |
-| Untouched | Traffic lights native; sizes and placements; bubbles, discs and hairlines keep their colours (they sit on the washed surfaces above); Matte. | — |
+| Adaptive washes | Every Glass region — sidebar, chat column, right pane, floating cards — is washed with its own tint at the alpha **the text on it needs over the desktop that is actually there**: body ≥ 4.5:1, muted ≥ 3:1 (WCAG, sRGB compositing), never under the region's floor (chat / pane 0.25, sidebar 0.25, cards 0.55). A black desktop under a dark theme, or a white one under a light theme, gets the floor and the picture shows through; a white desktop under white text gets what it takes (≈ 0.8). The desktop is read by `ui::backdrop` — `CGWindowListCreateImage` of the screen region below the window (our own window excluded, nominal resolution), reduced to three band luminances (left quarter / middle half / right quarter), every 1.5 s and at once on a move or resize, repainting only on a change ≥ 0.02. A blank capture (no Screen Recording grant for other apps' windows) is not a sample. Without a sample the washes assume the worst desktop — #1922's fixed values. The window material is never credited: it can only add. | `Theme::adaptive_wash` / `wash_alpha` / `needed_alpha`, `Theme::backdrop`, `GlassRegion`, `CHAT_WASH_FLOOR` / `CHROME_WASH_FLOOR` / `CARD_WASH_FLOOR`, `ui::backdrop` |
+| Floating cards | Menus, sheets, pickers: the adaptive card wash with the header's 1 pt rim and top highlight on Glass. | `Theme::card()`, `glass::plate` |
+| Text on glass | Still GPUI's flat `text` / `text_muted`; the adaptive washes carry the contrast. Vibrant label colours (plusD / plusL over the sampled backdrop) are the next item, Jacob-tier, with a lint that every Glass container uses them. | — |
+| Untouched | Traffic lights native; sizes and placements; bubbles, discs and hairlines keep their colours (they sit on the washed surfaces above); Matte, except the header pill rule. | — |
 
-Pinned by `theme::glass_contrast_tests` (the matrix above with a WCAG model of
-the compositing) and `vibrancy::tests` (material on Glass, none on Matte,
-kept across dark → light → dark).
+Pinned by `theme::glass_contrast_tests` (white / black / photo × light / dark × 0 / 50 / 100 %, sampled and unsampled; the floors over the friendly desktop), `backdrop::tests` (throttle, change gate, bands, coverage) and `vibrancy::tests` (Liquid on 26, under-window before, none on Matte, kept across dark → light → dark).
 
 ## Full screen (Jacob 2026-10-24, [feedback fullscreen-traffic-lights-2026-10-24] → [feedback topbar-grok-parity-2026-10-24])
 
@@ -890,6 +950,35 @@ the cursor nor the AccessKit tree, so hand and label are pinned by
 construction (every target goes through `attach` / `mark`; the scan guards
 the road).
 
+### Blocked state (Jacob 2026-10-26, [feedback blocked-state-mac-2026-10-26])
+
+**Once I block a person, every place that shows them says so, every Unblock
+asks first, and a DM with them has no input.** Jacob: "Today you can't tell in
+the app that you've blocked someone." The block list is the relay's
+(`AppState::blocked`, `GET /blocks`); no surface keeps a local flag. The iPhone
+has the same surfaces ([feedback blocked-state-ios-2026-10-26]).
+
+| Surface | Rule | Where |
+|---|---|---|
+| Person pane | a **Blocked** chip (`nosign` glyph + word, `danger` on `danger_soft`, 22 pt) under the @handle; the hero's one action is **Unblock** (the Message pill is gone); the footer row reads **Unblock** (accent) | `profiles/user.rs`, `ui/blocked.rs` `chip` |
+| Unblock confirm | the row (pane) or the bar (DM composer) becomes "Unblock @x?" · "They'll be able to message you and see you in groups again." · Cancel · **Unblock** (the kit's confirm buttons); Unblock sends `DELETE /blocks/{id}`; nothing changes until the relay's list comes back without them | `Shell::{arm_unblock, cancel_unblock, confirm_unblock}`, `blocked::confirm` |
+| DM header pill | a **Blocked** tag (16 pt capsule, 10.5 semibold) after the name | `header.rs`, `blocked::tag` |
+| Member lists (group / shared project) | the same tag on the member's row, before the owner's remove × | `profiles/group.rs` |
+| DM composer | "You blocked X · Unblock" — a `COMPOSER_HEIGHT` bar on `surface_2`, the composer's radius, in the composer's place (transcript and empty-state layouts alike) | `Shell::blocked_composer`, `blocked::composer_bar` |
+| Refused push (chat-level note) — **DMs** | the shared `error_note` with `PushRefusal::sentence()`: "<name> has blocked you in this chat." · "Couldn't post: you've blocked <name>, who is in this chat. Unblock to post." (+ an **Unblock** capsule → the confirm) · the mute line · else the generic delivery line. The relay's code stays `not_available`; the words come from its `reason` | `Shell::render_delivery_note`, `sync/mod.rs` |
+| Groups: hidden for the blocker alone (Jacob 2026-10-26 17:28 CR) | a group block never refuses the room. The blocked person's rows fold, per run, into one muted stamp-style line "**N messages hidden because you blocked <name> · Unblock**" (`nosign` glyph; Unblock opens their pane on the confirm) — for the blocker only; everyone else sees the messages. The blocker's sidebar preview, unread dot, notifications, search hits and Library skip those rows. Senders come from the relay's `blockedSenders` hint on the chat plus my block list (`AppState::hidden_senders_in`, `hides_message`) | `transcript::build_rows_hiding`, `RowKind::Hidden`, `blocked::hidden_row`, `sidebar::preview`, `AppState` arrivals / search, `profiles::collect` |
+
+Pinned by `blocked::hidden_tests` (runs fold into Hidden rows; the real shell: only the
+others' bubbles, the preview skips the blocked sender, Unblock on the fold opens the pane
+on the confirm, unblock reveals every row; a hidden arrival leaves the dot dark while a
+third member's lights it) and `blocked::render_tests` (the real shell: pane chip / pill / row and
+the confirm's Cancel and Unblock with the one command; the DM pill's tag and
+the bar, the confirm in its place, the field back once unblocked; the member
+list's tag on the blocked member only; the note's sentences and its Unblock
+capsule) and `sync::push_refusal_tests` (the sentences). Rig:
+`ARBOS_RIG_FAILURE=blocks-member|blocked-by` (the note, every chat) with the
+fixture's `ARBOS_FIXTURE_BLOCKED=<handle>` (my block list + the groups' `blockedSenders`).
+
 ## Pane animations (Jacob 2026-10-24, [feedback right-pane-slide-2026-10-24], [feedback sidebar-slide-2026-10-24])
 
 **The right info pane and the left chat sidebar slide; they never pop.**
@@ -1084,3 +1173,45 @@ landmarks in all 15 languages, aliases and fallbacks), the Mac's
 iPhone's `CodeHighlightTests`. Rig: `ARBOS_FIXTURE_REPLY=math` (Mac) /
 `ARBOS_SHOW=math` (iPhone) is Jacob's bubble-sort turn; `ARBOS_RIG_CODE_COPY=hover|pressed|copied`
 paints the copy square in that state for a capture (the check needs `copied`).
+## Chart bubbles: a native chart card, the code card's frame (Jacob 2026-10-26, approved mock; [feedback chart-bubble-mac-2026-10-26], iPhone [feedback chart-bubble-ios-2026-10-26], agentd [feedback chart-post-tool-agentd-2026-10-26], core [feedback chart-core-2026-10-26])
+
+**An agent posts a chart as data, not a picture, and the apps draw it natively.**
+`post_chart(chart, caption)` (agentd) writes one row: `text` (the caption) →
+`attachment` (a 1200 × 675 light PNG agentd renders on the box, `chartPart`
+naming the chart part — what an app that cannot draw the chart shows, and what
+push previews and Library use) → `chart` (`specVersion`, the validated
+`arbos_core::chart::Chart`, its markdown `table`, `fallback` = the attachment
+id). The data lives in the part (≤ 32 KB), never in a blob. Both apps skip
+unknown part kinds, so an older build shows the picture; a build that knows the
+part draws the chart and hides the attachment that names it.
+
+One source of numbers: `arbos_core::chart` validates (8 series · 500 points per
+series · 2 000 total · 100 categories · pie 12 slices, one series · 12
+annotations), resolves scales (linear / log / time / category), nice ticks,
+stacking, value formats (`%` glued, other units spaced, currency in front,
+compact `1.2k`, durations) and the readout columns; `layout(w, h, style)` gives
+the pixel geometry the Mac canvas and the picture paint; `hit` the readout under
+the pointer; `table_markdown` / `table_tsv` the data. The iPhone draws Swift
+Charts from the same model through `arbos-ffi`.
+
+| Item | Mac | iPhone |
+|---|---|---|
+| Frame | the code card's: inside the bubble, `code_bg`, `border` hairline, radius **10**, padding 12; one block of the bubble (`Block::Chart`), so corners, the hover rail and selection treat it like a code card | radius 12, the same tokens |
+| Header | title 13 semibold, subtitle 11.5 `text_muted`; the axis title sits above the plot (horizontal), never rotated | 15 / 13 |
+| Icon squares | **24** pt, 6 pt radius, hairline, 13 pt glyph in `text_muted`, inset 8 from the card's top-right: **Copy data** (`copy` → `check` in `online` for 1.5 s, the code card's `#copy-check`), **Save PNG** (`download`), **Expand** (`expand`) | the same three |
+| Series colours | the code-card token palette in order — keyword `#95D0CD`, function `#E6B387`, string `#D898D8`, number `#F1C972`, then `accent`, `online`; light: the derived light set. A `color` the agent gave is kept in both themes | the same (`ChartPalette`) |
+| Plot | canvas 210 pt (bar 200, pie 220): gridlines = `border`, ticks 11 pt `text_faint`, lines 2 pt round-joined, areas 18 % fill, bars 62 % slot width with 3 pt top radii, pie slices seamed in the bubble colour with the share inside slices ≥ 6 % | Swift Charts marks from the core model's domains and ticks |
+| Values | **none at rest**. Hover: a 1 pt crosshair at the nearest column, a dot per series ringed in the bubble colour, one readout chip (x label, then dot · name · value per series; `surface_2` / `surface_1`, hairline, radius 8) beside the crosshair at the plot's top, flipped left near the right edge. Bars: the hovered category stays full, the others dim to 45 % | touch-and-hold: the same readout centred above the thumb |
+| Copy data | TSV with a header row (units in the header) | the same |
+| Save PNG | the core picture renderer in the **current theme at 2x** (`chart_card::png_bytes`), to Downloads with the "Saved to …" toast and the Finder reveal every saved attachment gets; a failure is the shared error toast ("couldn't save the chart") | `ImageRenderer` at 3x, to Photos |
+| Expand | an **in-window overlay** (`ui::chart_viewer`): scrim 58 % / 40 %, a panel ≤ 1140 × 706 (radius 16, `bg`, hairline, shadow) with the title · subtitle, **Copy data** · **Save PNG** pills and the close disc top-right, the plot at the panel's width with the same hover readout, and a Chart \| Data switch whose Data view is the table in the markdown table's style; Esc, the disc or the scrim closes; focus follows `viewer_focus` like the media viewer | a full-screen cover with ×, title, share; Chart \| Data; Save image · Copy data pills |
+| Fallback | the PNG as an inline picture + the caption (older builds); push body = the caption | the same |
+
+Code: `ui/chart_card.rs` (`card`, `plot`, `paint_plot`, `save_png`), `ui/chart_viewer.rs`,
+`model::Part::Chart` + `Attachment::chart_part`, `markdown::Block::Chart`, the
+transcript's row builder (a chart part is a `Markdown` row; an attachment whose
+`chart_part` names a chart part of the same message is skipped). Pinned by
+`transcript::chart_tests` (part parse, rows + the hidden picture, the headless card:
+title / legend / plot height / the three 24 pt squares at the top-right, Copy data
+→ TSV + check, Save / Expand wired) and `chart_card::tests` (palette per theme,
+file names, the 2x themed PNG); the numbers by `arbos_core::chart::tests`.

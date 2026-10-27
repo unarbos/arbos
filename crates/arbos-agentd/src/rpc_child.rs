@@ -109,6 +109,9 @@ impl RpcChild {
                 }
             }
             reader_me.exited.store(true, Ordering::SeqCst);
+            // Whoever is waiting on this child hears now, not at their 60 s timeout: a
+            // `switch_session` sent to a child that a restart replaced (#2007).
+            reader_me.pending.lock().await.clear();
             let _ = reader_me.events.send(Event::Other);
             tracing::info!(child = %reader_me.name, "rpc child stdout closed");
         });
@@ -144,6 +147,9 @@ impl RpcChild {
         }
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(r)) => Ok(r),
+            Ok(Err(_)) if !self.is_alive() => {
+                Err(anyhow!("child {} exited before answering {id}", self.name))
+            }
             Ok(Err(_)) => Err(anyhow!("child {} dropped response {id}", self.name)),
             Err(_) => {
                 self.pending.lock().await.remove(id);
