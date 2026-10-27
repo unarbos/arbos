@@ -1979,68 +1979,84 @@ struct TableBlock: View {
     }
 }
 
-/// A fenced ``` block: the language and a Copy pill in the header (the Mac's
-/// code card), the mono body under it. Copy puts the block on the pasteboard,
-/// tints while pressed and reads "Copied" for 1.5 s (Jacob 2026-10-24: the
-/// Mac pill showed no click effect; the iPhone card had no Copy at all).
+/// A fenced ``` block as Grok Bot's code card ([feedback
+/// code-highlighting-ios-2026-10-26]): no header row, a copy icon floating
+/// top-right, the mono body coloured by the shared highlighter (keywords,
+/// function names, strings, numbers, comments in italic), 1 pt indent guides,
+/// and long lines scrolling sideways inside the card. Copy puts the block on the
+/// pasteboard, tints while pressed and shows a check for 1.5 s.
 struct CodeCard: View {
     @Environment(\.theme) private var theme
     let lang: String
     let code: String
     /// Screenshot rig (`ARBOS_RIG_CODE_COPY=pressed|copied`): the simulator
-    /// cannot hold a touch through a capture, and "Copied" lasts 1.5 s.
+    /// cannot hold a touch through a capture, and the check lasts 1.5 s.
     private static let rig = ProcessInfo.processInfo.environment["ARBOS_RIG_CODE_COPY"]
     @State private var copied = CodeCard.rig == "copied"
 
     static let copiedFor: Duration = .seconds(1.5)
+    static let radius: CGFloat = 12
+
+    /// The button's action: the block, verbatim, on the general pasteboard.
+    static func copyToPasteboard(_ code: String) {
+        UIPasteboard.general.string = code
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Text(lang.isEmpty ? "code" : lang)
-                    .font(theme.font(Theme.tiny))
-                    .foregroundStyle(theme.muted)
-                Spacer(minLength: 8)
-                Button {
-                    UIPasteboard.general.string = code
-                    Haptics.pick()
-                    copied = true
-                    Task { @MainActor in
-                        try? await Task.sleep(for: Self.copiedFor)
-                        copied = false
-                    }
-                } label: {
-                    HStack(spacing: 3) {
-                        if copied {
-                            Image(systemName: "checkmark").font(theme.font(11, weight: .semibold))
-                        }
-                        Text(copied ? "Copied" : "Copy")
-                            .font(theme.font(Theme.tiny, weight: .medium))
-                    }
-                    .foregroundStyle(copied ? theme.online : theme.muted)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(copied ? theme.online.opacity(0.14) : .clear)
-                    )
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(CopyPillPress(tint: theme.accent, forced: CodeCard.rig == "pressed"))
-                .accessibilityLabel(copied ? "Copied" : "Copy code")
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .overlay(alignment: .bottom) { Rectangle().fill(theme.separator).frame(height: 0.5) }
+        let size = CodeHighlight.fontSize * theme.textScale
+        let advance = CodeHighlight.glyphAdvance(size: size)
+        let lineHeight = CodeHighlight.lineHeight(size: size)
+        let font = theme.font(CodeHighlight.fontSize, design: .monospaced)
+        let text = CodeHighlight.attributed(lang: lang, code: code, palette: theme.codePalette, font: font, plain: theme.text)
+        let guides = CodeHighlight.indentGuides(code, advance: advance)
+        ZStack(alignment: .topTrailing) {
             ScrollView(.horizontal, showsIndicators: false) {
-                Text(code)
-                    .font(theme.font(14, design: .monospaced))
-                    .foregroundStyle(theme.text)
-                    .padding(10)
+                Text(text)
+                    .lineSpacing(0)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .overlay(alignment: .topLeading) {
+                        ForEach(Array(guides.enumerated()), id: \.offset) { _, guide in
+                            Rectangle()
+                                .fill(theme.codePalette.guide)
+                                .frame(width: 1, height: lineHeight)
+                                .offset(x: guide.x, y: CGFloat(guide.line) * lineHeight)
+                        }
+                    }
+                    .padding(.leading, CodeHighlight.padX)
+                    .padding(.trailing, CodeHighlight.padRight)
+                    .padding(.vertical, CodeHighlight.padY)
+                    .accessibilityIdentifier("code-body")
             }
+            Button {
+                Self.copyToPasteboard(code)
+                Haptics.pick()
+                copied = true
+                Task { @MainActor in
+                    try? await Task.sleep(for: Self.copiedFor)
+                    copied = false
+                }
+            } label: {
+                Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(copied ? theme.online : theme.muted)
+                    .frame(width: CodeHighlight.copySize, height: CodeHighlight.copySize)
+                    .background(
+                        // The card's own colour, so the square covers the code under it.
+                        ZStack { theme.bubbleAssistant; theme.bg.opacity(0.6) }
+                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    )
+                    .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(theme.separator, lineWidth: 0.5))
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(CopyPillPress(tint: theme.accent, forced: CodeCard.rig == "pressed"))
+            .accessibilityLabel(copied ? "Copied" : "Copy code")
+            .accessibilityIdentifier(copied ? "code-copy-check" : "code-copy")
+            .padding(CodeHighlight.copyInset)
         }
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.bg.opacity(0.6)))
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(RoundedRectangle(cornerRadius: Self.radius, style: .continuous).fill(theme.bg.opacity(0.6)))
+        .overlay(RoundedRectangle(cornerRadius: Self.radius, style: .continuous).stroke(theme.separator, lineWidth: 0.5))
+        .clipShape(RoundedRectangle(cornerRadius: Self.radius, style: .continuous))
+        .accessibilityIdentifier("code-card")
     }
 }
 
