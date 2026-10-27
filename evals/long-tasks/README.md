@@ -13,7 +13,11 @@ store (`docs/agent-eval.md`, `docs/agent-eval-runs/`).
   summary + per-run report; `lib/issues.py` — one root-cause issue per failure.
 - `scoreboard/<run>.json`, `scoreboard/SUMMARY.md` — versioned results. `results/` is local evidence
   (chat docs, pi sessions) and is not committed.
-- One command: `scripts/evals/long-tasks/run-suite.sh [--tasks a,b] [--subset regression|quick] [--lanes a,b] [--no-issues]` — run from a
+- `setup_actions`: `people_group` (`peer_handle`, `with: [lanes]`, `title`) opens a people group — the eval
+  user, a scratch peer, this lane's agent and the named lanes' agents — and `chat: "dm"` turns run in it; per
+  turn `reply_from: "lane-a"` / `silent_agents: ["lane-b"]` check who answered by sender handle, and
+  `expect_no_reply_s` checks that nobody did. `--subset respond-gate` is the group respond-gate set (g6–g9 + h2).
+- One command: `scripts/evals/long-tasks/run-suite.sh [--tasks a,b] [--subset regression|quick|respond-gate] [--lanes a,b] [--no-issues]` — run from a
   checkout of `main`; it also commits the scoreboard on a fresh `feedback/long-task-eval-run-<run>` branch
   and registers it with the loop (`LT_COMMIT=0` to skip). Partial re-runs fold in with `merge.py`;
   `rejudge.py` re-runs the rubric for turns the judge skipped.
