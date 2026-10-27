@@ -1,0 +1,26 @@
+{
+ "id": "s5-reminder-then-cancel",
+ "lane": "c",
+ "category": "scheduling",
+ "title": "Set a reminder, then cancel it in plain words; it must not fire",
+ "turns": [
+  {
+   "prompt": "Remind me in 3 minutes to call Ana — when it fires, append the line CALL ANA to {D}/remind.log. Confirm the time it will fire.",
+   "seed": "mkdir -p {D}",
+   "timeout_s": 120,
+   "reply_regex": "(?i)\\b(3|three) min|in 3|at \\d{1,2}:\\d{2}"
+  },
+  {
+   "prompt": "Never mind, Ana just called me. Drop that reminder.",
+   "pre_wait_s": 5,
+   "timeout_s": 120,
+   "reply_regex": "(?i)(cancel|dropp|remov|delet)",
+   "after_s": 190,
+   "verify": "f={D}/remind.log; n=$(test -f $f && grep -c 'CALL ANA' $f || echo 0); echo \"SHOW fired=$n\"; [ $n -eq 0 ] && echo PASS || echo FAIL: the cancelled reminder fired",
+   "routine": {
+    "count": 0
+   }
+  }
+ ],
+ "cleanup_routines": true
+}

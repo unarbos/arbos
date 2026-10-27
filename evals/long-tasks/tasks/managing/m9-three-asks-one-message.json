@@ -1,0 +1,26 @@
+{
+ "id": "m9-three-asks-one-message",
+ "lane": "a",
+ "category": "managing",
+ "title": "Three unrelated asks in one message, all answered, none dropped",
+ "turns": [
+  {
+   "prompt": "Three things: (1) write today's UTC date as YYYY-MM-DD into {D}/today.txt; (2) tell me how many days are in February 2028; (3) add a todo 'renew passport' to my list. Confirm all three.",
+   "seed": "mkdir -p {D}",
+   "timeout_s": 240,
+   "reply_regex": "\\b29\\b",
+   "verify": "f={D}/today.txt; test -f $f || { echo FAIL: no today.txt; exit 0; }; d=$(tr -dc '0-9-' < $f | head -c 10); echo \"SHOW today=$d expected=$(date -u +%F)\"; [ \"$d\" = \"$(date -u +%F)\" ] && echo PASS || echo FAIL: date mismatch",
+   "rubric": {
+    "criteria": "Pass if the reply confirms all three: the date file written, 29 days (2028 is a leap year), and the todo added; fail if any of the three is missing, deferred, or answered wrongly.",
+    "min": 3
+   }
+  },
+  {
+   "prompt": "What is on my todo list?",
+   "pre_wait_s": 3,
+   "timeout_s": 120,
+   "reply_regex": "(?i)renew passport"
+  }
+ ],
+ "regression": "#1776 (prose dropped after the ack row)"
+}
