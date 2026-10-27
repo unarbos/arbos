@@ -44,6 +44,9 @@ SUBSETS = {
     # Grok convergence (docs/grok-convergence-loop.md): the corpus-derived replays under tasks/convergence/ plus the
     # parity replays covering steer, stop, parallel asks and busy; ≈ 10 tasks, ≈ 15 min, ≈ $1.5. Owner bc-c608fb3e.
     "convergence": cv.subset_ids(),
+    # Group respond gate (issue #2110): the Arbonites misfires as live people-group checks — about-agents
+    # silence, @mention as a signal, everyone, exactly one taker. ≈ 15 min, ≈ $0.20 (two lanes' agents).
+    "respond-gate": ["g6-respond-gate-about-agents", "g7-respond-gate-mention-signal", "g8-respond-gate-everyone", "g9-respond-gate-one-of-you", "h2-people-chat-mention-send"],
 }
 # fixtures the agent must fetch over the web live in the repo; main after the suite lands, else the branch
 FIXTURES = os.environ.get("LT_FIXTURE_BASE", "https://raw.githubusercontent.com/unarbos/arbos/main/evals/long-tasks/fixtures")
@@ -161,6 +164,12 @@ class Lane(threading.Thread):
         elif kind == "group_create":
             st["group_chat"] = rl.group_create(self.project, act["with"], act.get("title", "eval group"))
             time.sleep(5)
+        elif kind == "people_group":
+            # a people group (Arbonites shape): the eval user, a scratch peer, this lane's agent and
+            # the named lanes' agents; `chat: "dm"` turns, peer rows and quiet checks run against it
+            agents = [self.project] + [rl.ensure_project(n) for n in act.get("with", [])]
+            st["dm_chat"], st["dm_peer_token"] = rl.people_group_with_agents(act["peer_handle"], agents, act.get("title", "eval people group"))
+            time.sleep(8)
         else:
             raise RuntimeError(f"unknown driver action {kind}")
 
@@ -348,6 +357,19 @@ class Lane(threading.Thread):
                 if turn_spec.get(k) and task_state.get("old_name"):
                     turn_spec[k] = turn_spec[k].replace("{OLD_NAME}", re.escape(task_state["old_name"]))
             g = gr.grade_turn(turn_spec, ctx, self.box, self.project, env)
+            if turn.get("reply_from") or turn.get("silent_agents"):
+                # who answered in a shared chat: assistant rows after the send, by sender handle
+                rows = [m for m in (res.get("doc") or {}).get("messages", []) if m.get("role") == "assistant" and (m.get("createdAt") or 0) >= t0_ms - 2000 and dr.text_of(m)]
+                repliers = sorted({(m.get("senderHandle") or "").lower() for m in rows})
+                g["truth"]["repliers"] = repliers
+                want = (turn.get("reply_from") or "").lower()
+                if want and want not in repliers:
+                    g["ok"] = False
+                    g["reasons"].append(f"no reply from {want} (repliers: {repliers})")
+                for h in turn.get("silent_agents", []):
+                    if h.lower() in repliers:
+                        g["ok"] = False
+                        g["reasons"].append(f"{h} answered a message that was not for it")
             if turn.get("expect_activity_change_s"):
                 g["truth"]["activity_changed_s"] = activity_seen["changed_at"]
                 g["truth"]["activity_text"] = (activity_seen["text"] or "")[:80]
