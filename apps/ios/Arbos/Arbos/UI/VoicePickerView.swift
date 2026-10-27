@@ -15,6 +15,7 @@ struct VoicePickerView: View {
     let project: Project
     @StateObject private var player = SamplePlayer()
     @State private var failed = false
+    @State private var errorDetailsOpen = false
 
     private var current: Project { model.project(project.id) ?? project }
     private var catalog: VoiceCatalog? { model.voiceCatalog }
@@ -32,8 +33,12 @@ struct VoicePickerView: View {
                             voiceRow(id: v.id, name: v.name, description: v.description, sample: v.sampleURL, selected: current.voice == v.id)
                         }
                     } else if failed {
-                        Text("Could not load the voices from the relay.").foregroundStyle(theme.muted)
-                            .listRowBackground(theme.card)
+                        // The sheet's note (the shared element) where the list would be.
+                        ErrorNote(id: "voices-error",
+                                  error: UserError.of("load the voices", .offline(deviceOffline: false), "GET /voices failed"),
+                                  detailsOpen: $errorDetailsOpen)
+                            .listRowBackground(Color.clear)
+                            .listRowInsets(EdgeInsets())
                     } else {
                         HStack(spacing: 10) {
                             ProgressView()

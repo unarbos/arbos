@@ -67,6 +67,21 @@ and a 250 GB volume (five leftover 13 GB test-simulator clones took it from 60 t
 - The clean script's sweep (idle clones > 30 min, idle rig checkouts > 30 min, stale `Deleting-*` dirs) is the
   backstop, not the plan; a run that leaves the box under 20 GB free is a regression to raise on your issue.
 
+## One avatar resolver on both platforms (Jacob, 2026-10-26, ARB-394)
+
+- Every agent avatar on the Mac and the iPhone — typing/status/activity row, chat header, sidebar
+  and chat list, bubbles, mention chips, profile hero, members, search, notifications, call tiles,
+  Secrets picker — is drawn through one resolver keyed by agent id + `avatar_version`: Mac
+  `ui::avatars` (`project_in` / `project_with` / `member_picture` / `agent_identity` +
+  `agent_picture`, newest copy from `sync::agent_avatar`), iPhone `AgentAvatar(project:)`
+  (resolves through `AppModel.newestAgentAvatar`) and `model.projectImageURL(_:)`.
+- No surface builds its own picture URL or reads the copy it was handed (`.image_url` /
+  `.imageURL`). `scripts/avatar-lint.sh` scans both trees in CI's Layout job and fails the build;
+  a line that must draw a group / server / person picture carries `// avatar-lint: allow (<why>)`.
+- The stamp is the only truth: a newer known version never loses to a cached or older copy; at
+  equal stamps the caller's order holds (chat roster, my records, other rosters). While a picture
+  loads, the disc is the neutral initial — never an older picture, never the leaf.
+
 ## Rigs take a heavy slot on the shared EC2 Mac (2026-10-26 20:30 UTC)
 
 The Mac's heavy-job cap (`/usr/local/bin/arbos-heavy-slot.sh`, versioned at `scripts/runner/arbos-heavy-slot.sh`;
@@ -123,6 +138,11 @@ exit code; `axbin/osascript` is a shim on `runner.sh`'s PATH that forwards every
 - An ax job is killed after `AX_JOB_MAX_S` (600 s) with rc 124 and a line in `ax-runner.status` and syslog; a
   caller waits at most `AX_TIMEOUT_S` (600 s) for its result. A click step that needs longer is doing something
   wrong — split it.
+- GPUI windows (the Arbos Mac app) ignore `System Events click at …` — that is an Accessibility *action*, and GPUI
+  exposes no per-element AX tree, so the click lands nowhere. For a real click use `cgclick` (a CGEvent mouse
+  click; `/Users/Shared/arbos-tools/bin/cgclick`, source `/Users/Shared/arbos-tools/src/cgclick.swift`) through
+  the ax-runner: `ax /Users/Shared/arbos-tools/bin/cgclick <x> <y>`. CGEvent posting needs the same
+  Accessibility grant, which is why it must go through `ax`, never directly from a `runner.sh` command.
 - After a reboot both runners are gone: start `ax-runner.sh` via `sudo launchctl asuser 502 sudo -u arbosgui …`
   from ssh and `runner.sh` via `open /Users/Shared/arbos-run/start-runner.command` (Terminal identity).
 

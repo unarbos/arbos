@@ -26,27 +26,52 @@ struct SettingsView: View {
     @ObservedObject private var push = PushManager.shared
     @State private var confirmUnpair = false
     /// Connector errors — the root `notice` alert sits under this sheet and looks like a silent fail.
-    @State private var connectorError: String?
+    @State private var connectorError: UserError?
     /// The avatar picker (Generate | Upload, Reset) over my picture — the agents' sheet
     /// (Jacob, 2026-10-25); `ARBOS_SETTINGS_PAGE=avatar[-generate|-upload]` opens it (rig).
     @State private var showAvatarPicker: AvatarPickerTab?
     @State private var showProfileEdit = false
     /// Profile | Settings — the same pill as the person and group panes.
-    /// Settings is the landing tab; `ARBOS_SETTINGS_PAGE=profile` lands on Profile.
-    @State private var tab = DebugHooks.settingsPage == "profile" ? "Profile" : "Settings"
-    /// `ARBOS_SETTINGS_PAGE=appearance` lands on that page (screenshot rig).
-    @State private var showAppearancePage = DebugHooks.settingsPage == "appearance"
-    @State private var showTextSizePage = DebugHooks.settingsPage == "textsize"
-    @State private var showConnectorsPage = DebugHooks.settingsPage == "connectors"
-    // Rig: ARBOS_SETTINGS_PAGE=machine | credits | notifications | about | relay (Debug only).
-    @State private var showMachinePage = DebugHooks.settingsPage == "machine" || DebugHooks.settingsPage == "machine-expanded"
-    @State private var showCreditsPage = DebugHooks.settingsPage == "credits"
-    @State private var showNotificationsPage = DebugHooks.settingsPage == "notifications"
-    @State private var showPrivacyPage = DebugHooks.settingsPage == "privacy"
-    @State private var showAboutPage = DebugHooks.settingsPage == "about"
-    @State private var showDevicesPage = DebugHooks.settingsPage == "devices"
-    @State private var showRelayPage = DebugHooks.settingsPage == "relay"
-    @State private var showSecretsPage = ["secrets", "vault", "connect", "new-secret"].contains(DebugHooks.settingsPage ?? "") || DebugHooks.settingsPage?.hasPrefix("secret:") == true
+    /// Settings is the landing tab; a `landing` of `profile` lands on Profile.
+    @State private var tab: String
+    /// The page the sheet lands on: a search result's page ([feedback
+    /// search-settings-ios-2026-10-26]) or the rig's `ARBOS_SETTINGS_PAGE`
+    /// (appearance · textsize · connectors · machine | machine-expanded · credits · notifications ·
+    /// privacy · about · devices · relay · secrets | vault | connect | new-secret | secret:<ENV>).
+    private let landing: String?
+    @State private var showAppearancePage: Bool
+    @State private var showTextSizePage: Bool
+    @State private var showConnectorsPage: Bool
+    @State private var showMachinePage: Bool
+    @State private var showCreditsPage: Bool
+    @State private var showNotificationsPage: Bool
+    @State private var showPrivacyPage: Bool
+    @State private var showAboutPage: Bool
+    @State private var showDevicesPage: Bool
+    @State private var showRelayPage: Bool
+    @State private var showSecretsPage: Bool
+
+    /// The pages the Settings list shows (`settingsSections`), as search routes;
+    /// the structure test checks the shared index finds each of them.
+    static let listedPages: [GlobalSearch.SettingsPageRoute] = [
+        .credits, .connectedApps, .secrets, .devices, .machine, .notifications, .privacy, .appearance, .textSize, .about,
+    ]
+
+    init(landing: String? = DebugHooks.settingsPage) {
+        self.landing = landing
+        _tab = State(initialValue: landing == "profile" ? "Profile" : "Settings")
+        _showAppearancePage = State(initialValue: landing == "appearance")
+        _showTextSizePage = State(initialValue: landing == "textsize")
+        _showConnectorsPage = State(initialValue: landing == "connectors")
+        _showMachinePage = State(initialValue: landing == "machine" || landing == "machine-expanded")
+        _showCreditsPage = State(initialValue: landing == "credits")
+        _showNotificationsPage = State(initialValue: landing == "notifications")
+        _showPrivacyPage = State(initialValue: landing == "privacy")
+        _showAboutPage = State(initialValue: landing == "about")
+        _showDevicesPage = State(initialValue: landing == "devices")
+        _showRelayPage = State(initialValue: landing == "relay")
+        _showSecretsPage = State(initialValue: ["secrets", "vault", "connect", "new-secret"].contains(landing ?? "") || landing?.hasPrefix("secret:") == true)
+    }
 
     var body: some View {
         NavigationStack {
@@ -57,7 +82,7 @@ struct SettingsView: View {
                 theme.bg.ignoresSafeArea()
                 ScrollView {
                     VStack(spacing: 18) {
-                        Color.clear.frame(height: 80)
+                        Color.clear.frame(height: PaneKit.pageTop)
                         ProfilePane(
                             hero: PaneHero(
                                 picture: .image(AnyView(profilePicture)),
@@ -74,7 +99,7 @@ struct SettingsView: View {
                 }
                 .scrollIndicators(.visible)
                 // Settings is a sheet (from Home's account circle): back closes it.
-                ProfileTopBar(onBack: { dismiss() }) { EmptyView() }
+                ProfileTopBar(onBack: { dismiss() }, screen: .ownProfile) { EmptyView() }
             }
             .toolbar(.hidden, for: .navigationBar)
             .navigationBarBackButtonHidden(true)
@@ -92,7 +117,7 @@ struct SettingsView: View {
                 Task { await model.refreshSecrets() }
                 Task { await model.refreshDevices() }
                 Task { await model.refreshGoals() }
-                if let page = DebugHooks.settingsPage, page.hasPrefix("avatar") {
+                if let page = landing, page.hasPrefix("avatar") {
                     tab = "Profile"
                     let initial: AvatarPickerTab = page.hasSuffix("upload") ? .upload : .generate
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { showAvatarPicker = initial }
@@ -105,24 +130,13 @@ struct SettingsView: View {
                     Task { await push.refreshStatus() }
                 }
             }
-            // Steal connector notices so they appear above this sheet, not under it.
-            .onChange(of: model.notice) { _, n in
-                guard let text = n?.text else { return }
-                let isConnector = text.hasPrefix("Connect ")
-                    || text.hasPrefix("Connectors:")
-                    || text.hasPrefix("Disconnect:")
-                    || text.hasPrefix("Could not update profile picture:")
-                guard isConnector else { return }
-                connectorError = text
-                model.notice = nil
-            }
-            .alert("Arbos", isPresented: Binding(
-                get: { connectorError != nil },
-                set: { if !$0 { connectorError = nil } }
-            )) {
-                Button("OK", role: .cancel) { connectorError = nil }
-            } message: {
-                Text(connectorError ?? "")
+            // The sheet's own toast layer (Jacob 2026-10-26): a failure while Settings is up —
+            // Connect, a picture save, a secret — is the shared note at the top of this sheet,
+            // not an alert and not a toast hidden under it.
+            .overlay(alignment: .top) {
+                ToastHost()
+                    .environmentObject(model)
+                    .environment(\.theme, theme)
             }
             .sheet(item: $showAvatarPicker) { initial in
                 AvatarPickerSheet(target: .me, initialTab: initial).environmentObject(model).environment(\.theme, theme)
@@ -144,7 +158,7 @@ struct SettingsView: View {
                 EmptyView()
                 #endif
             }
-            .navigationDestination(isPresented: $showSecretsPage) { SecretsPage() }
+            .navigationDestination(isPresented: $showSecretsPage) { SecretsPage(landing: landing) }
             .sheet(isPresented: $showProfileEdit) {
                 NavigationStack {
                     ProfileEditView()
@@ -659,7 +673,7 @@ struct MachinePage: View {
                             }
                         }
                     case .spec:
-                        SettingsValueRow("Spec", value: m.spec.isEmpty ? (model.machineError ?? "Not reported yet") : m.spec)
+                        SettingsValueRow("Spec", value: m.spec.isEmpty ? "Not reported yet" : m.spec)
                     case .machineTime:
                         if m.alwaysOn {
                             SettingsValueRow("Machine time today") {
@@ -916,7 +930,8 @@ struct MachineAgentRow: View {
 struct ConnectorsPage: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
-    @Binding var connectorError: String?
+    @Binding var connectorError: UserError?
+    @State private var connectorErrorDetailsOpen = false
     /// Provider whose token paste field is open (`nil` = none).
     @State private var tokenFor: String?
     @State private var tokenDraft = ""
@@ -925,6 +940,10 @@ struct ConnectorsPage: View {
 
     var body: some View {
         SettingsPage(title: "Connected apps") {
+            // The page's note: under the page header, before the first card.
+            if let connectorError {
+                ErrorNote(id: "connector-error", error: connectorError, detailsOpen: $connectorErrorDetailsOpen)
+            }
             SettingsGroup(footer: "Connect Gmail, Calendar, Slack, GitHub, or Harness Comms so your agents can use them. Tokens stay on the relay; the agent asks before it sends.") {
                 ForEach(catalogProviders) { p in
                     connectorRow(p)
@@ -1097,14 +1116,14 @@ struct ConnectorsPage: View {
         if !model.connectors.mock {
             if !model.connectors.loaded {
                 model.refreshConnectors()
-                connectorError = "Still loading connected apps. Try Connect again in a moment."
+                connectorError = UserError.refused("connect \(p.label)", "Still loading connected apps. Try Connect again in a moment.")
                 return
             }
             // Prefer the live catalog row (oauthConfigured) over a stale stand-in.
             let live = model.connectors.providers.first(where: { $0.provider == p.provider }) ?? p
             if !live.oauthConfigured {
-                connectorError = "Connect \(live.label): OAuth client not configured on the relay."
-                    + (live.acceptsToken ? " Use Token… with an API key or personal access token instead." : "")
+                connectorError = UserError.refused("connect \(live.label)", "The OAuth client is not configured on the relay."
+                    + (live.acceptsToken ? " Use Token… with an API key or personal access token instead." : ""))
                 return
             }
             model.connectConnector(provider: live.provider)
@@ -1154,6 +1173,7 @@ struct DevicesPage: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     @State private var pending: AuthDevice?
+    @State private var errorDetailsOpen = false
 
     private var rows: [AuthDevice] {
         model.devices.sorted { a, b in a.current && !b.current }
@@ -1162,9 +1182,9 @@ struct DevicesPage: View {
     var body: some View {
         SettingsPage(title: "Devices") {
             if let why = model.devicesError, model.devices.isEmpty {
-                SettingsGroup(footer: "\(why). Reopen Devices to try again.") {
-                    SettingsValueRow("Devices", value: "Could not load")
-                }
+                // The page's note: under the page header, before the first card.
+                ErrorNote(id: "devices-error", error: why, detailsOpen: $errorDetailsOpen,
+                          onTryAgain: { Task { await model.refreshDevices() } })
             } else if !model.devicesLoaded && model.devices.isEmpty {
                 Text("Loading…").font(theme.font(Theme.small)).foregroundStyle(theme.muted)
                     .frame(maxWidth: .infinity).padding(.top, 36)
@@ -1216,6 +1236,7 @@ struct DevicesPage: View {
                 Text("This iPhone").font(theme.font(Theme.small)).foregroundStyle(theme.muted).lineLimit(1).fixedSize()
             } else {
                 Button { pending = d } label: {
+                    // error-ui: exception destructive-action
                     Text("Sign out").font(theme.font(Theme.small)).foregroundStyle(theme.danger).lineLimit(1).fixedSize()
                 }
                 .buttonStyle(.borderless)
@@ -1261,10 +1282,14 @@ struct NotificationsPage: View {
 /// Who may add me to people groups — stops random spam-group adds.
 struct PrivacyPage: View {
     @EnvironmentObject private var model: AppModel
-    @State private var error: String?
+    @State private var error: UserError?
+    @State private var errorDetailsOpen = false
 
     var body: some View {
         SettingsPage(title: "Privacy") {
+            if let error {
+                ErrorNote(id: "privacy-error", error: error, detailsOpen: $errorDetailsOpen)
+            }
             SettingsGroup(
                 header: "Groups",
                 footer: "Controls who can put you in a group without asking. “People I message” means anyone you already have a direct chat with."
@@ -1276,20 +1301,12 @@ struct PrivacyPage: View {
                     ) {
                         Task {
                             if let err = await model.updateGroupAddPolicy(policy) {
-                                error = err
+                                error = UserError.refused("save the privacy setting", err)
                             }
                         }
                     }
                 }
             }
-        }
-        .alert("Arbos", isPresented: Binding(
-            get: { error != nil },
-            set: { if !$0 { error = nil } }
-        )) {
-            Button("OK", role: .cancel) { error = nil }
-        } message: {
-            Text(error ?? "")
         }
     }
 }
@@ -1446,7 +1463,8 @@ struct ProfileEditView: View {
     @State private var name: String = ""
     @State private var handle: String = ""
     @State private var busy = false
-    @State private var error: String?
+    @State private var error: UserError?
+    @State private var errorDetailsOpen = false
     @FocusState private var focus: Field?
 
     private enum Field { case name, handle }
@@ -1471,14 +1489,14 @@ struct ProfileEditView: View {
                             .frame(maxWidth: .infinity)
                     }
 
+                    // The form's note: above the fields (the shared element).
+                    if let error {
+                        ErrorNote(id: "profile-error", error: error, detailsOpen: $errorDetailsOpen,
+                                  onTryAgain: { Task { await save() } })
+                    }
+
                     nameField
                     handleField
-
-                    if let error {
-                        Text(error)
-                            .font(theme.font(Theme.small))
-                            .foregroundStyle(theme.danger)
-                    }
 
                     Text("Handle: letters, numbers, and hyphens · up to 39 characters.")
                         .font(theme.font(Theme.tiny))
@@ -1583,7 +1601,7 @@ struct ProfileEditView: View {
         error = nil
         defer { busy = false }
         if let msg = await model.updateProfile(name: name, handle: handle) {
-            error = msg
+            error = UserError.refused("save your profile", msg)
             return
         }
         dismiss()
@@ -1871,6 +1889,7 @@ struct GoalDetailPage: View {
                         Button(role: .destructive) { model.deleteGoal(goal) } label: {
                             Text("Delete goal")
                                 .font(theme.font(Theme.body))
+                                // error-ui: exception destructive-action
                                 .foregroundStyle(theme.danger)
                                 .frame(maxWidth: .infinity, minHeight: SettingsRow.height)
                                 .contentShape(Rectangle())

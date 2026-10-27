@@ -21,6 +21,7 @@ pub mod chart;
 pub mod highlight;
 pub mod matrix;
 pub mod search;
+pub mod settings_search;
 
 /// Frame decode, doc import, or writer failure. Sans-IO session has no transport errors.
 #[derive(Debug, Clone, thiserror::Error, uniffi::Error)]
@@ -357,6 +358,19 @@ impl RoomSession {
 
     pub fn is_closed(&self) -> bool {
         self.lock().is_closed()
+    }
+
+    /// This connection stands refused (`not_available`); local commits queue until an ACK,
+    /// a reconnect or `retry_refused` clears it.
+    pub fn push_refused(&self) -> bool {
+        self.lock().push_refused()
+    }
+
+    /// The condition behind a refusal may have changed (a people-chat event for this room,
+    /// the user unblocked someone): resend every pending batch now with the same ids and
+    /// drop the refusal. True when a resend went out ([feedback 2005]).
+    pub fn retry_refused(&self, now_ms: u64) -> bool {
+        self.lock().retry_refused(now_ms)
     }
 
     pub fn drain_actions(&self) -> Vec<RoomAction> {
