@@ -803,7 +803,7 @@ fn identity_picture(s: &AppState, a: &avatars::AgentIdentity, theme: &Theme) -> 
 }
 
 fn project_picture(s: &AppState, p: &Project, theme: &Theme) -> Picture {
-    if let Some(image) = p.image_url.as_deref().and_then(|url| s.avatar(url)) {
+    if let Some(image) = avatars::project_image(s, p) {
         return Picture::Image(image);
     }
     if avatars::leaf::is_neutral(p.avatar_leaf) {
