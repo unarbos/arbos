@@ -147,12 +147,76 @@ pub(crate) fn people_cap(slot_width: f32) -> f32 {
 }
 /// A new time stamp line whenever messages are this far apart.
 const STAMP_GAP_MS: u64 = 60 * 60 * 1000;
+/// Grouped messages (Jacob, 2026-10-28, [feedback grouped-messages-mac-2026-10-28]):
+/// consecutive messages from one sender this close together form one **run** —
+/// the name and the disc show once, on the run's first message; the later
+/// messages sit under its text with the avatar column empty and the 6 pt
+/// in-run gap between them. The run breaks when the sender changes, when this
+/// window passes between two messages, at a date stamp or a system line, and
+/// at a bubble that carries a reply quote (it starts a run of its own). People
+/// and agents group alike, my own messages too. Mirrored by the iPhone's
+/// `Transcript.runWindowMs` (the row builders live in the two clients, not in
+/// `arbos_core`): keep the two in step.
+pub const RUN_WINDOW_MS: u64 = 2 * 60 * 1000;
 /// Vertical rhythm measured from Grok Bot's Mac app (parity it.36, 2 px/pt):
-/// consecutive bubbles of one sender sit 6 pt apart, a change of sender opens
-/// 20 pt, a time stamp has 20 pt above and 24 below, and the last message keeps
-/// 54 pt clear of the composer.
+/// consecutive bubbles of one run sit 6 pt apart, a new run opens 20 pt, a time
+/// stamp has 20 pt above and 24 below, and the last message keeps 54 pt clear
+/// of the composer.
 pub(crate) const ROW_GAP_HALF: f32 = 3.0;
 pub(crate) const TURN_GAP_EXTRA: f32 = 20.0 - 2.0 * ROW_GAP_HALF;
+/// The gap between two bubbles of one run, and the gap a new run opens — the
+/// numbers the rhythm tests pin.
+#[cfg(test)]
+pub(crate) const RUN_GAP: f32 = 2.0 * ROW_GAP_HALF;
+#[cfg(test)]
+pub(crate) const TURN_GAP: f32 = TURN_GAP_EXTRA + 2.0 * ROW_GAP_HALF;
+
+/// The tail of the sender run the row builder is in: who spoke last and when
+/// (`created_at`, ms). `None` after a date stamp, a system line or a hidden fold.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RunTail {
+    pub sender: String,
+    pub at: u64,
+}
+
+/// Whether a message from `sender` at `at` continues the run `tail` ends: the
+/// same sender, within [`RUN_WINDOW_MS`] of the run's last message, and no
+/// reply quote on the new bubble (`quoted`). Rows without a clock never group.
+pub(crate) fn continues_run(tail: Option<&RunTail>, sender: &str, at: u64, quoted: bool) -> bool {
+    let Some(tail) = tail else {
+        return false;
+    };
+    !quoted
+        && tail.sender == sender
+        && at > 0
+        && tail.at > 0
+        && at.abs_diff(tail.at) <= RUN_WINDOW_MS
+}
+
+/// Whether the message's bubble draws a reply quote — a person's `replyRef` /
+/// `replyTo`; an agent's `replyTo`, else `inReplyTo` in an attributed chat (a
+/// people-chat reply or another Project's row, the fallback the row builder
+/// uses). A quoted bubble names its sender and starts its own run.
+fn carries_quote(message: &Message) -> bool {
+    let non_empty = |id: Option<&str>| id.is_some_and(|id| !id.is_empty());
+    match message.role {
+        Role::User => {
+            message
+                .reply_ref
+                .as_ref()
+                .is_some_and(|r| !r.chat_id.is_empty() && !r.message_id.is_empty())
+                || non_empty(message.reply_to.as_deref())
+        }
+        Role::Assistant | Role::Project => {
+            let in_people =
+                message.sender.starts_with("agent:") && message.asked_by_handle.is_some();
+            let attributed = message.role == Role::Project || in_people;
+            non_empty(message.reply_to.as_deref())
+                || (attributed && non_empty(message.in_reply_to.as_deref()))
+        }
+        Role::System => false,
+    }
+}
 /// Measured glyph-to-bubble, like the reference: the stamp's 13 pt line box
 /// carries ~4 pt of its own above and ~7 below the glyphs (measured).
 const STAMP_PAD_TOP: f32 = 20.0 - ROW_GAP_HALF - 4.0;
@@ -492,11 +556,15 @@ pub enum RowKind {
         sender_label: Option<String>,
         /// Another person's bubble carries their name inside it, at the top, when
         /// the chat names its senders (group / channel, see [`names_senders`]) and
-        /// the sender changed (Grok Bot's group style for the run).
+        /// the message starts a run (Grok Bot's group style for the run).
         named: bool,
         /// Another person in a people chat (D72): left bubble with their
         /// avatar and handle instead of my right bubble.
         from: Option<Person>,
+        /// Draw `from`'s disc on the avatar column: the run's first message only; a
+        /// message that continues the run keeps the column empty
+        /// ([feedback grouped-messages-mac-2026-10-28]).
+        disc: bool,
         /// "9:41 PM", revealed at the bubble's outer edge on hover only.
         time: Option<String>,
         /// My own messages: pending → failed / sent → seen, shown as the
@@ -543,6 +611,9 @@ pub enum RowKind {
         /// First block of a message whose sender is named, in a chat that names
         /// its senders: the agent's name sits inside this bubble, at the top.
         named: bool,
+        /// The message starts its run: its last block draws the disc. A message
+        /// that continues the run keeps the lane empty on every block.
+        disc: bool,
     },
     /// A finished reply with no words, cards or attachments: one plain line in the
     /// agent's bubble. `name` is the row's `senderName`; the agent id in `seed` resolves
@@ -555,6 +626,8 @@ pub enum RowKind {
         /// People / group reply: quote of the user message this would have answered.
         quote: Option<Quote>,
         named: bool,
+        /// The message starts its run (draws the disc), as on a `Markdown` row.
+        disc: bool,
     },
     /// Centered muted time line ("Today 9:39 PM").
     Stamp {
@@ -604,9 +677,9 @@ pub enum RowKind {
         /// The sender's name above the card (first card of the message only; the
         /// message's text bubble, if any, then carries no name).
         named: bool,
-        /// Draw the disc: on the message's last row only — its text bubble when it has
-        /// one, else its last card; earlier cards keep the lane free (the agent bubble's
-        /// rule: the disc at the bottom of the run).
+        /// Draw the disc: on the last row of a message that starts its run — its text
+        /// bubble when it has one, else its last card; earlier cards and every card of
+        /// a message that continues the run keep the lane free.
         disc: bool,
         /// The message's clock label, hover-only like a bubble's.
         time: Option<String>,
@@ -1501,18 +1574,13 @@ impl Transcript {
         );
         self.multi_party = multi_party;
         self.people = people;
-        // A sender change opens the turn gap. So does every new assistant /
-        // project message — consecutive replies from the same agent (quick ack
-        // then the answer, or two answers in a row) must not read as one bubble
-        // (#1447 / doug-merged-reply-bubbles).
-        self.turn_starts = messages
-            .windows(2)
-            .filter(|w| {
-                (w[0].role, &w[0].sender) != (w[1].role, &w[1].sender)
-                    || matches!(w[1].role, Role::Assistant | Role::Project)
-            })
-            .map(|w| w[1].id.clone())
-            .collect();
+        // A new sender run opens the turn gap: a sender change, more than
+        // `RUN_WINDOW_MS` since the run's last message, a quoted reply, a system
+        // line or a date stamp in between. Messages inside a run — a person's
+        // quick lines, an agent's follow-up bubbles, my own — sit 6 pt apart
+        // (Jacob, 2026-10-28, [feedback grouped-messages-mac-2026-10-28];
+        // supersedes #1447's gap on every agent message).
+        self.turn_starts = self.row_cache.run_starts.clone();
 
         // Veils: observe text growth of live markdown rows.
         for row in &new_rows {
@@ -2417,6 +2485,7 @@ impl Transcript {
         lane: Option<String>,
         quote: Option<Quote>,
         named: bool,
+        disc: bool,
         rail_centre: Option<Pixels>,
         now: Instant,
         theme: &Theme,
@@ -2531,10 +2600,12 @@ impl Transcript {
                 .children(hover_time)
         });
         let bubble = bubble.children(hover_rail);
-        // People chats: the sender's disc at the bubble's bottom-left on
-        // the last block; earlier blocks keep the lane free (mocks a/f).
+        // People chats: the sender's disc at the bubble's bottom-left on the
+        // last block of the run's first message; earlier blocks, and every
+        // block of a message that continues the run, keep the lane free
+        // (mocks a/f; grouped messages, Jacob 2026-10-28).
         let disc = lane.as_deref().map(|seed| {
-            if last {
+            if last && disc {
                 // The disc is the same profile target as the name.
                 let (agent_name, _, _, agent_pid) = self.agent_identity(seed, "Agent", cx);
                 div()
@@ -2625,6 +2696,7 @@ impl Transcript {
                 sender_label,
                 from,
                 named,
+                disc,
                 time,
                 delivery,
                 quote,
@@ -2782,30 +2854,32 @@ impl Transcript {
                                 self.hover_row(&row.id, &row.id, now, window, cx);
                             let actions =
                                 self.hover_rail(&row.id, &row.message_id, reveal, &theme, cx);
+                            // The disc on the run's first message only; a message
+                            // that continues the run keeps the column empty so its
+                            // bubble still aligns under the text (grouped messages).
+                            let disc_el = if disc {
+                                // The disc is the same profile target as the name.
+                                profile_target::attach(
+                                    div()
+                                        .id(SharedString::from(format!("{}#disc", row.id)))
+                                        .debug_selector(|| format!("disc#{}", row.id))
+                                        .flex_shrink_0()
+                                        .child(people::avatar(image, &person, SENDER_DISC, &theme)),
+                                    &self.state,
+                                    person_page(self, &person, cx),
+                                    &person.display_name(),
+                                    cx,
+                                )
+                                .into_any_element()
+                            } else {
+                                div().w(px(SENDER_DISC)).flex_shrink_0().into_any_element()
+                            };
                             row_el
                                 .justify_start()
                                 .items_end()
                                 .pl(px(AVATAR_COLUMN_INSET))
                                 .gap(px(SENDER_DISC_GAP))
-                                .child(
-                                    // The disc is the same profile target as the name.
-                                    profile_target::attach(
-                                        div()
-                                            .id(SharedString::from(format!("{}#disc", row.id)))
-                                            .debug_selector(|| format!("disc#{}", row.id))
-                                            .flex_shrink_0()
-                                            .child(people::avatar(
-                                                image,
-                                                &person,
-                                                SENDER_DISC,
-                                                &theme,
-                                            )),
-                                        &self.state,
-                                        person_page(self, &person, cx),
-                                        &person.display_name(),
-                                        cx,
-                                    ),
-                                )
+                                .child(disc_el)
                                 .child(
                                     div()
                                         .flex_1()
@@ -2814,6 +2888,9 @@ impl Transcript {
                                         .items_center()
                                         .child(
                                             bubble
+                                                .debug_selector(|| {
+                                                    format!("person-bubble#{}", row.id)
+                                                })
                                                 .bg(theme.bubble_assistant)
                                                 .text_color(theme.text)
                                                 .border_l_2()
@@ -2881,6 +2958,7 @@ impl Transcript {
                 lane,
                 quote,
                 named,
+                disc,
             } => {
                 let rail_centre = (last && !live)
                     .then(|| self.bubble_rail_centre(ix))
@@ -2898,6 +2976,7 @@ impl Transcript {
                     lane,
                     quote,
                     named,
+                    disc,
                     rail_centre,
                     now,
                     &theme,
@@ -2913,6 +2992,7 @@ impl Transcript {
                 lane,
                 quote,
                 named,
+                disc,
             } => {
                 let hint = name.as_deref().unwrap_or("Agent");
                 let (resolved, _, _, _) = self.agent_identity(&seed, hint, cx);
@@ -2936,6 +3016,7 @@ impl Transcript {
                     lane,
                     quote,
                     named,
+                    disc,
                     None,
                     now,
                     &theme,
@@ -3938,19 +4019,25 @@ pub struct MessageRowCache {
     /// last [`build_rows_with_cache`] call. Tests assert a streaming edit
     /// rebuilds one message, not the whole transcript.
     pub built: usize,
+    /// The messages that start a sender run on the last call (see
+    /// [`RUN_WINDOW_MS`]): their first row opens the turn gap. Rebuilt on
+    /// every call, cache hits included.
+    pub run_starts: HashSet<Id>,
 }
 
 struct CachedMessageRows {
     version: u64,
     rows: Vec<Row>,
     last_stamp_at: u64,
-    prev_sender: Option<String>,
+    run_tail: Option<RunTail>,
+    run_start: bool,
 }
 
 impl MessageRowCache {
     pub fn clear(&mut self) {
         self.entries.clear();
         self.built = 0;
+        self.run_starts.clear();
     }
 }
 
@@ -3961,7 +4048,7 @@ impl MessageRowCache {
 fn message_render_version(
     message: &Message,
     last_stamp_at: u64,
-    prev_sender: Option<&str>,
+    continues_run: bool,
     is_last_reply: bool,
     show_details: bool,
     speech: &SpeechRows<'_>,
@@ -4021,7 +4108,7 @@ fn message_render_version(
     format!("{:?}", message.reply_ref).hash(&mut h);
     format!("{:?}", message.job).hash(&mut h);
     last_stamp_at.hash(&mut h);
-    prev_sender.hash(&mut h);
+    continues_run.hash(&mut h);
     is_last_reply.hash(&mut h);
     show_details.hash(&mut h);
     speech.enabled.hash(&mut h);
@@ -4124,15 +4211,18 @@ pub fn build_rows_with_cache(
         .iter()
         .rposition(|m| m.role == Role::Assistant && !m.is_streaming());
     let mut last_stamp_at: u64 = 0;
-    // Who spoke last in a people chat: a bubble carries its sender's name only when
-    // the sender changed or a date stamp broke the run (Grok Bot's group style), and
-    // only in chats that name their senders at all (`names_senders`).
-    let mut prev_sender: Option<String> = None;
+    // The sender run the builder is in (who spoke last, when): a message that
+    // continues it draws no name and no disc and sits in the tight in-run gap; a
+    // date stamp, a system line or a hidden fold ends it ([feedback
+    // grouped-messages-mac-2026-10-28]). Names only in chats that name their
+    // senders at all (`names_senders`).
+    let mut run_tail: Option<RunTail> = None;
+    cache.run_starts.clear();
     // The stamp pushed for the current message, with the state it replaced. A
     // message that then draws nothing — a hidden job / worker row, a stream
     // with no words yet — takes its stamp back, so no date line hangs over
     // empty space above the status row ([feedback status-row-gap-mac-2026-10-26]).
-    let mut pending_stamp: Option<(usize, u64, Option<String>)> = None;
+    let mut pending_stamp: Option<(usize, u64, Option<RunTail>)> = None;
     let width_class = u8::from(names_senders);
     let mut keep: HashSet<Id> = HashSet::new();
     for (mix, message) in messages.iter().enumerate() {
@@ -4141,7 +4231,7 @@ pub fn build_rows_with_cache(
             &mut rows,
             &mut pending_stamp,
             &mut last_stamp_at,
-            &mut prev_sender,
+            &mut run_tail,
         );
         // Someone I blocked: fold the run into one hidden line, no bubble, no stamp.
         // Cross-message fold — do not serve from the per-message row cache.
@@ -4170,14 +4260,24 @@ pub fn build_rows_with_cache(
                     },
                 }),
             }
-            prev_sender = None;
+            run_tail = None;
             continue;
         }
         let is_last_reply = last_reply == Some(mix);
+        // Does this message continue the run? Decided before the stamp below:
+        // a stamp only lands when the hour gap passed, which is past the run
+        // window anyway.
+        let continues = continues_run(
+            run_tail.as_ref(),
+            &message.sender,
+            message.created_at,
+            carries_quote(message),
+        );
+        let run_start = !continues;
         let version = message_render_version(
             message,
             last_stamp_at,
-            prev_sender.as_deref(),
+            continues,
             is_last_reply,
             show_details,
             &speech,
@@ -4190,7 +4290,10 @@ pub fn build_rows_with_cache(
             if hit.version == version {
                 rows.extend(hit.rows.iter().cloned());
                 last_stamp_at = hit.last_stamp_at;
-                prev_sender = hit.prev_sender.clone();
+                run_tail = hit.run_tail.clone();
+                if hit.run_start {
+                    cache.run_starts.insert(message.id.clone());
+                }
                 pending_stamp = None;
                 continue;
             }
@@ -4200,7 +4303,7 @@ pub fn build_rows_with_cache(
         let streaming = message.is_streaming();
         if message.created_at > 0 && message.created_at.saturating_sub(last_stamp_at) > STAMP_GAP_MS
         {
-            pending_stamp = Some((rows.len(), last_stamp_at, prev_sender.take()));
+            pending_stamp = Some((rows.len(), last_stamp_at, run_tail.take()));
             last_stamp_at = message.created_at;
             let label = crate::ui::sidebar::stamp_label(message.created_at);
             rows.push(Row {
@@ -4277,9 +4380,7 @@ pub fn build_rows_with_cache(
                 } else {
                     sender_caption(message)
                 };
-                let named = names_senders
-                    && from.is_some()
-                    && prev_sender.as_deref() != Some(message.sender.as_str());
+                let named = names_senders && from.is_some() && run_start;
                 // Image preview / file card rows (same cards as agent attachments).
                 let is_mine = from.is_none();
                 // A media-viewer forward's whole text is the "Forwarded from …" line:
@@ -4342,7 +4443,7 @@ pub fn build_rows_with_cache(
                     // their name on the first card when the run changes sender.
                     let sender = from.clone().map(AttachmentSender::Person);
                     let card_named = named && ix == 0;
-                    let disc = !show_text && ix + 1 == attachment_parts.len();
+                    let disc = run_start && !show_text && ix + 1 == attachment_parts.len();
                     rows.push(Row {
                         version: hash_version(
                             &(
@@ -4392,6 +4493,8 @@ pub fn build_rows_with_cache(
                                 &forwarded_from,
                                 &ghost,
                                 &preview,
+                                run_start,
+                                named,
                             ),
                             false,
                         ),
@@ -4403,6 +4506,7 @@ pub fn build_rows_with_cache(
                             from,
                             // The first card already names the sender.
                             named: named && attachment_parts.is_empty(),
+                            disc: run_start,
                             time: clock_label(message.created_at),
                             delivery,
                             quote,
@@ -4438,7 +4542,7 @@ pub fn build_rows_with_cache(
                         message_id: message.id.clone(),
                         kind: RowKind::Stamp { label: line },
                     });
-                    prev_sender = None;
+                    run_tail = None;
                 }
             }
             Role::Assistant | Role::Project => {
@@ -4531,14 +4635,13 @@ pub fn build_rows_with_cache(
                     lane = Some(message.sender.clone());
                 }
                 // Group / channel: the agent's name sits inside its first bubble (the
-                // name resolves at render time from the seed, like the disc). Each
-                // people-chat reply names its sender (#1447): consecutive answers from
-                // the same agent must not merge into one unnamed run. A stream with no
-                // words yet has no bubble, so it shows no name either (the presence row
-                // says who is working).
-                let sender_named = names_senders
-                    && lane.is_some()
-                    && (agent_speaker || prev_sender.as_deref() != Some(message.sender.as_str()));
+                // name resolves at render time from the seed, like the disc) when the
+                // message starts a run. Agents group like people (Jacob, 2026-10-28,
+                // supersedes #1447's name-on-every-reply): a reply that quotes the ask
+                // starts its own run and is named; a quick follow-up within the window
+                // is not. A stream with no words yet has no bubble, so it shows no name
+                // either (the presence row says who is working).
+                let sender_named = names_senders && lane.is_some() && run_start;
                 let last_text_part = message
                     .parts
                     .iter()
@@ -4631,7 +4734,15 @@ pub fn build_rows_with_cache(
                                 name_taken |= named;
                                 rows.push(Row {
                                     version: hash_version(
-                                        &(&block, first, last, fill, &reply_quote, named),
+                                        &(
+                                            &block,
+                                            first,
+                                            last,
+                                            fill,
+                                            &reply_quote,
+                                            named,
+                                            run_start,
+                                        ),
                                         live,
                                     ),
                                     id: format!("{}#{}.{}", message.id, id, bix),
@@ -4647,6 +4758,7 @@ pub fn build_rows_with_cache(
                                         lane: lane.clone(),
                                         quote: if first { reply_quote.clone() } else { None },
                                         named,
+                                        disc: run_start,
                                     },
                                 });
                                 block_ix += 1;
@@ -4670,7 +4782,7 @@ pub fn build_rows_with_cache(
                             name_taken |= named;
                             rows.push(Row {
                                 version: hash_version(
-                                    &(&block, first, last, fill, &reply_quote, named),
+                                    &(&block, first, last, fill, &reply_quote, named, run_start),
                                     false,
                                 ),
                                 id: format!("{}#{}", message.id, id),
@@ -4686,6 +4798,7 @@ pub fn build_rows_with_cache(
                                     lane: lane.clone(),
                                     quote: if first { reply_quote.clone() } else { None },
                                     named,
+                                    disc: run_start,
                                 },
                             });
                             block_ix += 1;
@@ -4707,7 +4820,7 @@ pub fn build_rows_with_cache(
                             let named = sender_named && first;
                             rows.push(Row {
                                 version: hash_version(
-                                    &(&block, first, last, fill, &reply_quote, named),
+                                    &(&block, first, last, fill, &reply_quote, named, run_start),
                                     false,
                                 ),
                                 id: format!("{}#{}", message.id, id),
@@ -4723,6 +4836,7 @@ pub fn build_rows_with_cache(
                                     lane: lane.clone(),
                                     quote: if first { reply_quote.clone() } else { None },
                                     named,
+                                    disc: run_start,
                                 },
                             });
                             block_ix += 1;
@@ -4745,9 +4859,10 @@ pub fn build_rows_with_cache(
                             // photo in Arbonites drew as a bare picture before).
                             let card_named = sender_named && !name_taken;
                             name_taken |= card_named;
-                            // The disc goes on the message's last row: its text bubble
-                            // when it has words, else its last card.
-                            let disc = total_blocks == 0 && Some(pix) == last_card_part;
+                            // The disc goes on the last row of a message that starts its
+                            // run: its text bubble when it has words, else its last card.
+                            let disc =
+                                run_start && total_blocks == 0 && Some(pix) == last_card_part;
                             rows.push(Row {
                                 version: hash_version(
                                     &(
@@ -4956,6 +5071,7 @@ pub fn build_rows_with_cache(
                             lane: lane.clone(),
                             quote: reply_quote.clone(),
                             named: sender_named,
+                            disc: run_start,
                         },
                         None => RowKind::NoAnswer {
                             seed: message.sender.clone(),
@@ -4964,6 +5080,7 @@ pub fn build_rows_with_cache(
                             lane: lane.clone(),
                             quote: reply_quote.clone(),
                             named: sender_named,
+                            disc: run_start,
                         },
                     };
                     rows.push(Row {
@@ -4974,6 +5091,7 @@ pub fn build_rows_with_cache(
                                 errors.first().map(|(_, _, text)| text),
                                 &reply_quote,
                                 sender_named,
+                                run_start,
                             ),
                             false,
                         ),
@@ -5055,17 +5173,27 @@ pub fn build_rows_with_cache(
                 }
             }
         }
-        if rows.len() > rows_before_message {
-            prev_sender = Some(message.sender.clone());
+        // A message that drew rows is the run's new tail; one that drew nothing
+        // (a hidden job, a stream with no words yet) neither starts nor continues
+        // a run, and is never a turn start.
+        let drew = rows.len() > rows_before_message;
+        if drew {
+            run_tail = Some(RunTail {
+                sender: message.sender.clone(),
+                at: message.created_at,
+            });
+            if run_start {
+                cache.run_starts.insert(message.id.clone());
+            }
         }
         // Finalize a no-content message's stamp now so the cached slice is
         // complete (same outcome as retract on the next turn).
-        if rows.len() == rows_before_message {
+        if !drew {
             retract_dangling_stamp(
                 &mut rows,
                 &mut pending_stamp,
                 &mut last_stamp_at,
-                &mut prev_sender,
+                &mut run_tail,
             );
         }
         cache.entries.insert(
@@ -5074,7 +5202,8 @@ pub fn build_rows_with_cache(
                 version,
                 rows: rows[start..].to_vec(),
                 last_stamp_at,
-                prev_sender: prev_sender.clone(),
+                run_tail: run_tail.clone(),
+                run_start: drew && run_start,
             },
         );
     }
@@ -5082,12 +5211,12 @@ pub fn build_rows_with_cache(
         &mut rows,
         &mut pending_stamp,
         &mut last_stamp_at,
-        &mut prev_sender,
+        &mut run_tail,
     );
     cache.entries.retain(|id, _| keep.contains(id));
     // Who is working is the presence row over the composer (`ui::presence`),
     // not a transcript row: one notice per agent, never a caption plus a line.
-    let _ = (running, queued, last_stamp_at, prev_sender);
+    let _ = (running, queued, last_stamp_at, run_tail);
     // Trailing clearance: scrolls with the list so mid-thread bubbles can
     // reach the composer, while the pinned end still keeps 54 pt above it.
     if !rows.is_empty() {
@@ -5106,15 +5235,15 @@ pub fn build_rows_with_cache(
 /// clock and the sender run to what they were before it.
 fn retract_dangling_stamp(
     rows: &mut Vec<Row>,
-    pending: &mut Option<(usize, u64, Option<String>)>,
+    pending: &mut Option<(usize, u64, Option<RunTail>)>,
     last_stamp_at: &mut u64,
-    prev_sender: &mut Option<String>,
+    run_tail: &mut Option<RunTail>,
 ) {
-    if let Some((ix, at, sender)) = pending.take() {
+    if let Some((ix, at, tail)) = pending.take() {
         if rows.len() == ix + 1 && matches!(rows[ix].kind, RowKind::Stamp { .. }) {
             rows.pop();
             *last_stamp_at = at;
-            *prev_sender = sender;
+            *run_tail = tail;
         }
     }
 }
@@ -8780,6 +8909,85 @@ mod transcript_smoke_tests {
             "a nearby jump glides; the landing cue is for the long way"
         );
     }
+
+    /// Grouped messages ([feedback grouped-messages-mac-2026-10-28]), drawn by the real
+    /// transcript in a people group: Bob's second line 30 s later has no disc and no name
+    /// but keeps the lane (its bubble's left edge is the first bubble's), and sits in the
+    /// 6 pt in-run gap; Sam's line opens the 20 pt turn gap with a disc and a name.
+    #[gpui::test]
+    fn a_run_shows_one_disc_and_opens_no_turn_gap(cx: &mut TestAppContext) {
+        let t = 1_700_000_000_000u64;
+        let person = |id: &str, who: &str, text: &str, at: u64| -> Message {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "chatId": "c1", "role": "user", "sender": format!("user:gh_{who}"),
+                "senderHandle": who, "senderName": who, "status": "done",
+                "createdAt": at, "completedAt": at,
+                "parts": [{ "id": format!("{id}-t"), "kind": "text", "text": text }],
+            }))
+            .expect("message")
+        };
+        let (_rt, state, transcript) = mount_with(
+            cx,
+            vec![
+                person("m1", "bob", "hi all", t),
+                person("m2", "bob", "two", t + 30_000),
+                person("m3", "sam", "hey", t + 60_000),
+            ],
+        );
+        // A people group: the chat names its senders and draws their discs.
+        state.update(cx, |s, cx| {
+            s.projects[0].kind = SpaceKind::Group;
+            cx.notify();
+        });
+        transcript.update(cx, |t, cx| t.sync(cx));
+        let (_view, vcx) = cx.add_window_view(|_, _| Host {
+            transcript: transcript.clone(),
+        });
+        vcx.run_until_parked();
+        let disc1 = vcx
+            .debug_bounds("disc#m1#user")
+            .expect("Bob's first line has his disc");
+        assert!(
+            vcx.debug_bounds("disc#m2#user").is_none(),
+            "Bob's second line, inside the run, draws no disc"
+        );
+        let disc3 = vcx
+            .debug_bounds("disc#m3#user")
+            .expect("Sam starts a run: disc");
+        assert_eq!(
+            disc1.origin.x, disc3.origin.x,
+            "discs share the avatar column"
+        );
+        let mut bubble = |id: &str| {
+            let sel: &'static str = Box::leak(format!("person-bubble#{id}#user").into_boxed_str());
+            vcx.debug_bounds(sel)
+                .unwrap_or_else(|| panic!("bubble {id} drawn"))
+        };
+        let b1 = bubble("m1");
+        let b2 = bubble("m2");
+        let b3 = bubble("m3");
+        assert_eq!(b1.origin.x, b2.origin.x, "the continuation keeps the lane");
+        assert_eq!(b2.origin.x, b3.origin.x);
+        let gap = |a: Bounds<Pixels>, b: Bounds<Pixels>| {
+            f32::from(b.origin.y - (a.origin.y + a.size.height))
+        };
+        assert_eq!(gap(b1, b2), 2.0 * ROW_GAP_HALF, "in-run gap: 6 pt");
+        assert_eq!(
+            gap(b2, b3),
+            2.0 * ROW_GAP_HALF + TURN_GAP_EXTRA,
+            "a new run opens the 20 pt turn gap"
+        );
+        // One name line taller: the run's first bubble names Bob, the second does not.
+        assert_eq!(
+            f32::from(b1.size.height - b2.size.height),
+            CHAT_LINE_HEIGHT + NAME_TO_TEXT_GAP,
+            "the continuation carries no name"
+        );
+        assert_eq!(
+            b3.size.height, b1.size.height,
+            "Sam's first bubble is named like Bob's"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -9969,8 +10177,9 @@ mod system_line_tests {
         );
     }
 
-    /// #1447: consecutive people-chat replies from the same agent each get a sender
-    /// caption and a quote of the message they answer — not one merged run.
+    /// #1447, as grouped messages keep it: consecutive people-chat replies from the same
+    /// agent each quote the message they answer, and a quoted bubble starts its own run —
+    /// so each is named. (Unquoted follow-ups group; see `grouping_tests`.)
     #[test]
     fn consecutive_agent_replies_each_name_and_quote() {
         let t = 1_700_000_000_000u64;
@@ -10061,8 +10270,8 @@ mod system_line_tests {
     }
 
     /// Jacob, 2026-10-23: the sender's name sits inside the bubble in group chats and
-    /// channels — people when the sender changed, agents on every reply (#1447) — and
-    /// never on my own bubble.
+    /// channels — on the first bubble of a run (people and agents alike; these agent
+    /// replies each quote the ask, so each starts a run) — and never on my own bubble.
     #[test]
     fn group_and_channel_bubbles_name_their_sender_but_not_mine() {
         let t = 1_700_000_000_000u64;
@@ -10397,6 +10606,371 @@ mod system_line_tests {
             "me ↔ agent keeps Grok's widths"
         );
         assert!(!people_chat(None, None, false));
+    }
+}
+
+#[cfg(test)]
+mod grouping_tests {
+    //! Grouped messages (Jacob, 2026-10-28, [feedback grouped-messages-mac-2026-10-28]):
+    //! consecutive messages from one sender within `RUN_WINDOW_MS` form a run — the name
+    //! and the disc once, on the first message; the later ones under its text with the
+    //! avatar column empty and the 6 pt in-run gap. The run breaks on a sender change,
+    //! on the window passing, at a system line or a date stamp, and at a reply quote.
+    use std::collections::{HashMap, HashSet};
+
+    use super::*;
+
+    fn message(id: &str, role: &str, sender: &str, text: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "chatId": "chat_group",
+            "role": role,
+            "sender": sender,
+            "senderHandle": if sender.starts_with("user:") { sender.trim_start_matches("user:gh_") } else { "" },
+            "status": "done",
+            "createdAt": at,
+            "parts": [{ "id": format!("p-{id}"), "kind": "text", "text": text }],
+        }))
+        .expect("message")
+    }
+
+    fn person(id: &str, who: &str, text: &str, at: u64) -> Message {
+        message(id, "user", &format!("user:gh_{who}"), text, at)
+    }
+
+    /// A people-chat agent reply with no `inReplyTo` (a follow-up bubble of a
+    /// multi-message answer): quotes nothing.
+    fn agent(id: &str, text: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "chatId": "chat_group",
+            "role": "assistant",
+            "sender": "agent:doug",
+            "senderName": "Doug",
+            "senderHandle": "doug",
+            "askedByHandle": "jacob",
+            "status": "done",
+            "createdAt": at,
+            "parts": [{ "id": format!("p-{id}"), "kind": "text", "text": text }],
+        }))
+        .expect("agent reply")
+    }
+
+    fn rows_of(messages: &[Message], names_senders: bool) -> (Vec<Row>, HashSet<Id>) {
+        let (spoken, failed) = (HashSet::new(), HashMap::new());
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        let mut cache = MessageRowCache::default();
+        let rows = build_rows_with_cache(
+            messages,
+            false,
+            speech,
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            names_senders,
+            &mut cache,
+            &HashSet::new(),
+        );
+        (rows, cache.run_starts)
+    }
+
+    /// `(text, named, disc)` for every bubble from someone else, `("agent", named, disc)`
+    /// for an agent's first block, `("mine", false, false)` for mine.
+    fn shape(rows: &[Row]) -> Vec<(String, bool, bool)> {
+        rows.iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::User {
+                    text,
+                    named,
+                    disc,
+                    from: Some(_),
+                    ..
+                } => Some((text.clone(), *named, *disc)),
+                RowKind::User { from: None, .. } => Some(("mine".into(), false, false)),
+                RowKind::Markdown {
+                    first: true,
+                    named,
+                    disc,
+                    lane,
+                    ..
+                } => Some((
+                    if lane.is_some() { "agent" } else { "agent-1:1" }.into(),
+                    *named,
+                    *disc,
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    const T: u64 = 1_700_000_000_000;
+
+    #[test]
+    fn the_window_is_two_minutes_and_the_gaps_are_groks() {
+        assert_eq!(RUN_WINDOW_MS, 120_000, "a couple of minutes = 2 min");
+        assert_eq!(RUN_GAP, 6.0, "bubbles of one run sit 6 pt apart (Grok Mac)");
+        assert_eq!(
+            TURN_GAP, 20.0,
+            "a new run opens 20 pt (Grok Mac), unchanged"
+        );
+    }
+
+    #[test]
+    fn continues_run_rule() {
+        let tail = RunTail {
+            sender: "user:gh_bob".into(),
+            at: T,
+        };
+        assert!(continues_run(Some(&tail), "user:gh_bob", T + 1_000, false));
+        assert!(
+            continues_run(Some(&tail), "user:gh_bob", T + RUN_WINDOW_MS, false),
+            "exactly the window still groups"
+        );
+        assert!(
+            !continues_run(Some(&tail), "user:gh_bob", T + RUN_WINDOW_MS + 1, false),
+            "one ms past the window breaks"
+        );
+        assert!(
+            !continues_run(Some(&tail), "user:gh_sam", T + 1_000, false),
+            "another sender breaks"
+        );
+        assert!(
+            !continues_run(Some(&tail), "user:gh_bob", T + 1_000, true),
+            "a reply quote breaks"
+        );
+        assert!(
+            !continues_run(None, "user:gh_bob", T + 1_000, false),
+            "no run yet"
+        );
+        assert!(
+            !continues_run(Some(&tail), "user:gh_bob", 0, false),
+            "a row without a clock never groups"
+        );
+        assert!(
+            continues_run(Some(&tail), "user:gh_bob", T - 30_000, false),
+            "a clock a little behind the run's (another device) still groups"
+        );
+    }
+
+    #[test]
+    fn same_sender_within_the_window_continues_the_run() {
+        let messages = [
+            person("m1", "bob", "hi all", T),
+            person("m2", "bob", "two", T + 30_000),
+            person("m3", "bob", "three", T + 90_000),
+        ];
+        let (rows, starts) = rows_of(&messages, true);
+        assert_eq!(
+            shape(&rows),
+            [
+                ("hi all".into(), true, true),
+                ("two".into(), false, false),
+                ("three".into(), false, false),
+            ],
+            "name and disc once, on the run's first message"
+        );
+        assert_eq!(
+            starts,
+            HashSet::from(["m1".to_string()]),
+            "one turn gap, at the top"
+        );
+        // The later rows still keep the lane (the `from` person) so the bubble aligns
+        // under the first one's text.
+        assert!(rows
+            .iter()
+            .all(|r| !matches!(r.kind, RowKind::User { from: None, .. })));
+    }
+
+    #[test]
+    fn a_sender_change_or_the_window_passing_starts_a_new_run() {
+        let messages = [
+            person("m1", "bob", "a", T),
+            person("m2", "sam", "b", T + 10_000),
+            person("m3", "sam", "c", T + 10_000 + RUN_WINDOW_MS + 1),
+            person("m4", "bob", "d", T + 10_000 + RUN_WINDOW_MS + 2_000),
+        ];
+        let (rows, starts) = rows_of(&messages, true);
+        assert_eq!(
+            shape(&rows),
+            [
+                ("a".into(), true, true),
+                ("b".into(), true, true),
+                ("c".into(), true, true),
+                ("d".into(), true, true),
+            ]
+        );
+        assert_eq!(starts.len(), 4);
+    }
+
+    #[test]
+    fn a_system_line_a_date_stamp_or_a_quote_breaks_the_run() {
+        let mut quoted = person("m5", "bob", "re: that", T + 3_000);
+        quoted.reply_to = Some("m1".into());
+        let messages = [
+            person("m1", "bob", "a", T),
+            message("s1", "system", "system", "Jacob added Doug", T + 1_000),
+            person("m2", "bob", "b", T + 2_000),
+            quoted,
+            person("m6", "bob", "after the quote", T + 4_000),
+            // An hour later: the date stamp lands and breaks the run (the window has
+            // passed anyway).
+            person("m7", "bob", "next hour", T + 2 * STAMP_GAP_MS),
+        ];
+        let (rows, starts) = rows_of(&messages, true);
+        assert_eq!(
+            shape(&rows),
+            [
+                ("a".into(), true, true),
+                ("b".into(), true, true),
+                ("re: that".into(), true, true),
+                ("after the quote".into(), false, false),
+                ("next hour".into(), true, true),
+            ],
+            "the quoted bubble starts a run of its own; the next line joins it"
+        );
+        // The system line keeps its own turn gap above (as before), so it counts as a start.
+        assert_eq!(
+            starts,
+            HashSet::from([
+                "m1".to_string(),
+                "s1".to_string(),
+                "m2".to_string(),
+                "m5".to_string(),
+                "m7".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn agents_group_like_people_unless_they_quote() {
+        let mut quoting = agent("a3", "answering the ask", T + 40_000);
+        quoting.in_reply_to = Some("m1".into());
+        let messages = [
+            person("m1", "jacob", "ask", T),
+            agent("a1", "first part", T + 10_000),
+            agent("a2", "second part", T + 20_000),
+            quoting,
+            agent("a4", "and a note", T + 50_000),
+        ];
+        let (rows, starts) = rows_of(&messages, true);
+        assert_eq!(
+            shape(&rows),
+            [
+                ("ask".into(), true, true),
+                ("agent".into(), true, true),
+                ("agent".into(), false, false),
+                ("agent".into(), true, true),
+                ("agent".into(), false, false),
+            ],
+            "an unquoted follow-up continues the agent's run; a quoted reply starts one"
+        );
+        assert_eq!(
+            starts,
+            HashSet::from(["m1".to_string(), "a1".to_string(), "a3".to_string()])
+        );
+    }
+
+    #[test]
+    fn my_own_messages_group_too_and_a_dm_groups_its_discs() {
+        let messages = [
+            person("m1", "me", "one", T),
+            person("m2", "me", "two", T + 5_000),
+            person("m3", "bob", "hey", T + 10_000),
+            person("m4", "bob", "you there?", T + 20_000),
+        ];
+        // A DM names nobody but still shows the disc once per run.
+        let (rows, starts) = rows_of(&messages, false);
+        assert_eq!(
+            shape(&rows),
+            [
+                ("mine".into(), false, false),
+                ("mine".into(), false, false),
+                ("hey".into(), false, true),
+                ("you there?".into(), false, false),
+            ]
+        );
+        assert_eq!(
+            starts,
+            HashSet::from(["m1".to_string(), "m3".to_string()]),
+            "my second line sits in the in-run gap; Bob's run opens the turn gap once"
+        );
+    }
+
+    #[test]
+    fn an_agent_in_its_own_chat_groups_its_bubbles() {
+        // 1:1 agent chat (no lane): a quick ack and the answer within the window are one
+        // run — one turn gap, then 6 pt (supersedes #1447's gap on every agent message).
+        let messages = [
+            message("m1", "user", "user", "chart the weather", T),
+            message("a1", "assistant", "box:1", "On it.", T + 5_000),
+            message("a2", "assistant", "box:1", "Here is the chart.", T + 60_000),
+            message(
+                "a3",
+                "assistant",
+                "box:1",
+                "Late addendum.",
+                T + 60_000 + RUN_WINDOW_MS + 1,
+            ),
+        ];
+        let (rows, starts) = rows_of(&messages, false);
+        assert_eq!(
+            shape(&rows),
+            [
+                ("mine".into(), false, false),
+                ("agent-1:1".into(), false, true),
+                ("agent-1:1".into(), false, false),
+                ("agent-1:1".into(), false, true),
+            ]
+        );
+        assert_eq!(
+            starts,
+            HashSet::from(["m1".to_string(), "a1".to_string(), "a3".to_string()])
+        );
+    }
+
+    #[test]
+    fn the_row_cache_keeps_run_starts_on_a_hit() {
+        let messages = [
+            person("m1", "bob", "a", T),
+            person("m2", "bob", "b", T + 1_000),
+            person("m3", "sam", "c", T + 2_000),
+        ];
+        let (spoken, failed) = (HashSet::new(), HashMap::new());
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        let mut cache = MessageRowCache::default();
+        let build = |cache: &mut MessageRowCache| {
+            build_rows_with_cache(
+                &messages,
+                false,
+                speech,
+                "gh_me",
+                &HashSet::new(),
+                &Mentions::empty(),
+                true,
+                cache,
+                &HashSet::new(),
+            )
+        };
+        let first = build(&mut cache);
+        assert_eq!(cache.built, 3);
+        let second = build(&mut cache);
+        assert_eq!(cache.built, 0, "every message served from the cache");
+        assert_eq!(shape(&first), shape(&second));
+        assert_eq!(
+            cache.run_starts,
+            HashSet::from(["m1".to_string(), "m3".to_string()]),
+            "run starts are rebuilt from the cached entries"
+        );
     }
 }
 
