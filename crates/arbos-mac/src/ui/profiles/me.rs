@@ -67,6 +67,7 @@ impl Shell {
         let notify_on = state.notifier.enabled;
         let permission = state.notification_permission();
         let read_receipts = state.read_receipts;
+        let link_previews = state.link_previews;
         let secrets_value = if state.secrets.loaded {
             state.secrets.row_value()
         } else {
@@ -741,6 +742,29 @@ impl Shell {
                     ),
                 );
             }
+            // Link previews ([feedback link-embeds-mac-2026-10-27]): the cards under links in
+            // chat, on or off on this Mac; off leaves every link plain.
+            let group = group.child(seg_row(
+                "Link previews",
+                div()
+                    .flex()
+                    .gap(px(2.0))
+                    .child(
+                        glass::segment("link-previews-on", "On", link_previews, &theme).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.state.update(cx, |s, cx| s.set_link_previews(true, cx));
+                            }),
+                        ),
+                    )
+                    .child(
+                        glass::segment("link-previews-off", "Off", !link_previews, &theme)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.state
+                                    .update(cx, |s, cx| s.set_link_previews(false, cx));
+                            })),
+                    ),
+                &theme,
+            ));
             div()
                 .flex()
                 .flex_col()
