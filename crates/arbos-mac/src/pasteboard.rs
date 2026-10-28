@@ -140,6 +140,68 @@ pub fn format_of_uti(uti: &str) -> Option<ImageFormat> {
     })
 }
 
+/// The flavors a text copy carries next to its plain words (TextEdit, Safari, Mail, Notes,
+/// Word, Pages, Numbers, an iPhone through Universal Clipboard).
+#[cfg_attr(any(not(target_os = "macos"), test), allow(dead_code))]
+pub const RICH_TEXT_UTIS: &[&str] = &[
+    "public.rtf",
+    "public.html",
+    "com.apple.rtfd",
+    "com.apple.flat-rtfd",
+    "com.apple.webarchive",
+    "com.apple.uikit.attributedstring",
+    "Apple Web Archive pasteboard type",
+    "Apple HTML pasteboard type",
+    "NeXT Rich Text Format v1.0 pasteboard type",
+    "NeXT RTFD pasteboard type",
+];
+
+#[cfg_attr(any(not(target_os = "macos"), test), allow(dead_code))]
+fn is_plain_text(uti: &str) -> bool {
+    matches!(
+        uti,
+        UTI_UTF8_TEXT | "public.utf16-plain-text" | "public.plain-text" | "NSStringPboardType"
+    )
+}
+
+/// What the composer's paste takes from one pasteboard item besides its words.
+#[cfg_attr(any(not(target_os = "macos"), test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ItemRead {
+    FileUrl,
+    /// The first declared type we know — the native one (a GIF, not its PNG twin).
+    Image(ImageFormat),
+    Nothing,
+}
+
+/// The composer's paste rule on the declared types alone, one answer per item in order:
+/// - a `public.file-url` is a file (Finder, a copied Arbos file attachment);
+/// - words plus a rich-text flavor ([`RICH_TEXT_UTIS`]) is a text copy — a picture on it
+///   is a rendering of the words (Word, Pages, Numbers), never staged;
+/// - otherwise a picture is a picture, also next to plain words (a copied Arbos message:
+///   picture + caption, [feedback copy-image-messages-mac-2026-10-27]);
+/// - anything else is words or nothing.
+#[cfg_attr(any(not(target_os = "macos"), test), allow(dead_code))]
+pub fn read_plan<S: AsRef<str>>(items: &[Vec<S>]) -> Vec<ItemRead> {
+    let all = || items.iter().flatten().map(AsRef::as_ref);
+    let rich_copy = all().any(is_plain_text) && all().any(|t| RICH_TEXT_UTIS.contains(&t));
+    items
+        .iter()
+        .map(|types| {
+            if types.iter().any(|t| t.as_ref() == UTI_FILE_URL) {
+                ItemRead::FileUrl
+            } else if rich_copy {
+                ItemRead::Nothing
+            } else {
+                types
+                    .iter()
+                    .find_map(|t| format_of_uti(t.as_ref()))
+                    .map_or(ItemRead::Nothing, ItemRead::Image)
+            }
+        })
+        .collect()
+}
+
 /// The format of a fetched picture: the bytes decide (the relay's `content-type` and the
 /// attachment's `mime` are hints that have been wrong before — a `.png` named file that
 /// is a JPEG), then the MIME, then the file name. `None` for anything that is not a
@@ -381,7 +443,7 @@ mod macos {
     use objc2_app_kit::{NSImage, NSPasteboard, NSPasteboardItem, NSPasteboardWriting};
     use objc2_foundation::{NSArray, NSData, NSString, NSURL};
 
-    use super::{format_of_uti, PasteItem, UTI_FILE_URL, UTI_PNG, UTI_TIFF, UTI_UTF8_TEXT};
+    use super::{ItemRead, PasteItem, UTI_FILE_URL, UTI_PNG, UTI_TIFF, UTI_UTF8_TEXT};
 
     fn ns_type(uti: &str) -> Retained<NSString> {
         NSString::from_str(uti)
@@ -432,37 +494,46 @@ mod macos {
         pasteboard.writeObjects(&NSArray::from_retained_slice(&objects))
     }
 
-    /// Every pasteboard item → gpui entries (see [`super::read`]).
+    /// Every pasteboard item → gpui entries (see [`super::read`]); which items count as a
+    /// file or a picture is [`super::read_plan`]'s call.
     pub(super) fn read() -> Option<ClipboardItem> {
         let pasteboard = NSPasteboard::generalPasteboard();
         let items = pasteboard.pasteboardItems()?;
+        let declared: Vec<Vec<String>> = items
+            .iter()
+            .map(|item| item.types().iter().map(|t| t.to_string()).collect())
+            .collect();
+        let plan = super::read_plan(&declared);
         let mut paths: Vec<PathBuf> = Vec::new();
         let mut images = Vec::new();
         let mut text = String::new();
-        for item in items.iter() {
-            let types = item.types();
-            let declared: Vec<String> = types.iter().map(|t| t.to_string()).collect();
-            if declared.iter().any(|t| t == UTI_FILE_URL) {
-                if let Some(s) = item.stringForType(&ns_type(UTI_FILE_URL)) {
-                    if let Some(path) = NSURL::URLWithString(&s).and_then(|u| u.to_file_path()) {
+        for ((item, types), read) in items.iter().zip(&declared).zip(plan) {
+            match read {
+                ItemRead::FileUrl => {
+                    if let Some(path) = item
+                        .stringForType(&ns_type(UTI_FILE_URL))
+                        .and_then(|s| NSURL::URLWithString(&s))
+                        .and_then(|u| u.to_file_path())
+                    {
                         paths.push(path);
                         continue;
                     }
                 }
-            }
-            if let Some(format) = declared.iter().find_map(|t| format_of_uti(t)) {
-                if let Some(data) = item.dataForType(&ns_type(super::uti_of(format))) {
-                    let bytes = data.to_vec();
-                    if !bytes.is_empty() {
-                        images.push(ClipboardEntry::Image(gpui::Image {
-                            format,
-                            id: gpui::hash(&bytes),
-                            bytes,
-                        }));
+                ItemRead::Image(format) => {
+                    if let Some(data) = item.dataForType(&ns_type(super::uti_of(format))) {
+                        let bytes = data.to_vec();
+                        if !bytes.is_empty() {
+                            images.push(ClipboardEntry::Image(gpui::Image {
+                                format,
+                                id: gpui::hash(&bytes),
+                                bytes,
+                            }));
+                        }
                     }
                 }
+                ItemRead::Nothing => {}
             }
-            if declared.iter().any(|t| t == UTI_UTF8_TEXT) {
+            if types.iter().any(|t| t == UTI_UTF8_TEXT) {
                 if let Some(s) = item.stringForType(&ns_type(UTI_UTF8_TEXT)) {
                     text.push_str(&s.to_string());
                 }
@@ -711,6 +782,87 @@ mod tests {
             assert_eq!(format_of_uti(uti_of(format)), Some(format));
         }
         assert_eq!(format_of_uti("public.utf8-plain-text"), None);
+    }
+
+    // [feedback paste-rich-text-mac-2026-10-28]: a rich-text copy pastes its words only.
+
+    #[test]
+    fn rtf_next_to_plain_text_is_words_only() {
+        let plan = read_plan(&[vec![
+            "public.rtf",
+            "NeXT Rich Text Format v1.0 pasteboard type",
+            UTI_UTF8_TEXT,
+        ]]);
+        assert_eq!(plan, [ItemRead::Nothing]);
+    }
+
+    #[test]
+    fn html_next_to_plain_text_is_words_only() {
+        let plan = read_plan(&[vec![
+            "public.html",
+            "Apple HTML pasteboard type",
+            UTI_UTF8_TEXT,
+        ]]);
+        assert_eq!(plan, [ItemRead::Nothing]);
+    }
+
+    #[test]
+    fn a_picture_rendered_next_to_rich_text_is_not_staged() {
+        // Word / Pages / Numbers: the words, their rich forms and a picture of the selection.
+        let plan = read_plan(&[vec![
+            UTI_UTF8_TEXT,
+            "public.rtf",
+            "public.html",
+            "com.adobe.pdf",
+            UTI_PNG,
+            UTI_TIFF,
+        ]]);
+        assert_eq!(plan, [ItemRead::Nothing]);
+        let plan = read_plan(&[vec![UTI_UTF8_TEXT, "com.apple.flat-rtfd"], vec![UTI_TIFF]]);
+        assert_eq!(plan, [ItemRead::Nothing, ItemRead::Nothing]);
+    }
+
+    #[test]
+    fn an_image_paste_still_attaches() {
+        assert_eq!(
+            read_plan(&[vec![UTI_PNG]]),
+            [ItemRead::Image(ImageFormat::Png)]
+        );
+        assert_eq!(
+            read_plan(&[vec![UTI_TIFF, UTI_PNG]]),
+            [ItemRead::Image(ImageFormat::Tiff)],
+            "the first declared type is the native one"
+        );
+        assert_eq!(
+            read_plan(&[vec![UTI_GIF, UTI_PNG, UTI_TIFF]]),
+            [ItemRead::Image(ImageFormat::Gif)]
+        );
+        // A copied Arbos message: pictures + caption, no rich flavor.
+        assert_eq!(
+            read_plan(&[
+                vec![UTI_PNG, UTI_TIFF, UTI_UTF8_TEXT],
+                vec![UTI_JPEG, UTI_PNG]
+            ]),
+            [
+                ItemRead::Image(ImageFormat::Png),
+                ItemRead::Image(ImageFormat::Jpeg)
+            ]
+        );
+        // An image copied from a browser comes with its HTML but no plain words.
+        assert_eq!(
+            read_plan(&[vec![UTI_PNG, "public.html"]]),
+            [ItemRead::Image(ImageFormat::Png)]
+        );
+    }
+
+    #[test]
+    fn a_file_url_is_a_file_even_with_words() {
+        assert_eq!(
+            read_plan(&[vec![UTI_FILE_URL, UTI_UTF8_TEXT, UTI_TIFF]]),
+            [ItemRead::FileUrl]
+        );
+        assert_eq!(read_plan(&[vec![UTI_UTF8_TEXT]]), [ItemRead::Nothing]);
+        assert!(read_plan::<&str>(&[]).is_empty());
     }
 
     /// The test-platform path end to end: what `write` puts on gpui's clipboard,

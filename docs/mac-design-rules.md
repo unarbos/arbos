@@ -1157,6 +1157,47 @@ this is the correctness of the existing surface):
 
 Pinned by `theme::glass_contrast_tests` (white / black / photo × light / dark × 0 / 50 / 100 %, sampled and unsampled; the floors over the friendly desktop), `backdrop::tests` (throttle, change gate, bands, coverage) and `vibrancy::tests` (Liquid on 26, under-window before, none on Matte, kept across dark → light → dark).
 
+### Right pane components on Glass (Jacob 2026-10-28, [feedback right-pane-glass-cards-2026-10-28]; approved 18:17 UTC on the Xvfb sheet)
+
+Jacob's Members-tab shot: the pane wore the adaptive wash but its cards
+("Add members / Description", the member list), the Members · Library
+capsule, the glyph tiles and the fields were still painted with their Matte
+tokens — `pane_card`, `surface_2`, `field`, `bubble`, opaque hex colours on
+every surface — so they sat as solid slabs on a see-through pane while the
+sidebar beside them was frosted. "We can still have the glass for basically
+every component in the pane when we go glass."
+
+**On Glass every pane component is a wash of the text colour** (white-alpha
+in dark, black-alpha in light — the material's own plusL / plusD idiom), so
+the desktop shows through it as through the pane and it rides the adaptive
+wash; **Matte returns the old tokens untouched.**
+
+| Component | Matte | Glass dark | Glass light | Code |
+| --- | --- | --- | --- | --- |
+| Grouped card (`kit::card`: members, settings, Connection / Key cards, Library lists) | `pane_card` | white 8 % + 1 pt rim white 10 % (inset shadow: no layout cost) | white 55 % + rim black 6 % | `Theme::pane_card_fill` / `pane_card_rim`, `PANE_CARD_GLASS_*` |
+| Small controls: the round-button family — the pane's share / close / back discs, the sidebar strip's search · + · collapse and the collapsed rail's discs (Jacob 2026-10-28 16:58: "they should be glass"; hover and pressed stay `ui::highlight`'s two wash steps over the fill, the glyph the text colour) — the tab capsule, glyph tiles, Library thumbnails, hero glyph tile, Message pill, tag chips | `surface_2` | white 14 % | black 7 % | `Theme::control_fill` |
+| Sidebar filter's selected capsule (All · Agents · People · Servers) | `bubble_assistant` | white 14 % | black 7 % | `Theme::filter_on_fill` |
+| Fields in the pane (description / label / name editors, the handle field, Unarchive) | `field` | white 6 % | white 60 % | `Theme::field_fill` |
+| Settings icon tile | `#5c5c60` / `#6e6e73` | white 22 % | black 42 % (white glyph ≥ 3:1) | `Theme::tile_fill` |
+| Selected On / Off / Dark / Light segment | `bubble` | white 16 % | black 72 % | `Theme::segment_on_fill` |
+| Secondary text (subtitles, details, section titles, footnotes, unselected tab, empty lines) | `text_muted` | text at 72 % (vibrant) | text at 62 % | `Theme::label_muted` |
+| Tertiary (chevrons, placeholders) | `text_faint` | text at 45 % | text at 42 % | `Theme::label_faint` |
+| Hairlines between rows, the pane's left edge | unchanged | unchanged | unchanged | `kit::hairline_below`, `pane_edge` |
+
+Pinned by `theme::glass_contrast_tests::every_pane_component_reads_over_every_desktop_on_glass`
+(card, field on a card, tile on a card, control on the pane: body ≥ 4.5:1,
+vibrant muted ≥ 3:1 over white / black / photo × light / dark × 0 / 50 /
+100 %, sampled and unsampled; the selected segment's label ≥ 4.5:1, the
+icon tile's glyph ≥ 3:1), `…::on_glass_the_pane_components_are_translucent`
+and `…::on_matte_the_pane_components_keep_their_solid_tokens`.
+
+Rig: `ARBOS_MOCK_WALLPAPER=<pre-blurred png>` + `ARBOS_MOCK_BACKDROP_LUM=<0…1>`
+(`ui::mock_backdrop`) paint a stand-in desktop under the window and seed the
+sampler where there is no vibrancy (Linux / Xvfb previews); inert without the
+variables (`mock_backdrop::tests`). The iPhone's `PaneCard` takes the same
+card token (`Theme.paneCardFill` / `paneCardRim`, [feedback
+right-pane-glass-cards-ios-2026-10-28]) so both panes match on Glass.
+
 ## Full screen (Jacob 2026-10-24, [feedback fullscreen-traffic-lights-2026-10-24] → [feedback topbar-grok-parity-2026-10-24])
 
 **The traffic lights are macOS's own standard window buttons, always. The
