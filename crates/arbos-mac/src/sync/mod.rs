@@ -111,6 +111,25 @@ pub enum SyncEvent {
     NeedsPairing {
         relay_url: String,
     },
+    /// An outside agent's key (#2141), shown once on the reveal sheet: after a connect or a
+    /// rotate.
+    OutsideAgentKey {
+        project_id: Id,
+        name: String,
+        transport: String,
+        key: String,
+        link: String,
+        relay_url: String,
+        /// The agent's 1:1 chat (connect only).
+        chat_id: Option<Id>,
+        rotated: bool,
+    },
+    /// The connection of an outside agent, polled while the reveal sheet is up and on the
+    /// Details pane.
+    OutsideAgentStatus {
+        project_id: Id,
+        info: crate::model::OutsideInfo,
+    },
     /// Who is signed in (`/auth/token` or `/me`); `None` after sign-out.
     Account(Option<AccountView>),
     /// Remote feature flags from `GET /me` → `features` (one object, one place on the relay).
@@ -889,6 +908,26 @@ pub enum ClientCommand {
     },
     /// Soft-delete an owned agent (`DELETE /projects/{id}`).
     DeleteProject {
+        project_id: Id,
+    },
+    /// Connect an outside agent (#2141): `POST /outside-agents {name, transport}` →
+    /// [`SyncEvent::OutsideAgentKey`] (the key, shown once) and a registry refresh.
+    ConnectAgent {
+        name: String,
+        /// `acp` | `grok` | `custom`.
+        transport: String,
+        avatar_color_index: Option<u8>,
+    },
+    /// `GET /outside-agents/{id}` → [`SyncEvent::OutsideAgentStatus`].
+    OutsideAgentStatus {
+        project_id: Id,
+    },
+    /// `POST /outside-agents/{id}/rotate` → [`SyncEvent::OutsideAgentKey`] (fresh key).
+    OutsideAgentRotate {
+        project_id: Id,
+    },
+    /// `DELETE /outside-agents/{id}` (revoke the key; the agent stays) → status refresh.
+    OutsideAgentRevoke {
         project_id: Id,
     },
     /// Delete a people chat I own (`DELETE /chats/{id}`).
