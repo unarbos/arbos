@@ -72,6 +72,7 @@
 		A16B7487AC090D4969019FDF /* SignInView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1947AC5E87D2B2E121B97A0 /* SignInView.swift */; };
 		A19E8F90C26169886405B87C /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DA96384927E136586BC012 /* Theme.swift */; };
 		A1AF934D450F6DEFF67E0212 /* Transcript.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1ECED47C60FFA9826884A25 /* Transcript.swift */; };
+		A1CC00000000000000000032 /* ChatImageCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CC00000000000000000031 /* ChatImageCache.swift */; };
 		A1C0DE5A11B2C3D4E5F60712 /* QuestionCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C0DE5A11B2C3D4E5F60711 /* QuestionCard.swift */; };
 		A1C0DE5A11B2C3D4E5F60912 /* InCallOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C0DE5A11B2C3D4E5F60911 /* InCallOverlay.swift */; };
 		A1C0DE5A11B2C3D4E5F60922 /* VoicePickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C0DE5A11B2C3D4E5F60921 /* VoicePickerView.swift */; };
@@ -296,6 +297,7 @@
 		A1947AC5E87D2B2E121B97A0 /* SignInView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignInView.swift; sourceTree = "<group>"; };
 		A1DA96384927E136586BC012 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		A1ECED47C60FFA9826884A25 /* Transcript.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Transcript.swift; sourceTree = "<group>"; };
+		A1CC00000000000000000031 /* ChatImageCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatImageCache.swift; sourceTree = "<group>"; };
 		A1C0DE5A11B2C3D4E5F60711 /* QuestionCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuestionCard.swift; sourceTree = "<group>"; };
 		A1C0DE5A11B2C3D4E5F60911 /* InCallOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InCallOverlay.swift; sourceTree = "<group>"; };
 		A1C0DE5A11B2C3D4E5F60921 /* VoicePickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoicePickerView.swift; sourceTree = "<group>"; };
@@ -579,6 +581,7 @@
 				A1947AC5E87D2B2E121B97A0,
 				A1DA96384927E136586BC012,
 				A1ECED47C60FFA9826884A25,
+				A1CC00000000000000000031 /* ChatImageCache.swift */,
 				A1BC00000000000000000001 /* MessageMenu.swift */,
 				A1BC00000000000000000005 /* MessageActions.swift */,
 				A1BC00000000000000000011 /* MessageActionsLayout.swift */,
@@ -956,6 +959,7 @@
 				A19E8F90C26169886405B87C /* Theme.swift in Sources */,
 				A1AD0000000000000000B002 /* SheetHeader.swift in Sources */,
 				A1AF934D450F6DEFF67E0212 /* Transcript.swift in Sources */,
+				A1CC00000000000000000032 /* ChatImageCache.swift in Sources */,
 				A1BC00000000000000000002 /* MessageMenu.swift in Sources */,
 				A1BC00000000000000000006 /* MessageActions.swift in Sources */,
 				A1BC00000000000000000012 /* MessageActionsLayout.swift in Sources */,
