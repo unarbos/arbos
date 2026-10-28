@@ -626,6 +626,7 @@ mod tests {
                     mime: "application/pdf".into(),
                     kind: Some("file".into()),
                     blob_ref: Some("att-1".into()),
+                    source: None,
                 });
             }
             doc.append_user_message(&id, &format!("message {i}"), "dev1", &opts)
