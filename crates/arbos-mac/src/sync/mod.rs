@@ -737,6 +737,12 @@ pub enum ClientCommand {
         chat_id: Id,
         message_id: Id,
     },
+    /// Remove a message's link preview for everyone (`preview: "off"` on the row, the part
+    /// dropped; the relay decides with the delete rule) ([feedback link-embeds-mac-2026-10-27]).
+    RemoveLinkPreview {
+        chat_id: Id,
+        message_id: Id,
+    },
     /// S18: decide an approval card (`approve` / `reject` commands, `arbos_core::approval`).
     Approve {
         chat_id: Id,
