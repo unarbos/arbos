@@ -446,9 +446,10 @@ extension View {
             // simultaneous so the chat ScrollView keeps vertical pans that start
             // on a bubble; exclusive onLongPressGesture eats the scroll
             // ([feedback app-01M5Q1N6C1HAKHC6P2XPEWMRSS]).
+            // A hold on a chart plot reads a value instead (`ChartTouch`).
             simultaneousGesture(
                 LongPressGesture(minimumDuration: 0.35)
-                    .onEnded { _ in onLongPress() },
+                    .onEnded { _ in if !ChartTouch.holding { onLongPress() } },
                 enabled: ChatGestures.longPress
             )
         } else {

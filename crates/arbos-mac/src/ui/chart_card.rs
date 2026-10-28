@@ -333,6 +333,7 @@ pub fn legend(model: &ChartModel, theme: &Theme, font: f32, dot: f32) -> gpui::D
                 .flex()
                 .items_center()
                 .gap(px(6.0))
+                // status-dot: exception — a legend swatch carries the series' data colour, not a state.
                 .child(div().size(px(dot)).rounded_full().bg(color))
                 .child(name),
         );

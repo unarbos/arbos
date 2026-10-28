@@ -451,6 +451,18 @@ extension AppModel {
             messages["fx-dm-unconst"]?.append(contentsOf: [theirs, mine, outside])
         }
         caughtUp.insert("fx-dm-unconst")
+        // `ARBOS_FIXTURE_BLOCKED=<handle,…>`: my block list, as the relay's `GET /blocks` lists
+        // it — the blocked-state rig (the Mac fixture has the same hook).
+        let blockedHandles = DebugHooks.fixtureBlocked
+        if !blockedHandles.isEmpty {
+            var seen = Set<String>()
+            var list: [Person] = []
+            for m in peopleChats.flatMap(\.members) where !m.isAgent && blockedHandles.contains(m.handle) && !seen.contains(m.id) {
+                seen.insert(m.id)
+                list.append(Person(id: m.id, handle: m.handle, avatarUrl: m.avatarUrl, name: m.name, status: "member"))
+            }
+            setBlockedForTests(list)
+        }
         directory = [
             Person(id: "fx-u1", handle: "alex-rivera", avatarUrl: nil, name: "Alex Rivera", status: "member"),
             Person(id: "fx-u2", handle: "jen", avatarUrl: nil, name: "Jen Park", status: "member"),

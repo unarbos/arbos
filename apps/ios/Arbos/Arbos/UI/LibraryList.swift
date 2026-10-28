@@ -20,6 +20,8 @@ enum LibraryList {
     /// The thumbnail / type tile (the kit's 36 pt leading) and its corners.
     static let thumb: CGFloat = PaneKit.avatar
     static let thumbRadius: CGFloat = 8
+    /// The link tile in the long-press preview's picture frame (the 36 pt globe it replaces, as a tile).
+    static let previewTile: CGFloat = 72
     /// The preview card: width, picture height, the sender's picture.
     static let previewWidth: CGFloat = 344
     static let previewImageHeight: CGFloat = 206
@@ -308,7 +310,8 @@ struct LibraryThumb: View {
             case .voice:
                 Image(systemName: "waveform").font(theme.font(15, weight: .medium)).foregroundStyle(theme.muted)
             case .link:
-                Image(systemName: "link").font(theme.font(15, weight: .medium)).foregroundStyle(theme.muted)
+                // The one link tile ([feedback link-icons-ios-adopt-2026-10-27]).
+                LinkRowTile(url: item.url, size: LibraryList.thumb)
             }
         }
         .frame(width: LibraryList.thumb, height: LibraryList.thumb)
@@ -343,7 +346,7 @@ struct LibraryPreview: View {
                 case .voice:
                     Image(systemName: "waveform").font(.system(size: 36)).foregroundStyle(theme.muted)
                 case .link:
-                    Image(systemName: "globe").font(.system(size: 36)).foregroundStyle(theme.muted)
+                    LinkRowTile(url: item.url, size: LibraryList.previewTile)
                 }
             }
             .frame(width: LibraryList.previewWidth, height: LibraryList.previewImageHeight)

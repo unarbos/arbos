@@ -143,7 +143,7 @@ extension AppModel {
             case .link:
                 guard let url = c.url else { continue }
                 out.append(GlobalSearch.Entry(kind: .link, title: GlobalSearch.linkHost(c.name), subtitle: "Link · \(c.who) in \(place)",
-                                              when: c.createdAt, rank: .of(c.name, q: q), target: .link(url)))
+                                              when: c.createdAt, rank: .of(c.name, q: q), target: .link(url), picture: .link(url)))
             case .media, .file:
                 let kindLabel = Attachment(name: c.name, mime: c.mime, blobRef: nil, bytes: c.bytes).kindLabel
                 let size = Attachment(name: c.name, mime: c.mime, blobRef: nil, bytes: c.bytes).sizeLabel

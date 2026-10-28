@@ -16,6 +16,12 @@ enum BlockedState {
 
     static func confirmTitle(handle: String) -> String { "Unblock @\(handle)?" }
 
+    /// The Unblock confirm (`Confirm.swift`): "Unblock @x?" · the note · Cancel · Unblock.
+    /// Plain, not red — unblocking undoes a block, it destroys nothing.
+    static func unblockConfirm(handle: String) -> ConfirmSpec {
+        ConfirmSpec(title: confirmTitle(handle: handle), message: confirmNote, action: unblock, destructive: false)
+    }
+
     /// "N messages hidden because you blocked @x" for the transcript's folded line.
     static func hiddenLine(count: Int, who: String) -> String {
         "\(count == 1 ? "1 message" : "\(count) messages") hidden because you blocked \(who)"
