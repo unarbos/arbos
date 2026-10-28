@@ -8,6 +8,7 @@ use arbos_core::markdown as core;
 
 use super::math;
 use super::urlwrap;
+use crate::model::LinkPreview;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Block {
@@ -41,6 +42,12 @@ pub enum Block {
         part_id: String,
         spec: String,
         table: String,
+    },
+    /// A link preview card ([feedback link-embeds-mac-2026-10-27]): the relay's
+    /// `link_preview` part as one block of the bubble, under the prose that held the link.
+    LinkPreview {
+        part_id: String,
+        preview: Box<LinkPreview>,
     },
 }
 
@@ -154,7 +161,10 @@ pub fn link_hosts(text: &str) -> Vec<String> {
                     header.iter().for_each(|c| push(c, out));
                     rows.iter().flatten().for_each(|c| push(c, out));
                 }
-                Block::Code { .. } | Block::Math { .. } | Block::Chart { .. } => {}
+                Block::Code { .. }
+                | Block::Math { .. }
+                | Block::Chart { .. }
+                | Block::LinkPreview { .. } => {}
             }
         }
     }
