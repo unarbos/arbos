@@ -187,8 +187,8 @@ struct ServerChannelsView: View {
             ListTopFade(screen: .serverChannels)
             header
         }
-        // Custom back chevron; swipe right (edge pop or anywhere) goes back to Home —
-        // `BackSwipe.swift`, the same rules as every chat screen.
+        // Custom back chevron; the system's edge pop, or a swipe right anywhere, goes back
+        // to Home — `BackSwipe.swift`, the same rules as every chat screen.
         .backSwipeToPop()
         .sheet(isPresented: $showNewChannel) {
             NewChannelSheet(serverId: serverId).environmentObject(model).environment(\.theme, theme)
