@@ -385,6 +385,7 @@ struct HomeView: View {
                                 Button { model.open(peopleChat: chat) } label: {
                                     PeopleRow(chat: chat, preview: entry.hit.reason ?? peoplePreview(chat), time: timeLabel(ms: peopleActivity(chat)),
                                               unread: model.peopleUnread.contains(chat.id) || model.unreadCount(for: chat) > 0,
+                                              streaming: model.isStreaming(chat.id),
                                               count: model.unreadCount(for: chat), me: model.user?.id,
                                               pinned: pinned)
                                 }
@@ -855,7 +856,11 @@ struct HomeView: View {
     }
 
     private func peoplePreview(_ c: PeopleChat) -> String {
-        guard let m = model.messages(of: c.id).last(where: { !$0.voice && !$0.plainText.isEmpty }) else {
+        // Skip group deletion audits (hidden in the chat; Activity only) so the
+        // home row matches what you see when you open the conversation.
+        guard let m = model.messages(of: c.id).last(where: {
+            !$0.voice && !$0.plainText.isEmpty && !GroupActivity.isAuditLine($0.plainText)
+        }) else {
             return c.pending ? "Invited · opens when they sign in" : "Say hi"
         }
         let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
@@ -1176,8 +1181,13 @@ struct HiddenChatsView: View {
     }
 
     static func peoplePreview(_ c: PeopleChat, in model: AppModel) -> String {
-        // A row hidden for me (someone I blocked) never previews.
-        guard let m = model.messages(of: c.id).last(where: { !$0.voice && !$0.plainText.isEmpty && !model.hidesMessage($0, chatId: c.id) }) else {
+        // A row hidden for me (someone I blocked) never previews. Deletion
+        // audits stay out too — same filter as the open chat (Transcript).
+        guard let m = model.messages(of: c.id).last(where: {
+            !$0.voice && !$0.plainText.isEmpty
+                && !model.hidesMessage($0, chatId: c.id)
+                && !GroupActivity.isAuditLine($0.plainText)
+        }) else {
             return c.pending ? "Invited · opens when they sign in" : "Say hi"
         }
         let line = m.plainText.split(separator: "\n").first.map(String.init) ?? ""
@@ -1202,9 +1212,9 @@ struct AgentRow: View {
         // semibold over a 15 pt grey preview, time right, 10 pt unread dot at the far
         // right of the preview line, 80 pt row pitch.
         HStack(spacing: 15) {
-            // No "agent is working" indicator on rows (Jacob, 2026-10-22): the working
-            // state lives in the chat header / activity line. The right edge keeps the
-            // unread dot.
+            // The status slot at the right end of the preview line, under the time
+            // (Jacob, 2026-10-27): the braille spinner while the agent works (one
+            // shared ticker, `WorkingSpinner`), else the unread dot, else nothing.
             AgentAvatar(project: project, theme: theme, size: Theme.rowAvatar)
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
@@ -1237,14 +1247,35 @@ struct AgentRow: View {
                         .foregroundStyle(theme.muted)
                         .lineLimit(1)
                     Spacer(minLength: 0)
-                    if unread {
+                    switch RowStatus.of(streaming: streaming, unread: unread) {
+                    case .working:
+                        WorkingSpinner()
+                    case .unread:
                         Circle().fill(theme.unread).frame(width: Theme.unreadDot, height: Theme.unreadDot)
+                    case .quiet:
+                        EmptyView()
                     }
                 }
             }
         }
         .padding(.vertical, Theme.rowVPad)
         .contentShape(Rectangle())
+    }
+}
+
+/// What the status slot under a row's time shows ([feedback
+/// working-braille-spinner-ios-2026-10-27]; the Mac's `sidebar::RowStatus`): one
+/// thing — the spinner while the chat's agent works, else the unread mark,
+/// else nothing.
+enum RowStatus: Equatable {
+    case working
+    case unread
+    case quiet
+
+    static func of(streaming: Bool, unread: Bool) -> RowStatus {
+        if streaming { return .working }
+        if unread { return .unread }
+        return .quiet
     }
 }
 
@@ -1257,6 +1288,9 @@ struct PeopleRow: View {
     let preview: String
     let time: String
     let unread: Bool
+    /// An agent in this chat is working: the spinner takes the slot unless a
+    /// count pill is showing.
+    var streaming: Bool = false
     /// Unread messages (Grok/Telegram-style count pill); 0 → the dot only.
     var count: Int = 0
     let me: String?
@@ -1279,31 +1313,13 @@ struct PeopleRow: View {
         return other?.handle ?? chat.title
     }
 
-    /// Tokenised blob URL for the group's custom picture, when one is set.
-    private var groupImageURL: String? {
-        guard chat.isGroup, let key = chat.imageKey, !key.isEmpty else { return nil }
-        return model.blobURL(projectId: "\(peopleSlot):\(chat.id)", key: key)?.absoluteString
-    }
-
     var body: some View {
         HStack(spacing: 15) {
             ZStack(alignment: .bottomTrailing) {
                 if chat.isGroup {
-                    if let groupImageURL {
-                        AvatarCluster(members: [], size: Theme.rowAvatar, imageUrl: groupImageURL)
-                    } else if chat.isNeutralAvatar {
-                        NeutralAvatar(name: chat.title, size: Theme.rowAvatar)
-                    } else if let leaf = chat.leafPick, LeafAvatarsFlag.shared.on {
-                        // D92 amendment: the leaf picked on the Create screen.
-                        LeafAvatar(pick: leaf, size: Theme.rowAvatar)
-                    } else {
-                        ZStack {
-                            Circle().fill(theme.card).frame(width: Theme.rowAvatar, height: Theme.rowAvatar)
-                            Image(systemName: "person.2.fill")
-                                .font(theme.font(17, weight: .medium))
-                                .foregroundStyle(theme.accent)
-                        }
-                    }
+                    // The group's picture through the resolver (its upload, else the leaf or
+                    // neutral initial from the Create screen, else the two-person disc).
+                    GroupAvatar(chat: chat, model: model, size: Theme.rowAvatar)
                 } else {
                     PersonAvatar(url: other?.avatarUrl, handle: other?.handle ?? "?", size: Theme.rowAvatar, name: other?.name, id: other?.id, colorIndex: other?.avatarColorIndex)
                 }
@@ -1340,8 +1356,12 @@ struct PeopleRow: View {
                         .foregroundStyle(theme.muted)
                         .lineLimit(1)
                     Spacer(minLength: 0)
+                    // Information over animation (coordinator, 2026-10-27): an unread
+                    // count pill wins the slot; the spinner replaces only the plain dot.
                     if count > 0 {
                         UnreadBadge(count: count)
+                    } else if streaming {
+                        WorkingSpinner()
                     } else if unread {
                         Circle().fill(theme.unread).frame(width: Theme.unreadDot, height: Theme.unreadDot)
                     }

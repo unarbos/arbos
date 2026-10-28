@@ -1549,8 +1549,21 @@ impl LayoutStyle {
         glyph_em: 0.56,
     };
 
-    fn text_w(&self, s: &str, size: f32) -> f32 {
-        s.chars().count() as f32 * size * self.glyph_em
+    /// Estimated advance of `s` at `size`. `glyph_em` is the average letter; digits are tabular
+    /// (≈ 0.6 em in Inter / SF) and `%` and the widest letters run near a full em — the tick
+    /// labels of a percent axis are mostly those, so the average alone under-reserves the gutter.
+    pub(crate) fn text_w(&self, s: &str, size: f32) -> f32 {
+        s.chars()
+            .map(|c| match c {
+                '%' | '@' | 'M' | 'W' | 'm' | 'w' | '—' => 0.95,
+                '0'..='9' | '+' | '−' => 0.6,
+                '.' | ',' | ':' | ';' | '|' | '\'' | ' ' | 'i' | 'l' | 'I' | 'j' | 'f' | 't' => {
+                    0.32
+                }
+                _ => self.glyph_em,
+            })
+            .sum::<f32>()
+            * size
     }
 }
 
@@ -1672,8 +1685,9 @@ impl ChartModel {
         if self.kind == Kind::Pie {
             return self.layout_pie(w, h, style);
         }
+        // The rotated title is one `label_font` wide plus a hairline of air on each side.
         let y_label_w = if self.y.label.is_some() {
-            style.label_font * 1.4
+            style.label_font * 1.5 + 4.0
         } else {
             0.0
         };
@@ -1699,7 +1713,7 @@ impl ChartModel {
             .y2
             .as_ref()
             .and_then(|a| a.label.as_ref())
-            .map(|_| style.label_font * 1.4)
+            .map(|_| style.label_font * 1.5 + 4.0)
             .unwrap_or(0.0);
         let pad_r = (y2_tick_w + y2_label_w).max(font * 0.9).round();
         let pad_t = (font * 0.55).round();

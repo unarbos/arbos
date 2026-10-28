@@ -549,21 +549,22 @@ struct SecretPage: View {
             default: break
             }
         }
-        .confirmationDialog("Delete \(secret?.env ?? "secret")?", isPresented: $confirmDelete, titleVisibility: .visible) {
-            Button("Delete secret", role: .destructive) {
-                model.deleteSecret(secretId)
-                dismiss()
-            }
-        } message: { Text("Agents lose it immediately. Activity is kept.") }
-        .confirmationDialog("Remove from all agents?", isPresented: $confirmRevoke, titleVisibility: .visible) {
-            Button("Remove from all agents", role: .destructive) { model.revokeSecretEverywhere(secretId) }
-        } message: { Text("Every agent loses \(secret?.env ?? "it") within seconds. You can turn them back on one by one.") }
-        .confirmationDialog("Scrub \(secret?.env ?? "secret") from context?", isPresented: $confirmScrub, titleVisibility: .visible) {
-            Button("Scrub from context", role: .destructive) {
-                model.scrubSecret(secretId)
-                Task { await load() }
-            }
-        } message: { Text("Arbos looks for this value in chats, agent sessions and logs, and replaces every copy with a redaction.") }
+        .confirm(ConfirmSpec(title: "Delete \(secret?.env ?? "secret")?", message: "Agents lose it immediately. Activity is kept.",
+                             action: "Delete secret"), isPresented: $confirmDelete) {
+            model.deleteSecret(secretId)
+            dismiss()
+        }
+        .confirm(ConfirmSpec(title: "Remove from all agents?",
+                             message: "Every agent loses \(secret?.env ?? "it") within seconds. You can turn them back on one by one.",
+                             action: "Remove from all agents"), isPresented: $confirmRevoke) {
+            model.revokeSecretEverywhere(secretId)
+        }
+        .confirm(ConfirmSpec(title: "Scrub \(secret?.env ?? "secret") from context?",
+                             message: "Arbos looks for this value in chats, agent sessions and logs, and replaces every copy with a redaction.",
+                             action: "Scrub from context"), isPresented: $confirmScrub) {
+            model.scrubSecret(secretId)
+            Task { await load() }
+        }
         .sheet(isPresented: $showEdit) {
             if let s = secret {
                 NavigationStack { EditSecretSheet(secret: s) }
@@ -1485,10 +1486,10 @@ struct VaultPage: View {
             }
         }
         .task { await load() }
-        .confirmationDialog("Disconnect this vault?", isPresented: $confirmDisconnect, titleVisibility: .visible) {
-            Button("Disconnect", role: .destructive) { model.deleteVault(vaultId); dismiss() }
-        } message: {
-            Text("\(agentsLine) lose every item in it. Also revoke the service account in 1Password.")
+        .confirm(ConfirmSpec(title: "Disconnect this vault?",
+                             message: "\(agentsLine) lose every item in it. Also revoke the service account in 1Password.",
+                             action: "Disconnect"), isPresented: $confirmDisconnect) {
+            model.deleteVault(vaultId); dismiss()
         }
         .alert("Replace token", isPresented: $showToken) {
             SecureField("ops_…", text: $token)

@@ -13,6 +13,11 @@ final class BlockedStateTests: XCTestCase {
         XCTAssertEqual(BlockedState.label, "Blocked")
         XCTAssertEqual(BlockedState.unblock, "Unblock")
         XCTAssertEqual(BlockedState.confirmTitle(handle: "sam"), "Unblock @sam?")
+        let confirm = BlockedState.unblockConfirm(handle: "sam")
+        XCTAssertEqual(confirm.title, "Unblock @sam?")
+        XCTAssertEqual(confirm.message, BlockedState.confirmNote)
+        XCTAssertEqual(confirm.buttons, ["Unblock", "Cancel"])
+        XCTAssertFalse(confirm.destructive, "unblocking undoes a block; not red")
         XCTAssertEqual(BlockedState.composerLine(name: "Sam Rivera"), "You blocked Sam Rivera")
         XCTAssertFalse(BlockedState.confirmNote.isEmpty)
     }
@@ -84,7 +89,7 @@ final class BlockedStateTests: XCTestCase {
         XCTAssertTrue(pages.contains("PanePillButton(glyph: \"nosign\", title: BlockedState.unblock) { confirmUnblock = true }"), "the pill asks first")
         XCTAssertTrue(pages.contains("PaneActionRow(title: BlockRow.title(blocked: true), color: theme.accent) { confirmUnblock = true }"), "the row asks first")
         XCTAssertFalse(pages.contains("color: theme.accent) { model.unblock(entry) }"), "no unblock without the confirm")
-        XCTAssertTrue(pages.contains(".confirmationDialog(BlockedState.confirmTitle(handle: person.handle), isPresented: $confirmUnblock"), "one confirm for both")
+        XCTAssertTrue(pages.contains(".confirm(BlockedState.unblockConfirm(handle: person.handle), isPresented: $confirmUnblock)"), "one confirm for both, the centred alert")
         XCTAssertTrue(pages.contains("case (true, let manage?): return AnyView(HStack(spacing: 6) { BlockedTag(); manage })"), "the member row's tag before the menu")
         XCTAssertTrue(pages.contains("case (true, nil): return AnyView(BlockedTag())"))
     }
@@ -97,7 +102,7 @@ final class BlockedStateTests: XCTestCase {
         XCTAssertTrue(chat.contains("if blockedPeer != nil { BlockedTag() }"), "the tag after the DM peer's name")
         XCTAssertTrue(chat.contains("} else if let peer = blockedPeer {"), "the bar takes the composer's branch")
         XCTAssertTrue(chat.contains("BlockedComposerBar(name: peer.displayName) { confirmUnblock = true }"), "the bar's Unblock asks first")
-        XCTAssertTrue(chat.contains(".confirmationDialog(BlockedState.confirmTitle(handle: blockedPeer?.handle ?? counterpart?.handle ?? \"\"), isPresented: $confirmUnblock"))
+        XCTAssertTrue(chat.contains(".confirm(BlockedState.unblockConfirm(handle: blockedPeer?.handle ?? counterpart?.handle ?? \"\"), isPresented: $confirmUnblock)"), "the centred alert, not a dialog floating over the transcript")
         XCTAssertTrue(chat.contains("BlockedState.isBlocked(id: other.id, handle: other.handle, in: model.blocked)"), "from the relay's block list")
     }
 
