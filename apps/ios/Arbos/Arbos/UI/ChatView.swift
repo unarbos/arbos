@@ -191,6 +191,8 @@ struct ChatSession: View {
     @State private var pinnedToBottom = true
     /// When this chat screen appeared (the history window does not grow in its first second).
     @State private var appearedAt = Date()
+    /// `chat-first-row` has been marked for this open (lazy rows re-appear when scrolled back to).
+    @State private var firstRowMarked = false
     /// Rows that arrived while the reader was away from the end — drives the
     /// "New messages" pill. Cleared when they re-pin or jump to the latest.
     @State private var newBelowCount = 0
@@ -476,7 +478,6 @@ struct ChatSession: View {
     /// Long-press → Edit: the own message whose text is in the composer.
     @State private var editing: Message?
     /// Drives the connection pill's dot pulse while it is reconnecting / syncing.
-    @State private var pulsePhase = false
     /// The original a quote tap scrolled to; tinted until the fade timer clears it.
     @State private var highlightedMessage: Id?
     /// After a quote tap: the reply we came from. The ↓ disc returns here once
@@ -1565,7 +1566,7 @@ struct ChatSession: View {
                     } else {
                         HStack(spacing: Theme.headerPillGap) {
                             if let project {
-                                AgentAvatar(project: project, theme: theme, size: Controls.avatar, dot: machineDotColor(model.machine.state, theme: theme), working: streaming)
+                                AgentAvatar(project: project, theme: theme, size: Controls.avatar, mark: machineMark(model.machine.state), working: streaming)
                             }
                             Text(name)
                                 .font(.system(size: Theme.body, weight: .semibold))
@@ -1754,10 +1755,15 @@ struct ChatSession: View {
     private func transcript(width: CGFloat, height: CGFloat) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
-                // VStack (not LazyVStack): a growing vertical TextField resizes the
-                // bottom safe-area inset, and LazyVStack can drop every visible row
-                // for a white transcript until the next layout pass.
-                VStack(alignment: .leading, spacing: 0) {
+                // Lazy: SwiftUI builds and lays out only the rows near the viewport. With a
+                // plain VStack every one of the windowed rows (80 at open, up to 360 while
+                // reading history) was laid out on every change of the row set — a 1.6–2.7 s
+                // frame at open, a 0.3–0.45 s stall per 30-row grow step, 1 s on jump-to-bottom
+                // (iphone-scroll-perf, Time Profiler: 7.7 of 10.3 busy main-thread seconds in
+                // AttributeGraph layout). An older iOS let a LazyVStack drop its visible rows
+                // when the composer's safe-area inset grew; the rig's keyboard / typing pass
+                // on iOS 27 is what guards that now.
+                LazyVStack(alignment: .leading, spacing: 0) {
                     // iOS 17 window growth: report this top edge's position in the scroll space.
                     Color.clear.frame(height: 0)
                         .background(
@@ -1804,32 +1810,11 @@ struct ChatSession: View {
                     // One MentionTable for every bubble (Mac builds Mentions once per
                     // sync). Per-row rebuilds were the main group-chat lag on iPhone.
                     let mentions = MentionTable.Cache.shared.table(model: model, theme: theme)
-                    // Equatable host: composer keystrokes re-evaluate ChatView but
-                    // skip the ForEach when the transcript inputs are unchanged.
-                    TranscriptRows(
-                        model: model,
-                        theme: theme,
-                        composerInset: composerSideInset,
-                        people: isPeople || isChannel,
-                        mentions: mentions,
-                        shown: shown,
-                        shownStamp: Self.shownStamp(rowsVersion, windowCount, windowSkipEnd, searchText, showSearch),
-                        chatId: chatId,
-                        width: width,
-                        timeReveal: timeReveal,
-                        replySwipe: replySwipe,
-                        rowFrames: rowFrames,
-                        highlightedMessage: highlightedMessage,
-                        searchHitsActive: searchHitsActive,
-                        rowsCount: rows.count,
-                        messagesCount: messages.count,
-                        canReply: { isMessageRow($0) },
-                        onQuoteTap: { quote, fromReply in revealQuoted(quote, from: fromReply) },
-                        onMenu: { runMessageMenu($0, row: $1) },
-                        actionsRowId: actionsRow?.id,
-                        onLongPress: { row in openActions(row) }
-                    )
-                    .equatable()
+                    // The ForEach sits directly in the LazyVStack: that is what makes the rows
+                    // lazy (wrapped in another view it is one child, and every row is built).
+                    // Keystrokes do not reach this body (the composer is isolated); the other
+                    // publishes re-diff the ids and let each realized `RowView` skip by `==`.
+                    transcriptRows(shown: shown, mentions: mentions, width: width)
                     // Who is working is the presence row over the composer
                     // (`PresenceRow`), not a transcript row.
                     // Clears the 24 pt fade above the composer, so the last row
@@ -2310,22 +2295,18 @@ struct ChatSession: View {
     @ViewBuilder private var linkPill: some View {
         let _ = model.linkPillRepaint
         if let state = model.linkPill(for: chatId, channel: isChannel), let label = state.label {
-            let dot: Color = {
+            // The capsule's mark (Jacob, 2026-10-27: never a coloured dot): the braille
+            // spinner while the link is being brought back, the fault glyph when the
+            // relay is down, nothing for Offline — the words say it.
+            let mark: StatusMark? = {
                 switch state {
-                case .offline: return theme.muted.opacity(0.6)
-                case .relayDown: return theme.danger
-                case .reconnecting, .restartSoon: return theme.warn
-                case .syncing: return theme.accent
-                case .live: return .clear
+                case .reconnecting, .restartSoon, .syncing: return .working
+                case .relayDown: return .fault
+                case .offline, .live: return nil
                 }
             }()
-            let pulsing = state == .reconnecting || state == .syncing || state == .restartSoon
             HStack(spacing: 6) {
-                Circle()
-                    .fill(dot)
-                    .frame(width: 6, height: 6)
-                    .opacity(pulsing ? (pulsePhase ? 1 : 0.5) : 1)
-                    .animation(pulsing ? .easeInOut(duration: 0.7).repeatForever(autoreverses: true) : .default, value: pulsePhase)
+                if let mark { StatusMarkView(mark: mark, size: 9) }
                 Text(label)
                     .font(theme.font(Theme.tiny, weight: .medium))
                     .foregroundStyle(theme.muted)
@@ -2336,8 +2317,6 @@ struct ChatSession: View {
             .background(Capsule().fill(theme.field)) // control-size: exception inlineChips
             .accessibilityElement(children: .combine)
             .accessibilityIdentifier("link-pill")
-            .onAppear { pulsePhase = true }
-            .onDisappear { pulsePhase = false }
             .transition(.opacity.combined(with: .move(edge: .top)))
         }
     }
@@ -3396,71 +3375,23 @@ struct ModelPickerView: View {
 /// The visible transcript rows. Equatable so a composer keystroke (ChatView's
 /// composer draft) or an AppModel presence tick that re-evaluates ChatView
 /// does not rebuild every bubble when the row list is unchanged.
-private struct TranscriptRows: View, Equatable {
-    let model: AppModel
-    let theme: Theme
-    let composerInset: CGFloat
-    /// People chat: the wider bubble caps (`Theme.peopleBubbleInset`).
-    let people: Bool
-    let mentions: MentionTable
-    let shown: [Row]
-    /// Identity of `shown` (rows version + window bounds + search): compared instead of the array.
-    let shownStamp: Int
-    let chatId: Id
-    let width: CGFloat
-    let timeReveal: CGFloat
-    /// The reply swipe in progress (one row follows the finger).
-    let replySwipe: ReplySwipe
-    /// Row frames the rows write on layout (not compared: a class, same instance for the chat).
-    let rowFrames: RowFrameIndex
-    let highlightedMessage: Id?
-    /// Search-in-chat has a keyword: filtered message bubbles get the soft wash.
-    let searchHitsActive: Bool
-    let rowsCount: Int
-    let messagesCount: Int
-    let canReply: (Row) -> Bool
-    /// Quote and the reply message id it was tapped from (for jump-back).
-    let onQuoteTap: (Quote, Id) -> Void
-    let onMenu: (MessageMenuItem, Row) -> Void
-    /// The bubble whose long-press actions are open (it alone reports its frame).
-    let actionsRowId: String?
-    let onLongPress: (Row) -> Void
-
-    static func == (lhs: TranscriptRows, rhs: TranscriptRows) -> Bool {
-        let same = lhs.shownStamp == rhs.shownStamp
-            && lhs.actionsRowId == rhs.actionsRowId
-            && lhs.composerInset == rhs.composerInset
-            && lhs.people == rhs.people
-            && lhs.theme == rhs.theme
-            && lhs.chatId == rhs.chatId
-            && lhs.width == rhs.width
-            && lhs.timeReveal == rhs.timeReveal
-            && lhs.replySwipe == rhs.replySwipe
-            && lhs.highlightedMessage == rhs.highlightedMessage
-            && lhs.searchHitsActive == rhs.searchHitsActive
-            && lhs.mentions.stamp == rhs.mentions.stamp
-        #if DEBUG
-        PerfCounters.bump(same ? "rowsEqTrue" : "rowsEqFalse")
-        if !same {
-            PerfCounters.bump("rowsEq.\(lhs.shownStamp == rhs.shownStamp ? "" : "shown,")\(lhs.width == rhs.width ? "" : "width,")\(lhs.timeReveal == rhs.timeReveal ? "" : "reveal,")\(lhs.mentions.stamp == rhs.mentions.stamp ? "" : "stamp,")\(lhs.highlightedMessage == rhs.highlightedMessage ? "" : "hl,")")
-        }
-        #endif
-        return same
-    }
-
-    var body: some View {
-        #if DEBUG
-        let _ = PerfCounters.bump("transcriptRowsBody")
-        let _ = DebugHooks.perfChanges ? Self._printChanges() : ()
-        #endif
-        // Rows keyed by id, never by position: a grow step prepends older rows and
-        // must not touch the ones already laid out (arbonites-chat-lag).
+extension ChatSession {
+    /// The transcript's rows, keyed by id, never by position: a grow step prepends older
+    /// rows and must not touch the ones already laid out (arbonites-chat-lag).
+    @ViewBuilder
+    fileprivate func transcriptRows(shown: [Row], mentions: MentionTable, width: CGFloat) -> some View {
+        let people = isPeople || isChannel
+        let composerInset = composerSideInset
+        let actionsRowId = actionsRow?.id
         let firstId = shown.first?.id
+        // Lazy rows: the oldest row of the window sits above the viewport and may never
+        // appear; the newest one is on screen at open, so it marks the open.
+        let lastId = shown.last?.id
         ForEach(shown) { row in
-            let reply = canReply(row)
+            let reply = isMessageRow(row)
             RowView(model: model, theme: theme, composerInset: composerInset, row: row, chatId: chatId, width: width,
                     people: people, timeReveal: timeReveal,
-                    onQuoteTap: { quote in onQuoteTap(quote, row.messageId) },
+                    onQuoteTap: { quote in revealQuoted(quote, from: row.messageId) },
                     highlighted: highlightedMessage == row.messageId,
                     searchHit: searchHitsActive && Self.isMessageBubble(row),
                     canReply: reply,
@@ -3483,9 +3414,11 @@ private struct TranscriptRows: View, Equatable {
                         SendTrace.markIfPresent("row-in-tree", ids: [row.messageId], detail: "row=\(row.id)")
                     }
                     #endif
-                    // Once per open — not on every row (group chats fire this dozens of times).
-                    if row.id == firstId {
-                        LaunchClock.mark("chat-first-row", detail: "shown=\(shown.count) rows=\(rowsCount) messages=\(messagesCount)")
+                    // Once per open — not on every row, and not again when the newest row is
+                    // realised a second time after a trip into history.
+                    if row.id == lastId, !firstRowMarked {
+                        firstRowMarked = true
+                        LaunchClock.mark("chat-first-row", detail: "shown=\(shown.count) rows=\(rows.count) messages=\(messages.count)")
                         #if DEBUG
                         PerfLog.shared.armScrollable()
                         #endif
@@ -3496,8 +3429,8 @@ private struct TranscriptRows: View, Equatable {
                 .anchorPreference(key: RowFrameKey.self, value: .bounds) { anchor in
                     actionsRowId == row.id ? [row.id: anchor] : [:]
                 }
-                .messageRowGestures(isMessage: reply, onLongPress: { onLongPress(row) },
-                                    onCopyMenu: { onMenu($0, row) })
+                .messageRowGestures(isMessage: reply, onLongPress: { openActions(row) },
+                                    onCopyMenu: { runMessageMenu($0, row: row) })
         }
     }
 
@@ -3592,6 +3525,11 @@ private struct AwayFromBottomReporter: ViewModifier {
                     }
                     return
                 }
+                // Lazy rows: the content height is an estimate that is corrected as rows are
+                // measured, down as well as up. A sample where the height changed says nothing
+                // about where the reader is; only an unchanged height may re-pin (a re-pin on a
+                // shrink would send the next growth's `onStick` to the bottom mid-history).
+                if abs(new.height - old.height) > 0.5 { return }
                 let isAway = new.distance > 120
                 away = isAway
                 if isAway {
@@ -3734,7 +3672,8 @@ private struct ComposerField: View {
                         .opacity(min(1, -memoDragX / cancelDistance))
                 } else {
                     HStack(spacing: 8) {
-                        Circle().fill(theme.danger).frame(width: 8, height: 8)
+                        // The braille spinner, not a red dot (Jacob, 2026-10-27).
+                        WorkingSpinner(size: 8, glyphSize: 11)
                         // Level bars drawn into whatever width is left (newest on the right),
                         // so the recorder row never pushes the composer past the screen edge.
                         Canvas { ctx, size in
