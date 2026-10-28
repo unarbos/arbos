@@ -209,6 +209,9 @@ final class BackSwipeUITests: XCTestCase {
         XCTAssertTrue(preview.waitForExistence(timeout: settle), "the reply quote is in the composer")
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: settle), "the composer is focused")
         XCTAssertTrue(back.exists, "the chat did not go back")
+        // The swipe is a swipe, not a tap: the quoted original must not be revealed (tinted)
+        // on release — that was the quote `Button` firing after the pan.
+        XCTAssertFalse(app.descendants(matching: .any)["bubble:d3"].isSelected, "the swipe did not also fire the quote's jump")
     }
 
     /// Same bubble, finger on the words under the quote.
