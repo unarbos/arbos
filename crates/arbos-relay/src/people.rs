@@ -1388,7 +1388,8 @@ pub async fn chat_read(
     // Read here = cleared everywhere else: the other devices drop the chat's banners and
     // take the new badge (`/me/pushes` now; the APNs badge alert while push is on).
     let device = device_of(&principal);
-    crate::notify::clear_on_read(&state, &me, &device, &chat_ref).await;
+    let read_upto = format!("seq:{}", b.seq.max(0));
+    crate::notify::clear_on_read(&state, &me, &device, &chat_ref, &read_upto).await;
     crate::notify::badge_refresh(&state, &me, &device).await;
     StatusCode::NO_CONTENT.into_response()
 }
@@ -3713,11 +3714,65 @@ pub fn sender_gate(
     })
 }
 
+/// The agents in a people chat, with the user whose box serves each (soft-deleted agents are
+/// gone already: `project()` is `None` for them).
+pub fn serving_agents(state: &AppState, cm: &ChatWithMembers) -> Vec<crate::boxes::ServingAgent> {
+    let mut agents: Vec<crate::boxes::ServingAgent> = cm
+        .members
+        .iter()
+        .filter_map(|m| m.project_id())
+        .filter_map(|pid| state.db.project(pid).ok().flatten())
+        .map(|p| crate::boxes::ServingAgent {
+            project_id: p.id,
+            owner: p.user_id,
+        })
+        .collect();
+    agents.sort_by(|a, b| a.project_id.cmp(&b.project_id));
+    agents.dedup();
+    agents
+}
+
+/// `@handle` tokens in `text` that name a member of the chat, as the row's `mentions`
+/// (`agent:<project>` by the agent's slug, `user:<id>` by the person's handle) — what the
+/// apps' autocomplete writes, for a message posted through `POST /chats/{id}/messages`.
+pub fn resolve_mentions(state: &AppState, cm: &ChatWithMembers, text: &str) -> Vec<String> {
+    let mut by_handle: Vec<(String, String)> = Vec::new();
+    for m in &cm.members {
+        if let Some(pid) = m.project_id() {
+            if let Ok(Some(p)) = state.db.project(pid) {
+                by_handle.push((agent_slug(&p.name), format!("agent:{pid}")));
+            }
+        } else if let Some(uid) = m.user_id() {
+            if let Ok(Some(card)) = state.db.user_card(uid) {
+                if !card.handle.is_empty() {
+                    by_handle.push((card.handle.to_lowercase(), format!("user:{uid}")));
+                }
+            }
+        }
+    }
+    let mut out: Vec<String> = Vec::new();
+    for token in text.split(|c: char| {
+        c.is_whitespace() || matches!(c, ',' | ':' | ';' | '!' | '?' | '(' | ')' | '"' | '\'')
+    }) {
+        let Some(handle) = token.strip_prefix('@') else {
+            continue;
+        };
+        let handle = handle.trim_end_matches('.').to_lowercase();
+        if let Some((_, member)) = by_handle.iter().find(|(h, _)| *h == handle) {
+            if !out.contains(member) {
+                out.push(member.clone());
+            }
+        }
+    }
+    out
+}
+
+/// Gates a person's row into a people chat and returns the agents whose boxes it must reach.
 pub fn on_room_push(
     state: &AppState,
     principal: &Principal,
     chat_id: &str,
-) -> Result<Vec<String>, PushRefused> {
+) -> Result<Vec<crate::boxes::ServingAgent>, PushRefused> {
     let Principal::Device { user_id, .. } = principal else {
         return Ok(Vec::new()); // boxes (agents) are metered by their owner's credits, not here
     };
@@ -3797,16 +3852,7 @@ pub fn on_room_push(
             }
         }
     }
-    let mut owners: Vec<String> = cm
-        .members
-        .iter()
-        .filter_map(|m| m.project_id())
-        .filter_map(|pid| state.db.project(pid).ok().flatten())
-        .map(|p| p.user_id)
-        .collect();
-    owners.sort();
-    owners.dedup();
-    Ok(owners)
+    Ok(serving_agents(state, &cm))
 }
 
 /// Notify every human member except `skip`.

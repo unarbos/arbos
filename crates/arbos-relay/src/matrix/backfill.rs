@@ -143,7 +143,8 @@ fn carried_parts(row: &Value) -> Option<Value> {
 }
 
 /// Queue a `Message` job for every finished, non-empty row of `doc` whose id is not in `skip`;
-/// returns how many. Oldest first, so the room's stream order follows the chat.
+/// returns `(message_id, sender, created_at)` of each. Oldest first, so the room's stream
+/// order follows the chat.
 fn queue_messages(
     state: &AppState,
     chat_id: &str,
@@ -151,8 +152,8 @@ fn queue_messages(
     owner: Option<&str>,
     doc: &ChatDoc,
     skip: &std::collections::HashSet<String>,
-) -> usize {
-    let mut n = 0;
+) -> Vec<(String, String, Option<i64>)> {
+    let mut out = Vec::new();
     for row in doc.projected_rows() {
         let status = row["status"].as_str().unwrap_or("done");
         if matches!(status, "queued" | "streaming") {
@@ -169,35 +170,59 @@ fn queue_messages(
         if text.trim().is_empty() && parts.is_none() {
             continue;
         }
+        let sender = sender_of(&row, owner, project_id);
+        let ts = row["createdAt"].as_i64();
         state.matrix.enqueue(
             state,
             Job::Message {
                 chat_id: chat_id.to_owned(),
                 project_id: project_id.map(str::to_owned),
                 message_id: id.to_owned(),
-                sender: sender_of(&row, owner, project_id),
+                sender: sender.clone(),
                 text,
                 parts,
-                ts: row["createdAt"].as_i64(),
+                ts,
             },
         );
-        n += 1;
+        out.push((id.to_owned(), sender, ts));
     }
-    n
+    out
+}
+
+/// What one `Resync` found (#2120: the old "unannounced rows … queued=N" line counted every
+/// row the worker had not applied yet, which read as "the announce never fired").
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Resync {
+    /// `Message` jobs queued by this pass.
+    pub queued: usize,
+    /// Rows whose `Message` job from `notify::announce` was still in the outbox: announced,
+    /// on their way, not counted.
+    pub pending_skipped: usize,
+    /// Queued rows that were announced (`chat_events`) but whose mirror job is gone — a hole in
+    /// the mirror, not in the announce path.
+    pub announced: usize,
+    /// Queued rows nobody announced, where that is the design: a solo project chat (the Mac
+    /// does not call notify when nobody else is in the project, `crdt-sync.md` §7c).
+    pub unannounced_expected: usize,
+    /// Queued rows nobody announced in a chat where every row should be: a people chat or a
+    /// shared project. These are the rows the resync is the only path for.
+    pub unannounced: usize,
 }
 
 /// A device pushed rows into a chat (the `Resync` job, debounced per chat): rebuild the doc and
 /// queue the messages the relay has not mirrored yet. Covers what nobody announces — a person's
 /// own messages in a solo project chat (`crdt-sync.md` §7c: "solo projects have nobody else to
-/// tell"), rows from older apps. Returns how many were queued.
-pub fn resync_chat(state: &AppState, chat_id: &str, project_id: Option<&str>) -> usize {
+/// tell"), rows from older apps. Rows whose announce job is still queued are left to it.
+pub fn resync_chat(state: &AppState, chat_id: &str, project_id: Option<&str>) -> Resync {
+    let mut rep = Resync::default();
     let Ok(Some(doc)) = load_doc(state, chat_id, project_id) else {
-        return 0;
+        return rep;
     };
     if doc.projected_rows().is_empty() {
-        return 0;
+        return rep;
     }
-    let owner = project_id.and_then(|p| state.db.project(p).ok().flatten().map(|p| p.user_id));
+    let project = project_id.and_then(|p| state.db.project(p).ok().flatten());
+    let owner = project.as_ref().map(|p| p.user_id.clone());
     if state
         .db
         .matrix_room(chat_id)
@@ -207,21 +232,56 @@ pub fn resync_chat(state: &AppState, chat_id: &str, project_id: Option<&str>) ->
     {
         state.matrix.touch_chat(state, chat_id, project_id);
     }
-    let mirrored: std::collections::HashSet<String> = state
+    let mut skip: std::collections::HashSet<String> = state
         .db
         .matrix_events_of(chat_id)
         .unwrap_or_default()
         .into_iter()
         .map(|(m, _, _)| m)
         .collect();
-    queue_messages(
-        state,
-        chat_id,
-        project_id,
-        owner.as_deref(),
-        &doc,
-        &mirrored,
-    )
+    let pending = state
+        .db
+        .matrix_pending_message_ids(chat_id)
+        .unwrap_or_default();
+    for id in &pending {
+        if skip.insert(id.clone()) {
+            rep.pending_skipped += 1;
+        }
+    }
+    let queued = queue_messages(state, chat_id, project_id, owner.as_deref(), &doc, &skip);
+    rep.queued = queued.len();
+    // A solo project chat is the one place rows are unannounced by design.
+    let solo_project = project.as_ref().is_some_and(|p| {
+        state
+            .db
+            .project_members(&p.id)
+            .map(|m| m.is_empty())
+            .unwrap_or(true)
+    });
+    let now = arbos_core::ids::now_ms();
+    for (message_id, sender, ts) in queued {
+        if state
+            .db
+            .chat_event_exists(chat_id, &message_id)
+            .unwrap_or(false)
+        {
+            rep.announced += 1;
+        } else if solo_project {
+            rep.unannounced_expected += 1;
+        } else {
+            rep.unannounced += 1;
+            tracing::warn!(
+                chat = %chat_id,
+                project = project_id.unwrap_or(PEOPLE_PROJECT),
+                message = %message_id,
+                %sender,
+                age_ms = ts.map(|t| now - t).unwrap_or(-1),
+                "matrix resync: row nobody announced (the resync is its only path)"
+            );
+        }
+    }
+    state.matrix.counters.note_resync(&rep);
+    rep
 }
 
 /// Queue the rooms and history of every chat in `scope`.
@@ -277,7 +337,8 @@ pub fn run(state: &AppState, scope: Scope) -> Report {
             owner.as_deref(),
             &doc,
             &std::collections::HashSet::new(),
-        );
+        )
+        .len();
     }
     // Rooms whose chat is gone (a closed project tab, a deleted group) get closed.
     if scope.chat_id.is_none() && scope.user_id.is_none() && scope.project_id.is_none() {
@@ -404,7 +465,7 @@ mod doc_tests {
 
     use super::*;
     use crate::matrix::{Config, Matrix, Mode};
-    use crate::people::tests_support::{person, project_of};
+    use crate::people::tests_support::{dm, person, project_of};
     use crate::state::test_support::test_state;
     use crate::state::AuthMode;
 
@@ -543,7 +604,10 @@ mod doc_tests {
         });
         assert_eq!(n.expect("count"), 1);
 
-        assert_eq!(resync_chat(&state, &chat_id, Some(&project)), 1);
+        let rep = resync_chat(&state, &chat_id, Some(&project));
+        assert_eq!(rep.queued, 1);
+        assert_eq!(rep.unannounced_expected, 1, "a solo project row: by design");
+        assert_eq!(rep.unannounced, 0);
         let jobs: Vec<Job> = state
             .db
             .with(|c| {
@@ -560,6 +624,89 @@ mod doc_tests {
         assert!(
             matches!(&jobs[0], Job::Message { message_id, text, .. } if *message_id == second && text == "second")
         );
+    }
+
+    /// #2120: the resync tells a row whose announce job is still queued (not counted), a row
+    /// that was announced but never mirrored, and a row nobody announced in a chat where every
+    /// row should be (a people chat) apart; only the last one counts as `unannounced`.
+    #[test]
+    fn resync_classifies_pending_announced_and_unannounced_rows() {
+        let mut state = test_state(AuthMode::Github);
+        dual(&mut state);
+        let (alice, _) = person(&state, 2004);
+        let (bob, _) = person(&state, 2005);
+        let chat_id = dm(&state, &alice, &bob);
+        let doc = ChatDoc::new(Some(4), false);
+        doc.init_meta(&chat_id, "people", 1);
+        let opts = UserMessageOpts {
+            sender: Some(format!("user:{alice}")),
+            ..Default::default()
+        };
+        let pending = ulid();
+        doc.append_user_message(&pending, "announce job still queued", "dev1", &opts)
+            .expect("user message");
+        let announced = ulid();
+        doc.append_user_message(&announced, "announced, mirror job lost", "dev1", &opts)
+            .expect("user message");
+        let silent = ulid();
+        doc.append_user_message(&silent, "nobody announced me", "dev1", &opts)
+            .expect("user message");
+        let bytes = doc.export_updates_since(&Default::default());
+        state
+            .db
+            .append_row(
+                &wire::room_name("people", &chat_id),
+                "dev1",
+                &ulid(),
+                &bytes,
+            )
+            .expect("row");
+        state.matrix.message(
+            &state,
+            &chat_id,
+            None,
+            &pending,
+            &format!("user:{alice}"),
+            "announce job still queued",
+        );
+        state
+            .db
+            .insert_chat_event(&chat_id, None, &announced, Some(&alice))
+            .expect("event");
+
+        let rep = resync_chat(&state, &chat_id, None);
+        assert_eq!(
+            rep,
+            Resync {
+                queued: 2,
+                pending_skipped: 1,
+                announced: 1,
+                unannounced_expected: 0,
+                unannounced: 1,
+            }
+        );
+        let counters = state.matrix.counters.json();
+        assert_eq!(counters["passes"], 1);
+        assert_eq!(counters["unannounced"], 1);
+        assert_eq!(counters["announced"], 1);
+        assert_eq!(counters["pending_skipped"], 1);
+        // The pending row's job is still the only one for it: no duplicate was queued.
+        let pending_ids = state
+            .db
+            .matrix_pending_message_ids(&chat_id)
+            .expect("pending");
+        assert_eq!(pending_ids.len(), 3);
+        let n: i64 = state
+            .db
+            .with(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM matrix_outbox WHERE kind = 'message' AND chat_key = ?1",
+                    [&chat_id],
+                    |r| r.get(0),
+                )
+            })
+            .expect("count");
+        assert_eq!(n, 3);
     }
 
     #[test]
