@@ -380,6 +380,11 @@ struct MediaViewer: View {
 
 /// Shared swipe-down-to-dismiss for every page kind: a vertical drag at 1×
 /// follows the finger, fades the chrome, and closes past 120 pt.
+///
+/// Uses a UIKit pan that only *begins* when the drag is clearly vertical, so a
+/// horizontal album swipe is never claimed by dismiss. A SwiftUI `DragGesture`
+/// recognizes after ~12 pt in any direction and freezes paging even when its
+/// handlers then no-op ([feedback app-01M5ZFF6EW6QE7RB7M5EQ4F2NP]).
 private struct DismissDrag: ViewModifier {
     @Binding var progress: CGFloat
     let onClose: () -> Void
@@ -390,27 +395,127 @@ private struct DismissDrag: ViewModifier {
         content
             .offset(y: offset)
             .scaleEffect(max(0.85, 1 - offset / 1000))
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 12)
-                    .onChanged { v in
-                        guard enabled else { return }
-                        let t = v.translation
-                        guard t.height > 0, t.height >= abs(t.width) * 1.2 else { return }
-                        offset = t.height
-                        progress = min(1, t.height / 400)
-                    }
-                    .onEnded { v in
-                        guard enabled else { return }
-                        if offset > 120, v.translation.height > abs(v.translation.width) * 1.2 {
-                            onClose()
-                        } else {
-                            withAnimation(.easeOut(duration: 0.2)) {
-                                offset = 0
-                                progress = 0
-                            }
-                        }
-                    }
+            .background(
+                VerticalDismissProbe(enabled: enabled, offset: $offset, progress: $progress, onClose: onClose)
             )
+    }
+}
+
+/// Installs a vertical-only pan on the page host. The probe itself never takes
+/// hits (`isUserInteractionEnabled = false`); the recognizer lives on the
+/// enclosing page view so Play / Open / double-tap still work.
+private struct VerticalDismissProbe: UIViewRepresentable {
+    var enabled: Bool
+    @Binding var offset: CGFloat
+    @Binding var progress: CGFloat
+    var onClose: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(offset: $offset, progress: $progress, onClose: onClose)
+    }
+
+    func makeUIView(context: Context) -> Probe {
+        let probe = Probe()
+        probe.isUserInteractionEnabled = false
+        probe.backgroundColor = .clear
+        probe.coordinator = context.coordinator
+        return probe
+    }
+
+    func updateUIView(_ uiView: Probe, context: Context) {
+        context.coordinator.enabled = enabled
+        context.coordinator.offset = $offset
+        context.coordinator.progress = $progress
+        context.coordinator.onClose = onClose
+        DispatchQueue.main.async { uiView.attachIfNeeded() }
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var enabled = true
+        var offset: Binding<CGFloat>
+        var progress: Binding<CGFloat>
+        var onClose: () -> Void
+        /// How far down this drag has already moved the page (for the end threshold).
+        private var dragOffset: CGFloat = 0
+
+        init(offset: Binding<CGFloat>, progress: Binding<CGFloat>, onClose: @escaping () -> Void) {
+            self.offset = offset
+            self.progress = progress
+            self.onClose = onClose
+        }
+
+        @objc func handle(_ pan: UIPanGestureRecognizer) {
+            guard enabled else { return }
+            let t = pan.translation(in: pan.view)
+            switch pan.state {
+            case .changed:
+                guard t.y > 0, t.y >= abs(t.x) * 1.2 else { return }
+                dragOffset = t.y
+                offset.wrappedValue = t.y
+                progress.wrappedValue = min(1, t.y / 400)
+            case .ended, .cancelled:
+                if dragOffset > 120, t.y > abs(t.x) * 1.2 {
+                    onClose()
+                } else {
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        offset.wrappedValue = 0
+                        progress.wrappedValue = 0
+                    }
+                }
+                dragOffset = 0
+            default:
+                break
+            }
+        }
+
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            guard enabled, let pan = gestureRecognizer as? UIPanGestureRecognizer else { return false }
+            let v = pan.velocity(in: pan.view)
+            return v.y > 0 && v.y >= abs(v.x) * 1.2
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            true
+        }
+    }
+
+    final class Probe: UIView {
+        weak var coordinator: Coordinator?
+        private weak var host: UIView?
+        private var pan: UIPanGestureRecognizer?
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            attachIfNeeded()
+        }
+
+        deinit {
+            if let pan { pan.view?.removeGestureRecognizer(pan) }
+        }
+
+        func attachIfNeeded() {
+            guard window != nil, let coordinator else { return }
+            guard let found = Self.pageHost(from: self) else { return }
+            if host === found, pan != nil { return }
+            if let pan { pan.view?.removeGestureRecognizer(pan) }
+            let gr = UIPanGestureRecognizer(target: coordinator, action: #selector(Coordinator.handle(_:)))
+            gr.delegate = coordinator
+            gr.cancelsTouchesInView = false
+            found.addGestureRecognizer(gr)
+            host = found
+            pan = gr
+        }
+
+        /// First ancestor large enough to be the page (the probe is zero-sized).
+        private static func pageHost(from view: UIView) -> UIView? {
+            var node: UIView? = view.superview
+            while let current = node {
+                if current.bounds.width > 100, current.bounds.height > 100 { return current }
+                node = current.superview
+            }
+            return view.superview
+        }
     }
 }
 
@@ -446,7 +551,9 @@ private struct ZoomableImagePage: View {
                         .scaleEffect(scale)
                         .offset(offset)
                         .gesture(magnify)
-                        .simultaneousGesture(pan)
+                        // Pan only while zoomed: an always-on DragGesture steals the
+                        // album's horizontal page swipe at 1× and freezes it.
+                        .simultaneousGesture(pan, including: scale > minScale + 0.01 ? .all : .subviews)
                         .onTapGesture(count: 2, perform: toggleZoom)
                         .modifier(DismissDrag(progress: $dismissProgress, onClose: onClose, enabled: scale <= minScale + 0.01))
                         .accessibilityLabel("Image")

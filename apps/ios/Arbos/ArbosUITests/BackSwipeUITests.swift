@@ -208,9 +208,11 @@ final class BackSwipeUITests: XCTestCase {
     }
 
     /// A vertical drag on a bubble is left to the scroll view: no reply, no keyboard, no
-    /// back. (Whether the transcript moved is not asserted here: XCUI's synthetic pans
-    /// do not scroll this SwiftUI ScrollView on the rig — real pans do, see the idb probe
-    /// shots on #1985 — and `BackSwipeTests` pins the axis rule.)
+    /// back. Until iphone-scroll-perf (2026-10-27) XCUI's pans never scrolled this transcript
+    /// — the per-bubble reply drag kept the scroll view's pan from beginning — so this test
+    /// passed trivially; now the drag scrolls, and the pan stays inside the transcript (up,
+    /// 200 pt) so its end never lands on the composer. `BackSwipeTests` pins the axis rule,
+    /// `ScrollPerfUITests` measures the pans.
     func testVerticalDragOnABubbleDoesNotReplyOrGoBack() {
         let app = launch(["ARBOS_OPEN_PEOPLE": "fx-group-launch", "ARBOS_FIXTURE_LONG_ROWS": "120"])
         let back = chatBack(app, "fx-group-launch")
@@ -218,12 +220,12 @@ final class BackSwipeUITests: XCTestCase {
         let bubbles = app.descendants(matching: .any).matching(bubbleQuery)
         XCTAssertTrue(bubbles.firstMatch.waitForExistence(timeout: settle), "the transcript shows bubbles")
         let window = app.windows.firstMatch.frame
-        // A bubble whose top is clear of the header and of the composer.
-        let onBubble = bubbles.allElementsBoundByIndex.first { $0.frame.minY > 140 && $0.frame.minY < window.maxY - 220 }
+        // A bubble in the lower half of the transcript, clear of the composer.
+        let onBubble = bubbles.allElementsBoundByIndex.last { $0.frame.minY > window.midY && $0.frame.maxY < window.maxY - 200 }
         XCTAssertNotNil(onBubble, "a bubble is on screen")
-        let start = onBubble!.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3))
-        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 6, dy: 300)), withVelocity: .slow, thenHoldForDuration: 0.1)
-        onBubble?.swipeDown()
+        let start = onBubble!.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 6, dy: -200)), withVelocity: .slow, thenHoldForDuration: 0.1)
+        sleep(1)
         XCTAssertFalse(app.descendants(matching: .any)["composer-reply-preview"].exists, "no reply started")
         XCTAssertFalse(app.keyboards.firstMatch.exists, "the composer was not focused")
         XCTAssertTrue(back.exists, "the chat did not go back")

@@ -683,15 +683,11 @@ struct HomeView: View {
     private var topBarRow: some View {
         HStack(spacing: 10) {
             Button { showSettings = true } label: {
-                ZStack(alignment: .bottomTrailing) {
-                    PersonAvatar(url: model.user?.avatarUrl, handle: model.user?.login ?? "?", size: Theme.control, name: model.user?.name, id: model.user?.id, colorIndex: model.user?.avatarColorIndexEffective)
-                    Circle()
-                        .fill(machineDotColor(model.machine.state, theme: theme))
-                        .frame(width: 11, height: 11)
-                        .overlay(Circle().strokeBorder(theme.bg, lineWidth: 2))
-                        .offset(x: 2, y: 2)
-                }
-                .frame(width: Theme.control, height: Theme.control)
+                // My picture with the machine dot through the one presence badge (in front,
+                // ring cut out of the picture — `PresenceBadge`).
+                PersonAvatar(url: model.user?.avatarUrl, handle: model.user?.login ?? "?", size: Theme.control, name: model.user?.name, id: model.user?.id, colorIndex: model.user?.avatarColorIndexEffective)
+                    .presenceBadge(machineDotColor(model.machine.state, theme: theme), size: Theme.control)
+                    .frame(width: Theme.control, height: Theme.control)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Account, machine and settings · \(model.machine.label)")
