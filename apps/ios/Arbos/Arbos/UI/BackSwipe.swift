@@ -26,6 +26,7 @@
 import SwiftUI
 import UIKit
 import UIKit.UIGestureRecognizerSubclass
+import os
 
 /// The back-gesture rules, as data (unit-tested in `BackSwipeTests`).
 enum BackSwipe {
@@ -218,11 +219,46 @@ final class DirectionalSwipeRecognizer: UIGestureRecognizer {
     private var lastPoint = CGPoint.zero
     private var lastTime: TimeInterval = 0
     private var tracked: UITouch?
+    /// The view the tracked touch landed on (`UITouch.view`): the chain from it up to the
+    /// window holds the recognizers this swipe competes with (`cancelPresses`).
+    private(set) weak var touchView: UIView?
 
     override init(target: Any?, action: Selector?) {
         super.init(target: target, action: action)
         delaysTouchesBegan = false
         delaysTouchesEnded = false
+    }
+
+    /// Exclusivity policy for both swipe recognizers (the transcript's and the screen's):
+    /// the first of the scroll view's pan, this recognizer and its siblings to begin wins and
+    /// the others fail. Everything else — SwiftUI's own recognizers on the hosting views,
+    /// which carry taps, button presses and long presses — runs beside it: a `Button`
+    /// press (a reply bubble's quote header, a sender's name or avatar, a link card) begins
+    /// on touch-down, and an exclusive swipe that starts on it could never begin
+    /// ([feedback swipe-reply-own-quoted-2026-10-28]: no swipe-to-reply on an own bubble
+    /// with a quote block). When the swipe begins it cancels those presses (`cancelPresses`)
+    /// so the button does not fire on release.
+    static func staysExclusive(with other: UIGestureRecognizer) -> Bool {
+        other is UIPanGestureRecognizer || other is DirectionalSwipeRecognizer || other.view is UIScrollView
+    }
+
+    /// Cancel every recognizer that was already recognizing this touch and that
+    /// `staysExclusive(with:)` let run beside us — what UIKit would have done to us had it
+    /// begun first. Hover recognizers (pointer, not touch) and anything owned by a scroll
+    /// view or the window are left alone. Disabling a recognizer mid-gesture cancels it.
+    private func cancelPresses() {
+        var node = touchView
+        while let current = node, !(current is UIWindow) {
+            if !(current is UIScrollView) {
+                for gr in current.gestureRecognizers ?? [] where gr !== self && gr.isEnabled
+                    && (gr.state == .began || gr.state == .changed)
+                    && !Self.staysExclusive(with: gr) && !(gr is UIHoverGestureRecognizer) {
+                    gr.isEnabled = false
+                    gr.isEnabled = true
+                }
+            }
+            node = current.superview
+        }
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
@@ -233,6 +269,7 @@ final class DirectionalSwipeRecognizer: UIGestureRecognizer {
             return
         }
         tracked = t
+        touchView = t.view
         start = t.location(in: view)
         lastPoint = start
         lastTime = t.timestamp
@@ -256,7 +293,15 @@ final class DirectionalSwipeRecognizer: UIGestureRecognizer {
             guard abs(translation.width) + abs(translation.height) >= minimumDistance else { return }
             switch decide(start, translation) {
             case .undecided: break
-            case .claimed: state = .began
+            case .claimed:
+                #if DEBUG
+                SwipeLog.claim(self)
+                #endif
+                state = .began
+                #if DEBUG
+                SwipeLog.event("began → state \(state.rawValue) (3 = began, 5 = failed: prevented by a competitor)")
+                #endif
+                cancelPresses()
             case .declined: state = .failed
             }
         case .began, .changed:
@@ -439,6 +484,9 @@ struct TranscriptSwipeHost: UIViewRepresentable {
             switch gr.state {
             case .began, .changed:
                 if case .reply = mode { BackSwipe.bubbleSwipeActive = true }
+                #if DEBUG
+                if gr.state == .began { SwipeLog.event("transcript began \(mode)") }
+                #endif
                 switch mode {
                 case .reply(let row): onEvent(.replyChanged(row: row, dx: gr.translation.width))
                 case .time: onEvent(.timeChanged(dx: gr.translation.width))
@@ -447,6 +495,9 @@ struct TranscriptSwipeHost: UIViewRepresentable {
                 switch mode {
                 case .reply(let row):
                     let fire = gr.state == .ended && BubbleSwipe.triggers(reveal: BubbleSwipe.reveal(for: gr.translation.width))
+                    #if DEBUG
+                    SwipeLog.event("reply ended row=\(row) fire=\(fire) dx=\(Int(gr.translation.width))")
+                    #endif
                     onEvent(.replyEnded(row: row, fire: fire))
                     // The screen's back recognizer may read the flag for this same touch.
                     DispatchQueue.main.async { BackSwipe.bubbleSwipeActive = false }
@@ -461,13 +512,57 @@ struct TranscriptSwipeHost: UIViewRepresentable {
             }
         }
 
-        /// Exclusive with every other recognizer (the scroll pan above all); SwiftUI's own
-        /// recognizer still asks for itself and keeps taps / long-press alive until we begin.
+        /// Exclusive with the scroll pan and the screen's swipe (the first to begin wins);
+        /// SwiftUI's presses run beside us and are cancelled when we begin
+        /// (`DirectionalSwipeRecognizer.staysExclusive`).
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
-            false
+            !DirectionalSwipeRecognizer.staysExclusive(with: other)
         }
     }
 }
+
+#if DEBUG
+/// Rig log for the swipe recognizers (`ARBOS_SWIPE_LOG=1`): what each one found under the
+/// finger when it claimed a drag — the recognizers on the touch's view chain and their
+/// states — so a swipe that never starts can be read from the `swipe` log.
+enum SwipeLog {
+    private static let log = Logger(subsystem: "com.unarbos.arbos.ios", category: "swipe")
+    private static let on = ProcessInfo.processInfo.environment["ARBOS_SWIPE_LOG"] == "1"
+
+    static func claim(_ gr: DirectionalSwipeRecognizer) {
+        guard on, let view = gr.view else { return }
+        var chain: [String] = []
+        var node: UIView? = gr.touchView ?? view
+        while let current = node, !(current is UIWindow) {
+            let grs = (current.gestureRecognizers ?? []).filter { $0 !== gr }
+            if !grs.isEmpty {
+                let names = grs.map { "\(String(describing: type(of: $0)))=\(name($0.state))" }
+                chain.append("\(String(describing: type(of: current)).prefix(28)): \(names.joined(separator: " "))")
+            }
+            node = current.superview
+        }
+        let owner = String(describing: type(of: view)).prefix(28)
+        log.notice("claim on \(owner, privacy: .public) start=(\(Int(gr.start.x)),\(Int(gr.start.y))) t=(\(Int(gr.translation.width)),\(Int(gr.translation.height))) | \(chain.joined(separator: " | "), privacy: .public)")
+    }
+
+    static func event(_ what: String) {
+        guard on else { return }
+        log.notice("\(what, privacy: .public)")
+    }
+
+    private static func name(_ s: UIGestureRecognizer.State) -> String {
+        switch s {
+        case .possible: return "possible"
+        case .began: return "began"
+        case .changed: return "changed"
+        case .ended: return "ended"
+        case .cancelled: return "cancelled"
+        case .failed: return "failed"
+        @unknown default: return "?"
+        }
+    }
+}
+#endif
 
 /// Hides the system bar and back button and owns the back gestures: the edge pop and the
 /// full-screen swipe-right, both → `dismiss()` (SwiftUI pops, so the stack's path stays
@@ -603,6 +698,9 @@ private struct BackSwipeHost: UIViewRepresentable {
                 edgeKeyboardDropped = false
                 if BackSwipe.isBackSwipe(translation: gr.translation, velocity: gr.velocity, start: start,
                                          composerTop: composerTop, bubbleSwipeActive: BackSwipe.bubbleSwipeActive) {
+                    #if DEBUG
+                    SwipeLog.event("back fired start=(\(Int(start.x)),\(Int(start.y))) dx=\(Int(gr.translation.width))")
+                    #endif
                     BackSwipe.dismissKeyboard()
                     onBack()
                 }
@@ -615,8 +713,11 @@ private struct BackSwipeHost: UIViewRepresentable {
             }
         }
 
+        /// Same policy as the transcript's swipe: exclusive with the scroll pan and the
+        /// transcript's swipe, beside SwiftUI's presses (an edge pop may start on a sender's
+        /// avatar button).
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
-            false
+            !DirectionalSwipeRecognizer.staysExclusive(with: other)
         }
     }
 }

@@ -2163,6 +2163,9 @@ struct ChatSession: View {
     /// (Reply in DM) opens the source chat on the original instead; the header is not
     /// tappable when the viewer is not in that chat.
     private func revealQuoted(_ quote: Quote, from replyId: Id) {
+        #if DEBUG
+        SwipeLog.event("quote tap from=\(replyId) to=\(quote.messageId)")
+        #endif
         if let src = quote.source {
             if src.chatId == chatId {
                 jumpBackTo = replyId
