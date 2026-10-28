@@ -74,6 +74,25 @@ final class ScreenshotTranscriptUITests: XCTestCase {
         }
     }
 
+    /// Arbonites is live: while the sheet covers the chat someone starts and stops typing, so the
+    /// presence row over the composer comes and goes — the bottom inset changes under the sheet.
+    func testGroupScreenshotWithTypingUnderTheSheetKeepsBubbles() {
+        let app = launch(["ARBOS_OPEN_PEOPLE": Self.group, "ARBOS_FIXTURE_LONG_ROWS": rows, "ARBOS_FIXTURE_LONG_RICH": "1", "ARBOS_FIXTURE_TYPING": "0"])
+        for round in 1...rounds {
+            cycle(app, chatId: Self.group, shape: "typing-under-sheet", round: round, before: {}, between: { self.toggleTypingUnderTheSheet() })
+        }
+    }
+
+    /// Same with the keyboard up first and a background → foreground trip as well.
+    func testGroupKeyboardScreenshotTypingAndBackgroundKeepsBubbles() {
+        let app = launch(["ARBOS_OPEN_PEOPLE": Self.group, "ARBOS_FIXTURE_LONG_ROWS": rows, "ARBOS_FIXTURE_LONG_RICH": "1", "ARBOS_FIXTURE_TYPING": "0"])
+        for round in 1...rounds {
+            cycle(app, chatId: Self.group, shape: "keyboard-typing-background", round: round,
+                  before: { self.raiseKeyboard(app) },
+                  between: { self.toggleTypingUnderTheSheet(); self.backgroundAndForeground(app) })
+        }
+    }
+
     /// No sheet at all: background and foreground alone (lock / app switcher).
     func testGroupBackgroundForegroundAloneKeepsBubbles() {
         let app = launchGroup()
@@ -120,12 +139,14 @@ final class ScreenshotTranscriptUITests: XCTestCase {
         // What the user sees first — before any scroll or tap that would make a lazy list recover.
         usleep(900_000)
         let countAfter = drawnBubbleCount(app)
+        let probeAfter = probe(app)
         shot(app, "\(shape)-r\(round)-3-after-\(countAfter)")
+        NSLog("[cempty] \(shape) r\(round): before=\(countBefore) after=\(countAfter) probe=\(probeAfter)")
         if countAfter == 0 {
             // Give layout a moment more, then judge; the first shot shows what the user saw.
             let late = waitForBubbles(app, timeout: 4)
             shot(app, "\(shape)-r\(round)-4-late-\(late)")
-            XCTFail("\(shape) r\(round): the transcript came back EMPTY after the screenshot (late count \(late))")
+            XCTFail("\(shape) r\(round): the transcript came back EMPTY after the screenshot (late count \(late); \(probeAfter) → \(probe(app)))")
         }
         // Leave the keyboard down for the next round.
         if app.keyboards.firstMatch.exists {
@@ -196,6 +217,22 @@ final class ScreenshotTranscriptUITests: XCTestCase {
             usleep(500_000)
         }
         sleep(2)
+    }
+
+    /// Someone types for a moment, then stops (the fixture's presence row shows and hides).
+    private func toggleTypingUnderTheSheet() {
+        notify_post("com.unarbos.arbos.rig.typing-on")
+        sleep(2)
+        notify_post("com.unarbos.arbos.rig.typing-off")
+        sleep(1)
+        notify_post("com.unarbos.arbos.rig.typing-on")
+        sleep(1)
+    }
+
+    /// The Debug probe's line (rows / shown / realised / pinned / window / epoch), for failure messages.
+    private func probe(_ app: XCUIApplication) -> String {
+        let el = app.descendants(matching: .any)["transcript-probe"]
+        return el.exists ? (el.value as? String ?? "?") : "no probe"
     }
 
     private func backgroundAndForeground(_ app: XCUIApplication) {
