@@ -257,6 +257,20 @@ pub fn overlay(
         }
     }
 
+    // One material ([feedback search-popup-single-layer-2026-10-28]): the
+    // popup plate — frosted on Glass, the flat card on Matte — is the only
+    // fill between the chat and the rows. The rows are transparent; the
+    // highlighted one is a tint on top (`highlight::row`). No dim behind,
+    // no second border: `glass::popup_plate`.
+    // The panel owns the pointer over its whole box ([feedback
+    // search-popup-swallows-hover-2026-10-28], Scout: "it also traces
+    // movements through the search popup into the chat window"; Jacob: the
+    // result list scrolled the chat behind it). `occlude` takes every hitbox
+    // under the panel out of the hit test — no row behind it hovers, no rail
+    // appears, no wheel reaches the transcript, also at the list's end; the
+    // wheel stop is the belt to that brace. Clicks inside still land on the
+    // rows and the field; a click outside is the shell's capture-phase
+    // `click_outside`, which never looks at hitboxes under the pointer.
     let panel = div()
         .id("palette-panel")
         .key_context("Palette")
@@ -266,11 +280,9 @@ pub fn overlay(
         .flex()
         .flex_col()
         .rounded(px(RADIUS))
-        .bg(theme.card())
-        .border_1()
-        .border_color(theme.border_strong)
-        .shadow_lg()
         .overflow_hidden()
+        .occlude()
+        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
         .debug_selector(|| "palette-panel".into())
         .on_action(cx.listener(|this, a: &Pick1, w, cx| this.palette_pick_action(a, w, cx)))
         .on_action(cx.listener(|this, a: &Pick2, w, cx| this.palette_pick_action(a, w, cx)))
@@ -284,6 +296,7 @@ pub fn overlay(
         .child(field)
         .child(hairline)
         .child(list);
+    let panel = glass::popup_plate(RADIUS, &theme, panel);
 
     // Spotlight hangs high, not mid-window: the shared backdrop hangs the
     // panel `top` under the window edge.
@@ -861,5 +874,359 @@ mod tests {
         assert_eq!(pick_index(&Pick1), Some(0));
         assert_eq!(pick_index(&Pick9), Some(8));
         assert_eq!(pick_index(&crate::ui::shell::Escape), None);
+    }
+}
+
+#[cfg(test)]
+mod shell_tests {
+    //! The popup over the real shell ([feedback
+    //! search-popup-swallows-hover-2026-10-28]; Scout 2026-10-28: "it also
+    //! traces movements through the search popup into the chat window";
+    //! Jacob: "scrolling the popup's result list also scrolls the chat behind
+    //! it"). A DM long enough that bubbles fill the column under the panel,
+    //! and enough chats that the palette's own list overflows: the pointer
+    //! over the panel hovers nothing behind it, the wheel over it — also at
+    //! the end of its list — leaves the transcript where it was, a click on
+    //! a row still opens it, and the ⌘F bar swallows the wheel the same way.
+    use futures::future::BoxFuture;
+    use gpui::{
+        point, px, AppContext as _, Entity, Pixels, Point, ScrollDelta, ScrollWheelEvent,
+        TestAppContext, TouchPhase,
+    };
+    use tokio::sync::mpsc;
+
+    use crate::app::AppState;
+    use crate::model::{now_ms, Chat, Message, Person, Project, SpaceKind};
+    use crate::sync::{ClientCommand, SyncEvent, SyncSource};
+    use crate::ui::motion::PulseClock;
+    use crate::ui::shell::Shell;
+    use crate::ui::theme::{Surface, Theme};
+
+    /// Chats in the sidebar and the palette's Recent list: more than fit the
+    /// panel at its 72 % cap, so the list scrolls.
+    const CHATS: usize = 16;
+    /// Rows in the open DM: enough to fill the column top to bottom.
+    const ROWS: usize = 40;
+
+    struct Quiet;
+
+    impl SyncSource for Quiet {
+        fn name(&self) -> &'static str {
+            "quiet"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            _commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    fn dm_id(n: usize) -> String {
+        format!("01DM{n:02}000000000000000000000")
+    }
+
+    fn message(chat: &str, n: usize, at: u64) -> Message {
+        let (sender, handle) = if n % 2 == 0 {
+            ("user:gh_2", "sam")
+        } else {
+            ("user:gh_me", "unconst")
+        };
+        serde_json::from_value(serde_json::json!({
+            "id": format!("{chat}-m{n}"), "chatId": chat, "role": "user", "sender": sender,
+            "senderHandle": handle, "senderName": if handle == "sam" { "Sam Rivera" } else { "Jacob" },
+            "status": "done", "createdAt": at, "completedAt": at,
+            "parts": [{ "id": format!("{chat}-m{n}-t"), "kind": "text",
+                        "text": format!("Line {n} of a long thread about the launch page and what a seat includes.") }],
+        }))
+        .expect("message")
+    }
+
+    fn mount(
+        cx: &mut TestAppContext,
+        surface: Surface,
+    ) -> (
+        tokio::runtime::Runtime,
+        Entity<AppState>,
+        Entity<Shell>,
+        &mut gpui::VisualTestContext,
+    ) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| {
+            gpui_tokio::init_from_handle(cx, handle);
+            cx.set_global(Theme::dark(surface));
+            if !cx.has_global::<PulseClock>() {
+                PulseClock::init(cx);
+            }
+        });
+        let state = cx.new(|cx| AppState::new(Box::new(Quiet), cx));
+        let now = now_ms();
+        state.update(cx, |s, cx| {
+            for n in 0..CHATS {
+                let id = dm_id(n);
+                let person = Person {
+                    id: format!("gh_{}", n + 2),
+                    handle: format!("person{n}"),
+                    name: Some(format!("Person {n}")),
+                    ..Person::default()
+                };
+                s.projects.push(Project {
+                    id: id.clone(),
+                    name: format!("person{n}"),
+                    kind: SpaceKind::Dm,
+                    people: vec![person],
+                    ..Project::default()
+                });
+                let last = now - (n as u64) * 60_000;
+                let chat: Chat = serde_json::from_value(serde_json::json!({
+                    "id": id, "project_id": id, "title": format!("person{n}"), "is_pinned": false,
+                    "is_system": false, "unread": false, "last_message_at": last,
+                }))
+                .expect("chat");
+                s.chats.insert(id.clone(), vec![chat]);
+                let rows = if n == 0 { ROWS } else { 1 };
+                s.messages.insert(
+                    id.clone(),
+                    (0..rows)
+                        .map(|m| message(&id, m, last - ((rows - m) as u64) * 1_000))
+                        .collect(),
+                );
+                s.active_tab.insert(id.clone(), id.clone());
+            }
+            s.selected_project = Some(dm_id(0));
+            cx.notify();
+        });
+        let (shell, vcx) = cx.add_window_view(|window, cx| Shell::new(state.clone(), window, cx));
+        vcx.run_until_parked();
+        settle(&state, &shell, vcx);
+        (rt, state, shell, vcx)
+    }
+
+    fn settle(state: &Entity<AppState>, shell: &Entity<Shell>, vcx: &mut gpui::VisualTestContext) {
+        for _ in 0..3 {
+            state.update(vcx, |_, cx| cx.notify());
+            shell.update(vcx, |_, cx| cx.notify());
+            vcx.run_until_parked();
+        }
+    }
+
+    fn hovered(shell: &Entity<Shell>, vcx: &gpui::VisualTestContext) -> Option<String> {
+        shell.read_with(vcx, |sh, cx| sh.transcript.read(cx).hovered_bubble())
+    }
+
+    fn scroll(shell: &Entity<Shell>, vcx: &gpui::VisualTestContext) -> (usize, f32) {
+        shell.read_with(vcx, |sh, cx| sh.transcript.read(cx).scroll_position())
+    }
+
+    fn own_offset(shell: &Entity<Shell>, vcx: &gpui::VisualTestContext) -> f32 {
+        shell.read_with(vcx, |sh, _| sh.palette_scroll.offset().y.into())
+    }
+
+    fn wheel(vcx: &mut gpui::VisualTestContext, at: Point<Pixels>, dy: f32) {
+        vcx.simulate_event(ScrollWheelEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(0.0), px(dy))),
+            modifiers: Default::default(),
+            touch_phase: TouchPhase::Moved,
+        });
+        vcx.run_until_parked();
+    }
+
+    fn open_palette(
+        state: &Entity<AppState>,
+        shell: &Entity<Shell>,
+        vcx: &mut gpui::VisualTestContext,
+    ) {
+        vcx.dispatch_action(crate::ui::shell::OpenPalette);
+        settle(state, shell, vcx);
+        assert!(shell.read_with(&*vcx, |sh, _| sh.palette.open));
+    }
+
+    /// The chat column's transcript area: the header's width, from under the
+    /// header to the composer.
+    fn transcript_area(vcx: &mut gpui::VisualTestContext) -> gpui::Bounds<Pixels> {
+        let header = vcx.debug_bounds("chat-header-bar").expect("header drawn");
+        let composer = vcx
+            .debug_bounds("chat-composer-block")
+            .expect("composer drawn");
+        gpui::Bounds::from_corners(
+            point(header.origin.x, header.bottom()),
+            point(header.right(), composer.origin.y),
+        )
+    }
+
+    /// A point on the panel that has a transcript row under it: a row in the
+    /// middle of the list, inside the chat column.
+    fn point_over_a_row(vcx: &mut gpui::VisualTestContext) -> Point<Pixels> {
+        let row = vcx.debug_bounds("palette-row-4").expect("row 4 drawn");
+        let transcript = transcript_area(vcx);
+        let at = row.center();
+        assert!(
+            transcript.contains(&at),
+            "the panel row at {at:?} is not over the chat column {transcript:?}"
+        );
+        at
+    }
+
+    /// Scout: the pointer over the popup hovers the bubble behind — its rail
+    /// and time appear. With the panel occluding, nothing under it hovers;
+    /// the same point with the palette closed hovers the bubble (so the
+    /// check is live).
+    #[gpui::test]
+    fn the_pointer_over_the_panel_hovers_nothing_behind_it(cx: &mut TestAppContext) {
+        let (_rt, state, shell, vcx) = mount(cx, Surface::Glass);
+        open_palette(&state, &shell, vcx);
+        let at = point_over_a_row(vcx);
+        // Approach from outside the panel, as a hand would.
+        vcx.simulate_mouse_move(point(at.x, px(2.0)), None, Default::default());
+        vcx.run_until_parked();
+        vcx.simulate_mouse_move(at, None, Default::default());
+        settle(&state, &shell, vcx);
+        assert_eq!(
+            hovered(&shell, vcx),
+            None,
+            "a bubble under the panel hovered"
+        );
+
+        // Control: the palette closed, the same point hovers a bubble.
+        vcx.dispatch_action(crate::ui::shell::OpenPalette);
+        settle(&state, &shell, vcx);
+        assert!(!shell.read_with(&*vcx, |sh, _| sh.palette.open));
+        vcx.simulate_mouse_move(point(at.x, px(2.0)), None, Default::default());
+        vcx.run_until_parked();
+        vcx.simulate_mouse_move(at, None, Default::default());
+        settle(&state, &shell, vcx);
+        assert!(
+            hovered(&shell, vcx).is_some(),
+            "with the palette closed the same point hovers a bubble"
+        );
+    }
+
+    /// Jacob: the result list and the chat scrolled together. A wheel over
+    /// the list scrolls the list only; at the list's end the wheel is
+    /// consumed, not forwarded; over the field and the panel's edge the same.
+    #[gpui::test]
+    fn the_wheel_over_the_panel_never_moves_the_transcript_also_at_the_lists_end(
+        cx: &mut TestAppContext,
+    ) {
+        let (_rt, state, shell, vcx) = mount(cx, Surface::Glass);
+        // Control first: with nothing over it, the wheel moves the chat.
+        let at_rest = scroll(&shell, vcx);
+        let column = transcript_area(vcx);
+        wheel(vcx, column.center(), 160.0);
+        settle(&state, &shell, vcx);
+        assert_ne!(
+            scroll(&shell, vcx),
+            at_rest,
+            "the control wheel moved the chat"
+        );
+
+        open_palette(&state, &shell, vcx);
+        let before = scroll(&shell, vcx);
+        let list = vcx.debug_bounds("palette-list").expect("list");
+        let field = vcx.debug_bounds("palette-field").expect("field");
+        let panel = vcx.debug_bounds("palette-panel").expect("panel");
+        wheel(vcx, list.center(), -160.0);
+        settle(&state, &shell, vcx);
+        assert!(
+            own_offset(&shell, vcx) < -1.0,
+            "the palette's own list scrolled ({})",
+            own_offset(&shell, vcx)
+        );
+        assert_eq!(
+            scroll(&shell, vcx),
+            before,
+            "the transcript moved under the list"
+        );
+
+        // To the end of the list and past it: still nothing behind moves.
+        for _ in 0..12 {
+            wheel(vcx, list.center(), -400.0);
+        }
+        settle(&state, &shell, vcx);
+        let at_end = own_offset(&shell, vcx);
+        wheel(vcx, list.center(), -160.0);
+        settle(&state, &shell, vcx);
+        assert_eq!(own_offset(&shell, vcx), at_end, "the list is at its end");
+        assert_eq!(
+            scroll(&shell, vcx),
+            before,
+            "the wheel chained into the transcript at the end"
+        );
+        wheel(vcx, list.center(), 160.0);
+        wheel(vcx, field.center(), 160.0);
+        wheel(
+            vcx,
+            point(panel.right() - px(2.0), panel.bottom() - px(2.0)),
+            160.0,
+        );
+        settle(&state, &shell, vcx);
+        assert_eq!(
+            scroll(&shell, vcx),
+            before,
+            "the transcript moved under the panel"
+        );
+    }
+
+    /// Clicks on results still work with the panel occluding: a click on a
+    /// row opens that chat and closes the palette.
+    #[gpui::test]
+    fn a_click_on_a_row_still_opens_it(cx: &mut TestAppContext) {
+        let (_rt, state, shell, vcx) = mount(cx, Surface::Glass);
+        open_palette(&state, &shell, vcx);
+        let row = vcx.debug_bounds("palette-row-1").expect("row 1");
+        vcx.simulate_click(row.center(), Default::default());
+        settle(&state, &shell, vcx);
+        assert!(
+            !shell.read_with(&*vcx, |sh, _| sh.palette.open),
+            "the palette closed"
+        );
+        let selected = state.read_with(&*vcx, |s, _| s.selected_project.clone());
+        assert_eq!(
+            selected.as_deref(),
+            Some(dm_id(1).as_str()),
+            "row 1 opened its chat"
+        );
+    }
+
+    /// The ⌘F bar: a wheel over it leaves the transcript where it was.
+    #[gpui::test]
+    fn the_wheel_over_the_chat_search_bar_never_moves_the_transcript(cx: &mut TestAppContext) {
+        let (_rt, state, shell, vcx) = mount(cx, Surface::Matte);
+        vcx.dispatch_action(crate::ui::chat_search::Open);
+        settle(&state, &shell, vcx);
+        let bar = vcx.debug_bounds("chat-search-bar").expect("bar drawn");
+        let before = scroll(&shell, vcx);
+        wheel(vcx, bar.center(), 160.0);
+        wheel(vcx, bar.center(), -160.0);
+        settle(&state, &shell, vcx);
+        assert_eq!(
+            scroll(&shell, vcx),
+            before,
+            "the transcript moved under the bar"
+        );
+    }
+
+    /// Layering ([feedback search-popup-single-layer-2026-10-28]) over the
+    /// real shell: the panel is drawn once, inside the see-through backdrop,
+    /// and no second plate or dim sits between the chat and the rows.
+    #[gpui::test]
+    fn the_panel_is_drawn_once_on_a_backdrop_that_does_not_dim(cx: &mut TestAppContext) {
+        let (_rt, state, shell, vcx) = mount(cx, Surface::Glass);
+        open_palette(&state, &shell, vcx);
+        let backdrop = vcx.debug_bounds("palette-backdrop").expect("backdrop");
+        let panel = vcx.debug_bounds("palette-panel").expect("panel");
+        let viewport = vcx.update(|window, _| window.viewport_size());
+        assert_eq!(backdrop.size, viewport, "the backdrop spans the window");
+        assert!(backdrop.contains(&panel.center()));
+        assert_eq!(crate::ui::modal::PASSTHROUGH_BACKDROP_ALPHA, 0.0);
+        let material = vcx.update(|_, cx| crate::ui::glass::popup_material(Theme::of(cx)));
+        assert!(!material.dims_window && material.blur > 0.0 && material.fill.a > 0.0);
     }
 }

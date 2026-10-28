@@ -266,7 +266,7 @@ pub struct Shell {
     /// Likewise the Search-in-chat bar.
     pub(crate) chat_search_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// The palette's result list scroll (keeps the highlight in view).
-    palette_scroll: ScrollHandle,
+    pub(crate) palette_scroll: ScrollHandle,
     /// The media viewer's Forward picker search field (feedback media-viewer-2026-10-23).
     pub(crate) viewer_search: Entity<ComposerInput>,
     /// Keyboard focus while the media viewer is up (← → page, Esc closes).

@@ -127,6 +127,11 @@ pub fn bar(shell: &Shell, cx: &mut Context<Shell>) -> Option<AnyElement> {
         .pl(px(metrics::INSET))
         .pr(px(metrics::INSET_RIGHT))
         .cursor_text()
+        // The bar owns the pointer over its box like the palette's panel
+        // ([feedback search-popup-swallows-hover-2026-10-28]): nothing under
+        // it hovers, and a wheel over it never reaches the transcript.
+        .occlude()
+        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
         .on_mouse_down(
             gpui::MouseButton::Left,
             cx.listener(|this, _, window, cx| {
