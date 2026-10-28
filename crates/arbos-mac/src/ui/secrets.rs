@@ -18,8 +18,10 @@ use crate::model::{
 use crate::ui::agent_picker::{self, AgentPicker};
 use crate::ui::avatars;
 use crate::ui::composer::ComposerInput;
+use crate::ui::error_note;
 use crate::ui::frost::{frosted, MENU_BLUR};
 use crate::ui::glass;
+use crate::ui::highlight::{self, Shape};
 use crate::ui::icons::icon;
 use crate::ui::profiles::kit;
 use crate::ui::theme::{Theme, PANEL_RADIUS, RAIL_WIDTH, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
@@ -28,6 +30,28 @@ pub enum SecretsEvent {
     /// "‹ Settings": return to the settings sheet.
     Back,
 }
+
+/// The failures the Secrets pane draws inline while one of its forms is up (the verbs
+/// `sync::relay` reports them under).
+const SECRETS_VERBS: &[&str] = &[
+    "save the secret",
+    "replace the value",
+    "delete the secret",
+    "change who may use it",
+    "revoke the access",
+    "change that person's access",
+    "remove that person",
+    "add @",
+    "change the pause",
+    "answer the request",
+    "connect 1Password",
+    "replace the token",
+    "change the vault access",
+    "save the item name",
+    "disconnect the vault",
+    "load your secrets",
+    "load the agent's secrets",
+];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Page {
@@ -87,6 +111,7 @@ pub struct SecretsPanel {
     hosts_input: Entity<ComposerInput>,
     token_input: Entity<ComposerInput>,
     error: Option<String>,
+    local_details_open: bool,
     /// Rig: a secret env name to open as soon as the list arrives.
     pending_env: Option<String>,
     /// Rig: with `pending_env`, open that secret's "Give a person access" sheet too.
@@ -154,6 +179,7 @@ impl SecretsPanel {
             hosts_input,
             token_input,
             error: None,
+            local_details_open: false,
             pending_env: None,
             pending_people: false,
             pending_vault: false,
@@ -555,6 +581,9 @@ impl SecretsPanel {
             .min_h(px(52.0))
             .px(px(16.0))
             .py(px(8.0))
+            // Lights for rows that join `kit::HOT` (vault / secret rows, the
+            // switch rows); a plain detail row never does.
+            .child(highlight::layer(false, Shape::Nested(PANEL_RADIUS), theme))
             .child(kit::hairline_below(theme))
             .child(glass::icon_tile(glyph, theme).when(dim, |el| el.opacity(0.55)))
             .child(
@@ -600,7 +629,7 @@ impl SecretsPanel {
             .text_size(px(TEXT_BODY))
             .text_color(theme.text)
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), theme))
             .child(
                 div()
                     .size(px(30.0))
@@ -644,7 +673,7 @@ impl SecretsPanel {
             .text_size(px(TEXT_BODY))
             .text_color(if danger { theme.danger } else { theme.text })
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), theme))
             .child(label.into())
     }
 
@@ -693,14 +722,13 @@ impl SecretsPanel {
             .h(px(26.0))
             .px(px(10.0))
             .rounded_full()
-            .bg(theme.field)
             .flex()
             .items_center()
             .text_size(px(TEXT_TINY))
             .font_weight(FontWeight::MEDIUM)
             .text_color(if danger { theme.danger } else { theme.text })
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .map(|el| highlight::washed(el, theme.field, theme))
             .child(label.into())
     }
 
@@ -712,7 +740,7 @@ impl SecretsPanel {
     ) -> Stateful<Div> {
         let _ = id;
         row.cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .group(kit::HOT)
             .child(glass::switch(on, theme))
     }
 
@@ -895,7 +923,7 @@ impl SecretsPanel {
                         theme,
                     )
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme.surface_2))
+                    .group(kit::HOT)
                     .child(icon("chevron-right", 13.0, theme.text_faint))
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.go(Page::Vault(vid.clone()), cx)),
@@ -935,15 +963,19 @@ impl SecretsPanel {
                     format!("secret-{}", s.id),
                     s.glyph(),
                     s.env.clone(),
-                    Some(format!(
-                        "{who} · {}",
-                        secret_usage(s.last_used_at, None, true)
-                    )),
+                    Some(match s.source_label() {
+                        // Secret hand-off: "Arbos · given in chat · never used".
+                        Some(given) => format!(
+                            "{who} · {given} · {}",
+                            secret_usage(s.last_used_at, None, true)
+                        ),
+                        None => format!("{who} · {}", secret_usage(s.last_used_at, None, true)),
+                    }),
                     paused,
                     theme,
                 )
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
+                .group(kit::HOT)
                 .child(icon("chevron-right", 13.0, theme.text_faint))
                 .on_click(
                     cx.listener(move |this, _, _, cx| this.go(Page::Secret(sid.clone()), cx)),
@@ -1031,6 +1063,10 @@ impl SecretsPanel {
         if s.name != s.env {
             g = g.child(Self::value_row("Name", s.name.clone(), theme));
         }
+        // Secret hand-off: where it came from ("In chat with Arbos").
+        if let Some(added) = s.added_label() {
+            g = g.child(Self::value_row("Added", added, theme));
+        }
         if let Some(u) = s.username.as_deref().filter(|u| !u.is_empty()) {
             g = g.child(Self::value_row("Username", u.to_string(), theme));
         }
@@ -1081,14 +1117,6 @@ impl SecretsPanel {
                     Some("Sent once and encrypted. The old value keeps working for 24 hours."),
                     theme,
                 ));
-            }
-            if let Some(e) = &self.error {
-                form = form.child(
-                    div()
-                        .text_size(px(TEXT_TINY))
-                        .text_color(theme.danger)
-                        .child(e.clone()),
-                );
             }
             let sid2 = sid.clone();
             form = form.child(
@@ -1150,11 +1178,8 @@ impl SecretsPanel {
         let ask = s.ask_every_time;
         let sid_ask = sid.clone();
         g = g.child(
-            glass::row("Ask every time", theme)
-                .id("secret-ask")
+            glass::hot_row("secret-ask", "Ask every time", theme)
                 .border_b_0()
-                .cursor_pointer()
-                .hover(|st| st.bg(theme.surface_2))
                 .child(glass::switch(ask, theme))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let id = sid_ask.clone();
@@ -1224,7 +1249,19 @@ impl SecretsPanel {
             sub.push(secret_usage(a.last_used_at, a.disabled_at, a.enabled));
             let avatar = match projects.iter().find(|p| p.id == a.project_id) {
                 Some(p) => avatars::project_with(images.get(&p.id).cloned(), p, 30.0, theme),
-                None => avatars::agent(&a.project_id, &a.name, None, None, None, 30.0, theme),
+                None => avatars::agent_picture(
+                    &arbos_core::avatar::identity::resolve(
+                        &avatars::AgentQuery {
+                            sender: &a.project_id,
+                            handle: None,
+                            name: Some(&a.name),
+                        },
+                        &[],
+                    ),
+                    None,
+                    30.0,
+                    theme,
+                ),
             };
             let (sid_a, pid_a, on) = (sid.clone(), a.project_id.clone(), a.enabled);
             g = g.child(
@@ -1239,7 +1276,7 @@ impl SecretsPanel {
                     .relative()
                     .child(kit::hairline_below(theme))
                     .cursor_pointer()
-                    .hover(|st| st.bg(theme.surface_2))
+                    .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), theme))
                     .child(avatar)
                     .child(
                         div()
@@ -1385,7 +1422,7 @@ impl SecretsPanel {
                     .relative()
                     .child(kit::hairline_below(theme))
                     .cursor_pointer()
-                    .hover(|st| st.bg(theme.surface_2))
+                    .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), theme))
                     .child(avatars::element(
                         &d.user_id,
                         &d.display_name(),
@@ -1589,6 +1626,69 @@ impl SecretsPanel {
         body
     }
 
+    /// The claimed relay failure first, else the form's validation (a refusal with the words).
+    fn note(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<Div> {
+        let claimed = self.state.read(cx).claimed_failure.clone();
+        let (slot, claimed_one) = match (claimed, &self.error) {
+            (Some(slot), _) => (slot, true),
+            (None, Some(words)) => (crate::app::refused(self.verb(), words), false),
+            (None, None) => return None,
+        };
+        let mut handlers = error_note::Handlers::new();
+        if claimed_one {
+            handlers = handlers
+                .toggle_details(cx.listener(|this, _, _, cx| {
+                    this.state.update(cx, |s, cx| {
+                        s.toggle_claimed_failure_details();
+                        cx.notify();
+                    });
+                }))
+                .try_again(cx.listener(|this, _, _, cx| this.retry_last(cx)));
+        } else {
+            handlers = handlers.toggle_details(cx.listener(|this, _, _, cx| {
+                this.local_details_open = !this.local_details_open;
+                cx.notify();
+            }));
+        }
+        let open = if claimed_one {
+            slot.details_open
+        } else {
+            self.local_details_open
+        };
+        Some(div().child(error_note::render(
+            "secrets-error",
+            &slot.error,
+            open,
+            error_note::Style::Inline,
+            theme,
+            handlers,
+        )))
+    }
+
+    /// What the open form does, for the validation note's sentence.
+    fn verb(&self) -> &'static str {
+        match self.page {
+            Page::Add => "save the secret",
+            Page::Connect => "connect 1Password",
+            Page::Vault(_) => "replace the token",
+            Page::Secret(_) => "save the secret",
+            Page::Agent(_) | Page::List => "save the change",
+        }
+    }
+
+    /// Try again on a claimed failure: the form's own action, once more.
+    fn retry_last(&mut self, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| {
+            s.clear_claimed_failure();
+            cx.notify();
+        });
+        match self.page {
+            Page::Add => self.submit_add(cx),
+            Page::Connect => self.submit_connect(cx),
+            Page::Vault(_) | Page::Secret(_) | Page::Agent(_) | Page::List => {}
+        }
+    }
+
     fn render_add(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let kind = self.add_kind;
         let segs = div()
@@ -1763,14 +1863,6 @@ impl SecretsPanel {
                         }),
                 ),
         );
-        if let Some(err) = &self.error {
-            form = form.child(
-                div()
-                    .text_size(px(TEXT_TINY))
-                    .text_color(theme.danger)
-                    .child(err.clone()),
-            );
-        }
         form.child(
             div()
                 .flex()
@@ -2068,7 +2160,7 @@ impl SecretsPanel {
                         .child(text.to_string()),
                 )
         };
-        let mut form = div()
+        let form = div()
             .flex()
             .flex_col()
             .gap(px(12.0))
@@ -2108,14 +2200,6 @@ impl SecretsPanel {
                     .child(agent_picker::render(self, &self.state.clone(), "connect", &[], theme, cx)),
             )
             .child(Self::field("Note", self.note_input.clone(), Some(VAULT_NOTE_HINT), theme));
-        if let Some(err) = &self.error {
-            form = form.child(
-                div()
-                    .text_size(px(TEXT_TINY))
-                    .text_color(theme.danger)
-                    .child(err.clone()),
-            );
-        }
         form.child(
             div()
                 .flex()
@@ -2165,7 +2249,19 @@ impl SecretsPanel {
         for a in &v.agents {
             let avatar = match projects.iter().find(|p| p.id == a.project_id) {
                 Some(p) => avatars::project_with(images.get(&p.id).cloned(), p, 30.0, theme),
-                None => avatars::agent(&a.project_id, &a.name, None, None, None, 30.0, theme),
+                None => avatars::agent_picture(
+                    &arbos_core::avatar::identity::resolve(
+                        &avatars::AgentQuery {
+                            sender: &a.project_id,
+                            handle: None,
+                            name: Some(&a.name),
+                        },
+                        &[],
+                    ),
+                    None,
+                    30.0,
+                    theme,
+                ),
             };
             let (vid, pid, on) = (v.id.clone(), a.project_id.clone(), a.enabled);
             g = g.child(
@@ -2180,7 +2276,7 @@ impl SecretsPanel {
                     .relative()
                     .child(kit::hairline_below(theme))
                     .cursor_pointer()
-                    .hover(|st| st.bg(theme.surface_2))
+                    .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), theme))
                     .child(avatar)
                     .child(
                         div()
@@ -2309,7 +2405,7 @@ impl SecretsPanel {
                     .relative()
                     .child(kit::hairline_below(theme))
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme.surface_2))
+                    .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), theme))
                     .child(
                         div()
                             .flex_1()
@@ -2390,14 +2486,6 @@ impl SecretsPanel {
                 Some("Stored encrypted. Arbos never shows it again."),
                 theme,
             ));
-            if let Some(e) = &self.error {
-                form = form.child(
-                    div()
-                        .text_size(px(TEXT_TINY))
-                        .text_color(theme.danger)
-                        .child(e.clone()),
-                );
-            }
             form = form.child(
                 div()
                     .flex()
@@ -2641,6 +2729,21 @@ impl Render for SecretsPanel {
             },
         };
 
+        // The page's note — under the header, before the first field (Jacob 2026-10-26): the
+        // relay's refusal of a save / connect / delete (claimed from the toast stack while a
+        // form is up) or the form's own validation, through the one shared element.
+        let form_open = matches!(
+            self.page,
+            Page::Add | Page::Connect | Page::Secret(_) | Page::Vault(_) | Page::Agent(_)
+        );
+        let claim = form_open.then_some(crate::app::FailureClaim {
+            surface: "secrets",
+            verbs: SECRETS_VERBS,
+        });
+        if self.state.read(cx).failure_claim != claim {
+            self.state.update(cx, |s, _| s.set_failure_claim(claim));
+        }
+        let note = self.note(&theme, cx);
         let card = div()
             .id("secrets-popover")
             .track_focus(&self.focus_handle)
@@ -2649,6 +2752,7 @@ impl Render for SecretsPanel {
             .gap(px(10.0))
             .p(px(12.0))
             .child(header)
+            .children(note)
             .child(
                 div()
                     .id("secrets-scroll")

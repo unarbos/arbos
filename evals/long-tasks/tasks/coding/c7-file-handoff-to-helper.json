@@ -1,0 +1,31 @@
+{
+ "id": "c7-file-handoff-to-helper",
+ "lane": "b",
+ "category": "coding",
+ "title": "Hand a produced file to a helper and get a derived file back",
+ "turns": [
+  {
+   "prompt": "In {D}: write sales.csv with columns region,amount and these 6 rows — north,120; south,80; north,45; east,200; south,15; east,5. Then hand that file to a helper (a subagent, not you) whose only job is to produce {D}/by_region.csv with one row per region and the summed amount, sorted by amount descending. Tell me the three totals when the helper is done.",
+   "seed": "mkdir -p {D}",
+   "timeout_s": 120,
+   "background": true,
+   "latency_max_s": 15
+  }
+ ],
+ "doc_checks": {
+  "no_truncated_reply": true,
+  "no_repeated_sentence": true,
+  "max_handoffs": 1
+ },
+ "regression": "#1776 (empty result row) · the helper's result must reach the chat after the hand-off",
+ "verify_wait": {
+  "wait_s": 420,
+  "settle_s": 10,
+  "verify": "f={D}/by_region.csv; test -f $f || { echo FAIL: no by_region.csv; exit 0; }; echo \"SHOW $(tr '\\n' '|' < $f)\"; if grep -q '^east,205' $f && grep -q '^north,165' $f && grep -q '^south,95' $f && [ \"$(grep -v -i '^region' $f | head -1 | cut -d, -f1)\" = east ]; then echo PASS; else echo FAIL: totals or order wrong; fi",
+  "text_regex": "\\b205\\b",
+  "rubric": {
+   "criteria": "Pass if the three totals (east 205, north 165, south 95) are stated and by_region.csv exists sorted; whether a helper or the main agent did the aggregation is checked separately (max_handoffs doc check), do not fail on the wording. Fail only on wrong totals, no file, or asking the user for the data again.",
+   "min": 3
+  }
+ }
+}

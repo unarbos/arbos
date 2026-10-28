@@ -520,6 +520,20 @@ impl Db {
         })
     }
 
+    /// The channel behind a homeserver room id (the push gateway's way in).
+    pub fn channel_by_room_id(&self, room_id: &str) -> Result<Option<Channel>> {
+        self.with(|c| {
+            c.query_row(
+                &format!(
+                    "SELECT {CHANNEL_COLS} FROM channels WHERE room_id = ?1 AND deleted_at IS NULL"
+                ),
+                params![room_id],
+                channel_from_row,
+            )
+            .optional()
+        })
+    }
+
     pub fn channels_of_server(&self, server_id: &str) -> Result<Vec<Channel>> {
         self.with(|c| {
             let mut st = c.prepare(&format!(

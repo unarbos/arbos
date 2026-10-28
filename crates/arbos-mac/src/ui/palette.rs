@@ -27,6 +27,7 @@ use crate::palette::{arrange, flatten, shortcut_label, Cursor, Entry, Kind, Sect
 use crate::search;
 use crate::ui::glass;
 use crate::ui::groups;
+use crate::ui::highlight;
 use crate::ui::icons::icon;
 use crate::ui::modal;
 use crate::ui::people;
@@ -265,16 +266,18 @@ pub fn overlay(
 
     // Spotlight hangs high, not mid-window: the shared backdrop hangs the
     // panel `top` under the window edge.
-    let close = cx.listener(|this: &mut Shell, _: &(), window, cx| this.close_palette(window, cx));
+    // Click-outside dismissal lives in `Shell::click_outside` (capture phase,
+    // against these bounds), so the click also reaches what is under it.
+    let bounds = shell.palette_bounds.clone();
+    let panel = div()
+        .on_children_prepainted(move |children, _, _| {
+            bounds.set(children.first().copied());
+        })
+        .child(panel);
     Some(
-        modal::modal_overlay_top(
-            "palette-backdrop",
-            move |window, cx| close(&(), window, cx),
-            top,
-            panel,
-        )
-        .debug_selector(|| "palette-backdrop".into())
-        .into_any_element(),
+        modal::modal_overlay_top_passthrough("palette-backdrop", top, panel)
+            .debug_selector(|| "palette-backdrop".into())
+            .into_any_element(),
     )
 }
 
@@ -351,8 +354,7 @@ fn row(
         .gap(px(AVATAR_GAP))
         .cursor_pointer()
         .debug_selector(move || format!("palette-row-{index}"))
-        .when(selected, |el| el.bg(theme.surface_2))
-        .hover(|s| s.bg(theme.surface_2))
+        .map(|el| highlight::row(el, selected, highlight::Shape::Own, theme))
         .child(picture(shell, entry, theme, cx))
         .child(
             div()
@@ -423,6 +425,16 @@ fn picture(shell: &Shell, entry: &Entry, theme: &Theme, cx: &Context<Shell>) -> 
             .child(icon(glyph, AVATAR * 0.58, theme.text_muted))
     };
     match &entry.target {
+        Target::Setting(setting) => {
+            if let crate::palette::SettingTarget::Agent { project_id, .. } = setting {
+                if let Some(space) = state.project(project_id) {
+                    return groups::picture(space, state, AVATAR, theme).into_any_element();
+                }
+            }
+            // The Settings list's own tile, at the palette's picture size.
+            glass::icon_tile_sized(crate::palette::target_glyph(setting), AVATAR, theme)
+                .into_any_element()
+        }
         Target::Space(id) | Target::Message { space_id: id, .. } => {
             let Some(space) = state.project(id) else {
                 return tile("person").into_any_element();
@@ -538,7 +550,9 @@ mod tests {
         transcript: ScrollHandle,
         list: ScrollHandle,
         open: bool,
-        closed: Rc<Cell<bool>>,
+        /// Set by a click on the target under the backdrop (a stand-in for a
+        /// message / sidebar row / button).
+        hit: Rc<Cell<bool>>,
         composer: gpui::Entity<ComposerInput>,
         field: gpui::Entity<ComposerInput>,
         selected: usize,
@@ -574,12 +588,22 @@ mod tests {
                 .right_0()
                 .h(px(44.0))
                 .child(self.composer.clone());
+            let hit = self.hit.clone();
+            let target = div()
+                .id("under-target")
+                .absolute()
+                .left(px(10.0))
+                .bottom(px(60.0))
+                .size(px(40.0))
+                .debug_selector(|| "under-target".into())
+                .on_click(move |_, _, _| hit.set(true));
             let mut root = div()
                 .relative()
                 .w(px(W))
                 .h(px(H))
                 .child(transcript)
-                .child(composer);
+                .child(composer)
+                .child(target);
             if self.open {
                 let field = div()
                     .h(px(FIELD_ROW))
@@ -616,7 +640,9 @@ mod tests {
                         .items_center()
                         .gap(px(AVATAR_GAP))
                         .debug_selector(move || sel.into())
-                        .when(i == self.selected, |el| el.bg(theme.surface_2))
+                        .when(i == self.selected, |el| {
+                            el.bg(highlight::fills(&theme).selected)
+                        })
                         .child(div().size(px(AVATAR)).rounded_full().bg(theme.surface_2))
                         .child(div().flex_1().child(format!("Row {i}")));
                     if let Some(label) = shortcut_label(i) {
@@ -643,10 +669,8 @@ mod tests {
                     .child(field)
                     .child(div().h(px(1.0)))
                     .child(list);
-                let closed = self.closed.clone();
-                root = root.child(modal::modal_overlay_top(
+                root = root.child(modal::modal_overlay_top_passthrough(
                     "palette-backdrop",
-                    move |_, _| closed.set(true),
                     (H * TOP_FRACTION).max(MIN_TOP),
                     panel,
                 ));
@@ -674,7 +698,7 @@ mod tests {
                 transcript: ScrollHandle::new(),
                 list: ScrollHandle::new(),
                 open,
-                closed: Rc::new(Cell::new(false)),
+                hit: Rc::new(Cell::new(false)),
                 composer,
                 field,
                 selected: 0,
@@ -737,22 +761,29 @@ mod tests {
         assert_eq!(composer, "", "the composer behind the palette typed");
     }
 
-    /// A click outside the panel closes it; a click inside does not.
+    /// The backdrop is see-through for the mouse ([feedback
+    /// search-toggle-click-outside-mac-2026-10-27]): a click outside the panel
+    /// reaches the target under it in the same click (the shell closes the
+    /// palette from its capture-phase `click_outside`; `ui::chat_search::tests`
+    /// covers that on the real shell). A click inside the panel stays inside.
     #[gpui::test]
-    fn a_click_outside_closes_and_inside_does_not(cx: &mut TestAppContext) {
+    fn a_click_outside_the_panel_reaches_what_is_under_the_backdrop(cx: &mut TestAppContext) {
         let (view, vcx) = setup(cx, true);
         let panel = vcx.debug_bounds("palette-panel").expect("panel");
         vcx.simulate_click(panel.center(), Default::default());
         vcx.run_until_parked();
         assert!(
-            !view.read_with(vcx, |s, _| s.closed.get()),
-            "inside closed it"
+            !view.read_with(vcx, |s, _| s.hit.get()),
+            "a click in the panel leaked under it"
         );
-        vcx.simulate_click(point(px(30.0), px(H - 30.0)), Default::default());
+        let target = vcx
+            .debug_bounds("under-target")
+            .expect("target under the backdrop");
+        vcx.simulate_click(target.center(), Default::default());
         vcx.run_until_parked();
         assert!(
-            view.read_with(vcx, |s, _| s.closed.get()),
-            "outside did not close"
+            view.read_with(vcx, |s, _| s.hit.get()),
+            "the click outside was swallowed"
         );
     }
 

@@ -165,6 +165,36 @@ pub struct Room {
     /// Rebuilt chat doc for covered-push checks and ROWS_DONE's version vector. Dropped when the
     /// room has no sockets left.
     pub doc_cache: std::sync::Mutex<Option<RoomDocCache>>,
+    /// Box users (owners) with a live socket on this room: a row from a person reaches their
+    /// agent live only through such a socket; without one the box is told to open the room
+    /// (`boxes::after_person_row`, #2120).
+    pub boxes: std::sync::Mutex<HashMap<String, u32>>,
+}
+
+impl Room {
+    pub fn box_joined(&self, user_id: &str) {
+        *self
+            .boxes
+            .lock()
+            .unwrap()
+            .entry(user_id.to_owned())
+            .or_insert(0) += 1;
+    }
+
+    pub fn box_left(&self, user_id: &str) {
+        let mut b = self.boxes.lock().unwrap();
+        if let Some(n) = b.get_mut(user_id) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                b.remove(user_id);
+            }
+        }
+    }
+
+    /// Does `user_id`'s box have a socket open on this room right now?
+    pub fn has_box(&self, user_id: &str) -> bool {
+        self.boxes.lock().unwrap().contains_key(user_id)
+    }
 }
 
 /// How the relay tells its room sockets that it is about to go down on purpose (a deploy, an
@@ -208,6 +238,10 @@ pub struct AppState {
     pub wake_started: Arc<Mutex<HashMap<String, i64>>>,
     /// user_id → ms of the last client row; rows pushed while a box was dying must re-wake it.
     pub last_client_push: Arc<Mutex<HashMap<String, i64>>>,
+    /// `POST /proxy/decisions` answers by request hash (`proxy::DecisionsCache`): every box in
+    /// a people room asks the judge the same question about one message, and one answer for
+    /// all of them is what makes their verdicts agree.
+    pub decisions_cache: Arc<std::sync::Mutex<crate::proxy::DecisionsCache>>,
     /// user_id → wakes that produced no hello within the deadline (stale-box detector).
     pub stale_bounces: Arc<Mutex<HashMap<String, u32>>>,
     pub conn_seq: Arc<std::sync::atomic::AtomicU64>,
@@ -221,12 +255,15 @@ pub struct AppState {
     pub download_cache: Arc<Mutex<Option<(i64, String)>>>,
     /// user_id → box upgrade in progress (`POST /machine/upgrade`).
     pub upgrading: Arc<Mutex<HashMap<String, UpgradeStatus>>>,
+    /// user_id → the last upgrade the relay refused before touching the box (ARB-339: `/work`
+    /// over the carry limit). Shown as `upgrade.last_refused`; cleared by the next success.
+    pub upgrade_refused: Arc<Mutex<HashMap<String, UpgradeRefusal>>>,
     /// Hash of a just-rotated refresh token → (when, the pair it was rotated into). Within
     /// `signin::REFRESH_GRACE_MS` the old token gets that same pair again instead of counting
     /// as a replay, so concurrent refreshers from one device converge on one rotation.
     pub refresh_grace: Arc<Mutex<HashMap<String, (i64, serde_json::Value)>>>,
     /// Message notifications transport (APNs, a capture list in tests, or off).
-    pub push: Arc<crate::apns::Pusher>,
+    pub push: Arc<crate::push::Push>,
     /// device_id → the chat its presence says is on screen (suppresses that chat's pushes).
     pub focus: crate::notify::Focus,
     /// (chat_id, sender user) → when the row-level fallback last notified for it.
@@ -314,6 +351,14 @@ pub struct UpgradeStatus {
     pub to_snapshot: String,
 }
 
+/// An upgrade refused at the measure step: the box kept running, nothing was stopped or copied.
+#[derive(Debug, Clone)]
+pub struct UpgradeRefusal {
+    pub reason: String,
+    pub at: i64,
+    pub work_mib: i64,
+}
+
 impl AppState {
     pub async fn room(&self, name: &str) -> Arc<Room> {
         if let Some(r) = self.rooms.read().await.get(name) {
@@ -328,6 +373,7 @@ impl AppState {
                     replicas: Default::default(),
                     health_cache: std::sync::Mutex::new(None),
                     doc_cache: std::sync::Mutex::new(None),
+                    boxes: std::sync::Mutex::new(HashMap::new()),
                 })
             })
             .clone()
@@ -552,7 +598,7 @@ pub(crate) mod test_support {
                 .collect(),
         };
         AppState {
-            db,
+            db: db.clone(),
             cfg: Arc::new(cfg),
             http: reqwest::Client::new(),
             daytona: None,
@@ -562,15 +608,17 @@ pub(crate) mod test_support {
             box_conns: Arc::new(Mutex::new(HashMap::new())),
             wake_started: Arc::new(Mutex::new(HashMap::new())),
             last_client_push: Arc::new(Mutex::new(HashMap::new())),
+            decisions_cache: Arc::new(std::sync::Mutex::new(Default::default())),
             conn_seq: Arc::new(AtomicU64::new(0)),
             relay_key: Arc::new(RelayKey::derive("test-key")),
             jwt_key: Arc::new(RelayKey::derive("test-key").subkey("jwt")),
             download_cache: Arc::new(Mutex::new(None)),
             upgrading: Arc::new(Mutex::new(HashMap::new())),
+            upgrade_refused: Arc::new(Mutex::new(HashMap::new())),
             stale_bounces: Arc::new(Mutex::new(HashMap::new())),
             local_conns: Arc::new(Mutex::new(HashMap::new())),
             refresh_grace: Arc::new(Mutex::new(HashMap::new())),
-            push: Arc::new(crate::apns::Pusher::Capture(Mutex::new(Vec::new()))),
+            push: Arc::new(crate::push::Push::capture(db.clone())),
             focus: Arc::new(Mutex::new(HashMap::new())),
             fallback_sent: Arc::new(Mutex::new(HashMap::new())),
             livekit: None,

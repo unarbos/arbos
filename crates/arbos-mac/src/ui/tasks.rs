@@ -25,7 +25,7 @@
 use std::time::Instant;
 
 use gpui::{
-    anchored, deferred, div, prelude::*, px, Anchor, AnyElement, Context, Div, FontWeight,
+    anchored, deferred, div, prelude::*, px, Anchor, AnyElement, Context, Div, Entity, FontWeight,
     MouseButton, Stateful,
 };
 
@@ -33,6 +33,7 @@ use crate::app::AppState;
 use crate::model::{Id, Job, JobState};
 use crate::ui::cards;
 use crate::ui::glass;
+use crate::ui::highlight;
 use crate::ui::icons::icon;
 use crate::ui::mention::{self, ChipPointer};
 use crate::ui::presence::{self, Presence};
@@ -181,6 +182,7 @@ pub fn link(
 #[allow(clippy::too_many_arguments)]
 pub fn presence_row(
     presence: Presence,
+    app: &Entity<AppState>,
     chat_id: Id,
     jobs: Vec<Job>,
     open: bool,
@@ -190,17 +192,17 @@ pub fn presence_row(
     cx: &mut Context<Shell>,
 ) -> Div {
     if jobs.is_empty() {
-        return presence::row(presence, theme, cx);
+        return presence::row(presence, Some(app), theme, cx);
     }
     let count = jobs.len();
     let chip = chip(count, open, chat_id.clone(), pointer, theme, cx).into_any_element();
     // In a job tab the line is the job's own; elsewhere it links to the newest job's tab.
     let words = presence::shown_text(&presence, true);
     let mut row = if crate::jobtabs::is_job_chat(&chat_id) {
-        presence::row_with_chip(presence, chip, theme, cx).relative()
+        presence::row_with_chip(presence, Some(app), chip, theme, cx).relative()
     } else {
         let words = link(words, link_state, chat_id.clone(), theme, cx).into_any_element();
-        presence::row_with_chip_and_words(presence, chip, words, theme, cx).relative()
+        presence::row_with_chip_and_words(presence, Some(app), chip, words, theme, cx).relative()
     };
     if open {
         row = row.child(
@@ -412,7 +414,7 @@ fn job_row(
         .items_center()
         .gap(px(10.0))
         .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
+        .map(|el| highlight::row(el, false, highlight::Shape::Own, theme))
         .debug_selector(move || format!("tasks-row-{ix}"))
         .on_click(cx.listener(move |this, _, window, cx| {
             cx.stop_propagation();
@@ -469,7 +471,6 @@ fn text_button(
         .px(px(BUTTON_PAD_X))
         .flex_shrink_0()
         .rounded_full()
-        .bg(theme.surface_2)
         .flex()
         .items_center()
         .justify_center()
@@ -478,8 +479,7 @@ fn text_button(
         .text_color(color)
         .whitespace_nowrap()
         .cursor_pointer()
-        .hover(|s| s.bg(Theme::with_alpha(theme.text, 0.14)))
-        .active(|s| s.bg(Theme::with_alpha(theme.text, 0.22)))
+        .map(|el| highlight::washed(el, theme.surface_2, theme))
         .child(label.to_string())
 }
 

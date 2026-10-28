@@ -64,7 +64,8 @@ struct MessageActionsOverlay<Bubble: View>: View {
     private var mine: Bool { row.role == .user }
     private var gap: CGFloat { 8 }
     private var menuWidth: CGFloat { 250 }
-    private var menuHeight: CGFloat { CGFloat(items.count) * 44 + (items.contains(.delete) ? 8 : 0) }
+    /// The menu's height is its rows' (the same geometry `menu` draws and hit-tests).
+    private var menuHeight: CGFloat { MessageActionsMenuRows.compute(items: items, width: menuWidth).height }
 
     var body: some View {
         GeometryReader { geo in
@@ -116,6 +117,13 @@ struct MessageActionsOverlay<Bubble: View>: View {
         .transition(.opacity)
     }
 
+    // Every cell and every menu row is tappable over its WHOLE rect (feedback
+    // iphone-bubble-menu-hit-area-2026-10-26): a `.plain` Button only hit-tests the drawn
+    // glyphs — not `.frame` padding, not a `Spacer`, not a `Color.clear` background — so
+    // taps between the icon and the right edge of a row, or beside an emoji, fell
+    // through. `.contentShape(Rectangle())` over the full frame fixes that; the pressed
+    // highlight comes from `MenuRowButtonStyle` / `CapsuleCellButtonStyle`.
+
     private var capsule: some View {
         HStack(spacing: 0) {
             ForEach(ReactionCapsule.palette, id: \.self) { emoji in
@@ -126,8 +134,9 @@ struct MessageActionsOverlay<Bubble: View>: View {
                         .font(.system(size: ReactionCapsule.emojiSize))
                         .frame(width: ReactionCapsule.cell, height: ReactionCapsule.cell)
                         .background(Circle().fill(held.contains(emoji) ? theme.accent.opacity(0.22) : Color.clear))
+                        .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(CapsuleCellButtonStyle(pressed: theme.text.opacity(0.1)))
                 .accessibilityLabel("React \(emoji)")
             }
             Button {
@@ -143,48 +152,107 @@ struct MessageActionsOverlay<Bubble: View>: View {
                         .offset(x: 4, y: -3)
                 }
                 .frame(width: ReactionCapsule.cell, height: ReactionCapsule.cell)
+                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(CapsuleCellButtonStyle(pressed: theme.text.opacity(0.1)))
             .accessibilityLabel("More emoji")
         }
         .padding(ReactionCapsule.padding)
         .background(Capsule(style: .continuous).fill(theme.card))
         .overlay(Capsule(style: .continuous).strokeBorder(theme.separator, lineWidth: 1))
+        .overlay { hitRectsOverlay(ReactionCapsule.cellFrames) }
         .shadow(color: .black.opacity(0.35), radius: 14, y: 6)
         .padding(.horizontal, 16)
     }
 
     private var menu: some View {
-        VStack(spacing: 0) {
-            ForEach(Array(items.enumerated()), id: \.element) { i, item in
-                if item.isDestructive, i > 0 {
-                    Rectangle().fill(theme.bg.opacity(0.6)).frame(height: 8)
-                }
+        let rows = MessageActionsMenuRows.compute(items: items, width: menuWidth)
+        return VStack(spacing: 0) {
+            ForEach(rows.rows, id: \.item) { row in
                 Button {
-                    onMenu(item)
+                    onMenu(row.item)
                 } label: {
-                    HStack(spacing: 12) {
-                        Image(systemName: item.systemImage)
-                            .font(.system(size: 17))
-                            .frame(width: 22)
-                        Text(item.label).font(theme.font(Theme.body))
-                        Spacer(minLength: 0)
+                    VStack(spacing: 0) {
+                        if row.bandAbove > 0 {
+                            Rectangle().fill(theme.bg.opacity(0.6)).frame(height: row.bandAbove)
+                        }
+                        HStack(spacing: 12) {
+                            Image(systemName: row.item.systemImage)
+                                .font(.system(size: 17))
+                                .frame(width: 22)
+                            Text(row.item.label).font(theme.font(Theme.body))
+                            Spacer(minLength: 0)
+                        }
+                        .foregroundStyle(row.item.isDestructive ? theme.danger : theme.text)
+                        .padding(.horizontal, 16)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(height: MessageActionsMenuRows.rowHeight)
                     }
-                    .foregroundStyle(item.isDestructive ? theme.danger : theme.text)
-                    .padding(.horizontal, 16)
-                    .frame(height: 44)
+                    .frame(width: row.frame.width, height: row.frame.height)
+                    .overlay(alignment: .bottom) {
+                        if row.dividerBelow {
+                            Rectangle().fill(theme.separator)
+                                .frame(height: MessageActionsMenuRows.dividerHeight)
+                                .padding(.leading, MessageActionsMenuRows.dividerInset)
+                        }
+                    }
+                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
-                if i + 1 < items.count, !items[i + 1].isDestructive {
-                    Rectangle().fill(theme.separator).frame(height: 0.5).padding(.leading, 50)
-                }
+                .buttonStyle(MenuRowButtonStyle(pressed: theme.text.opacity(0.08), bandAbove: row.bandAbove))
+                .accessibilityIdentifier("message-menu-\(row.item.label.lowercased().replacingOccurrences(of: " ", with: "-"))")
             }
         }
-        .frame(width: menuWidth)
+        .frame(width: menuWidth, height: rows.height)
         .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(theme.card))
         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(theme.separator, lineWidth: 1))
+        .overlay { hitRectsOverlay(rows.rows.map(\.hitRect)) }
         .shadow(color: .black.opacity(0.35), radius: 14, y: 6)
         .padding(.horizontal, 16)
+    }
+
+    /// Rig only (`ARBOS_HIT_RECTS=1`): strokes each hit rect so a shot shows what a tap reaches.
+    @ViewBuilder
+    private func hitRectsOverlay(_ rects: [CGRect]) -> some View {
+        if DebugHooks.hitRects {
+            ZStack(alignment: .topLeading) {
+                ForEach(Array(rects.enumerated()), id: \.offset) { _, r in
+                    Rectangle()
+                        .strokeBorder(Color.green, lineWidth: 1.5)
+                        .background(Color.green.opacity(0.12))
+                        .frame(width: r.width, height: r.height)
+                        .offset(x: r.minX, y: r.minY)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .allowsHitTesting(false)
+        }
+    }
+}
+
+/// A menu row's pressed state: the label row tints, the destructive band above it does not.
+struct MenuRowButtonStyle: ButtonStyle {
+    let pressed: Color
+    let bandAbove: CGFloat
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(alignment: .bottom) {
+                if configuration.isPressed {
+                    Rectangle().fill(pressed).frame(height: MessageActionsMenuRows.rowHeight)
+                }
+            }
+    }
+}
+
+/// A capsule cell's pressed state: a soft disc under the emoji.
+struct CapsuleCellButtonStyle: ButtonStyle {
+    let pressed: Color
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(Circle().fill(configuration.isPressed ? pressed : Color.clear))
+            .scaleEffect(configuration.isPressed ? 1.12 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 
@@ -299,7 +367,8 @@ extension View {
             // ([feedback app-01M5Q1N6C1HAKHC6P2XPEWMRSS]).
             simultaneousGesture(
                 LongPressGesture(minimumDuration: 0.35)
-                    .onEnded { _ in onLongPress() }
+                    .onEnded { _ in onLongPress() },
+                enabled: ChatGestures.longPress
             )
         } else {
             contextMenu { MessageMenuContent(items: MessageMenu.copyOnly, action: onCopyMenu) }

@@ -2,6 +2,8 @@
 //! `crdt-sync.md` §6). No GPUI, no Loro: the sync layer fills these in, the
 //! views only read them.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
 pub use arbos_core::doc::ReplyRef;
@@ -80,6 +82,10 @@ pub struct Project {
     /// API §9: `machine {state, class, snapshot, always_on, …}` of the agent's box.
     #[serde(default)]
     pub machine_info: Option<ProjectMachine>,
+    /// A connected (outside) agent (#2141): its brain runs elsewhere, the relay hosts the
+    /// member. `GET /projects/{id}` carries this beside the DTO; `None` = a native agent.
+    #[serde(default)]
+    pub outside: Option<OutsideInfo>,
     /// People chats: my `me.muted` on the relay (synced across devices).
     #[serde(default)]
     pub muted: bool,
@@ -124,6 +130,14 @@ pub struct Project {
     /// owner allowed to message this agent. Empty unless I own it.
     #[serde(default)]
     pub message_grants: Vec<MessageGrant>,
+    /// Members I blocked, as `user:<id>` — the relay's `blockedSenders` hint on a people
+    /// chat ([feedback blocked-state-mac-2026-10-26]): their rows are hidden for me alone.
+    #[serde(default)]
+    pub blocked_senders: Vec<String>,
+    /// People chat: my membership role on the relay (`me.role`: `owner`, `admin` or
+    /// `member`); `None` when the relay did not say (fixture, older cache).
+    #[serde(default)]
+    pub my_role: Option<String>,
 }
 
 /// One row of an agent's "Who may message X" card (`message_grants` on the project).
@@ -166,6 +180,63 @@ pub struct Voice {
     pub sample_url: String,
 }
 
+/// The connection of an outside agent, as `GET /outside-agents/{id}` / the project detail
+/// report it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct OutsideInfo {
+    /// `connected` | `away` | `never` | `revoked`.
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub connected: bool,
+    /// `acp` | `grok` | `custom`.
+    #[serde(default)]
+    pub transport: String,
+    /// `asp/1`.
+    #[serde(default)]
+    pub protocol: String,
+    #[serde(default)]
+    pub last_seen_at: Option<i64>,
+    #[serde(default)]
+    pub connected_at: Option<i64>,
+}
+
+impl OutsideInfo {
+    /// The transport as the Details pane names it.
+    pub fn transport_label(&self) -> &'static str {
+        match self.transport.as_str() {
+            "acp" => "ACP · on your Mac",
+            "grok" => "Grok · HTTPS",
+            _ => "Custom · HTTPS / WebSocket",
+        }
+    }
+
+    /// "Connected · 12 s ago", "Away · 40 min ago", "Waiting for the first heartbeat",
+    /// "Disconnected".
+    pub fn status_line(&self, now: i64) -> String {
+        let ago = |t: i64| {
+            let s = ((now - t).max(0) / 1000).max(0);
+            if s < 60 {
+                format!("{s} s ago")
+            } else if s < 3600 {
+                format!("{} min ago", s / 60)
+            } else if s < 86_400 {
+                format!("{} h ago", s / 3600)
+            } else {
+                format!("{} d ago", s / 86_400)
+            }
+        };
+        match (self.status.as_str(), self.last_seen_at) {
+            ("revoked", _) => "Disconnected".to_owned(),
+            ("connected", Some(t)) => format!("Connected · {}", ago(t)),
+            ("connected", None) => "Connected".to_owned(),
+            ("away", Some(t)) => format!("Away · {}", ago(t)),
+            ("away", None) => "Away".to_owned(),
+            _ => "Waiting for the first heartbeat".to_owned(),
+        }
+    }
+}
+
 /// API §9 `project.machine`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProjectMachine {
@@ -206,6 +277,20 @@ impl Project {
     /// A people group chat (several humans, no project).
     pub fn is_people_group(&self) -> bool {
         self.kind == SpaceKind::Group
+    }
+
+    /// May I change this group's name, picture and description? The owner and admins
+    /// only — the relay refuses everyone else (`PATCH /chats/{id}` 403 since
+    /// 2026-10-27, after members renamed Arbonites), so the controls hide for them.
+    /// Without a role from the relay only the owner (by handle) counts.
+    pub fn may_edit_group_settings(&self, me_handle: &str) -> bool {
+        if !self.is_people_group() {
+            return false;
+        }
+        match self.my_role.as_deref() {
+            Some(role) => role == "owner" || role == "admin",
+            None => self.owner_handle.as_deref() == Some(me_handle),
+        }
     }
 
     /// Shown as a group page: a people group or a project with other humans in it.
@@ -1285,6 +1370,11 @@ pub struct Attachment {
     /// Caption for the card; the file name when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// The fallback picture of a chart bubble: names the `chart` part of the same message.
+    /// A client that draws the chart hides this attachment; an older one shows the picture
+    /// ([feedback chart-bubble-mac-2026-10-26]).
+    #[serde(default, rename = "chartPart", skip_serializing_if = "Option::is_none")]
+    pub chart_part: Option<String>,
 }
 
 impl Attachment {
@@ -1464,8 +1554,136 @@ pub enum Part {
         #[serde(default)]
         grant: Option<String>,
     },
+    /// The row a message becomes when its value moved into the vault (secret hand-off):
+    /// "Secret saved as NAME". Names only — there is no value field.
+    SecretRedacted {
+        id: Id,
+        #[serde(default)]
+        name: String,
+        #[serde(default)]
+        env: String,
+        #[serde(default)]
+        secret_id: String,
+        /// `user:<id>` whose message held the value.
+        #[serde(default)]
+        saved_by: String,
+        /// Project id of the agent that saved it.
+        #[serde(default)]
+        agent: Option<String>,
+    },
+    /// Chart bubble ([feedback chart-bubble-mac-2026-10-26]): the structured chart
+    /// `post_chart` posted. `chart` is the validated `arbos_core::chart::Chart` as JSON,
+    /// `table` its markdown table, `fallback` the PNG attachment part this client hides.
+    Chart {
+        id: Id,
+        #[serde(default)]
+        spec_version: u32,
+        #[serde(default)]
+        chart: serde_json::Value,
+        #[serde(default)]
+        table: String,
+        #[serde(default)]
+        fallback: Option<String>,
+    },
+    /// Link preview ([feedback link-embeds-mac-2026-10-27], #2065): the card the relay
+    /// unfurled for the message's first bare URL. Read-only here; `preview: "off"` on the
+    /// message hides it.
+    LinkPreview {
+        id: Id,
+        #[serde(flatten)]
+        preview: Box<LinkPreview>,
+    },
     #[serde(other)]
     Unknown,
+}
+
+/// What a `link_preview` part carries (relay `unfurl.rs`, spec 1). Everything but `title` is
+/// optional; `facts` are pre-formatted footer strings in order.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkPreview {
+    #[serde(default)]
+    pub spec_version: u32,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub canonical_url: String,
+    /// `spotify` `youtube` `x` `github` `bluesky` `vimeo` `loom` `soundcloud` `apple_music`
+    /// `google_maps` `wikipedia` `arbos` `file` `web`.
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub provider_name: String,
+    /// `song` `album` … `pull_request` `issue` `repo` `article` `image` `file` `place` `page`.
+    #[serde(default, rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub subtitle: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub facts: Vec<String>,
+    /// `open` `merged` `closed` `draft`.
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub diff: Option<PreviewDiff>,
+    /// "18:24" on a video thumbnail.
+    #[serde(default)]
+    pub duration: Option<String>,
+    #[serde(default)]
+    pub image: Option<PreviewImage>,
+    /// The final host ("github.com"): the shared link-icon tile picks its mark by it.
+    #[serde(default)]
+    pub site_host: Option<String>,
+    /// Reserved for the shared link-icon tile (a blob in the chat's slot); unused here.
+    #[serde(default)]
+    pub site_icon: Option<PreviewImage>,
+    /// `compact` (art row) or `expanded` (media on top).
+    #[serde(default)]
+    pub layout: String,
+}
+
+impl LinkPreview {
+    pub fn expanded(&self) -> bool {
+        self.layout == "expanded" && self.image.is_some()
+    }
+
+    /// "<title> — <provider>" for quote headers and one-line previews.
+    pub fn one_line(&self) -> String {
+        if self.provider_name.is_empty() {
+            self.title.clone()
+        } else {
+            format!("{} — {}", self.title, self.provider_name)
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewImage {
+    #[serde(rename = "ref", default)]
+    pub blob_ref: String,
+    #[serde(default)]
+    pub width: u32,
+    #[serde(default)]
+    pub height: u32,
+    #[serde(default)]
+    pub mime: String,
+    #[serde(default)]
+    pub art: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PreviewDiff {
+    #[serde(default)]
+    pub additions: u64,
+    #[serde(default)]
+    pub deletions: u64,
+    #[serde(default)]
+    pub files: u64,
 }
 
 fn open_state() -> QuestionState {
@@ -1881,6 +2099,47 @@ impl JobRollout {
     }
 }
 
+/// One person or agent a membership line names: `user:<id>` / `agent:<project id>` split.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoticeSubject {
+    pub kind: String,
+    pub id: String,
+}
+
+/// The facts behind a membership system line (relay `notices::Notice`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MembershipNotice {
+    /// `added` | `removed` | `left` | `joined`.
+    pub kind: String,
+    /// User id of the person who acted.
+    pub actor: String,
+    #[serde(default)]
+    pub subjects: Vec<NoticeSubject>,
+}
+
+impl MembershipNotice {
+    /// The line worded from `name_of` — `name_of("user", id)` / `name_of("agent", id)` is the
+    /// live roster name. `None` when anyone named is unknown to the roster (a person who has
+    /// since left, a deleted agent): the caller then shows the stored words.
+    pub fn text(&self, name_of: impl Fn(&str, &str) -> Option<String>) -> Option<String> {
+        let actor = name_of("user", &self.actor)?;
+        let names = self
+            .subjects
+            .iter()
+            .map(|s| name_of(&s.kind, &s.id))
+            .collect::<Option<Vec<String>>>()?;
+        match self.kind.as_str() {
+            "added" if !names.is_empty() => Some(format!("{actor} added {}", join_names(&names))),
+            "removed" if !names.is_empty() => {
+                Some(format!("{actor} removed {}", join_names(&names)))
+            }
+            "left" => Some(format!("{actor} left")),
+            "joined" => Some(format!("{actor} joined")),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
@@ -1903,6 +2162,12 @@ pub struct Message {
     /// Messages exchanged with the subagent on a hand-off row (1 = brief sent, 2 = result back).
     #[serde(default)]
     pub handoff_messages: Option<u32>,
+    /// A membership line's facts (relay `notices::Notice`): the actor and subjects by id, so
+    /// the line is worded from the live roster and a rename applies to old lines too
+    /// ("Const added Aureum" → "Jacob added Aureum", 2026-10-26). `None` on rows older than
+    /// the field — those keep their stored words.
+    #[serde(default)]
+    pub notice: Option<MembershipNotice>,
     /// A background worker the user never named (agentd, Grok parity trait 15): the
     /// transcript hides this spawn row — Grok shows no "N messages with …" line for its own
     /// workers — while the working line still reads its `activity`. An agent-to-agent
@@ -1998,11 +2263,112 @@ pub struct Message {
     /// the project; never read as the user's words.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub greeting: bool,
+    /// `"off"` once the sender removed the link preview for everyone (#2065); the
+    /// `link_preview` part, if any is still there, is not drawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
 }
 
 /// The reaction capsule's set, in Grok Bot's order (the iPhone's
 /// `MessageReaction.palette`); any other emoji comes from the system picker.
 pub const REACTION_PALETTE: [&str; 5] = ["😂", "👍", "👎", "❤️", "🎉"];
+
+/// What a message says and shows, as one thing — the accessor Forward, Copy and any
+/// other "take this message" action read, so they all see the same parts
+/// ([feedback forward-attachments-mac-2026-10-27]): the prose, every attachment that is
+/// on the relay (a chart's fallback picture excluded), and every chart with its fallback.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MessageBody {
+    pub text: String,
+    pub attachments: Vec<Attachment>,
+    pub charts: Vec<ChartBody>,
+}
+
+/// A chart bubble as a message carries it: the `chart` part plus its fallback picture
+/// when the message has one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChartBody {
+    /// Always a `Part::Chart`.
+    pub chart: Part,
+    pub fallback: Option<Attachment>,
+}
+
+/// An attachment the relay holds (not a `local:` key still uploading).
+fn on_relay(a: &Attachment) -> bool {
+    a.blob_ref
+        .as_deref()
+        .is_some_and(|k| !k.is_empty() && !k.starts_with("local:"))
+}
+
+impl Message {
+    /// The message's body, in part order; `None` when there is nothing to take —
+    /// no words, no attachment on the relay, no chart. A picture-only message has a
+    /// body like any other.
+    pub fn body(&self) -> Option<MessageBody> {
+        let text = self.plain_text().trim().to_owned();
+        let chart_fallbacks: HashSet<&str> = self
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                Part::Chart {
+                    fallback: Some(f), ..
+                } => Some(f.as_str()),
+                _ => None,
+            })
+            .collect();
+        let attachments: Vec<Attachment> = self
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                Part::Attachment { id, attachment }
+                    if !chart_fallbacks.contains(id.as_str()) && on_relay(attachment) =>
+                {
+                    Some(attachment.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        let charts: Vec<ChartBody> = self
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                Part::Chart { fallback, .. } => {
+                    let fallback = fallback.as_deref().and_then(|f| {
+                        self.parts.iter().find_map(|q| match q {
+                            Part::Attachment { id, attachment }
+                                if id == f && on_relay(attachment) =>
+                            {
+                                Some(attachment.clone())
+                            }
+                            _ => None,
+                        })
+                    });
+                    Some(ChartBody {
+                        chart: p.clone(),
+                        fallback,
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+        (!text.is_empty() || !attachments.is_empty() || !charts.is_empty()).then_some(MessageBody {
+            text,
+            attachments,
+            charts,
+        })
+    }
+
+    /// Does the message hold an attachment whose upload has not finished (a `local:` key)?
+    pub fn has_uploading_attachment(&self) -> bool {
+        self.parts.iter().any(|p| match p {
+            Part::Attachment { attachment, .. } => attachment
+                .blob_ref
+                .as_deref()
+                .is_some_and(|k| k.starts_with("local:")),
+            _ => false,
+        })
+    }
+}
 
 impl Message {
     /// Reactions as `(emoji, senders)`, palette order first, then the rest
@@ -2166,6 +2532,27 @@ impl Message {
                 }
                 _ => None,
             })
+    }
+
+    /// Does this message carry the `chart` part `part_id`? (Its fallback picture is
+    /// hidden only when the chart it stands in for is really here.)
+    pub fn has_chart_part(&self, part_id: &str) -> bool {
+        self.parts
+            .iter()
+            .any(|p| matches!(p, Part::Chart { id, .. } if id == part_id))
+    }
+
+    /// The link preview the relay attached, unless the sender switched it off.
+    pub fn link_preview(&self) -> Option<(&Id, &LinkPreview)> {
+        if self.preview.as_deref() == Some("off") {
+            return None;
+        }
+        self.parts.iter().find_map(|p| match p {
+            Part::LinkPreview { id, preview } if !preview.title.trim().is_empty() => {
+                Some((id, &**preview))
+            }
+            _ => None,
+        })
     }
 
     /// Open `question` parts of this message, newest last.
@@ -2487,9 +2874,42 @@ pub struct Secret {
     /// `refuse | card`: what a non-listed person's ask does (spec §7.7).
     #[serde(default)]
     pub others_ask: String,
+    /// Where it came from: `settings`, or `chat` + the agent it was handed to (secret hand-off).
+    #[serde(default)]
+    pub source: Option<SecretSource>,
+}
+
+/// Where a secret came from (`secret.source`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SecretSource {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub project_name: Option<String>,
+    #[serde(default)]
+    pub chat_id: Option<String>,
 }
 
 impl Secret {
+    /// "given in chat" for a hand-off secret, else nothing (list subtitle).
+    pub fn source_label(&self) -> Option<&'static str> {
+        self.source
+            .as_ref()
+            .filter(|s| s.kind == "chat")
+            .map(|_| "given in chat")
+    }
+
+    /// "In chat with Arbos" — the Secret page's Added row, when it came from a chat.
+    pub fn added_label(&self) -> Option<String> {
+        let s = self.source.as_ref().filter(|s| s.kind == "chat")?;
+        Some(match s.project_name.as_deref().filter(|n| !n.is_empty()) {
+            Some(n) => format!("In chat with {n}"),
+            None => "In chat".to_owned(),
+        })
+    }
+
     pub fn kind_label(&self) -> &'static str {
         match self.kind.as_str() {
             "login" => "Login",
@@ -2743,7 +3163,7 @@ pub struct DevicesView {
     pub items: Vec<DeviceView>,
     pub loaded: bool,
     /// Why the list could not be read, when it could not.
-    pub error: Option<String>,
+    pub error: Option<crate::sync::user_error::UserError>,
 }
 
 /// Settings → Secrets state (`GET /secrets` + `GET /secrets/requests`).
@@ -3227,12 +3647,26 @@ pub struct BoxReport {
     pub reachable: bool,
     pub unreachable_reason: Option<String>,
     pub uptime_s: Option<u64>,
-    /// 1-minute load average.
+    /// 1-minute load average. Inside a Daytona sandbox this is the **host's** (`load_scope`
+    /// = `host`, agentd ≥ 0.6.277): then it says nothing about the box and is not drawn.
     pub load_1m: Option<f64>,
+    pub load_is_host: bool,
     pub mem_total_mb: Option<u64>,
     pub mem_available_mb: Option<u64>,
     pub disk_total_mb: Option<u64>,
     pub disk_available_mb: Option<u64>,
+    /// `resources.cpu` (agentd ≥ 0.6.277): cores the box may use and the share busy over
+    /// the last 5 s.
+    pub cpu_cores: Option<f64>,
+    pub cpu_pct: Option<f64>,
+    /// `resources.disk.inodes_*`: file slots (#1857 — a box can be "full" with bytes free).
+    pub inodes_total: Option<u64>,
+    pub inodes_avail: Option<u64>,
+    /// `resources.net`: bytes per second over the last 5 s and bytes since the UTC day began.
+    pub net_rx_bps: Option<f64>,
+    pub net_tx_bps: Option<f64>,
+    pub net_rx_today: Option<u64>,
+    pub net_tx_today: Option<u64>,
     pub workspaces: Vec<BoxWorkspace>,
 }
 
@@ -3247,6 +3681,13 @@ pub struct BoxWorkspace {
     /// How long the current turn has run (`turn.current.elapsed_ms`).
     pub elapsed_ms: Option<u64>,
     pub tool_calls: Option<u64>,
+    /// Background jobs (sub-agents) running for this agent (`jobs_running`, agentd ≥ 0.6.277).
+    pub jobs_running: Option<u64>,
+    /// Its share of the box (`usage`, from the workspace cgroup and a cached `du`).
+    pub cpu_pct: Option<f64>,
+    pub mem_mb: Option<u64>,
+    pub pids: Option<u64>,
+    pub disk_mb: Option<u64>,
 }
 
 impl BoxReport {
@@ -3273,10 +3714,30 @@ impl BoxReport {
         }
         out.uptime_s = st["uptime_s"].as_u64();
         out.load_1m = st["load"].get(0).and_then(|l| l.as_f64());
-        out.mem_total_mb = st["memory_mb"]["total"].as_u64();
-        out.mem_available_mb = st["memory_mb"]["available"].as_u64();
+        out.load_is_host = st["load_scope"].as_str() == Some("host");
+        // `memory_mb` carries the cgroup cap on agentd ≥ 0.6.277 (the host's figures before);
+        // `resources.memory` is the same view with `used` instead of `available`.
+        let res = &st["resources"];
+        out.mem_total_mb = res["memory"]["total_mb"]
+            .as_u64()
+            .or_else(|| st["memory_mb"]["total"].as_u64());
+        out.mem_available_mb = match (
+            res["memory"]["total_mb"].as_u64(),
+            res["memory"]["used_mb"].as_u64(),
+        ) {
+            (Some(t), Some(u)) => Some(t.saturating_sub(u)),
+            _ => st["memory_mb"]["available"].as_u64(),
+        };
         out.disk_total_mb = st["disk"]["total_mb"].as_u64();
         out.disk_available_mb = st["disk"]["available_mb"].as_u64();
+        out.cpu_cores = res["cpu"]["cores"].as_f64();
+        out.cpu_pct = res["cpu"]["pct"].as_f64();
+        out.inodes_total = res["disk"]["inodes_total"].as_u64();
+        out.inodes_avail = res["disk"]["inodes_avail"].as_u64();
+        out.net_rx_bps = res["net"]["rx_bps"].as_f64();
+        out.net_tx_bps = res["net"]["tx_bps"].as_f64();
+        out.net_rx_today = res["net"]["rx_bytes_today"].as_u64();
+        out.net_tx_today = res["net"]["tx_bytes_today"].as_u64();
         out.workspaces = st["workspaces"]
             .as_array()
             .map(|ws| {
@@ -3288,11 +3749,43 @@ impl BoxReport {
                         running: w["turn"]["running"].as_bool().unwrap_or(false),
                         elapsed_ms: w["turn"]["current"]["elapsed_ms"].as_u64(),
                         tool_calls: w["turn"]["current"]["tool_calls"].as_u64(),
+                        jobs_running: w["jobs_running"].as_u64(),
+                        cpu_pct: w["usage"]["cpu_pct"].as_f64(),
+                        mem_mb: w["usage"]["mem_mb"].as_u64(),
+                        pids: w["usage"]["pids"].as_u64(),
+                        disk_mb: w["usage"]["disk_mb"].as_u64(),
                     })
                     .collect()
             })
             .unwrap_or_default();
         out
+    }
+
+    /// Workspaces whose box share the sampler reported (agentd ≥ 0.6.277), biggest memory
+    /// first — the per-agent breakdown.
+    pub fn usage_rows(&self) -> Vec<&BoxWorkspace> {
+        let mut rows: Vec<&BoxWorkspace> = self
+            .workspaces
+            .iter()
+            .filter(|w| w.cpu_pct.is_some() || w.mem_mb.is_some() || w.disk_mb.is_some())
+            .collect();
+        rows.sort_by(|a, b| {
+            b.running
+                .cmp(&a.running)
+                .then(b.mem_mb.unwrap_or(0).cmp(&a.mem_mb.unwrap_or(0)))
+                .then(a.name.cmp(&b.name))
+        });
+        rows
+    }
+
+    /// Background jobs running across every workspace, when any workspace reports the count.
+    pub fn jobs_running(&self) -> Option<u64> {
+        let counts: Vec<u64> = self
+            .workspaces
+            .iter()
+            .filter_map(|w| w.jobs_running)
+            .collect();
+        (!counts.is_empty()).then(|| counts.iter().sum())
     }
 
     /// The workspace of one agent, if the box lists it.
@@ -3610,6 +4103,8 @@ pub struct OptimisticNotice {
     pub id: Id,
     pub text: String,
     pub created_at: u64,
+    /// The facts the relay's row will carry (see [`Self::new`]).
+    pub notice: Option<MembershipNotice>,
 }
 
 impl OptimisticNotice {
@@ -3621,11 +4116,15 @@ impl OptimisticNotice {
     /// still counts as the same notice.
     const SKEW_MS: u64 = 15_000;
 
-    pub fn new(text: String, now: u64) -> Self {
+    /// `notice`: the same facts the relay's row will carry (actor = me, subjects by id), so
+    /// this copy is worded from the live roster like that row and matched to it by facts,
+    /// not by words a stale local name could get wrong ("Const added Aureum", 2026-10-26).
+    pub fn new(text: String, now: u64, notice: Option<MembershipNotice>) -> Self {
         Self {
             id: format!("{}{}", Self::ID_PREFIX, new_id()),
             text,
             created_at: now,
+            notice,
         }
     }
 
@@ -3642,6 +4141,7 @@ impl OptimisticNotice {
             subagent_id: None,
             subagent_name: None,
             handoff_messages: None,
+            notice: self.notice.clone(),
             worker: false,
             job: None,
             hidden: false,
@@ -3677,16 +4177,24 @@ impl OptimisticNotice {
             }],
             hidden_parts: Vec::new(),
             greeting: false,
+            preview: None,
         }
     }
 
-    /// The relay's row for this notice: a system line with the same words, written no earlier
-    /// than the local one (minus clock skew).
+    /// The relay's row for this notice: a system line with the same facts (or, from a relay
+    /// that writes none, the same words), written no earlier than the local one (minus
+    /// clock skew).
     pub fn confirmed_by(&self, m: &Message) -> bool {
-        m.role == Role::System
-            && !m.id.starts_with(Self::ID_PREFIX)
-            && m.created_at + Self::SKEW_MS >= self.created_at
-            && m.plain_text().trim() == self.text
+        if m.role != Role::System
+            || m.id.starts_with(Self::ID_PREFIX)
+            || m.created_at + Self::SKEW_MS < self.created_at
+        {
+            return false;
+        }
+        match (&self.notice, &m.notice) {
+            (Some(mine), Some(theirs)) => mine == theirs,
+            _ => m.plain_text().trim() == self.text,
+        }
     }
 }
 
@@ -3771,7 +4279,7 @@ mod optimistic_notice_tests {
             Some("Jacob added Home, hjkb and Doug")
         );
         assert_eq!(added_line("Jacob", &[]), None);
-        let n = OptimisticNotice::new("Jacob added Affine".into(), 1_000);
+        let n = OptimisticNotice::new("Jacob added Affine".into(), 1_000, None);
         let m = n.message("c");
         assert_eq!(m.role, Role::System);
         assert_eq!(m.plain_text(), "Jacob added Affine");
@@ -3781,7 +4289,11 @@ mod optimistic_notice_tests {
     #[test]
     fn a_local_notice_survives_snapshots_until_the_relay_row_confirms_it() {
         let now = 100_000;
-        let mut notices = vec![OptimisticNotice::new("Jacob added Affine".into(), now)];
+        let mut notices = vec![OptimisticNotice::new(
+            "Jacob added Affine".into(),
+            now,
+            None,
+        )];
         // Snapshot 1: something unrelated arrived; the local line stays, in time order.
         let mut snap = vec![user_row("m1", now - 5_000), user_row("m2", now + 300)];
         let confirmed = reconcile_optimistic_notices(&mut snap, &mut notices, now + 400);
@@ -3816,7 +4328,11 @@ mod optimistic_notice_tests {
     #[test]
     fn other_notices_and_old_rows_do_not_confirm_and_a_stale_notice_expires() {
         let now = 100_000;
-        let mut notices = vec![OptimisticNotice::new("Jacob added Affine".into(), now)];
+        let mut notices = vec![OptimisticNotice::new(
+            "Jacob added Affine".into(),
+            now,
+            None,
+        )];
         let mut snap = vec![
             relay_row("old", "Jacob added Affine", now - 60_000),
             relay_row("other", "Jacob removed Affine", now + 10),
@@ -3937,6 +4453,52 @@ mod add_members_tests {
         let plan = add_members_plan(&g, "unarbos", &[person("gh_1", "allan")], &[]);
         assert_eq!(plan.chat_id, "chat_testing");
         assert!(plan.handles.is_empty() && plan.agent_ids.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod group_settings_permission_tests {
+    //! The group pane's edit controls (picture crayon, inline name) follow the relay's
+    //! rule: owner and admins only ([feedback group-settings-permissions-2026-10-27]).
+
+    use super::*;
+
+    fn group(my_role: Option<&str>, owner: &str) -> Project {
+        Project {
+            id: "g".into(),
+            kind: SpaceKind::Group,
+            owner_handle: Some(owner.into()),
+            my_role: my_role.map(str::to_owned),
+            ..Project::default()
+        }
+    }
+
+    #[test]
+    fn owner_and_admin_edit_members_do_not() {
+        assert!(group(Some("owner"), "me").may_edit_group_settings("me"));
+        assert!(group(Some("admin"), "alice").may_edit_group_settings("me"));
+        assert!(!group(Some("member"), "alice").may_edit_group_settings("me"));
+        // The relay's role wins over the handle match.
+        assert!(!group(Some("member"), "me").may_edit_group_settings("me"));
+    }
+
+    #[test]
+    fn without_a_role_only_the_owner_by_handle_edits() {
+        assert!(group(None, "me").may_edit_group_settings("me"));
+        assert!(!group(None, "alice").may_edit_group_settings("me"));
+        let mut unknown_owner = group(None, "alice");
+        unknown_owner.owner_handle = None;
+        assert!(!unknown_owner.may_edit_group_settings("me"));
+    }
+
+    #[test]
+    fn dms_and_projects_have_no_group_settings() {
+        let mut dm = group(Some("owner"), "me");
+        dm.kind = SpaceKind::Dm;
+        assert!(!dm.may_edit_group_settings("me"));
+        let mut project = group(Some("owner"), "me");
+        project.kind = SpaceKind::Project;
+        assert!(!project.may_edit_group_settings("me"));
     }
 }
 

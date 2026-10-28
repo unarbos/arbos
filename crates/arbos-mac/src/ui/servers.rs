@@ -2,7 +2,8 @@
 //! Create, a field in a card, a line of help. **New server** asks for a name and lands on
 //! `#general`; **Join a server** takes an invite link or its code; **New channel** (owner/admin,
 //! from the `+` inside a server) takes a name — letters, digits and dashes — and the "Admins
-//! only post" switch. Errors from the relay show under the field, in the sheet.
+//! only post" switch. A refusal from the relay is the shared error note at the top of the
+//! sheet's body (Jacob, 2026-10-26).
 //!
 //! None of this appears when the relay answers `servers_off` (`ARBOS_MATRIX=off`, the remote
 //! kill switch): the rows, the sheets and the server list stay hidden on every device until
@@ -11,10 +12,12 @@
 use gpui::{div, prelude::*, px, Context, Div, Focusable as _};
 
 use crate::app::{AppState, ServerSheet};
+use crate::ui::error_note;
 use crate::ui::glass;
+use crate::ui::highlight::{self, Shape};
 use crate::ui::profiles::kit;
 use crate::ui::shell::Shell;
-use crate::ui::theme::{Theme, TEXT_SMALL, TEXT_TINY};
+use crate::ui::theme::{Theme, PANEL_RADIUS, TEXT_SMALL, TEXT_TINY};
 
 /// The open sheet, over everything; a click on the dimmed area cancels it.
 pub fn sheet(shell: &Shell, sheet: &ServerSheet, cx: &mut Context<Shell>) -> Div {
@@ -81,7 +84,7 @@ pub fn sheet(shell: &Shell, sheet: &ServerSheet, cx: &mut Context<Shell>) -> Div
                 .px(px(14.0))
                 .py(px(10.0))
                 .cursor_pointer()
-                .hover(|st| st.bg(theme.surface_2))
+                .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), &theme))
                 .child(
                     div()
                         .flex()
@@ -110,11 +113,35 @@ pub fn sheet(shell: &Shell, sheet: &ServerSheet, cx: &mut Context<Shell>) -> Div
                 })),
         );
     }
-    let mut body = div()
+    // The note (a refused create / join) goes first in the body, under the sheet header,
+    // before the field — the shared error element and its one place in a sheet.
+    let note = error.map(|slot| {
+        div().mx(px(16.0)).child(error_note::render(
+            "server-sheet-error",
+            &slot.error,
+            slot.details_open,
+            error_note::Style::Inline,
+            &theme,
+            error_note::Handlers::new()
+                .try_again(cx.listener(|this, _, window, cx| {
+                    this.submit_server_input(window, cx);
+                }))
+                .toggle_details(cx.listener(|this, _, _, cx| {
+                    this.state.update(cx, |s, cx| {
+                        if let Some(slot) = s.server_error.as_mut() {
+                            slot.toggle_details();
+                        }
+                        cx.notify();
+                    });
+                })),
+        ))
+    });
+    let body = div()
         .flex()
         .flex_col()
         .gap(px(10.0))
         .pb(px(18.0))
+        .children(note)
         .child(group)
         .child(
             div()
@@ -123,15 +150,6 @@ pub fn sheet(shell: &Shell, sheet: &ServerSheet, cx: &mut Context<Shell>) -> Div
                 .text_color(theme.text_faint)
                 .child(help),
         );
-    if let Some(err) = error {
-        body = body.child(
-            div()
-                .px(px(30.0))
-                .text_size(px(TEXT_SMALL))
-                .text_color(theme.danger)
-                .child(err),
-        );
-    }
 
     let left = glass::sheet_button("server-sheet-cancel", "Cancel", &theme)
         .on_click(cx.listener(|this, _, window, cx| this.close_server_sheet(window, cx)));

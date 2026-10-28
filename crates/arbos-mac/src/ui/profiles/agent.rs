@@ -46,6 +46,9 @@ use super::{chats_of, collect, editable_name, hero_picture, HeroClick, HERO_AVAT
 /// (the agent's box). Every pane keeps the structure (hero, pill, options),
 /// not a tab count.
 pub(super) const TABS: [&str; 3] = ["Details", "Library", "Computer"];
+/// A connected (outside) agent has no Arbos machine: Details · Library (#2141; the
+/// Connection and Key cards sit under Details, `connect_agent::details_sections`).
+pub(super) const OUTSIDE_TABS: [&str; 2] = ["Details", "Library"];
 /// Jacob 2026-10-25 ([feedback agent-details-remove-sections-mac-2026-10-25]):
 /// the Details tab hides its Coding and Routines cards for now. Temporary —
 /// flip this to bring them back; the Computer tab, the routines calls and the
@@ -79,7 +82,7 @@ fn project_from_member(state: &crate::app::AppState, project_id: &str) -> Option
             avatar_leaf_color: a.avatar_leaf_color,
             // The owner's picture travels with the roster copy; without it the hero drew the
             // automatic leaf for every foreign agent (Jacob, 2026-10-25: "Hezbola").
-            image_url: a.image_url.clone(),
+            image_url: a.image_url.clone(), // avatar-lint: allow (data copy, not a draw)
             avatar_version: a.avatar_version,
             description: a.description.clone(),
             owner_person: a.owner.clone(),
@@ -125,7 +128,12 @@ pub(super) fn page(
     let voice_text = crate::ui::voicepicker::current_label(&project, &state.voices);
     let pick = state.agent_pick;
     let renaming = state.profile_editing_name && mine;
-    let tab = state.profile_tab;
+    let outside = project.outside.clone();
+    // An outside agent has no Computer tab: a stale index lands on Details.
+    let tab = match state.profile_tab {
+        TAB_COMPUTER if outside.is_some() => 0,
+        t => t,
+    };
     let editing_description = state.profile_editing_description && mine;
     let pid: Id = project.id.clone();
     // Library tab: what the agent's chats hold (read while `state` is borrowed).
@@ -148,10 +156,9 @@ pub(super) fn page(
 
     // D92 amendment: the uploaded / generated picture wins over the leaf (read while `state`
     // is borrowed) — from the newest copy the store holds, like every other surface.
-    let hero_image = crate::sync::agent_avatar::newest(&state.projects, &project.id)
-        .and_then(|f| f.image_url)
-        .or_else(|| project.image_url.clone())
-        .and_then(|url| state.avatar(&url));
+    let hero_image = avatars::project_image(state, &project);
+    let newest_picture_url =
+        crate::sync::agent_avatar::newest(&state.projects, &project.id).and_then(|f| f.image_url); // avatar-lint: allow (resolver)
     if avatar_state != AvatarState::Idle || streaming {
         PulseClock::request(cx);
     }
@@ -188,16 +195,13 @@ pub(super) fn page(
         Box::new(f) as HeroClick
     });
     // Someone else's agent: its picture opens full-size in the media viewer (a leaf opens nothing).
-    let view_click = (!mine)
-        .then(|| project.image_url.clone())
-        .flatten()
-        .map(|url| {
-            let name = project.name.clone();
-            let f = cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
-                this.view_picture(&name, &url, cx);
-            });
-            Box::new(f) as HeroClick
+    let view_click = (!mine).then_some(newest_picture_url).flatten().map(|url| {
+        let name = project.name.clone();
+        let f = cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+            this.view_picture(&name, &url, cx);
         });
+        Box::new(f) as HeroClick
+    });
     let avatar = hero_picture("profile-avatar", picture, pic_click, view_click).into_any_element();
     let p_rename = pid.clone();
     let name_click = mine.then(|| {
@@ -279,6 +283,12 @@ pub(super) fn page(
         TAB_LIBRARY => library_sections(
             content.expect("collected for the Library tab"),
             shell,
+            &theme,
+            cx,
+        ),
+        _ if outside.is_some() => crate::ui::connect_agent::details_sections(
+            &pid,
+            outside.as_ref().expect("outside"),
             &theme,
             cx,
         ),
@@ -389,7 +399,11 @@ pub(super) fn page(
                 project_id: project.id.clone(),
             },
             hero,
-            tabs: &TABS,
+            tabs: if outside.is_some() {
+                &OUTSIDE_TABS
+            } else {
+                &TABS
+            },
             selected: tab,
             body,
             footer,
@@ -613,7 +627,7 @@ fn details_sections(
                     theme,
                 )
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
+                .group(kit::HOT)
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.state
                         .update(cx, |s, cx| s.set_profile_tab(TAB_COMPUTER, cx));
@@ -855,7 +869,20 @@ fn computer_sections(
                         kit::value_row("agent-box-memory", "Memory", mem, theme).into_any_element(),
                     );
                 }
-                if let Some(load) = r.load_1m {
+                // CPU share from the box's cgroup (agentd ≥ 0.6.277); the load average is
+                // the host's inside Daytona (`load_is_host`), so it is drawn only when it is
+                // really the box's and no CPU figure exists.
+                if let Some(cpu) = r.cpu_pct {
+                    rows.push(
+                        kit::value_row(
+                            "agent-box-cpu",
+                            "CPU",
+                            format!("{} %", cpu.round() as u64),
+                            theme,
+                        )
+                        .into_any_element(),
+                    );
+                } else if let Some(load) = r.load_1m.filter(|_| !r.load_is_host) {
                     rows.push(
                         kit::value_row("agent-box-load", "Load", format!("{load:.2}"), theme)
                             .into_any_element(),
@@ -1141,6 +1168,10 @@ mod tests {
         assert_eq!(r.image.as_deref(), Some("arbos-agent-0.1.114"));
         assert_eq!(r.disk_available_mb, Some(6900));
         assert_eq!(r.load_1m, Some(0.42));
+        assert!(!r.load_is_host);
+        assert_eq!(r.cpu_pct, None);
+        assert!(r.usage_rows().is_empty());
+        assert_eq!(r.jobs_running(), None);
         assert_eq!(r.workspaces.len(), 2);
         assert_eq!(r.running().count(), 1);
         assert_eq!(r.workspace("p1").unwrap().tool_calls, Some(7));
@@ -1155,6 +1186,51 @@ mod tests {
             Some("box has no url yet")
         );
         assert!(asleep.workspaces.is_empty());
+    }
+
+    /// agentd ≥ 0.6.277 ([feedback machine-page-agentd-2026-10-26]): `resources` carries the
+    /// cgroup cap (inside Daytona `/proc/meminfo` is the host's), `load_scope` says the load is
+    /// the host's, and every workspace has its share and job count.
+    #[test]
+    fn box_report_reads_the_samplers_resources_and_per_workspace_usage() {
+        let v: serde_json::Value = serde_json::json!({
+            "relay": { "state": "awake", "awake_for_s": 100, "agentd": { "image": "arbos-agent-0.1.152" } },
+            "box": { "reachable": true, "state": {
+                "uptime_s": 100, "load": [38.5, 36.9, 32.1], "load_scope": "host",
+                "memory_mb": { "total": 8192, "available": 7039, "source": "cgroup" },
+                "disk": { "path": "/work", "total_mb": 10240, "available_mb": 9925 },
+                "resources": {
+                    "sampled_at": 1, "load_scope": "host",
+                    "cpu": { "cores": 4.0, "pct": 23.4, "source": "cgroup" },
+                    "memory": { "total_mb": 8192, "used_mb": 1153, "peak_mb": 1204, "source": "cgroup" },
+                    "disk": { "total_mb": 10240, "used_mb": 315, "available_mb": 9925, "inodes_total": 131072, "inodes_avail": 93000 },
+                    "net": { "rx_bps": 1200000.0, "tx_bps": 80000.0, "rx_bytes_today": 2000000000u64, "tx_bytes_today": 100000000u64 }
+                },
+                "workspaces": [
+                    { "project_id": "p1", "name": "Arbos", "healthy": true, "jobs_running": 1,
+                      "usage": { "cpu_pct": 61.0, "mem_mb": 1900, "pids": 40, "disk_mb": 2300 },
+                      "turn": { "running": true, "current": { "elapsed_ms": 42000, "tool_calls": 7 } } },
+                    { "project_id": "p2", "name": "Comms", "healthy": true, "jobs_running": 0,
+                      "usage": { "cpu_pct": 0.0, "mem_mb": 600, "pids": 12, "disk_mb": 400 },
+                      "turn": { "running": false, "current": null } }
+                ]
+            } }
+        });
+        let r = BoxReport::from_debug(&v, 5);
+        assert!(r.load_is_host);
+        assert_eq!(r.cpu_cores, Some(4.0));
+        assert_eq!(r.cpu_pct, Some(23.4));
+        assert_eq!(r.mem_total_mb, Some(8192));
+        assert_eq!(r.mem_available_mb, Some(8192 - 1153));
+        assert_eq!(r.inodes_avail, Some(93000));
+        assert_eq!(r.net_rx_bps, Some(1_200_000.0));
+        assert_eq!(r.net_tx_today, Some(100_000_000));
+        assert_eq!(r.jobs_running(), Some(1));
+        let rows = r.usage_rows();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].name, "Arbos");
+        assert_eq!(rows[0].disk_mb, Some(2300));
+        assert_eq!(rows[1].jobs_running, Some(0));
     }
 }
 

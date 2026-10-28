@@ -63,18 +63,32 @@ struct AgentAvatar: View {
     var idle: Bool = false
     @State private var gust = 0
 
+    /// Jacob's rule (2026-10-26): every surface draws an agent through ONE resolver, keyed by
+    /// agent id and avatar version — never the copy it happened to be handed. The caller's
+    /// `project` names the agent (id, name, machine dot); what is drawn comes from the model's
+    /// newest copy (`AppModel.newestAgentAvatar`): a stale record or roster copy on some screen
+    /// (the mention table's raw `model.projects` entry, a roster row's `project`) can no longer
+    /// show a different picture than the row next to it.
+    private var shown: Project {
+        guard let model = AppModel.current, let facts = model.newestAgentAvatar(project.id) else { return project }
+        var p = project
+        p.imageKey = facts.imageKey
+        p.avatarLeaf = facts.avatarLeaf
+        p.avatarLeafColor = facts.avatarLeafColor
+        p.avatarVersion = facts.version
+        p.imageURL = model.agentPictureURL(id: project.id, imageKey: facts.imageKey, version: facts.version)
+        return p
+    }
+
     var body: some View {
-        ZStack(alignment: .bottomTrailing) {
+        let project = shown
+        Group {
             if let url = project.imageURL, !url.isEmpty {
-                // D92 amendment: the uploaded / generated picture wins over the leaf.
+                // D92 amendment: the uploaded / generated picture wins over the leaf. While the
+                // picture loads the disc is the neutral initial — never the leaf, which would
+                // read as "the agent's avatar changed" for a moment (Jacob, 2026-10-26).
                 AgentPicture(url: url, size: size) {
-                    if LeafArt.isNeutral(project.avatarLeaf) {
-                        NeutralAvatar(name: project.name, size: size)
-                    } else if flag.on {
-                        LeafAvatar(pick: LeafArt.pick(project), size: size)
-                    } else {
-                        Circle().fill(theme.field)
-                    }
+                    NeutralAvatar(name: project.name, size: size)
                 }
             } else if LeafArt.isNeutral(project.avatarLeaf) {
                 // Jacob, 2026-10-25: created with no leaf — the name's initial on a neutral disc.
@@ -88,17 +102,81 @@ struct AgentAvatar: View {
                 InitialsAvatar(name: project.name, handle: mentionSlug(project.name), id: project.id,
                                override: project.effectiveAvatarColorIndex, size: size)
             }
-            if let dot {
-                // Grok's status badge is 12 pt on a 48 pt row avatar; smaller avatars scale.
-                let d = min(size * 0.36, 12)
-                Circle()
-                    .fill(dot)
-                    .frame(width: d, height: d)
-                    .overlay(Circle().strokeBorder(theme.bg, lineWidth: 2))
-                    .offset(x: size * 0.08, y: size * 0.08)
-            }
         }
         .frame(width: size, height: size)
+        .presenceBadge(dot, size: size)
+    }
+}
+
+// MARK: - Presence badge
+
+/// The one status badge on a picture (Jacob 2026-10-27, [feedback
+/// presence-dot-layering-ios-2026-10-27]; `docs/mac-design-rules.md` § Avatars): the dot
+/// sits **in front of** the picture, past its bottom-right corner, inside a ring that is
+/// **cut out of the picture** — so whatever surface is behind (the page, a card, the
+/// header pill's material, Liquid Glass) shows through as the ring, and no colour has to
+/// be guessed per surface. Same numbers as the Mac's `ui::badge`: dot = size / 4 clamped
+/// 6–12 (12 on the 48 pt home circle, 8 on the 32 pt pill picture), ring 2 pt, the ring
+/// box 2 pt past the picture's edge. Every picture-with-dot goes through
+/// [`View.presenceBadge(_:size:)`]; `PresenceBadgeTests` fails the gate on a corner
+/// dot drawn by hand.
+enum PresenceBadge {
+    static let ringWidth: CGFloat = 2
+    static let overhang: CGFloat = 2
+    static let dotMin: CGFloat = 6
+    static let dotMax: CGFloat = 12
+
+    struct Metrics: Equatable {
+        let dot: CGFloat
+        let ring: CGFloat
+        let overhang: CGFloat
+    }
+
+    static func metrics(_ size: CGFloat) -> Metrics {
+        let dot = min(max((size / 4).rounded(), dotMin), dotMax)
+        return Metrics(dot: dot, ring: dot + 2 * ringWidth, overhang: overhang)
+    }
+
+    /// Cuts the ring out of `content` (a `size` square) and lays the dot over it.
+    struct Modifier: ViewModifier {
+        let color: Color?
+        let size: CGFloat
+
+        @ViewBuilder
+        func body(content: Content) -> some View {
+            if let color {
+                let m = PresenceBadge.metrics(size)
+                content
+                    .mask {
+                        ZStack(alignment: .bottomTrailing) {
+                            // Wider than the picture: a leaf's sway or a shadow must not be clipped.
+                            Rectangle().padding(-size)
+                            Circle()
+                                .frame(width: m.ring, height: m.ring)
+                                .offset(x: m.overhang, y: m.overhang)
+                                .blendMode(.destinationOut)
+                        }
+                        .compositingGroup()
+                    }
+                    .overlay(alignment: .bottomTrailing) {
+                        Circle()
+                            .fill(color)
+                            .frame(width: m.dot, height: m.dot)
+                            .offset(x: m.overhang - PresenceBadge.ringWidth, y: m.overhang - PresenceBadge.ringWidth)
+                            .accessibilityHidden(true)
+                    }
+            } else {
+                content
+            }
+        }
+    }
+}
+
+extension View {
+    /// A status dot (machine state) on this `size`-pt picture: in front of it, inside a
+    /// ring cut out of the picture. `nil` draws the bare picture in the same box.
+    func presenceBadge(_ color: Color?, size: CGFloat) -> some View {
+        modifier(PresenceBadge.Modifier(color: color, size: size))
     }
 }
 

@@ -1,27 +1,27 @@
 {
-  "id": "m1-todos-roundtrip",
-  "lane": "a",
-  "category": "managing",
-  "title": "Add todos, mark one done, show the list (3 turns)",
-  "turns": [
-    {
-      "prompt": "Keep a todo list for me in this chat. Add three todos: 'renew the TLS cert', 'review the Q4 budget', 'book the dentist'.",
-      "reply_regex": "cert|budget|dentist",
-      "timeout_s": 240
-    },
-    {
-      "prompt": "Mark 'review the Q4 budget' as done.",
-      "reply_regex": "done|complete|checked|✓|✔|\\[x\\]",
-      "timeout_s": 240
-    },
-    {
-      "prompt": "Show me the current todo list with what is open and what is done.",
-      "reply_regex": "cert[\\s\\S]*dentist|dentist[\\s\\S]*cert",
-      "rubric": {
-        "criteria": "The list shows 'renew the TLS cert' and 'book the dentist' as open and 'review the Q4 budget' as done; nothing else invented.",
-        "min": 4
-      },
-      "timeout_s": 240
-    }
-  ]
+ "id": "m1-todos-roundtrip",
+ "lane": "a",
+ "category": "managing",
+ "title": "Add todos, mark one done, show the list (3 turns)",
+ "turns": [
+  {
+   "prompt": "Keep a todo list for me in this chat. Add three todos: 'renew the TLS cert', 'review the Q4 budget', 'book the dentist'.",
+   "reply_regex": "cert|budget|dentist",
+   "timeout_s": 240
+  },
+  {
+   "prompt": "Mark 'review the Q4 budget' as done.",
+   "reply_regex": "done|complete|checked|✓|✔|\\[x\\]",
+   "timeout_s": 240
+  },
+  {
+   "prompt": "Show me the current todo list with what is open and what is done.",
+   "reply_regex": "cert[\\s\\S]*dentist|dentist[\\s\\S]*cert",
+   "rubric": {
+    "criteria": "The list shows 'renew the TLS cert' and 'book the dentist' as open and 'review the Q4 budget' as done; nothing else invented. Items added by other evaluation tasks in this project (for example 'renew passport') may also be present; they are not inventions.",
+    "min": 4
+   },
+   "timeout_s": 240
+  }
+ ]
 }

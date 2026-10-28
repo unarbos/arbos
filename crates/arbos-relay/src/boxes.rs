@@ -62,6 +62,20 @@ pub fn default_provider(state: &AppState) -> Provider {
     }
 }
 
+/// Where THIS user's next box goes: the admin override (`users.box_provider`) when set, else
+/// [`default_provider`]. The override exists so a scratch user can get a Daytona box on a host
+/// whose default is gVisor (the carry e2e of ARB-339); it never moves an existing box.
+pub fn provider_for_user(state: &AppState, user_id: &str) -> Provider {
+    state
+        .db
+        .user_provider(user_id)
+        .ok()
+        .flatten()
+        .as_deref()
+        .and_then(Provider::parse)
+        .unwrap_or_else(|| default_provider(state))
+}
+
 /// Environment every box gets. No provider key is in it (D2). Project-level settings (models,
 /// instructions, chats) are not baked in any more: the box learns them from `/box/hello` and the
 /// `/box/projects` poll, one workspace per project.
@@ -455,7 +469,7 @@ pub async fn start_box(state: &AppState, user_id: &str) -> Result<()> {
             // A user with projects but no box yet (pre-D70 data, or a fresh sign-in): create it on
             // first wake. On a full host (D89) the user is waitlisted instead and this is not an
             // error: the admission tick wakes them later.
-            let provider = default_provider(state);
+            let provider = provider_for_user(state, user_id);
             tracing::info!(%user_id, provider = provider.as_str(), "no box for this user yet; creating one");
             match ensure_user_box(state, user_id, provider).await {
                 Ok(_) => {}
@@ -739,6 +753,105 @@ pub async fn ensure_awake_project(state: &AppState, project_id: &str, reason: &s
     if let Some(u) = state.user_of(project_id) {
         ensure_awake(state, &u, reason).await;
     }
+}
+
+/// An agent that serves a chat room: the project whose push queue reaches it and the user
+/// whose box runs it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServingAgent {
+    pub project_id: String,
+    pub owner: String,
+}
+
+/// Push kinds that tell a box to open one chat's room now (#2120; agentd handles them from
+/// 0.1.169 — older agentd logs them as unknown). `chat_open` names a project chat
+/// (`{chat_id, reason, project_id, title?, is_pinned?, created_at?, forked_from?}`);
+/// `people_chat_open` a people chat (`{chat_id, reason}`). Neither marks a late join on the
+/// box: the rows waiting in the room are the work.
+pub const CHAT_OPEN_PUSH: &str = "chat_open";
+pub const PEOPLE_CHAT_OPEN_PUSH: &str = "people_chat_open";
+
+/// The `chat_open` payload: the chat row rides along because agentd's `open_listed_chat`
+/// upserts title / pin / created_at from it (a bare id would reset them).
+fn chat_open_payload(chat: &crate::db::Chat, reason: &str) -> Value {
+    json!({
+        "chat_id": chat.id,
+        "project_id": chat.project_id,
+        "reason": reason,
+        "title": chat.title,
+        "is_pinned": chat.is_pinned,
+        "created_at": chat.created_at,
+        "forked_from": chat.forked_from,
+    })
+}
+
+/// A new project chat exists: its box opens the room without waiting for the 3 s listing.
+/// Returns whether a push was queued (false when one is already waiting).
+pub fn chat_created(state: &AppState, chat: &crate::db::Chat) -> bool {
+    match state.db.enqueue_push_once(
+        &chat.project_id,
+        CHAT_OPEN_PUSH,
+        &chat_open_payload(chat, "created"),
+    ) {
+        Ok(added) => added,
+        Err(e) => {
+            tracing::warn!(chat = %chat.id, project = %chat.project_id, error = %e, "chat_open push not queued");
+            false
+        }
+    }
+}
+
+/// A person's row landed in `chat` — over a room socket or through `POST /chats/{id}/messages`:
+/// the wake obligation for every serving agent's box (crdt-sync §8.4 steps 1–2), and, for a
+/// box with no socket on this room, a push that opens the room now rather than at its next
+/// listing (#2120: the first row of a new chat used to reach the box only through the 3 s
+/// `/box/projects` poll, and a stalled poll cost Jacob a 9-minute first reply). Returns how
+/// many open pushes were queued.
+pub async fn after_person_row(
+    state: &AppState,
+    room: &crate::state::Room,
+    chat: &crate::notify::ChatRef,
+    agents: &[ServingAgent],
+) -> usize {
+    let mut queued = 0;
+    for a in agents {
+        state
+            .last_client_push
+            .lock()
+            .await
+            .insert(a.owner.clone(), now_ms());
+        ensure_awake(state, &a.owner, "send").await;
+        if room.has_box(&a.owner) {
+            continue;
+        }
+        let (kind, payload) = match &chat.project_id {
+            None => (
+                PEOPLE_CHAT_OPEN_PUSH,
+                json!({ "chat_id": chat.chat_id, "reason": "rows_pending" }),
+            ),
+            Some(pid) => {
+                // A row into a chat the relay has no row for (gone meanwhile): nothing to open.
+                let Ok(Some(row)) = state.db.chat(pid, &chat.chat_id) else {
+                    continue;
+                };
+                (CHAT_OPEN_PUSH, chat_open_payload(&row, "rows_pending"))
+            }
+        };
+        match state.db.enqueue_push_once(&a.project_id, kind, &payload) {
+            Ok(true) => {
+                queued += 1;
+                tracing::info!(
+                    chat = %chat.chat_id, project = %a.project_id, owner = %a.owner, kind,
+                    "row landed with no box socket on the room; told the box to open it"
+                );
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(chat = %chat.chat_id, project = %a.project_id, error = %e, "open push not queued")
+            }
+        }
+    }
+    queued
 }
 
 /// The user's box, created on first use (D32 moved from project to user).
