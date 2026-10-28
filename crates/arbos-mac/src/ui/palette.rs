@@ -29,6 +29,7 @@ use crate::ui::glass;
 use crate::ui::groups;
 use crate::ui::highlight;
 use crate::ui::icons::icon;
+use crate::ui::link_tile;
 use crate::ui::modal;
 use crate::ui::people;
 use crate::ui::shell::Shell;
@@ -136,6 +137,22 @@ pub fn overlay(
         arrange(entries, query.is_empty())
     };
     let rows = flatten(&arranged);
+    // The links section's tiles want the relay's icon for hosts without a bundled brand mark
+    // ([feedback link-icons-mac-adopt-2026-10-27]); asked once per host per session.
+    let wants: Vec<String> = rows
+        .iter()
+        .filter_map(|e| match &e.target {
+            Target::Link(url) if link_tile::Brand::for_url(url).is_none() => {
+                Some(crate::ui::profiles::link_icon_host(url))
+            }
+            _ => None,
+        })
+        .collect();
+    shell.state.update(cx, |s, _| {
+        for host in wants {
+            s.want_link_icon(host);
+        }
+    });
     if shell.palette.last_query != query {
         shell.palette.last_query = query.clone();
         // Typing resets the highlight to the top; the very first frame keeps
@@ -518,7 +535,13 @@ fn picture(shell: &Shell, entry: &Entry, theme: &Theme, cx: &Context<Shell>) -> 
                 None => tile("person").into_any_element(),
             }
         }
-        Target::Link(_) => tile("link").into_any_element(),
+        Target::Link(url) => {
+            // The one link tile: brand mark, the relay's icon, or the host's letter.
+            let icon_host = crate::ui::profiles::link_icon_host(url);
+            let host = crate::ui::profiles::link_host(url);
+            let icon = link_tile::icon_for(url, &host, state.link_icon(&icon_host));
+            link_tile::tile(icon, AVATAR, theme).into_any_element()
+        }
     }
 }
 
