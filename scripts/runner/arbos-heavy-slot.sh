@@ -241,7 +241,8 @@ acquire() {
     fair=0; fair_after=$RIG_FAIR_AFTER_GATES
     if ! is_gate_name "$name" && ! is_exempt_name "$name"; then
       (( $(rigs_waiting) >= RIG_CROWD_N )) && fair_after=1
-      (( $(cat "$GATE_GRANTS" 2>/dev/null || echo 0) >= fair_after )) && fair=1
+      # An empty counter file made `(( >= fair_after ))` a syntax error (chart rig, 05:3x Oct 28): read it into a variable.
+      local grants; grants=$(cat "$GATE_GRANTS" 2>/dev/null); grants=${grants//[^0-9]/}; (( ${grants:-0} >= fair_after )) && fair=1
     fi
     # Grant order: a due release first (it preempts gate halves and rigs); then gate halves; rigs when no gate half
     # waits or on their fair turn. A release not yet due still yields to a queued gate half, as before.
@@ -266,9 +267,9 @@ acquire() {
           (( waited_note )) && echo "$(ts) heavy-slot: $name got a slot after $(( $(date +%s) - t0 )) s" >&2
           [[ -n "$mark" ]] && rm -f "$mark" 2>/dev/null
           if is_gate_name "$name"; then
-            echo $(( $(cat "$GATE_GRANTS" 2>/dev/null || echo 0) + 1 )) > "$GATE_GRANTS" 2>/dev/null || true
+            { local g; g=$(cat "$GATE_GRANTS" 2>/dev/null); g=${g//[^0-9]/}; echo $(( ${g:-0} + 1 )) > "$GATE_GRANTS"; chmod 666 "$GATE_GRANTS"; } 2>/dev/null || true
           elif ! is_exempt_name "$name"; then
-            echo 0 > "$GATE_GRANTS" 2>/dev/null || true
+            { echo 0 > "$GATE_GRANTS"; chmod 666 "$GATE_GRANTS"; } 2>/dev/null || true  # world-writable: rigs run as ec2-user and arbosgui
             if (( fair )); then echo "$RIG_FAIR_LEASE_S" > "$slot/lease"; echo "$(ts) heavy-slot: $name took its fair-share turn (lease ${RIG_FAIR_LEASE_S}s, after $fair_after gate grant(s), $(rigs_waiting) rig(s) waiting) ahead of a queued gate half" >&2; fi
             if is_p0_rig "$name"; then echo "$P0_RIG_LEASE_S" > "$slot/lease"; echo "$(ts) heavy-slot: $name is a P0 rig — first in the rig queue, lease ${P0_RIG_LEASE_S}s" >&2; fi
           fi
