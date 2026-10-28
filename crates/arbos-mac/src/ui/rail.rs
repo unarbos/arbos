@@ -493,9 +493,12 @@ pub(crate) fn render(shell: &Shell, cx: &mut Context<Shell>) -> gpui::Stateful<D
     // The rail's right edge is the same resize handle as the sidebar's:
     // dragging it out past the snap width restores the column at its last
     // width ([feedback sidebar-narrow-wrap-2026-10-27]).
-    column
-        .child(account)
-        .child(sidebar::resize_handle("rail-resize", &theme, cx))
+    column.child(account).child(sidebar::resize_handle(
+        "rail-resize",
+        &theme,
+        &shell.split_drag,
+        cx,
+    ))
 }
 
 /// The hovered picture's name, drawn at the root so the rail's clip never cuts

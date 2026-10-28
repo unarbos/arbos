@@ -173,6 +173,35 @@ the_rows_time_shrinks_then_hides_before_the_name_gives,
 dragging_past_the_snap_point_collapses_to_the_rail_and_back_restores_the_width}`.
 Rig: `<config>/sidebar_width` (the saved width) + `ARBOS_SIDEBAR_COLLAPSED=0`.
 
+## Split handles: a wide grab, a hairline look (Jacob 2026-10-28, [feedback sidebar-slide-handle-minimal-2026-10-28])
+
+**Every split / resize handle on the Mac is macOS's split-view divider: what
+the pointer grabs is wide and invisible, what the eye sees is at most a 1 pt
+low-contrast hairline that brightens a little on hover and a little more while
+dragging. Never a thick bar, never a coloured fill.** Jacob (2026-10-28 15:15 UTC, v0.6.331): "the
+slide highlight on the side bar is wrong. Should make this much more minimal"
+— the sidebar's handle lit its whole 10 pt band in `primary` at 45 % on hover,
+a fat light-grey bar down the sidebar's edge. #2082's tester note ("fidgety")
+was about the grab, not the look; the grab stays generous, the look goes.
+Rules (`ui/split_handle.rs`):
+
+| Part | Rule |
+|---|---|
+| Hit band | `HIT_WIDTH` **10** pt inside the pane's right edge, full height, `col-resize` cursor, **never drawn** (8–10 pt is the range: easy to start, does not eat the list) |
+| Idle | nothing of the handle's own; the pane's separator is the only line — the sidebar's and the rail's `border_r_1` in `theme.border` (white 8 % / black 10 %), the right info pane's `pane_edge` hairline |
+| Hover | a `LINE_WIDTH` **1** pt hairline flush with the edge, over the separator, text colour at `HOVER_ALPHA` **0.18** — a step above the border, still low contrast |
+| Dragging | the same hairline at `DRAG_ALPHA` **0.30** — one step more, held for the whole gesture (GPUI suppresses hover styles during a drag; `split_handle::DragState` carries the state, raised with the drag's ghost view and lowered when GPUI drops it at mouse up) |
+| Where | one builder, `split_handle::right_edge(id, theme, dragging)`; the sidebar's `sidebar-resize` and the rail's `rail-resize` are that element with the drag wiring (`sidebar::resize_handle`). The right info pane has a fixed width (`Shell::pane_width`) and so no handle — its hairline rule is the one above. Any new divider uses the same builder |
+| Snap / width rules | unchanged: `SIDEBAR_WIDTH_MIN` 220, hysteresis 16, rail snap and restore (`ui/sidebar_fit.rs`, § above) |
+
+Pinned by `split_handle::tests::{the_hit_band_is_generous_and_the_line_is_a_hairline,
+the_line_is_dark_at_rest_and_brightens_in_two_steps,
+the_drag_state_lowers_itself_when_the_ghost_drops,
+the_rendered_hit_band_is_wide_and_the_drawn_line_is_one_point}` (a headless
+render measures the hit band at 10 × full height and the drawable line at
+1 × full height, both flush with the pane's edge). The `// hover-fill:
+exception handle` marker in `highlight`'s lint is this hairline's.
+
 ## Sidebar footer (Jacob 2026-10-24, [feedback footer-avatar-grok-size-2026-10-24])
 
 **The footer is the top strip mirrored at the window's bottom edge: a 60 pt
@@ -859,6 +888,23 @@ ack rises by exactly the reply's row; scrolled into history → no row). Record:
 project store `internal/feedback-loop/status-row-gap-2026-10-26.md`, shots in
 `media/feedback/status-row-gap/`.
 
+### iPhone chat bar: an opaque band with a short fade, like Grok Bot (Jacob 2026-10-28, [feedback iphone-composer-bottom-fade-2026-10-28])
+
+Grok's messages fade out into the solid page colour above the composer; nothing
+is readable behind or between the `+`, the field and the voice pill. Ours hung a
+24 pt gradient over the bar and rows read through around the controls.
+
+| Item | Rule (pt) | Code |
+| --- | --- | --- |
+| Band | opaque from the bar's top edge (8 over the status row / composer) through the home indicator; keyboard up → ends on the keyboard and moves with it | `ComposerBandMaterial`, the bar's `.background` in `ChatView` |
+| Fade | **28** above the bar's top, clear → band, over the transcript; drawn in the chat canvas under the ↓ chevron and the new-messages pill | `Theme.composerFade`, `ComposerBottomFade` |
+| Last row at rest | fully above the fade: the transcript's tail = the fade's height | `Theme.transcriptTail` |
+| Material | Matte: the page colour. Glass: `.ultraThinMaterial` under the list top fade's 0.94 wash | `ComposerBottomBand.wash(glass:)` |
+
+Pinned by `ArbosTests/ComposerBottomBandTests`. Record: project store
+`internal/feedback-loop/iphone-composer-bottom-fade-2026-10-28.md`, shots in
+`media/feedback/iphone-composer-fade/`.
+
 ## iPhone control family — one size for every round button, pill, field and bar (iPhone only; Jacob 2026-10-26, [feedback iphone-header-composer-sizing-2026-10-26])
 
 **iPhone only.** The Mac keeps its own `CONTROL` family (36 pt discs and pill, 44 pt
@@ -1339,7 +1385,7 @@ a slightly stronger fill of the same shape; pressed = one step more.** One token
 | Fills | washes of `text` so one number reads the same on the chat, sidebar, card, frosted plate and Glass. Matte dark **0.055 / 0.09 / 0.13** (hover / selected / pressed), Matte light **0.045 / 0.08 / 0.12**, Glass dark **0.08 / 0.12 / 0.16**, Glass light **0.06 / 0.10 / 0.14**. A selected row keeps its step under the pointer; pressed is the third step for every row | `highlight::alphas`, `highlight::fills` |
 | Transparent buttons | an icon disc, a text button, a tab segment, a small ×: the same hover / pressed washes on its own rounded shape | `highlight::button`, `button_with` (extra hover styling), `segment` (the on segment is a filled control) |
 | Filled controls | the fill at rest, the wash composited over it under the pointer and while down — `surface_2` discs and pills, `field` pills, the glass circle, the blue update disc. Dark: the old chip rule (a shade lighter); light: a shade darker (lifting `#E8E8E8` toward white vanished on the `#F6F6F6` sidebar). `DISC_HOVER_LIFT` / `DISC_PRESSED_LIFT` are gone | `highlight::washed(el, base, theme)`, `highlight::over` |
-| Exceptions | a line that must set its own fill says why: `// hover-fill: exception <kind>` on it or the line above — `handle` (the sidebar resize hairline), `overlay` (white / black washes over a photo or video), `code-card` (the copy pill's four states), `danger` (a Delete label's `danger_soft`), `card-option` (the approval card's own palette), `choice` (a chosen chip / segment in a form, not a list selection), `removed-by-sibling`. The "Add agent" / "Add your agent" rows and the add-agent popover are untouched while [feedback add-agent-row-removal] removes them | `highlight::tests::EXCEPTION_KINDS` |
+| Exceptions | a line that must set its own fill says why: `// hover-fill: exception <kind>` on it or the line above — `handle` (a split handle's hover hairline, `ui/split_handle.rs`), `overlay` (white / black washes over a photo or video), `code-card` (the copy pill's four states), `danger` (a Delete label's `danger_soft`), `card-option` (the approval card's own palette), `choice` (a chosen chip / segment in a form, not a list selection), `removed-by-sibling`. The "Add agent" / "Add your agent" rows and the add-agent popover are untouched while [feedback add-agent-row-removal] removes them | `highlight::tests::EXCEPTION_KINDS` |
 | Focus | the keyboard focus ring is not part of this token and did not change | — |
 
 Pinned by `highlight::tests::no_hover_or_pressed_fill_outside_the_token` (scans `src/ui` for
