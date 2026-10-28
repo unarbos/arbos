@@ -273,8 +273,13 @@ pub fn card(
         .relative()
         .flex()
         .flex_col()
-        .w_full()
-        .max_w(px(CARD_MAX_WIDTH))
+        // A definite width, not `w_full` capped at 400: the bubble shrink-wraps its content, and
+        // Taffy sizes a percentage-wide child at its unwrapped text width before the cap
+        // applies — a title that wraps at 400 pt came out a line short and the footer was
+        // clipped (v0.6.310 proof shot, the YouTube row). `max_w_full` keeps a narrower bubble
+        // (window at its 900 pt minimum) from overflowing.
+        .w(px(CARD_MAX_WIDTH))
+        .max_w_full()
         .rounded(px(CARD_RADIUS))
         .border_1()
         .border_color(theme.border)
