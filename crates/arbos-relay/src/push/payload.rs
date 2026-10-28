@@ -151,9 +151,7 @@ pub fn badge_only(total: i64) -> Value {
 }
 
 /// Silent clear for one chat. The app side (iPhone, the clear-on-read item) reads `type`,
-/// `chat_id`, `upto_message_id` and `badge`. No caller on the relay yet: the clear-on-read
-/// item enqueues it.
-#[allow(dead_code)]
+/// `chat_id`, `upto_message_id` and `badge`; `notify::clear_on_read` enqueues it.
 pub fn clear(chat_id: &str, upto_message_id: Option<&str>, badge: i64) -> Value {
     let mut v = json!({
         "aps": { "content-available": 1 },

@@ -6857,6 +6857,24 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
         "Sending in a sec. Also: can we add your Arbos agent here so it can pull the numbers while we talk?",
         base + 150_000,
     ));
+    if std::env::var("ARBOS_FIXTURE_LINKS").is_ok_and(|v| v == "1") {
+        // Sam's Links tab ([feedback link-icons-mac-tile-2026-10-27] shots): a brand with a
+        // mono mark, one with a colour, X, and a site with no bundled mark.
+        for (i, text) in [
+            "The repo: https://github.com/unarbos/arbos",
+            "Launch playlist https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M?si=abc",
+            "Their post https://x.com/arbos/status/1982341234567890123",
+            "Background reading https://nypost.com/2026/10/25/business/musk-says-spacex-cut-ukraines-starlink-access/",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            insert_message_via_core(
+                &doc,
+                &human_message(DM_SAM, &sam(), text, base + 160_000 + i as u64 * 5_000),
+            );
+        }
+    }
     // The Launch week group's rows are built here so the DM can quote them
     // (`ARBOS_FIXTURE_REPLY_DM=1`, #1835: Reply in DM carries the original).
     let samir = person("gh_457", "samir", Some("Samir Haddad"), "member");
