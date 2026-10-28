@@ -286,6 +286,9 @@ enum Mode {
         reply_to: Option<String>,
         /// Reply in DM: the quoted message in another chat (`replyRef` on the row).
         reply_ref: Option<Box<arbos_core::doc::ReplyRef>>,
+        /// An uploaded attachment (`{name, mime, kind, ref, bytes, width?, height?}`) added as a
+        /// part beside the text.
+        attachment: Option<Value>,
     },
     /// Append one out-of-band command (`stop`, `approve`, `reject`) and exit on its ack.
     Command {
@@ -483,6 +486,7 @@ async fn run(
                         answer,
                         reply_to,
                         reply_ref,
+                        attachment,
                     } => {
                         s.print_new();
                         let msg_id = ulid();
@@ -530,6 +534,9 @@ async fn run(
                                     &extra,
                                 );
                             }
+                        }
+                        if let Some(a) = attachment {
+                            s.doc.add_attachment_part(&msg_id, a);
                         }
                         if let Some(reply_to) = reply_to {
                             s.doc
@@ -656,6 +663,7 @@ pub async fn send(
     text: &str,
     reply_to: Option<&str>,
     reply_ref: Option<&arbos_core::doc::ReplyRef>,
+    attachment: Option<&Value>,
     stream: bool,
     timeout_s: u64,
 ) -> Result<()> {
@@ -669,6 +677,7 @@ pub async fn send(
             answer: None,
             reply_to: reply_to.map(str::to_owned),
             reply_ref: reply_ref.cloned().map(Box::new),
+            attachment: attachment.cloned(),
         },
         Duration::from_secs(timeout_s),
     )
@@ -696,6 +705,7 @@ pub async fn answer(
             answer: Some((question_id.unwrap_or("").to_owned(), value)),
             reply_to: None,
             reply_ref: None,
+            attachment: None,
         },
         Duration::from_secs(timeout_s),
     )
