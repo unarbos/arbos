@@ -173,4 +173,35 @@ final class ComposerMetricsTests: XCTestCase {
             assertOnPixel(value, name)
         }
     }
+
+    // MARK: Pending attachments ([feedback composer-attachment-removal-ios-2026-10-27])
+
+    private func pendingTrio() -> [AppModel.PendingAttachment] {
+        [.init(name: "profile-card.png", mime: "image/png", data: Data([1])),
+         .init(name: "portrait.png", mime: "image/png", data: Data([2])),
+         .init(name: "notes.txt", mime: "text/plain", data: Data([3]))]
+    }
+
+    func testRemovingOnePendingAttachmentKeepsTheOthers() {
+        let trio = pendingTrio()
+        let left = ChatSession.removingPending(trio[1].id, from: trio)
+        XCTAssertEqual(left.map(\.name), ["profile-card.png", "notes.txt"])
+        XCTAssertEqual(ChatSession.removingPending(UUID(), from: trio).count, 3, "an unknown id removes nothing")
+    }
+
+    func testBackspaceOnAnEmptyDraftRemovesTheLastPendingAttachment() {
+        let trio = pendingTrio()
+        let two = ChatSession.removingLastPending(from: trio, draftEmpty: true)
+        XCTAssertEqual(two.map(\.name), ["profile-card.png", "portrait.png"])
+        XCTAssertEqual(ChatSession.removingLastPending(from: trio, draftEmpty: false).count, 3,
+                       "with text in the draft the key edits text, never the strip")
+        XCTAssertTrue(ChatSession.removingLastPending(from: [], draftEmpty: true).isEmpty)
+    }
+
+    func testPendingRemoveHitTargetIsAtLeastTwentyPoints() {
+        XCTAssertGreaterThanOrEqual(Theme.pendingRemoveHit, 20)
+        // The glyph keeps 10 pt from the capsule's edge whatever the hit frame.
+        XCTAssertEqual(Theme.pendingChipTrailing + (Theme.pendingRemoveHit - Theme.pendingRemoveGlyph) / 2, 10)
+        XCTAssertGreaterThanOrEqual(Theme.pendingChipTrailing, 0)
+    }
 }

@@ -521,6 +521,10 @@ pub mod metrics {
             b
         }
     }
+    /// The toast slot (`shell::render_notices`): just below the pill — under the connection
+    /// pill when it hangs there — centred on the chat column (Jacob 2026-10-27, [feedback
+    /// toast-stack-mac-2026-10-27]).
+    pub const TOAST_SLOT_TOP: f32 = LINK_PILL_TOP + LINK_PILL_HEIGHT + 8.0;
 }
 
 /// The frame of every chat header — agent, DM, group, server channel: the top
