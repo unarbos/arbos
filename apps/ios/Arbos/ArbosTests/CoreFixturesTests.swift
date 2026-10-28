@@ -64,11 +64,14 @@ final class CoreFixturesTests: XCTestCase {
                 XCTAssertFalse(msg.reactions.isEmpty, "row \(i) reactions", file: file, line: line)
                 for (emoji, people) in reactions {
                     guard let people = people as? [String: Any] else { continue }
-                    let got = msg.reactions.first { $0.emoji == emoji }
-                    XCTAssertNotNil(got, "row \(i) missing emoji \(emoji)", file: file, line: line)
+                    // Core stores the collapsed base (👍); chips must use that key, not a palette tone.
+                    let base = MessageReaction.normalizeEmoji(emoji)
+                    let got = msg.reactions.first { MessageReaction.sameBase($0.emoji, emoji) }
+                    XCTAssertNotNil(got, "row \(i) missing emoji \(base)", file: file, line: line)
+                    XCTAssertEqual(got?.emoji, base, "row \(i) chip key \(base)", file: file, line: line)
                     for (sender, flag) in people {
                         guard (flag as? Bool) == true else { continue }
-                        XCTAssertTrue(got?.senders.contains(sender) == true, "row \(i) \(emoji)/\(sender)", file: file, line: line)
+                        XCTAssertTrue(got?.senders.contains(sender) == true, "row \(i) \(base)/\(sender)", file: file, line: line)
                     }
                 }
             }
@@ -878,5 +881,21 @@ final class CoreFixturesTests: XCTestCase {
             spendTodayUsd: 0,
             spendCapUsd: 0
         )
+    }
+
+    // MARK: Animated image frames (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG)
+
+    /// GIF and animated WebP fixtures decode to 3 frames; a PNG stays still (`nil`).
+    func testAnimatedImageFramesFixtures() throws {
+        let gif = try fixtureData("anim_three.gif")
+        let gifFrames = try XCTUnwrap(AnimatedImageFrames.frames(from: gif))
+        XCTAssertEqual(gifFrames.images.count, 3)
+
+        let webp = try fixtureData("anim_three.webp")
+        let webpFrames = try XCTUnwrap(AnimatedImageFrames.frames(from: webp))
+        XCTAssertEqual(webpFrames.images.count, 3)
+
+        let png = try fixtureData("anim_still.png")
+        XCTAssertNil(AnimatedImageFrames.frames(from: png), "PNG is still")
     }
 }

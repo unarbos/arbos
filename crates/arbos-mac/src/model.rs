@@ -1355,6 +1355,16 @@ impl AttachmentKind {
     }
 }
 
+/// Where a GIF / sticker came from. Written on the attachment as
+/// `{ provider, id, pageUrl }`; old messages and pastes have none.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentSource {
+    pub provider: String,
+    pub id: String,
+    pub page_url: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Attachment {
@@ -1375,6 +1385,10 @@ pub struct Attachment {
     /// ([feedback chart-bubble-mac-2026-10-26]).
     #[serde(default, rename = "chartPart", skip_serializing_if = "Option::is_none")]
     pub chart_part: Option<String>,
+    /// GIF-picker attribution; when set the bubble shows "via \<provider\>".
+    /// Boxed so [`Attachment`] stays small inside enums (Outgoing, library Entry).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<Box<AttachmentSource>>,
 }
 
 impl Attachment {
@@ -2388,31 +2402,45 @@ impl Message {
 impl Message {
     /// Reactions as `(emoji, senders)`, palette order first, then the rest
     /// alphabetically; emojis nobody holds any more are dropped.
+    /// Skin-tone variants of the same base merge into one chip.
     pub fn reaction_list(&self) -> Vec<(String, Vec<String>)> {
-        let senders = |emoji: &str| -> Vec<String> {
-            self.reactions
-                .get(emoji)
-                .map(|people| {
-                    people
-                        .iter()
-                        .filter(|(sid, on)| !sid.is_empty() && **on)
-                        .map(|(sid, _)| sid.clone())
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
-        let mut out: Vec<(String, Vec<String>)> = REACTION_PALETTE
-            .iter()
-            .map(|e| (e.to_string(), senders(e)))
-            .filter(|(_, s)| !s.is_empty())
-            .collect();
-        out.extend(
-            self.reactions
-                .keys()
-                .filter(|e| !e.is_empty() && !REACTION_PALETTE.contains(&e.as_str()))
-                .map(|e| (e.clone(), senders(e)))
-                .filter(|(_, s)| !s.is_empty()),
-        );
+        use arbos_core::doc::normalize_reaction_emoji;
+        use std::collections::{BTreeMap, BTreeSet};
+        let mut by_base: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for (emoji, people) in &self.reactions {
+            if emoji.is_empty() {
+                continue;
+            }
+            let base = normalize_reaction_emoji(emoji);
+            if base.is_empty() {
+                continue;
+            }
+            let entry = by_base.entry(base).or_default();
+            for (sid, on) in people {
+                if *on && !sid.is_empty() {
+                    entry.insert(sid.clone());
+                }
+            }
+        }
+        let mut used = BTreeSet::new();
+        let mut out: Vec<(String, Vec<String>)> = Vec::new();
+        // Chip glyphs are the untoned base (matches core + iPhone orderedReactions).
+        for e in REACTION_PALETTE {
+            let base = normalize_reaction_emoji(e);
+            let Some(people) = by_base.get(&base) else {
+                continue;
+            };
+            if people.is_empty() || !used.insert(base.clone()) {
+                continue;
+            }
+            out.push((base, people.iter().cloned().collect()));
+        }
+        for (base, people) in &by_base {
+            if people.is_empty() || used.contains(base) {
+                continue;
+            }
+            out.push((base.clone(), people.iter().cloned().collect()));
+        }
         out
     }
 

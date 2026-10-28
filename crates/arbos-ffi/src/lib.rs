@@ -483,6 +483,8 @@ impl From<UserAttachmentRecord> for doc::UserAttachment {
             mime: r.mime,
             kind: r.kind,
             blob_ref: r.blob_ref,
+            // GIF-picker attribution is written by a later path; clients leave it unset.
+            source: None,
         }
     }
 }
@@ -555,14 +557,16 @@ impl From<UserMessageOptsRecord> for doc::UserMessageOpts {
 }
 
 /// Whether `sender` currently holds `emoji` on a message (flat key or legacy bucket).
+/// Skin-tone variants of the same base count as the same hold.
 fn reaction_is_on(doc: &CoreChatDoc, message_id: &str, emoji: &str, sender: &str) -> bool {
     let Some(map) = doc.find_message(message_id) else {
         return false;
     };
     let mut json = serde_json::to_value(map.get_deep_value()).unwrap_or(Value::Null);
     doc::project_reactions(&mut json);
+    let base = doc::normalize_reaction_emoji(emoji);
     json.get("reactions")
-        .and_then(|r| r.get(emoji))
+        .and_then(|r| r.get(base.as_str()))
         .and_then(|bucket| bucket.get(sender))
         .and_then(Value::as_bool)
         .unwrap_or(false)

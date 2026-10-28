@@ -135,7 +135,7 @@ enum PaneKit {
 enum PaneLeading {
     case none
     /// Apple-style 30 pt icon tile (settings rows); `dot` = machine state.
-    case tile(String, dot: Color? = nil)
+    case tile(String, mark: StatusMark? = nil)
     /// A 36 pt picture (people, agents, groups).
     case avatar(AnyView)
     /// A 36 pt box with a glyph in it (Add members, files).
@@ -258,7 +258,7 @@ struct PaneRow: View {
         switch leading {
         case .none:
             EmptyView()
-        case .tile(let icon, let dot):
+        case .tile(let icon, let mark):
             ZStack(alignment: .bottomTrailing) {
                 RoundedRectangle(cornerRadius: 7.5, style: .continuous)
                     .fill(theme.isDark ? Color(hex: "#5C5C60")! : Color(hex: "#6E6E73")!)
@@ -268,10 +268,14 @@ struct PaneRow: View {
                             .font(theme.font(15, weight: .semibold))
                             .foregroundStyle(.white)
                     )
-                if let dot {
-                    Circle().fill(dot).frame(width: 9, height: 9)
-                        .overlay(Circle().strokeBorder(theme.bubbleAssistant, lineWidth: 1.5))
-                        .offset(x: 3, y: 3)
+                if let mark {
+                    // The machine mark on the tile's corner — never a coloured dot (2026-10-27).
+                    ZStack {
+                        Circle().fill(theme.bubbleAssistant)
+                        StatusMarkView(mark: mark, size: 8)
+                    }
+                    .frame(width: 13, height: 13)
+                    .offset(x: 3, y: 3)
                 }
             }
         case .avatar(let view):
@@ -2604,27 +2608,9 @@ struct GroupEditSheet: View {
                 .padding(.top, 28)
             }
             .background(theme.bg)
-            .navigationTitle("Edit group")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(theme.bg, for: .navigationBar)
-            .toolbarBackground(.visible, for: .navigationBar)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Cancel") { dismiss() }.foregroundStyle(theme.text)
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { Task { await save() } } label: {
-                        Text(saving ? "Saving…" : "Save")
-                            .font(theme.font(Theme.small, weight: .semibold))
-                            .foregroundStyle(theme.onPrimary)
-                            .padding(.horizontal, 12).frame(height: 32)
-                            .background(Capsule().fill(theme.primary))
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(saving)
-                    .opacity(saving ? 0.55 : 1)
-                }
-            }
+            .sheetHeader(title: "Edit group", onLeading: { dismiss() },
+                         action: saving ? "Saving…" : "Save", actionEnabled: !saving,
+                         onAction: { Task { await save() } })
             .onAppear {
                 name = people?.title ?? ""
                 descriptionText = people?.description ?? ""

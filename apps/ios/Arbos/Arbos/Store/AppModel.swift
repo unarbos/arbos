@@ -1274,6 +1274,15 @@ final class AppModel: ObservableObject {
         return (unreadCounts[chat.id] ?? 0) > 0
     }
 
+    /// Missed messages across an agent's chats — the home row's count pill; 1 per chat
+    /// whose flag is lit without a relay count.
+    func unreadCount(project projectId: Id) -> Int {
+        chats(of: projectId).reduce(0) { sum, chat in
+            guard chatHasUnread(chat) else { return sum }
+            return sum + max(1, unreadCounts[chat.id] ?? 0)
+        }
+    }
+
     func unreadCount(for chat: PeopleChat) -> Int {
         Self.peopleUnreadCount(
             remote: unreadCounts[chat.id],
@@ -1460,6 +1469,15 @@ final class AppModel: ObservableObject {
     var deviceId: String { credentials?.deviceId ?? "ios:unpaired" }
 
     // MARK: Pairing
+
+    #if DEBUG
+    /// Unit tests: talk to a loopback relay with a fixed token — no keychain, no auth probe,
+    /// no rooms. Used by `AddMembersActionTests` to drive `addMembers` end to end.
+    func installRelayForTests(url: String, token: String) {
+        api = RelayAPI(endpoint: RelayEndpoint(url)) { token }
+        credentials = DeviceCredentials(relayUrl: url, deviceId: "ios:test", deviceToken: token)
+    }
+    #endif
 
     func setRelayUrl(_ raw: String) {
         let endpoint = RelayEndpoint(raw)

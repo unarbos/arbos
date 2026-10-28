@@ -904,6 +904,27 @@ A new screen declares itself there.
 | `primaryCTA` | 50 pt filled capsules (Sign in, Pair, Create) | primary buttons, `primary` fill, no rim |
 | `textAreas` | feedback note / description areas, 18 pt corners | free-form, grow |
 
+### iPhone sheet header: the confirm control is never squeezed (Jacob 2026-10-26, [feedback iphone-add-members-2026-10-26])
+
+Jacob's 17:52 CR shot: on "Add members to Arbonites" with @arbos picked, the system inline
+navigation bar gave the title the room and cut the Add pill to "A…" — and the tap target with
+it ("Add members button broken on iPhone"). Rule, for every sheet whose title can be long
+(Add members to <group / server>, Give a person access, New group, Edit group, New channel,
+Add agent, the Secrets sheets, Share <agent>): the sheet draws its own bar, `SheetHeaderBar`
+(`UI/SheetHeader.swift`, `.sheetHeader(title:…)`), in place of the system bar.
+
+| Part | Rule |
+| --- | --- |
+| Bar | `Controls.height` (48) tall, `Controls.inset` (16) side insets, `Controls.top` gap, `bg` fill, 0.5 pt `separator` under it — one more `Controls.Screen` (`sheetHeader`). |
+| Controls | Cancel (or a back chevron on a pushed step, or nothing) leading; the confirm trailing: a `primary` capsule `Controls.sheetAction` (36) tall with `Controls.textInset` sides for Add · Add (n) · Create · Save, plain semibold text for the Secrets sheets' Save / Replace / Connect and Done. Both are `fixedSize()` with layout priority: **never compressed, never truncated**, full hit area. |
+| Title | `Theme.body` semibold, centred on the bar, in the room left symmetric around the centre (`SheetHeaderLayout.titleRoom`); shrinks to 70 % (`minimumScaleFactor`) and then cuts with an ellipsis. |
+| Label | `SheetAction.label`: "Add" for one pick, "Add (n)" for several, "Adding…" while the call runs; "Create" / "Creating…" for a new group. |
+
+Pinned by `ArbosTests/SheetHeaderLayoutTests` (every label × the longest titles × 320–430 pt:
+the control keeps its width and its place, the title never runs under it) and
+`AddMembersActionTests` (the Add tap posts one batch, replaces the roster on 200, reports a
+refusal, falls back per item on an old relay).
+
 ## Chat density in people chats: Discord-size pictures, wider bubbles (Jacob 2026-10-26, [feedback chat-density-ios-2026-10-26], Mac [feedback chat-density-mac-2026-10-26])
 
 Jacob (17:54 CR, iPhone Arbonites group): "In chats the pfp chat bubble takes
