@@ -1888,6 +1888,24 @@ pub struct NotificationsClearedPayloadDto {
     pub badge: i64,
 }
 
+/// `GET /me/pins` / `PUT /me/pins` body and answer: the user's sidebar pins, top first
+/// (Jacob 2026-10-28, sidebar pinning). A pin is a row key `agent:<project id>`,
+/// `chat:<people chat id>` or `server:<server id>`; `cap` is the relay's limit.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PinsDto {
+    pub pins: Vec<String>,
+    pub cap: u32,
+}
+
+/// `pins_changed` payload: another device of mine replaced the pin list (`PUT /me/pins`);
+/// `pins` is the whole list, top first.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PinsChangedPayloadDto {
+    pub pins: Vec<String>,
+}
+
 /// One kind the relay queues on `/me/pushes` via `push_user` / `push_user_except` /
 /// `push_everyone`. Adjacent tagging matches the stored `{ kind, payload }` row.
 ///
@@ -1960,6 +1978,8 @@ pub enum PushEventDto {
     AgentProfileUpdated(AgentProfileUpdatedPayloadDto),
     #[serde(rename = "notifications_cleared")]
     NotificationsCleared(NotificationsClearedPayloadDto),
+    #[serde(rename = "pins_changed")]
+    PinsChanged(PinsChangedPayloadDto),
 }
 
 impl PushEventDto {

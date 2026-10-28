@@ -33,6 +33,9 @@ pub const KEY_LAST_CHATS: &str = "last_chats";
 pub const KEY_ARCHIVED_CHATS: &str = "archived_chats";
 /// Set once the local archived ids were pushed up to the relay (§9c union migration).
 pub const KEY_ARCHIVE_MIGRATED: &str = "archive_migrated";
+/// My sidebar pins (row keys, top first) as the relay last confirmed them — shown at launch
+/// before `GET /me/pins` answers ([feedback sidebar-pinning-mac-2026-10-28]).
+pub const KEY_PINS: &str = "pins";
 /// `avatar:<url>` → the picture's bytes. The URL carries the picture's version
 /// (`…/avatar.jpg?v=<stamp>`, `/avatars/<user>.jpg?v=…`), so a changed picture is a new key
 /// and a cached one can never be stale; keys no current URL names are pruned with the registry.

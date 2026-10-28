@@ -982,6 +982,16 @@ fn push_fixture_events() -> Vec<(&'static str, PushEventDto)> {
                 badge: 2,
             }),
         ),
+        (
+            "push_pins_changed.json",
+            PushEventDto::PinsChanged(arbos_core::api::PinsChangedPayloadDto {
+                pins: vec![
+                    "agent:01FIXTUREAGENT".into(),
+                    "chat:people_dm".into(),
+                    "server:01FIXTURESERVER".into(),
+                ],
+            }),
+        ),
     ]
 }
 

@@ -1815,6 +1815,29 @@ public struct PeopleProjectSharedPayloadDto: Codable {
 	}
 }
 
+/// `pins_changed` payload: another device of mine replaced the pin list (`PUT /me/pins`);
+/// `pins` is the whole list, top first.
+public struct PinsChangedPayloadDto: Codable {
+	public let pins: [String]
+
+	public init(pins: [String]) {
+		self.pins = pins
+	}
+}
+
+/// `GET /me/pins` / `PUT /me/pins` body and answer: the user's sidebar pins, top first
+/// (Jacob 2026-10-28, sidebar pinning). A pin is a row key `agent:<project id>`,
+/// `chat:<people chat id>` or `server:<server id>`; `cap` is the relay's limit.
+public struct PinsDto: Codable {
+	public let pins: [String]
+	public let cap: UInt32
+
+	public init(pins: [String], cap: UInt32) {
+		self.pins = pins
+		self.cap = cap
+	}
+}
+
 /// `profile_updated` payload: a person changed their picture (`PUT` / `DELETE /me/avatar`).
 /// Sent to their own other devices and to everyone who shares a people chat or a server with
 /// them; `avatar_url` is the new picture (`null` = none, the coloured initials show).
@@ -2757,6 +2780,7 @@ public enum PushEventDto: Codable {
 	case profileUpdated(ProfileUpdatedPayloadDto)
 	case agentProfileUpdated(AgentProfileUpdatedPayloadDto)
 	case notificationsCleared(NotificationsClearedPayloadDto)
+	case pinsChanged(PinsChangedPayloadDto)
 
 	enum CodingKeys: String, CodingKey, Codable {
 		case peopleMessage = "people_message",
@@ -2789,7 +2813,8 @@ public enum PushEventDto: Codable {
 			secretExpiring = "secret_expiring",
 			profileUpdated = "profile_updated",
 			agentProfileUpdated = "agent_profile_updated",
-			notificationsCleared = "notifications_cleared"
+			notificationsCleared = "notifications_cleared",
+			pinsChanged = "pins_changed"
 	}
 
 	private enum ContainerCodingKeys: String, CodingKey {
@@ -2955,6 +2980,11 @@ public enum PushEventDto: Codable {
 					self = .notificationsCleared(content)
 					return
 				}
+			case .pinsChanged:
+				if let content = try? container.decode(PinsChangedPayloadDto.self, forKey: .payload) {
+					self = .pinsChanged(content)
+					return
+				}
 			}
 		}
 		throw DecodingError.typeMismatch(PushEventDto.self, DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "Wrong type for PushEventDto"))
@@ -3055,6 +3085,9 @@ public enum PushEventDto: Codable {
 			try container.encode(content, forKey: .payload)
 		case .notificationsCleared(let content):
 			try container.encode(CodingKeys.notificationsCleared, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .pinsChanged(let content):
+			try container.encode(CodingKeys.pinsChanged, forKey: .kind)
 			try container.encode(content, forKey: .payload)
 		}
 	}

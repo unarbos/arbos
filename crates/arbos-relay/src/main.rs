@@ -51,6 +51,7 @@ mod outside_sidecar;
 mod outside_wake;
 mod people;
 mod perf;
+mod pins;
 mod proxy;
 mod push;
 mod releases;
@@ -446,6 +447,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/avatars/{file}", get(signin::get_avatar))
         .route("/projects/{file}/avatar.jpg", get(images::project_avatar))
         .route("/me/pushes", get(people::me_pushes))
+        .route("/me/pins", get(pins::get_pins).put(pins::put_pins))
         .route("/me/unread", get(notify::me_unread))
         .route(
             "/me/notifications",
