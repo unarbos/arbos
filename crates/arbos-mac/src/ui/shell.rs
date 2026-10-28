@@ -666,6 +666,7 @@ impl Shell {
         cx.observe(&composer, |_, _, cx| cx.notify()).detach();
         cx.observe_window_activation(window, |this, window, cx| {
             let active = window.is_window_active();
+            crate::ui::working::WorkingClock::set_window_active(cx, active);
             this.state
                 .update(cx, |s, cx| s.set_window_active(active, cx));
         })
