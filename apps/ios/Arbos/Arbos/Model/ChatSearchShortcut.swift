@@ -27,3 +27,28 @@ enum ChatSearchShortcut {
         Effect(open: !open, focus: !open, animate: true)
     }
 }
+
+/// How the Search-in-chat bar closes ([feedback iphone-search-close-2026-10-28], Jacob
+/// 2026-10-28: "The x button doesn't work on the search on iPhone. Also clicking away from
+/// the search should close it."). The ✕, a tap on the messages area and a swipe on an
+/// empty-query list all close through one path (`closeSearch`: bar gone, query cleared,
+/// keyboard down); a tap on a result closes and then reveals that message. The Mac bar
+/// follows the same rule since [feedback search-toggle-click-outside-mac-2026-10-27].
+enum ChatSearchClose {
+    /// The ✕ cell: 44 wide, the bar's full height (the glyph alone was 17 pt).
+    static let closeHitWidth: CGFloat = 44
+
+    /// A tap anywhere on the transcript (empty chrome or a non-result row) closes the bar.
+    static func tapOutsideCloses(open: Bool) -> Bool { open }
+
+    /// A swipe on the list closes the bar only while nothing is typed: with a keyword the
+    /// list is the result list, and scrolling results must keep the bar.
+    static func scrollCloses(open: Bool, query: String) -> Bool {
+        open && query.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    /// A tap on a row while a keyword filters the list: close, then reveal that message.
+    static func resultTapReveals(open: Bool, query: String) -> Bool {
+        open && !query.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+}
