@@ -922,7 +922,7 @@ struct ChatSession: View {
     /// Sheets + lifecycle on top of `sessionCanvas` (split so the type
     /// checker can finish — same pattern as `ServerProfileView`).
     private var sessionRoot: some View {
-        sessionLifecycle(sessionSheets(sessionCanvas))
+        sessionObservers(sessionTasks(sessionActionSheets(sessionSetupSheets(sessionCanvas))))
     }
 
     /// Transcript + header + composer + message-actions overlay.
@@ -1132,8 +1132,8 @@ struct ChatSession: View {
         }
     }
 
-    /// Presentation sheets on the canvas.
-    private func sessionSheets<V: View>(_ content: V) -> some View {
+    /// Setup sheets: media viewer, model, secrets, settings, call picker, unblock, agent edit.
+    private func sessionSetupSheets<V: View>(_ content: V) -> some View {
         content
         // Custom back chevron; swipe right (edge pop or anywhere outside the composer
         // bar) goes back one level — `BackSwipe.swift`, shared by every chat screen.
@@ -1171,6 +1171,11 @@ struct ChatSession: View {
         .sheet(isPresented: $showProfile) {
             AgentEditSheet(projectId: projectId).environmentObject(model).environment(\.theme, theme)
         }
+    }
+
+    /// Forward / thread / tasks sheets (kept separate so the type checker finishes).
+    private func sessionActionSheets<V: View>(_ content: V) -> some View {
+        content
         .sheet(item: $pendingForward) { pending in
             ForwardSheet(fromName: pending.from, attachmentNote: pending.message.body?.hasMedia == true) { target in
                 pendingForward = nil
@@ -1206,343 +1211,89 @@ struct ChatSession: View {
         }
     }
 
-    /// Tasks, appear/disappear, and onChange hooks.
-    private func sessionLifecycle<V: View>(_ content: V) -> some View {
+    /// Async tasks attached to the session (jobs poll, demos, call refresh).
+    private func sessionTasks<V: View>(_ content: V) -> some View {
         content
-        .task(id: chatId) {
-            // Polls the open chat's jobs while one is live (`AppModel.pollJobsIfNeeded`);
-            // cancelled with the view. The sheet lists live work only: nothing open → it
-            // closes itself.
-            if isJobTab { model.pollRolloutIfNeeded(chatId: chatId, force: true) }
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(AppModel.jobsPollMs))
-                guard !Task.isCancelled else { break }
-                model.pollJobsIfNeeded(chatId: chatId)
-                if isJobTab { model.pollRolloutIfNeeded(chatId: chatId) }
-                if showTasks, model.openJobs(chatId).isEmpty { showTasks = false }
-            }
+        .task(id: chatId) { await pollJobsWhileOpen() }
+        .task { await runLiveDemoTask() }
+        .task { await runFixtureDemoTask() }
+        .task(id: calls.activeByChat[chatId]?.callId) { await refreshActiveCallWhileBarUp() }
+    }
+
+    private func pollJobsWhileOpen() async {
+        // Polls the open chat's jobs while one is live (`AppModel.pollJobsIfNeeded`);
+        // cancelled with the view. The sheet lists live work only: nothing open → it
+        // closes itself.
+        if isJobTab { model.pollRolloutIfNeeded(chatId: chatId, force: true) }
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(AppModel.jobsPollMs))
+            guard !Task.isCancelled else { break }
+            model.pollJobsIfNeeded(chatId: chatId)
+            if isJobTab { model.pollRolloutIfNeeded(chatId: chatId) }
+            if showTasks, model.openJobs(chatId).isEmpty { showTasks = false }
         }
-        .task {
-            guard DebugHooks.liveDemo, !model.demoStarted, DebugHooks.openChat == chatId || DebugHooks.openChat == nil, let text = DebugHooks.autoSend else { return }
-            model.demoStarted = true
-            while !model.caughtUp.contains(chatId) { try? await Task.sleep(nanoseconds: 200_000_000) }
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            composerFocused = true
-            try? await Task.sleep(nanoseconds: 800_000_000)
-            for ch in text { composerDraft.text.append(ch); try? await Task.sleep(nanoseconds: 45_000_000) }
-            try? await Task.sleep(nanoseconds: 600_000_000)
-            send()
-            try? await Task.sleep(nanoseconds: 400_000_000)
-            composerFocused = false
-            // Wait for the turn: streaming starts, then ends (cap 45 s).
-            var waited = 0
-            while !streaming && waited < 150 { try? await Task.sleep(nanoseconds: 200_000_000); waited += 1 }
-            while streaming && waited < 225 { try? await Task.sleep(nanoseconds: 200_000_000); waited += 1 }
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            if rows.count > 8 {
-                withAnimation(.easeInOut(duration: 1.2)) { scroller?.scrollTo(rows[rows.count - 8].id, anchor: .top) }
-                try? await Task.sleep(nanoseconds: 2_400_000_000)
-                withAnimation(.easeInOut(duration: 1.0)) { scroller?.scrollTo("bottom", anchor: .bottom) }
-                try? await Task.sleep(nanoseconds: 1_600_000_000)
-            }
-            demoQueue = ["model", "threads", "attach", "voice", "settings"]
-            demoPresentNext()
+    }
+
+    private func runLiveDemoTask() async {
+        guard DebugHooks.liveDemo, !model.demoStarted, DebugHooks.openChat == chatId || DebugHooks.openChat == nil, let text = DebugHooks.autoSend else { return }
+        model.demoStarted = true
+        while !model.caughtUp.contains(chatId) { try? await Task.sleep(nanoseconds: 200_000_000) }
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        composerFocused = true
+        try? await Task.sleep(nanoseconds: 800_000_000)
+        for ch in text { composerDraft.text.append(ch); try? await Task.sleep(nanoseconds: 45_000_000) }
+        try? await Task.sleep(nanoseconds: 600_000_000)
+        send()
+        try? await Task.sleep(nanoseconds: 400_000_000)
+        composerFocused = false
+        // Wait for the turn: streaming starts, then ends (cap 45 s).
+        var waited = 0
+        while !streaming && waited < 150 { try? await Task.sleep(nanoseconds: 200_000_000); waited += 1 }
+        while streaming && waited < 225 { try? await Task.sleep(nanoseconds: 200_000_000); waited += 1 }
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        if rows.count > 8 {
+            withAnimation(.easeInOut(duration: 1.2)) { scroller?.scrollTo(rows[rows.count - 8].id, anchor: .top) }
+            try? await Task.sleep(nanoseconds: 2_400_000_000)
+            withAnimation(.easeInOut(duration: 1.0)) { scroller?.scrollTo("bottom", anchor: .bottom) }
+            try? await Task.sleep(nanoseconds: 1_600_000_000)
         }
-        .task {
-            guard DebugHooks.demo, model.isFixture, !model.demoStarted else { return }
-            model.demoStarted = true
-            try? await Task.sleep(nanoseconds: 1_800_000_000)
-            composerFocused = true
-            try? await Task.sleep(nanoseconds: 900_000_000)
-            for ch in "Also keep your replies short, please." {
-                composerDraft.text.append(ch)
-                try? await Task.sleep(nanoseconds: 55_000_000)
-            }
-            try? await Task.sleep(nanoseconds: 500_000_000)
-            send()
-            try? await Task.sleep(nanoseconds: 300_000_000)
-            composerFocused = false
-            try? await Task.sleep(nanoseconds: 7_500_000_000)
-            dismiss()
+        demoQueue = ["model", "threads", "attach", "voice", "settings"]
+        demoPresentNext()
+    }
+
+    private func runFixtureDemoTask() async {
+        guard DebugHooks.demo, model.isFixture, !model.demoStarted else { return }
+        model.demoStarted = true
+        try? await Task.sleep(nanoseconds: 1_800_000_000)
+        composerFocused = true
+        try? await Task.sleep(nanoseconds: 900_000_000)
+        for ch in "Also keep your replies short, please." {
+            composerDraft.text.append(ch)
+            try? await Task.sleep(nanoseconds: 55_000_000)
         }
-        .task(id: calls.activeByChat[chatId]?.callId) {
-            // While the Join bar is up, re-check the relay so an ended call does not stick.
-            guard !isChannel, calls.activeByChat[chatId] != nil else { return }
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 4_000_000_000)
-                guard !Task.isCancelled, calls.activeByChat[chatId] != nil else { return }
-                await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId)
-            }
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        send()
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        composerFocused = false
+        try? await Task.sleep(nanoseconds: 7_500_000_000)
+        dismiss()
+    }
+
+    private func refreshActiveCallWhileBarUp() async {
+        // While the Join bar is up, re-check the relay so an ended call does not stick.
+        guard !isChannel, calls.activeByChat[chatId] != nil else { return }
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            guard !Task.isCancelled, calls.activeByChat[chatId] != nil else { return }
+            await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId)
         }
-        .onAppear {
-            appearedAt = Date()
-            LaunchClock.mark("chat-appear", detail: "messages=\(messages.count)")
-            #if DEBUG
-            PerfLog.mark("chat-open appear \(chatId) messages=\(messages.count)", ms: 0)
-            #endif
-            // Force: re-PUT even if the cursor is unchanged so the relay clears
-            // unread events recorded after the last PUT (other apps / badge).
-            model.markRead(chatId: chatId, force: true)
-            model.visibleChatId = chatId
-            // Restore unsent text left when the user backed out of this thread.
-            let saved = DebugHooks.composerDraft ?? model.composerDraft(for: chatId)
-            composerDraft.onChange = { [chatId] d in
-                // Keep the draft while the view is still up so a process kill mid-type
-                // is not required — leaving the thread saves on disappear too.
-                model.setComposerDraft(d, for: chatId)
-                // People chats (DM + group): tell the room we are typing so peers
-                // see names on the presence row ([feedback app-01M5N7WSA1VCYHE9BE3CX4V0R6]).
-                if isPeople, !d.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    model.typedIn(chatId: chatId)
-                }
-                let everyone = AppModel.addressesEveryone(d)
-                if everyone != draftAddressesEveryone { draftAddressesEveryone = everyone }
-                // `@handle` + a separator typed right after it: a chip, no picker (behaviour 5).
-                if isPeople, let m = MentionDraft.autoResolve(text: d, caret: composerDraft.caret, mentions: composerDraft.mentions,
-                                                              members: people?.members ?? [], me: model.user?.login) {
-                    var next = composerDraft.mentions
-                    next.append(m)
-                    next.sort { $0.range.lowerBound < $1.range.lowerBound }
-                    composerDraft.mentions = next
-                }
-                updateMentionQuery()
-            }
-            composerDraft.onCaretOrMentions = { updateMentionQuery() }
-            if composerDraft.text.isEmpty, !saved.isEmpty {
-                composerDraft.text = saved
-                composerDraft.caret = (saved as NSString).length
-                composerDraft.mentions = MentionDraft.resolveAll(text: saved, mentions: [], members: people?.members ?? [], me: model.user?.login, collectives: isPeople)
-                if DebugHooks.composerDraft != nil { composerFocused = true }
-            }
-            if isPeople { model.markPeopleRead(chatId, force: true) }
-            if isChannel {
-                // The newest page now, live rows through the listener from here on.
-                model.openChannel(chatId)
-            } else {
-                Task { await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId) }
-            }
-            openPendingSearchIfNeeded()
-            takePendingDMReplyIfNeeded()
-            takePendingForwardDraftIfNeeded()
-            revealPendingIfNeeded()
-            // Rig: `ARBOS_SHOW=chatsearch` raises the Search-in-chat bar (header-glass shots).
-            if DebugHooks.show == "chatsearch" { showSearch = true }
-            if let link = DebugHooks.link {
-                model.setRoomLink(chatId, link)
-                if let ms = DebugHooks.linkClearsMs {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(ms)) { model.setRoomLink(chatId, .live) }
-                }
-            }
-            #if DEBUG
-            let drive = DebugHooks.perfDrive
-            if !drive.isEmpty { Task { @MainActor in await runPerfDrive(drive) } }
-            #endif
-            if let show = DebugHooks.show, !model.showHookDone {
-                model.showHookDone = true
-                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(DebugHooks.showDelayMs)) {
-                    switch show {
-                    case "keyboard": composerFocused = true
-                    case "settings": showSettings = true
-                    case "agentsecrets": showAgentSecrets = true
-                    case "voice": startCall(.voice)
-                    case "model": showModelPicker = true
-                    // `agentvoice | agentlabel | agentrename`: the agent pane, which opens the Voice
-                    // picker / edits the label / opens the rename alert on appear.
-                    case "profile", "agentvoice", "agentlabel", "agentrename": openHeaderProfile()
-                    // `avatarpicker[-generate|-upload]`: the agent pane, which opens the sheet on that tab.
-                    case let s where s.hasPrefix("avatarpicker"): openHeaderProfile()
-                    case "edit": showProfile = true
-                    // `tasks`: the tasks sheet over the presence row (needs `ARBOS_FIXTURE_JOBS`).
-                    case "tasks": if !model.openJobs(chatId).isEmpty { showTasks = true }
-                    // `jobtab`: the newest job's tab (needs `ARBOS_FIXTURE_JOBS`).
-                    case "jobtab": model.openNewestJobTab(from: chatId)
-                    case "userprofile": if let c = counterpart { model.showProfile(.user(ProfilePerson(c))) }
-                    // `addmembers`: the group pane opens its Add members sheet on appear.
-                    case "groupprofile", "addmembers", "removemember": model.showProfile(.group(chatId: chatId, projectId: isPeople ? nil : projectId))
-                    case let s where s.hasPrefix("groupavatar"): model.showProfile(.group(chatId: chatId, projectId: isPeople ? nil : projectId))
-                    case "member":
-                        // The group page, then its first other member pushed over it (rig).
-                        openHeaderProfile()
-                        if let other = people?.humans.first(where: { $0.id != model.user?.id }) {
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { model.showProfile(.user(ProfilePerson(other))) }
-                        }
-                    case "members", "addperson": openHeaderProfile()
-                    case "foreignagent", "foreignagent-owner":
-                        // Someone else's agent in this group (needs `ARBOS_FIXTURE_FOREIGN_AGENT=1`):
-                        // its page; `-owner` then follows its "Run by …" link
-                        // ([feedback agent-pane-run-by-link-ios-2026-10-25]).
-                        if let agent = people?.agents.first(where: { $0.ownerId != model.user?.id }), let foreign = model.foreignAgent(agent.id) {
-                            model.showProfile(.agent(projectId: foreign.id))
-                            if show == "foreignagent-owner", let owner = agent.ownerHandle {
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-                                    model.showProfile(.user(ProfilePerson(id: agent.ownerId ?? owner, handle: owner, name: foreign.ownerName, avatarUrl: foreign.ownerAvatarUrl)))
-                                }
-                            }
-                        }
-                    // `agentprofile`: the first roster agent's profile hero (a foreign agent's
-                    // picture — the avatar-flip rig).
-                    case "agentprofile": if let a = people?.agents.first { model.showProfile(.agent(projectId: a.id)) }
-                    case "feedback": FeedbackCenter.shared.open(screen: "chat", chatId: chatId, projectId: isPeople ? nil : projectId)
-                    case "call":
-                        #if DEBUG
-                        if let url = DebugHooks.callUrl, let token = DebugHooks.callToken {
-                            Task { await calls.debugJoin(url: url, token: token, kind: DebugHooks.callKind == "video" ? .video : .voice,
-                                                         chatId: chatId, projectId: isPeople ? peopleSlot : projectId) }
-                        } else {
-                            startCall(DebugHooks.callKind == "video" ? .video : .voice)
-                        }
-                        #else
-                        startCall(.voice)
-                        #endif
-                    case "recording": recorder.start()
-                    // `copy[:<n>]` (Debug, [feedback copy-image-messages-ios-2026-10-27] rig): Copy of
-                    // the n-th newest message row (0 = newest) through the menu's own path, the
-                    // pasteboard printed to the console, then the composer's paste 2 s later.
-                    case let s where s.hasPrefix("copy"):
-                        #if DEBUG
-                        let n = Int(s.split(separator: ":").dropFirst().first ?? "0") ?? 0
-                        let candidates = rows.filter { isMessageRow($0) }
-                        if n < candidates.count {
-                            let row = candidates[candidates.count - 1 - n]
-                            runMessageMenu(.copy, row: row)
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                                MessagePasteboard.debugDump()
-                                let media = MessagePasteboard.pendingAttachments()
-                                if !media.isEmpty { pending.append(contentsOf: media); composerFocused = true }
-                                if let words = UIPasteboard.general.string { composerDraft.text = words }
-                                print("rig copy: composer staged \(media.count) attachment(s), draft \"\(composerDraft.text)\"")
-                            }
-                        }
-                        #endif
-                    case "scrollup":
-                        if let first = windowedRows.first { withAnimation { scroller?.scrollTo(first.id, anchor: .top) } }
-                    case "media", "media-forward", "media-file":
-                        // Rig (media-viewer-2026-10-23): the viewer on this chat's album at
-                        // ARBOS_MEDIA_INDEX (chat order, default 0), with the Forward sheet
-                        // up for `media-forward`; `media-file` opens the chat's first file.
-                        let slot = isPeople ? "\(peopleSlot):\(chatId)" : projectId
-                        if show == "media-file" {
-                            let file = messages.lazy.flatMap { m in m.parts.compactMap { part -> MediaItem? in
-                                guard case .attachment(let id, let a) = part, MediaAlbum.kind(of: a) == .file else { return nil }
-                                return MediaAlbum.item(id: "\(m.id)#\(id)", message: m, attachment: a, kind: .file, slot: slot,
-                                                       projectName: { model.project($0)?.name })
-                            } }.first
-                            if let file { rigViewer = MediaViewerState(items: [file], index: 0) }
-                        } else {
-                            let album = MediaAlbum.items(messages: messages, slot: slot, projectName: { model.project($0)?.name })
-                            let ix = Int(ProcessInfo.processInfo.environment["ARBOS_MEDIA_INDEX"] ?? "") ?? 0
-                            if !album.isEmpty { rigViewer = MediaViewerState(items: album, index: min(ix, album.count - 1)) }
-                        }
-                        rigViewerForward = show == "media-forward"
-                    case "pending":
-                        pending = [.init(name: "Q3 board deck v5.pdf", mime: "application/pdf", data: Data()),
-                                   .init(name: "Photo Oct 15.jpg", mime: "image/jpeg", data: Data())]
-                        composerFocused = true
-                    case "reply":
-                        // Rig: the composer's reply preview on the newest agent message.
-                        replyTo = messages.last { $0.role == .assistant && !$0.isStreaming }
-                        composerFocused = true
-                    case "reply-long":
-                        // Rig: the preview on a multi-paragraph markdown reply (the shape of
-                        // Jacob's Oct 23 screenshot; fixture only).
-                        #if DEBUG
-                        if model.isFixture {
-                            model.fixtureAppendAssistant(chatId: chatId, text: AppModel.longReview)
-                            replyTo = model.messages[chatId]?.last { $0.role == .assistant }
-                            composerFocused = true
-                        }
-                        #endif
-                    case "code-block":
-                        // Rig: a finished reply with a fenced ```rust block, for the code
-                        // card's Copy pill shots (fixture only).
-                        #if DEBUG
-                        if model.isFixture {
-                            model.fixtureAppendAssistant(chatId: chatId, text: AppModel.codeReply)
-                        }
-                        #endif
-                    case "table", "table-top":
-                        // Rig: Jacob's Lima bookstore turn — a GFM table of linked stores
-                        // between two prose bubbles; `table-top` stops after the table so a
-                        // phone-height shot shows it (fixture only).
-                        #if DEBUG
-                        if model.isFixture {
-                            model.fixtureLimaReply(chatId: chatId, bubbles: show == "table-top" ? 2 : 3)
-                        }
-                        #endif
-                    case "links":
-                        // Rig: Jacob's New York Post turn — seven linked headlines as
-                        // bullets, each with its site icon (fixture only).
-                        #if DEBUG
-                        if model.isFixture {
-                            model.fixtureNYPostReply(chatId: chatId)
-                        }
-                        #endif
-                    case "math":
-                        // Rig: Jacob's bubble-sort turn — a Python code card, then prose
-                        // with inline `$O(n^2)$` math (fixture only).
-                        #if DEBUG
-                        if model.isFixture {
-                            model.fixtureBubbleSortReply(chatId: chatId)
-                        }
-                        #endif
-                    case "agent-message", "agent-message-received":
-                        // Rig: agent-to-agent messaging rows (fixture only) — the sender's
-                        // hand-off + confirm + relayed reply, or the receiver's labelled row.
-                        #if DEBUG
-                        if model.isFixture {
-                            model.fixtureAgentMessage(chatId: chatId, received: show == "agent-message-received")
-                        }
-                        #endif
-                    case "forward":
-                        // Rig: the Forward sheet for the newest message bubble.
-                        if let row = rows.last(where: { isMessageRow($0) }) { beginForward(row) }
-                    case "forwarded":
-                        // Rig: a sent bubble forwarded from Sam Rivera (fixture only).
-                        #if DEBUG
-                        if model.isFixture {
-                            model.fixtureAppend(chatId: chatId,
-                                                text: "Sending in a sec. Also: can we add your Arbos agent here so it can pull the numbers while we talk?",
-                                                attachments: [], forwardedFrom: "Sam Rivera")
-                        }
-                        #endif
-                    case "actions":
-                        // Rig: the long-press actions (capsule + menu) on the newest bubble.
-                        if let row = rows.last(where: { isMessageRow($0) }) { openActions(row) }
-                    case "keyboard-actions":
-                        // Rig (iphone-bubble-menu-keyboard): the composer keyboard is up, then the
-                        // newest bubble is long-pressed — the overlay must clear the keyboard.
-                        composerFocused = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(1200)) {
-                            if let row = rows.last(where: { isMessageRow($0) }) { openActions(row) }
-                        }
-                    case "reply-dm":
-                        // Rig (#1836): the composer armed with a cross-chat reply, as Reply in DM leaves it.
-                        replyRef = ReplyRef(chatId: "fx-group-launch", projectId: "people", messageId: "g1", chatTitle: "Launch week",
-                                            sender: "user:fx-u3", senderName: "Mira Kaplan", senderHandle: "mira-k",
-                                            text: "Launch checklist is here: https://notion.so/arbos/launch-week")
-                        composerFocused = true
-                    case "replied":
-                        // Rig: a sent bubble quoting the newest agent message (fixture only).
-                        #if DEBUG
-                        if model.isFixture, let m = messages.last(where: { $0.role == .assistant && !$0.isStreaming }) {
-                            model.fixtureAppend(chatId: chatId, text: "Does that cover the #general channel too?",
-                                                attachments: [], replyTo: m.id)
-                        }
-                        #endif
-                    default: break
-                    }
-                }
-            }
-        }
-        .onDisappear {
-            // Keep the typed draft so coming back to this thread restores it.
-            model.setComposerDraft(composerDraft.text, for: chatId)
-            // Catch notifies that landed after the last onChange mark-read while we were still in the chat
-            // (including rows that arrived while the app was inactive on a call — isWatching was false).
-            if isPeople { model.markPeopleRead(chatId) }
-            else { model.markRead(chatId: chatId) }
-            if model.visibleChatId == chatId { model.visibleChatId = nil }
-        }
+    }
+
+    /// Appear / disappear / onChange observers.
+    private func sessionObservers<V: View>(_ content: V) -> some View {
+        content
+        .onAppear(perform: handleSessionAppear)
+        .onDisappear(perform: handleSessionDisappear)
         // Profile "search" sets pendingSearchChat while this chat is already on screen
         // (sheet over us), so onAppear alone never sees it — watch the published flag.
         .onChange(of: model.pendingSearchChat) { _, _ in openPendingSearchIfNeeded() }
@@ -1555,23 +1306,7 @@ struct ChatSession: View {
         // body (each keystroke, presence tick, publish) was a measurable share of
         // the Arbonites lag (arbonites-chat-lag, 2026-10-24).
         .onChange(of: model.messagesVersion[chatId] ?? 0, initial: true) { _, new in
-            #if DEBUG
-            if SendTrace.traces(chatId) { SendTrace.mark("version-onchange", detail: "version=\(new)", once: false) }
-            #endif
-            let old = rowsSource
-            let new = messages
-            let initial = old.isEmpty && rows.isEmpty
-            rowsSource = new
-            refreshRows()
-            // Streaming tokens reassign `messages` with the same last id — do not
-            // mark-read on every delta. Initial call (`old == new`) and a new last
-            // row still mark; AppModel also skips/throttles the PUT.
-            if old.last?.id != new.last?.id || initial {
-                model.markRead(chatId: chatId)
-                if isPeople { model.markPeopleRead(chatId) }
-            }
-            // A channel's read marker moves when a new row lands while it is on screen.
-            if isChannel, old.last?.id != new.last?.id { model.markChannelRead(chatId) }
+            handleMessagesVersionChange(new)
         }
         // Adding a person or agent updates membership without a new message — rebuild so "@handle joined" appears.
         // A member's rename re-words the membership lines that name them, so the key carries names.
@@ -1580,22 +1315,323 @@ struct ChatSession: View {
         }
         .onChange(of: model.user?.name) { _, _ in refreshRows() }
         .onChange(of: model.caughtUp.contains(chatId), initial: true) { _, ready in
-            if ready, !sentOnce, !DebugHooks.liveDemo, let text = DebugHooks.autoSend, DebugHooks.openChat == chatId {
-                // Several messages separated by " ||| " go out a few seconds apart
-                // (multitasking checks: the composer never waits for a reply).
-                let parts = text.components(separatedBy: " ||| ").filter { !$0.isEmpty }
-                composerDraft.text = parts.first ?? text
-                send()
-                if parts.count > 1 {
-                    Task {
-                        for p in parts.dropFirst() {
-                            try? await Task.sleep(nanoseconds: 3_000_000_000)
-                            composerDraft.text = p
-                            send()
-                        }
+            handleCaughtUpChange(ready)
+        }
+    }
+
+    private func handleSessionAppear() {
+        appearedAt = Date()
+        LaunchClock.mark("chat-appear", detail: "messages=\(messages.count)")
+        #if DEBUG
+        PerfLog.mark("chat-open appear \(chatId) messages=\(messages.count)", ms: 0)
+        #endif
+        // Force: re-PUT even if the cursor is unchanged so the relay clears
+        // unread events recorded after the last PUT (other apps / badge).
+        model.markRead(chatId: chatId, force: true)
+        model.visibleChatId = chatId
+        // Restore unsent text left when the user backed out of this thread.
+        let saved = DebugHooks.composerDraft ?? model.composerDraft(for: chatId)
+        composerDraft.onChange = { [chatId] d in
+            // Keep the draft while the view is still up so a process kill mid-type
+            // is not required — leaving the thread saves on disappear too.
+            model.setComposerDraft(d, for: chatId)
+            // People chats (DM + group): tell the room we are typing so peers
+            // see names on the presence row ([feedback app-01M5N7WSA1VCYHE9BE3CX4V0R6]).
+            if isPeople, !d.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                model.typedIn(chatId: chatId)
+            }
+            let everyone = AppModel.addressesEveryone(d)
+            if everyone != draftAddressesEveryone { draftAddressesEveryone = everyone }
+            // `@handle` + a separator typed right after it: a chip, no picker (behaviour 5).
+            if isPeople, let m = MentionDraft.autoResolve(text: d, caret: composerDraft.caret, mentions: composerDraft.mentions,
+                                                          members: people?.members ?? [], me: model.user?.login) {
+                var next = composerDraft.mentions
+                next.append(m)
+                next.sort { $0.range.lowerBound < $1.range.lowerBound }
+                composerDraft.mentions = next
+            }
+            updateMentionQuery()
+        }
+        composerDraft.onCaretOrMentions = { updateMentionQuery() }
+        if composerDraft.text.isEmpty, !saved.isEmpty {
+            composerDraft.text = saved
+            composerDraft.caret = (saved as NSString).length
+            composerDraft.mentions = MentionDraft.resolveAll(text: saved, mentions: [], members: people?.members ?? [], me: model.user?.login, collectives: isPeople)
+            if DebugHooks.composerDraft != nil { composerFocused = true }
+        }
+        if isPeople { model.markPeopleRead(chatId, force: true) }
+        if isChannel {
+            // The newest page now, live rows through the listener from here on.
+            model.openChannel(chatId)
+        } else {
+            Task { await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId) }
+        }
+        openPendingSearchIfNeeded()
+        takePendingDMReplyIfNeeded()
+        takePendingForwardDraftIfNeeded()
+        revealPendingIfNeeded()
+        // Rig: `ARBOS_SHOW=chatsearch` raises the Search-in-chat bar (header-glass shots).
+        if DebugHooks.show == "chatsearch" { showSearch = true }
+        if let link = DebugHooks.link {
+            model.setRoomLink(chatId, link)
+            if let ms = DebugHooks.linkClearsMs {
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(ms)) { model.setRoomLink(chatId, .live) }
+            }
+        }
+        #if DEBUG
+        let drive = DebugHooks.perfDrive
+        if !drive.isEmpty { Task { @MainActor in await runPerfDrive(drive) } }
+        #endif
+        if let show = DebugHooks.show, !model.showHookDone {
+            model.showHookDone = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(DebugHooks.showDelayMs)) {
+                runShowHook(show)
+            }
+        }
+    }
+
+    private func handleSessionDisappear()    private func handleSessionDisappear() {
+        // Keep the typed draft so coming back to this thread restores it.
+        model.setComposerDraft(composerDraft.text, for: chatId)
+        // Catch notifies that landed after the last onChange mark-read while we were still in the chat
+        // (including rows that arrived while the app was inactive on a call — isWatching was false).
+        if isPeople { model.markPeopleRead(chatId) }
+        else { model.markRead(chatId: chatId) }
+        if model.visibleChatId == chatId { model.visibleChatId = nil }
+    }
+
+
+    private func handleMessagesVersionChange(_ version: Int) {
+        #if DEBUG
+        if SendTrace.traces(chatId) { SendTrace.mark("version-onchange", detail: "version=\(version)", once: false) }
+        #endif
+        let old = rowsSource
+        let new = messages
+        let initial = old.isEmpty && rows.isEmpty
+        rowsSource = new
+        refreshRows()
+        // Streaming tokens reassign `messages` with the same last id — do not
+        // mark-read on every delta. Initial call (`old == new`) and a new last
+        // row still mark; AppModel also skips/throttles the PUT.
+        if old.last?.id != new.last?.id || initial {
+            model.markRead(chatId: chatId)
+            if isPeople { model.markPeopleRead(chatId) }
+        }
+        // A channel's read marker moves when a new row lands while it is on screen.
+        if isChannel, old.last?.id != new.last?.id { model.markChannelRead(chatId) }
+    }
+
+    private func handleCaughtUpChange(_ ready: Bool) {
+        if ready, !sentOnce, !DebugHooks.liveDemo, let text = DebugHooks.autoSend, DebugHooks.openChat == chatId {
+            // Several messages separated by " ||| " go out a few seconds apart
+            // (multitasking checks: the composer never waits for a reply).
+            let parts = text.components(separatedBy: " ||| ").filter { !$0.isEmpty }
+            composerDraft.text = parts.first ?? text
+            send()
+            if parts.count > 1 {
+                Task {
+                    for p in parts.dropFirst() {
+                        try? await Task.sleep(nanoseconds: 3_000_000_000)
+                        composerDraft.text = p
+                        send()
                     }
                 }
             }
+        }
+    }
+
+    /// Rig / `ARBOS_SHOW=…` hooks that fire once after appear.
+    private func runShowHook(_ show: String) {
+        switch show {
+        case "keyboard": composerFocused = true
+        case "settings": showSettings = true
+        case "agentsecrets": showAgentSecrets = true
+        case "voice": startCall(.voice)
+        case "model": showModelPicker = true
+        // `agentvoice | agentlabel | agentrename`: the agent pane, which opens the Voice
+        // picker / edits the label / opens the rename alert on appear.
+        case "profile", "agentvoice", "agentlabel", "agentrename": openHeaderProfile()
+        // `avatarpicker[-generate|-upload]`: the agent pane, which opens the sheet on that tab.
+        case let s where s.hasPrefix("avatarpicker"): openHeaderProfile()
+        case "edit": showProfile = true
+        // `tasks`: the tasks sheet over the presence row (needs `ARBOS_FIXTURE_JOBS`).
+        case "tasks": if !model.openJobs(chatId).isEmpty { showTasks = true }
+        // `jobtab`: the newest job's tab (needs `ARBOS_FIXTURE_JOBS`).
+        case "jobtab": model.openNewestJobTab(from: chatId)
+        case "userprofile": if let c = counterpart { model.showProfile(.user(ProfilePerson(c))) }
+        // `addmembers`: the group pane opens its Add members sheet on appear.
+        case "groupprofile", "addmembers", "removemember": model.showProfile(.group(chatId: chatId, projectId: isPeople ? nil : projectId))
+        case let s where s.hasPrefix("groupavatar"): model.showProfile(.group(chatId: chatId, projectId: isPeople ? nil : projectId))
+        case "member":
+            // The group page, then its first other member pushed over it (rig).
+            openHeaderProfile()
+            if let other = people?.humans.first(where: { $0.id != model.user?.id }) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { model.showProfile(.user(ProfilePerson(other))) }
+            }
+        case "members", "addperson": openHeaderProfile()
+        case "foreignagent", "foreignagent-owner":
+            // Someone else's agent in this group (needs `ARBOS_FIXTURE_FOREIGN_AGENT=1`):
+            // its page; `-owner` then follows its "Run by …" link
+            // ([feedback agent-pane-run-by-link-ios-2026-10-25]).
+            if let agent = people?.agents.first(where: { $0.ownerId != model.user?.id }), let foreign = model.foreignAgent(agent.id) {
+                model.showProfile(.agent(projectId: foreign.id))
+                if show == "foreignagent-owner", let owner = agent.ownerHandle {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                        model.showProfile(.user(ProfilePerson(id: agent.ownerId ?? owner, handle: owner, name: foreign.ownerName, avatarUrl: foreign.ownerAvatarUrl)))
+                    }
+                }
+            }
+        // `agentprofile`: the first roster agent's profile hero (a foreign agent's
+        // picture — the avatar-flip rig).
+        case "agentprofile": if let a = people?.agents.first { model.showProfile(.agent(projectId: a.id)) }
+        case "feedback": FeedbackCenter.shared.open(screen: "chat", chatId: chatId, projectId: isPeople ? nil : projectId)
+        case "call":
+            #if DEBUG
+            if let url = DebugHooks.callUrl, let token = DebugHooks.callToken {
+                Task { await calls.debugJoin(url: url, token: token, kind: DebugHooks.callKind == "video" ? .video : .voice,
+                                             chatId: chatId, projectId: isPeople ? peopleSlot : projectId) }
+            } else {
+                startCall(DebugHooks.callKind == "video" ? .video : .voice)
+            }
+            #else
+            startCall(.voice)
+            #endif
+        case "recording": recorder.start()
+        // `copy[:<n>]` (Debug, [feedback copy-image-messages-ios-2026-10-27] rig): Copy of
+        // the n-th newest message row (0 = newest) through the menu's own path, the
+        // pasteboard printed to the console, then the composer's paste 2 s later.
+        case let s where s.hasPrefix("copy"):
+            #if DEBUG
+            let n = Int(s.split(separator: ":").dropFirst().first ?? "0") ?? 0
+            let candidates = rows.filter { isMessageRow($0) }
+            if n < candidates.count {
+                let row = candidates[candidates.count - 1 - n]
+                runMessageMenu(.copy, row: row)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                    MessagePasteboard.debugDump()
+                    let media = MessagePasteboard.pendingAttachments()
+                    if !media.isEmpty { pending.append(contentsOf: media); composerFocused = true }
+                    if let words = UIPasteboard.general.string { composerDraft.text = words }
+                    print("rig copy: composer staged \(media.count) attachment(s), draft \"\(composerDraft.text)\"")
+                }
+            }
+            #endif
+        case "scrollup":
+            if let first = windowedRows.first { withAnimation { scroller?.scrollTo(first.id, anchor: .top) } }
+        case "media", "media-forward", "media-file":
+            // Rig (media-viewer-2026-10-23): the viewer on this chat's album at
+            // ARBOS_MEDIA_INDEX (chat order, default 0), with the Forward sheet
+            // up for `media-forward`; `media-file` opens the chat's first file.
+            let slot = isPeople ? "\(peopleSlot):\(chatId)" : projectId
+            if show == "media-file" {
+                let file = messages.lazy.flatMap { m in m.parts.compactMap { part -> MediaItem? in
+                    guard case .attachment(let id, let a) = part, MediaAlbum.kind(of: a) == .file else { return nil }
+                    return MediaAlbum.item(id: "\(m.id)#\(id)", message: m, attachment: a, kind: .file, slot: slot,
+                                           projectName: { model.project($0)?.name })
+                } }.first
+                if let file { rigViewer = MediaViewerState(items: [file], index: 0) }
+            } else {
+                let album = MediaAlbum.items(messages: messages, slot: slot, projectName: { model.project($0)?.name })
+                let ix = Int(ProcessInfo.processInfo.environment["ARBOS_MEDIA_INDEX"] ?? "") ?? 0
+                if !album.isEmpty { rigViewer = MediaViewerState(items: album, index: min(ix, album.count - 1)) }
+            }
+            rigViewerForward = show == "media-forward"
+        case "pending":
+            pending = [.init(name: "Q3 board deck v5.pdf", mime: "application/pdf", data: Data()),
+                       .init(name: "Photo Oct 15.jpg", mime: "image/jpeg", data: Data())]
+            composerFocused = true
+        case "reply":
+            // Rig: the composer's reply preview on the newest agent message.
+            replyTo = messages.last { $0.role == .assistant && !$0.isStreaming }
+            composerFocused = true
+        case "reply-long":
+            // Rig: the preview on a multi-paragraph markdown reply (the shape of
+            // Jacob's Oct 23 screenshot; fixture only).
+            #if DEBUG
+            if model.isFixture {
+                model.fixtureAppendAssistant(chatId: chatId, text: AppModel.longReview)
+                replyTo = model.messages[chatId]?.last { $0.role == .assistant }
+                composerFocused = true
+            }
+            #endif
+        case "code-block":
+            // Rig: a finished reply with a fenced ```rust block, for the code
+            // card's Copy pill shots (fixture only).
+            #if DEBUG
+            if model.isFixture {
+                model.fixtureAppendAssistant(chatId: chatId, text: AppModel.codeReply)
+            }
+            #endif
+        case "table", "table-top":
+            // Rig: Jacob's Lima bookstore turn — a GFM table of linked stores
+            // between two prose bubbles; `table-top` stops after the table so a
+            // phone-height shot shows it (fixture only).
+            #if DEBUG
+            if model.isFixture {
+                model.fixtureLimaReply(chatId: chatId, bubbles: show == "table-top" ? 2 : 3)
+            }
+            #endif
+        case "links":
+            // Rig: Jacob's New York Post turn — seven linked headlines as
+            // bullets, each with its site icon (fixture only).
+            #if DEBUG
+            if model.isFixture {
+                model.fixtureNYPostReply(chatId: chatId)
+            }
+            #endif
+        case "math":
+            // Rig: Jacob's bubble-sort turn — a Python code card, then prose
+            // with inline `$O(n^2)$` math (fixture only).
+            #if DEBUG
+            if model.isFixture {
+                model.fixtureBubbleSortReply(chatId: chatId)
+            }
+            #endif
+        case "agent-message", "agent-message-received":
+            // Rig: agent-to-agent messaging rows (fixture only) — the sender's
+            // hand-off + confirm + relayed reply, or the receiver's labelled row.
+            #if DEBUG
+            if model.isFixture {
+                model.fixtureAgentMessage(chatId: chatId, received: show == "agent-message-received")
+            }
+            #endif
+        case "forward":
+            // Rig: the Forward sheet for the newest message bubble.
+            if let row = rows.last(where: { isMessageRow($0) }) { beginForward(row) }
+        case "forwarded":
+            // Rig: a sent bubble forwarded from Sam Rivera (fixture only).
+            #if DEBUG
+            if model.isFixture {
+                model.fixtureAppend(chatId: chatId,
+                                    text: "Sending in a sec. Also: can we add your Arbos agent here so it can pull the numbers while we talk?",
+                                    attachments: [], forwardedFrom: "Sam Rivera")
+            }
+            #endif
+        case "actions":
+            // Rig: the long-press actions (capsule + menu) on the newest bubble.
+            if let row = rows.last(where: { isMessageRow($0) }) { openActions(row) }
+        case "keyboard-actions":
+            // Rig (iphone-bubble-menu-keyboard): the composer keyboard is up, then the
+            // newest bubble is long-pressed — the overlay must clear the keyboard.
+            composerFocused = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(1200)) {
+                if let row = rows.last(where: { isMessageRow($0) }) { openActions(row) }
+            }
+        case "reply-dm":
+            // Rig (#1836): the composer armed with a cross-chat reply, as Reply in DM leaves it.
+            replyRef = ReplyRef(chatId: "fx-group-launch", projectId: "people", messageId: "g1", chatTitle: "Launch week",
+                                sender: "user:fx-u3", senderName: "Mira Kaplan", senderHandle: "mira-k",
+                                text: "Launch checklist is here: https://notion.so/arbos/launch-week")
+            composerFocused = true
+        case "replied":
+            // Rig: a sent bubble quoting the newest agent message (fixture only).
+            #if DEBUG
+            if model.isFixture, let m = messages.last(where: { $0.role == .assistant && !$0.isStreaming }) {
+                model.fixtureAppend(chatId: chatId, text: "Does that cover the #general channel too?",
+                                    attachments: [], replyTo: m.id)
+            }
+            #endif
+        default: break
         }
     }
 
