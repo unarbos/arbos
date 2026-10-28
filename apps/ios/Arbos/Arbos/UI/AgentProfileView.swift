@@ -237,8 +237,12 @@ struct AgentProfileView: View {
     @State private var showReasoning = false
     /// The call-voice picker (#1316's `VoicePickerView`) from the Settings card's Voice row.
     @State private var showVoice = false
+    /// Connect an agent (#2142): Rotate key… pushes the reveal screen with the fresh key.
+    @State private var rotated: ConnectReveal?
 
     private var project: Project? { model.project(projectId) ?? fallback }
+    /// A connected (outside) agent: no Computer tab; Connection + Key under Details (#2142).
+    private var outside: OutsideAgentInfo? { model.outsideInfo[projectId] }
     private var isMine: Bool { model.project(projectId) != nil && project?.shared != true }
     private var items: [ChatItem] {
         let msgs = model.chats(of: projectId).flatMap { model.messages(of: $0.id) }
@@ -257,7 +261,7 @@ struct AgentProfileView: View {
                             Color.clear.frame(height: PaneKit.pageTop)
                             ProfilePane(
                                 hero: hero(project),
-                                tabs: PaneKinds.agent,
+                                tabs: outside != nil ? PaneKinds.outsideAgent : PaneKinds.agent,
                                 selected: $tab,
                                 body: sections(project)
                             )
@@ -286,10 +290,21 @@ struct AgentProfileView: View {
             }
         }
         .task { await model.loadVoices() }
+        .task(id: projectId) {
+            // Outside agents (#2142): the connection for the Details pane; a native agent leaves no entry.
+            guard isMine else { return }
+            await model.refreshOutsideInfo(projectId)
+            if outside != nil, tab == "Computer" { tab = "Details" }
+        }
         .task(id: isMine) {
             guard isMine else { return }
             await model.refreshRoutines(projectId)
             await model.refreshBoxReport()
+        }
+        .navigationDestination(isPresented: Binding(get: { rotated != nil }, set: { if !$0 { rotated = nil } })) {
+            if let rotated {
+                ConnectRevealView(reveal: rotated, onDone: { self.rotated = nil })
+            }
         }
         .task(id: "\(tab)-\(model.isStreaming(project: projectId))") {
             // The Coding row's elapsed time and the Computer tab's jobs move: poll while
@@ -465,9 +480,52 @@ struct AgentProfileView: View {
     private func sections(_ project: Project) -> [PaneSection] {
         switch tab {
         case "Library": return librarySections(project)
-        case "Computer": return computerSections(project)
-        default: return detailsSections(project)
+        case "Computer" where outside == nil: return computerSections(project)
+        default:
+            if let outside { return outsideSections(project, outside) }
+            return detailsSections(project)
         }
+    }
+
+    // MARK: Details for a connected agent — Connection · Key (#2142)
+
+    private func outsideSections(_ project: Project, _ info: OutsideAgentInfo) -> [PaneSection] {
+        var out: [PaneSection] = []
+        out.append(.title("Connection"))
+        let waiting = !info.connected && info.status == "never"
+        let statusTrailing: AnyView? = waiting
+            ? AnyView(ProgressView().controlSize(.small).tint(theme.accent))
+            : nil
+        out.append(.card([
+            AnyView(PaneRow(title: "Status", value: info.statusLine(), trailing: statusTrailing)
+                .accessibilityIdentifier("outside-status")),
+            AnyView(PaneRow(title: "Transport", value: info.transportLabel)),
+            AnyView(PaneRow(title: "Protocol", value: info.proto)),
+        ]))
+        out.append(.footnote("It reads and posts in the chats it is in, reacts, and shows typing and status. Secrets and members stay off."))
+        out.append(.title("Key"))
+        let revoked = info.status == "revoked"
+        out.append(.card([
+            AnyView(
+                Button {
+                    Task { if let r = await model.rotateOutsideKey(project.id) { rotated = r } }
+                } label: {
+                    PaneRow(leading: .tile("key"), title: "Rotate key…", chevron: true)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("outside-rotate")
+            ),
+            AnyView(
+                PaneDangerRow(title: revoked ? "Access revoked" : "Revoke access") {
+                    guard !revoked else { return }
+                    Task { await model.revokeOutsideAgent(project.id) }
+                }
+                .disabled(revoked)
+                .accessibilityIdentifier("outside-revoke")
+            ),
+        ]))
+        out.append(.footnote("Revoke stops it at once. Its messages stay."))
+        return out
     }
 
     // MARK: Details — Settings (Coding and Routines ahead of it while the flag is on)

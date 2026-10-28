@@ -290,6 +290,8 @@ final class AppModel: ObservableObject {
     @Published var needsProfileSetup = false
     private let webAuth = WebAuth()
     private var refreshTask: Task<Bool, Never>?
+    /// Outside agents (#2142): the connection per project, for the agent pane and the reveal.
+    @Published var outsideInfo: [Id: OutsideAgentInfo] = [:]
     @Published var projects: [Project] = [] {
         didSet {
         }
@@ -6071,6 +6073,54 @@ final class AppModel: ObservableObject {
             } catch {
                 fail("create the agent", error)
             }
+        }
+    }
+
+    // MARK: Outside agents (#2142)
+
+    /// `POST /outside-agents`: the relay makes the agent (no box) and mints its key; the caller
+    /// pushes the reveal screen. A refusal is the claimed failure on the Create sheet.
+    func connectAgent(name: String, transport: String) async -> ConnectReveal? {
+        do {
+            let reveal = try await api.connectAgent(name: name, transport: transport)
+            if let info = reveal.info { outsideInfo[reveal.projectId] = info }
+            await refreshRegistry()
+            return reveal
+        } catch {
+            fail("connect the agent", error)
+            return nil
+        }
+    }
+
+    /// The connection of an outside agent for the pane and the reveal screen; a native agent
+    /// leaves no entry.
+    @discardableResult
+    func refreshOutsideInfo(_ projectId: Id) async -> OutsideAgentInfo? {
+        guard !isFixture else { return nil }
+        if let info = try? await api.outsideAgent(projectId) {
+            outsideInfo[projectId] = info
+            return info
+        }
+        return outsideInfo[projectId]
+    }
+
+    func rotateOutsideKey(_ projectId: Id) async -> ConnectReveal? {
+        do {
+            let reveal = try await api.rotateOutsideKey(projectId)
+            if let info = reveal.info { outsideInfo[projectId] = info }
+            return reveal
+        } catch {
+            fail("rotate the key", error)
+            return nil
+        }
+    }
+
+    func revokeOutsideAgent(_ projectId: Id) async {
+        do {
+            try await api.revokeOutsideAgent(projectId)
+            await refreshOutsideInfo(projectId)
+        } catch {
+            fail("revoke the agent's access", error)
         }
     }
 
