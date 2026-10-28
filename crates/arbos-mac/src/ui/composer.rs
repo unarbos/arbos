@@ -1692,10 +1692,17 @@ impl EntityInputHandler for ComposerInput {
         } else {
             self.marked_range = None;
         }
+        // `new_selected_range_utf16` is relative to the newly marked text (Apple
+        // setMarkedText selectedRange), not the whole document. Map it onto the
+        // insertion in UTF-16, then convert to UTF-8 byte offsets.
+        let insertion_start_utf16 = self.offset_to_utf16(range.start);
+        let inserted_length_utf16 = new_text.encode_utf16().count();
         self.selected_range = new_selected_range_utf16
-            .as_ref()
-            .map(|range_utf16| self.range_from_utf16(range_utf16))
-            .map(|new_range| new_range.start + range.start..new_range.end + range.end)
+            .map(|selected| {
+                let start = insertion_start_utf16 + selected.start.min(inserted_length_utf16);
+                let end = insertion_start_utf16 + selected.end.min(inserted_length_utf16);
+                self.range_from_utf16(&(start..end))
+            })
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
         cx.notify();
     }
