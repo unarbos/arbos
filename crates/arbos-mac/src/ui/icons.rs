@@ -250,6 +250,10 @@ impl AssetSource for Assets {
         if let Some(bytes) = crate::ui::avatars::leaf_asset_bytes(path) {
             return Ok(Some(Cow::Borrowed(bytes)));
         }
+        // The link tiles' bundled brand marks (`brands/<slug>.svg`).
+        if let Some(bytes) = crate::ui::link_tile::brand_asset_bytes(path) {
+            return Ok(Some(Cow::Borrowed(bytes)));
+        }
         Ok(ICONS
             .iter()
             .find(|(p, _)| *p == path)
