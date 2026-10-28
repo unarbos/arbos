@@ -6,10 +6,12 @@
 // Sender chip + keyword ([feedback app-01M61GXS849K96HRER4YD0ZZ6R]): the bar
 // filters by who wrote a message as well as by text, mirroring
 // `crates/arbos-mac/src/chat_search.rs` (`Query::hits_row`, `offer_sender`).
+// The bar UI lives here (not in ChatView) so ChatSession type-checks.
 
 import ArbosFFI
 import Foundation
 import SwiftUI
+import UIKit
 
 enum ChatSearchShortcut {
     /// ⌘F — the Find key on every Apple platform.
@@ -97,5 +99,226 @@ enum ChatSearchFilter {
             let handle = m.isAgent ? mentionSlug(m.project?.name ?? m.handle) : m.handle
             return Sender(key: m.member, name: m.displayName, handle: handle)
         }
+    }
+}
+
+/// Search-in-chat bar: person Menu, pinned accent chip, keyword field, offer chip
+/// ([feedback app-01M61GXS849K96HRER4YD0ZZ6R]). Lives outside `ChatSession` so
+/// that view's `sessionRoot` type-checks.
+struct ChatSearchBar<Avatar: View>: View {
+    @Environment(\.theme) private var theme
+    @Binding var text: String
+    @Binding var pinned: ChatSearchFilter.Sender?
+    @Binding var focused: Bool
+    let senders: [ChatSearchFilter.Sender]
+    var onClose: () -> Void
+    var onPin: (ChatSearchFilter.Sender) -> Void
+    var onUnpin: () -> Void
+    @ViewBuilder var avatar: (ChatSearchFilter.Sender) -> Avatar
+
+    private var offered: ChatSearchFilter.Sender? {
+        guard pinned == nil else { return nil }
+        return ChatSearchFilter.offer(typed: text, senders: senders)
+    }
+
+    var body: some View {
+        VStack(spacing: 6) {
+            fieldRow
+            if let offered {
+                offerChip(offered)
+            }
+        }
+        .padding(.horizontal, Controls.inset)
+    }
+
+    private var fieldRow: some View {
+        HStack(spacing: 8) {
+            senderMenu
+            if let pinned {
+                pinnedChip(pinned)
+            }
+            ChatSearchTextField(
+                text: $text,
+                isFocused: $focused,
+                placeholder: "Search in chat",
+                placeholderColor: UIColor(theme.placeholder),
+                textColor: UIColor(theme.text),
+                font: UIFont.systemFont(ofSize: Theme.body * theme.textScale),
+                onDeleteBackwardEmpty: {
+                    if text.isEmpty { onUnpin() }
+                })
+            .frame(maxWidth: .infinity, minHeight: 22)
+            Button(action: onClose) {
+                Image(systemName: "xmark.circle.fill").foregroundStyle(theme.muted)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Close search")
+        }
+        .padding(.horizontal, Controls.textInset).frame(height: Controls.height)
+        .background {
+            HeaderGlassBackground(
+                shape: Capsule(),
+                material: ChatHeaderGlass.searchBarMaterial(surface: theme.surface),
+                tinted: true)
+        }
+    }
+
+    private var senderMenu: some View {
+        Menu {
+            ForEach(senders) { sender in
+                Button {
+                    onPin(sender)
+                } label: {
+                    Label {
+                        Text(Self.title(sender))
+                    } icon: {
+                        avatar(sender)
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: "person.crop.circle")
+                .font(.system(size: Controls.glyph, weight: .medium))
+                .foregroundStyle(pinned != nil ? theme.accent : theme.muted)
+        }
+        .accessibilityLabel("Filter by sender")
+    }
+
+    private static func title(_ sender: ChatSearchFilter.Sender) -> String {
+        if sender.handle.isEmpty { return sender.name }
+        return "\(sender.name)  @\(sender.handle)"
+    }
+
+    private func pinnedChip(_ pinned: ChatSearchFilter.Sender) -> some View {
+        HStack(spacing: 4) {
+            Text("From \(pinned.name)")
+                .font(theme.font(12.5, weight: .medium))
+                .foregroundStyle(theme.accent)
+                .lineLimit(1)
+            Button(action: onUnpin) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(theme.accent)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Clear sender filter")
+        }
+        .padding(.leading, 8).padding(.trailing, 6).padding(.vertical, 4)
+        .background(Capsule().fill(theme.accent.opacity(0.18)))
+    }
+
+    private func offerChip(_ offered: ChatSearchFilter.Sender) -> some View {
+        Button {
+            onPin(offered)
+        } label: {
+            HStack(spacing: 6) {
+                avatar(offered)
+                Text("From \(offered.name)")
+                    .font(theme.font(12.5, weight: .medium))
+                    .foregroundStyle(theme.text)
+                    .lineLimit(1)
+                if !offered.handle.isEmpty {
+                    Text("@\(offered.handle)")
+                        .font(theme.font(12.5))
+                        .foregroundStyle(theme.muted)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            .background(
+                Capsule()
+                    .fill(theme.text.opacity(0.08))
+                    .overlay(Capsule().strokeBorder(theme.separator, lineWidth: 1))
+            )
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, Controls.textInset)
+        .accessibilityLabel("Filter from \(offered.name)")
+    }
+}
+
+/// Search-in-chat field: ⌫ on an empty field unpins the sender chip
+/// ([feedback app-01M61GXS849K96HRER4YD0ZZ6R]; Mac `chat_search_unpin_sender`).
+struct ChatSearchTextField: UIViewRepresentable {
+    @Binding var text: String
+    @Binding var isFocused: Bool
+    var placeholder: String
+    var placeholderColor: UIColor
+    var textColor: UIColor
+    var font: UIFont
+    var onDeleteBackwardEmpty: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeUIView(context: Context) -> ChatSearchUITextField {
+        let field = ChatSearchUITextField()
+        field.delegate = context.coordinator
+        field.onDeleteBackwardEmpty = { [weak field] in
+            guard let field, (field.text ?? "").isEmpty else { return }
+            context.coordinator.parent.onDeleteBackwardEmpty()
+        }
+        field.borderStyle = .none
+        field.backgroundColor = .clear
+        field.autocorrectionType = .no
+        field.autocapitalizationType = .none
+        field.returnKeyType = .search
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        field.addTarget(context.coordinator, action: #selector(Coordinator.changed(_:)), for: .editingChanged)
+        return field
+    }
+
+    func updateUIView(_ uiView: ChatSearchUITextField, context: Context) {
+        context.coordinator.parent = self
+        if uiView.text != text { uiView.text = text }
+        uiView.font = font
+        uiView.textColor = textColor
+        uiView.attributedPlaceholder = NSAttributedString(
+            string: placeholder,
+            attributes: [.foregroundColor: placeholderColor, .font: font])
+        uiView.onDeleteBackwardEmpty = { [weak uiView] in
+            guard let uiView, (uiView.text ?? "").isEmpty else { return }
+            context.coordinator.parent.onDeleteBackwardEmpty()
+        }
+        if isFocused {
+            if !uiView.isFirstResponder { uiView.becomeFirstResponder() }
+        } else if uiView.isFirstResponder {
+            uiView.resignFirstResponder()
+        }
+    }
+
+    final class Coordinator: NSObject, UITextFieldDelegate {
+        var parent: ChatSearchTextField
+        init(_ parent: ChatSearchTextField) { self.parent = parent }
+
+        @objc func changed(_ field: UITextField) {
+            let next = field.text ?? ""
+            if parent.text != next { parent.text = next }
+        }
+
+        func textFieldDidBeginEditing(_ textField: UITextField) {
+            if !parent.isFocused { parent.isFocused = true }
+        }
+
+        func textFieldDidEndEditing(_ textField: UITextField) {
+            if parent.isFocused { parent.isFocused = false }
+        }
+
+        func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+            textField.resignFirstResponder()
+            return true
+        }
+    }
+}
+
+final class ChatSearchUITextField: UITextField {
+    var onDeleteBackwardEmpty: (() -> Void)?
+
+    override func deleteBackward() {
+        if (text ?? "").isEmpty {
+            onDeleteBackwardEmpty?()
+            return
+        }
+        super.deleteBackward()
     }
 }

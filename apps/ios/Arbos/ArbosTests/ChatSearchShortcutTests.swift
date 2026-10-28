@@ -45,6 +45,7 @@ final class ChatSearchShortcutTests: XCTestCase {
         XCTAssertTrue(source.contains(".keyboardShortcut(.cancelAction)"), "Esc closes the bar like the Mac's")
         XCTAssertTrue(source.contains("searchPinnedSender"), "closeSearch and the bar clear the pinned sender")
         XCTAssertTrue(source.contains("ChatSearchFilter.hits"), "visibleRows goes through the shared helper")
+        XCTAssertTrue(source.contains("ChatSearchBar("), "bar UI is the extracted ChatSearchBar")
     }
 
     // MARK: - Sender + keyword ([feedback app-01M61GXS849K96HRER4YD0ZZ6R])

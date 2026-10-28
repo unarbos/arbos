@@ -464,128 +464,36 @@ struct ChatSession: View {
         searchFocused = true
     }
 
-    /// Search-in-chat bar with sender Menu / pin chip / offer
-    /// ([feedback app-01M61GXS849K96HRER4YD0ZZ6R]). Own builder so `sessionRoot`
-    /// type-checks in reasonable time.
-    @ViewBuilder
+    /// Search-in-chat bar ([feedback app-01M61GXS849K96HRER4YD0ZZ6R]): UI lives
+    /// in `ChatSearchBar` so `sessionRoot` type-checks.
     private var chatSearchBar: some View {
-        VStack(spacing: 6) {
-            chatSearchBarField
-            if let offered = searchOfferedSender {
-                chatSearchOfferChip(offered)
-            }
-        }
-        .padding(.horizontal, Controls.inset)
+        ChatSearchBar(
+            text: $searchText,
+            pinned: $searchPinnedSender,
+            focused: Binding(get: { searchFocused }, set: { searchFocused = $0 }),
+            senders: searchSenders,
+            onClose: closeSearch,
+            onPin: pinSearchSender,
+            onUnpin: unpinSearchSender,
+            avatar: { searchSenderAvatar($0, size: 22) })
     }
 
-    /// Magnifier-side person Menu, optional pinned chip, keyword field, close.
-    private var chatSearchBarField: some View {
-        HStack(spacing: 8) {
-            chatSearchSenderMenu
-            if let pinned = searchPinnedSender {
-                chatSearchPinnedChip(pinned)
+    /// Avatar for a sender in the Search-in-chat person Menu / offer chip.
+    @ViewBuilder
+    private func searchSenderAvatar(_ sender: ChatSearchFilter.Sender, size: CGFloat) -> some View {
+        if let people, let m = people.members.first(where: { $0.member == sender.key }) {
+            if m.isAgent {
+                AgentAvatar(project: model.agent(member: m, chatId: chatId), theme: theme, size: size, still: true)
+            } else {
+                PersonAvatar(url: m.avatarUrl, handle: m.handle, size: size, name: m.name, id: m.id, colorIndex: m.avatarColorIndex)
             }
-            ChatSearchTextField(
-                text: $searchText,
-                isFocused: Binding(
-                    get: { searchFocused },
-                    set: { searchFocused = $0 }),
-                placeholder: "Search in chat",
-                placeholderColor: UIColor(theme.placeholder),
-                textColor: UIColor(theme.text),
-                font: UIFont.systemFont(ofSize: Theme.body * theme.textScale),
-                onDeleteBackwardEmpty: {
-                    if searchText.isEmpty { unpinSearchSender() }
-                })
-            .frame(maxWidth: .infinity, minHeight: 22)
-            Button { closeSearch() } label: {
-                Image(systemName: "xmark.circle.fill").foregroundStyle(theme.muted)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Close search")
+        } else if sender.key == model.myUserId, let u = model.user {
+            PersonAvatar(url: u.avatarUrl, handle: u.login, size: size, name: u.name, id: u.id, colorIndex: u.avatarColorIndexEffective)
+        } else if sender.key.hasPrefix("agent:"), let p = model.project(String(sender.key.dropFirst(6))) {
+            AgentAvatar(project: p, theme: theme, size: size, still: true)
+        } else {
+            PersonAvatar(url: nil, handle: sender.handle.isEmpty ? sender.name : sender.handle, size: size, name: sender.name, id: sender.key)
         }
-        .padding(.horizontal, Controls.textInset).frame(height: Controls.height)
-        .background {
-            HeaderGlassBackground(
-                shape: Capsule(),
-                material: ChatHeaderGlass.searchBarMaterial(surface: theme.surface),
-                tinted: true)
-        }
-    }
-
-    /// Person button → Menu of senders (avatar, name, @handle).
-    private var chatSearchSenderMenu: some View {
-        Menu {
-            ForEach(searchSenders) { sender in
-                Button {
-                    pinSearchSender(sender)
-                } label: {
-                    Label(chatSearchSenderTitle(sender), systemImage: sender.key.hasPrefix("agent:") ? "cpu" : "person.crop.circle")
-                }
-            }
-        } label: {
-            Image(systemName: "person.crop.circle")
-                .font(.system(size: Controls.glyph, weight: .medium))
-                .foregroundStyle(searchPinnedSender != nil ? theme.accent : theme.muted)
-        }
-        .accessibilityLabel("Filter by sender")
-    }
-
-    private func chatSearchSenderTitle(_ sender: ChatSearchFilter.Sender) -> String {
-        if sender.handle.isEmpty { return sender.name }
-        return "\(sender.name)  @\(sender.handle)"
-    }
-
-    /// Accent chip at the start of the field with ✕ to unpin.
-    private func chatSearchPinnedChip(_ pinned: ChatSearchFilter.Sender) -> some View {
-        HStack(spacing: 4) {
-            Text("From \(pinned.name)")
-                .font(theme.font(12.5, weight: .medium))
-                .foregroundStyle(theme.accent)
-                .lineLimit(1)
-            Button(action: unpinSearchSender) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(theme.accent)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Clear sender filter")
-        }
-        .padding(.leading, 8).padding(.trailing, 6).padding(.vertical, 4)
-        .background(Capsule().fill(theme.accent.opacity(0.18)))
-    }
-
-    /// Offered sender chip under the field while a typed name / @handle matches.
-    private func chatSearchOfferChip(_ offered: ChatSearchFilter.Sender) -> some View {
-        Button {
-            pinSearchSender(offered)
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "person.crop.circle.fill")
-                    .font(.system(size: 14))
-                    .foregroundStyle(theme.muted)
-                Text("From \(offered.name)")
-                    .font(theme.font(12.5, weight: .medium))
-                    .foregroundStyle(theme.text)
-                    .lineLimit(1)
-                if !offered.handle.isEmpty {
-                    Text("@\(offered.handle)")
-                        .font(theme.font(12.5))
-                        .foregroundStyle(theme.muted)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 12).padding(.vertical, 6)
-            .background(
-                Capsule()
-                    .fill(theme.text.opacity(0.08))
-                    .overlay(Capsule().strokeBorder(theme.separator, lineWidth: 1))
-            )
-        }
-        .buttonStyle(.plain)
-        .padding(.horizontal, Controls.textInset)
-        .accessibilityLabel("Filter from \(offered.name)")
     }
 
     /// Hardware-keyboard keys for the bar ([feedback iphone-chat-search-cmd-f-2026-10-26]).
@@ -1011,9 +919,20 @@ struct ChatSession: View {
         sessionRoot
     }
 
-    /// Transcript canvas + composer inset (no sheets / lifecycle).
-    @ViewBuilder
+    /// Sheets + lifecycle on top of `sessionCanvas` (split so the type
+    /// checker can finish — same pattern as `ServerProfileView`).
+    private var sessionRoot: some View {
+        sessionLifecycle(sessionSheets(sessionCanvas))
+    }
+
+    /// Transcript + header + composer + message-actions overlay.
     private var sessionCanvas: some View {
+        sessionActionsOverlay(sessionComposerInset(sessionStage))
+    }
+
+    /// Transcript canvas under the floating header (no composer inset).
+    @ViewBuilder
+    private var sessionStage: some View {
         // Header stays outside GeometryReader (same pattern as ServerChannelsView /
         // HiddenChatsView). Nesting it inside the reader let iOS 26/27 vertically
         // centre the glass bar over the transcript (feedback app-01M5P98RB40WKA70R70DMDN97E).
@@ -1098,61 +1017,72 @@ struct ChatSession: View {
         .animation(.easeOut(duration: 0.2), value: awayFromBottom)
         .animation(.easeOut(duration: 0.2), value: newBelowCount > 0)
         .environment(\.composerInset, composerSideInset)
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            VStack(spacing: 0) {
-                // The composer's note (Jacob 2026-10-26): the last send / attachment / recording
-                // failure in this chat, directly above the composer at its width; Try again
-                // re-sends the newest failed message.
-                if let error = model.sendErrors[chatId] {
-                    ErrorNote(id: "composer-error", error: error,
-                              detailsOpen: Binding(get: { model.sendErrorDetailsOpen.contains(chatId) },
-                                                   set: { if $0 { model.sendErrorDetailsOpen.insert(chatId) } else { model.sendErrorDetailsOpen.remove(chatId) } }),
-                              onTryAgain: { model.retrySendError(chatId) })
-                        .padding(.horizontal, composerSideInset)
-                        .padding(.bottom, 10)
-                }
-                presenceRow
-                    .environment(\.composerInset, composerSideInset)
-                    .animation(.easeOut(duration: 0.25), value: composerFocused)
-                Group {
-                    if isChannel, !model.channelCanPost(chatId) {
-                        // Rule 9: a restricted channel I cannot post in — one quiet line, no composer.
-                        Text("Only admins post here")
-                            .font(theme.font(Theme.small))
-                            .foregroundStyle(theme.muted)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: Theme.composerHeight)
-                            .accessibilityIdentifier("channel-read-only")
-                    } else if isPeople, people?.isSilencedNow == true {
-                        // Group admin muted me from posting — one quiet line, no composer.
-                        Text("You've been muted in this group")
-                            .font(theme.font(Theme.small))
-                            .foregroundStyle(theme.muted)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: Theme.composerHeight)
-                            .accessibilityIdentifier("group-silenced")
-                    } else if let peer = blockedPeer {
-                        // A DM with someone I blocked has no input ([feedback
-                        // blocked-state-ios-2026-10-26]): "You blocked X · Unblock" in its place.
-                        BlockedComposerBar(name: peer.displayName) { confirmUnblock = true }
-                    } else {
-                        composer
-                    }
-                }
-                // Grok: 31 pt side inset with the keyboard down, 19 pt with it up.
-                .padding(.horizontal, composerSideInset)
-                .animation(.easeOut(duration: 0.25), value: composerFocused)
+    }
+
+    /// Presence + composer band pinned under the transcript.
+    @ViewBuilder
+    private var sessionComposerBar: some View {
+        VStack(spacing: 0) {
+            // The composer's note (Jacob 2026-10-26): the last send / attachment / recording
+            // failure in this chat, directly above the composer at its width; Try again
+            // re-sends the newest failed message.
+            if let error = model.sendErrors[chatId] {
+                ErrorNote(id: "composer-error", error: error,
+                          detailsOpen: Binding(get: { model.sendErrorDetailsOpen.contains(chatId) },
+                                               set: { if $0 { model.sendErrorDetailsOpen.insert(chatId) } else { model.sendErrorDetailsOpen.remove(chatId) } }),
+                          onTryAgain: { model.retrySendError(chatId) })
+                    .padding(.horizontal, composerSideInset)
+                    .padding(.bottom, 10)
             }
-            .padding(.top, Theme.chatBarTopPad)
-            // Grok: 18 pt between the field and the keyboard, 2 pt above the home indicator.
-            .padding(.bottom, composerFocused ? Theme.composerBottomKeyboard : Theme.composerBottom)
-            // The band: opaque from the bar's top edge through the home indicator (the
-            // keyboard's edge when it is up) — nothing reads behind or between the controls.
-            // The fade above it is `ComposerBottomFade` in the canvas.
-            .background { ComposerBandMaterial().ignoresSafeArea(.container, edges: .bottom) }
-            // A drag that starts here selects text or slides the mic — never "back".
-            .backSwipeComposerBar()
+            presenceRow
+                .environment(\.composerInset, composerSideInset)
+                .animation(.easeOut(duration: 0.25), value: composerFocused)
+            Group {
+                if isChannel, !model.channelCanPost(chatId) {
+                    // Rule 9: a restricted channel I cannot post in — one quiet line, no composer.
+                    Text("Only admins post here")
+                        .font(theme.font(Theme.small))
+                        .foregroundStyle(theme.muted)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: Theme.composerHeight)
+                        .accessibilityIdentifier("channel-read-only")
+                } else if isPeople, people?.isSilencedNow == true {
+                    // Group admin muted me from posting — one quiet line, no composer.
+                    Text("You've been muted in this group")
+                        .font(theme.font(Theme.small))
+                        .foregroundStyle(theme.muted)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: Theme.composerHeight)
+                        .accessibilityIdentifier("group-silenced")
+                } else if let peer = blockedPeer {
+                    // A DM with someone I blocked has no input ([feedback
+                    // blocked-state-ios-2026-10-26]): "You blocked X · Unblock" in its place.
+                    BlockedComposerBar(name: peer.displayName) { confirmUnblock = true }
+                } else {
+                    composer
+                }
+            }
+            // Grok: 31 pt side inset with the keyboard down, 19 pt with it up.
+            .padding(.horizontal, composerSideInset)
+            .animation(.easeOut(duration: 0.25), value: composerFocused)
         }
+        .padding(.top, Theme.chatBarTopPad)
+        // Grok: 18 pt between the field and the keyboard, 2 pt above the home indicator.
+        .padding(.bottom, composerFocused ? Theme.composerBottomKeyboard : Theme.composerBottom)
+        // The band: opaque from the bar's top edge through the home indicator (the
+        // keyboard's edge when it is up) — nothing reads behind or between the controls.
+        // The fade above it is `ComposerBottomFade` in the canvas.
+        .background { ComposerBandMaterial().ignoresSafeArea(.container, edges: .bottom) }
+        // A drag that starts here selects text or slides the mic — never "back".
+        .backSwipeComposerBar()
+    }
+
+    private func sessionComposerInset<V: View>(_ content: V) -> some View {
+        content.safeAreaInset(edge: .bottom, spacing: 0) { sessionComposerBar }
+    }
+
+    private func sessionActionsOverlay<V: View>(_ content: V) -> some View {
+        content
         .overlayPreferenceValue(RowFrameKey.self) { anchors in
             GeometryReader { geo in
                 if let row = actionsRow, let anchor = anchors[row.id] {
@@ -1202,10 +1132,9 @@ struct ChatSession: View {
         }
     }
 
-    /// Sheets, tasks, and appear/disappear hooks on top of `sessionCanvas`.
-    @ViewBuilder
-    private var sessionRoot: some View {
-        sessionCanvas
+    /// Presentation sheets on the canvas.
+    private func sessionSheets<V: View>(_ content: V) -> some View {
+        content
         // Custom back chevron; swipe right (edge pop or anywhere outside the composer
         // bar) goes back one level — `BackSwipe.swift`, shared by every chat screen.
         .backSwipeToPop()
@@ -1275,6 +1204,11 @@ struct ChatSession: View {
                 .presentationBackground(theme.bg)
                 .preferredColorScheme(theme.isDark ? .dark : .light)
         }
+    }
+
+    /// Tasks, appear/disappear, and onChange hooks.
+    private func sessionLifecycle<V: View>(_ content: V) -> some View {
+        content
         .task(id: chatId) {
             // Polls the open chat's jobs while one is live (`AppModel.pollJobsIfNeeded`);
             // cancelled with the view. The sheet lists live work only: nothing open → it
@@ -4082,90 +4016,5 @@ private struct ComposerField: View {
         } message: {
             Text("Allow the microphone in Settings to record a voice memo.")
         }
-    }
-}
-
-/// Search-in-chat field: ⌫ on an empty field unpins the sender chip
-/// ([feedback app-01M61GXS849K96HRER4YD0ZZ6R]; Mac `chat_search_unpin_sender`).
-private struct ChatSearchTextField: UIViewRepresentable {
-    @Binding var text: String
-    @Binding var isFocused: Bool
-    var placeholder: String
-    var placeholderColor: UIColor
-    var textColor: UIColor
-    var font: UIFont
-    var onDeleteBackwardEmpty: () -> Void
-
-    func makeCoordinator() -> Coordinator { Coordinator(self) }
-
-    func makeUIView(context: Context) -> ChatSearchUITextField {
-        let field = ChatSearchUITextField()
-        field.delegate = context.coordinator
-        field.onDeleteBackwardEmpty = { [weak field] in
-            guard let field, (field.text ?? "").isEmpty else { return }
-            context.coordinator.parent.onDeleteBackwardEmpty()
-        }
-        field.borderStyle = .none
-        field.backgroundColor = .clear
-        field.autocorrectionType = .no
-        field.autocapitalizationType = .none
-        field.returnKeyType = .search
-        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        field.addTarget(context.coordinator, action: #selector(Coordinator.changed(_:)), for: .editingChanged)
-        return field
-    }
-
-    func updateUIView(_ uiView: ChatSearchUITextField, context: Context) {
-        context.coordinator.parent = self
-        if uiView.text != text { uiView.text = text }
-        uiView.font = font
-        uiView.textColor = textColor
-        uiView.attributedPlaceholder = NSAttributedString(
-            string: placeholder,
-            attributes: [.foregroundColor: placeholderColor, .font: font])
-        uiView.onDeleteBackwardEmpty = { [weak uiView] in
-            guard let uiView, (uiView.text ?? "").isEmpty else { return }
-            context.coordinator.parent.onDeleteBackwardEmpty()
-        }
-        if isFocused {
-            if !uiView.isFirstResponder { uiView.becomeFirstResponder() }
-        } else if uiView.isFirstResponder {
-            uiView.resignFirstResponder()
-        }
-    }
-
-    final class Coordinator: NSObject, UITextFieldDelegate {
-        var parent: ChatSearchTextField
-        init(_ parent: ChatSearchTextField) { self.parent = parent }
-
-        @objc func changed(_ field: UITextField) {
-            let next = field.text ?? ""
-            if parent.text != next { parent.text = next }
-        }
-
-        func textFieldDidBeginEditing(_ textField: UITextField) {
-            if !parent.isFocused { parent.isFocused = true }
-        }
-
-        func textFieldDidEndEditing(_ textField: UITextField) {
-            if parent.isFocused { parent.isFocused = false }
-        }
-
-        func textFieldShouldReturn(_ textField: UITextField) -> Bool {
-            textField.resignFirstResponder()
-            return true
-        }
-    }
-}
-
-private final class ChatSearchUITextField: UITextField {
-    var onDeleteBackwardEmpty: (() -> Void)?
-
-    override func deleteBackward() {
-        if (text ?? "").isEmpty {
-            onDeleteBackwardEmpty?()
-            return
-        }
-        super.deleteBackward()
     }
 }
