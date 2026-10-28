@@ -188,6 +188,31 @@ mod core_writer_tests {
         assert_eq!(greet.sender, "agent:proj");
     }
 
+    /// Core `edit_message_text` writes `editedAt`; the Mac Message reads it.
+    /// An unedited row keeps `edited_at: None`.
+    #[test]
+    fn edit_message_text_sets_mac_edited_at() {
+        let core = arbos_core::doc::ChatDoc::new(None, false);
+        core.transact(|d| {
+            d.append_user_message("m1", "before", "dev:mac", &UserMessageOpts::default())
+                .unwrap();
+            d.append_user_message("m2", "plain", "dev:mac", &UserMessageOpts::default())
+                .unwrap();
+            d.edit_message_text("m1", "after").unwrap();
+        });
+        let rows = core.to_json()["messages"].as_array().cloned().unwrap();
+        let edited = message_from_core_row(&rows[0]);
+        assert_eq!(edited.plain_text(), "after");
+        assert!(
+            edited.edited_at.is_some_and(|t| t > 0),
+            "edited row carries edited_at, got {:?}",
+            edited.edited_at
+        );
+        let plain = message_from_core_row(&rows[1]);
+        assert_eq!(plain.plain_text(), "plain");
+        assert_eq!(plain.edited_at, None);
+    }
+
     #[test]
     fn mac_style_send_via_core_transact_is_one_commit() {
         let mac = ChatDoc::empty("chat1");

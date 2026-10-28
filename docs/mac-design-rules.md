@@ -517,7 +517,9 @@ channel; mine, another person's, an agent's). The time ("9:41 PM") appears only
 while the pointer is over the row, beside the bubble on its outer edge (left of
 my bubble, after the ☺ ↩ ⋯ rail of everyone else's), fading with the rail; at
 rest it is not drawn at all. On the iPhone the same rule is the iMessage
-drag-to-reveal (`timeReveal`): no inline or footer time in any bubble.
+drag-to-reveal (`timeReveal`): no inline or footer time in any bubble. An
+edited message's muted "edited" under the bubble is not a time — it stays at
+rest; its tooltip carries the edit clock ("Edited 9:45 PM").
 
 Lost twice before this page existed: v0.6.183 (#1437, group bubbles got the time
 after the text) and v0.6.203 (#1496, a tester's request for an always-visible

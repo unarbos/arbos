@@ -48,4 +48,62 @@ final class DeliveryStateTests: XCTestCase {
         }
         XCTAssertEqual(states, [.delivered, nil, .pending])
     }
+
+    /// [feedback app-01M61H26NH5CPFKDF62AKFQH50]: DocJSON reads `editedAt`; rows stamp
+    /// it on the last bubble only (text, or a captioned picture).
+    func testDocJSONReadsEditedAt() {
+        let raw: [String: Any] = [
+            "id": "e1", "role": "user", "sender": "user:fx-me", "status": "done",
+            "createdAt": t0, "editedAt": t0 + 60_000,
+            "parts": [["id": "e1-t", "kind": "text", "text": "after"]],
+        ]
+        let m = DocJSON.message(raw, chatId: chat)!
+        XCTAssertEqual(m.editedAt, t0 + 60_000)
+
+        let absent = DocJSON.message([
+            "id": "e2", "role": "user", "sender": "user:fx-me", "status": "done",
+            "createdAt": t0, "parts": [["id": "e2-t", "kind": "text", "text": "plain"]],
+        ] as [String: Any], chatId: chat)!
+        XCTAssertNil(absent.editedAt)
+
+        let zero = DocJSON.message([
+            "id": "e3", "role": "user", "sender": "user:fx-me", "status": "done",
+            "createdAt": t0, "editedAt": 0,
+            "parts": [["id": "e3-t", "kind": "text", "text": "zero"]],
+        ] as [String: Any], chatId: chat)!
+        XCTAssertNil(zero.editedAt)
+    }
+
+    func testRowsStampEditedAtOnTheLastBubbleOnly() {
+        var text = msg("t", at: t0)
+        text.editedAt = t0 + 1_000
+        var picture = msg("p", at: t0 + 2_000)
+        picture.parts = [
+            .attachment(id: "p-a", attachment: Attachment(name: "p.png", mime: "image/png",
+                                                          blobRef: "blob-1", kind: "image")),
+            .text(id: "p-t", text: "a real caption"),
+        ]
+        picture.editedAt = t0 + 3_000
+        let plain = msg("plain", at: t0 + 4_000)
+
+        let rows = Transcript.rows([text, picture, plain], projectId: "people:\(chat)", me: "user:fx-me", people: true)
+        let textRow = rows.first { $0.messageId == "t" && $0.editedAt != nil }
+        XCTAssertEqual(textRow?.editedAt, t0 + 1_000)
+        XCTAssertEqual(rows.filter { $0.messageId == "t" }.compactMap(\.editedAt).count, 1)
+        if case .user = textRow?.kind {} else {
+            XCTFail("edited text stamps the user bubble, got \(String(describing: textRow?.kind))")
+        }
+
+        // A captioned picture folds the caption onto the image row (no separate text bubble).
+        let captionRow = rows.first { $0.messageId == "p" && $0.editedAt != nil }
+        XCTAssertEqual(captionRow?.editedAt, t0 + 3_000)
+        if case .image(_, _, let caption, _, _, _, _, _) = captionRow?.kind {
+            XCTAssertEqual(caption, "a real caption")
+        } else {
+            XCTFail("edited caption stamps the image row, got \(String(describing: captionRow?.kind))")
+        }
+        XCTAssertEqual(rows.filter { $0.messageId == "p" }.compactMap(\.editedAt).count, 1)
+
+        XCTAssertTrue(rows.filter { $0.messageId == "plain" }.allSatisfy { $0.editedAt == nil })
+    }
 }

@@ -516,6 +516,9 @@ pub enum RowKind {
         /// (or as the whole bubble when the text was only the link): `(part id, preview)`
         /// ([feedback link-embeds-mac-2026-10-27]).
         preview: Option<Box<(String, LinkPreview)>>,
+        /// When the sender edited this message: `editedAt` ms. Drawn as a muted
+        /// "edited" under the bubble at rest (not a time — hover-only time still holds).
+        edited: Option<u64>,
     },
     Markdown {
         block: Block,
@@ -611,6 +614,9 @@ pub enum RowKind {
         time: Option<String>,
         /// The message's "Forwarded from …" line, drawn on the card.
         forwarded_from: Option<String>,
+        /// When this is the message's last row and it was edited: `editedAt` ms.
+        /// Drawn as a muted "edited" under the card at rest.
+        edited: Option<u64>,
     },
     /// S8: the agent asked a question.
     AskUser {
@@ -2599,6 +2605,7 @@ impl Transcript {
                 forwarded_from,
                 ghost,
                 preview,
+                edited,
             } => {
                 // My bubble is dark in both appearances: white text, a
                 // stronger highlight than the soft one on the grey bubbles.
@@ -2779,18 +2786,28 @@ impl Transcript {
                                         .flex_1()
                                         .min_w_0()
                                         .flex()
-                                        .items_center()
+                                        .flex_col()
+                                        .items_start()
                                         .child(
-                                            bubble
-                                                .bg(theme.bubble_assistant)
-                                                .text_color(theme.text)
-                                                .border_l_2()
-                                                .border_color(Theme::with_alpha(color, 0.7)),
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .child(
+                                                    bubble
+                                                        .bg(theme.bubble_assistant)
+                                                        .text_color(theme.text)
+                                                        .border_l_2()
+                                                        .border_color(Theme::with_alpha(
+                                                            color, 0.7,
+                                                        )),
+                                                )
+                                                .child(actions.ml(px(6.0)))
+                                                .children(
+                                                    hover_time(time, reveal, &theme)
+                                                        .map(|t| t.ml(px(8.0))),
+                                                ),
                                         )
-                                        .child(actions.ml(px(6.0)))
-                                        .children(
-                                            hover_time(time, reveal, &theme).map(|t| t.ml(px(8.0))),
-                                        ),
+                                        .children(edited_label(edited, &theme)),
                                 )
                         })
                         .into_any_element()
@@ -2835,6 +2852,9 @@ impl Transcript {
                                 )
                                 .child(own_bubble(bubble, delivery))
                         })
+                        // "edited" under the bubble on its side — not a time, so the
+                        // hover-only clock still sits on the bubble's line alone.
+                        .children(edited_label(edited, &theme))
                         .into_any_element()
                 }
             }
@@ -3065,6 +3085,7 @@ impl Transcript {
                 disc,
                 time,
                 forwarded_from,
+                edited,
             } => {
                 let preview = match attachment.blob_ref.as_ref() {
                     None => attachments::Preview::Unavailable,
@@ -3125,6 +3146,7 @@ impl Transcript {
                                 .child(actions.mr(px(6.0)))
                                 .child(card),
                         )
+                        .children(edited_label(edited, &theme))
                         .into_any_element()
                 } else if let Some(sender) = sender {
                     // Someone else's picture / file in a people chat: their disc on the
@@ -3158,6 +3180,7 @@ impl Transcript {
                                         .flex()
                                         .flex_col()
                                         .gap(px(4.0))
+                                        .items_start()
                                         .children(name_el.map(|n| div().pl(px(6.0)).child(n)))
                                         .child(
                                             div()
@@ -3169,7 +3192,8 @@ impl Transcript {
                                                     hover_time(time, reveal, &theme)
                                                         .map(|t| t.ml(px(8.0))),
                                                 ),
-                                        ),
+                                        )
+                                        .children(edited_label(edited, &theme)),
                                 ),
                         )
                         .into_any_element()
@@ -3189,6 +3213,7 @@ impl Transcript {
                                 .child(actions.ml(px(6.0)))
                                 .children(hover_time(time, reveal, &theme).map(|t| t.ml(px(8.0)))),
                         )
+                        .children(edited_label(edited, &theme))
                         .into_any_element()
                 }
             }
@@ -3811,6 +3836,28 @@ fn hover_time(time: Option<String>, opacity: f32, theme: &Theme) -> Option<Div> 
     })
 }
 
+/// A small muted "edited" under a bubble that was edited. Always on at rest —
+/// it is not a time, so the hover-only timestamp rule still holds. Tooltip
+/// reads "Edited 9:45 PM" ([feedback app-01M61H26NH5CPFKDF62AKFQH50]).
+fn edited_label(edited: Option<u64>, theme: &Theme) -> Option<impl IntoElement> {
+    let at = edited.filter(|&t| t > 0)?;
+    let tip: SharedString = clock_label(at)
+        .map(|t| format!("Edited {t}"))
+        .unwrap_or_else(|| "Edited".into())
+        .into();
+    Some(
+        div()
+            .id("bubble-edited")
+            .flex_shrink_0()
+            .whitespace_nowrap()
+            .text_size(px(11.0))
+            .text_color(theme.text_muted)
+            .debug_selector(|| "bubble-edited".into())
+            .tooltip(move |_, cx| cx.new(|_| ReactionSendersTip(tip.clone())).into())
+            .child("edited"),
+    )
+}
+
 /// My own bubble at its delivery opacity (see [`Delivery::opacity`]). Applied
 /// to the bubble itself, never a wrapper: the bubble's cap is
 /// `relative_width(own_bubble_fraction(..))` of its parent, and a wrapper that is itself
@@ -3924,6 +3971,7 @@ fn message_render_version(
     std::mem::discriminant(&message.status).hash(&mut h);
     message.pending.hash(&mut h);
     message.created_at.hash(&mut h);
+    message.edited_at.hash(&mut h);
     message.completed_at.hash(&mut h);
     message.hidden.hash(&mut h);
     message.worker.hash(&mut h);
@@ -4255,6 +4303,9 @@ pub fn build_rows_with_cache(
                 let show_text = !text.is_empty()
                     && !(has_image && is_generic_media_label(&text))
                     && legacy_hint.is_none();
+                // A User / caption row follows when there is text, no cards, or a link card.
+                let has_user_row = show_text || attachment_parts.is_empty() || preview.is_some();
+                let edited = message.edited_at.filter(|&t| t > 0);
                 for (ix, (part_id, attachment)) in attachment_parts.iter().enumerate() {
                     let forwarded = forwarded.clone().filter(|_| ix == 0);
                     let has_thumb = attachment
@@ -4266,6 +4317,12 @@ pub fn build_rows_with_cache(
                     let sender = from.clone().map(AttachmentSender::Person);
                     let card_named = named && ix == 0;
                     let disc = !show_text && ix + 1 == attachment_parts.len();
+                    // No text/caption bubble: the last card carries the "edited" mark.
+                    let card_edited = if !has_user_row && ix + 1 == attachment_parts.len() {
+                        edited
+                    } else {
+                        None
+                    };
                     rows.push(Row {
                         version: hash_version(
                             &(
@@ -4279,6 +4336,7 @@ pub fn build_rows_with_cache(
                                 from.as_ref().map(|p| &p.handle),
                                 card_named,
                                 disc,
+                                card_edited,
                             ),
                             false,
                         ),
@@ -4293,10 +4351,11 @@ pub fn build_rows_with_cache(
                             disc,
                             time: clock_label(message.created_at),
                             forwarded_from: forwarded.clone(),
+                            edited: card_edited,
                         },
                     });
                 }
-                if show_text || attachment_parts.is_empty() || preview.is_some() {
+                if has_user_row {
                     // A cross-chat reply (Reply in DM) quotes its own snapshot;
                     // an in-chat reply quotes the row it points at.
                     let quote = message
@@ -4325,6 +4384,7 @@ pub fn build_rows_with_cache(
                                 &forwarded_from,
                                 &ghost,
                                 &preview,
+                                edited,
                             ),
                             false,
                         ),
@@ -4342,6 +4402,7 @@ pub fn build_rows_with_cache(
                             forwarded_from,
                             ghost,
                             preview,
+                            edited,
                         },
                     });
                 }
@@ -4708,6 +4769,7 @@ pub fn build_rows_with_cache(
                                     disc,
                                     time: clock_label(message.created_at),
                                     forwarded_from: None,
+                                    edited: None,
                                 },
                             })
                         }
@@ -7886,6 +7948,8 @@ mod layout_tests {
             let theme = Theme::dark(crate::ui::theme::Surface::Matte);
             let selectable = Selectable::new(&self.selection, theme.accent_soft, cx);
             let time = || hover_time(Some("1:52 PM".to_string()), self.hover, &theme);
+            // A fixed edit time so layout tests can find `bubble-edited` at rest.
+            let edited = || edited_label(Some(1_700_000_000_000), &theme);
             let name = |name: &'static str| {
                 div()
                     .text_size(px(CHAT_BODY))
@@ -7925,14 +7989,28 @@ mod layout_tests {
                                 .child(div().size(px(16.0)))
                                 .children(time().map(|t| t.ml(px(8.0)))),
                         );
+                    // "edited" sits under the slot, not inside it — wrapping the
+                    // slot broke its width cap (layout_tests short / wrap bubbles).
                     div()
                         .w_full()
                         .flex()
-                        .items_end()
-                        .pl(px(AVATAR_COLUMN_INSET))
-                        .gap(px(SENDER_DISC_GAP))
-                        .child(div().size(px(SENDER_DISC)).flex_shrink_0())
-                        .child(incoming_slot(bubble, true))
+                        .flex_col()
+                        .items_start()
+                        .child(
+                            div()
+                                .w_full()
+                                .flex()
+                                .items_end()
+                                .pl(px(AVATAR_COLUMN_INSET))
+                                .gap(px(SENDER_DISC_GAP))
+                                .child(div().size(px(SENDER_DISC)).flex_shrink_0())
+                                .child(incoming_slot(bubble, true)),
+                        )
+                        .child(
+                            div()
+                                .pl(px(AVATAR_COLUMN_INSET + SENDER_DISC + SENDER_DISC_GAP))
+                                .children(edited()),
+                        )
                 }
                 Who::Mine | Who::Other => {
                     let body = user_message_body(
@@ -7963,33 +8041,53 @@ mod layout_tests {
                         div()
                             .w_full()
                             .flex()
-                            .items_end()
-                            .pl(px(AVATAR_COLUMN_INSET))
-                            .gap(px(SENDER_DISC_GAP))
-                            .child(div().size(px(SENDER_DISC)).flex_shrink_0())
+                            .flex_col()
+                            .items_start()
                             .child(
                                 div()
-                                    .flex_1()
-                                    .min_w_0()
+                                    .w_full()
                                     .flex()
-                                    .items_center()
-                                    .debug_selector(|| "test-bubble-parent".into())
-                                    .child(bubble)
-                                    .child(div().size(px(16.0)).ml(px(6.0)))
-                                    .children(time().map(|t| t.ml(px(8.0)))),
+                                    .items_end()
+                                    .pl(px(AVATAR_COLUMN_INSET))
+                                    .gap(px(SENDER_DISC_GAP))
+                                    .child(div().size(px(SENDER_DISC)).flex_shrink_0())
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .flex()
+                                            .items_center()
+                                            .debug_selector(|| "test-bubble-parent".into())
+                                            .child(bubble)
+                                            .child(div().size(px(16.0)).ml(px(6.0)))
+                                            .children(time().map(|t| t.ml(px(8.0)))),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .pl(px(AVATAR_COLUMN_INSET + SENDER_DISC + SENDER_DISC_GAP))
+                                    .children(edited()),
                             )
                     } else {
                         div()
                             .w_full()
                             .flex()
+                            .flex_col()
                             .items_end()
-                            .justify_end()
-                            .debug_selector(|| "test-bubble-parent".into())
-                            .children(time().map(|t| t.mr(px(8.0))))
-                            .child(div().size(px(16.0)).mr(px(6.0)))
-                            // Through the real delivery wrapper: a sent bubble must
-                            // keep the same cap as a seen one (v0.6.223 regression).
-                            .child(own_bubble(bubble, Delivery::Delivered))
+                            .child(
+                                div()
+                                    .w_full()
+                                    .flex()
+                                    .items_end()
+                                    .justify_end()
+                                    .debug_selector(|| "test-bubble-parent".into())
+                                    .children(time().map(|t| t.mr(px(8.0))))
+                                    .child(div().size(px(16.0)).mr(px(6.0)))
+                                    // Through the real delivery wrapper: a sent bubble must
+                                    // keep the same cap as a seen one (v0.6.223 regression).
+                                    .child(own_bubble(bubble, Delivery::Delivered)),
+                            )
+                            .children(edited())
                     }
                 }
             };
@@ -8145,6 +8243,9 @@ mod layout_tests {
                 vcx.debug_bounds("bubble-time").is_none(),
                 "{who:?}: a time is drawn at rest"
             );
+            // "edited" is not a time: it stays at rest while the clock stays hidden.
+            vcx.debug_bounds("bubble-edited")
+                .unwrap_or_else(|| panic!("{who:?}: no edited label at rest"));
 
             let (_view, vcx) = cx.add_window_view(|_, cx| BubbleRow {
                 pane: REFERENCE_PANE,
@@ -10655,6 +10756,117 @@ mod delivery_tests {
         assert!(
             f32::from(clock.origin.x + clock.size.width) <= f32::from(pending.origin.x),
             "the clock sits outside the pending bubble"
+        );
+    }
+}
+
+#[cfg(test)]
+mod edited_label_tests {
+    //! [feedback app-01M61H26NH5CPFKDF62AKFQH50]: an edited message's last bubble
+    //! row (text, or the caption / last attachment card) carries `edited`; plain
+    //! messages carry none.
+    use std::collections::{HashMap, HashSet};
+
+    use super::*;
+
+    fn text_msg(id: &str, text: &str, at: u64, edited_at: Option<u64>) -> Message {
+        let mut m: Message = serde_json::from_value(serde_json::json!({
+            "id": id,
+            "chatId": "c1",
+            "role": "user",
+            "sender": "user:gh_me",
+            "status": "done",
+            "createdAt": at,
+            "parts": [{ "id": format!("{id}-t"), "kind": "text", "text": text }],
+        }))
+        .expect("message");
+        m.edited_at = edited_at;
+        m
+    }
+
+    fn picture_caption(id: &str, caption: &str, at: u64, edited_at: Option<u64>) -> Message {
+        let mut m: Message = serde_json::from_value(serde_json::json!({
+            "id": id,
+            "chatId": "c1",
+            "role": "user",
+            "sender": "user:gh_me",
+            "status": "done",
+            "createdAt": at,
+            "parts": [
+                { "id": format!("{id}-a"), "kind": "attachment",
+                  "attachment": { "name": "p.png", "mime": "image/png", "ref": "blob-1", "kind": "image" } },
+                { "id": format!("{id}-t"), "kind": "text", "text": caption }
+            ],
+        }))
+        .expect("message");
+        m.edited_at = edited_at;
+        m
+    }
+
+    fn rows_of(messages: &[Message]) -> Vec<Row> {
+        let (spoken, failed) = (HashSet::new(), HashMap::new());
+        build_rows(
+            messages,
+            false,
+            SpeechRows {
+                enabled: false,
+                spoken: &spoken,
+                failed: &failed,
+                voice_mode: false,
+            },
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+        )
+    }
+
+    fn edited_of(row: &Row) -> Option<u64> {
+        match &row.kind {
+            RowKind::User { edited, .. } | RowKind::Attachment { edited, .. } => *edited,
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn build_rows_puts_edited_on_the_last_bubble_row_only() {
+        let t = 1_700_000_000_000u64;
+        let edited_at = t + 60_000;
+        let plain = text_msg("plain", "hello", t, None);
+        let edited_text = text_msg("edit", "hello again", t + 1_000, Some(edited_at));
+        let edited_caption =
+            picture_caption("cap", "a real caption", t + 2_000, Some(edited_at + 1));
+
+        let plain_rows = rows_of(&[plain]);
+        assert!(
+            plain_rows.iter().all(|r| edited_of(r).is_none()),
+            "unedited message stamps no row: {:?}",
+            plain_rows.iter().map(|r| &r.id).collect::<Vec<_>>()
+        );
+
+        let text_rows = rows_of(&[edited_text]);
+        let user = text_rows
+            .iter()
+            .find(|r| matches!(r.kind, RowKind::User { .. }))
+            .expect("user row");
+        assert_eq!(edited_of(user), Some(edited_at));
+        assert!(text_rows
+            .iter()
+            .filter(|r| r.id != user.id)
+            .all(|r| edited_of(r).is_none()));
+
+        let cap_rows = rows_of(&[edited_caption]);
+        let caption = cap_rows
+            .iter()
+            .find(|r| matches!(r.kind, RowKind::User { .. }))
+            .expect("caption row");
+        assert_eq!(edited_of(caption), Some(edited_at + 1));
+        assert!(
+            cap_rows
+                .iter()
+                .filter(|r| matches!(r.kind, RowKind::Attachment { .. }))
+                .all(|r| edited_of(r).is_none()),
+            "the picture card itself is not the edited row when a caption follows"
         );
     }
 }

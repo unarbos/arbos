@@ -6793,6 +6793,7 @@ fn human_message(chat_id: &str, who: &Person, text: &str, at: u64) -> Message {
         model: None,
         effort: None,
         created_at: at,
+        edited_at: None,
         completed_at: Some(at),
         call_id: None,
         activity: None,

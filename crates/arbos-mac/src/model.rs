@@ -2271,6 +2271,10 @@ pub struct Message {
     pub effort: Option<Effort>,
     #[serde(default)]
     pub created_at: u64,
+    /// When the sender last edited the text (or a picture / video caption).
+    /// `None` until an edit; the transcript draws a small "edited" under the bubble.
+    #[serde(default)]
+    pub edited_at: Option<u64>,
     #[serde(default)]
     pub completed_at: Option<u64>,
     /// System lines about a call ("<name> started a video call") carry it.
@@ -4210,6 +4214,7 @@ impl OptimisticNotice {
             model: None,
             effort: None,
             created_at: self.created_at,
+            edited_at: None,
             completed_at: None,
             call_id: None,
             activity: None,

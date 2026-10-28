@@ -4918,6 +4918,7 @@ final class AppModel: ObservableObject {
                 parts.append(.text(id: "\(messageId)-t", text: trimmed))
             }
             list[idx].parts = parts
+            list[idx].editedAt = Int64(Date().timeIntervalSince1970 * 1000)
             messages[chatId] = list
             Haptics.pick()
             return

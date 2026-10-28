@@ -112,6 +112,7 @@ fn base(chat: &str, id: String, role: Role, status: MessageStatus, at: u64) -> M
         model: None,
         effort: None,
         created_at: at,
+        edited_at: None,
         completed_at: Some(at),
         call_id: None,
         activity: None,

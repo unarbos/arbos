@@ -227,6 +227,8 @@ struct Row: Identifiable, Equatable {
     var replyCount: Int = 0
     /// The message's `createdAt` (ms), so the swipe-revealed time needs no lookup.
     var createdAt: Int64 = 0
+    /// The message's `editedAt` (ms), stamped on the same last bubble row as reactions.
+    var editedAt: Int64? = nil
     /// Space above this row (8 pt within a run, 24 pt at a sender / turn change,
     /// 20 pt around system lines), fixed at build time so a row's layout does not
     /// depend on its position in the visible window.
@@ -651,14 +653,20 @@ enum Transcript {
             }
             guard !chunk.isEmpty else { continue }
             for i in chunk.indices { chunk[i].createdAt = message.createdAt }
-            if !message.reactions.isEmpty,
-               let ix = chunk.lastIndex(where: {
-                   switch $0.kind {
-                   case .user, .other, .member, .assistant, .image, .file, .voiceMemo: return true
-                   default: return false
-                   }
-               }) {
-                chunk[ix].reactions = message.reactions
+            // Reactions and the "edited" label share the message's last bubble row
+            // (text, or a captioned picture / file when that is the last bubble).
+            if let ix = chunk.lastIndex(where: {
+                switch $0.kind {
+                case .user, .other, .member, .assistant, .image, .file, .voiceMemo: return true
+                default: return false
+                }
+            }) {
+                if !message.reactions.isEmpty {
+                    chunk[ix].reactions = message.reactions
+                }
+                if let edited = message.editedAt, edited > 0 {
+                    chunk[ix].editedAt = edited
+                }
             }
             // Reply count on the first prose/media row so the badge sits on the message's top bubble.
             if let count = replyCounts[message.id], count > 0,
@@ -1365,6 +1373,29 @@ struct RowView: View, Equatable {
             .formatted(date: .omitted, time: .shortened)
     }
 
+    /// Clock for an edit ("9:45 PM"), same short style as the swipe-revealed time.
+    private var editedClockLabel: String? {
+        guard let at = row.editedAt, at > 0 else { return nil }
+        return Date(timeIntervalSince1970: Double(at) / 1000)
+            .formatted(date: .omitted, time: .shortened)
+    }
+
+    /// Small "edited" under the bubble (or "Edited 9:45 PM" in the held overlay).
+    @ViewBuilder
+    private var editedLabel: some View {
+        if let clock = editedClockLabel {
+            let text = showReactionSenders ? "Edited \(clock)" : "edited"
+            HStack(spacing: 0) {
+                if row.role == .user { Spacer(minLength: 0) }
+                Text(text)
+                    .font(theme.font(11))
+                    .foregroundStyle(theme.muted)
+                    .accessibilityLabel("Edited at \(clock)")
+                if row.role != .user { Spacer(minLength: 0) }
+            }
+        }
+    }
+
     var body: some View {
         #if DEBUG
         let _ = PerfCounters.bump("rowBody")
@@ -1372,6 +1403,7 @@ struct RowView: View, Equatable {
         #endif
         VStack(spacing: 4) {
             bubble
+            editedLabel
             if !row.reactions.isEmpty {
                 reactionChips
                 if showReactionSenders {

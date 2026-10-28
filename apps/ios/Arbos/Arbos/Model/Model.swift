@@ -1202,6 +1202,9 @@ struct Message: Identifiable, Equatable {
     var usage: [String: Double]
     var model: String?
     var createdAt: Int64
+    /// When the sender last edited the text (or a picture / video caption).
+    /// `nil` until an edit; the transcript draws a small "edited" under the bubble.
+    var editedAt: Int64? = nil
     var completedAt: Int64?
     /// True until the relay `ACK`s the client's push (S3 faint echo). Client-only.
     var pending: Bool
@@ -1447,6 +1450,7 @@ enum DocJSON {
             usage: usage,
             model: str(m["model"]),
             createdAt: int(m["createdAt"]) ?? 0,
+            editedAt: int(m["editedAt"]).flatMap { $0 == 0 ? nil : $0 },
             completedAt: int(m["completedAt"]),
             pending: false,
             parts: parts,
