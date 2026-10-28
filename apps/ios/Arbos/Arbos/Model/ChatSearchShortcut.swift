@@ -6,7 +6,8 @@
 // Sender chip + keyword ([feedback app-01M61GXS849K96HRER4YD0ZZ6R]): the bar
 // filters by who wrote a message as well as by text, mirroring
 // `crates/arbos-mac/src/chat_search.rs` (`Query::hits_row`, `offer_sender`).
-// The bar UI lives here (not in ChatView) so ChatSession type-checks.
+// The bar UI lives here (not in ChatView) so ChatSession type-checks
+// (swift-core-check on the hosted Mac).
 
 import ArbosFFI
 import Foundation
