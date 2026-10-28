@@ -330,6 +330,9 @@ mod tests {
         // A chosen option in a form — a picker chip, a segmented control's
         // on segment with its own palette — not a list row's selection.
         "choice",
+        // The presence badge's ring (`ui::badge`): the row's own hover step
+        // composited over the sidebar, so the ring stays the row's colour.
+        "badge-ring",
     ];
 
     fn marker(line: &str) -> Option<&str> {

@@ -39,14 +39,15 @@ use gpui::{
 };
 
 use crate::model::Id;
+use crate::ui::badge;
 use crate::ui::composer::Composer;
 use crate::ui::frost::edge_faded;
 use crate::ui::glass::{self, WindowDrag};
 use crate::ui::highlight;
 use crate::ui::shell::Shell;
 use crate::ui::sidebar::{
-    self, is_control_click, ListEntry, StripControl, FOOTER_AVATAR, FOOTER_BOTTOM,
-    FOOTER_DOT_OVERHANG, FOOTER_DOT_RING, FOOTER_HEIGHT, LIST_FADE_BAND, STRIP_GAP,
+    self, is_control_click, ListEntry, StripControl, FOOTER_AVATAR, FOOTER_BOTTOM, FOOTER_HEIGHT,
+    LIST_FADE_BAND, STRIP_GAP,
 };
 use crate::ui::theme::{Theme, CONTROL, TEXT_SMALL};
 
@@ -96,10 +97,12 @@ pub(crate) mod metrics {
     /// The hover tip: 28 tall, 8 right of the rail's edge.
     pub const TIP_HEIGHT: f32 = 28.0;
     pub const TIP_GAP: f32 = 8.0;
-    /// Badge discs at the picture's bottom-right corner: the unread dot in a
-    /// ring of the rail's colour, the typing dot in the footer dot's ring.
+    /// Badge discs at the picture's bottom-right corner (`ui::badge`): the
+    /// unread dot in a 2 pt ring of the tile's colour, the typing dot at the
+    /// footer dot's size.
     pub const UNREAD_DOT: f32 = 8.0;
-    pub const UNREAD_RING: f32 = 12.0;
+    #[cfg(test)]
+    pub const UNREAD_RING: f32 = UNREAD_DOT + 2.0 * crate::ui::badge::RING_WIDTH;
     pub const TYPING_DOT: f32 = 9.0;
 }
 
@@ -223,26 +226,17 @@ pub(crate) fn lights_frame() -> Bounds<Pixels> {
     )
 }
 
-fn badge_element(badge: RailBadge, ring: gpui::Hsla, theme: &Theme, phase: f32) -> Div {
-    let (ring_size, dot, color) = match badge {
+/// A tile's badge for `ui::badge::badged`: the typing pulse at the footer
+/// dot's size, the smaller unread dot; `ring` is the tile's fill.
+fn tile_badge(badge: RailBadge, ring: gpui::Hsla, theme: &Theme, phase: f32) -> badge::Badge {
+    let (dot, color) = match badge {
         RailBadge::Typing => (
-            FOOTER_DOT_RING,
             metrics::TYPING_DOT,
             Theme::with_alpha(theme.online, 0.35 + 0.65 * phase),
         ),
-        RailBadge::Unread => (metrics::UNREAD_RING, metrics::UNREAD_DOT, theme.accent),
+        RailBadge::Unread => (metrics::UNREAD_DOT, theme.accent),
     };
-    div()
-        .absolute()
-        .right(px(-FOOTER_DOT_OVERHANG))
-        .bottom(px(-FOOTER_DOT_OVERHANG))
-        .size(px(ring_size))
-        .rounded_full()
-        .bg(ring)
-        .flex()
-        .items_center()
-        .justify_center()
-        .child(div().size(px(dot)).rounded_full().bg(color))
+    badge::Badge::new(color, ring).dot_size(dot)
 }
 
 /// One of the rail's three discs with the strip's own handlers.
@@ -371,17 +365,14 @@ pub(crate) fn render(shell: &Shell, cx: &mut Context<Shell>) -> gpui::Stateful<D
                 el.debug_selector(|| "rail-first-tile".into())
             })
             .child(
-                div()
-                    .relative()
-                    .size(px(metrics::AVATAR))
-                    .flex_shrink_0()
-                    .when(index == 0, |el| {
-                        el.debug_selector(|| "rail-first-picture".into())
-                    })
-                    .child(picture)
-                    .when_some(badge, |el, b| {
-                        el.child(badge_element(b, ring, &theme, phase))
-                    }),
+                badge::badged(
+                    metrics::AVATAR,
+                    picture,
+                    badge.map(|b| tile_badge(b, ring, &theme, phase)),
+                )
+                .when(index == 0, |el| {
+                    el.debug_selector(|| "rail-first-picture".into())
+                }),
             )
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 let now = if *hovered {
@@ -735,7 +726,9 @@ mod tests {
         assert!((centre_from_bottom - grok::USER_CENTRE_FROM_BOTTOM).abs() <= 1.0);
         assert_eq!(FOOTER_HEIGHT, HEADER_HEIGHT);
         assert_eq!(UNREAD_DOT, grok::UNREAD_DOT);
+        assert_eq!(UNREAD_RING, 12.0);
         assert_eq!(TYPING_DOT, super::super::sidebar::FOOTER_DOT);
+        assert_eq!(TYPING_DOT, crate::ui::badge::metrics(AVATAR).dot);
     }
 
     /// Jacob's 1720 × 1079 window (Grok's rail-2 shot) holds 14 pictures
