@@ -1728,8 +1728,10 @@ pub async fn create_chat(
     state.db.insert_chat(&chat).map_err(internal)?;
     // The box opens the new room from this push (its 3 s listing is the fallback) and a
     // sleeping box wakes: the first message is usually seconds away (#2120).
-    boxes::chat_created(&state, &chat);
-    boxes::ensure_awake(&state, &p.user_id, "api").await;
+    if !crate::outside::is_outside(&state, &p.id) {
+        boxes::chat_created(&state, &chat);
+        boxes::ensure_awake(&state, &p.user_id, "api").await;
+    }
     Ok(Json(
         serde_json::to_value(CreateChatResponseDto {
             chat: chat_dto(&chat),
