@@ -33,7 +33,7 @@ fn overlay_at(
     card: impl IntoElement,
     top: Option<f32>,
 ) -> Stateful<Div> {
-    backdrop(id, top)
+    backdrop(id, top, BACKDROP_ALPHA)
         .occlude()
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             cx.stop_propagation();
@@ -49,18 +49,27 @@ fn overlay_at(
 /// on what is under it** — a message, a sidebar row, a button answers in the
 /// same click. So this backdrop does not occlude and takes no mouse-down of
 /// its own; the dismissal is the shell's capture-phase click-outside
-/// (`Shell::click_outside`). It still dims, and still swallows the wheel so
-/// the transcript stays put (#1632). `card` keeps the modal card's own
-/// mouse-down stop, so a click inside the panel never reaches the chat.
+/// (`Shell::click_outside`). It still swallows the wheel so the transcript
+/// stays put (#1632). `card` keeps the modal card's own mouse-down stop, so a
+/// click inside the panel never reaches the chat.
+///
+/// It does **not** dim ([feedback search-popup-single-layer-2026-10-28], Jacob
+/// 2026-10-28 "double transparency"): the panel is one frosted plate
+/// (`glass::popup_plate`), and a dim under a translucent plate was the second
+/// layer — the two stacked to a muddy wash with the chat still reading through.
+/// Spotlight does not dim the desktop either.
 pub fn modal_overlay_top_passthrough(
     id: impl Into<ElementId>,
     top: f32,
     card: impl IntoElement,
 ) -> Stateful<Div> {
-    backdrop(id, Some(top)).child(modal_card(card))
+    backdrop(id, Some(top), PASSTHROUGH_BACKDROP_ALPHA).child(modal_card(card))
 }
 
-fn backdrop(id: impl Into<ElementId>, top: Option<f32>) -> Stateful<Div> {
+/// How much the see-through backdrop dims: nothing. One layer, the plate.
+pub const PASSTHROUGH_BACKDROP_ALPHA: f32 = 0.0;
+
+fn backdrop(id: impl Into<ElementId>, top: Option<f32>, dim: f32) -> Stateful<Div> {
     div()
         .id(id)
         .absolute()
@@ -72,7 +81,7 @@ fn backdrop(id: impl Into<ElementId>, top: Option<f32>) -> Stateful<Div> {
             Some(top) => el.justify_start().pt(gpui::px(top)),
             None => el.justify_center(),
         })
-        .bg(Theme::with_alpha(gpui::black(), BACKDROP_ALPHA))
+        .when(dim > 0.0, |el| el.bg(Theme::with_alpha(gpui::black(), dim)))
         // Wheel / trackpad scrolling over the sheet — list or backdrop — ends
         // here; the transcript underneath stays still.
         .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
