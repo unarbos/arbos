@@ -1172,6 +1172,9 @@ struct ChatSession: View {
         .onAppear {
             appearedAt = Date()
             LaunchClock.mark("chat-appear", detail: "messages=\(messages.count)")
+            #if DEBUG
+            PerfLog.mark("chat-open appear \(chatId) messages=\(messages.count)", ms: 0)
+            #endif
             // Force: re-PUT even if the cursor is unchanged so the relay clears
             // unread events recorded after the last PUT (other apps / badge).
             model.markRead(chatId: chatId, force: true)
@@ -2100,6 +2103,37 @@ struct ChatSession: View {
                 try? await Task.sleep(for: .seconds(1))
             }
             PerfLog.mark("phase typing end", ms: 0)
+        }
+        if drive.contains("keyboard") {
+            // Keyboard show / hide, three times: the composer inset animation re-lays the
+            // transcript each way (broader pass, iphone-scroll-perf release 3).
+            for i in 0..<3 {
+                PerfLog.mark("phase keyboard-show \(i) begin", ms: 0)
+                composerFocused = true
+                try? await Task.sleep(for: .milliseconds(1600))
+                PerfLog.mark("phase keyboard-hide \(i) begin", ms: 0)
+                composerFocused = false
+                try? await Task.sleep(for: .milliseconds(1600))
+            }
+            PerfLog.mark("phase keyboard end", ms: 0)
+        }
+        if drive.contains("switch"), !PerfDriveProbe.switchStarted {
+            // Chat switching: pop to Home and open the other chat, four times alternating
+            // (`ARBOS_PERF_SWITCH_TO`, default the fixture DM). Only the first-opened chat
+            // drives; every chat it opens runs this driver too and must not start another.
+            PerfDriveProbe.switchStarted = true
+            let other = DebugHooks.perfSwitchTo ?? "fx-dm-unconst"
+            let home = chatId
+            for i in 0..<4 {
+                let target = i % 2 == 0 ? other : home
+                PerfLog.mark("phase switch \(i) pop", ms: 0)
+                model.path = []
+                try? await Task.sleep(for: .milliseconds(1200))
+                PerfLog.mark("phase switch \(i) open \(target)", ms: 0)
+                if let c = model.peopleChats.first(where: { $0.id == target }) { model.open(peopleChat: c) }
+                try? await Task.sleep(for: .milliseconds(3000))
+            }
+            PerfLog.mark("phase switch end", ms: 0)
         }
         PerfLog.mark("phase done", ms: 0)
     }
@@ -3744,6 +3778,7 @@ extension ChatSession {
                         firstRowMarked = true
                         LaunchClock.mark("chat-first-row", detail: "shown=\(shown.count) rows=\(rows.count) messages=\(messages.count)")
                         #if DEBUG
+                        PerfLog.mark("chat-open first-row \(chatId) shown=\(shown.count)", ms: 0)
                         PerfLog.shared.armScrollable()
                         #endif
                     }
@@ -3824,6 +3859,8 @@ private struct AwayFromBottomReporter: ViewModifier {
     @Binding var away: Bool
     @Binding var pinned: Bool
     var onStick: () -> Void
+    /// The finger (or its deceleration) is moving the scroll view right now.
+    @State private var userDriven = false
 
     private struct Sample: Equatable {
         var height: CGFloat
@@ -3832,44 +3869,51 @@ private struct AwayFromBottomReporter: ViewModifier {
 
     func body(content: Content) -> some View {
         if #available(iOS 18, *) {
-            content.onScrollGeometryChange(for: Sample.self) { g in
-                Sample(
-                    height: g.contentSize.height,
-                    distance: g.contentSize.height - g.contentOffset.y - g.containerSize.height
-                )
-            } action: { old, new in
-                let grew = new.height > old.height + 0.5
-                #if DEBUG
-                PerfDriveProbe.lastScrollGeometry = Date()
-                if SendTrace.recent {
-                    SendTrace.mark("scroll-geometry", detail: "grew=\(grew) distance=\(Int(new.distance)) pinned=\(pinned)", once: false)
-                    // The "bottom" spacer and padding sit ~60 pt under the last bubble.
-                    if new.distance < 100 { SendTrace.mark("at-bottom", detail: "distance=\(Int(new.distance))") }
-                }
-                #endif
-                if grew {
-                    if pinned {
-                        away = false
-                        onStick()
-                    } else {
-                        // Keep history put; distance may dip from layout / bottom anchor.
-                        away = true
+            content
+                // Only the reader's own scrolling decides whether they are at the bottom. Lazy
+                // rows (#2149) change the content height as rows are measured — up and down,
+                // during a flick and after it as pictures arrive — and a geometry sample alone
+                // cannot tell that from a scroll (iphone-scroll-perf: a flick up from the bottom
+                // was pulled back down by the next growth, every time).
+                .onScrollPhaseChange { _, phase in
+                    switch phase {
+                    case .tracking, .interacting, .decelerating: userDriven = true
+                    case .idle, .animating: userDriven = false
+                    @unknown default: userDriven = false
                     }
-                    return
                 }
-                // Lazy rows: the content height is an estimate that is corrected as rows are
-                // measured, down as well as up. A sample where the height changed says nothing
-                // about where the reader is; only an unchanged height may re-pin (a re-pin on a
-                // shrink would send the next growth's `onStick` to the bottom mid-history).
-                if abs(new.height - old.height) > 0.5 { return }
-                let isAway = new.distance > 120
-                away = isAway
-                if isAway {
-                    pinned = false
-                } else {
-                    pinned = true
+                .onScrollGeometryChange(for: Sample.self) { g in
+                    Sample(
+                        height: g.contentSize.height,
+                        distance: g.contentSize.height - g.contentOffset.y - g.containerSize.height
+                    )
+                } action: { old, new in
+                    let grew = new.height > old.height + 0.5
+                    #if DEBUG
+                    PerfDriveProbe.lastScrollGeometry = Date()
+                    if SendTrace.recent {
+                        SendTrace.mark("scroll-geometry", detail: "grew=\(grew) distance=\(Int(new.distance)) pinned=\(pinned) user=\(userDriven)", once: false)
+                        // The "bottom" spacer and padding sit ~60 pt under the last bubble.
+                        if new.distance < 100 { SendTrace.mark("at-bottom", detail: "distance=\(Int(new.distance))") }
+                    }
+                    #endif
+                    if userDriven {
+                        let isAway = new.distance > 120
+                        away = isAway
+                        pinned = !isAway
+                        return
+                    }
+                    // Content or layout moved, not the reader: a growth while pinned (a new or
+                    // streaming row) re-sticks to the end; while away it stays put.
+                    if grew {
+                        if pinned {
+                            away = false
+                            onStick()
+                        } else {
+                            away = true
+                        }
+                    }
                 }
-            }
         } else {
             content
         }
