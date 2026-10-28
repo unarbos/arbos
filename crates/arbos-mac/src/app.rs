@@ -417,6 +417,7 @@ impl ViewerItem {
                 kind: Some(AttachmentKind::Image),
                 title: None,
                 chart_part: None,
+                source: None,
             },
             by: name.to_owned(),
             when: 0,
@@ -4549,6 +4550,7 @@ impl AppState {
                     kind: None,
                     title: None,
                     chart_part: None,
+                    source: None,
                 };
                 if probe.is_image() {
                     if let Some((image, trimmed)) = decode_image_pair(&data) {
@@ -4575,6 +4577,7 @@ impl AppState {
                     kind: None,
                     title: None,
                     chart_part: None,
+                    source: None,
                 },
             });
         }
@@ -4589,6 +4592,7 @@ impl AppState {
                     kind: Some(AttachmentKind::Audio),
                     title: None,
                     chart_part: None,
+                    source: None,
                 },
             });
         }
@@ -11571,14 +11575,19 @@ fn mime_for_path(path: &std::path::Path) -> &'static str {
     }
 }
 
-/// PNG/JPEG/GIF/WebP/ICO → BGRA frame for GPUI (`RenderImage` is BGRA).
+/// PNG/JPEG/GIF/WebP/ICO → BGRA frame(s) for GPUI (`RenderImage` is BGRA).
+/// GIF and animated WebP keep every frame (capped); other formats stay one frame.
 pub fn decode_image(bytes: &[u8]) -> Option<RenderImage> {
-    decode_rgba(bytes).and_then(bgra_frame)
+    match decode_pixels(bytes)? {
+        DecodedPixels::Animated(frames) => bgra_frames(frames),
+        DecodedPixels::Still(rgba) => bgra_frame(rgba),
+    }
 }
 
 /// Decode `bytes` for a small tile: the longer side shrinks to `max_side`
 /// device pixels (never enlarged). The composer's staged thumbnails use it so
 /// a pasted Retina screenshot does not sit in GPU memory at full size.
+/// Animated GIF/WebP use the first frame only (the tile does not animate).
 pub fn decode_thumbnail(bytes: &[u8], max_side: u32) -> Option<RenderImage> {
     let img = decode_rgba(bytes)?;
     // A macOS window capture (⌘⇧4 + space, "Copy") is the window plus its
@@ -11654,13 +11663,22 @@ pub fn downscale_for_chat(img: image::RgbaImage) -> image::RgbaImage {
 /// must not become a white band in the bubble). The viewer shows the untrimmed
 /// picture. Both are capped to [`CHAT_IMAGE_MAX_SIDE`] so the transcript can
 /// scroll without holding full-resolution textures.
+/// Animated GIF/WebP skip the trim (every frame must stay aligned) and return
+/// a multi-frame [`RenderImage`].
 pub fn decode_image_pair(bytes: &[u8]) -> Option<(RenderImage, Option<RenderImage>)> {
-    let rgba = decode_rgba(bytes)?;
-    let trimmed = trim_rect(&rgba)
-        .map(|(x, y, w, h)| image::imageops::crop_imm(&rgba, x, y, w, h).to_image())
-        .map(downscale_for_chat);
-    let full = bgra_frame(downscale_for_chat(rgba))?;
-    Some((full, trimmed.and_then(bgra_frame)))
+    match decode_pixels(bytes)? {
+        DecodedPixels::Animated(frames) => {
+            let full = bgra_frames(frames)?;
+            Some((full, None))
+        }
+        DecodedPixels::Still(rgba) => {
+            let trimmed = trim_rect(&rgba)
+                .map(|(x, y, w, h)| image::imageops::crop_imm(&rgba, x, y, w, h).to_image())
+                .map(downscale_for_chat);
+            let full = bgra_frame(downscale_for_chat(rgba))?;
+            Some((full, trimmed.and_then(bgra_frame)))
+        }
+    }
 }
 
 /// Where the content of `img` sits once a uniform border is removed:
@@ -11728,20 +11746,120 @@ pub fn trim_rect(img: &image::RgbaImage) -> Option<(u32, u32, u32, u32)> {
     Some((left, top, cw, ch))
 }
 
-/// PNG/JPEG/GIF/WebP/ICO → RGBA pixels.
+/// Cap on GIF/WebP frames kept for a chat bubble (feedback
+/// app-01M5TGH18WV3QCK5KZT6XKG7FG). Past this, only the first frame is shown.
+pub const ANIM_MAX_FRAMES: usize = 300;
+/// Cap on decoded RGBA bytes across all frames. Past this, only the first frame.
+pub const ANIM_MAX_DECODED_BYTES: usize = 20 * 1024 * 1024;
+
+/// Still pixels, or every frame of an animation (already scaled, RGBA, with delays).
+enum DecodedPixels {
+    Still(image::RgbaImage),
+    Animated(Vec<image::Frame>),
+}
+
+/// GIF87a / GIF89a magic.
+fn looks_like_gif(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"GIF8")
+}
+
+/// RIFF....WEBP magic.
+fn looks_like_webp(bytes: &[u8]) -> bool {
+    bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP"
+}
+
+/// PNG/JPEG/GIF/WebP/ICO → RGBA pixels (first / only frame). Used by thumbnails
+/// and the still path for formats that are not GIF/WebP.
 fn decode_rgba(bytes: &[u8]) -> Option<image::RgbaImage> {
     Some(image::load_from_memory(bytes).ok()?.into_rgba8())
 }
 
-/// RGBA pixels → the BGRA frame GPUI draws.
-fn bgra_frame(img: image::RgbaImage) -> Option<RenderImage> {
+/// Decode `bytes`: multi-frame for GIF/animated WebP, still otherwise.
+fn decode_pixels(bytes: &[u8]) -> Option<DecodedPixels> {
+    if looks_like_gif(bytes) || looks_like_webp(bytes) {
+        // A still WebP (or a GIF the animation decoder rejects) falls back to
+        // the single-frame path so the bubble still shows something.
+        return decode_animation_pixels(bytes)
+            .or_else(|| decode_rgba(bytes).map(DecodedPixels::Still));
+    }
+    Some(DecodedPixels::Still(decode_rgba(bytes)?))
+}
+
+/// All frames of a GIF or WebP, each scaled to [`CHAT_IMAGE_MAX_SIDE`]. A still
+/// WebP (or a single-frame GIF) becomes [`DecodedPixels::Still`]. Over the
+/// frame or memory cap → first frame only.
+fn decode_animation_pixels(bytes: &[u8]) -> Option<DecodedPixels> {
+    use image::AnimationDecoder;
+    use std::io::Cursor;
+
+    let frames_iter: Box<dyn Iterator<Item = image::ImageResult<image::Frame>>> =
+        if looks_like_gif(bytes) {
+            let dec = image::codecs::gif::GifDecoder::new(Cursor::new(bytes)).ok()?;
+            Box::new(dec.into_frames())
+        } else {
+            let dec = image::codecs::webp::WebPDecoder::new(Cursor::new(bytes)).ok()?;
+            Box::new(dec.into_frames())
+        };
+
+    let mut frames: Vec<image::Frame> = Vec::new();
+    let mut decoded_bytes: usize = 0;
+    for result in frames_iter {
+        let frame = result.ok()?;
+        let delay = frame.delay();
+        let left = frame.left();
+        let top = frame.top();
+        let scaled = downscale_for_chat(frame.into_buffer());
+        let (w, h) = scaled.dimensions();
+        let frame_bytes = (w as usize).saturating_mul(h as usize).saturating_mul(4);
+        if frames.len() >= ANIM_MAX_FRAMES
+            || decoded_bytes.saturating_add(frame_bytes) > ANIM_MAX_DECODED_BYTES
+        {
+            // Cap hit: keep only the first frame as a still.
+            return frames
+                .into_iter()
+                .next()
+                .map(|f| DecodedPixels::Still(f.into_buffer()))
+                .or(Some(DecodedPixels::Still(scaled)));
+        }
+        decoded_bytes += frame_bytes;
+        frames.push(image::Frame::from_parts(scaled, left, top, delay));
+    }
+    match frames.len() {
+        0 => None,
+        1 => Some(DecodedPixels::Still(
+            frames.into_iter().next()?.into_buffer(),
+        )),
+        _ => Some(DecodedPixels::Animated(frames)),
+    }
+}
+
+/// RGBA pixels → BGRA (swap R/B in place).
+fn rgba_to_bgra(img: image::RgbaImage) -> Option<image::RgbaImage> {
     let (w, h) = img.dimensions();
     let mut raw = img.into_raw();
     for px in raw.chunks_exact_mut(4) {
         px.swap(0, 2);
     }
-    let buffer = image::RgbaImage::from_raw(w, h, raw)?;
+    image::RgbaImage::from_raw(w, h, raw)
+}
+
+/// RGBA pixels → the BGRA frame GPUI draws.
+fn bgra_frame(img: image::RgbaImage) -> Option<RenderImage> {
+    let buffer = rgba_to_bgra(img)?;
     Some(RenderImage::new(vec![image::Frame::new(buffer)]))
+}
+
+/// Many RGBA frames → one multi-frame BGRA [`RenderImage`] (delays kept).
+fn bgra_frames(frames: Vec<image::Frame>) -> Option<RenderImage> {
+    let mut out = Vec::with_capacity(frames.len());
+    for frame in frames {
+        let delay = frame.delay();
+        let left = frame.left();
+        let top = frame.top();
+        let buffer = rgba_to_bgra(frame.into_buffer())?;
+        out.push(image::Frame::from_parts(buffer, left, top, delay));
+    }
+    Some(RenderImage::new(out))
 }
 
 fn same_shape(a: &Message, b: &Message) -> bool {
@@ -12406,6 +12524,105 @@ mod chat_image_scale_tests {
         // Aspect ≈ 3024/1964.
         let ratio = w as f32 / h as f32;
         assert!((ratio - 3024.0 / 1964.0).abs() < 0.02);
+    }
+}
+
+#[cfg(test)]
+mod animated_image_tests {
+    //! GIF / animated WebP decode to every frame; still WebP and PNG stay one
+    //! (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG).
+    use super::{decode_image, decode_image_pair, ANIM_MAX_DECODED_BYTES, ANIM_MAX_FRAMES};
+    use image::{Delay, Frame, Rgba, RgbaImage};
+    use std::io::Cursor;
+
+    fn three_color_frames() -> Vec<Frame> {
+        [
+            ([255, 0, 0, 255], 100u32),
+            ([0, 255, 0, 255], 100),
+            ([0, 0, 255, 255], 100),
+        ]
+        .into_iter()
+        .map(|(c, ms)| {
+            Frame::from_parts(
+                RgbaImage::from_pixel(8, 8, Rgba(c)),
+                0,
+                0,
+                Delay::from_numer_denom_ms(ms, 1),
+            )
+        })
+        .collect()
+    }
+
+    fn encode_gif(frames: Vec<Frame>) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut enc = image::codecs::gif::GifEncoder::new(Cursor::new(&mut out));
+            enc.encode_frames(frames).expect("gif encode");
+        }
+        out
+    }
+
+    fn encode_webp_anim(frames: Vec<Frame>) -> Vec<u8> {
+        // image::codecs::webp::WebPEncoder is still-only; build via the
+        // `image-webp` path used by the decoder tests — encode a GIF and
+        // re-wrap is not WebP. Use the fixture bytes for WebP instead.
+        let _ = frames;
+        include_bytes!("../../arbos-core/fixtures/anim_three.webp").to_vec()
+    }
+
+    #[test]
+    fn a_three_frame_gif_keeps_every_frame() {
+        let bytes = encode_gif(three_color_frames());
+        let image = decode_image(&bytes).expect("gif decodes");
+        assert_eq!(image.frame_count(), 3);
+        let (full, trimmed) = decode_image_pair(&bytes).expect("pair");
+        assert_eq!(full.frame_count(), 3);
+        assert!(trimmed.is_none(), "animated pictures are not trimmed");
+    }
+
+    #[test]
+    fn an_animated_webp_keeps_every_frame() {
+        let bytes = encode_webp_anim(three_color_frames());
+        let image = decode_image(&bytes).expect("webp decodes");
+        assert_eq!(image.frame_count(), 3);
+    }
+
+    #[test]
+    fn a_still_webp_and_a_png_are_one_frame() {
+        let still_webp = include_bytes!("../../arbos-core/fixtures/still.webp");
+        assert_eq!(
+            decode_image(still_webp).expect("still webp").frame_count(),
+            1
+        );
+        let png = include_bytes!("../../arbos-core/fixtures/anim_still.png");
+        assert_eq!(decode_image(png).expect("png").frame_count(), 1);
+    }
+
+    #[test]
+    fn past_the_frame_cap_falls_back_to_the_first_frame() {
+        // Many tiny frames: the decoder stops at ANIM_MAX_FRAMES and returns
+        // only the first as a still.
+        let delay = Delay::from_numer_denom_ms(20, 1);
+        let frames: Vec<Frame> = (0..(ANIM_MAX_FRAMES + 5))
+            .map(|i| {
+                let c = (i % 255) as u8;
+                Frame::from_parts(
+                    RgbaImage::from_pixel(2, 2, Rgba([c, 0, 0, 255])),
+                    0,
+                    0,
+                    delay,
+                )
+            })
+            .collect();
+        let bytes = encode_gif(frames);
+        let image = decode_image(&bytes).expect("decodes");
+        assert_eq!(
+            image.frame_count(),
+            1,
+            "over {ANIM_MAX_FRAMES} frames → first only"
+        );
+        // Memory cap is the sibling of the frame cap (same fallback path).
+        let _ = ANIM_MAX_DECODED_BYTES;
     }
 }
 
