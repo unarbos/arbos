@@ -1580,6 +1580,16 @@ pub struct PeopleMessagePayloadDto {
     /// device's row-level push has none and the banner says "New message").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// `dm` | `group` | `project` (shared project chat). Absent on an older relay → `dm`.
+    /// Since 2026-10-27: a group banner is titled with the chat, the sender goes in the body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_kind: Option<String>,
+    /// The chat's name as this recipient sees it (groups and shared project chats; a DM has none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_title: Option<String>,
+    /// Blob key of the group picture under `people:{chat_id}` (people groups with a picture).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_image_key: Option<String>,
 }
 
 /// `channel_message` payload: a message in a server channel (Matrix room), fanned out by the
