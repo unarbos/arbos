@@ -1081,21 +1081,6 @@ impl Theme {
         c
     }
 
-    /// `over` (with its alpha) composited onto the opaque `under`, as GPUI
-    /// does (sRGB): the opaque colour a translucent fill reads as on a known
-    /// surface — a hover tint over the sidebar, the header pill over the page.
-    pub fn composite(over: Hsla, under: Hsla) -> Hsla {
-        let (o, u) = (over.to_rgb(), under.to_rgb());
-        let a = o.a.clamp(0.0, 1.0);
-        gpui::Rgba {
-            r: a * o.r + (1.0 - a) * u.r,
-            g: a * o.g + (1.0 - a) * u.g,
-            b: a * o.b + (1.0 - a) * u.b,
-            a: 1.0,
-        }
-        .into()
-    }
-
     /// The same hue, `by` lighter (HSL lightness, clamped): a solid control's
     /// hover and pressed fills — brighter under the hand, brighter still while
     /// the button is down (the chip rule).
@@ -1212,7 +1197,15 @@ mod glass_contrast_tests {
 
     /// `over` (with its alpha) composited onto the opaque `under`, as GPUI does (sRGB).
     fn composite(over: Hsla, under: Hsla) -> Hsla {
-        Theme::composite(over, under)
+        let (o, u) = (over.to_rgb(), under.to_rgb());
+        let a = o.a.clamp(0.0, 1.0);
+        gpui::Rgba {
+            r: a * o.r + (1.0 - a) * u.r,
+            g: a * o.g + (1.0 - a) * u.g,
+            b: a * o.b + (1.0 - a) * u.b,
+            a: 1.0,
+        }
+        .into()
     }
 
     /// The desktops of the matrix: pure white, pure black, and the busy photo
