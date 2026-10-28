@@ -45,6 +45,11 @@ enum MessagePasteboard {
 
     /// The image types we declare natively, most to least common.
     static let imageTypes = [png, jpeg, gif, webp, heic, tiff, bmp]
+    /// Reading an item back, the native picture before any twin: a GIF / WebP / HEIC item
+    /// also carries a `public.png` re-encode (ours and other apps' alike), a JPEG item a
+    /// PNG twin, a screenshot PNG a TIFF — so animated and lossy originals come first, PNG
+    /// before TIFF.
+    static let readPreference = [gif, webp, heic, jpeg, png, tiff, bmp]
 
     /// The native type of a fetched picture: the bytes decide (the relay's `content-type`
     /// and the attachment's `mime` have been wrong before — a `.png` that is a JPEG),
@@ -153,7 +158,7 @@ enum MessagePasteboard {
         let stamp = Self.stamp.string(from: Date())
         let perItem: [[String]] = pb.types(forItemSet: nil) ?? []
         for (ix, itemTypes) in perItem.enumerated() {
-            if let native = imageTypes.first(where: { itemTypes.contains($0) }),
+            if let native = readPreference.first(where: { itemTypes.contains($0) }),
                let data = pb.data(forPasteboardType: native, inItemSet: IndexSet(integer: ix))?.first, !data.isEmpty {
                 let ext = UTType(native)?.preferredFilenameExtension ?? "png"
                 let mime = UTType(native)?.preferredMIMEType ?? "image/\(ext)"
