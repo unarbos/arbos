@@ -35,6 +35,7 @@ use crate::api::{internal, ApiResult};
 use crate::auth::Principal;
 use crate::db::{Chat, Project};
 use crate::notify::{ChatRef, Sender};
+use crate::outside_wake::{self, LastWake, Nudge};
 use crate::people;
 use crate::signin::api_error;
 use crate::state::AppState;
@@ -85,6 +86,10 @@ pub struct OutsideAgent {
     pub last_seen_at: Option<i64>,
     pub connected_at: Option<i64>,
     pub agent_info: Value,
+    /// Wake URL (`outside_wake`): the URL is plain, the header value never leaves the DB.
+    pub wake_url: Option<String>,
+    pub wake_auth_set: bool,
+    pub wake_last: Option<LastWake>,
     /// Owner overrides per scope name (`{"files.read": true}`); [`Scopes::effective`] fills the rest.
     pub scopes: Value,
 }
@@ -131,6 +136,17 @@ impl OutsideAgent {
 }
 
 impl OutsideAgent {
+    /// What the owner API and the apps' Connection card see of the Wake URL (no secret).
+    pub fn wake_json(&self) -> Value {
+        json!({
+            "url": self.wake_url,
+            "url_set": self.wake_url.is_some(),
+            "auth_set": self.wake_auth_set,
+            "header": outside_wake::HEADER,
+            "last": self.wake_last.as_ref().map(LastWake::json),
+        })
+    }
+
     pub fn connected(&self) -> bool {
         self.revoked_at.is_none() && self.last_seen_at.is_some_and(|t| now_ms() - t <= ONLINE_MS)
     }
@@ -163,12 +179,14 @@ impl OutsideAgent {
             "last_seen_at": self.last_seen_at,
             "connected_at": self.connected_at,
             "agent": self.agent_info,
+            "wake": self.wake_json(),
             "scopes": Value::Object(self.effective_scopes()),
         })
     }
 }
 
 fn row_to_agent(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutsideAgent> {
+    let wake_last_at: Option<i64> = r.get(12)?;
     Ok(OutsideAgent {
         project_id: r.get(0)?,
         user_id: r.get(1)?,
@@ -180,10 +198,19 @@ fn row_to_agent(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutsideAgent> {
         connected_at: r.get(7)?,
         agent_info: serde_json::from_str(&r.get::<_, String>(8)?).unwrap_or(Value::Null),
         scopes: serde_json::from_str(&r.get::<_, String>(9)?).unwrap_or_else(|_| json!({})),
+        wake_url: r.get::<_, Option<String>>(10)?.filter(|u| !u.is_empty()),
+        wake_auth_set: r
+            .get::<_, Option<String>>(11)?
+            .is_some_and(|a| !a.is_empty()),
+        wake_last: wake_last_at.map(|at| LastWake {
+            at,
+            status: r.get::<_, Option<u16>>(13).unwrap_or(None),
+            error: r.get::<_, Option<String>>(14).unwrap_or(None),
+        }),
     })
 }
 
-const AGENT_COLS: &str = "project_id, user_id, transport, created_at, revoked_at, rotated_at, last_seen_at, connected_at, agent_info, scopes";
+const AGENT_COLS: &str = "project_id, user_id, transport, created_at, revoked_at, rotated_at, last_seen_at, connected_at, agent_info, scopes, wake_url, wake_auth, wake_last_at, wake_last_status, wake_last_error";
 
 impl crate::db::Db {
     pub fn outside_agent(&self, project_id: &str) -> anyhow::Result<Option<OutsideAgent>> {
@@ -424,13 +451,30 @@ fn open_streams() -> &'static StdMutex<OpenStreams> {
     S.get_or_init(|| StdMutex::new(HashMap::new()))
 }
 
-/// Store one event for the agent and wake whoever is parked on its inbox.
+/// Does this queued event ask the agent to act: a `wake: true` row or a chat it was added to?
+fn wakes(payload: &Value) -> bool {
+    payload["wake"].as_bool() == Some(true) || payload["type"] == "member.added"
+}
+
+/// Store one event for the agent, wake whoever is parked on its inbox, and nudge its Wake URL
+/// when the event asks the agent to act.
 fn deliver(state: &AppState, project_id: &str, mut payload: Value) {
     payload["ts"] = json!(now_ms());
     match state.db.insert_asp_event(project_id, &payload) {
         Ok(id) => {
             tracing::debug!(project = %project_id, id, kind = %payload["type"], "asp event queued");
             waiter(project_id).notify_waiters();
+            if wakes(&payload) {
+                outside_wake::nudge(
+                    state,
+                    Nudge {
+                        agent: project_id.to_owned(),
+                        chat: payload["chat"]["id"].as_str().map(str::to_owned),
+                        event_id: id,
+                        kind: payload["type"].as_str().unwrap_or_default().to_owned(),
+                    },
+                );
+            }
         }
         Err(e) => tracing::warn!(project = %project_id, error = %e, "asp event not stored"),
     }
@@ -1042,53 +1086,6 @@ pub async fn get(
     .into_response())
 }
 
-#[derive(Deserialize, Default)]
-pub struct PatchBody {
-    /// Scope name → on/off; a partial object merges into the owner's overrides.
-    #[serde(default)]
-    pub scopes: Option<serde_json::Map<String, Value>>,
-}
-
-/// `PATCH /outside-agents/{id} {scopes: {"files.read": true}}` — the owner's switches (the
-/// relay admin may set them too). Answers the agent as `GET` does.
-pub async fn patch(
-    State(state): State<AppState>,
-    principal: Principal,
-    Path(id): Path<String>,
-    Json(b): Json<PatchBody>,
-) -> ApiResult {
-    let project = match &principal {
-        Principal::Admin => state
-            .db
-            .project(&id)
-            .map_err(internal)?
-            .ok_or((StatusCode::NOT_FOUND, "no such agent".to_owned()))?,
-        _ => owned(&state, &principal, &id)?.1,
-    };
-    if let Some(scopes) = &b.scopes {
-        if let Some(bad) = scopes.keys().find(|k| !SCOPES.iter().any(|(n, _)| n == *k)) {
-            return Err((StatusCode::BAD_REQUEST, format!("unknown scope {bad}")));
-        }
-        state
-            .db
-            .set_outside_scopes(&project.id, scopes)
-            .map_err(internal)?;
-        let changed = Value::Object(scopes.clone()).to_string();
-        tracing::info!(project = %project.id, scopes = %changed, "outside agent scopes changed");
-    }
-    let agent = state
-        .db
-        .outside_agent(&project.id)
-        .map_err(internal)?
-        .ok_or_else(|| internal("row vanished"))?;
-    Ok(Json(json!({
-        "agent": agent.json(Some(&project)),
-        "link": link_for(&state, &project.id),
-        "relay_url": state.cfg.public_url,
-    }))
-    .into_response())
-}
-
 /// `POST /outside-agents/{id}/rotate` — a new key, shown once; the old one stops at once.
 pub async fn rotate(
     State(state): State<AppState>,
@@ -1132,6 +1129,140 @@ pub async fn revoke(
     waiter(&project.id).notify_waiters();
     tracing::info!(project = %project.id, "outside agent revoked");
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// Absent ≠ null: `Some(None)` clears, `None` leaves the field alone.
+fn double_option<'de, T, D>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Deserialize::deserialize(d).map(Some)
+}
+
+/// `PATCH /outside-agents/{id}`: optional fields, each applied only when present; `null` clears.
+#[derive(Deserialize, Default)]
+pub struct PatchBody {
+    /// Scope name → on/off; a partial object merges into the owner's overrides.
+    #[serde(default)]
+    pub scopes: Option<serde_json::Map<String, Value>>,
+    /// Wake URL (`https://…`); `null` clears it and forgets the last delivery.
+    #[serde(default, deserialize_with = "double_option")]
+    pub wake_url: Option<Option<String>>,
+    /// The `Authorization` header value the Wake URL expects, verbatim; `null` clears.
+    #[serde(default, deserialize_with = "double_option")]
+    pub wake_auth: Option<Option<String>>,
+}
+
+/// `PATCH /outside-agents/{id} {scopes?, wake_url?, wake_auth?}` — the owner's switches (the
+/// relay admin may set them too) and the Wake URL; answers the agent as `GET` does. The header
+/// value is stored and never returned; the URL is shown back.
+pub async fn patch(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Json(b): Json<PatchBody>,
+) -> ApiResult {
+    let (agent, project) = match &principal {
+        Principal::Admin => {
+            let project = state
+                .db
+                .project(&id)
+                .map_err(internal)?
+                .ok_or((StatusCode::NOT_FOUND, "no such agent".to_owned()))?;
+            let agent = state
+                .db
+                .outside_agent(&id)
+                .map_err(internal)?
+                .ok_or((StatusCode::NOT_FOUND, "no such connected agent".to_owned()))?;
+            (agent, project)
+        }
+        _ => owned(&state, &principal, &id)?,
+    };
+    if let Some(scopes) = &b.scopes {
+        if let Some(bad) = scopes.keys().find(|k| !SCOPES.iter().any(|(n, _)| n == *k)) {
+            return Err((StatusCode::BAD_REQUEST, format!("unknown scope {bad}")));
+        }
+        state
+            .db
+            .set_outside_scopes(&project.id, scopes)
+            .map_err(internal)?;
+        let changed = Value::Object(scopes.clone()).to_string();
+        tracing::info!(project = %project.id, scopes = %changed, "outside agent scopes changed");
+    }
+    if (b.wake_url.is_some() || b.wake_auth.is_some()) && agent.revoked_at.is_some() {
+        return Err((StatusCode::CONFLICT, "access is revoked".into()));
+    }
+    let url = match b.wake_url {
+        Some(Some(raw)) if !raw.trim().is_empty() => Some(Some(
+            outside_wake::check_url(&raw).map_err(|e| (StatusCode::BAD_REQUEST, e.to_owned()))?,
+        )),
+        Some(_) => Some(None),
+        None => None,
+    };
+    let auth = match b.wake_auth {
+        Some(Some(raw)) if !raw.trim().is_empty() => Some(Some(
+            outside_wake::check_auth(&raw).map_err(|e| (StatusCode::BAD_REQUEST, e.to_owned()))?,
+        )),
+        Some(_) => Some(None),
+        None => None,
+    };
+    if let Some(url) = &url {
+        if agent.wake_url != *url {
+            state
+                .db
+                .set_wake_url(&project.id, url.as_deref())
+                .map_err(internal)?;
+        }
+    }
+    if let Some(auth) = &auth {
+        state
+            .db
+            .set_wake_auth(&project.id, auth.as_deref())
+            .map_err(internal)?;
+    }
+    if url.is_some() || auth.is_some() {
+        tracing::info!(
+            project = %project.id,
+            url_set = url.as_ref().map(|u| u.is_some()),
+            auth_set = auth.as_ref().map(|a| a.is_some()),
+            "outside agent wake settings changed"
+        );
+    }
+    let agent = state
+        .db
+        .outside_agent(&project.id)
+        .map_err(internal)?
+        .ok_or_else(|| internal("row vanished"))?;
+    Ok(Json(json!({
+        "agent": agent.json(Some(&project)),
+        "link": link_for(&state, &project.id),
+        "relay_url": state.cfg.public_url,
+    }))
+    .into_response())
+}
+
+fn wake_result_json(last: &LastWake) -> Value {
+    json!({
+        "ok": last.error.is_none(),
+        "status": last.status,
+        "error": last.error,
+        "at": last.at,
+    })
+}
+
+/// `POST /outside-agents/{id}/wake/test` (owner; the Connection card's "Send test wake"): one
+/// `wake.test` nudge now, no debounce, no retry → `{ok, status, error, at}`.
+pub async fn wake_test(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+) -> ApiResult {
+    let (_, project) = owned(&state, &principal, &id)?;
+    let last = outside_wake::send_now(&state, &project.id, &Nudge::test(&project.id))
+        .await
+        .map_err(|e| (StatusCode::CONFLICT, e))?;
+    Ok(Json(wake_result_json(&last)).into_response())
 }
 
 // ---- agent API -----------------------------------------------------------------------------------
@@ -1244,8 +1375,19 @@ pub async fn me(State(state): State<AppState>, me: AgentPrincipal) -> Response {
         },
         "chats": chats,
         "inbox_head": state.db.asp_events_head(&me.project.id).unwrap_or(0),
+        "wake_url_set": me.agent.wake_url.is_some() && me.agent.wake_auth_set,
+        "wake_header": outside_wake::HEADER,
+        "last_wake": me.agent.wake_last.as_ref().map(LastWake::json),
     }))
     .into_response()
+}
+
+/// `POST /asp/wake/test` (agent key) — the same test nudge the Connection card's button sends.
+pub async fn asp_wake_test(State(state): State<AppState>, me: AgentPrincipal) -> Response {
+    match outside_wake::send_now(&state, &me.project.id, &Nudge::test(&me.project.id)).await {
+        Ok(last) => Json(wake_result_json(&last)).into_response(),
+        Err(e) => api_error(StatusCode::CONFLICT, "no_wake_url", &e),
+    }
 }
 
 #[derive(Deserialize)]
@@ -1930,6 +2072,15 @@ pub async fn connect_page(State(state): State<AppState>, Path(id): Path<String>)
          Stream:  message.start → message.delta (text) → message.end\n\
          Typing:  {{\"type\":\"typing\",\"chat\":\"…\",\"on\":true}}   Status: {{\"type\":\"status\",\"chat\":\"…\",\"text\":\"reading Stripe\"}}\n\
          Alive:   {{\"type\":\"presence.heartbeat\"}} every 60 s (any call renews the lease)\n\n\
+         Wake URL (Grok Bot routine with a webhook trigger, or any bot with an HTTPS endpoint):\n\
+         in Arbos open the agent's profile → Connection → Wake URL, paste the webhook URL and the\n\
+         exact Authorization header value the routine panel shows, Save, then Send test wake.\n\
+         When a message needs an answer the relay POSTs there at once (no message text):\n\
+         {{\"agent\":\"{id}\",\"chat\":\"<chat id>\",\"event_id\":N,\"type\":\"message.received\"}}\n\
+         with headers  Authorization: <your value>  and  X-Arbos-Signature: sha256=<hex HMAC-SHA256 of the body, key = that value>.\n\
+         On a nudge: GET {relay}/asp/inbox?since=<last next>  and answer the events with wake=true.\n\
+         At most one nudge per 5 s per agent; keep a slow poll (every 5 min) as the fallback.\n\
+         Test from the agent side: POST {relay}/asp/wake/test (same key) → {{ok,status,error}}.\n\n\
          Claude Code / Codex on a Mac: cargo install --git https://github.com/unarbos/arbos arbos-acp\n\
          then ARBOS_AGENT_KEY=arbk_… arbos-acp --relay {relay} --agent claude-agent-acp\n"
     );
@@ -2384,6 +2535,9 @@ mod tests {
             connected_at: None,
             agent_info: Value::Null,
             scopes: json!({}),
+            wake_url: None,
+            wake_auth_set: false,
+            wake_last: None,
         };
         assert_eq!(a.status(), "never");
         a.last_seen_at = Some(now_ms());
