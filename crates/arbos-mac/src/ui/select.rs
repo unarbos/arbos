@@ -15,7 +15,7 @@
 //! [`StyledText`] and wires the mouse to the model from inside its own paint,
 //! where the text layout is guaranteed to exist.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -197,6 +197,10 @@ pub struct TextSelection {
     /// that pointer state. The EC2 Mac's VNC session cannot hold a button
     /// down for a capture, so the rig asks.
     rig_chip: Option<mention::ChipState>,
+    /// The `||spoilers||` this viewer has clicked open, by bubble key and the
+    /// spoiler's start in the bubble's plain text. Per viewer, per launch:
+    /// nothing is stored ([feedback chat-markdown-mac-2026-10-27]).
+    revealed: Rc<HashSet<SpoilerKey>>,
     /// The cursor the last painted bubble text asked for (tests).
     #[cfg(test)]
     pub(crate) cursor: CursorStyle,
@@ -204,6 +208,10 @@ pub struct TextSelection {
     #[cfg(test)]
     pub(crate) opened: Vec<String>,
 }
+
+/// Names one spoiler across frames: the bubble and where the spoiler's text
+/// starts in the bubble's plain text.
+pub type SpoilerKey = (SharedString, usize);
 
 /// Names one chip across frames: the bubble and the chip's range in the
 /// bubble's plain text.
@@ -219,11 +227,27 @@ impl TextSelection {
             rig_chip: std::env::var("ARBOS_RIG_CHIP")
                 .ok()
                 .and_then(|s| mention::ChipState::parse(&s)),
+            revealed: Rc::new(HashSet::new()),
             #[cfg(test)]
             cursor: CursorStyle::Arrow,
             #[cfg(test)]
             opened: Vec::new(),
         }
+    }
+
+    /// Show or hide one spoiler for this viewer.
+    pub fn toggle_spoiler(&mut self, key: SpoilerKey, cx: &mut Context<Self>) {
+        let revealed = Rc::make_mut(&mut self.revealed);
+        if !revealed.remove(&key) {
+            revealed.insert(key);
+        }
+        cx.notify();
+    }
+
+    /// Whether the viewer has opened the spoiler at `key`.
+    #[cfg(test)]
+    pub fn spoiler_revealed(&self, key: &SpoilerKey) -> bool {
+        self.revealed.contains(key)
     }
 
     /// The selected text when the selection lives in one bubble. A selection
@@ -539,6 +563,8 @@ pub struct Selectable {
     icon_placeholder: Hsla,
     /// Search-in-chat marks for this bubble's words, while the bar is up.
     marks: Option<Rc<SearchMarks>>,
+    /// The spoilers open this frame.
+    revealed: Rc<HashSet<SpoilerKey>>,
 }
 
 /// What ⌘F Search-in-chat paints on a hit's words ([feedback
@@ -556,7 +582,9 @@ pub struct SearchMarks {
 
 impl Selectable {
     pub fn new(entity: &Entity<TextSelection>, color: Hsla, cx: &App) -> Self {
-        let current = entity.read(cx).model.span();
+        let selection = entity.read(cx);
+        let current = selection.model.span();
+        let revealed = selection.revealed.clone();
         Self {
             entity: entity.clone(),
             current,
@@ -567,6 +595,7 @@ impl Selectable {
             link_icons: LinkIcons::empty(),
             icon_placeholder: Hsla::default(),
             marks: None,
+            revealed,
         }
     }
 
@@ -641,6 +670,7 @@ impl Selectable {
             link_icons: self.link_icons.clone(),
             icon_placeholder: self.icon_placeholder,
             marks: self.marks.clone(),
+            revealed: self.revealed.clone(),
         }
     }
 }
@@ -658,6 +688,15 @@ pub struct BubbleSelectable {
     link_icons: Rc<LinkIcons>,
     icon_placeholder: Hsla,
     marks: Option<Rc<SearchMarks>>,
+    revealed: Rc<HashSet<SpoilerKey>>,
+}
+
+impl BubbleSelectable {
+    /// Whether the spoiler whose text starts at byte `at` of this bubble's
+    /// plain text is open for the viewer.
+    pub fn spoiler_revealed(&self, at: usize) -> bool {
+        self.revealed.contains(&(self.at.key.clone(), at))
+    }
 }
 
 /// One mention chip inside a [`SelectableText`]: the `@Name` run (element-local
@@ -746,6 +785,7 @@ impl BubbleSelectable {
             span: at..at + text.len(),
             at,
             links: Vec::new(),
+            spoilers: Vec::new(),
             chips,
             icons: Vec::new(),
             link_icons: self.link_icons.clone(),
@@ -965,6 +1005,9 @@ pub struct SelectableText {
     span: Range<usize>,
     styled: StyledText,
     links: Vec<(Range<usize>, String)>,
+    /// Spoiler ranges (element-local) and each one's key: a plain click
+    /// inside one shows or hides it.
+    spoilers: Vec<(Range<usize>, SpoilerKey)>,
     chips: Vec<Chip>,
     /// Named links' icon cells, with the site picture when it is known.
     icons: Vec<LinkIcon>,
@@ -978,6 +1021,17 @@ impl SelectableText {
     /// one opens it.
     pub fn with_links(mut self, links: Vec<(Range<usize>, String)>) -> Self {
         self.links = links;
+        self
+    }
+
+    /// Spoiler ranges (element-local) with the byte each spoiler starts at
+    /// in the bubble's plain text: a plain click toggles the spoiler.
+    pub fn with_spoilers(mut self, spoilers: Vec<(Range<usize>, usize)>) -> Self {
+        let key = self.bubble.key.clone();
+        self.spoilers = spoilers
+            .into_iter()
+            .map(|(range, start)| (range, (key.clone(), start)))
+            .collect();
         self
     }
 
@@ -1104,6 +1158,7 @@ impl Element for SelectableText {
             paint_link_icon(&layout, icon, self.icon_placeholder, window);
         }
         let links = std::mem::take(&mut self.links);
+        let spoilers = std::mem::take(&mut self.spoilers);
         let focus_handle = selection.read(cx).focus_handle.clone();
         let (bubble, at) = (self.bubble.clone(), self.at);
         let key = bubble.key.clone();
@@ -1113,6 +1168,7 @@ impl Element for SelectableText {
                 .index_for_position(window.mouse_position())
                 .is_ok_and(|ix| {
                     links.iter().any(|(r, _)| r.contains(&ix))
+                        || spoilers.iter().any(|(r, _)| r.contains(&ix))
                         || chips.iter().any(|c| c.clickable() && c.range.contains(&ix))
                 });
         let cursor = if over_link {
@@ -1275,12 +1331,18 @@ impl Element for SelectableText {
                     && hitbox.is_hovered(window)
                     && selection.read(cx).model.pressed_in(&bubble.key, &span)
                 {
+                    let index = layout.index_for_position(event.position).ok();
                     if let Some(chip) = chip_at(&chips, &layout, event.position) {
                         chip.mentions.open(&chip.mention, cx);
-                    } else if let Some((_, href)) = layout
-                        .index_for_position(event.position)
-                        .ok()
-                        .and_then(|ix| links.iter().find(|(r, _)| r.contains(&ix)))
+                    } else if let Some((_, key)) =
+                        index.and_then(|ix| spoilers.iter().find(|(r, _)| r.contains(&ix)))
+                    {
+                        // A hidden spoiler opens; its link (if any) waits for
+                        // the next click, once the text can be read.
+                        let key = key.clone();
+                        selection.update(cx, |s, cx| s.toggle_spoiler(key, cx));
+                    } else if let Some((_, href)) =
+                        index.and_then(|ix| links.iter().find(|(r, _)| r.contains(&ix)))
                     {
                         #[cfg(test)]
                         selection.update(cx, |s, _| s.opened.push(href.clone()));

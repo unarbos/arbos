@@ -76,12 +76,30 @@ struct Toast: Identifiable, Equatable {
     var error: UserError?
     var detailsOpen = false
     var held = false
+    /// Since when a touch holds it (the hold has a cap).
+    var heldSince: Date? = nil
     var hasRetry = false
     var at: Date
+    /// How many times this same failure arrived while the toast stood (1 = once); 2 and up
+    /// is a "×N" on the note instead of a second toast ([feedback toast-stack-ios-2026-10-27]).
+    var count: Int = 1
 
     static let infoTTL: TimeInterval = 6
     static let errorTTL: TimeInterval = 10
+    /// A held toast (touch on it, Details closed) is let go after this long.
+    static let holdMax: TimeInterval = 60
+    /// How many the slot shows at once; older ones fold into one "N more" line.
+    static let visibleMax = 3
     var ttl: TimeInterval { error == nil ? Toast.infoTTL : Toast.errorTTL }
+
+    /// Two toasts are the same failure when they read the same sentence.
+    func sameAs(_ other: UserError) -> Bool { error?.sentence == other.sentence }
+}
+
+/// What the slot draws: the newest toasts, oldest first, and how many older ones are folded.
+struct ToastStack: Equatable {
+    var visible: [Toast]
+    var folded: Int
 }
 
 /// Which surface owns which failures while it is up (a sheet with a form open): a failure for
@@ -390,6 +408,11 @@ final class AppModel: ObservableObject {
                 store.put(StoreKey.lastChat, Data(chatId.utf8))
             }
         }
+    }
+    /// A chat screen is on top of the stack: the toast slot is its header's, not the root's.
+    var chatIsUp: Bool {
+        if case .chat? = path.last { return true }
+        return false
     }
     /// True when the Debug fixture replaced the relay (screenshots).
     var isFixture = false
@@ -1454,9 +1477,29 @@ final class AppModel: ObservableObject {
 
     // MARK: - toasts and failures (one element, one place — Jacob 2026-10-26)
 
-    /// An info toast: something that worked or a plain status. Never a failure.
+    /// An info toast: something that worked or a plain status. Never a failure. The same text
+    /// again while its toast stands restarts that toast instead of adding one.
     func notify(_ text: String) {
+        if let i = toasts.firstIndex(where: { $0.error == nil && $0.text == text }) {
+            toasts[i].count += 1
+            toasts[i].at = Date()
+            armToast(toasts[i].id, after: toasts[i].ttl)
+            return
+        }
         pushToast(Toast(id: UUID(), text: text, error: nil, at: Date()))
+    }
+
+    /// The newest `Toast.visibleMax` toasts (oldest first) and how many older ones are folded
+    /// away above them (Jacob 2026-10-27: at most three visible, the rest a count).
+    var toastStack: ToastStack {
+        let folded = max(0, toasts.count - Toast.visibleMax)
+        return ToastStack(visible: Array(toasts.dropFirst(folded)), folded: folded)
+    }
+
+    /// The "N more" line's ×: the whole slot goes.
+    func dismissAllToasts() {
+        for t in toasts { toastTimers[t.id]?.cancel(); toastTimers[t.id] = nil; toastRetries[t.id] = nil }
+        toasts.removeAll()
     }
 
     /// Something the user asked for did not happen: `verb` is what they tried ("save the
@@ -1466,11 +1509,22 @@ final class AppModel: ObservableObject {
         fail(UserError.classify(verb, error), retry: retry)
     }
 
-    /// A failure already classified.
+    /// A failure already classified. The same failure again while its toast stands (same
+    /// sentence) bumps that toast's count and restarts its clock — one note per failure,
+    /// however often it repeats (eight "Couldn't load your secrets. You're offline." toasts
+    /// on the Mac, 2026-10-27, are the reason).
     func fail(_ error: UserError, retry: (() -> Void)? = nil) {
         if let claim = failureClaim, claim.verbs.contains(where: { error.verb.hasPrefix($0) }) {
             claimedFailure = error
             claimedFailureDetailsOpen = false
+            return
+        }
+        if let i = toasts.firstIndex(where: { $0.sameAs(error) }) {
+            toasts[i].count += 1
+            toasts[i].error = error
+            toasts[i].at = Date()
+            if let retry { toastRetries[toasts[i].id] = retry; toasts[i].hasRetry = true }
+            armToast(toasts[i].id, after: toasts[i].ttl)
             return
         }
         let toast = Toast(id: UUID(), text: error.sentence, error: error, hasRetry: retry != nil, at: Date())
@@ -1493,7 +1547,16 @@ final class AppModel: ObservableObject {
         toastTimers[id] = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(ttl * 1_000_000_000))
             guard let self, !Task.isCancelled else { return }
-            if let t = self.toasts.first(where: { $0.id == id }), t.held { return }
+            if let t = self.toasts.first(where: { $0.id == id }), t.held {
+                // Details open: stays. A plain hold ends at the cap (a finger parked on the
+                // slot, or a release that never arrived, cannot pin a toast forever).
+                let since = t.heldSince ?? Date()
+                let left = Toast.holdMax - Date().timeIntervalSince(since)
+                if t.detailsOpen || left > 0 {
+                    self.armToast(id, after: t.detailsOpen ? ttl : max(left, 0.5))
+                    return
+                }
+            }
             self.dismissToast(id)
         }
     }
@@ -1508,13 +1571,15 @@ final class AppModel: ObservableObject {
     /// A touch on a toast holds it; letting go restarts its clock.
     func holdToast(_ id: UUID, held: Bool) {
         guard let i = toasts.firstIndex(where: { $0.id == id }) else { return }
+        if held, !toasts[i].held { toasts[i].heldSince = Date() }
         toasts[i].held = held
-        if !held { armToast(id, after: toasts[i].ttl) }
+        if !held { toasts[i].heldSince = nil; armToast(id, after: toasts[i].ttl) }
     }
 
     func setToastDetails(_ id: UUID, open: Bool) {
         guard let i = toasts.firstIndex(where: { $0.id == id }) else { return }
         toasts[i].detailsOpen = open
+        if !toasts[i].held { toasts[i].heldSince = Date() }
         toasts[i].held = true
     }
 

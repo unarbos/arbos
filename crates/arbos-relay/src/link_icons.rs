@@ -372,7 +372,7 @@ pub fn icon_href(html: &str) -> Option<String> {
 }
 
 /// Every `<name …>` tag of `html` (lower-cased name match), attributes text only.
-fn tags(html: &str, name: &str) -> Vec<String> {
+pub(crate) fn tags(html: &str, name: &str) -> Vec<String> {
     let lower = html.to_ascii_lowercase();
     let open = format!("<{name}");
     let mut out = Vec::new();
@@ -394,7 +394,7 @@ fn tags(html: &str, name: &str) -> Vec<String> {
 }
 
 /// The value of attribute `key` in a tag's attribute text (quoted or bare).
-fn attr(tag: &str, key: &str) -> Option<String> {
+pub(crate) fn attr(tag: &str, key: &str) -> Option<String> {
     let lower = tag.to_ascii_lowercase();
     let mut from = 0usize;
     while let Some(i) = lower[from..].find(key) {

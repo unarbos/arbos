@@ -32,6 +32,9 @@ struct ErrorNote: View {
     var onTryAgain: (() -> Void)? = nil
     var onSignIn: (() -> Void)? = nil
     var onDismiss: (() -> Void)? = nil
+    /// How many times this same failure arrived while the note stands; 2 and up draws a small
+    /// "×N" after the sentence (`{id}-count`) instead of a second note.
+    var count: Int = 1
 
     static let radius: CGFloat = 16
     static let padV: CGFloat = 12
@@ -103,6 +106,15 @@ struct ErrorNote: View {
                 .foregroundStyle(theme.text)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("\(id)-sentence")
+            if count >= 2 {
+                Text("×\(count)")
+                    .font(theme.font(Theme.tiny, weight: .semibold))
+                    .foregroundStyle(theme.muted)
+                    .padding(.horizontal, 7)
+                    .frame(height: Self.line)
+                    .background(Capsule().fill(pillFill))
+                    .accessibilityIdentifier("\(id)-count")
+            }
         }
     }
 
@@ -197,14 +209,43 @@ struct ErrorNote: View {
 /// The toast layer (Jacob 2026-10-26): the app's transient notices at the top of the screen,
 /// under the status bar, 16 inset — an info notice as the plain card (6 s, tap dismisses) and a
 /// failure as `ErrorNote` in its toast style (10 s, a touch holds it, × dismisses, Try again
-/// re-runs the action). Replaces the root `.alert(item: $model.notice)`.
+/// re-runs the action). Replaces the root `.alert(item: $model.notice)`. One slot (Jacob
+/// 2026-10-27, [feedback toast-stack-ios-2026-10-27]): just below the open chat's header pill
+/// (`ChatView`), the root's top only when no chat is up, the Settings sheet's own top while it
+/// is up; the newest three, older ones folded into one "N more" line, the same failure again a
+/// ×N on its note.
 struct ToastHost: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
 
     var body: some View {
+        let stack = model.toastStack
         VStack(spacing: 8) {
-            ForEach(model.toasts) { toast in
+            if stack.folded > 0 {
+                HStack {
+                    Text("\(stack.folded) more \(stack.folded == 1 ? "notice" : "notices")")
+                        .font(theme.font(Theme.small))
+                        .foregroundStyle(theme.muted)
+                    Spacer(minLength: 8)
+                    Button { model.dismissAllToasts() } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(theme.muted)
+                            .frame(width: 28, height: 28)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("toast-folded-close")
+                }
+                .padding(.leading, 14)
+                .padding(.trailing, 2)
+                .frame(height: 32)
+                .background(Capsule().fill(theme.card))
+                .overlay(Capsule().strokeBorder(theme.separator, lineWidth: 1))
+                .accessibilityIdentifier("toast-folded")
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
+            ForEach(stack.visible) { toast in
                 ToastRow(toast: toast)
             }
         }
@@ -213,6 +254,7 @@ struct ToastHost: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .allowsHitTesting(!model.toasts.isEmpty)
         .animation(.easeOut(duration: 0.2), value: model.toasts)
+        .accessibilityIdentifier("toast-slot")
     }
 }
 
@@ -230,12 +272,13 @@ private struct ToastRow: View {
                 style: .toast,
                 onTryAgain: toast.hasRetry ? { model.retryToast(toast.id) } : nil,
                 onSignIn: error.action == .signIn ? { model.dismissToast(toast.id); model.signOutForReauth() } : nil,
-                onDismiss: { model.dismissToast(toast.id) }
+                onDismiss: { model.dismissToast(toast.id) },
+                count: toast.count
             )
             .onLongPressGesture(minimumDuration: 0.05, pressing: { pressing in model.holdToast(toast.id, held: pressing) }, perform: {})
             .transition(.move(edge: .top).combined(with: .opacity))
         } else {
-            Text(toast.text)
+            Text(toast.count >= 2 ? "\(toast.text) (×\(toast.count))" : toast.text)
                 .font(theme.font(Theme.small))
                 .foregroundStyle(theme.text)
                 .padding(.horizontal, 14)
