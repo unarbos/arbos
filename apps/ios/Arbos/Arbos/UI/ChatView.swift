@@ -1390,7 +1390,7 @@ struct ChatSession: View {
         }
     }
 
-    private func handleSessionDisappear()    private func handleSessionDisappear() {
+    private func handleSessionDisappear() {
         // Keep the typed draft so coming back to this thread restores it.
         model.setComposerDraft(composerDraft.text, for: chatId)
         // Catch notifies that landed after the last onChange mark-read while we were still in the chat
