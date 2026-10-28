@@ -213,6 +213,136 @@ pub struct OutsideInfo {
     /// The Wake URL (`agent.wake`), absent on a relay without it.
     #[serde(default)]
     pub wake: Option<WakeInfo>,
+    /// The session log's header numbers (`log` on `GET /outside-agents/{id}`, #2224); absent
+    /// on a relay without the log.
+    #[serde(default)]
+    pub log: Option<OutsideLogSummary>,
+}
+
+/// `log {entries, last_at, last_reply_ms}` on the agent record.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct OutsideLogSummary {
+    #[serde(default)]
+    pub entries: i64,
+    #[serde(default)]
+    pub last_at: Option<i64>,
+    #[serde(default)]
+    pub last_reply_ms: Option<i64>,
+}
+
+/// One line of a connected agent's session log as the sidecar uploaded it (spec §13.3): a
+/// wake, an ack, a reply, a session event or an error — never message text.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct OutsideLogEntry {
+    #[serde(default)]
+    pub id: i64,
+    #[serde(default)]
+    pub at: i64,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub chat: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub ms: std::collections::HashMap<String, i64>,
+    #[serde(default)]
+    pub session: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub generation: Option<u32>,
+    #[serde(default)]
+    pub turns: Option<u32>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub handoff_from: Option<String>,
+}
+
+impl OutsideLogEntry {
+    pub fn is_error(&self) -> bool {
+        self.kind == "error"
+    }
+
+    pub fn is_session(&self) -> bool {
+        self.kind.starts_with("session.")
+    }
+
+    /// Rows worth a line on the card: replies (one per wake), errors and session events.
+    /// Wakes, typing, reads and uploads are the plumbing behind them.
+    pub fn shown(&self) -> bool {
+        matches!(self.kind.as_str(), "reply" | "post") || self.is_error() || self.is_session()
+    }
+
+    /// "17:02:11" in local time.
+    pub fn clock(&self) -> String {
+        use chrono::TimeZone;
+        chrono::Local
+            .timestamp_millis_opt(self.at)
+            .single()
+            .map(|t| t.format("%H:%M:%S").to_string())
+            .unwrap_or_default()
+    }
+
+    /// Local calendar day, for section headers.
+    pub fn day(&self) -> String {
+        use chrono::TimeZone;
+        let t = chrono::Local.timestamp_millis_opt(self.at).single();
+        let today = chrono::Local::now().date_naive();
+        match t {
+            Some(t) if t.date_naive() == today => "Today".to_owned(),
+            Some(t) if t.date_naive() == today.pred_opt().unwrap_or(today) => {
+                "Yesterday".to_owned()
+            }
+            Some(t) => t.format("%A, %-d %B").to_string(),
+            None => String::new(),
+        }
+    }
+
+    fn secs(ms: i64) -> String {
+        format!("{:.1} s", ms as f64 / 1000.0)
+    }
+
+    /// The muted second line: "ack 1.2 s · reply 9.8 s", "turn 12", or the error sentence.
+    pub fn detail(&self) -> String {
+        if let Some(e) = &self.error {
+            return e.clone();
+        }
+        if self.is_session() {
+            return match self.kind.as_str() {
+                "session.resume" => self.turns.map(|t| format!("turn {t}")).unwrap_or_default(),
+                "session.new" => self
+                    .handoff_from
+                    .as_ref()
+                    .map(|h| format!("handoff from {}…", h.chars().take(4).collect::<String>()))
+                    .unwrap_or_else(|| "first session".to_owned()),
+                "session.rotate" => self.reason.clone().unwrap_or_default(),
+                _ => String::new(),
+            };
+        }
+        let mut parts = Vec::new();
+        if let Some(a) = self.ms.get("event_to_ack") {
+            parts.push(format!("ack {}", Self::secs(*a)));
+        }
+        if let Some(r) = self.ms.get("event_to_reply") {
+            parts.push(format!("reply {}", Self::secs(*r)));
+        } else if let Some(r) = self.ms.get("nudge_to_reply") {
+            parts.push(format!("reply {}", Self::secs(*r)));
+        }
+        parts.join(" · ")
+    }
+
+    /// The first line for a session event ("session resumed", "session rotated").
+    pub fn session_title(&self) -> &'static str {
+        match self.kind.as_str() {
+            "session.new" => "new session",
+            "session.resume" => "session resumed",
+            "session.resume_failed" => "session could not be resumed",
+            "session.rotate" => "session rotated",
+            _ => "session",
+        }
+    }
 }
 
 /// An outside agent's Wake URL as the relay reports it: the URL is shown back, the

@@ -7680,13 +7680,41 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .get_json(&format!("/outside-agents/{project_id}"))
                     .await
                 {
-                    if let Ok(info) =
+                    if let Ok(mut info) =
                         serde_json::from_value::<crate::model::OutsideInfo>(v["agent"].clone())
                     {
+                        // The log summary rides beside `agent` on the record (#2224).
+                        if info.log.is_none() {
+                            info.log = serde_json::from_value(v["log"].clone()).ok();
+                        }
                         let _ = shared
                             .events
                             .send(SyncEvent::OutsideAgentStatus { project_id, info });
                     }
+                }
+            });
+        }
+        ClientCommand::OutsideAgentLog { project_id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                // Newest 200: the card shows four, View all the rest. An older relay answers
+                // 404 and the card simply stays away.
+                if let Ok(v) = shared
+                    .get_json(&format!("/outside-agents/{project_id}/log?limit=500"))
+                    .await
+                {
+                    let entries: Vec<crate::model::OutsideLogEntry> = v["entries"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|e| serde_json::from_value(e.clone()).ok())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let _ = shared.events.send(SyncEvent::OutsideAgentLog {
+                        project_id,
+                        entries,
+                    });
                 }
             });
         }

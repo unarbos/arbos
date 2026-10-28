@@ -5,19 +5,23 @@
 //! relay and flips to "Connected" when the agent first checks in. Waiting uses the app's one
 //! working indicator (`cards::activity_spinner`), never a coloured status dot.
 
-use gpui::{div, prelude::*, px, ClipboardItem, Context, Div, FontWeight, MouseButton};
+use gpui::{
+    div, prelude::*, px, AnyElement, ClipboardItem, Context, Div, FontWeight, MouseButton,
+    SharedString, Stateful,
+};
 
-use crate::app::ConnectReveal;
-use crate::model::{now_ms, Id, OutsideInfo, OUTSIDE_SCOPES};
+use crate::app::{ConnectReveal, ProfilePage};
+use crate::model::{now_ms, Id, OutsideInfo, OutsideLogEntry, OUTSIDE_SCOPES};
 use crate::ui::create_entity::{self, hex, palette, Transport};
 use crate::ui::frost::{frosted, PANEL_BLUR};
 use crate::ui::highlight;
 use crate::ui::motion::PulseClock;
 use crate::ui::profiles::kit::{self, Leading};
-use crate::ui::profiles::pane::Section;
+use crate::ui::profiles::pane::{self, Hero, Picture, ProfilePane, Section};
 use crate::ui::sf_symbols;
 use crate::ui::shell::Shell;
 use crate::ui::theme::Theme;
+use crate::ui::theme::{TEXT_BODY, TEXT_SMALL};
 
 const WIDTH: f32 = create_entity::WIDTH;
 const RADIUS: f32 = 16.0;
@@ -403,6 +407,11 @@ pub fn details_sections(
         .into_any_element(),
     ];
     out.push(Section::Card(rows));
+    // The Session log card (spec §13.3, approved 2026-10-28): under Connection, above the
+    // rest; only on a relay that keeps the log (#2224).
+    if info.log.is_some() {
+        out.extend(session_log_sections(project_id, info, shell, theme, cx));
+    }
     // The Can card (spec §4.3, the approved mockup): one switch per scope, flipped on click.
     out.push(Section::Title("Can".into()));
     let switches: Vec<gpui::AnyElement> = OUTSIDE_SCOPES
@@ -773,4 +782,292 @@ mod tests {
             "ACP · on your Mac"
         );
     }
+}
+
+// ----- Session log (spec §13.3, [feedback sidecar-sessions-mac-2026-10-28]) ----------------
+
+/// Rows the card shows before "View all".
+const LOG_CARD_ROWS: usize = 4;
+
+/// The View all page's filters — the pane's tab pill, same labels as the iPhone.
+pub const LOG_TABS: [&str; 4] = ["All", "Replies", "Errors", "Sessions"];
+
+fn secs(ms: i64) -> String {
+    format!("{:.1} s", ms as f64 / 1000.0)
+}
+
+/// "Last reply 9.8 s · 12 wakes today".
+fn log_header_line(info: &OutsideInfo, entries: &[OutsideLogEntry]) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(ms) = info.log.as_ref().and_then(|l| l.last_reply_ms) {
+        parts.push(format!("Last reply {}", secs(ms)));
+    }
+    let today = entries
+        .iter()
+        .filter(|e| e.kind == "wake" && e.day() == "Today")
+        .count();
+    if today > 0 {
+        parts.push(format!(
+            "{today} wake{} today",
+            if today == 1 { "" } else { "s" }
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+/// One log line: the time on the left, then two lines — the chat (or the session event) over
+/// the muted latency / detail. Only an error's sentence is red (no dots, no badges).
+fn log_row(
+    id: impl Into<gpui::ElementId>,
+    entry: &OutsideLogEntry,
+    chat_title: String,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let (title, detail): (SharedString, SharedString) = if entry.is_session() {
+        (entry.session_title().into(), entry.detail().into())
+    } else {
+        (chat_title.into(), entry.detail().into())
+    };
+    let detail_color = if entry.is_error() {
+        theme.danger
+    } else {
+        theme.text_muted
+    };
+    div()
+        .id(id)
+        .relative()
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .gap(px(kit::GAP))
+        .min_h(px(kit::ROW_MIN_H))
+        .px(px(kit::INSET))
+        .py(px(6.0))
+        .text_size(px(TEXT_BODY))
+        .text_color(theme.text)
+        .child(
+            div()
+                .flex_shrink_0()
+                .w(px(62.0))
+                .text_size(px(TEXT_SMALL))
+                .text_color(theme.text_muted)
+                .child(entry.clock()),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(1.0))
+                .child(
+                    div()
+                        .truncate()
+                        .when(entry.is_session(), |el| {
+                            el.italic().text_color(theme.text_muted)
+                        })
+                        .child(title),
+                )
+                .when(!detail.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .text_size(px(TEXT_SMALL))
+                            .text_color(detail_color)
+                            .when(entry.is_session(), |el| el.italic())
+                            .truncate()
+                            .child(detail),
+                    )
+                }),
+        )
+        .child(kit::hairline_below(theme))
+}
+
+/// The card: a title with the header numbers, the newest four lines, View all, a footnote.
+fn session_log_sections(
+    project_id: &Id,
+    info: &OutsideInfo,
+    shell: &Shell,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> Vec<Section> {
+    let state = shell.state.read(cx);
+    let entries: Vec<OutsideLogEntry> = state
+        .outside_logs
+        .get(project_id)
+        .cloned()
+        .unwrap_or_default();
+    let header = log_header_line(info, &entries);
+    let title: AnyElement = div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .child(kit::section_title("Session log", theme))
+        .when_some(header, |el, h| {
+            el.child(
+                div()
+                    .pr(px(kit::INSET * 2.0))
+                    .text_size(px(TEXT_SMALL))
+                    .text_color(theme.text_muted)
+                    .child(h),
+            )
+        })
+        .into_any_element();
+    let shown: Vec<&OutsideLogEntry> = entries
+        .iter()
+        .rev()
+        .filter(|e| e.shown())
+        .take(LOG_CARD_ROWS)
+        .collect();
+    let mut rows: Vec<AnyElement> = shown
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let chat = e
+                .chat
+                .as_deref()
+                .map(|c| state.outside_log_chat_title(c, project_id))
+                .unwrap_or_default();
+            log_row(
+                gpui::ElementId::Name(format!("outside-log-{i}").into()),
+                e,
+                chat,
+                theme,
+            )
+            .debug_selector(move || format!("outside-log-{i}"))
+            .into_any_element()
+        })
+        .collect();
+    if shown.is_empty() {
+        rows.push(
+            kit::row(
+                "outside-log-empty",
+                Leading::None,
+                "No wakes yet",
+                Some("Lines appear here when someone writes to the agent.".into()),
+                None,
+                None,
+                false,
+                theme,
+            )
+            .into_any_element(),
+        );
+    }
+    let pid = project_id.clone();
+    rows.push(
+        kit::row(
+            "outside-log-all",
+            Leading::None,
+            "View all",
+            None,
+            None,
+            None,
+            true,
+            theme,
+        )
+        .debug_selector(|| "outside-log-all".into())
+        .cursor_pointer()
+        .on_click(cx.listener(move |this, _, _, cx| {
+            let pid = pid.clone();
+            this.state.update(cx, |s, cx| s.open_outside_log(pid, cx));
+        }))
+        .into_any_element(),
+    );
+    vec![
+        Section::Custom(title),
+        Section::Card(rows),
+        Section::Footnote(
+            "Written by the sidecar on the agent's machine. Never message text or secrets.".into(),
+        ),
+    ]
+}
+
+/// The View all page: every line of the log, newest first, grouped by day, with the pane's
+/// tab pill as the filter (All · Replies · Errors · Sessions).
+pub fn log_page(project_id: &Id, shell: &Shell, cx: &mut Context<Shell>) -> Option<Stateful<Div>> {
+    let theme = Theme::of(cx).clone();
+    let state = shell.state.read(cx);
+    let project = state.project(project_id)?.clone();
+    let tab = state.profile_tab.min(LOG_TABS.len() - 1);
+    let entries: Vec<OutsideLogEntry> = state
+        .outside_logs
+        .get(project_id)
+        .cloned()
+        .unwrap_or_default();
+    let keep = |e: &OutsideLogEntry| match tab {
+        1 => matches!(e.kind.as_str(), "reply" | "post"),
+        2 => e.is_error(),
+        3 => e.is_session(),
+        _ => e.shown(),
+    };
+    let mut body: Vec<Section> = Vec::new();
+    let mut day = String::new();
+    let mut rows: Vec<AnyElement> = Vec::new();
+    for (i, e) in entries.iter().rev().filter(|e| keep(e)).enumerate() {
+        let d = e.day();
+        if d != day {
+            if !rows.is_empty() {
+                body.push(Section::Card(std::mem::take(&mut rows)));
+            }
+            body.push(Section::Title(d.clone().into()));
+            day = d;
+        }
+        let chat = e
+            .chat
+            .as_deref()
+            .map(|c| state.outside_log_chat_title(c, project_id))
+            .unwrap_or_default();
+        rows.push(
+            log_row(
+                gpui::ElementId::Name(format!("outside-log-all-{i}").into()),
+                e,
+                chat,
+                &theme,
+            )
+            .into_any_element(),
+        );
+    }
+    if !rows.is_empty() {
+        body.push(Section::Card(rows));
+    }
+    if body.is_empty() {
+        body.push(Section::Empty(
+            match tab {
+                1 => "No replies yet",
+                2 => "No errors",
+                3 => "No session events yet",
+                _ => "No wakes yet",
+            }
+            .into(),
+        ));
+    }
+    body.push(Section::Footnote(
+        "Written by the sidecar on the agent's machine. Never message text or secrets.".into(),
+    ));
+    let hero = Hero {
+        picture: Picture::Glyph("list.bullet.rectangle"),
+        name: pane::name("Session log", &theme),
+        badge: None,
+        subtitle: Some(project.name.clone().into()),
+        subtitle_color: theme.text_muted,
+        subtitle_click: None,
+        subtitle_element: None,
+        editor: None,
+        action: None,
+    };
+    Some(pane::render(
+        ProfilePane {
+            page: ProfilePage::AgentLog {
+                project_id: project_id.clone(),
+            },
+            hero,
+            tabs: &LOG_TABS,
+            selected: tab,
+            body,
+            footer: Vec::new(),
+            done: None,
+            share: None,
+        },
+        shell,
+        cx,
+    ))
 }
