@@ -349,6 +349,23 @@ struct Theme: Equatable {
     /// Frosted chrome (header blur, glass circles/pills) when Surface is Glass.
     var isGlass: Bool { surface == .glass }
 
+    /// The grouped pane card (`PaneCard`: members, settings, library lists). Matte: the
+    /// assistant-bubble grey, as before. Glass: a wash of white over the frosted page —
+    /// 8 % dark / 55 % light — so the desktop-through-material shows through the card as it
+    /// does through the page, not an opaque slab on a see-through pane (Jacob 2026-10-28,
+    /// [feedback right-pane-glass-cards-ios-2026-10-28]; the Mac's `Theme::pane_card_fill`
+    /// uses the same numbers, pinned there by `theme::glass_contrast_tests`).
+    var paneCardFill: Color {
+        guard isGlass else { return bubbleAssistant }
+        return Color.white.opacity(PaneCardGlass.fillAlpha(isDark: isDark))
+    }
+    /// The 1 pt rim the card wears on Glass so its edge reads where the fill is thin
+    /// (white 10 % dark / black 6 % light); clear on Matte, where the card has no border.
+    var paneCardRim: Color {
+        guard isGlass else { return .clear }
+        return isDark ? Color.white.opacity(PaneCardGlass.rimAlphaDark) : Color.black.opacity(PaneCardGlass.rimAlphaLight)
+    }
+
     /// Grok's bot palette; a project's hex colour snaps to the nearest one.
     static let palette: [Color] = [
         Color(hex: "#1084FE")!, Color(hex: "#10B981")!, Color(hex: "#FF7A00")!, Color(hex: "#FF3B5C")!,
@@ -417,6 +434,23 @@ extension EnvironmentValues {
         get { self[ThemeKey.self] }
         set { self[ThemeKey.self] = newValue }
     }
+}
+
+// MARK: - Pane card glass ([feedback right-pane-glass-cards-ios-2026-10-28], Jacob 2026-10-28)
+
+/// The pane card's fill on Glass, as numbers (the Mac's `PANE_CARD_GLASS_DARK` / `_LIGHT`):
+/// white at `fillAlpha` over the page's material + wash; a hairline rim so the edge
+/// reads. Matte keeps `bubbleAssistant` (`Theme.paneCardFill`).
+enum PaneCardGlass {
+    static let fillAlphaDark: Double = 0.08
+    static let fillAlphaLight: Double = 0.55
+    static let rimAlphaDark: Double = 0.10
+    static let rimAlphaLight: Double = 0.06
+
+    static func fillAlpha(isDark: Bool) -> Double { isDark ? fillAlphaDark : fillAlphaLight }
+
+    /// Is the card glass for this surface? (Glass yes, Matte no — on every appearance.)
+    static func isGlass(surface: Surface) -> Bool { surface == .glass }
 }
 
 // MARK: - Chat header glass ([feedback ios-header-glass-2026-10-25], Jacob 2026-10-25)

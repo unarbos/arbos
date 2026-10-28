@@ -150,6 +150,11 @@ pub const FALLBACKS: &[(&str, &str)] = &[
     ("mic.slash", "mic-off"),
     ("phone.down.fill", "phone-down"),
     ("text.alignleft", "text-align-left"),
+    // Sidebar pinning ([feedback sidebar-pinning-mac-2026-10-28]): the row menu's Pin /
+    // Unpin and the pinned row's mark — the iPhone's `pin` / `pin.slash` / `pin.fill`.
+    ("pin", "pin"),
+    ("pin.slash", "pin-slash"),
+    ("pin.fill", "pin-fill"),
 ];
 
 /// The pack glyph that stands in for `name`, if `name` is a registered symbol.

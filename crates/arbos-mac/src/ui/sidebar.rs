@@ -65,6 +65,148 @@ impl Render for SidebarResizeDragGhost {
     }
 }
 
+/// A pinned row being dragged to a new slot in the Pinned section ([feedback
+/// sidebar-pinning-mac-2026-10-28]). The row itself moves live in the list (the
+/// ghost under the pointer draws nothing); `to` is the slot under the pointer among
+/// the pinned rows the current filter shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PinDragState {
+    pub(crate) id: Id,
+    pub(crate) to: usize,
+}
+
+/// The drag's payload (GPUI's `on_drag` value).
+#[derive(Clone, Debug)]
+struct PinDrag {
+    id: Id,
+}
+
+struct PinDragGhost;
+
+impl Render for PinDragGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
+/// The "Pinned" label over the section: `TEXT_SMALL` medium in `text_muted` at the rows'
+/// text inset (the list's 8 + the row's 12), in a 26 pt band — the voice of the
+/// "Hidden chats · N ›" footer.
+pub(crate) const PINNED_HEADER_H: f32 = 26.0;
+/// The hairline band after the pinned rows: 1 pt `border` with 4 pt margins
+/// (`glass::MENU_DIVIDER_HEIGHT`).
+pub(crate) const PINNED_DIVIDER_H: f32 = glass::MENU_DIVIDER_HEIGHT;
+
+fn pinned_header(theme: &Theme) -> gpui::Stateful<Div> {
+    div()
+        .id("sidebar-pinned-header")
+        .debug_selector(|| "sidebar-pinned-header".into())
+        .flex_shrink_0()
+        .h(px(PINNED_HEADER_H))
+        .px(px(12.0))
+        .flex()
+        .items_center()
+        .text_size(px(TEXT_SMALL))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(theme.text_muted)
+        .child("Pinned")
+}
+
+fn pinned_divider(theme: &Theme) -> gpui::Stateful<Div> {
+    div()
+        .id("sidebar-pinned-divider")
+        .debug_selector(|| "sidebar-pinned-divider".into())
+        .flex_shrink_0()
+        .h(px(1.0))
+        .mx(px(12.0))
+        .my(px((PINNED_DIVIDER_H - 1.0) / 2.0))
+        .bg(theme.border)
+}
+
+/// The pinned row's mark before its time: SF `pin.fill` at 11 pt semibold in
+/// `text_muted` — the iPhone row's glyph.
+fn pin_mark(id: &Id, theme: &Theme) -> Div {
+    sf_symbols::symbol(
+        "pin.fill",
+        11.0,
+        sf_symbols::Weight::Semibold,
+        13.0,
+        theme.text_muted,
+    )
+    .debug_selector(|| format!("row-pin-{id}"))
+}
+
+/// The list as the drop target of a pin drag: every move picks the slot under the
+/// pointer from the pinned cards' recorded bounds, the drop (or a mouse-up anywhere)
+/// commits the previewed order through `AppState::reorder_pins`.
+fn pin_drop_target(list: gpui::Stateful<Div>, cx: &mut Context<Shell>) -> gpui::Stateful<Div> {
+    let weak = cx.weak_entity();
+    list.on_drag_move::<PinDrag>(cx.listener(|this, ev: &DragMoveEvent<PinDrag>, _, cx| {
+        let y = f32::from(ev.event.position.y);
+        let Some(drag) = this.pin_drag.clone() else {
+            return;
+        };
+        let to = this.pin_slot_at(&drag.id, y, cx);
+        if to != drag.to {
+            this.pin_drag = Some(PinDragState { id: drag.id, to });
+            cx.notify();
+        }
+    }))
+    .can_drop(|dragged, _, _| dragged.is::<PinDrag>())
+    .on_drop(cx.listener(|this, _: &PinDrag, _, cx| this.finish_pin_drag(cx)))
+    .child(
+        gpui::canvas(
+            |_, _, _| (),
+            move |_, _, window, _| {
+                let weak = weak.clone();
+                window.on_mouse_event(move |_: &gpui::MouseUpEvent, _, _, cx| {
+                    weak.update(cx, |this, cx| this.finish_pin_drag(cx)).ok();
+                });
+            },
+        )
+        .absolute()
+        .size(px(0.0)),
+    )
+}
+
+impl Shell {
+    /// Which slot among the shown pinned rows the pointer's `y` is over: the number of
+    /// *other* pinned cards whose centre is above it.
+    pub(crate) fn pin_slot_at(&self, dragged: &Id, y: f32, cx: &Context<Shell>) -> usize {
+        let state = self.state.read(cx);
+        let cards = &self.morph.borrow().cards;
+        state
+            .pins
+            .iter()
+            .filter_map(|k| AppState::pinned_space_id(k))
+            .filter(|id| *id != dragged.as_str())
+            .filter_map(|id| cards.get(id))
+            .filter(|b| f32::from(b.origin.y) + f32::from(b.size.height) / 2.0 < y)
+            .count()
+    }
+
+    /// Start dragging a pinned row (its current slot is where it starts).
+    pub(crate) fn begin_pin_drag(&mut self, id: Id, cx: &mut Context<Shell>) {
+        let (pinned, _) = list_sections(self, cx);
+        let to = pinned.iter().position(|e| e.id() == &id).unwrap_or(0);
+        self.pin_drag = Some(PinDragState { id, to });
+        self.row_menu = None;
+        cx.notify();
+    }
+
+    /// Drop: the order the list shows becomes the pin order (through the relay).
+    pub(crate) fn finish_pin_drag(&mut self, cx: &mut Context<Shell>) {
+        if self.pin_drag.is_none() {
+            return;
+        }
+        let (pinned, _) = list_sections(self, cx);
+        let shown: Vec<Id> = pinned.iter().map(|e| e.id().clone()).collect();
+        self.pin_drag = None;
+        self.state.update(cx, |s, cx| s.reorder_pins(&shown, cx));
+        cx.notify();
+    }
+}
+
 /// The column's right-edge resize handle — the expanded sidebar's and the
 /// rail's are the same element (`id`s differ), so one drag runs across the
 /// snap between them: `split_handle::right_edge`'s invisible band and
@@ -602,6 +744,9 @@ pub(crate) struct RowView {
     pub(crate) time: String,
     pub(crate) person_image: Option<Arc<RenderImage>>,
     pub(crate) guests: people::PeopleWithAvatars,
+    /// In the Pinned section ([feedback sidebar-pinning-mac-2026-10-28]): the row carries
+    /// the muted `pin.fill` before its time.
+    pub(crate) pinned: bool,
 }
 
 /// A server in the chat list (D88 rule 1): the same row as a group — disc, name, preview,
@@ -613,6 +758,7 @@ pub(crate) struct ServerRowView {
     pub(crate) unread_count: usize,
     pub(crate) preview: String,
     pub(crate) time: String,
+    pub(crate) pinned: bool,
 }
 
 /// One entry of the left list, chats and servers interleaved.
@@ -651,6 +797,13 @@ impl ListEntry {
         }
     }
 
+    fn set_pinned(&mut self, pinned: bool) {
+        match self {
+            ListEntry::Chat(r) => r.pinned = pinned,
+            ListEntry::Server(r) => r.pinned = pinned,
+        }
+    }
+
     /// The space's agent is working (the rail's spinner badge).
     pub(crate) fn working(&self) -> bool {
         match self {
@@ -685,10 +838,50 @@ impl ListEntry {
     }
 }
 
-/// The chat list's entries under the current filter, newest activity first —
-/// shared by the expanded list and the collapsed rail so both show the same
-/// rows in the same order.
+/// The chat list's entries under the current filter — the pinned rows first in the
+/// user's order, then the rest newest activity first — shared by the expanded list and
+/// the collapsed rail so both show the same rows in the same order.
 pub(crate) fn list_entries(shell: &Shell, cx: &Context<Shell>) -> Vec<ListEntry> {
+    let (mut pinned, rest) = list_sections(shell, cx);
+    pinned.extend(rest);
+    pinned
+}
+
+/// The list in two parts ([feedback sidebar-pinning-mac-2026-10-28]): the **Pinned**
+/// section — the rows of `AppState::pins` the current filter admits, in the pin order,
+/// never re-sorted by unread or activity — and the rest in today's order. While a pin
+/// is being dragged, the dragged row sits at the slot under the pointer. Hidden chats
+/// have no pinned part (an archived row is never pinned).
+pub(crate) fn list_sections(
+    shell: &Shell,
+    cx: &Context<Shell>,
+) -> (Vec<ListEntry>, Vec<ListEntry>) {
+    let rows = unsorted_entries(shell, cx);
+    let state = shell.state.read(cx);
+    let mut pinned: Vec<(usize, ListEntry)> = Vec::new();
+    let mut rest: Vec<ListEntry> = Vec::new();
+    for entry in rows {
+        match state.pin_index(entry.id()) {
+            Some(i) if !shell.hidden_open => pinned.push((i, entry)),
+            _ => rest.push(entry),
+        }
+    }
+    pinned.sort_by_key(|(i, _)| *i);
+    let mut pinned: Vec<ListEntry> = pinned.into_iter().map(|(_, e)| e).collect();
+    if let Some(drag) = &shell.pin_drag {
+        if let Some(from) = pinned.iter().position(|e| e.id() == &drag.id) {
+            let row = pinned.remove(from);
+            let to = drag.to.min(pinned.len());
+            pinned.insert(to, row);
+        }
+    }
+    for e in pinned.iter_mut() {
+        e.set_pinned(true);
+    }
+    (pinned, rest)
+}
+
+fn unsorted_entries(shell: &Shell, cx: &Context<Shell>) -> Vec<ListEntry> {
     let state = shell.state.read(cx);
     let selected = state.selected_project.clone();
     let hidden_mode = shell.hidden_open;
@@ -720,6 +913,7 @@ pub(crate) fn list_entries(shell: &Shell, cx: &Context<Shell>) -> Vec<ListEntry>
                 preview: hit.reason.unwrap_or_else(|| server_preview(state, s)),
                 time: time_label(at),
                 server: s.clone(),
+                pinned: false,
             })),
         ));
     }
@@ -764,6 +958,7 @@ pub(crate) fn list_entries(shell: &Shell, cx: &Context<Shell>) -> Vec<ListEntry>
                 })
                 .collect(),
             space: p.clone(),
+            pinned: false,
         };
         rows.push((
             (hit.kind, std::cmp::Reverse(last_activity(state, p))),
@@ -945,7 +1140,9 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
 /// they are painted, which is what the overlay interpolates from.
 pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<Shell>) -> Div {
     let theme = Theme::of(cx).clone();
-    let rows = list_entries(shell, cx);
+    let (pinned_rows, rest_rows) = list_sections(shell, cx);
+    let pinned_count = pinned_rows.len();
+    let rows: Vec<ListEntry> = pinned_rows.into_iter().chain(rest_rows).collect();
     let snap = shell.morph.clone();
     let state = shell.state.read(cx);
     let machine = state.machine.shown_state();
@@ -1279,9 +1476,18 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
             );
         }
     }
-    for entry in rows {
+    // The Pinned section ([feedback sidebar-pinning-mac-2026-10-28]): a muted label, the
+    // pinned rows in the user's order, a hairline, then the rest. Zero pins → nothing of
+    // this is drawn and the list is exactly as before.
+    if pinned_count > 0 {
+        list = list.child(pinned_header(&theme));
+    }
+    for (index, entry) in rows.into_iter().enumerate() {
+        if pinned_count > 0 && index == pinned_count {
+            list = list.child(pinned_divider(&theme));
+        }
         // The row's card bounds feed the rail morph (the selected card shrinks
-        // into its 54 pt tile).
+        // into its 54 pt tile) and the pin drag (which slot the pointer is over).
         let snap_card = snap.clone();
         let card_id = entry.id().clone();
         let row = match entry {
@@ -1302,6 +1508,9 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
                 })
                 .child(row),
         );
+    }
+    if pinned_count > 0 {
+        list = pin_drop_target(list, cx);
     }
     if !hidden_mode && hidden_count > 0 {
         // Grok Bot's footer: muted "Hidden chats · N ›" under the list.
@@ -1482,6 +1691,17 @@ pub fn server_row_picture(server: &ServerInfo, state: &AppState, size: f32, them
 
 /// A server row (D88 rule 1): drawn like a group row — picture, name, time, last line,
 /// unread dot. No badge, no count, no disclosure. The picture is a rounded square.
+/// A pinned row can be dragged to another slot of the Pinned section: the drag's start
+/// records the row, the list (`pin_drop_target`) follows the pointer and commits.
+fn pin_draggable(el: gpui::Stateful<Div>, id: Id, cx: &mut Context<Shell>) -> gpui::Stateful<Div> {
+    let weak = cx.weak_entity();
+    el.on_drag(PinDrag { id }, move |drag, _, _, cx| {
+        let id = drag.id.clone();
+        weak.update(cx, |this, cx| this.begin_pin_drag(id, cx)).ok();
+        cx.new(|_| PinDragGhost)
+    })
+}
+
 fn render_server_row(
     row: ServerRowView,
     shell: &Shell,
@@ -1500,6 +1720,7 @@ fn render_server_row(
             unread_count: row.unread_count,
             preview: String::new(),
             time: String::new(),
+            pinned: false,
         }))
         .picture(shell, AVATAR_ROW, theme, cx),
     );
@@ -1510,10 +1731,14 @@ fn render_server_row(
         unread_count,
         preview,
         time,
+        pinned,
     } = row;
     let id: Id = server.id.clone();
     let menu_id: Id = server.id.clone();
     let ctrl_menu_id: Id = server.id.clone();
+    let drag_id: Id = server.id.clone();
+    let mark_id: Id = server.id.clone();
+    let lifted = shell.pin_drag.as_ref().is_some_and(|d| d.id == server.id);
     div()
         .id(ElementId::Name(SharedString::from(format!(
             "row-server-{}",
@@ -1525,7 +1750,14 @@ fn render_server_row(
         .px(px(12.0))
         .py(px(11.0))
         .rounded(px(PANEL_RADIUS - 4.0))
-        .map(|el| highlight::row(el, selected && !hide_morphing, Shape::Own, theme))
+        .map(|el| {
+            if lifted {
+                highlight::lifted(el, theme)
+            } else {
+                highlight::row(el, selected && !hide_morphing, Shape::Own, theme)
+            }
+        })
+        .when(pinned, |el| pin_draggable(el, drag_id, cx))
         .cursor_pointer()
         .on_click(
             cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
@@ -1592,6 +1824,7 @@ fn render_server_row(
                                 .child(server.name.clone()),
                         )
                         .child(div().flex_1())
+                        .when(pinned, |el| el.child(pin_mark(&mark_id, theme)))
                         .when_some(row_time_size(shell, cx), |el, size| {
                             el.child(time_el(time, size, theme))
                         }),
@@ -2022,10 +2255,13 @@ fn render_row(
         time,
         person_image: _,
         guests: _,
+        pinned,
     } = row;
     let id: Id = space.id.clone();
     let menu_id: Id = space.id.clone();
     let ctrl_menu_id: Id = space.id.clone();
+    let drag_id: Id = space.id.clone();
+    let lifted = shell.pin_drag.as_ref().is_some_and(|d| d.id == space.id);
     let can_rename = !space.is_guest() && !space.is_people();
     let renaming = shell
         .state
@@ -2068,7 +2304,14 @@ fn render_row(
         .px(px(12.0))
         .py(px(11.0))
         .rounded(px(PANEL_RADIUS - 4.0))
-        .map(|el| highlight::row(el, selected && !hide_morphing, Shape::Own, theme))
+        .map(|el| {
+            if lifted {
+                highlight::lifted(el, theme)
+            } else {
+                highlight::row(el, selected && !hide_morphing, Shape::Own, theme)
+            }
+        })
+        .when(pinned, |el| pin_draggable(el, drag_id, cx))
         .cursor_pointer()
         .on_click({
             let id = id.clone();
@@ -2182,6 +2425,7 @@ fn render_row(
                             )
                         })
                         .child(div().flex_1())
+                        .when(pinned, |el| el.child(pin_mark(&id, theme)))
                         .when_some(row_time_size(shell, cx), |el, size| {
                             el.child(
                                 time_el(time, size, theme)
@@ -2321,6 +2565,25 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);
     let archived = state.is_space_archived(&space_id);
+    // Pin / Unpin leads every row's menu ([feedback sidebar-pinning-mac-2026-10-28]):
+    // SF `pin` / `pin.slash`, the iPhone's names. At the cap the click says so.
+    let pinned = state.is_pinned(&space_id);
+    let pin_row = |theme: &Theme, cx: &mut Context<Shell>| {
+        let id = space_id.clone();
+        glass::menu_row(
+            "row-menu-pin",
+            if pinned { "pin.slash" } else { "pin" },
+            if pinned { "Unpin" } else { "Pin" },
+            false,
+            theme,
+        )
+        .debug_selector(|| "row-menu-pin".into())
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.row_menu = None;
+            let id = id.clone();
+            this.state.update(cx, |s, cx| s.set_pinned(id, !pinned, cx));
+        }))
+    };
     let archive_row = |theme: &Theme, cx: &mut Context<Shell>| {
         let id = space_id.clone();
         glass::menu_row(
@@ -2347,6 +2610,7 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
             .flex()
             .flex_col()
             .gap(px(1.0))
+            .child(pin_row(&theme, cx))
             .child(archive_row(&theme, cx));
         return Some(
             div()
@@ -2392,7 +2656,11 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     let is_group = space.is_people_group();
     let delete_action = row_delete(&space, &state.me_handle());
 
-    let mut body = div().flex().flex_col().gap(px(1.0));
+    let mut body = div()
+        .flex()
+        .flex_col()
+        .gap(px(1.0))
+        .child(pin_row(&theme, cx));
     if is_group {
         // Mockup f: the group row's menu is "Delete group" — plus Archive (2026-10-23).
         body = body
@@ -4080,5 +4348,417 @@ mod status_cell_tests {
                 .is_some(),
             "the emoji name is drawn lifted onto the baseline"
         );
+    }
+}
+
+/// Sidebar pinning ([feedback sidebar-pinning-mac-2026-10-28]): the Pinned section and
+/// the pin list's rules, on the real Shell (headless) and on `AppState` alone.
+#[cfg(test)]
+mod pin_tests {
+    use std::sync::{Arc, Mutex};
+
+    use futures::future::BoxFuture;
+    use gpui::{AppContext as _, Bounds, Entity, Pixels, TestAppContext, VisualTestContext};
+    use tokio::sync::mpsc;
+
+    use super::ListFilter;
+    use crate::app::AppState;
+    use crate::model::{Person, Project, ServerInfo, SpaceKind};
+    use crate::sync::{ClientCommand, SyncEvent, SyncSource};
+    use crate::ui::motion::PulseClock;
+    use crate::ui::shell::Shell;
+    use crate::ui::theme::{Surface, Theme};
+    use crate::ui::working::WorkingClock;
+
+    type Commands = Arc<Mutex<Option<mpsc::UnboundedReceiver<ClientCommand>>>>;
+
+    /// Keeps the command channel so a test can read what the state sent (`SetPins`).
+    struct Recording(Commands);
+
+    impl SyncSource for Recording {
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            *self.0.lock().expect("commands slot") = Some(commands);
+            Box::pin(std::future::pending())
+        }
+    }
+
+    fn person(id: &str, handle: &str, name: &str) -> Person {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "handle": handle, "name": name, "status": "active",
+        }))
+        .expect("person")
+    }
+
+    /// Three agents (`arbos` selected, `lium`, `affine`), a DM (`dm`) and a server (`srv`).
+    fn seed(s: &mut AppState) {
+        for (pid, name, kind, people) in [
+            ("arbos", "Arbos", SpaceKind::Project, vec![]),
+            ("lium", "Lium", SpaceKind::Project, vec![]),
+            ("affine", "Affine", SpaceKind::Project, vec![]),
+            (
+                "dm",
+                "Sam Rivera",
+                SpaceKind::Dm,
+                vec![person("gh_2", "sam", "Sam Rivera")],
+            ),
+        ] {
+            s.projects.push(Project {
+                id: pid.into(),
+                name: name.into(),
+                kind,
+                people,
+                ..Project::default()
+            });
+        }
+        s.servers.push(ServerInfo {
+            id: "srv".into(),
+            name: "Launch week".into(),
+            ..ServerInfo::default()
+        });
+        s.servers_available = true;
+        s.selected_project = Some("arbos".into());
+    }
+
+    fn mount(
+        cx: &mut TestAppContext,
+    ) -> (
+        tokio::runtime::Runtime,
+        Commands,
+        Entity<AppState>,
+        Entity<Shell>,
+        &mut VisualTestContext,
+    ) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| {
+            gpui_tokio::init_from_handle(cx, handle);
+            cx.set_global(Theme::dark(Surface::Matte));
+            if !cx.has_global::<PulseClock>() {
+                PulseClock::init(cx);
+            }
+            WorkingClock::init(cx);
+        });
+        let commands: Commands = Arc::new(Mutex::new(None));
+        let state = cx.new(|cx| AppState::new(Box::new(Recording(commands.clone())), cx));
+        state.update(cx, |s, cx| {
+            seed(s);
+            cx.notify();
+        });
+        let (shell, vcx) = cx.add_window_view(|window, cx| Shell::new(state.clone(), window, cx));
+        vcx.run_until_parked();
+        // The source runs on tokio: a few turns so `Recording::run` stashes the receiver.
+        for _ in 0..3 {
+            rt.block_on(tokio::task::yield_now());
+        }
+        (rt, commands, state, shell, vcx)
+    }
+
+    fn top(b: Bounds<Pixels>) -> f32 {
+        f32::from(b.origin.y)
+    }
+
+    fn pins_of(state: &Entity<AppState>, cx: &mut TestAppContext) -> Vec<String> {
+        state.read_with(cx, |s, _| s.pins.clone())
+    }
+
+    fn sent_pins(commands: &Commands) -> Vec<Vec<String>> {
+        let mut out = Vec::new();
+        if let Some(rx) = commands.lock().expect("commands").as_mut() {
+            while let Ok(c) = rx.try_recv() {
+                if let ClientCommand::SetPins { pins } = c {
+                    out.push(pins);
+                }
+            }
+        }
+        out
+    }
+
+    #[gpui::test]
+    fn zero_pins_draws_no_section(cx: &mut TestAppContext) {
+        let (_rt, _cmds, _state, _shell, vcx) = mount(cx);
+        assert!(vcx.debug_bounds("sidebar-pinned-header").is_none());
+        assert!(vcx.debug_bounds("sidebar-pinned-divider").is_none());
+        for id in ["arbos", "lium", "affine", "dm", "srv"] {
+            assert!(
+                vcx.debug_bounds(Box::leak(format!("row-pin-{id}").into_boxed_str()))
+                    .is_none(),
+                "{id} carries no pin mark"
+            );
+        }
+        assert!(
+            vcx.debug_bounds("row-time-arbos").is_some(),
+            "the list is drawn"
+        );
+    }
+
+    #[gpui::test]
+    fn pinned_rows_lead_in_the_users_order_under_a_header(cx: &mut TestAppContext) {
+        let (_rt, _cmds, state, _shell, vcx) = mount(cx);
+        state.update(vcx, |s, cx| {
+            // The DM first, then the server, then an agent: not the activity order,
+            // not the kind order.
+            s.pins = vec!["chat:dm".into(), "server:srv".into(), "agent:affine".into()];
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        let header = vcx
+            .debug_bounds("sidebar-pinned-header")
+            .expect("the Pinned label");
+        let divider = vcx
+            .debug_bounds("sidebar-pinned-divider")
+            .expect("the hairline after the pins");
+        let dm = vcx.debug_bounds("row-pin-dm").expect("the DM's pin mark");
+        let srv = vcx
+            .debug_bounds("row-pin-srv")
+            .expect("the server's pin mark");
+        let affine = vcx
+            .debug_bounds("row-pin-affine")
+            .expect("Affine's pin mark");
+        let arbos = vcx.debug_bounds("row-time-arbos").expect("Arbos, unpinned");
+        let lium = vcx.debug_bounds("row-time-lium").expect("Lium, unpinned");
+        assert!(top(header) < top(dm), "header above the first pin");
+        assert!(
+            top(dm) < top(srv) && top(srv) < top(affine),
+            "the user's order"
+        );
+        assert!(top(affine) < top(divider), "hairline after the last pin");
+        assert!(
+            top(divider) < top(arbos) && top(divider) < top(lium),
+            "the rest below the hairline"
+        );
+        assert!(vcx.debug_bounds("row-pin-arbos").is_none());
+        assert!(vcx.debug_bounds("row-pin-lium").is_none());
+        assert_eq!(
+            f32::from(header.size.height),
+            super::PINNED_HEADER_H,
+            "header band"
+        );
+    }
+
+    #[gpui::test]
+    fn the_filter_shows_only_the_pins_it_admits(cx: &mut TestAppContext) {
+        let (_rt, _cmds, state, shell, vcx) = mount(cx);
+        state.update(vcx, |s, cx| {
+            s.pins = vec!["server:srv".into(), "agent:lium".into()];
+            cx.notify();
+        });
+        shell.update(vcx, |sh, cx| {
+            sh.list_filter = ListFilter::Agents;
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert!(vcx.debug_bounds("sidebar-pinned-header").is_some());
+        assert!(
+            vcx.debug_bounds("row-pin-lium").is_some(),
+            "the pinned agent"
+        );
+        assert!(
+            vcx.debug_bounds("row-pin-srv").is_none(),
+            "Agents never shows the pinned server"
+        );
+        state.update(vcx, |s, cx| {
+            s.pins = vec!["server:srv".into()];
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert!(
+            vcx.debug_bounds("sidebar-pinned-header").is_none(),
+            "no pin passes the filter → no section"
+        );
+        assert!(vcx.debug_bounds("sidebar-pinned-divider").is_none());
+        shell.update(vcx, |sh, cx| {
+            sh.list_filter = ListFilter::Servers;
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert!(
+            vcx.debug_bounds("row-pin-srv").is_some(),
+            "Servers shows it again"
+        );
+    }
+
+    #[gpui::test]
+    fn the_row_menu_leads_with_pin_then_unpin(cx: &mut TestAppContext) {
+        let (_rt, _cmds, state, shell, vcx) = mount(cx);
+        for id in ["lium", "dm", "srv"] {
+            shell.update(vcx, |sh, cx| {
+                sh.row_menu = Some((id.into(), gpui::point(gpui::px(40.0), gpui::px(200.0))));
+                cx.notify();
+            });
+            vcx.run_until_parked();
+            assert!(
+                vcx.debug_bounds("row-menu-pin").is_some(),
+                "{id}'s menu has the Pin row"
+            );
+        }
+        state.update(vcx, |s, cx| s.set_pinned("lium".into(), true, cx));
+        shell.update(vcx, |sh, cx| {
+            sh.row_menu = Some(("lium".into(), gpui::point(gpui::px(40.0), gpui::px(200.0))));
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert!(
+            vcx.debug_bounds("row-menu-pin").is_some(),
+            "Unpin in Pin's place"
+        );
+        assert!(state.read_with(vcx, |s, _| s.is_pinned("lium")));
+    }
+
+    #[gpui::test]
+    fn pins_land_on_top_stop_at_the_cap_and_go_to_the_relay(cx: &mut TestAppContext) {
+        let (_rt, cmds, state, _shell, vcx) = mount(cx);
+        vcx.run_until_parked();
+        state.update(vcx, |s, cx| {
+            s.set_pinned("lium".into(), true, cx);
+            s.set_pinned("dm".into(), true, cx);
+            s.set_pinned("srv".into(), true, cx);
+        });
+        assert_eq!(
+            pins_of(&state, vcx),
+            vec!["server:srv", "chat:dm", "agent:lium"],
+            "a new pin lands at the top"
+        );
+        assert_eq!(state.read_with(vcx, |s, _| s.pin_index("srv")), Some(0));
+        assert_eq!(
+            state.read_with(vcx, |s, _| s.pin_key("dm")).as_deref(),
+            Some("chat:dm")
+        );
+        assert_eq!(state.read_with(vcx, |s, _| s.pin_key("nope")), None);
+
+        state.update(vcx, |s, cx| {
+            s.pin_cap = 3;
+            s.set_pinned("affine".into(), true, cx);
+        });
+        assert_eq!(pins_of(&state, vcx).len(), 3, "the cap refuses the fourth");
+        assert!(
+            state.read_with(vcx, |s, _| s.notices.iter().any(|n| n
+                .error
+                .as_ref()
+                .is_some_and(|e| e.sentence().contains("pin up to 3")))),
+            "one sentence says why"
+        );
+
+        state.update(vcx, |s, cx| s.set_pinned("dm".into(), false, cx));
+        assert_eq!(pins_of(&state, vcx), vec!["server:srv", "agent:lium"]);
+
+        // Archiving a pinned row unpins it; deleting one does too.
+        state.update(vcx, |s, cx| s.set_space_archived("srv".into(), true, cx));
+        assert_eq!(pins_of(&state, vcx), vec!["agent:lium"]);
+        state.update(vcx, |s, cx| s.delete_project("lium".into(), cx));
+        assert!(pins_of(&state, vcx).is_empty());
+
+        let sent = sent_pins(&cmds);
+        assert_eq!(sent.len(), 6, "every change went to the relay: {sent:?}");
+        assert_eq!(sent[2], vec!["server:srv", "chat:dm", "agent:lium"]);
+        assert!(sent.last().is_some_and(Vec::is_empty));
+
+        // The relay's answer is the truth.
+        state.update(vcx, |s, cx| {
+            s.apply(
+                SyncEvent::Pins {
+                    pins: vec!["agent:arbos".into()],
+                    cap: 5,
+                },
+                cx,
+            )
+        });
+        assert_eq!(pins_of(&state, vcx), vec!["agent:arbos"]);
+        assert_eq!(state.read_with(vcx, |s, _| s.pin_cap), 5);
+    }
+
+    #[gpui::test]
+    fn reordering_keeps_hidden_pins_in_place(cx: &mut TestAppContext) {
+        let (_rt, _cmds, state, _shell, vcx) = mount(cx);
+        state.update(vcx, |s, cx| {
+            s.pins = vec![
+                "agent:lium".into(),
+                "server:srv".into(),
+                "agent:affine".into(),
+                "chat:dm".into(),
+            ];
+            // Under the Agents filter only Lium and Affine show; dragging Affine above Lium
+            // swaps the two and leaves the server and the DM where they were.
+            s.reorder_pins(&["affine".into(), "lium".into()], cx);
+        });
+        assert_eq!(
+            pins_of(&state, vcx),
+            vec!["agent:affine", "server:srv", "agent:lium", "chat:dm"]
+        );
+        // All filter: every pin shows; the DM dragged to the top.
+        state.update(vcx, |s, cx| {
+            s.reorder_pins(
+                &["dm".into(), "affine".into(), "srv".into(), "lium".into()],
+                cx,
+            )
+        });
+        assert_eq!(
+            pins_of(&state, vcx),
+            vec!["chat:dm", "agent:affine", "server:srv", "agent:lium"]
+        );
+    }
+
+    #[gpui::test]
+    fn a_pin_drag_previews_the_order_and_commits_on_drop(cx: &mut TestAppContext) {
+        let (_rt, cmds, state, shell, vcx) = mount(cx);
+        state.update(vcx, |s, cx| {
+            s.pins = vec!["agent:lium".into(), "chat:dm".into(), "server:srv".into()];
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        let _ = sent_pins(&cmds);
+        shell.update(vcx, |sh, cx| sh.begin_pin_drag("srv".into(), cx));
+        assert_eq!(
+            shell.read_with(vcx, |sh, _| sh.pin_drag.clone()),
+            Some(super::PinDragState {
+                id: "srv".into(),
+                to: 2
+            })
+        );
+        // The pointer over the first pinned card: the server previews at the top.
+        let first = vcx.debug_bounds("row-pin-lium").expect("Lium's card");
+        shell.update(vcx, |sh, cx| {
+            let to = sh.pin_slot_at(&"srv".into(), top(first) - 1.0, cx);
+            assert_eq!(to, 0, "above every other pinned card");
+            sh.pin_drag = Some(super::PinDragState {
+                id: "srv".into(),
+                to,
+            });
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        let srv = vcx.debug_bounds("row-pin-srv").expect("the server's mark");
+        let lium = vcx.debug_bounds("row-pin-lium").expect("Lium's mark");
+        assert!(
+            top(srv) < top(lium),
+            "the dragged row shows at the slot under the pointer"
+        );
+        assert_eq!(
+            pins_of(&state, vcx),
+            vec!["agent:lium", "chat:dm", "server:srv"],
+            "nothing stored until the drop"
+        );
+        shell.update(vcx, |sh, cx| sh.finish_pin_drag(cx));
+        assert_eq!(
+            pins_of(&state, vcx),
+            vec!["server:srv", "agent:lium", "chat:dm"]
+        );
+        assert!(shell.read_with(vcx, |sh, _| sh.pin_drag.clone()).is_none());
+        assert_eq!(
+            sent_pins(&cmds),
+            vec![vec!["server:srv", "agent:lium", "chat:dm"]]
+        );
+        shell.update(vcx, |sh, cx| sh.finish_pin_drag(cx));
+        assert!(sent_pins(&cmds).is_empty(), "a second drop is a no-op");
     }
 }

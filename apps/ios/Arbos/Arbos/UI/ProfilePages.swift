@@ -160,7 +160,16 @@ struct PaneCard<Rows: View>: View {
                     .padding(.leading, PaneKit.inset)
             }
             _VariadicView.Tree(PaneCardLayout(separator: theme.separator, inset: separatorInset)) { rows() }
-                .background(RoundedRectangle(cornerRadius: PaneKit.radius, style: .continuous).fill(theme.bubbleAssistant))
+                // Glass: a translucent wash with a hairline rim; Matte: the solid grey as before
+                // ([feedback right-pane-glass-cards-ios-2026-10-28], the Mac's `kit::card`).
+                .background(
+                    RoundedRectangle(cornerRadius: PaneKit.radius, style: .continuous)
+                        .fill(theme.paneCardFill)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: PaneKit.radius, style: .continuous)
+                                .strokeBorder(theme.paneCardRim, lineWidth: 1)
+                        )
+                )
             if let footer {
                 Text(footer)
                     .font(theme.font(Theme.tiny))

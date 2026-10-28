@@ -104,6 +104,8 @@ struct Shared {
     /// `ARBOS_FIXTURE_JOBS=<n>`: the open background jobs the relay's activity
     /// record would list (duplex §2.4), per chat, with their hidden rows' ids.
     jobs: Mutex<Vec<FixtureJob>>,
+    /// My sidebar pins (row keys, top first) — the relay's `/me/pins` stand-in.
+    pins: Mutex<Vec<String>>,
 }
 
 /// One seeded job: the relay's row plus when it started (elapsed grows live)
@@ -160,6 +162,7 @@ impl SyncSource for FixtureSource {
                 voice_blobs: Mutex::new(HashMap::new()),
                 blocked: Mutex::new(Vec::new()),
                 jobs: Mutex::new(Vec::new()),
+                pins: Mutex::new(Vec::new()),
                 machine: Mutex::new(Machine {
                     // `ARBOS_FIXTURE_MACHINE=error|waking` seeds a banner state (screenshot rig).
                     state: match std::env::var("ARBOS_FIXTURE_MACHINE").as_deref() {
@@ -234,6 +237,7 @@ impl SyncSource for FixtureSource {
             emit_local(&shared);
             emit_secrets(&shared);
             emit_open_request(&shared);
+            emit_pins_hook(&shared);
             emit_servers_hook(&shared);
             let _ = events.send(SyncEvent::Link(Link::Live));
             emit_link_hook(&shared);
@@ -1053,6 +1057,46 @@ fn emit_typing_hook(shared: &Arc<Shared>) {
     });
 }
 
+/// The relay's cap (Jacob 2026-10-28: five, no tiers).
+const FIXTURE_PIN_CAP: usize = 5;
+
+/// `ARBOS_RIG_PINS=<name or id>[,<name or id>…]` pins those sidebar rows at launch, top
+/// first (screenshot rigs, [feedback sidebar-pinning-mac-2026-10-28]). A name is matched
+/// against projects (agents, DMs, groups); a `server:<id>` key is passed through.
+fn emit_pins_hook(shared: &Arc<Shared>) {
+    let Ok(spec) = std::env::var("ARBOS_RIG_PINS") else {
+        return;
+    };
+    let projects = shared.projects.lock().unwrap();
+    let pins: Vec<String> = spec
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|name| {
+            if name.contains(':') {
+                return Some(name.to_owned());
+            }
+            projects
+                .iter()
+                .find(|p| p.id == name || p.name.eq_ignore_ascii_case(name))
+                .map(|p| {
+                    if p.is_people() {
+                        format!("chat:{}", p.id)
+                    } else {
+                        format!("agent:{}", p.id)
+                    }
+                })
+        })
+        .take(FIXTURE_PIN_CAP)
+        .collect();
+    drop(projects);
+    *shared.pins.lock().unwrap() = pins.clone();
+    let _ = shared.events.send(SyncEvent::Pins {
+        pins,
+        cap: FIXTURE_PIN_CAP,
+    });
+}
+
 /// `ARBOS_FIXTURE_OPEN=<project name or id>[/<chat id>]` opens that chat at
 /// launch (screenshot rigs; the iPhone has `ARBOS_OPEN_PROJECT` / `_CHAT`).
 fn emit_open_request(shared: &Arc<Shared>) {
@@ -1173,6 +1217,17 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::ChannelLoadOlder { .. }
         | ClientCommand::ChannelSend { .. }
         | ClientCommand::ChannelMarkRead { .. } => {}
+        // The relay keeps the pin list and answers with it; the fixture echoes
+        // the list it was given, capped like the relay.
+        ClientCommand::SetPins { pins } => {
+            let mut pins = pins;
+            pins.truncate(FIXTURE_PIN_CAP);
+            *shared.pins.lock().unwrap() = pins.clone();
+            let _ = shared.events.send(SyncEvent::Pins {
+                pins,
+                cap: FIXTURE_PIN_CAP,
+            });
+        }
         // The relay keeps archive state; the fixture does the same so a chat
         // brought back from the "+" dropdown stays back when the list is re-sent.
         ClientCommand::ArchiveChat { chat_id, archived } => {

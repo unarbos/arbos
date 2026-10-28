@@ -15,6 +15,9 @@ struct ServerRow: View {
     let time: String
     let unread: Bool
     var unreadCount: Int = 0
+    /// In the Pinned section ([feedback sidebar-pinning-ios-2026-10-28]): the muted
+    /// `pin.fill` before the time, as on agent and people rows.
+    var pinned: Bool = false
 
     var body: some View {
         HStack(spacing: 15) {
@@ -26,6 +29,12 @@ struct ServerRow: View {
                         .foregroundStyle(theme.text)
                         .lineLimit(1)
                     Spacer()
+                    if pinned {
+                        Image(systemName: "pin.fill")
+                            .font(theme.font(11, weight: .semibold))
+                            .foregroundStyle(theme.muted)
+                            .accessibilityLabel("Pinned")
+                    }
                     Text(time)
                         .font(theme.font(Theme.small))
                         .foregroundStyle(theme.muted)
