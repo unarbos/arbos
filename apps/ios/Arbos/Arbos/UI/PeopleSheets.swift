@@ -392,13 +392,16 @@ struct AgentPickRow: View {
     @Environment(\.theme) private var theme
     let project: Project
     var trailing: AnyView? = nil
+    /// Appended to the @handle line (another member's agent: "run by @owner").
+    var note: String? = nil
 
     var body: some View {
         HStack(spacing: SheetRow.gap) {
             AgentAvatar(project: project, theme: theme, size: SheetRow.avatar, still: true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(project.name).font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)
-                Text("@\(mentionSlug(project.name))").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(1)
+                Text(note.map { "@\(mentionSlug(project.name)) · \($0)" } ?? "@\(mentionSlug(project.name))")
+                    .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(1)
             }
             Spacer()
             if let trailing { trailing }
@@ -1042,14 +1045,57 @@ struct NewGroupView: View {
 
     private var trimmed: String { query.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "@")) }
 
-    /// Own agents only (same as Members → Add agent); shared ones cannot be re-shared here.
-    /// Empty query hides archived agents; a search finds them again — archived agents still
-    /// exist and can join groups unless deleted (home archive is hide-only).
+    /// Own agents only — the pickable rows of the Agents section; shared ones cannot be
+    /// re-shared here. Empty query hides archived agents; a search finds them again — archived
+    /// agents still exist and can join groups unless deleted (home archive is hide-only).
     private var agentCandidates: [Project] {
         if addToServer != nil || addToSecret != nil { return [] }
         let base = model.projects.filter { !$0.shared && (trimmed.isEmpty ? !model.isArchived($0.id) : true) }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         return PeoplePicker.agents(base, query: trimmed)
+    }
+
+    /// Add members on a group: the other members' agents already in it, after mine, greyed
+    /// ([feedback add-your-agent-row-removal-ios-2026-10-27]).
+    private var othersAgents: [ChatMember] {
+        AddMembersAgents.others(in: addToChat, meId: model.user?.id, query: trimmed)
+    }
+
+    private var showsAgents: Bool { !agentCandidates.isEmpty || !othersAgents.isEmpty }
+
+    /// The Agents card: my agents (pickable), then the other members' agents already in
+    /// (greyed). Its own property so `body` stays small for the type checker.
+    @ViewBuilder private var agentsSection: some View {
+        if showsAgents {
+            Text(AddMembersAgents.sectionTitle.uppercased())
+                .font(theme.font(12, weight: .medium))
+                .kerning(0.4)
+                .foregroundStyle(theme.muted)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
+                .accessibilityIdentifier("add-members-agents-section")
+            VStack(spacing: 0) {
+                ForEach(Array(agentCandidates.enumerated()), id: \.element.id) { i, p in
+                    let already = isIn(p)
+                    Button { toggleAgent(p) } label: {
+                        AgentPickRow(project: p, trailing: pickMark(selected: pickedAgents.contains(where: { $0.id == p.id }), already: already))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(already)
+                    .opacity(already ? 0.5 : 1)
+                    if i < agentCandidates.count - 1 || !othersAgents.isEmpty { Rectangle().fill(theme.separator).frame(height: 0.5).padding(.leading, SheetRow.textInset) }
+                }
+                // The other members' agents, already in: greyed, not pickable.
+                ForEach(Array(othersAgents.enumerated()), id: \.element.id) { i, m in
+                    AgentPickRow(project: model.agent(member: m, chatId: addTo), trailing: pickMark(selected: false, already: true), note: AddMembersAgents.note(for: m))
+                        .opacity(0.5)
+                    if i < othersAgents.count - 1 { Rectangle().fill(theme.separator).frame(height: 0.5).padding(.leading, SheetRow.textInset) }
+                }
+            }
+            .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(theme.card))
+            .padding(.horizontal, 16)
+            .padding(.bottom, 18)
+        }
     }
 
     /// Directory + remote hits through the shared matcher (display name and @handle):
@@ -1130,33 +1176,11 @@ struct NewGroupView: View {
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    if !agentCandidates.isEmpty {
-                        Text("YOUR AGENTS")
-                            .font(theme.font(12, weight: .medium))
-                            .kerning(0.4)
-                            .foregroundStyle(theme.muted)
-                            .padding(.horizontal, 16)
-                            .padding(.bottom, 8)
-                        VStack(spacing: 0) {
-                            ForEach(Array(agentCandidates.enumerated()), id: \.element.id) { i, p in
-                                let already = isIn(p)
-                                Button { toggleAgent(p) } label: {
-                                    AgentPickRow(project: p, trailing: pickMark(selected: pickedAgents.contains(where: { $0.id == p.id }), already: already))
-                                }
-                                .buttonStyle(.plain)
-                                .disabled(already)
-                                .opacity(already ? 0.5 : 1)
-                                if i < agentCandidates.count - 1 { Rectangle().fill(theme.separator).frame(height: 0.5).padding(.leading, SheetRow.textInset) }
-                            }
-                        }
-                        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(theme.card))
-                        .padding(.horizontal, 16)
-                        .padding(.bottom, 18)
-                    }
+                    agentsSection
 
-                    if !candidates.isEmpty || agentCandidates.isEmpty {
-                        if !agentCandidates.isEmpty {
-                            Text("PEOPLE")
+                    if !candidates.isEmpty || !showsAgents {
+                        if showsAgents {
+                            Text(AddMembersAgents.peopleTitle.uppercased())
                                 .font(theme.font(12, weight: .medium))
                                 .kerning(0.4)
                                 .foregroundStyle(theme.muted)
