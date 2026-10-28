@@ -5,7 +5,8 @@ import SwiftUI
 /// (#1370 + #1472; View thread when the message has replies); reactions live in
 /// the capsule, never here (Jacob, 2026-10-23). Forward opens the same chat
 /// picker the media viewer uses; Reply in DM opens a private chat with the human
-/// who wrote the message. Non-message rows get `copyOnly` as a plain `.contextMenu`.
+/// who wrote the message, and is omitted when already in a private / 1:1 chat
+/// (#1871). Non-message rows get `copyOnly` as a plain `.contextMenu`.
 enum MessageMenuItem: CaseIterable, Equatable {
     case copy
     case reply
@@ -66,13 +67,16 @@ enum MessageMenu {
 
     /// View thread when `hasReplies`; Edit only on the user's own text; Delete only
     /// when the relay would allow it (`MessageDeleteRule.mayDelete`); Remove preview only on a
-    /// message that shows a link card (`hasPreview`) the user may delete.
+    /// message that shows a link card (`hasPreview`) the user may delete. Reply in DM is
+    /// for group chats only — omit it in a private / 1:1 chat (`inPrivateChat`).
     static func items(forMessage: Bool, canEdit: Bool = false, canDelete: Bool = true,
-                      hasReplies: Bool = false, hasPreview: Bool = false) -> [MessageMenuItem] {
+                      hasReplies: Bool = false, hasPreview: Bool = false,
+                      inPrivateChat: Bool = false) -> [MessageMenuItem] {
         guard forMessage else { return copyOnly }
         var out: [MessageMenuItem] = [.copy, .reply]
         if hasReplies { out.append(.viewThread) }
-        out.append(contentsOf: [.forward, .replyInDM])
+        out.append(.forward)
+        if !inPrivateChat { out.append(.replyInDM) }
         if canEdit { out.append(.edit) }
         if canDelete && hasPreview { out.append(.removePreview) }
         if canDelete { out.append(.delete) }

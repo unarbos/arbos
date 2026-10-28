@@ -433,7 +433,26 @@ struct ChatSession: View {
         guard let p = model.pendingDMReply, p.chatId == chatId else { return }
         model.pendingDMReply = nil
         replyTo = nil
+        forwardedFrom = nil
         replyRef = p.ref
+        composerFocused = true
+    }
+
+    /// Forward landed here: put the text in the composer and remember who it was
+    /// forwarded from for the next send (feedback app-01M5YF7JWEZXPD1JSKBH9TMCES).
+    private func takePendingForwardDraftIfNeeded() {
+        guard let p = model.pendingForwardDraft, p.chatId == chatId else { return }
+        model.pendingForwardDraft = nil
+        replyTo = nil
+        replyRef = nil
+        editing = nil
+        forwardedFrom = p.from
+        composerDraft.text = p.text
+        composerDraft.caret = (p.text as NSString).length
+        composerDraft.mentions = MentionDraft.resolveAll(text: p.text, mentions: [],
+                                                         members: people?.members ?? [],
+                                                         me: model.user?.login, collectives: isPeople)
+        model.setComposerDraft(p.text, for: chatId)
         composerFocused = true
     }
 
@@ -487,6 +506,9 @@ struct ChatSession: View {
     /// Reply in DM (#1836): the message in another chat the next send here answers
     /// (its address + snapshot, written as `replyRef`). Exclusive with `replyTo`.
     @State private var replyRef: ReplyRef?
+    /// Forward (#feedback app-01M5YF7JWEZXPD1JSKBH9TMCES): original sender name for the
+    /// next send (`forwardedFrom` on the row). Cleared with the draft / reply / edit.
+    @State private var forwardedFrom: String?
     /// Long-press → Edit: the own message whose text is in the composer.
     @State private var editing: Message?
     /// Drives the connection pill's dot pulse while it is reconnecting / syncing.
@@ -979,7 +1001,10 @@ struct ChatSession: View {
                                                 canEdit: canEditMessage(row),
                                                 canDelete: canDelete(row),
                                                 hasReplies: row.replyCount > 0,
-                                                hasPreview: Transcript.linkPreviewsEnabled && messageById[row.messageId]?.linkPreview != nil),
+                                                hasPreview: Transcript.linkPreviewsEnabled && messageById[row.messageId]?.linkPreview != nil,
+                                                // Reply in DM only in people groups — not in a
+                                                // DM or 1:1 agent chat you're already in (#1871).
+                                                inPrivateChat: people?.isGroup != true),
                         onReact: { emoji in
                             closeActions()
                             model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: emoji)
@@ -1049,8 +1074,14 @@ struct ChatSession: View {
         .sheet(item: $pendingForward) { pending in
             ForwardSheet(fromName: pending.from, attachmentNote: pending.message.body?.hasMedia == true) { target in
                 pendingForward = nil
+                // Text-only: opens the target chat with the text drafted; the user
+                // taps Send (feedback app-01M5YF7JWEZXPD1JSKBH9TMCES). Media /
+                // charts still send at once ([feedback forward-attachments-ios-2026-10-27]).
+                let hasMedia = pending.message.body?.hasMedia == true
                 model.forwardMessage(pending.message, from: pending.from, slot: pending.slot, to: target)
-                model.notice = Notice(text: "Forwarded to \(target.title)")
+                if hasMedia {
+                    model.notice = Notice(text: "Forwarded to \(target.title)")
+                }
             }
             .environmentObject(model)
             .environment(\.theme, theme)
@@ -1184,6 +1215,7 @@ struct ChatSession: View {
             }
             openPendingSearchIfNeeded()
             takePendingDMReplyIfNeeded()
+            takePendingForwardDraftIfNeeded()
             revealPendingIfNeeded()
             // Rig: `ARBOS_SHOW=chatsearch` raises the Search-in-chat bar (header-glass shots).
             if DebugHooks.show == "chatsearch" { showSearch = true }
@@ -1407,6 +1439,7 @@ struct ChatSession: View {
         // (sheet over us), so onAppear alone never sees it — watch the published flag.
         .onChange(of: model.pendingSearchChat) { _, _ in openPendingSearchIfNeeded() }
         .onChange(of: model.pendingDMReply?.chatId) { _, _ in takePendingDMReplyIfNeeded() }
+        .onChange(of: model.pendingForwardDraft?.chatId) { _, _ in takePendingForwardDraftIfNeeded() }
         // A bottom-bar search result or a quote tap: the rows may land after appear (room backfill).
         .onChange(of: model.pendingReveal) { _, _ in revealPendingIfNeeded() }
         .onChange(of: rows.count) { _, _ in revealPendingIfNeeded() }
@@ -2286,6 +2319,7 @@ struct ChatSession: View {
     private func beginReply(to row: Row) {
         guard let m = messageById[row.messageId] else { return }
         editing = nil
+        forwardedFrom = nil
         replyTo = m
         if isPeople, let member = agentMember(for: m)?.member {
             talkTo = [member]
@@ -2299,6 +2333,7 @@ struct ChatSession: View {
         let text = m.plainText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, isOwnMessage(m) else { return }
         replyTo = nil
+        forwardedFrom = nil
         editing = m
         composerDraft.text = m.plainText
         composerDraft.caret = (m.plainText as NSString).length
@@ -2947,6 +2982,7 @@ struct ChatSession: View {
         composerDraft.text = ""
         composerDraft.mentions = []
         composerDraft.caret = 0
+        forwardedFrom = nil
         model.setComposerDraft("", for: chatId)
     }
 
@@ -3131,6 +3167,7 @@ struct ChatSession: View {
         let extras = pending
         let reply = replyTo?.id
         let crossReply = replyRef
+        let forward = forwardedFrom
         let address = sendAddress(for: typed)
         let chips = chipMentions(for: typed)
         let tokens = MentionDraft.tokens(composerDraft.mentions)
@@ -3153,12 +3190,13 @@ struct ChatSession: View {
                 if !text.isEmpty { model.sendChannel(chatId: chatId, text: text) }
             } else if isPeople {
                 model.sendPeople(chatId: chatId, text: text, replyTo: reply, address: address,
-                                 chipMentions: chips, attachments: extras, chipTokens: tokens,
-                                 replyRef: crossReply)
+                                 chipMentions: chips, attachments: extras, forwardedFrom: forward,
+                                 chipTokens: tokens, replyRef: crossReply)
             } else if needsAnswer && extras.isEmpty {
                 model.answer(chatId: chatId, text: text)
             } else {
-                model.send(chatId: chatId, text: text, attachments: extras, replyTo: reply)
+                model.send(chatId: chatId, text: text, attachments: extras, replyTo: reply,
+                           forwardedFrom: forward)
             }
         }
     }
@@ -3223,6 +3261,7 @@ struct ChatSession: View {
             let chips = chipMentions(for: text)
             model.sendPeople(chatId: chatId, text: text, replyTo: replyTo?.id, address: address,
                              chipMentions: chips, attachments: pending,
+                             forwardedFrom: forwardedFrom,
                              chipTokens: MentionDraft.tokens(composerDraft.mentions), replyRef: replyRef)
             pending.removeAll()
             clearDraft()
@@ -3238,7 +3277,8 @@ struct ChatSession: View {
         if needsAnswer && pending.isEmpty {
             model.answer(chatId: chatId, text: text)
         } else {
-            model.send(chatId: chatId, text: text, attachments: pending, replyTo: replyTo?.id)
+            model.send(chatId: chatId, text: text, attachments: pending, replyTo: replyTo?.id,
+                       forwardedFrom: forwardedFrom)
         }
         pending.removeAll()
         clearDraft()
@@ -3708,12 +3748,15 @@ extension ChatSession {
                         #endif
                     }
                 }
-                // A message bubble: long-press → the reaction capsule + menu overlay
-                // (`MessageActionsOverlay`). Other rows keep the plain Copy menu.
+                // A message bubble: long-press → reaction capsule + menu; double-tap → ❤️.
+                // Other rows keep the plain Copy menu.
                 .anchorPreference(key: RowFrameKey.self, value: .bounds) { anchor in
                     actionsRowId == row.id ? [row.id: anchor] : [:]
                 }
                 .messageRowGestures(isMessage: reply, onLongPress: { openActions(row) },
+                                    onDoubleTap: {
+                                        model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: "❤️")
+                                    },
                                     onCopyMenu: { runMessageMenu($0, row: row) })
         }
     }
