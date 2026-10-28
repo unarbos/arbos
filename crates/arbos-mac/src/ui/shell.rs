@@ -389,6 +389,8 @@ pub struct Shell {
     pub(crate) server_leave_armed: bool,
     /// Right-click menu on a sidebar row: the space and where the click landed.
     pub(crate) row_menu: Option<(crate::model::Id, gpui::Point<gpui::Pixels>)>,
+    /// A pinned sidebar row mid-drag to a new slot ([feedback sidebar-pinning-mac-2026-10-28]).
+    pub(crate) pin_drag: Option<sidebar::PinDragState>,
     /// Right-click menu on a channel row of the server's channel list (D88): server, channel,
     /// and where the click landed. Archive for everyone, Delete for owners/admins.
     pub(crate) channel_menu: Option<(
@@ -1150,6 +1152,7 @@ impl Shell {
             },
             settings_scroll,
             row_menu: None,
+            pin_drag: None,
             channel_menu: None,
             channel_delete_armed: false,
             run_by_chip: Default::default(),

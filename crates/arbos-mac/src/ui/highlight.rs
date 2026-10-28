@@ -160,6 +160,15 @@ pub fn row(el: Stateful<Div>, selected: bool, shape: Shape, theme: &Theme) -> St
     }
 }
 
+/// A row held in the air — a pinned sidebar row while it is dragged to a new slot:
+/// the token's **pressed** step as its rest fill, under and after the pointer alike.
+pub fn lifted(el: Stateful<Div>, theme: &Theme) -> Stateful<Div> {
+    let f = fills(theme);
+    el.bg(f.pressed)
+        .hover(move |s| s.bg(f.pressed))
+        .active(move |s| s.bg(f.pressed))
+}
+
 /// A transparent rounded control: the hover and pressed washes on its own
 /// shape (an icon disc, a text button, a tab segment, a small ×).
 pub fn button(el: Stateful<Div>, theme: &Theme) -> Stateful<Div> {
