@@ -3717,7 +3717,10 @@ impl Render for Composer {
                 .gap(px(8.0))
                 .pl(px(6.0))
                 .child(discard)
-                .child(render_recording_row(self.voice.read(cx), &theme))
+                .child({
+                    let mark = crate::ui::working::glyph(&theme, cx);
+                    render_recording_row(self.voice.read(cx), &theme, mark)
+                })
         } else {
             div()
                 .flex_1()

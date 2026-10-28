@@ -47,6 +47,7 @@ mod notices;
 mod notify;
 mod outside;
 mod people;
+mod perf;
 mod proxy;
 mod push;
 mod releases;
@@ -868,6 +869,10 @@ async fn main() -> anyhow::Result<()> {
             "/box/feedback/capture/{id}",
             get(feedback::box_capture_status),
         )
+        .route("/perf/report", post(perf::submit))
+        .route("/admin/perf", get(perf::admin_list))
+        .route("/admin/perf/summary", get(perf::admin_summary))
+        .route("/admin/perf/{id}", get(perf::admin_item))
         .route("/admin/feedback", get(feedback::admin_list))
         .route("/admin/feedback/{id}/image", get(feedback::admin_image))
         .route(
