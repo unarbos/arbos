@@ -424,6 +424,10 @@ extension AppModel {
                     subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 6 * 60_000, completedAt: nil, pending: false,
                     parts: [.text(id: "d4t", text: "Sure — add it, and send the copy whenever you're ready.")], hiddenCount: 0, senderHandle: "jacob", senderName: "Jacob Steeves"),
         ]
+        // My line answers unconst's: an own bubble with a quote block above it (the shape of
+        // DaWizzaa's report, [feedback swipe-reply-own-quoted-2026-10-28]) — swipe-to-reply
+        // must start on it, and a tap on the quote still jumps to d3.
+        messages["fx-dm-unconst"]?[3].replyTo = "d3"
         // `ARBOS_FIXTURE_LINKS=1` (rig, [feedback link-icons-ios-tile-2026-10-27]): unconst's
         // Links tab — a brand with a mono mark, one with a colour, X, and a site with no
         // bundled mark (nypost.com, whose icon the fixture ships).

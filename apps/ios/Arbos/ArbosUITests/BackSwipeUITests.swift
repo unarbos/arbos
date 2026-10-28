@@ -193,6 +193,66 @@ final class BackSwipeUITests: XCTestCase {
         XCTAssertTrue(back.exists, "the chat did not go back")
     }
 
+    /// An own bubble that is itself a reply (quote block above the words): the swipe must
+    /// start the reply from the quote line too, not only from the words under it —
+    /// DaWizzaa's report, [feedback swipe-reply-own-quoted-2026-10-28]. The tap on the
+    /// quote (jump to the original) is a SwiftUI `Button`; its press must not swallow a
+    /// horizontal pan before the transcript's swipe recognizer sees it.
+    func testSwipeRightOnAnOwnQuotedBubbleRepliesFromTheQuoteLine() {
+        let app = launch(["ARBOS_OPEN_PEOPLE": "fx-dm-unconst"])
+        let back = chatBack(app, "fx-dm-unconst")
+        XCTAssertTrue(back.waitForExistence(timeout: appear), "the @unconst DM opened")
+        let quote = app.descendants(matching: .any)["bubble:d4"].descendants(matching: .any)["reply-quote"]
+        XCTAssertTrue(quote.waitForExistence(timeout: settle), "my reply to unconst shows its quote block")
+        swipeRight(from: quote.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)))
+        let preview = app.descendants(matching: .any)["composer-reply-preview"]
+        XCTAssertTrue(preview.waitForExistence(timeout: settle), "the reply quote is in the composer")
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: settle), "the composer is focused")
+        XCTAssertTrue(back.exists, "the chat did not go back")
+    }
+
+    /// Same bubble, finger on the words under the quote.
+    func testSwipeRightOnAnOwnQuotedBubbleRepliesFromTheWords() {
+        let app = launch(["ARBOS_OPEN_PEOPLE": "fx-dm-unconst"])
+        let back = chatBack(app, "fx-dm-unconst")
+        XCTAssertTrue(back.waitForExistence(timeout: appear), "the @unconst DM opened")
+        let bubble = app.descendants(matching: .any)["bubble:d4"]
+        XCTAssertTrue(bubble.waitForExistence(timeout: settle), "my reply to unconst is on screen")
+        let quote = bubble.descendants(matching: .any)["reply-quote"]
+        XCTAssertTrue(quote.waitForExistence(timeout: settle), "it shows its quote block")
+        // Halfway between the quote line's bottom and the bubble's bottom: on the words.
+        let y = (quote.frame.maxY + bubble.frame.maxY) / 2
+        let start = app.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: quote.frame.midX, dy: y))
+        swipeRight(from: start)
+        XCTAssertTrue(app.descendants(matching: .any)["composer-reply-preview"].waitForExistence(timeout: settle),
+                      "the reply quote is in the composer")
+        XCTAssertTrue(back.exists, "the chat did not go back")
+    }
+
+    /// A tap on the quote block of my own reply is still the quote's (jump to the original):
+    /// it starts no reply and leaves the chat where it is. (The scroll-and-tint itself is
+    /// not observable through XCUI in a short DM; the rig's shots show it.)
+    func testTapOnTheQuoteOfAnOwnReplyStartsNoReply() {
+        let app = launch(["ARBOS_OPEN_PEOPLE": "fx-dm-unconst"])
+        let back = chatBack(app, "fx-dm-unconst")
+        XCTAssertTrue(back.waitForExistence(timeout: appear), "the @unconst DM opened")
+        let quote = app.descendants(matching: .any)["bubble:d4"].descendants(matching: .any)["reply-quote"]
+        XCTAssertTrue(quote.waitForExistence(timeout: settle), "my reply to unconst shows its quote block")
+        XCTAssertTrue(quote.isHittable, "the quote block takes taps")
+        quote.tap()
+        sleep(1)
+        XCTAssertFalse(app.descendants(matching: .any)["composer-reply-preview"].exists, "a tap on the quote starts no reply")
+        XCTAssertFalse(app.keyboards.firstMatch.exists, "a tap on the quote does not focus the composer")
+        XCTAssertTrue(back.exists, "the chat did not go back")
+    }
+
+    /// A slow 150 pt pan to the right from `start` — the reply swipe's shape.
+    private func swipeRight(from start: XCUICoordinate) {
+        let end = start.withOffset(CGVector(dx: 150, dy: 0))
+        start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.1)
+    }
+
     /// The edge zone is the edge pop's: a swipe from the edge at a bubble's height goes
     /// back and starts no reply.
     func testEdgeSwipeOverABubbleGoesBackNotReply() {
