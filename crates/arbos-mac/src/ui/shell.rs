@@ -346,6 +346,9 @@ pub struct Shell {
     pub(crate) morph: rail::Morph,
     /// The rail picture under the pointer (its name tip is drawn at the root).
     pub(crate) rail_hover: Option<crate::model::Id>,
+    /// Whether the sidebar's edge handle is mid-drag: its hairline shows the
+    /// drag state while GPUI suppresses hover styles (`ui::split_handle`).
+    pub(crate) split_drag: crate::ui::split_handle::DragState,
     /// The rail's picture list scroll (the tip and the morph follow it).
     pub(crate) rail_scroll: ScrollHandle,
     /// The sidebar filter capsules' horizontal scroll (a narrow column,
@@ -1174,6 +1177,7 @@ impl Shell {
             list_filter: sidebar::ListFilter::load(),
             morph: Default::default(),
             rail_hover: None,
+            split_drag: Default::default(),
             rail_scroll: ScrollHandle::new(),
             filter_scroll: ScrollHandle::new(),
             rig_fullscreen: std::env::var("ARBOS_RIG_FULLSCREEN").is_ok_and(|v| v == "1"),

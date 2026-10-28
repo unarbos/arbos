@@ -63,6 +63,7 @@ pub mod sidebar;
 pub mod sidebar_fit;
 pub mod skills;
 pub mod slide;
+pub mod split_handle;
 pub mod tasks;
 pub mod theme;
 pub mod tones;
