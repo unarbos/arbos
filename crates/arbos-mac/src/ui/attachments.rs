@@ -232,17 +232,17 @@ fn picture_bubble(
                 ),
         );
     }
-    let mut out = div().flex().flex_col().gap(px(4.0)).child(bubble);
+    let mut out = div().flex().flex_col().gap(px(4.0));
     if let Some(from) = forwarded_from {
-        out = out.child(
-            div()
-                .pl(px(6.0))
-                .text_size(px(11.0))
-                .text_color(theme.text_muted)
-                .child(from.to_owned()),
-        );
+        // The same header a forwarded text bubble carries, above the picture
+        // (Telegram / iMessage) — so a forwarded picture + caption reads as one
+        // forwarded message ([feedback forward-attachments-mac-2026-10-27]).
+        let by = from.strip_prefix(FORWARDED_FROM_PREFIX).unwrap_or(from);
+        out = out.child(div().pl(px(6.0)).max_w(px(w)).child(
+            crate::ui::transcript::forwarded_header(by.to_owned(), theme.text),
+        ));
     }
-    out.into_any_element()
+    out.child(bubble).into_any_element()
 }
 
 /// Grok's doc card (web-08): kind-coloured doc glyph, name, "PDF · 1.8 MB";
