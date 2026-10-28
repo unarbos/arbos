@@ -46,6 +46,9 @@ fn main() {
     // Before any thread or window: a panic that would end as a bare SIGABRT leaves its
     // message and backtrace in ~/Library/Logs/Arbos/panic.log (reported on the next launch).
     panic_log::install();
+    // rustls has two crypto backends linked (ring via tokio-tungstenite/reqwest,
+    // aws-lc-rs via matrix). It refuses to guess; install ring before any TLS.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let handle = runtime.handle().clone();
 
