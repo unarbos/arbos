@@ -1411,6 +1411,21 @@ impl Attachment {
     pub fn is_image(&self) -> bool {
         self.kind() == AttachmentKind::Image || self.mime.starts_with("image/")
     }
+
+    /// The blob is still on its way up from this device (`local:` key): nothing
+    /// anyone can fetch from the relay yet.
+    pub fn is_uploading(&self) -> bool {
+        self.blob_ref
+            .as_deref()
+            .is_some_and(|k| k.starts_with("local:"))
+    }
+
+    /// The bytes can be fetched from the relay (`GET /blob/{slot}/{key}`).
+    pub fn is_on_relay(&self) -> bool {
+        self.blob_ref
+            .as_deref()
+            .is_some_and(|k| !k.is_empty() && !k.starts_with("local:"))
+    }
 }
 
 /// One row of `messages[].parts` (`crdt-sync.md` §6.2). Unknown kinds decode

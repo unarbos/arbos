@@ -4,7 +4,10 @@
 //! in order) pages with ← → or the chevrons; × / Close / Esc / backdrop /
 //! swipe-down (scroll) close it and return to the chat
 //! ([feedback app-01M5N9BJNZX8T1EQCX3RAB7GXD]). Caption top-left (who, when,
-//! file), counter top-centre, Close · Download · Forward pills at the bottom.
+//! file), counter top-centre, Close · Copy · Download · Forward pills at the bottom
+//! (Copy — and ⌘C while the viewer is up — puts the picture itself on the
+//! pasteboard, original bytes under its own type,
+//! [feedback copy-image-messages-mac-2026-10-27]).
 //! Video shows its poster with Play (QuickTime Player); a file shows its tile
 //! with Quick Look. Forward opens a picker of DMs, agents and groups; one
 //! click sends the item there as a new message. The same picker serves the
@@ -25,7 +28,7 @@ use crate::ui::modal::modal_overlay;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, TEXT_SMALL, TEXT_TINY};
 
-actions!(media_viewer, [Prev, Next]);
+actions!(media_viewer, [Prev, Next, CopyItem]);
 
 /// Backdrop over the window.
 const BACKDROP: f32 = 0.88;
@@ -168,6 +171,8 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
     let act_next = shell.state.clone();
     let download = shell.state.clone();
     let forward = shell.state.clone();
+    let copy = shell.state.clone();
+    let act_copy = shell.state.clone();
 
     // ----- caption, counter, × -------------------------------------------
     let mut subline = if is_profile_picture {
@@ -314,6 +319,9 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
         .on_action(move |_: &Next, _, cx| {
             act_next.update(cx, |s, cx| s.media_viewer_step(1, cx));
         })
+        .on_action(move |_: &CopyItem, _, cx| {
+            act_copy.update(cx, |s, cx| s.media_viewer_copy(cx));
+        })
         .absolute()
         .inset_0()
         .occlude()
@@ -399,7 +407,7 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
     // when the album has more than one item.
     root = root.child(close_btn);
 
-    // ----- Close · Download · Forward (a profile picture: Close only) -----
+    // ----- Close · Copy · Download · Forward (a profile picture: Close only) -----
     root = root.child(
         div()
             .absolute()
@@ -417,6 +425,12 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
             )
             .when(!is_profile_picture, |el| {
                 el.child(
+                    pill("media-viewer-copy", "copy", "Copy").on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        copy.update(cx, |s, cx| s.media_viewer_copy(cx));
+                    }),
+                )
+                .child(
                     pill("media-viewer-download", "arrow-down", "Download").on_click(
                         move |_, _, cx| {
                             cx.stop_propagation();
