@@ -119,6 +119,7 @@ fn base(chat: &str, id: String, role: Role, status: MessageStatus, at: u64) -> M
         parts: Vec::new(),
         hidden_parts: Vec::new(),
         greeting: false,
+        preview: None,
     }
 }
 
