@@ -1116,9 +1116,6 @@ mod me_picker_tests {
         Box::leak(s.into_boxed_str())
     }
 
-    /// The notice stack hangs `HEADER_HEIGHT + 12` under the window's top.
-    const HEADER_HEIGHT_FOR_TEST: f32 = crate::ui::theme::HEADER_HEIGHT;
-
     struct Idle;
 
     impl SyncSource for Idle {
@@ -1228,7 +1225,7 @@ mod me_picker_tests {
             s.live_notices()
                 .iter()
                 .find(|n| n.error.is_some())
-                .map(|n| n.at)
+                .map(|n| n.id)
                 .expect("the error toast is live")
         });
         let id: &'static str = leak(format!("notice-{at}"));
@@ -1238,9 +1235,22 @@ mod me_picker_tests {
         let sentence = vcx
             .debug_bounds(leak(format!("{id}-sentence")))
             .expect("sentence");
+        // The one slot (Jacob 2026-10-27): just below the header pill, centred on the
+        // chat column — not down the right edge.
+        let slot = vcx.debug_bounds("toast-slot").expect("the slot");
         assert!(
-            toast.top() >= px(HEADER_HEIGHT_FOR_TEST),
-            "under the header: {toast:?}"
+            (f32::from(slot.top()) - crate::ui::header::metrics::TOAST_SLOT_TOP).abs() < 1.0,
+            "under the pill: {slot:?}"
+        );
+        assert!(
+            toast.top() > slot.top(),
+            "the info card above, the failure under it"
+        );
+        let width = f32::from(vcx.update(|window, _| window.viewport_size().width));
+        let sidebar = state.read_with(&*vcx, |s, _| s.sidebar_width);
+        assert!(
+            f32::from(toast.left()) > sidebar + 40.0 && f32::from(toast.right()) < width - 40.0,
+            "centred on the chat column, not pinned to the right edge: {toast:?} in {width}"
         );
         assert!(
             (f32::from(toast.size.width) - error_note::TOAST_WIDTH).abs() < 1.0,
@@ -1272,7 +1282,7 @@ mod me_picker_tests {
         assert!(state.read_with(&*vcx, |s, _| s
             .live_notices()
             .iter()
-            .any(|n| n.at == at && n.held && n.details_open)));
+            .any(|n| n.id == at && n.held && n.details_open)));
 
         // Try again re-issues the command and drops the toast.
         let try_again = leak(format!("{id}-try-again"));
@@ -1304,7 +1314,7 @@ mod me_picker_tests {
             s.live_notices()
                 .iter()
                 .find(|n| n.error.is_some())
-                .map(|n| n.at)
+                .map(|n| n.id)
                 .expect("second toast")
         });
         // No command to re-issue → no Try again (the action's own button is the retry).
@@ -1317,6 +1327,129 @@ mod me_picker_tests {
         let close = leak(format!("notice-{at2}-close"));
         click(vcx, &shell, close);
         assert!(vcx.debug_bounds(leak(format!("notice-{at2}"))).is_none());
+    }
+
+    /// [feedback toast-stack-mac-2026-10-27] (Jacob: eight identical "Couldn't load your
+    /// secrets. You're offline." toasts down the right side — "this must never happen"): the
+    /// same failure again while its toast stands is one toast with a ×N; distinct failures
+    /// beyond three fold into one "N more" line whose × clears the slot; a held toast is let
+    /// go after the hold cap.
+    #[gpui::test]
+    fn the_same_failure_eight_times_is_one_toast_and_the_slot_shows_at_most_three(
+        cx: &mut TestAppContext,
+    ) {
+        let (_rt, state, shell, vcx) = mount(cx, "");
+        settle(&shell, vcx);
+        let offline = || {
+            UserError::classify(
+                "load your secrets",
+                &anyhow::anyhow!(
+                    "error sending request for url (https://relay.arbos.life/secrets): dns error: failed to lookup address information"
+                )
+                .context("GET /secrets"),
+            )
+        };
+        state.update(vcx, |s, cx| {
+            for _ in 0..8 {
+                s.apply(
+                    SyncEvent::Failure {
+                        error: offline(),
+                        retry: None,
+                    },
+                    cx,
+                );
+            }
+        });
+        settle(&shell, vcx);
+        let live = state.read_with(&*vcx, |s, _| s.live_notices());
+        assert_eq!(live.len(), 1, "one toast, not eight: {live:?}");
+        assert_eq!(live[0].count, 8);
+        assert_eq!(live[0].text, "Couldn't load your secrets. You're offline.");
+        let id: &'static str = leak(format!("notice-{}", live[0].id));
+        assert!(vcx.debug_bounds(id).is_some());
+        assert!(
+            vcx.debug_bounds(leak(format!("{id}-count"))).is_some(),
+            "the ×8 badge"
+        );
+
+        // Four more distinct failures: three toasts visible (the newest), the rest folded.
+        state.update(vcx, |s, cx| {
+            for verb in [
+                "save the secret",
+                "load the voices",
+                "download report.pdf",
+                "join the call",
+            ] {
+                s.apply(
+                    SyncEvent::Failure {
+                        error: UserError::from_text(verb, "HTTP 502"),
+                        retry: None,
+                    },
+                    cx,
+                );
+            }
+        });
+        settle(&shell, vcx);
+        let stack = state.read_with(&*vcx, |s, _| s.notice_stack());
+        assert_eq!(stack.visible.len(), crate::app::NOTICE_VISIBLE_MAX);
+        assert_eq!(stack.folded, 2);
+        assert_eq!(
+            stack.visible.last().map(|n| n.text.as_str()),
+            Some("Couldn't join the call. The server had a problem."),
+            "newest at the bottom"
+        );
+        let folded = vcx.debug_bounds("toast-folded").expect("the N more line");
+        let newest = vcx
+            .debug_bounds(leak(format!("notice-{}", stack.visible[2].id)))
+            .expect("newest toast");
+        assert!(
+            folded.top() < newest.top(),
+            "the fold line sits above the stack"
+        );
+        assert!(
+            vcx.debug_bounds(id).is_none(),
+            "the oldest (secrets) toast is folded away"
+        );
+        // Three toasts and the fold line fit under the pill without reaching the composer.
+        assert!(
+            newest.bottom() < vcx.update(|window, _| window.viewport_size().height) - px(120.0),
+            "the stack stays out of the composer's way: {newest:?}"
+        );
+
+        // × on the fold line clears the slot.
+        click(vcx, &shell, "toast-folded-close");
+        assert!(state.read_with(&*vcx, |s, _| s.live_notices().is_empty()));
+        assert!(vcx.debug_bounds("toast-slot").is_none());
+    }
+
+    #[test]
+    fn a_held_toast_is_let_go_after_the_hold_cap_unless_details_are_open() {
+        let mut n = crate::app::Notice {
+            id: 1,
+            text: "x".into(),
+            at: 1_000,
+            error: Some(UserError::from_text("load your secrets", "HTTP 502")),
+            details_open: false,
+            held: true,
+            held_since: 1_000,
+            retry: None,
+            count: 1,
+        };
+        assert!(
+            n.live_at(1_000 + crate::app::ERROR_NOTICE_TTL_MS + 1),
+            "held: past the TTL"
+        );
+        assert!(
+            !n.live_at(1_000 + crate::app::NOTICE_HOLD_MAX_MS + 1),
+            "a hold without Details ends at the cap"
+        );
+        n.details_open = true;
+        assert!(
+            n.live_at(1_000 + crate::app::NOTICE_HOLD_MAX_MS + 1),
+            "Details open: stays"
+        );
+        n.held = false;
+        assert!(!n.live_at(1_000 + crate::app::ERROR_NOTICE_TTL_MS + 1));
     }
 
     #[gpui::test]
