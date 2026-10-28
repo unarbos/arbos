@@ -60,7 +60,7 @@ final class ReplyInDMTests: XCTestCase {
         XCTAssertEqual(sent.replyRef, ref, "the row carries the cross-chat reference")
         XCTAssertNil(sent.replyTo, "a cross-chat reply never carries an in-chat replyTo as well")
 
-        guard case .user(_, _, let quote?)? = dmRows(model).last?.kind else {
+        guard case .user(_, _, let quote?, _)? = dmRows(model).last?.kind else {
             return XCTFail("the sent bubble carries a quote: \(String(describing: dmRows(model).last?.kind))")
         }
         XCTAssertEqual(quote.messageId, "g1")

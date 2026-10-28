@@ -606,6 +606,9 @@ enum Part: Equatable {
     /// posted. `spec` is the validated `arbos_core::chart::Chart` as JSON (what the FFI reads),
     /// `table` its markdown table, `fallback` the PNG attachment part this client hides.
     case chart(id: Id, specVersion: Int, spec: String, table: String, fallback: String?)
+    /// Link preview ([feedback link-embeds-ios-2026-10-27]): the card the relay unfurled for
+    /// the message's first bare URL. `preview: "off"` on the message hides it.
+    case linkPreview(id: Id, preview: LinkPreview)
     /// Secret hand-off: the message's value moved into the vault; the row is the ghost
     /// "Secret saved as NAME". Names only — there is no value field.
     case secretRedacted(id: Id, name: String, savedBy: String, agent: String?)
@@ -615,7 +618,8 @@ enum Part: Equatable {
         switch self {
         case .text(let id, _), .reasoning(let id), .tool(let id, _, _), .attachment(let id, _),
              .error(let id, _, _), .status(let id, _, _), .question(let id, _), .subagentResult(let id),
-             .chart(let id, _, _, _, _), .secretRedacted(let id, _, _, _), .unknown(let id):
+             .chart(let id, _, _, _, _), .linkPreview(let id, _), .secretRedacted(let id, _, _, _),
+             .unknown(let id):
             return id
         }
     }
@@ -1118,8 +1122,21 @@ struct Message: Identifiable, Equatable {
     /// line is worded from the live roster and a rename applies to old lines too ("Const
     /// added Aureum" → "Jacob added Aureum", 2026-10-26). nil on rows older than the field.
     var notice: MembershipNotice? = nil
+    /// `"off"` once the sender removed the link preview for everyone (#2066).
+    var preview: String? = nil
 
     var isStreaming: Bool { status == .streaming }
+
+    /// The link preview the relay attached, unless the sender switched it off.
+    var linkPreview: (id: Id, preview: LinkPreview)? {
+        if preview == "off" { return nil }
+        for part in parts {
+            if case .linkPreview(let id, let p) = part, !p.title.trimmingCharacters(in: .whitespaces).isEmpty {
+                return (id, p)
+            }
+        }
+        return nil
+    }
 
     /// Does this message carry the `chart` part `partId`? (Its fallback picture is hidden only
     /// when the chart it stands in for is really here.)
@@ -1290,7 +1307,8 @@ enum DocJSON {
             voice: bool(m["voice"]) || str(m["source"]) == "voice",
             greeting: bool(m["greeting"]),
             reactions: reactions(m["reactions"]),
-            notice: MembershipNotice(row: m["notice"])
+            notice: MembershipNotice(row: m["notice"]),
+            preview: str(m["preview"])
         )
     }
 
@@ -1373,6 +1391,9 @@ enum DocJSON {
                 table: str(pm["table"]) ?? "",
                 fallback: str(pm["fallback"])
             )
+        case "link_preview":
+            guard let p = LinkPreview.parse(pm) else { return .unknown(id: id) }
+            return .linkPreview(id: id, preview: p)
         case "error":
             return .error(id: id, code: str(pm["code"]) ?? "error", message: str(pm["message"]) ?? "")
         case "status":
@@ -1901,5 +1922,97 @@ extension Project {
     static func pictureURL(httpUrl: String, id: Id, imageKey: String?, version: Int) -> String? {
         guard let imageKey, !imageKey.isEmpty, !httpUrl.isEmpty else { return nil }
         return "\(httpUrl)/projects/\(id)/avatar.jpg?v=\(version)"
+    }
+}
+
+/// What a `link_preview` part carries (relay `unfurl.rs`, spec 1): the card's words and its
+/// picture, pre-formatted — the app parses nothing from the site. Everything but `title` is
+/// optional ([feedback link-embeds-ios-2026-10-27]).
+struct LinkPreview: Equatable, Hashable {
+    struct Picture: Equatable, Hashable {
+        var ref: String
+        var width: Int
+        var height: Int
+        var mime: String
+        var art: Bool
+    }
+    struct Diff: Equatable, Hashable {
+        var additions: Int
+        var deletions: Int
+        var files: Int
+    }
+
+    var specVersion: Int = 1
+    var url: String
+    var canonicalUrl: String
+    /// `spotify` `youtube` `x` `github` `bluesky` `vimeo` `loom` `soundcloud` `apple_music`
+    /// `google_maps` `wikipedia` `arbos` `file` `web`.
+    var provider: String
+    var providerName: String
+    /// `song` `album` … `pull_request` `issue` `repo` `article` `image` `file` `place` `page`.
+    var type: String
+    var title: String
+    var subtitle: String? = nil
+    var description: String? = nil
+    /// Footer facts in order ("Song", "4:03", "opened 4 days ago").
+    var facts: [String] = []
+    /// `open` `merged` `closed` `draft`.
+    var state: String? = nil
+    var diff: Diff? = nil
+    /// "18:24" on a video thumbnail.
+    var duration: String? = nil
+    var image: Picture? = nil
+    /// The final host ("github.com"): the shared link-icon tile picks its mark by it.
+    var siteHost: String? = nil
+    /// Reserved for the shared link-icon tile (a blob in the chat's slot); unused here.
+    var siteIcon: Picture? = nil
+    /// `compact` (art row) or `expanded` (media on top).
+    var layout: String = "compact"
+    /// The chat's blob slot, set by the transcript builder so the card can load its picture.
+    var slot: String = ""
+
+    var expanded: Bool { layout == "expanded" && image != nil }
+    var isPost: Bool { type == "post" }
+    var isGitHubItem: Bool { type == "pull_request" || type == "issue" || type == "gist" }
+    /// Where a tap goes: the canonical URL (tracking parameters gone), else the typed one.
+    var openURL: URL? { URL(string: canonicalUrl.isEmpty ? url : canonicalUrl) }
+    /// "<title> — <provider>" for quote headers, copies and one-line previews.
+    var oneLine: String { providerName.isEmpty ? title : "\(title) — \(providerName)" }
+
+    /// Was `text` nothing but the link the card stands for? Then the card is the bubble.
+    func isLinkOnly(_ text: String) -> Bool {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, t.rangeOfCharacter(from: .whitespacesAndNewlines) == nil else { return false }
+        let trimSlash: (String) -> String = { $0.hasSuffix("/") ? String($0.dropLast()) : $0 }
+        return t == url.trimmingCharacters(in: .whitespaces) || t == canonicalUrl.trimmingCharacters(in: .whitespaces)
+            || trimSlash(t) == trimSlash(url.trimmingCharacters(in: .whitespaces))
+    }
+
+    static func parse(_ pm: [String: Any]) -> LinkPreview? {
+        func str(_ v: Any?) -> String? { v as? String }
+        func int(_ v: Any?) -> Int? { (v as? NSNumber)?.intValue }
+        func picture(_ v: Any?) -> Picture? {
+            guard let d = v as? [String: Any], let ref = str(d["ref"]), !ref.isEmpty else { return nil }
+            return Picture(ref: ref, width: int(d["width"]) ?? 0, height: int(d["height"]) ?? 0,
+                           mime: str(d["mime"]) ?? "image/jpeg", art: (d["art"] as? Bool) ?? false)
+        }
+        guard let title = str(pm["title"])?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty else { return nil }
+        var p = LinkPreview(url: str(pm["url"]) ?? "", canonicalUrl: str(pm["canonicalUrl"]) ?? "",
+                            provider: str(pm["provider"]) ?? "web", providerName: str(pm["providerName"]) ?? "",
+                            type: str(pm["type"]) ?? "page", title: title)
+        p.specVersion = int(pm["specVersion"]) ?? 1
+        p.subtitle = str(pm["subtitle"]).flatMap { $0.isEmpty ? nil : $0 }
+        p.description = str(pm["description"]).flatMap { $0.isEmpty ? nil : $0 }
+        p.facts = (pm["facts"] as? [Any])?.compactMap { $0 as? String } ?? []
+        p.state = str(pm["state"])
+        if let d = pm["diff"] as? [String: Any] {
+            p.diff = Diff(additions: int(d["additions"]) ?? 0, deletions: int(d["deletions"]) ?? 0, files: int(d["files"]) ?? 0)
+        }
+        p.duration = str(pm["duration"])
+        p.image = picture(pm["image"])
+        p.siteHost = str(pm["siteHost"])
+        p.siteIcon = picture(pm["siteIcon"])
+        p.layout = str(pm["layout"]) ?? "compact"
+        return p
     }
 }
