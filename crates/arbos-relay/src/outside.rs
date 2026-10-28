@@ -444,6 +444,8 @@ pub fn on_announce(
                 .collect()
         }
     };
+    // Remember the id: a row fallback racing this announce must not deliver it again.
+    let _ = mark_seen(&chat.chat_id, message_id);
     for (p, wake, chat_json) in targets {
         // Its own message, announced by the relay on its behalf: not news to it.
         if sender.kind == "agent" && sender.id == p.id {
@@ -480,6 +482,111 @@ pub fn on_announce(
             }),
         );
     }
+}
+
+/// Message ids already handed to outside agents by the row fallback (per chat, newest 64), so
+/// a row and its late announce never deliver the same message twice.
+fn seen_rows() -> &'static StdMutex<HashMap<String, std::collections::VecDeque<String>>> {
+    static S: OnceLock<StdMutex<HashMap<String, std::collections::VecDeque<String>>>> =
+        OnceLock::new();
+    S.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+fn mark_seen(chat_id: &str, message_id: &str) -> bool {
+    let mut all = seen_rows().lock().unwrap();
+    let q = all.entry(chat_id.to_owned()).or_default();
+    if q.iter().any(|m| m == message_id) {
+        return false;
+    }
+    q.push_back(message_id.to_owned());
+    while q.len() > 64 {
+        q.pop_front();
+    }
+    true
+}
+
+/// Does this chat have an outside agent in it (cheap enough for the row path)?
+fn has_outside_member(state: &AppState, chat: &ChatRef) -> bool {
+    match &chat.project_id {
+        Some(pid) => is_outside(state, pid),
+        None => people::load_chat(state, &chat.chat_id)
+            .map(|cm| {
+                cm.members
+                    .iter()
+                    .filter_map(|m| m.project_id())
+                    .any(|pid| is_outside(state, pid))
+            })
+            .unwrap_or(false),
+    }
+}
+
+/// A device wrote a row into a chat with an outside agent. The apps announce the message a
+/// moment later (`POST …/notify`, which reaches [`on_announce`]); a client that does not
+/// (arbosctl, older builds) would leave the agent deaf, so after a short wait the relay reads
+/// the new user messages out of the doc itself and delivers them. An announce that arrives
+/// first wins; the fallback never delivers a message twice.
+pub fn on_row(state: &AppState, chat: ChatRef, user_id: &str, at: i64) {
+    if !has_outside_member(state, &chat) {
+        return;
+    }
+    let state = state.clone();
+    let user_id = user_id.to_owned();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        if state
+            .db
+            .chat_event_since(&chat.chat_id, &user_id, at - 1_000)
+            .unwrap_or(true)
+        {
+            // Announced: the apps' path handled it. Remember the ids so a later row of the
+            // same message cannot double-deliver either.
+            return;
+        }
+        let Ok(Some(doc)) =
+            crate::matrix::backfill::load_doc(&state, &chat.chat_id, chat.project_id.as_deref())
+        else {
+            return;
+        };
+        let sender = Sender::user(&state, &user_id);
+        let me = format!("user:{user_id}");
+        for m in doc.messages() {
+            if m.role != "user" {
+                continue;
+            }
+            let created = m.rest["createdAt"].as_i64().unwrap_or(0);
+            if created < at - 30_000 {
+                continue;
+            }
+            // People chats stamp the author; a project chat's user rows are the owner's.
+            let author = m.rest["sender"].as_str().unwrap_or("user");
+            if author != "user" && author != me {
+                continue;
+            }
+            let text = m.text();
+            if text.trim().is_empty() || !mark_seen(&chat.chat_id, &m.id) {
+                continue;
+            }
+            let mentions: Vec<String> = m.rest["mentions"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let reply_to = m.rest["replyTo"].as_str().map(str::to_owned);
+            tracing::info!(chat = %chat.chat_id, message = %m.id, "row fallback: delivering to outside agents");
+            on_announce(
+                &state,
+                &chat,
+                &sender,
+                &m.id,
+                &text,
+                reply_to.as_deref(),
+                &mentions,
+            );
+        }
+    });
 }
 
 /// People chats this agent sits in: `member.added` / `member.removed` keep the bridge's list fresh.
