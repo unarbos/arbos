@@ -30,9 +30,9 @@ use crate::app::{AppState, ProfilePage};
 use crate::model::{now_ms, Attachment, AttachmentKind, Chat, Id, Message, Part};
 use crate::ui::glass;
 use crate::ui::highlight;
-use crate::ui::icons::icon;
 use crate::ui::link_tile;
 use crate::ui::mention;
+use crate::ui::sf_symbols;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, CONTROL_GAP, CONTROL_GLYPH, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
@@ -111,7 +111,7 @@ pub(super) fn pushed_frame(
             cx,
         );
     }
-    let back = glass::control_disc("profile-back", "chevron-left", CONTROL_GLYPH, theme)
+    let back = glass::control_disc("profile-back", "chevron.left", CONTROL_GLYPH, theme)
         .debug_selector(|| "profile-back".into())
         .on_click(cx.listener(|this, _, _, cx| this.back_profile(cx)));
     pane_frame(
@@ -148,9 +148,14 @@ pub(crate) fn top_bar() -> Div {
 /// The share disc of a page that has something to share (an agent, a group:
 /// the invite sheet). Left of the close disc, Grok's order.
 pub(crate) fn share_disc(theme: &Theme, on_click: HeroClick) -> Stateful<Div> {
-    glass::control_disc("profile-share", "share", glass::PANE_SHARE_GLYPH, theme)
-        .debug_selector(|| "profile-share".into())
-        .on_click(move |e, w, cx| on_click(e, w, cx))
+    glass::control_disc(
+        "profile-share",
+        "square.and.arrow.up",
+        glass::PANE_SHARE_GLYPH,
+        theme,
+    )
+    .debug_selector(|| "profile-share".into())
+    .on_click(move |e, w, cx| on_click(e, w, cx))
 }
 
 /// The close disc: `×` at [`glass::PANE_CLOSE_GLYPH`].
@@ -387,7 +392,7 @@ pub(super) fn hero_picture(
                     .bg(Theme::with_alpha(gpui::black(), 0.45))
                     .opacity(0.0)
                     .group_hover("hero-picture", |s| s.opacity(1.0))
-                    .child(icon("pencil", 30.0, gpui::white())),
+                    .child(sf_symbols::glyph("pencil", 30.0, gpui::white())),
             )
         })
         .when_some(on_click, |el, f| el.on_click(move |e, w, cx| f(e, w, cx)))

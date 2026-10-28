@@ -920,6 +920,10 @@ pub struct AppState {
     pending_relaunch: Option<arbos_update::client::Install>,
     /// Last composer keystroke (any chat): the "never mid-typing" guard for the relaunch.
     last_input_at: u64,
+    /// When the window last became focused. Auto-relaunch only counts time spent in
+    /// Arbos (D85 "while you are in Arbos" / "when you pause"), so a Spaces swipe
+    /// back after idle cannot be the restart edge.
+    became_active_at: u64,
     /// A version the automatic install already failed on: offer it in the rail, do not loop.
     auto_update_failed: Option<String>,
     /// Settings → This Mac (F9).
@@ -1325,6 +1329,7 @@ impl AppState {
             update: update_state,
             pending_relaunch: None,
             last_input_at: 0,
+            became_active_at: now_ms(),
             auto_update_failed: None,
             local: LocalView::default(),
             voice_mode: false,
@@ -1524,7 +1529,8 @@ impl AppState {
 
     /// Is this a moment the app may restart itself? Never in a call, right after a keystroke, or
     /// while another app has focus (relaunch would steal it). When Arbos is focused: after a pause
-    /// with no typing, or when the countdown is over.
+    /// with no typing, or when the countdown is over — both measured only for continuous focus,
+    /// so swiping back to an idle window is not the restart.
     fn relaunch_is_safe(&self) -> bool {
         let now = now_ms();
         if self.my_call.is_some() || self.incoming_call.is_some() {
@@ -1536,8 +1542,13 @@ impl AppState {
         if now.saturating_sub(self.last_input_at) < update::TYPING_GUARD_MS {
             return false;
         }
+        let focused_for = now.saturating_sub(self.became_active_at);
         let countdown_over = match &self.update.phase {
-            UpdatePhase::Installed { deadline_ms, .. } => now >= *deadline_ms,
+            UpdatePhase::Installed { deadline_ms, .. } => {
+                // Wall deadline alone used to fire on the focus-regain edge after time away.
+                // Require a full minute of continuous focus too ("while you are in Arbos").
+                now >= *deadline_ms && focused_for >= update::RELAUNCH_COUNTDOWN_MS
+            }
             UpdatePhase::Idle
             | UpdatePhase::Checking
             | UpdatePhase::UpToDate
@@ -1545,9 +1556,11 @@ impl AppState {
             | UpdatePhase::Downloading { .. }
             | UpdatePhase::Installing(_)
             | UpdatePhase::Restarting(_)
-            | UpdatePhase::Failed { .. } => true,
+            | UpdatePhase::Failed { .. } => focused_for >= update::RELAUNCH_COUNTDOWN_MS,
         };
-        now.saturating_sub(self.last_input_at) >= update::IDLE_RELAUNCH_MS || countdown_over
+        let paused = now.saturating_sub(self.last_input_at) >= update::IDLE_RELAUNCH_MS
+            && focused_for >= update::IDLE_RELAUNCH_MS;
+        paused || countdown_over
     }
 
     /// Relaunch into the pending install when it is safe; true when the relaunch was started.
@@ -8511,6 +8524,9 @@ impl AppState {
     pub fn set_window_active(&mut self, active: bool, cx: &mut Context<Self>) {
         if self.window_active != active {
             self.window_active = active;
+            if active {
+                self.became_active_at = now_ms();
+            }
             self.sync_focus();
             if active {
                 if let Some(room_id) = self
