@@ -122,9 +122,61 @@ pub fn project_hidden_parts(json: &mut Value) {
 /// Separator in flat reaction keys: `"emoji|sender"` under `reactions`.
 pub const REACTION_KEY_SEP: char = '|';
 
+/// Fitzpatrick skin-tone modifiers (U+1F3FB … U+1F3FF). Stripped so
+/// `👍🏽` and `👍🏿` count as the same reaction on a message.
+const SKIN_TONE_LO: u32 = 0x1F3FB;
+const SKIN_TONE_HI: u32 = 0x1F3FF;
+
+/// Drop skin-tone modifiers from an emoji. Other combining marks (ZWJ,
+/// variation selectors, hair/gender) stay. Empty input stays empty; if
+/// stripping would leave nothing, the original string is kept.
+pub fn normalize_reaction_emoji(emoji: &str) -> String {
+    if emoji.is_empty() {
+        return String::new();
+    }
+    let stripped: String = emoji
+        .chars()
+        .filter(|c| !(SKIN_TONE_LO..=SKIN_TONE_HI).contains(&(*c as u32)))
+        .collect();
+    if stripped.is_empty() {
+        emoji.to_string()
+    } else {
+        stripped
+    }
+}
+
 /// Build the CRDT key for one sender's hold of an emoji.
+/// The emoji side is skin-tone-normalized so tone variants share one key.
 pub fn reaction_key(emoji: &str, sender: &str) -> String {
-    format!("{emoji}{REACTION_KEY_SEP}{sender}")
+    let base = normalize_reaction_emoji(emoji);
+    format!("{base}{REACTION_KEY_SEP}{sender}")
+}
+
+/// Remove flat keys and legacy buckets that are skin-tone variants of `base`
+/// for `sender`, so a message keeps one entry per base emoji per person.
+fn clear_skin_tone_reaction_variants(reactions: &LoroMap, base: &str, sender: &str) {
+    let raw = serde_json::to_value(reactions.get_deep_value()).unwrap_or(Value::Null);
+    let Some(obj) = raw.as_object() else {
+        return;
+    };
+    for key in obj.keys() {
+        if let Some((emoji, sid)) = key.split_once(REACTION_KEY_SEP) {
+            if sid == sender && emoji != base && normalize_reaction_emoji(emoji) == base {
+                let _ = reactions.delete(key.as_str());
+            }
+            continue;
+        }
+        if key.contains(REACTION_KEY_SEP) {
+            continue;
+        }
+        if key != base && normalize_reaction_emoji(key) == base {
+            if let Some(ValueOrContainer::Container(Container::Map(bucket))) =
+                reactions.get(key.as_str())
+            {
+                let _ = bucket.delete(sender);
+            }
+        }
+    }
 }
 
 /// Concatenate text parts of a projected (or raw) message row JSON.
@@ -144,8 +196,9 @@ pub fn message_text(row: &Value) -> String {
 
 /// Reader projection: expand flat `reactions` keys (`"emoji|sender" → true`)
 /// into `emoji → { sender → true }` for UI / serde. Also folds legacy nested
-/// emoji-bucket maps so both shapes read the same. Call before deserializing
-/// a message row.
+/// emoji-bucket maps so both shapes read the same. Skin-tone variants of the
+/// same base emoji merge under one bucket. Call before deserializing a
+/// message row.
 pub fn project_reactions(json: &mut Value) {
     let Some(obj) = json.as_object_mut() else {
         return;
@@ -160,8 +213,12 @@ pub fn project_reactions(json: &mut Value) {
             if key.contains(REACTION_KEY_SEP) {
                 continue;
             }
+            let base = normalize_reaction_emoji(&key);
+            if base.is_empty() {
+                continue;
+            }
             let entry = nested
-                .entry(key)
+                .entry(base)
                 .or_insert_with(|| Value::Object(serde_json::Map::new()));
             if let Value::Object(dst) = entry {
                 for (sender, flag) in bucket {
@@ -181,8 +238,12 @@ pub fn project_reactions(json: &mut Value) {
         if emoji.is_empty() || sender.is_empty() {
             continue;
         }
+        let base = normalize_reaction_emoji(emoji);
+        if base.is_empty() {
+            continue;
+        }
         let entry = nested
-            .entry(emoji.to_string())
+            .entry(base)
             .or_insert_with(|| Value::Object(serde_json::Map::new()));
         if let Value::Object(dst) = entry {
             dst.insert(sender.to_string(), Value::Bool(true));
@@ -902,10 +963,11 @@ impl ChatDoc {
     ///
     /// CRDT shape: flat keys under `reactions` — `"emoji|sender" → true` — so
     /// concurrent first reacts on the same emoji merge as map-key inserts
-    /// instead of racing on nested emoji-bucket creation. Readers call
-    /// [`project_reactions`] to view `emoji → { sender → true }`. Does not
-    /// commit. Turning a reaction off is a no-op when the reactions map is
-    /// missing (does not create containers).
+    /// instead of racing on nested emoji-bucket creation. The emoji side is
+    /// skin-tone-normalized (`👍🏽` ≡ `👍`). Readers call [`project_reactions`]
+    /// to view `emoji → { sender → true }`. Does not commit. Turning a
+    /// reaction off is a no-op when the reactions map is missing (does not
+    /// create containers).
     pub fn set_reaction(
         &self,
         msg_id: &str,
@@ -916,6 +978,10 @@ impl ChatDoc {
         if emoji.is_empty() || sender.is_empty() {
             return Ok(());
         }
+        let base = normalize_reaction_emoji(emoji);
+        if base.is_empty() {
+            return Ok(());
+        }
         let Some(map) = self.find_message(msg_id) else {
             return Ok(());
         };
@@ -924,14 +990,18 @@ impl ChatDoc {
             _ if on => loro_err(map.insert_container("reactions", LoroMap::new()))?,
             _ => return Ok(()),
         };
-        let key = reaction_key(emoji, sender);
+        // Drop any older skin-tone variant keys / legacy buckets for this
+        // sender so only the normalized base remains.
+        clear_skin_tone_reaction_variants(&reactions, &base, sender);
+        let key = reaction_key(&base, sender);
         if on {
             loro_err(reactions.insert(key.as_str(), true))?;
         } else {
             // Flat key (current shape). Also clear a legacy nested bucket entry
             // if one is still present from older writers.
             let _ = reactions.delete(key.as_str());
-            if let Some(ValueOrContainer::Container(Container::Map(bucket))) = reactions.get(emoji)
+            if let Some(ValueOrContainer::Container(Container::Map(bucket))) =
+                reactions.get(base.as_str())
             {
                 let _ = bucket.delete(sender);
             }
@@ -2663,6 +2733,32 @@ mod tests {
             assert_eq!(row["reactions"]["👍"]["user:a"], true);
             assert_eq!(row["reactions"]["👍"]["user:b"], true);
         }
+    }
+
+    #[test]
+    fn skin_tone_variants_collapse_to_one_reaction() {
+        let doc = ChatDoc::new(None, false);
+        doc.transact(|d| {
+            d.append_user_message("m", "hi", "dev:a", &UserMessageOpts::default())
+                .unwrap();
+            d.set_reaction("m", "👍🏽", "user:a", true).unwrap();
+            d.set_reaction("m", "👍🏿", "user:b", true).unwrap();
+        });
+        let mut row = doc.to_json()["messages"][0].clone();
+        project_reactions(&mut row);
+        assert_eq!(row["reactions"]["👍"]["user:a"], true);
+        assert_eq!(row["reactions"]["👍"]["user:b"], true);
+        assert!(row["reactions"].get("👍🏽").is_none());
+        assert!(row["reactions"].get("👍🏿").is_none());
+        // Same sender toggling a different tone flips the shared base off.
+        doc.transact(|d| d.set_reaction("m", "👍🏻", "user:a", false).unwrap());
+        let mut row = doc.to_json()["messages"][0].clone();
+        project_reactions(&mut row);
+        assert!(row["reactions"]
+            .get("👍")
+            .and_then(|b| b.get("user:a"))
+            .is_none());
+        assert_eq!(row["reactions"]["👍"]["user:b"], true);
     }
 
     #[test]
