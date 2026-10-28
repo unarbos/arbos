@@ -1,6 +1,13 @@
 //! SF-Symbol-like glyphs, embedded as tiny SVGs and painted through GPUI's
 //! `svg()` element in the current text colour. Hand-drawn strokes on a 24 pt
 //! grid (round caps, 2 pt weight) to match the iPhone app's header controls.
+//!
+//! **Frozen since [feedback menu-sf-symbols-2026-10-27]** (Jacob: "use standard
+//! versions instead of making them"): menus draw the real system symbols
+//! through `ui::sf_symbols`, and this pack is (a) the fallback for a symbol the
+//! running macOS lacks or a non-mac build, and (b) the surfaces the follow-up
+//! release converts. No new hand-drawn path lands without a
+//! `// icon: custom <why>` line above it — `tests::no_new_hand_drawn_glyph_without_a_custom_marker`.
 
 use std::borrow::Cow;
 
@@ -505,42 +512,247 @@ mod tests {
         assert!(broken.is_empty(), "stubs in {broken:?}");
     }
 
-    /// The message menu's glyphs are one set: outline strokes of the pack's
-    /// weight (no `fill`, no `stroke-width` of their own) and one optical size
-    /// (anchors inside the 24 grid's 3…21 band, 13…18 pt across) — Copy,
-    /// Reply, Forward, Reply in DM, Remove preview and Delete read as siblings.
+    /// Every menu row draws a **system SF Symbol** registered in
+    /// `sf_symbols::FALLBACKS` — the names the iPhone passes to
+    /// `Image(systemName:)` — never a pack glyph ([feedback
+    /// menu-sf-symbols-2026-10-27]). Enum-driven menus are read from their
+    /// `glyph()`; literal `menu_row(id, "…", …)` calls are read from the
+    /// source, so a new menu row with a hand-drawn glyph fails here.
     #[test]
-    fn message_menu_glyphs_share_one_set_weight_and_size() {
-        let names: Vec<&str> = crate::ui::message_menu::ITEMS
-            .iter()
-            .map(|i| i.glyph())
-            .collect();
-        assert_eq!(
-            names,
-            ["copy", "reply", "forward", "bubble", "link", "trash"]
+    fn menus_draw_system_symbols_only() {
+        use crate::ui::sf_symbols::{is_registered, FALLBACKS};
+        let mut names: Vec<(&'static str, String)> = Vec::new();
+        for item in crate::ui::message_menu::ITEMS {
+            names.push((item.glyph(), format!("message menu {}", item.label())));
+        }
+        for item in [
+            crate::ui::member_menu::MemberMenuItem::ViewProfile,
+            crate::ui::member_menu::MemberMenuItem::Remove,
+        ] {
+            names.push((item.glyph(), format!("member menu {}", item.label())));
+        }
+        for item in [
+            crate::ui::profiles::library::MenuItem::Open,
+            crate::ui::profiles::library::MenuItem::Copy,
+            crate::ui::profiles::library::MenuItem::Forward,
+            crate::ui::profiles::library::MenuItem::Download,
+            crate::ui::profiles::library::MenuItem::OpenLink,
+            crate::ui::profiles::library::MenuItem::CopyLink,
+        ] {
+            names.push((item.glyph(), format!("library menu {}", item.label())));
+        }
+        for (file, src) in [
+            ("sidebar.rs", include_str!("sidebar.rs")),
+            ("header.rs", include_str!("header.rs")),
+            ("connectors.rs", include_str!("connectors.rs")),
+            ("message_menu.rs", include_str!("message_menu.rs")),
+            ("member_menu.rs", include_str!("member_menu.rs")),
+            ("profiles/library.rs", include_str!("profiles/library.rs")),
+        ] {
+            for (line, literal) in menu_row_literals(src) {
+                names.push((
+                    Box::leak(literal.into_boxed_str()),
+                    format!("{file}:{line} menu_row"),
+                ));
+            }
+        }
+        assert!(
+            names.len() >= 20,
+            "the scan found too few menu glyphs: {names:?}"
         );
-        for name in names {
-            let b = glyph(name);
+        let offenders: Vec<_> = names
+            .iter()
+            .filter(|(name, _)| !is_registered(name))
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "menu glyphs that are not registered system symbols: {offenders:?}"
+        );
+        // Every fallback the table names is a real pack glyph, and the table
+        // has no duplicates.
+        for (sf, glyph) in FALLBACKS {
             assert!(
-                !b.contains("fill=\"#000\""),
-                "{name}: filled shape in an outline set"
+                body(glyph).is_some(),
+                "{sf}: fallback {glyph:?} is not in the pack"
             );
-            assert!(!b.contains("stroke-width="), "{name}: own stroke weight");
             assert!(
-                lint::stubs(b, STROKE).is_empty(),
-                "{name}: closing stub {:?}",
-                lint::stubs(b, STROKE)
+                sf.is_ascii() && !sf.contains(' '),
+                "{sf:?} is not a symbol name"
             );
-            let (x0, y0, x1, y1) = lint::anchor_box(b);
-            assert!(
-                x0 >= 3.0 && y0 >= 3.0 && x1 <= 21.0 && y1 <= 21.0,
-                "{name}: anchors {:?} leave the 3…21 band",
-                (x0, y0, x1, y1)
+            assert_eq!(
+                FALLBACKS.iter().filter(|(s, _)| s == sf).count(),
+                1,
+                "{sf} registered twice"
             );
-            let (w, h) = (x1 - x0, y1 - y0);
+        }
+    }
+
+    /// The second argument of every `menu_row(` call in `src` that is a string
+    /// literal (or an `if … { "a" } else { "b" }` of literals), with its line.
+    fn menu_row_literals(src: &str) -> Vec<(usize, String)> {
+        let mut out = Vec::new();
+        for (ix, _) in src.match_indices("menu_row(") {
+            let line = src[..ix].matches('\n').count() + 1;
+            let rest = &src[ix + "menu_row(".len()..];
+            // Split the arguments at top-level commas.
+            let (mut depth, mut in_str, mut args, mut cur) =
+                (0i32, false, Vec::new(), String::new());
+            for ch in rest.chars() {
+                match ch {
+                    '"' => in_str = !in_str,
+                    '(' | '[' | '{' if !in_str => depth += 1,
+                    ')' | ']' | '}' if !in_str => {
+                        if depth == 0 {
+                            break;
+                        }
+                        depth -= 1;
+                    }
+                    ',' if !in_str && depth == 0 => {
+                        args.push(std::mem::take(&mut cur));
+                        if args.len() == 2 {
+                            break;
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
+                cur.push(ch);
+            }
+            let Some(second) = args.get(1) else { continue };
+            let second = second.trim();
+            if second.starts_with('"') || second.starts_with("if ") {
+                let mut parts = second.split('"');
+                parts.next();
+                while let (Some(literal), Some(_)) = (parts.next(), parts.next()) {
+                    out.push((line, literal.to_owned()));
+                }
+            }
+        }
+        out
+    }
+
+    /// The pack is frozen ([feedback menu-sf-symbols-2026-10-27]): a glyph is
+    /// either one of the names below (drawn by a surface the SF-Symbols
+    /// follow-up converts), a fallback of a registered system symbol, or
+    /// carries a `// icon: custom <why>` line right above its `icon!(` —
+    /// the only way to add a hand-drawn path from here on.
+    #[test]
+    fn no_new_hand_drawn_glyph_without_a_custom_marker() {
+        const FROZEN: &[&str] = &[
+            "plus",
+            "search",
+            "person",
+            "ellipsis",
+            "pencil",
+            "sidebar-left",
+            "chevron-left",
+            "chevron-right",
+            "chevron-down",
+            "chevron-up",
+            "eye",
+            "mic",
+            "waveform",
+            "arrow-up",
+            "hourglass",
+            "xmark",
+            "spinner",
+            "share",
+            "archivebox",
+            "square-pencil",
+            "person-plus",
+            "people",
+            "stop",
+            "play",
+            "paperclip",
+            "gear",
+            "sparkles",
+            "bell",
+            "phone",
+            "check",
+            "globe",
+            "doc",
+            "key",
+            "pause",
+            "archive",
+            "tray-up",
+            "lock",
+            "nosign",
+            "terminal",
+            "video",
+            "bell-slash",
+            "link",
+            "leave",
+            "block",
+            "copy",
+            "reply",
+            "forward",
+            "bubble",
+            "crown",
+            "photo",
+            "arrow-down",
+            "download",
+            "expand",
+            "cloud-download",
+            "cpu",
+            "window",
+            "creditcard",
+            "desktop",
+            "laptop",
+            "smartphone",
+            "bot",
+            "circle-half",
+            "info",
+            "exclamation",
+            "minus",
+            "envelope",
+            "hash",
+            "code",
+            "antenna",
+            "puzzle",
+            "face-smile",
+            "camera",
+            "camera-off",
+            "mic-off",
+            "phone-down",
+            "trash",
+            "branch",
+            // Landed on main while this freeze was gating (group pane's Description row).
+            "text-align-left",
+        ];
+        let src = include_str!("icons.rs");
+        let lines: Vec<&str> = src.lines().collect();
+        let mut seen = 0;
+        for (i, line) in lines.iter().enumerate() {
+            let Some(rest) = line.trim_start().strip_prefix("icon!(") else {
+                continue;
+            };
+            // `icon!("name", …)` on one line, or `icon!(` with the name on the next.
+            let name_line = if rest.trim_start().starts_with('"') {
+                rest
+            } else {
+                lines.get(i + 1).copied().unwrap_or("")
+            };
+            let Some(name) = name_line.split('"').nth(1) else {
+                continue;
+            };
+            seen += 1;
+            let frozen = FROZEN.contains(&name);
+            let fallback = crate::ui::sf_symbols::FALLBACKS
+                .iter()
+                .any(|(_, g)| *g == name);
+            let marked = lines[i.saturating_sub(4)..i]
+                .iter()
+                .any(|l| l.contains("// icon: custom "));
             assert!(
-                (13.0..=18.0).contains(&w.max(h)) && w.min(h) >= 12.0,
-                "{name}: {w} × {h} is not the set's optical size"
+                frozen || fallback || marked,
+                "{name:?} is a new hand-drawn glyph: use a system symbol (sf_symbols) or add `// icon: custom <why>` above it"
+            );
+        }
+        assert_eq!(seen, ICONS.len(), "the source scan missed icon! entries");
+        for name in FROZEN {
+            assert!(
+                body(name).is_some(),
+                "frozen name {name:?} left the pack: drop it from FROZEN"
             );
         }
     }

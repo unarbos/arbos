@@ -3242,10 +3242,12 @@ final class AppModel: ObservableObject {
     /// selector (any combination of agents that should all reply).
     /// `chipTokens` (#1596) are the composer's committed mention chips, lower-case handle →
     /// member id: an `@handle` in the text that has a chip means exactly that member.
+    /// `extraParts` (#forward-attachments): doc parts written after the text and attachment
+    /// parts — a forwarded chart and its fallback picture, already uploaded.
     func sendPeople(chatId: String, text: String, replyTo: String?, address: String? = nil,
                     chipMentions: [String] = [], attachments: [PendingAttachment] = [],
                     forwardedFrom: String? = nil, chipTokens: [String: String] = [:],
-                    replyRef: ReplyRef? = nil) {
+                    replyRef: ReplyRef? = nil, extraParts: [[String: Any]] = []) {
         guard let doc = docs[chatId], let chat = peopleChat(chatId), let me = user else { return }
         var mentions = AppModel.mentions(in: text, members: chat.members, senderHandle: me.login, chipTokens: chipTokens)
         // Leading bare agent names ("Bob?", "hey Bob …", "Arbos what is your name") count as
@@ -3318,7 +3320,7 @@ final class AppModel: ObservableObject {
         if attachments.isEmpty {
             commitPeople(chatId: chatId, doc: doc, messageId: messageId, text: text, author: author,
                          mentions: mentions, reply: reply, attachments: [], forwardedFrom: forwardedFrom,
-                         replyRef: replyRef)
+                         replyRef: replyRef, extraParts: extraParts)
             return
         }
         markUnacked(chatId: chatId, messageId: messageId)
@@ -3333,9 +3335,11 @@ final class AppModel: ObservableObject {
                     setSendError(chatId, UserError.classify("upload the attachment", error))
                 }
             }
+            // The forward header rides along with the pictures ([feedback
+            // forward-attachments-ios-2026-10-27]: it was dropped on this path).
             commitPeople(chatId: chatId, doc: doc, messageId: messageId, text: text, author: author,
                          mentions: mentions, reply: reply, attachments: uploaded, alreadyUnacked: true,
-                         replyRef: replyRef)
+                         forwardedFrom: forwardedFrom, replyRef: replyRef, extraParts: extraParts)
         }
     }
 
@@ -3344,7 +3348,8 @@ final class AppModel: ObservableObject {
     private func commitPeople(chatId: String, doc: CoreChatDoc, messageId: Id, text: String,
                               author: CoreChatDoc.Author, mentions: [String], reply: String?,
                               attachments: [Attachment], alreadyUnacked: Bool = false,
-                              forwardedFrom: String? = nil, replyRef: ReplyRef? = nil) {
+                              forwardedFrom: String? = nil, replyRef: ReplyRef? = nil,
+                              extraParts: [[String: Any]] = []) {
         if !alreadyUnacked { markUnacked(chatId: chatId, messageId: messageId) }
         // Rig (#1596): `ARBOS_TRACE_SENDS=1` prints what the row carries.
         if DebugHooks.traceSends {
@@ -3354,6 +3359,7 @@ final class AppModel: ObservableObject {
             try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments,
                                       author: author, mentions: mentions, replyTo: reply, forwardedFrom: forwardedFrom,
                                       replyRef: replyRef)
+            for part in extraParts { try doc.insertPart(messageId: messageId, part: part) }
             try doc.pushCommand("send", payload: ["messageId": messageId], device: deviceId)
         } catch {
             clearUnacked(chatId: chatId, messageId: messageId)
@@ -4518,15 +4524,31 @@ final class AppModel: ObservableObject {
                         let member = peopleChat(cid)?.members.first { $0.handle == from }
                         let agent = member?.isAgent == true ? member?.project : nil
                         let kind = sender.kind.isEmpty ? (agent != nil ? "agent" : "user") : sender.kind
-                        let body = (payload.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                        let text = (payload.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                        let senderName = sender.name.isEmpty ? (member?.displayName ?? from) : sender.name
+                        let who = kind == "agent" || from.isEmpty || from == "someone" ? senderName : "@\(from)"
+                        // Group / shared project chat (relay chat_kind since 2026-10-27; an older
+                        // relay sends none → the chat list's kind): title = the chat's name,
+                        // body = "Sender: text". A DM is titled with the sender.
+                        let chatKind = payload.chat_kind ?? (peopleChat(cid)?.kind == "group" ? "group" : "dm")
+                        let groupTitle = (payload.chat_title ?? peopleChat(cid)?.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                        let titled = chatKind != "dm" && !groupTitle.isEmpty
+                        let imageKey = payload.chat_image_key ?? peopleChat(cid)?.imageKey
+                        let groupImage = titled && inPeople ? imageKey.flatMap { blobURL(projectId: "\(peopleSlot):\(cid)", key: $0)?.absoluteString } : nil
+                        let shown = text.isEmpty ? "New message" : text
                         let info = MessagePush.userInfo(
-                            chatId: cid, projectId: projectId, title: sender.name.isEmpty ? (member?.displayName ?? "@\(from)") : sender.name,
-                            body: body.isEmpty ? "New message" : body,
+                            chatId: cid, projectId: projectId,
+                            title: titled ? groupTitle : who,
+                            body: titled ? "\(who): \(shown)" : shown,
                             senderKind: kind, senderId: sender.id.isEmpty ? (member?.id ?? from) : sender.id,
-                            senderName: sender.name.isEmpty ? (member?.displayName ?? from) : sender.name, senderHandle: from,
+                            senderName: senderName, senderHandle: from,
                             avatar: sender.avatar,
                             avatarColor: sender.avatar_color,
-                            avatarUrl: sender.avatar_url ?? member?.avatarUrl)
+                            avatarUrl: sender.avatar_url ?? member?.avatarUrl,
+                            chatTitle: titled ? groupTitle : nil,
+                            chatKind: chatKind,
+                            text: text.isEmpty ? nil : text,
+                            chatImageUrl: groupImage)
                         Task { await PushManager.shared.postMessage(id: p.id, info: info) }
                     }
                     applyBadge()
@@ -4619,8 +4641,9 @@ final class AppModel: ObservableObject {
                     let sender = payload.sender
                     let who = sender.kind == "agent" || sender.handle.isEmpty ? sender.name : "@\(sender.handle)"
                     let text = (payload.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                    PushManager.post(id: p.id, title: "\(who) in #\(payload.channel_name)",
-                                     body: text.isEmpty ? "New message" : text,
+// Same shape as a group: title = where ("Server › #channel"), body = "Sender: text".
+                    PushManager.post(id: p.id, title: "\(payload.server_name) › #\(payload.channel_name)",
+                                     body: "\(who): \(text.isEmpty ? "New message" : text)",
                                      chatId: payload.channel_id, projectId: channelSlot)
                 }
             case .peopleChatDeleted, .peopleInviteAccepted, .machineReady:
@@ -5110,8 +5133,10 @@ final class AppModel: ObservableObject {
 
     /// `replyTo` = the message this send answers (reply-to); it lands on the row as `replyTo`
     /// so every client draws the quote header and agentd puts the quoted message in the turn.
+    /// `extraParts` (#forward-attachments): doc parts written after the text and attachment
+    /// parts — a forwarded chart and its fallback picture, already uploaded.
     func send(chatId: Id, text: String, attachments: [PendingAttachment] = [], replyTo: Id? = nil,
-              forwardedFrom: String? = nil) {
+              forwardedFrom: String? = nil, extraParts: [[String: Any]] = []) {
         // A new send clears the composer's note (the next failure brings its own).
         clearSendError(chatId)
         if JobTabs.isJobChat(chatId) {
@@ -5120,7 +5145,7 @@ final class AppModel: ObservableObject {
         }
         if attachments.isEmpty {
             write(chatId: chatId, text: text, command: "send", attachments: [], replyTo: replyTo,
-                  forwardedFrom: forwardedFrom)
+                  forwardedFrom: forwardedFrom, extraParts: extraParts)
             return
         }
         guard let chat = chat(chatId) else { return }
@@ -5143,7 +5168,10 @@ final class AppModel: ObservableObject {
                     uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: nil, kind: kind))
                 }
             }
-            write(chatId: chatId, text: text, command: "send", attachments: uploaded, replyTo: replyTo)
+            // The forward header rides along with the pictures ([feedback
+            // forward-attachments-ios-2026-10-27]: it was dropped on this path).
+            write(chatId: chatId, text: text, command: "send", attachments: uploaded, replyTo: replyTo,
+                  forwardedFrom: forwardedFrom, extraParts: extraParts)
         }
     }
 
@@ -5172,6 +5200,15 @@ final class AppModel: ObservableObject {
             }
             return nil
         }
+    }
+
+    /// Upload one attachment's bytes under `slot` (`people:<chat>` or a project id) with a
+    /// fresh relay key; returns the key the row references. Forward copies a chart's fallback
+    /// picture into the target chat's slot with it ([feedback forward-attachments-ios-2026-10-27]).
+    func uploadBlob(slot: String, name: String, mime: String, data: Data) async throws -> String {
+        let key = AppModel.blobKey(for: name)
+        _ = try await api.putBlob(projectId: slot, key: key, mime: mime, data: data)
+        return key
     }
 
     /// Blob object name for `PUT /blob/{project}/{key}`. The relay's `safe_key` only
@@ -5328,7 +5365,7 @@ final class AppModel: ObservableObject {
 
     private func write(chatId: Id, text: String, command: String, attachments: [Attachment],
                        extra: [String: Any] = [:], messageId presetId: Id? = nil, replyTo: Id? = nil,
-                       forwardedFrom: String? = nil) {
+                       forwardedFrom: String? = nil, extraParts: [[String: Any]] = []) {
         guard let chat = chat(chatId) else {
             #if DEBUG
             if isFixture { fixtureAppend(chatId: chatId, text: text, attachments: attachments, replyTo: replyTo) }
@@ -5350,6 +5387,7 @@ final class AppModel: ObservableObject {
             try doc.insertUserMessage(id: messageId, text: text, deviceId: deviceId, attachments: attachments,
                                       author: author, replyTo: replyTo,
                                       forwardedFrom: forwardedFrom)
+            for part in extraParts { try doc.insertPart(messageId: messageId, part: part) }
             try doc.pushCommand(command, payload: extra.merging(["messageId": messageId]) { _, new in new }, device: deviceId)
             if !chat.isPinned && chat.title == "New chat" {
                 let title = AppModel.title(from: text)
