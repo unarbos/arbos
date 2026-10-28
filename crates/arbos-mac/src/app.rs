@@ -24,9 +24,9 @@ use crate::model::{
 use crate::model::{
     new_id, now_ms, Attachment, AttachmentKind, BoxReport, BoxState, ChannelSel, ChannelsView,
     Chat, ChatKind, ConnectorsView, DevicesView, Effort, Id, Job, JobRollout, Link, LinkState,
-    LocalView, Machine, Message, MessageStatus, NewSecret, Part, Project, ProjectDocView,
-    ProjectSecrets, QuestionState, ReplyRef, Role, Routine, RoutineRun, RoutineTrigger,
-    SecretDirector, SecretScope, SecretsView, ServerInfo, Skill, StatusKind,
+    LocalView, Machine, Message, MessageBody, MessageStatus, NewSecret, Part, Project,
+    ProjectDocView, ProjectSecrets, QuestionState, ReplyRef, Role, Routine, RoutineRun,
+    RoutineTrigger, SecretDirector, SecretScope, SecretsView, ServerInfo, Skill, StatusKind,
 };
 use crate::palette;
 use crate::search;
@@ -438,7 +438,7 @@ pub struct ForwardTarget {
     pub last_activity: u64,
 }
 
-/// Bubble menu → Forward (feedback app-01M5MXRZ7609S70P9S9P2RZDDF): the text
+/// Bubble menu → Forward (feedback app-01M5MXRZ7609S70P9S9P2RZDDF): the
 /// message the open picker will send on, and who wrote it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ForwardMessage {
@@ -446,6 +446,57 @@ pub struct ForwardMessage {
     pub message_id: Id,
     /// The original sender's display name ("Forwarded from <by>").
     pub by: String,
+}
+
+/// The parts the optimistic row in the destination draws before the relay
+/// echoes the real one: the same blob keys (their thumbnails are cached), the
+/// chart parts with their fallback pictures, then the text
+/// ([feedback forward-attachments-mac-2026-10-27]).
+pub fn forward_optimistic_parts(body: &MessageBody) -> Vec<Part> {
+    let mut parts: Vec<Part> = body
+        .attachments
+        .iter()
+        .map(|a| Part::Attachment {
+            id: new_id(),
+            attachment: a.clone(),
+        })
+        .collect();
+    for c in &body.charts {
+        let Part::Chart {
+            spec_version,
+            chart,
+            table,
+            ..
+        } = &c.chart
+        else {
+            continue;
+        };
+        let chart_id = new_id();
+        let fallback_id = c.fallback.as_ref().map(|a| {
+            let id = new_id();
+            let mut attachment = a.clone();
+            attachment.chart_part = Some(chart_id.clone());
+            parts.push(Part::Attachment {
+                id: id.clone(),
+                attachment,
+            });
+            id
+        });
+        parts.push(Part::Chart {
+            id: chart_id,
+            spec_version: *spec_version,
+            chart: chart.clone(),
+            table: table.clone(),
+            fallback: fallback_id,
+        });
+    }
+    if !body.text.is_empty() {
+        parts.push(Part::Text {
+            id: new_id(),
+            text: body.text.clone(),
+        });
+    }
+    parts
 }
 
 /// The text line a forwarded attachment travels with (every client renders
@@ -1664,6 +1715,23 @@ impl AppState {
                 reachable,
             } => self.on_call_ready(call, created, reachable, cx),
             SyncEvent::CallStarted { call, sender } => self.on_call_started(call, sender, cx),
+            SyncEvent::ChannelMessage {
+                server_id,
+                server_name,
+                channel_id,
+                channel_name,
+                room_id,
+                sender,
+                text,
+            } => self.notify_channel_message(
+                &server_id,
+                &server_name,
+                &channel_id,
+                &channel_name,
+                &room_id,
+                &sender,
+                text.as_deref(),
+            ),
             SyncEvent::FeedbackCapture {
                 request_id,
                 expires_at,
@@ -7523,12 +7591,26 @@ impl AppState {
         else {
             return;
         };
-        if message.plain_text().trim().is_empty() {
-            self.push_notice("Nothing to forward");
+        // Words, pictures, files, charts — any of them is enough; a picture still
+        // uploading is not on the relay yet, so there is nothing to copy.
+        if message.body().is_none() {
+            self.push_notice(if message.has_uploading_attachment() {
+                "Still uploading — try again in a moment"
+            } else {
+                "Nothing to forward"
+            });
             cx.notify();
             return;
         }
-        let by = self.forward_sender_name(message);
+        // Forwarding a forwarded message keeps the original author (Telegram), not
+        // whoever forwarded it last.
+        let by = message
+            .forwarded_from
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.forward_sender_name(message));
         self.forward_message = Some(ForwardMessage {
             chat_id,
             message_id,
@@ -7543,28 +7625,29 @@ impl AppState {
         }
     }
 
-    /// Forward the picked message's text to `target` as a new message of mine
-    /// there (no reply quote), carrying `forwardedFrom: <name>` so every client
-    /// draws the "Forwarded from <name>" header on the bubble.
+    /// Forward the picked message to `target` as a new message of mine there
+    /// (no reply quote): its text, its pictures / files / videos (each blob
+    /// copied into the destination's slot by the source) and its charts, all
+    /// carrying `forwardedFrom: <name>` so every client draws the "Forwarded
+    /// from <name>" header on the bubble
+    /// ([feedback forward-attachments-mac-2026-10-27]: the image and its
+    /// caption used to arrive as the caption alone).
     pub fn forward_message_to(&mut self, target: ForwardTarget, cx: &mut Context<Self>) {
         let Some(source) = self.forward_message.take() else {
             return;
         };
-        let Some(text) = self
+        let Some(payload) = self
             .messages
             .get(&source.chat_id)
             .and_then(|ms| ms.iter().find(|m| m.id == source.message_id))
-            .map(|m| m.plain_text().trim().to_owned())
-            .filter(|t| !t.is_empty())
+            .and_then(Message::body)
         else {
             cx.notify();
             return;
         };
+        let from_slot = self.space_of_chat(&source.chat_id);
         let message_id = new_id();
-        let parts = vec![Part::Text {
-            id: new_id(),
-            text: text.clone(),
-        }];
+        let parts = forward_optimistic_parts(&payload);
         self.messages
             .entry(target.chat_id.clone())
             .or_default()
@@ -7613,10 +7696,13 @@ impl AppState {
                 hidden_parts: Vec::new(),
                 greeting: false,
             });
-        self.command(ClientCommand::ForwardText {
+        self.command(ClientCommand::ForwardMessage {
             chat_id: target.chat_id.clone(),
             message_id,
-            text,
+            from_slot,
+            text: payload.text,
+            attachments: payload.attachments,
+            charts: payload.charts,
             forwarded_from: source.by,
         });
         self.push_notice(format!("Forwarded to {}", target.name));
@@ -7994,8 +8080,75 @@ impl AppState {
         self.sync_focus();
     }
 
-    /// A click on a notification: bring the window up and show that chat.
+    /// A server channel message (relay `channel_message` push, from the homeserver's push
+    /// rules — every member but the sender): a banner "<sender> in #channel" unless that
+    /// channel is on screen in a focused window or the server is muted. The coalescer keys
+    /// it under `server:<id>` so a busy server folds into "N updates in <server>".
+    #[allow(clippy::too_many_arguments)]
+    fn notify_channel_message(
+        &mut self,
+        server_id: &str,
+        server_name: &str,
+        channel_id: &str,
+        channel_name: &str,
+        room_id: &str,
+        sender: &crate::model::Sender,
+        text: Option<&str>,
+    ) {
+        let key = format!("server:{server_id}");
+        let visible = self.window_active
+            && self
+                .selected_channel
+                .as_ref()
+                .is_some_and(|c| c.server_id == server_id && c.channel_id == channel_id);
+        let gate = Gate {
+            streaming: false,
+            visible: visible || self.is_muted(&key),
+        };
+        let title = if sender.kind == "agent" || sender.handle.is_empty() {
+            sender.name.clone()
+        } else {
+            format!("@{}", sender.handle)
+        };
+        let mut event = NotifyEvent::new(
+            key,
+            server_name.to_string(),
+            NotifyKind::DirectMessage,
+            text.filter(|t| !t.is_empty())
+                .map(|t| format!("#{channel_name}: {t}"))
+                .unwrap_or_else(|| format!("#{channel_name}: new message")),
+        );
+        event.chat_id = Some(room_id.to_string());
+        event.sender = Some(title);
+        event.image = if sender.kind == "agent" {
+            crate::ui::avatars::notification_png(
+                &sender.id,
+                &sender.name,
+                sender.avatar_color_index,
+                crate::ui::theme::system_is_dark(),
+            )
+        } else if sender.avatar_url.is_empty() {
+            None
+        } else {
+            self.person_notification_png(&sender.avatar_url)
+        };
+        self.notifier.offer(event, now_ms(), gate);
+    }
+
+    /// A click on a notification: bring the window up and show that chat — or, for a
+    /// server channel banner (its id is the room id), that channel.
     pub fn open_chat_from_notification(&mut self, chat_id: Id, cx: &mut Context<Self>) {
+        let channel = self.servers.iter().find_map(|s| {
+            s.channels
+                .iter()
+                .find(|c| c.room_id.as_deref() == Some(chat_id.as_str()))
+                .map(|c| (s.id.clone(), c.id.clone()))
+        });
+        if let Some((server_id, channel_id)) = channel {
+            self.select_channel(server_id, channel_id, cx);
+            cx.activate(true);
+            return;
+        }
         let project_id = self
             .chats
             .values()
