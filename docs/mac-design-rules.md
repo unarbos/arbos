@@ -920,22 +920,51 @@ ack rises by exactly the reply's row; scrolled into history → no row). Record:
 project store `internal/feedback-loop/status-row-gap-2026-10-26.md`, shots in
 `media/feedback/status-row-gap/`.
 
-### iPhone chat bar: an opaque band with a short fade, like Grok Bot (Jacob 2026-10-28, [feedback iphone-composer-bottom-fade-2026-10-28])
+### iPhone bottom bars: rows stay readable behind the glass pills, a soft fade toward the edge (Jacob 2026-10-28, [feedback iphone-composer-see-through-2026-10-28]; supersedes [feedback iphone-composer-bottom-fade-2026-10-28])
 
-Grok's messages fade out into the solid page colour above the composer; nothing
-is readable behind or between the `+`, the field and the voice pill. Ours hung a
-24 pt gradient over the bar and rows read through around the controls.
+Jacob on TestFlight 202610281715985037: "yes this is not it. we should actually
+see the text behind the search bar." Grok Bot (his dark chats-list shot): the
+next row scrolls visibly UNDER a glass round button and a glass "Search"
+capsule — text and avatar dimmed but readable through and between the pills,
+no opaque band anywhere, a soft fade darkening the content toward the bottom
+edge. The opaque band shipped earlier that day is gone; this rule holds for the
+chat composer and Home's search capsule alike, light + dark, Matte + Glass,
+keyboard open.
 
-| Item | Rule (pt) | Code |
+| Item | Rule (pt / alpha) | Code |
 | --- | --- | --- |
-| Band | opaque from the bar's top edge (8 over the status row / composer) through the home indicator; keyboard up → ends on the keyboard and moves with it | `ComposerBandMaterial`, the bar's `.background` in `ChatView` |
-| Fade | **28** above the bar's top, clear → band, over the transcript; drawn in the chat canvas under the ↓ chevron and the new-messages pill | `Theme.composerFade`, `ComposerBottomFade` |
-| Last row at rest | fully above the fade: the transcript's tail = the fade's height | `Theme.transcriptTail` |
-| Material | Matte: the page colour. Glass: `.ultraThinMaterial` under the list top fade's 0.94 wash | `ComposerBottomBand.wash(glass:)` |
+| Layer | one layer at the canvas's bottom, over the content, under the controls — the page colour masked by a ramp; the bar has no background of its own | `BottomBarFadeView`, the canvas `.overlay(alignment: .bottom)` in `ChatView` / `HomeView` |
+| Ramp | clear **28** above the bar's top edge → **0.3** at that edge → **0.5** at the controls' bottom edge → **0.8** at the screen's (or keyboard's) edge; never 1 — no band, no hard edge; readable over every control (≤ **0.6**) | `BottomBarFade.fade / edgeWash / controlsWash / bottomWash / readableMax`, `.chat` / `.home` |
+| Controls | glass pills on Glass (Liquid Glass on iOS 26, frost before; the Search-in-chat bar's light `field` tint so a placeholder reads), the field colour on Matte; sizes are the control family's | `ControlSurface`, `HeaderGlassBackground`, `GlassCircle` |
+| Lists | the last row / result at rest sits above the fade: transcript tail = Home's trailing clear row = the fade | `Theme.transcriptTail`, `HomeChrome.listBottom` |
+| Keyboard | the keyboard is the bar's safe area: the layer ends on it and moves with it | `BottomBarFadeView` (GeometryReader reads the inset) |
+| System edge effect | none under the bar on iOS 26+ (`scrollEdgeEffectHidden(for: .bottom)`): one fade, ours | `NoBottomScrollEdgeEffect` |
 
-Pinned by `ArbosTests/ComposerBottomBandTests`. Record: project store
-`internal/feedback-loop/iphone-composer-bottom-fade-2026-10-28.md`, shots in
+Pinned by `ArbosTests/BottomBarFadeTests`. Record: project store
+`internal/feedback-loop/iphone-composer-see-through-2026-10-28.md`, shots in
 `media/feedback/iphone-composer-fade/`.
+
+### iPhone Home: the bars float over the list, rows fade out under them (Jacob 2026-10-28, [feedback iphone-home-bar-fades-2026-10-28])
+
+Grok's chat list: the top buttons and the bottom search bar float over the list;
+rows stay visible and fade out under them while scrolling. Ours cut the list
+hard — an opaque block through the discs and the whole tab bar at the top
+(#1988's answer to rows behind the status bar) and an opaque block behind the
+search capsule at the bottom. Supersedes #1988's opaque-through-the-tabs rule;
+nothing still reads behind the status bar itself.
+
+| Item | Rule (pt / alpha) | Code |
+| --- | --- | --- |
+| Top layer | opaque through the status bar + **4**, then one eased ramp: **0.75** at the disc row's bottom, **0.55** at the tab bar's bottom, **0** where the first row rests (`listTop`, unchanged); search mode has no tabs: 0.75 at the discs, 0 at `barOnlyListTop` | `ListTopFade.Screen.home/.homeSearch`, `HomeChrome.topSolid / discsWash / tabsWash` |
+| Bottom layer | the shared see-through fade of the rule above (`BottomBarFade.home`): clear 28 above the capsule, 0.3 at its top edge, 0.5 at its bottom edge, 0.8 at the home indicator / keyboard — rows readable behind the capsule | `BottomBarFadeView`, `BottomBarFade.home` |
+| Lists | leading clear row = the top layer's height (first row reachable at rest), trailing clear row = the bottom fade (last row / result reachable) | `HomeChrome.listTop`, `listBottom` |
+| Controls | unchanged: glass discs / capsules of the control family (`GlassCircle`, `controlField()`) | — |
+| Material | top layer — Matte: the page colour, Glass: `.ultraThinMaterial` under the 0.94 wash; bottom layer — the page colour on both; same geometry | `ListTopFade`, `BottomBarFadeView` |
+
+The chat bar floats the same way (rule above). Pinned by
+`ArbosTests/HomeBarFadeTests` and `ListTopFadeTests`. Record: project store
+`internal/feedback-loop/iphone-home-bar-fades-2026-10-28.md`, shots in
+`media/feedback/iphone-home-bar-fades/`.
 
 ## iPhone control family — one size for every round button, pill, field and bar (iPhone only; Jacob 2026-10-26, [feedback iphone-header-composer-sizing-2026-10-26])
 
