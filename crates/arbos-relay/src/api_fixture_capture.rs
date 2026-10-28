@@ -771,6 +771,9 @@ fn push_fixture_events() -> Vec<(&'static str, PushEventDto)> {
                 sender: sender.clone(),
                 project_id: None,
                 text: None,
+                chat_kind: None,
+                chat_title: None,
+                chat_image_key: None,
             }),
         ),
         (

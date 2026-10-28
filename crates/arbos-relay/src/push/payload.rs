@@ -17,7 +17,7 @@
 
 use serde_json::{json, Value};
 
-use crate::notify::{ChatRef, Sender, CATEGORY};
+use crate::notify::{ChatMeta, ChatRef, Sender, CATEGORY};
 
 /// The kinds of push the relay sends. The kind decides the APNs push type, priority, the
 /// collapse id and the dedupe key; the payload is built by the matching constructor below.
@@ -116,18 +116,28 @@ impl PushKind {
     }
 }
 
-/// The alert for one message. `chat_title` is set for group-style chats ("sender in <chat>").
+/// The alert for one message.
+///
+/// DM: title = sender, body = text. Group / shared project / channel: title = the chat's name,
+/// body = "Sender: text", `summary-arg` = the sender (iOS: "3 more from Doug"). The flat
+/// `text` is the message alone so a client that titles the banner itself (the iOS
+/// communication intent puts the sender in the subtitle) does not repeat the sender.
 pub fn message_alert(
     chat: &ChatRef,
     sender: &Sender,
     message_id: &str,
     body: &str,
     badge: i64,
-    chat_title: Option<&str>,
+    meta: &ChatMeta,
 ) -> Value {
+    let who = sender.title();
+    let (title, alert_body) = match meta.title.as_deref().filter(|_| meta.titled()) {
+        Some(group) => (group.to_owned(), format!("{who}: {body}")),
+        None => (who.clone(), body.to_owned()),
+    };
     let mut v = json!({
         "aps": {
-            "alert": { "title": sender.title(), "body": body },
+            "alert": { "title": title, "body": alert_body, "summary-arg": who, "summary-arg-count": 1 },
             "badge": badge,
             "sound": "default",
             "thread-id": chat.chat_id,
@@ -137,10 +147,15 @@ pub fn message_alert(
         "chat_id": chat.chat_id,
         "project_id": chat.project_label(),
         "message_id": message_id,
+        "chat_kind": meta.kind,
+        "text": body,
         "sender": sender.json(),
     });
-    if let Some(t) = chat_title {
+    if let Some(t) = meta.title.as_deref().filter(|t| !t.is_empty()) {
         v["chat_title"] = json!(t);
+    }
+    if let Some(k) = &meta.image_key {
+        v["chat_image_key"] = json!(k);
     }
     v
 }
@@ -186,12 +201,28 @@ mod tests {
         }
     }
 
+    fn agent() -> Sender {
+        Sender {
+            kind: "agent",
+            id: "p-9".into(),
+            name: "Doug".into(),
+            handle: String::new(),
+            avatar: Some("palm".into()),
+            avatar_color: Some("amber".into()),
+            avatar_url: None,
+            user_id: None,
+            avatar_color_index: None,
+            leaf: None,
+        }
+    }
+
     #[test]
-    fn a_message_alert_carries_thread_badge_mutable_content_and_category() {
+    fn a_dm_alert_is_titled_with_the_sender() {
         let chat = ChatRef::people("chat-1");
-        let p = message_alert(&chat, &sender(), "m-9", "hello", 4, None);
+        let p = message_alert(&chat, &sender(), "m-9", "hello", 4, &ChatMeta::dm());
         assert_eq!(p["aps"]["alert"]["title"], "@alice");
         assert_eq!(p["aps"]["alert"]["body"], "hello");
+        assert_eq!(p["aps"]["alert"]["summary-arg"], "@alice");
         assert_eq!(p["aps"]["thread-id"], "chat-1");
         assert_eq!(p["aps"]["badge"], 4);
         assert_eq!(p["aps"]["mutable-content"], 1);
@@ -200,13 +231,53 @@ mod tests {
         assert_eq!(p["chat_id"], "chat-1");
         assert_eq!(p["project_id"], "people");
         assert_eq!(p["message_id"], "m-9");
+        assert_eq!(p["chat_kind"], "dm");
+        assert_eq!(p["text"], "hello");
         assert_eq!(p["sender"]["handle"], "alice");
         assert!(p.get("chat_title").is_none());
+        assert!(p.get("chat_image_key").is_none());
+    }
 
-        let group = ChatRef::project("p-1", "chat-2");
-        let p = message_alert(&group, &sender(), "m-1", "x", 0, Some("Research"));
-        assert_eq!(p["chat_title"], "Research");
+    #[test]
+    fn a_group_alert_is_titled_with_the_group_and_names_the_sender_in_the_body() {
+        let group = ChatRef::people("chat-2");
+        let meta = ChatMeta {
+            kind: "group",
+            title: Some("Arbonites".into()),
+            image_key: Some("pic.png".into()),
+        };
+        let p = message_alert(&group, &sender(), "m-1", "Works", 0, &meta);
+        assert_eq!(p["aps"]["alert"]["title"], "Arbonites");
+        assert_eq!(p["aps"]["alert"]["body"], "@alice: Works");
+        assert_eq!(p["aps"]["alert"]["summary-arg"], "@alice");
+        assert_eq!(p["chat_kind"], "group");
+        assert_eq!(p["chat_title"], "Arbonites");
+        assert_eq!(p["chat_image_key"], "pic.png");
+        assert_eq!(p["text"], "Works");
+        // An agent's reply in the group follows the same rule.
+        let p = message_alert(&group, &agent(), "m-2", "Five.", 0, &meta);
+        assert_eq!(p["aps"]["alert"]["title"], "Arbonites");
+        assert_eq!(p["aps"]["alert"]["body"], "Doug: Five.");
+        assert_eq!(p["sender"]["kind"], "agent");
+    }
+
+    #[test]
+    fn a_shared_project_chat_is_a_group_and_an_own_agent_chat_is_a_dm() {
+        let chat = ChatRef::project("p-1", "chat-3");
+        let meta = ChatMeta {
+            kind: "project",
+            title: Some("Research".into()),
+            image_key: None,
+        };
+        let p = message_alert(&chat, &agent(), "m-1", "x", 0, &meta);
+        assert_eq!(p["aps"]["alert"]["title"], "Research");
+        assert_eq!(p["aps"]["alert"]["body"], "Doug: x");
+        assert_eq!(p["chat_kind"], "project");
         assert_eq!(p["project_id"], "p-1");
+        let p = message_alert(&chat, &agent(), "m-1", "x", 0, &ChatMeta::dm());
+        assert_eq!(p["aps"]["alert"]["title"], "Doug");
+        assert_eq!(p["aps"]["alert"]["body"], "x");
+        assert!(p.get("chat_title").is_none());
     }
 
     #[test]

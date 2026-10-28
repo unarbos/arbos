@@ -406,6 +406,7 @@ dependencies = [
  "sha2 0.10.9",
  "syntect",
  "thiserror 2.0.21",
+ "ttf-parser",
  "typeshare",
  "ulid",
  "unicode-normalization",

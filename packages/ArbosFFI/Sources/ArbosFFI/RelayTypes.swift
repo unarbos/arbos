@@ -1782,8 +1782,15 @@ public struct PeopleMessagePayloadDto: Codable {
 	/// The announced message's first line, when the sender announced one (agents do; a
 	/// device's row-level push has none and the banner says "New message").
 	public let text: String?
+	/// `dm` | `group` | `project` (shared project chat). Absent on an older relay → `dm`.
+	/// Since 2026-10-27: a group banner is titled with the chat, the sender goes in the body.
+	public let chat_kind: String?
+	/// The chat's name as this recipient sees it (groups and shared project chats; a DM has none).
+	public let chat_title: String?
+	/// Blob key of the group picture under `people:{chat_id}` (people groups with a picture).
+	public let chat_image_key: String?
 
-	public init(chat_id: String, from: String, from_handle: String, seq: Int64, sender: SenderDto, project_id: String?, text: String?) {
+	public init(chat_id: String, from: String, from_handle: String, seq: Int64, sender: SenderDto, project_id: String?, text: String?, chat_kind: String?, chat_title: String?, chat_image_key: String?) {
 		self.chat_id = chat_id
 		self.from = from
 		self.from_handle = from_handle
@@ -1791,6 +1798,9 @@ public struct PeopleMessagePayloadDto: Codable {
 		self.sender = sender
 		self.project_id = project_id
 		self.text = text
+		self.chat_kind = chat_kind
+		self.chat_title = chat_title
+		self.chat_image_key = chat_image_key
 	}
 }
 

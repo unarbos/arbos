@@ -140,9 +140,23 @@ final class ChartCardTests: XCTestCase {
         XCTAssertTrue(transcript.contains("case .chart(let partId, let spec, _):\n            ChartCard(partId: partId, spec: spec)"))
         let card = try String(contentsOf: root.appendingPathComponent("Arbos/UI/ChartCard.swift"), encoding: .utf8)
         for needle in ["ChartIconSquares", "\"chart-copy\"", "\"chart-save\"", "\"chart-expand\"", ".fullScreenCover(isPresented: $expanded)",
-                       "DragGesture(minimumDistance: 0)", "ImageRenderer(content: view)", "PHPhotoLibrary.requestAuthorization(for: .addOnly)",
+                       "ChartScrubHost(", "ImageRenderer(content: view)", "PHPhotoLibrary.requestAuthorization(for: .addOnly)",
                        "Picker(\"\", selection: $dataView)", "chartModelJson(specJson:", "chartTableTsv(specJson:"] {
             XCTAssertTrue(card.contains(needle), needle)
         }
+        // #2122 rule: nothing competing with the transcript scroll is a SwiftUI drag.
+        XCTAssertFalse(card.contains("DragGesture("), "the plot's touch surface is UIKit recognizers that can fail")
+    }
+
+    /// The plot's pan claims a mostly horizontal finger and declines at once otherwise, so a
+    /// vertical pan that starts on a chart scrolls the transcript (iphone-scroll-perf #2122).
+    func testTheScrubClaimsHorizontalPansAndYieldsVerticalOnesToTheScroll() {
+        XCTAssertEqual(ChartScrub.claim(CGSize(width: 12, height: 0)), .claimed)
+        XCTAssertEqual(ChartScrub.claim(CGSize(width: -12, height: 4)), .claimed)
+        XCTAssertEqual(ChartScrub.claim(CGSize(width: 0, height: 12)), .declined)
+        XCTAssertEqual(ChartScrub.claim(CGSize(width: 8, height: -8)), .declined, "a diagonal is the scroll's")
+        XCTAssertEqual(ChartScrub.claim(CGSize(width: 10, height: 9)), .declined, "needs a clear horizontal lead")
+        XCTAssertLessThanOrEqual(ChartScrub.minimumDistance, BubbleSwipe.lockDistance, "decides no later than the reply swipe")
+        XCTAssertLessThan(ChartScrub.holdDuration, 0.35, "the chart hold begins before the row's long press")
     }
 }

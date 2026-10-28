@@ -6,6 +6,7 @@
 
 import ArbosFFI
 import PhotosUI
+import QuickLook
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
@@ -175,6 +176,8 @@ struct ChatSession: View {
     @State private var sentOnce = false
     @State private var transcribing = false
     @State private var pending: [AppModel.PendingAttachment] = []
+    /// Quick Look URL for a staged picture/video (tap the chip while writing a description).
+    @State private var pendingPreviewURL: URL?
     @State private var photoItem: PhotosPickerItem?
     @State private var showPhotos = false
     @State private var showFiles = false
@@ -234,11 +237,18 @@ struct ChatSession: View {
     @State private var showTasks = false
     @State private var pendingThread: PendingThread?
 
-    /// Rows after the in-chat search filter (profile "search").
+    /// Rows after the in-chat search filter (profile "search"). Matching
+    /// messages also get a soft accent wash while the keyword is set
+    /// ([feedback app-01M5Z0GE2GV4ZJ5RH28QBT7H12]).
     private var visibleRows: [Row] {
         let q = searchText.trimmingCharacters(in: .whitespaces)
         guard showSearch, !q.isEmpty else { return rows }
         return rows.filter { m_text($0).localizedCaseInsensitiveContains(q) }
+    }
+
+    /// True while Search-in-chat has a keyword: every filtered message is a hit.
+    private var searchHitsActive: Bool {
+        showSearch && !searchText.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
     static func shownStamp(_ rowsVersion: Int, _ windowCount: Int, _ windowSkipEnd: Int, _ query: String, _ searching: Bool) -> Int {
@@ -469,6 +479,9 @@ struct ChatSession: View {
     @State private var pulsePhase = false
     /// The original a quote tap scrolled to; tinted until the fade timer clears it.
     @State private var highlightedMessage: Id?
+    /// After a quote tap: the reply we came from. The ↓ disc returns here once
+    /// (not to the latest message); cleared on use, send, or a real jump-to-latest.
+    @State private var jumpBackTo: Id?
     /// The bubble whose long-press actions (reaction capsule + menu) are open.
     @State private var actionsRow: Row?
     /// The composer had the keyboard up when the bubble was pressed (`openActions`).
@@ -1000,11 +1013,9 @@ struct ChatSession: View {
                 .environment(\.theme, theme)
             }
         }
-        .confirmationDialog(BlockedState.confirmTitle(handle: blockedPeer?.handle ?? counterpart?.handle ?? ""), isPresented: $confirmUnblock, titleVisibility: .visible) {
-            Button(BlockedState.unblock) {
-                if let peer = blockedPeer, let entry = BlockRow.entry(in: model.blocked, id: peer.id, handle: peer.handle) { model.unblock(entry) }
-            }
-        } message: { Text(BlockedState.confirmNote) }
+        .confirm(BlockedState.unblockConfirm(handle: blockedPeer?.handle ?? counterpart?.handle ?? ""), isPresented: $confirmUnblock) {
+            if let peer = blockedPeer, let entry = BlockRow.entry(in: model.blocked, id: peer.id, handle: peer.handle) { model.unblock(entry) }
+        }
         .sheet(isPresented: $showProfile) {
             AgentEditSheet(projectId: projectId).environmentObject(model).environment(\.theme, theme)
         }
@@ -1589,6 +1600,17 @@ struct ChatSession: View {
         composerFocused ? Theme.composerInsetKeyboard : Theme.composerInset
     }
 
+    /// ↓ after a quote tap: return to the reply we came from. Otherwise jump to
+    /// the latest row ([feedback app-01M5WDFMAZX82JNSEVZ94BM90D]).
+    private func jumpBackOrLatest() {
+        if let back = jumpBackTo {
+            jumpBackTo = nil
+            revealQuoted(back)
+            return
+        }
+        jumpToLatest()
+    }
+
     /// Jump to the latest row and resume stick-to-bottom.
     ///
     /// From deep in history — the window slid past the tail (`windowSkipEnd > 0`) —
@@ -1598,6 +1620,7 @@ struct ChatSession: View {
     /// group ([feedback jump-to-latest-instant-ios-2026-10-25]; the Mac's ↓ had the
     /// same shape of bug). Within the tail window the short animated hop stays.
     private func jumpToLatest() {
+        jumpBackTo = nil
         pinnedToBottom = true
         awayFromBottom = false
         newBelowCount = 0
@@ -1645,15 +1668,15 @@ struct ChatSession: View {
             Image(systemName: "chevron.down")
                 .font(theme.font(15, weight: .medium))
                 .foregroundStyle(theme.text)
-            ScrollInterruptTap(action: jumpToLatest)
+            ScrollInterruptTap(action: jumpBackOrLatest)
                 .frame(width: 44, height: 44)
         }
         .frame(width: Theme.voiceButton, height: Theme.voiceButton)
         .contentShape(Circle().inset(by: -(44 - Theme.voiceButton) / 2))
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Scroll to bottom")
+        .accessibilityLabel(jumpBackTo == nil ? "Scroll to bottom" : "Back to reply")
         .accessibilityAddTraits(.isButton)
-        .accessibilityAction { jumpToLatest() }
+        .accessibilityAction { jumpBackOrLatest() }
     }
 
     /// Shown when rows land below while the reader is up in history — tap jumps
@@ -1783,10 +1806,11 @@ struct ChatSession: View {
                         replySwipe: replySwipe,
                         rowFrames: rowFrames,
                         highlightedMessage: highlightedMessage,
+                        searchHitsActive: searchHitsActive,
                         rowsCount: rows.count,
                         messagesCount: messages.count,
                         canReply: { isMessageRow($0) },
-                        onQuoteTap: { revealQuoted($0) },
+                        onQuoteTap: { quote, fromReply in revealQuoted(quote, from: fromReply) },
                         onMenu: { runMessageMenu($0, row: $1) },
                         actionsRowId: actionsRow?.id,
                         onLongPress: { row in openActions(row) }
@@ -1885,6 +1909,7 @@ struct ChatSession: View {
             }
             .onChange(of: composerFocused) { _, focused in
                 guard focused else { return }
+                jumpBackTo = nil
                 pinnedToBottom = true
                 awayFromBottom = false
                 newBelowCount = 0
@@ -1893,9 +1918,11 @@ struct ChatSession: View {
                 }
             }
             .onChange(of: awayFromBottom) { _, away in
-                // Reader scrolled back to the end by hand — clear the pill; when the window
-                // had slid into history, its end is not the tail: jump to the real end.
+                // Reader scrolled back to the end by hand — clear the pill and any
+                // quote-tap jump-back; when the window had slid into history, its end
+                // is not the tail: jump to the real end.
                 if !away {
+                    jumpBackTo = nil
                     newBelowCount = 0
                     if windowSkipEnd > 0 { settleToBottom(proxy) }
                 }
@@ -2035,19 +2062,30 @@ struct ChatSession: View {
         return "you"
     }
 
-    /// Tap on a reply bubble's quote: scroll to the original and tint it for a moment. A
-    /// cross-chat quote (Reply in DM) opens the source chat on the original instead; the
-    /// header is not tappable when the viewer is not in that chat.
-    private func revealQuoted(_ quote: Quote) {
+    /// Tap on a reply bubble's quote: scroll to the original and tint it for a moment.
+    /// `from` is the reply we left — the ↓ disc returns there once. A cross-chat quote
+    /// (Reply in DM) opens the source chat on the original instead; the header is not
+    /// tappable when the viewer is not in that chat.
+    private func revealQuoted(_ quote: Quote, from replyId: Id) {
         if let src = quote.source {
-            if src.chatId == chatId { revealQuoted(src.messageId) } else { model.reveal(src) }
+            if src.chatId == chatId {
+                jumpBackTo = replyId
+                revealQuoted(src.messageId)
+            } else {
+                jumpBackTo = nil
+                model.reveal(src)
+            }
             return
         }
+        jumpBackTo = replyId
         revealQuoted(quote.messageId)
     }
 
     private func revealQuoted(_ messageId: Id) {
         guard let target = rows.first(where: { $0.messageId == messageId && $0.role != .system }) else { return }
+        // Leave stick-to-bottom so a window grow (or the ↓ disc) does not yank
+        // the reader off the revealed row / the reply they jumped back to.
+        pinnedToBottom = false
         if includeInWindow(messageId: messageId) {
             // The original was outside the window: let the grown VStack lay out first.
             DispatchQueue.main.async {
@@ -2535,19 +2573,31 @@ struct ChatSession: View {
                         ForEach(pending) { a in
                             // Images show a real thumbnail (same 28 pt chip as Mac);
                             // other files keep the SF Symbol + name pill.
+                            // Tap the chip (not ×) to open a picture/video while the
+                            // description bar is focused ([feedback app-01M5Z01FAES7QFEDGC1RKGS9DK]).
                             let thumb = a.mime.hasPrefix("image/") ? UIImage(data: a.data) : nil
+                            let canPreview = Self.isCaptionablePending(a)
                             HStack(spacing: 6) {
-                                if let thumb {
-                                    Image(uiImage: thumb)
-                                        .resizable()
-                                        .scaledToFill()
-                                        .frame(width: 28, height: 28)
-                                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                                } else {
-                                    Image(systemName: a.mime.hasPrefix("image/") ? "photo" : (a.mime.hasPrefix("audio/") ? "waveform" : "doc"))
-                                        .font(theme.font(12))
+                                Button {
+                                    openPendingPreview(a)
+                                } label: {
+                                    HStack(spacing: 6) {
+                                        if let thumb {
+                                            Image(uiImage: thumb)
+                                                .resizable()
+                                                .scaledToFill()
+                                                .frame(width: 28, height: 28)
+                                                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                                        } else {
+                                            Image(systemName: a.mime.hasPrefix("image/") ? "photo" : (a.mime.hasPrefix("audio/") ? "waveform" : (a.mime.hasPrefix("video/") ? "film" : "doc")))
+                                                .font(theme.font(12))
+                                        }
+                                        Text(a.name).font(theme.font(Theme.tiny)).lineLimit(1)
+                                    }
                                 }
-                                Text(a.name).font(theme.font(Theme.tiny)).lineLimit(1)
+                                .buttonStyle(.plain)
+                                .disabled(!canPreview)
+                                .accessibilityLabel(canPreview ? "\(a.name), tap to open" : a.name)
                                 // The remove ✕: always drawn, a full-size hit target
                                 // (not the 10 pt glyph alone), named for VoiceOver
                                 // ([feedback composer-attachment-removal-ios-2026-10-27]).
@@ -2578,6 +2628,7 @@ struct ChatSession: View {
                 textField
             }
         }
+        .quickLookPreview($pendingPreviewURL)
     }
 
     /// The chip's ✕: that one goes, the others and the draft stay.
@@ -2658,6 +2709,18 @@ struct ChatSession: View {
     private static func isCaptionablePending(_ a: AppModel.PendingAttachment) -> Bool {
         let mime = a.mime.lowercased()
         return mime.hasPrefix("image/") || mime.hasPrefix("video/")
+    }
+
+    /// Open a staged picture/video in Quick Look so the description can still be written after.
+    private func openPendingPreview(_ a: AppModel.PendingAttachment) {
+        guard Self.isCaptionablePending(a), let file = MediaFetch.tempFile(a.data, name: a.name) else { return }
+        // `.quickLookPreview` only presents when the binding becomes non-nil.
+        if pendingPreviewURL == file {
+            pendingPreviewURL = nil
+            Task { @MainActor in pendingPreviewURL = file }
+            return
+        }
+        pendingPreviewURL = file
     }
 
 
@@ -3027,6 +3090,7 @@ struct ChatSession: View {
         #endif
         Haptics.send()
         // A send means follow the reply: re-pin even if the reader had scrolled up.
+        jumpBackTo = nil
         pinnedToBottom = true
         awayFromBottom = false
         newBelowCount = 0
@@ -3337,10 +3401,13 @@ private struct TranscriptRows: View, Equatable {
     /// Row frames the rows write on layout (not compared: a class, same instance for the chat).
     let rowFrames: RowFrameIndex
     let highlightedMessage: Id?
+    /// Search-in-chat has a keyword: filtered message bubbles get the soft wash.
+    let searchHitsActive: Bool
     let rowsCount: Int
     let messagesCount: Int
     let canReply: (Row) -> Bool
-    let onQuoteTap: (Quote) -> Void
+    /// Quote and the reply message id it was tapped from (for jump-back).
+    let onQuoteTap: (Quote, Id) -> Void
     let onMenu: (MessageMenuItem, Row) -> Void
     /// The bubble whose long-press actions are open (it alone reports its frame).
     let actionsRowId: String?
@@ -3357,6 +3424,7 @@ private struct TranscriptRows: View, Equatable {
             && lhs.timeReveal == rhs.timeReveal
             && lhs.replySwipe == rhs.replySwipe
             && lhs.highlightedMessage == rhs.highlightedMessage
+            && lhs.searchHitsActive == rhs.searchHitsActive
             && lhs.mentions.stamp == rhs.mentions.stamp
         #if DEBUG
         PerfCounters.bump(same ? "rowsEqTrue" : "rowsEqFalse")
@@ -3379,8 +3447,9 @@ private struct TranscriptRows: View, Equatable {
             let reply = canReply(row)
             RowView(model: model, theme: theme, composerInset: composerInset, row: row, chatId: chatId, width: width,
                     people: people, timeReveal: timeReveal,
-                    onQuoteTap: onQuoteTap,
+                    onQuoteTap: { quote in onQuoteTap(quote, row.messageId) },
                     highlighted: highlightedMessage == row.messageId,
+                    searchHit: searchHitsActive && Self.isMessageBubble(row),
                     canReply: reply,
                     replyDrag: replySwipe.rowId == row.id ? replySwipe.reveal : 0,
                     replyArmed: replySwipe.rowId == row.id && replySwipe.armed,
@@ -3416,6 +3485,16 @@ private struct TranscriptRows: View, Equatable {
                 }
                 .messageRowGestures(isMessage: reply, onLongPress: { onLongPress(row) },
                                     onCopyMenu: { onMenu($0, row) })
+        }
+    }
+
+    /// Prose / media bubbles get the search wash; date / system / card / blocked rows do not.
+    private static func isMessageBubble(_ row: Row) -> Bool {
+        switch row.kind {
+        case .system, .question, .error, .forwardHint, .secretGhost, .hidden:
+            return false
+        case .user, .other, .member, .assistant, .file, .voiceMemo, .image:
+            return true
         }
     }
 }

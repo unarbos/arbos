@@ -1000,6 +1000,11 @@ final class AppModel: ObservableObject {
             }
             path = [.chat(chatId: chatId, projectId: projectId)]
             pendingOpen = deferRoom ? (chatId, projectId) : nil
+        } else if projectId == channelSlot,
+                  let server = servers.first(where: { $0.channels.contains { $0.id == chatId } }) {
+            // A server channel banner: land in the server, then the channel.
+            path = [.server(serverId: server.id), .chat(chatId: chatId, projectId: channelSlot)]
+            pendingOpen = nil
         } else {
             pendingOpen = (chatId, projectId)
         }
@@ -1084,6 +1089,12 @@ final class AppModel: ObservableObject {
         }
         return try await api.sendFeedback(note: note, image: data, mime: mime, width: w, height: h,
                                           appVersion: FeedbackCenter.appVersion, os: "iOS \(UIDevice.current.systemVersion)", projectId: projectId)
+    }
+
+    /// Opt-in MetricKit payload → the relay (`PerfDiagnostics`). The fixture never posts.
+    func sendPerfReport(_ envelope: [String: Any]) async throws {
+        if isFixture { return }
+        try await api.sendPerfReport(envelope)
     }
 
     // MARK: Calls v1
@@ -4218,7 +4229,8 @@ final class AppModel: ObservableObject {
         return out
     }
 
-    /// Tests: the relay's block list as `GET /blocks` would hand it over.
+    /// Tests and the fixture (`ARBOS_FIXTURE_BLOCKED`): the relay's block list as `GET /blocks`
+    /// would hand it over.
     func setBlockedForTests(_ list: [Person]) { blocked = list }
 
     /// Is this message hidden for me — from someone I blocked, in a people group?
@@ -4409,13 +4421,25 @@ final class AppModel: ObservableObject {
 
     func unblock(_ person: Person) {
         Task {
-            do { try await api.unblock(userId: person.id) }
+            do {
+                try await api.unblock(userId: person.id)
+                // A DM refused as `blocks_member` is postable again: resend now.
+                retryRefusedRooms(only: nil)
+            }
             catch let e as RelayError where e.status == 404 {
                 // Already not blocked on the relay; the list below says so.
             }
             catch { fail("unblock them", error) }
             await refreshBlocks()
         }
+    }
+
+    /// Ask the rooms that stand refused to resend now ([feedback 2005]): one chat when the
+    /// push names it, else every refused room (an unblock does not say which DM it frees).
+    /// A room that is not refused ignores the nudge inside its session.
+    func retryRefusedRooms(only chatId: Id?) {
+        let targets = chatId.map { pushRefused.contains($0) ? [$0] : [] } ?? Array(pushRefused)
+        for key in targets { rooms[key]?.retryRefused() }
     }
 
     func refreshBlocks() async {
@@ -4450,6 +4474,8 @@ final class AppModel: ObservableObject {
         for p in items where !notifiedPushIds.contains(p.id) {
             notifiedPushIds.insert(p.id)
             pushLog.notice("push id=\(p.id, privacy: .public) event=\(String(describing: p.event), privacy: .public)")
+            // The chat's members or settings changed: a refused room there resends now.
+            if let cid = RefusedSendRetry.chatToRetry(p.event) { retryRefusedRooms(only: cid) }
             switch p.event {
             case .peopleMessage(let payload):
                 let cid = payload.chat_id
@@ -4568,9 +4594,17 @@ final class AppModel: ObservableObject {
                 }
             case .spaceArchived(let payload):
                 applyRemoteArchive(spaceId: payload.space_id, kind: payload.kind, archived: payload.archived_at != nil)
-            case .channelMessage:
-                // Server channel banner: push-server-channels-ios-2026-10-26 (next item).
-                break
+            case .channelMessage(let payload):
+                // A server channel message (relay push gateway; every member but the sender).
+                // No banner while that channel is on screen; a tap opens it (openFromNotification).
+                if !isWatching(payload.channel_id) {
+                    let sender = payload.sender
+                    let who = sender.kind == "agent" || sender.handle.isEmpty ? sender.name : "@\(sender.handle)"
+                    let text = (payload.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    PushManager.post(id: p.id, title: "\(who) in #\(payload.channel_name)",
+                                     body: text.isEmpty ? "New message" : text,
+                                     chatId: payload.channel_id, projectId: channelSlot)
+                }
             case .peopleChatDeleted, .peopleInviteAccepted, .machineReady:
                 break
             case .notificationsCleared(let payload):
