@@ -1,0 +1,20 @@
+[package]
+name = "arbos-acp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+description = "Bridge an ACP agent (Claude Code, Codex, Goose, …) into Arbos chats as a connected member over the Arbos Session Protocol"
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+tokio-tungstenite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

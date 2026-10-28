@@ -330,6 +330,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "arbos-acp"
+version = "0.6.310"
+dependencies = [
+ "anyhow",
+ "clap",
+ "futures",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.26.2",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "arbos-agentd"
 version = "0.6.310"
 dependencies = [
