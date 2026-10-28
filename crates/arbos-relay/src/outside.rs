@@ -1054,6 +1054,15 @@ pub async fn list(State(state): State<AppState>, principal: Principal) -> ApiRes
     Ok(Json(json!({ "agents": out })).into_response())
 }
 
+/// `owned` for sibling modules (the session log reader).
+pub(crate) fn owned_for(
+    state: &AppState,
+    principal: &Principal,
+    project_id: &str,
+) -> Result<(OutsideAgent, Project), (StatusCode, String)> {
+    owned(state, principal, project_id)
+}
+
 fn owned(
     state: &AppState,
     principal: &Principal,
@@ -1083,10 +1092,12 @@ pub async fn get(
     Path(id): Path<String>,
 ) -> ApiResult {
     let (agent, project) = owned(&state, &principal, &id)?;
+    let log = state.db.asp_log_summary(&project.id).unwrap_or(Value::Null);
     Ok(Json(json!({
         "agent": agent.json(Some(&project)),
         "link": link_for(&state, &project.id),
         "relay_url": state.cfg.public_url,
+        "log": log,
     }))
     .into_response())
 }
@@ -2117,6 +2128,7 @@ pub async fn spawn_sweeper(state: AppState) {
                     tracing::info!(pruned = n, "asp events pruned");
                 }
             }
+            let _ = state.db.prune_asp_log();
         }
     });
 }
