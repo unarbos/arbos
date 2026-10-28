@@ -3873,9 +3873,24 @@ class Loop:
             last = st.get("ship_carrier")
             if last and st.get("ship_pause_started"):
                 conclusion = None
+                run_path = ""
                 if last.get("id"):
                     with contextlib.suppress(HttpError):
-                        conclusion = self.gh.repo_api("GET", f"/actions/runs/{last['id']}").get("conclusion")
+                        run = self.gh.repo_api("GET", f"/actions/runs/{last['id']}")
+                        conclusion = run.get("conclusion")
+                        run_path = run.get("path") or ""
+                if conclusion == "failure" and run_path.endswith("release.yml") and st.get("expects_ci") and not st.get("release_done"):
+                    # The Release lane itself is red (its Mac smoke, signing, notarization…) while the item's own CI is
+                    # green: that is an infra/lane failure, not this fix's — four items were failed "nothing shipped"
+                    # at 07:52 Oct 28 because two Release runs died in the composer paste smoke. The item stays
+                    # `pushed` with the clock paused; the lane failure is logged once and the next Release run (a
+                    # newer main, or the lane fixed) picks it up.
+                    if st.get("release_lane_red") != last.get("url"):
+                        st["release_lane_red"] = last.get("url")
+                        self.store.event(fid, "release_lane_red", run=last.get("url"))
+                        log(f"[{fid}] the Release run {last.get('url')} FAILED while this fix's CI is green: lane failure, ship clock stays paused")
+                    self.store.save_state(fid, st)
+                    return
                 if conclusion != "failure" and minutes_between(last.get("seen") or iso(), iso()) < self.SHIP_CARRIER_GAP_MIN:
                     # cancelled / superseded / just finished: its replacement (or the adoption) is seconds away
                     self.store.save_state(fid, st)
