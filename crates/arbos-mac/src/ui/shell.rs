@@ -3737,14 +3737,18 @@ impl Shell {
             let (avatar_state, person_image) =
                 hero_data.unwrap_or((avatars::AvatarState::Idle, None));
             let _ = avatar_state;
-            if !is_people {
-                // D92 amendment: an agent's uploaded / generated picture wins over the leaf.
-                let state = self.state.read(cx);
-                hero = hero.child(crate::ui::groups::picture(&space, state, 88.0, &theme));
-            } else if let Some(person) = space.person() {
+            // A DM shows the other person; everything else — an agent, a people group, a
+            // group of agents — shows the space's own picture through `groups::picture`. A
+            // people group used to fall into the DM arm (`space.person()` is just the first
+            // member) and open on that member's disc instead of the group's picture
+            // ([feedback group-row-avatar-mac-2026-10-27]).
+            let dm_partner = space
+                .person()
+                .filter(|_| is_people && !space.is_people_group());
+            if let Some(person) = dm_partner {
                 hero = hero.child(people::avatar(person_image, person, 88.0, &theme));
             } else {
-                // A group of agents only: its own picture, else the initials disc.
+                // D92 amendment: the uploaded / generated picture wins over the leaf / initials.
                 let state = self.state.read(cx);
                 hero = hero.child(crate::ui::groups::picture(&space, state, 88.0, &theme));
             }
