@@ -1,26 +1,27 @@
 {
-  "id": "b3-other-chat-while-busy",
-  "lane": "c",
-  "category": "background",
-  "title": "Answer in a second chat while the first is busy",
-  "turns": [
-    {
-      "prompt": "Start a background job: sleep for 240 seconds and then write 'done' to {D}/sleep.txt. Reply right away that it started; do not wait for it.",
-      "seed": "mkdir -p {D}",
-      "background": true,
-      "latency_max_s": 10,
-      "timeout_s": 120
-    },
-    {
-      "prompt": "In this new chat: what is the chemical symbol for gold?",
-      "new_chat": true,
-      "latency_max_s": 10,
-      "reply_regex": "\\bAu\\b",
-      "timeout_s": 120
-    }
-  ],
-  "verify_wait": {
-    "verify": "test -f {D}/sleep.txt && grep -qi done {D}/sleep.txt && echo PASS || echo FAIL: sleep.txt not written",
-    "wait_s": 420
+ "id": "b3-other-chat-while-busy",
+ "lane": "c",
+ "category": "background",
+ "title": "Answer in a second chat while the first is busy",
+ "turns": [
+  {
+   "prompt": "Start a background job: sleep for 240 seconds and then write 'done' to {D}/sleep.txt. Reply right away that it started; do not wait for it.",
+   "seed": "mkdir -p {D}",
+   "background": true,
+   "latency_max_s": 10,
+   "timeout_s": 120
+  },
+  {
+   "prompt": "In this new chat: what is the chemical symbol for gold?",
+   "new_chat": true,
+   "latency_max_s": 10,
+   "reply_regex": "\\bAu\\b",
+   "timeout_s": 120
   }
+ ],
+ "verify_wait": {
+  "verify": "test -f {D}/sleep.txt && grep -qi done {D}/sleep.txt && echo PASS || echo FAIL: sleep.txt not written",
+  "wait_s": 420
+ },
+ "regression": "run 10: sleep job died with the fleet roll — infrastructure"
 }
