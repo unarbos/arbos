@@ -49,6 +49,8 @@ fn tools() -> Value {
           "inputSchema": { "type": "object", "properties": { "thread_id": { "type": "string" }, "from": { "type": "integer" }, "to": { "type": "integer" }, "cursor": { "type": "string" } }, "required": ["thread_id"] } },
         { "name": "chat_messages", "description": "Read chat messages verbatim from the live chat doc (DMs, people groups, project chats): one message in full by message_id, or a page of history (newest last; `before`/`after` a message id; default the current chat, 20 messages, max 50). Use it whenever a message in your context carries a [truncated …] or [N earlier messages not shown …] marker.",
           "inputSchema": { "type": "object", "properties": { "chat_id": { "type": "string" }, "message_id": { "type": "string" }, "before": { "type": "string" }, "after": { "type": "string" }, "limit": { "type": "integer", "maximum": 50 } } } },
+        { "name": "chat_search", "description": "chat_search: find messages in a chat by text, sender or time range, newest first, with a total count; use it for counts, catch-ups by person and finding a topic instead of paging with chat_messages.",
+          "inputSchema": { "type": "object", "properties": { "chat_id": { "type": "string" }, "query": { "type": "string" }, "from": { "type": "string" }, "since_ms": { "type": "integer" }, "until_ms": { "type": "integer" }, "limit": { "type": "integer", "maximum": 50 }, "before": { "type": "string" } } } },
         { "name": "memory_search", "description": "Search Project memory (T0 user core, T1 project core, T2 thread memory). Bi-temporal fields included.",
           "inputSchema": { "type": "object", "properties": { "query": { "type": "string" }, "tiers": { "type": "array", "items": { "type": "string" } }, "include_expired": { "type": "boolean" }, "limit": { "type": "integer", "maximum": 20 } }, "required": ["query"] } },
         { "name": "memory_read", "description": "Read a thread's T2 memory, or memory records by id.",
@@ -132,6 +134,199 @@ fn clip(s: &str, max: usize) -> String {
     } else {
         format!("{}…[{} more chars]", &s[..max], s.len() - max)
     }
+}
+
+/// Resolve `chat_id` (default: the turn's chat) to an open host, or the same error
+/// `chat_messages` / `chat_search` both return when the room is not on this box.
+async fn resolve_open_chat(
+    a: &Arc<Agent>,
+    chat_id_arg: Option<String>,
+    default_chat: &str,
+) -> Result<(String, crate::sync::SharedHost), Value> {
+    let chat_id = chat_id_arg
+        .filter(|c| !c.trim().is_empty())
+        .unwrap_or_else(|| default_chat.to_owned());
+    match a.sync.host(&chat_id).await {
+        Some(host) => Ok((chat_id, host)),
+        None => Err(err_result(format!("no open chat {chat_id} on this box"))),
+    }
+}
+
+/// One chat_messages / chat_search row: id, role, from, status, at, reply_to, chars, text.
+/// `full` skips the FULL_MSG_CHARS clip (used when fetching one message by id).
+fn chat_message_row(chat_id: &str, m: &arbos_core::doc::MessageView, full: bool) -> Value {
+    let text = m.text();
+    let text = if full || text.chars().count() <= crate::truncate::FULL_MSG_CHARS {
+        text
+    } else {
+        crate::truncate::clip_marked(
+            &text,
+            crate::truncate::FULL_MSG_CHARS,
+            &m.id,
+            Some(&crate::truncate::fetch_message_hint(chat_id, &m.id)),
+        )
+    };
+    let from = m
+        .rest
+        .get("senderName")
+        .and_then(Value::as_str)
+        .or_else(|| m.rest.get("senderHandle").and_then(Value::as_str))
+        .or_else(|| m.rest.get("sender").and_then(Value::as_str))
+        .unwrap_or(if m.role == "assistant" {
+            "agent"
+        } else {
+            "user"
+        });
+    json!({
+        "id": m.id, "role": m.role, "from": from, "status": m.status,
+        "at": m.rest.get("createdAt"), "reply_to": m.rest.get("replyTo"),
+        "chars": text.chars().count(), "text": text,
+    })
+}
+
+fn chat_message_visible(m: &arbos_core::doc::MessageView) -> bool {
+    m.role != "system" && !m.text().trim().is_empty()
+}
+
+fn message_created_at(m: &arbos_core::doc::MessageView) -> Option<i64> {
+    m.rest.get("createdAt").and_then(|v| {
+        v.as_i64()
+            .or_else(|| v.as_u64().map(|n| n as i64))
+            .or_else(|| v.as_f64().map(|n| n as i64))
+    })
+}
+
+fn chat_from_matches(m: &arbos_core::doc::MessageView, from: &str) -> bool {
+    let needle = from.trim().trim_start_matches('@').to_ascii_lowercase();
+    if needle.is_empty() {
+        return false;
+    }
+    let handle = m
+        .rest
+        .get("senderHandle")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .trim_start_matches('@')
+        .to_ascii_lowercase();
+    let name = m
+        .rest
+        .get("senderName")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    handle == needle || name == needle
+}
+
+#[derive(Clone, Copy, Default)]
+struct ChatSearchFilter<'a> {
+    query: Option<&'a str>,
+    from: Option<&'a str>,
+    since_ms: Option<i64>,
+    until_ms: Option<i64>,
+}
+
+fn chat_search_matches(m: &arbos_core::doc::MessageView, f: ChatSearchFilter<'_>) -> bool {
+    if !chat_message_visible(m) {
+        return false;
+    }
+    if let Some(q) = f.query {
+        let q = q.trim();
+        if !q.is_empty() {
+            let hay = m.text().to_ascii_lowercase();
+            if !hay.contains(&q.to_ascii_lowercase()) {
+                return false;
+            }
+        }
+    }
+    if let Some(from) = f.from {
+        if !from.trim().is_empty() && !chat_from_matches(m, from) {
+            return false;
+        }
+    }
+    if f.since_ms.is_some() || f.until_ms.is_some() {
+        let Some(at) = message_created_at(m) else {
+            return false;
+        };
+        if let Some(since) = f.since_ms {
+            if at < since {
+                return false;
+            }
+        }
+        if let Some(until) = f.until_ms {
+            if at >= until {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Page a chat_search over an in-memory message list (oldest-first doc order). Pure: no box.
+/// Returns newest-first rows with the chat_messages clip rules and page budget.
+fn search_chat_messages(
+    chat_id: &str,
+    messages: &[arbos_core::doc::MessageView],
+    filter: ChatSearchFilter<'_>,
+    limit: usize,
+    before: Option<&str>,
+) -> Value {
+    let all_matches: Vec<(usize, &arbos_core::doc::MessageView)> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| chat_search_matches(m, filter))
+        .collect();
+    let total_matches = all_matches.len();
+    let before_idx = before
+        .filter(|b| !b.trim().is_empty())
+        .and_then(|b| messages.iter().position(|m| m.id == b));
+    let pool: Vec<&arbos_core::doc::MessageView> = match before_idx {
+        Some(i) => all_matches
+            .into_iter()
+            .filter(|(idx, _)| *idx < i)
+            .map(|(_, m)| m)
+            .collect(),
+        None => all_matches.into_iter().map(|(_, m)| m).collect(),
+    };
+    let start = pool.len().saturating_sub(limit);
+    let page = &pool[start..];
+    let older_remain = start > 0;
+    let mut budget = PAGE_TOKENS_CHARS;
+    let mut rows = Vec::new();
+    for m in page.iter().rev() {
+        let mut v = chat_message_row(chat_id, m, false);
+        let n = m.text().chars().count();
+        if n > 4000 && !rows.is_empty() {
+            v["text"] = json!(crate::truncate::clip_marked(
+                &m.text(),
+                4000,
+                &m.id,
+                Some(&crate::truncate::fetch_message_hint(chat_id, &m.id))
+            ));
+        }
+        let cost = v["text"].as_str().map(str::len).unwrap_or(0);
+        if cost > budget && !rows.is_empty() {
+            break;
+        }
+        budget = budget.saturating_sub(cost);
+        rows.push(v);
+    }
+    let oldest = rows
+        .last()
+        .and_then(|r| r["id"].as_str())
+        .map(str::to_owned);
+    let next_before = if older_remain || rows.len() < page.len() {
+        oldest
+    } else {
+        None
+    };
+    json!({
+        "chat_id": chat_id,
+        "messages": rows,
+        "total_matches": total_matches,
+        "next_before": next_before,
+    })
 }
 
 async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
@@ -273,42 +468,12 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
             }
         }
         "chat_messages" => {
-            let chat_id = s("chat_id")
-                .filter(|c| !c.trim().is_empty())
-                .unwrap_or_else(|| chat_for_scratch.clone());
-            let Some(host) = a.sync.host(&chat_id).await else {
-                return err_result(format!("no open chat {chat_id} on this box"));
+            let (chat_id, host) = match resolve_open_chat(a, s("chat_id"), &chat_for_scratch).await
+            {
+                Ok(v) => v,
+                Err(e) => return e,
             };
             let all = { host.lock().await.doc.messages() };
-            let row = |m: &arbos_core::doc::MessageView, full: bool| -> Value {
-                let text = m.text();
-                let text = if full || text.chars().count() <= crate::truncate::FULL_MSG_CHARS {
-                    text
-                } else {
-                    crate::truncate::clip_marked(
-                        &text,
-                        crate::truncate::FULL_MSG_CHARS,
-                        &m.id,
-                        Some(&crate::truncate::fetch_message_hint(&chat_id, &m.id)),
-                    )
-                };
-                let from = m
-                    .rest
-                    .get("senderName")
-                    .and_then(Value::as_str)
-                    .or_else(|| m.rest.get("senderHandle").and_then(Value::as_str))
-                    .or_else(|| m.rest.get("sender").and_then(Value::as_str))
-                    .unwrap_or(if m.role == "assistant" {
-                        "agent"
-                    } else {
-                        "user"
-                    });
-                json!({
-                    "id": m.id, "role": m.role, "from": from, "status": m.status,
-                    "at": m.rest.get("createdAt"), "reply_to": m.rest.get("replyTo"),
-                    "chars": text.chars().count(), "text": text,
-                })
-            };
             if let Some(mid) = s("message_id").filter(|x| !x.trim().is_empty()) {
                 return match all.iter().find(|m| m.id == mid) {
                     Some(m) => {
@@ -320,12 +485,12 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
                                 &format!("chat message {mid}"),
                                 &text,
                             );
-                            let mut v = row(m, false);
+                            let mut v = chat_message_row(&chat_id, m, false);
                             v["handle"] = json!(h);
                             v["note"] = json!("longer than one page: `text` is the head; read the rest with peek on `handle`");
                             text_result(v.to_string())
                         } else {
-                            text_result(row(m, true).to_string())
+                            text_result(chat_message_row(&chat_id, m, true).to_string())
                         }
                     }
                     None => err_result(format!("no message {mid} in chat {chat_id}")),
@@ -336,10 +501,8 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
                 .and_then(Value::as_i64)
                 .unwrap_or(20)
                 .clamp(1, 50) as usize;
-            let visible: Vec<&arbos_core::doc::MessageView> = all
-                .iter()
-                .filter(|m| m.role != "system" && !m.text().trim().is_empty())
-                .collect();
+            let visible: Vec<&arbos_core::doc::MessageView> =
+                all.iter().filter(|m| chat_message_visible(m)).collect();
             let (slice, older): (Vec<&arbos_core::doc::MessageView>, bool) =
                 if let Some(after) = s("after").filter(|x| !x.trim().is_empty()) {
                     let start = visible
@@ -365,7 +528,7 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
             let mut budget = PAGE_TOKENS_CHARS;
             let mut rows = Vec::new();
             for m in &slice {
-                let mut v = row(m, false);
+                let mut v = chat_message_row(&chat_id, m, false);
                 let n = m.text().chars().count();
                 if n > 4000 && !rows.is_empty() {
                     v["text"] = json!(crate::truncate::clip_marked(
@@ -401,6 +564,36 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
                     "total_in_chat": visible.len(),
                 })
                 .to_string(),
+            )
+        }
+        "chat_search" => {
+            let query = s("query").filter(|q| !q.trim().is_empty());
+            let from = s("from").filter(|f| !f.trim().is_empty());
+            if query.is_none() && from.is_none() {
+                return err_result(
+                    "chat_search needs query or from; use chat_messages to page the history",
+                );
+            }
+            let (chat_id, host) = match resolve_open_chat(a, s("chat_id"), &chat_for_scratch).await
+            {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
+            let all = { host.lock().await.doc.messages() };
+            let limit = args
+                .get("limit")
+                .and_then(Value::as_i64)
+                .unwrap_or(20)
+                .clamp(1, 50) as usize;
+            let before = s("before").filter(|b| !b.trim().is_empty());
+            let filter = ChatSearchFilter {
+                query: query.as_deref(),
+                from: from.as_deref(),
+                since_ms: args.get("since_ms").and_then(Value::as_i64),
+                until_ms: args.get("until_ms").and_then(Value::as_i64),
+            };
+            text_result(
+                search_chat_messages(&chat_id, &all, filter, limit, before.as_deref()).to_string(),
             )
         }
         "read_thread" => {
@@ -926,6 +1119,7 @@ pub fn router(agent: Arc<Agent>) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arbos_core::doc::MessageView;
 
     /// D69: a subagent-role session may not speak for the Project to other Projects.
     #[test]
@@ -937,5 +1131,236 @@ mod tests {
         assert!(refusal_for(SessionRole::Main, "send_message").is_none());
         assert!(refusal_for(SessionRole::Main, "group_send").is_none());
         assert!(refusal_for(SessionRole::Main, "projects_send").is_none());
+    }
+
+    const FIXTURE_BASE_MS: i64 = 1_700_000_000_000;
+
+    fn fixture_msg(i: usize, handle: &str, name: &str, text: &str) -> MessageView {
+        MessageView {
+            id: format!("m{i:03}"),
+            role: "user".into(),
+            status: "done".into(),
+            parts: vec![json!({ "kind": "text", "text": text })],
+            rest: json!({
+                "sender": format!("user:{handle}"),
+                "senderHandle": handle,
+                "senderName": name,
+                "createdAt": FIXTURE_BASE_MS + (i as i64) * 60_000,
+            }),
+        }
+    }
+
+    /// 300 rows from alice, bob and carol; createdAt one minute apart; some "Launch Date" text.
+    fn fixture_300() -> Vec<MessageView> {
+        let authors = [("alice", "Alice"), ("bob", "Bob"), ("carol", "Carol")];
+        (0..300)
+            .map(|i| {
+                let (handle, name) = authors[i % 3];
+                let text = if i % 17 == 0 {
+                    format!("Talking about Launch Date item {i}")
+                } else {
+                    format!("hello from {handle} #{i}")
+                };
+                fixture_msg(i, handle, name, &text)
+            })
+            .collect()
+    }
+
+    fn ids(v: &Value) -> Vec<&str> {
+        v["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn chat_search_from_alice_and_at_alice() {
+        let rows = fixture_300();
+        let alice_n = rows
+            .iter()
+            .filter(|m| chat_from_matches(m, "alice"))
+            .count();
+        assert_eq!(alice_n, 100);
+        for from in ["alice", "@Alice"] {
+            let v = search_chat_messages(
+                "c1",
+                &rows,
+                ChatSearchFilter {
+                    from: Some(from),
+                    ..Default::default()
+                },
+                50,
+                None,
+            );
+            assert_eq!(v["total_matches"], 100, "from={from}");
+            assert!(ids(&v).iter().all(|id| {
+                let i: usize = id.trim_start_matches('m').parse().unwrap();
+                i % 3 == 0
+            }));
+        }
+    }
+
+    #[test]
+    fn chat_search_query_launch_date_case_insensitive() {
+        let rows = fixture_300();
+        let v = search_chat_messages(
+            "c1",
+            &rows,
+            ChatSearchFilter {
+                query: Some("launch date"),
+                ..Default::default()
+            },
+            50,
+            None,
+        );
+        let expected: Vec<&str> = rows
+            .iter()
+            .filter(|m| m.text().to_ascii_lowercase().contains("launch date"))
+            .map(|m| m.id.as_str())
+            .collect();
+        assert_eq!(v["total_matches"], expected.len());
+        assert!(!expected.is_empty());
+        for id in ids(&v) {
+            assert!(expected.contains(&id));
+            let row = rows.iter().find(|m| m.id == id).unwrap();
+            assert!(row.text().contains("Launch Date"));
+        }
+    }
+
+    #[test]
+    fn chat_search_since_until_bounds() {
+        let rows = fixture_300();
+        // rows 10..20 → since = base+10min, until = base+20min (half-open)
+        let since = FIXTURE_BASE_MS + 10 * 60_000;
+        let until = FIXTURE_BASE_MS + 20 * 60_000;
+        // "o" appears in every fixture line; bounds alone keep rows 10..20.
+        let all_in_window = search_chat_messages(
+            "c1",
+            &rows,
+            ChatSearchFilter {
+                query: Some("o"),
+                since_ms: Some(since),
+                until_ms: Some(until),
+                ..Default::default()
+            },
+            50,
+            None,
+        );
+        assert_eq!(all_in_window["total_matches"], 10);
+        let mut got: Vec<usize> = ids(&all_in_window)
+            .iter()
+            .map(|id| id.trim_start_matches('m').parse().unwrap())
+            .collect();
+        got.sort();
+        assert_eq!(got, (10..20).collect::<Vec<_>>());
+
+        // from (or query) is required; Alice's rows inside the window only.
+        let filter = ChatSearchFilter {
+            from: Some("alice"),
+            since_ms: Some(since),
+            until_ms: Some(until),
+            ..Default::default()
+        };
+        let v = search_chat_messages("c1", &rows, filter, 50, None);
+        let alice_in_window: Vec<_> = (10..20).filter(|i| i % 3 == 0).collect();
+        assert_eq!(v["total_matches"], alice_in_window.len());
+        // A row with no createdAt is skipped when a bound is set.
+        let mut no_at = fixture_msg(999, "alice", "Alice", "bound skip");
+        no_at.rest.as_object_mut().unwrap().remove("createdAt");
+        let mixed = {
+            let mut v = rows[10..20].to_vec();
+            v.push(no_at);
+            v
+        };
+        let v2 = search_chat_messages("c1", &mixed, filter, 50, None);
+        assert_eq!(v2["total_matches"], alice_in_window.len());
+    }
+
+    #[test]
+    fn chat_search_pages_with_before_no_overlap() {
+        let rows = fixture_300();
+        let hello = ChatSearchFilter {
+            query: Some("hello"),
+            ..Default::default()
+        };
+        let page1 = search_chat_messages("c1", &rows, hello, 50, None);
+        let total = page1["total_matches"].as_u64().unwrap() as usize;
+        // "Launch Date" rows do not contain "hello"; 300 - 18 = 282
+        assert_eq!(total, 282);
+        let ids1 = ids(&page1);
+        assert_eq!(ids1.len(), 50);
+        assert_eq!(ids1[0], "m299");
+        let next = page1["next_before"].as_str().unwrap().to_owned();
+        assert_eq!(next, ids1[ids1.len() - 1]);
+
+        let page2 = search_chat_messages("c1", &rows, hello, 50, Some(&next));
+        assert_eq!(page2["total_matches"], total);
+        let ids2 = ids(&page2);
+        assert_eq!(ids2.len(), 50);
+        let set1: std::collections::HashSet<&str> = ids1.iter().copied().collect();
+        for id in &ids2 {
+            assert!(!set1.contains(id), "overlap {id}");
+        }
+        let next2 = page2["next_before"].as_str().unwrap().to_owned();
+
+        // Drain remaining pages; last has next_before null.
+        let mut before = Some(next2);
+        let mut seen: std::collections::HashSet<String> =
+            set1.into_iter().map(str::to_owned).collect();
+        seen.extend(ids2.iter().map(|s| (*s).to_owned()));
+        loop {
+            let page = search_chat_messages("c1", &rows, hello, 50, before.as_deref());
+            assert_eq!(page["total_matches"], total);
+            let batch: Vec<String> = ids(&page).into_iter().map(str::to_owned).collect();
+            for id in &batch {
+                assert!(seen.insert(id.clone()), "overlap {id}");
+            }
+            match page["next_before"].as_str() {
+                Some(b) => before = Some(b.to_owned()),
+                None => break,
+            }
+        }
+        assert_eq!(seen.len(), total);
+    }
+
+    #[tokio::test]
+    async fn chat_search_requires_query_or_from() {
+        let (agent, _root) = crate::status::tests::test_agent().await;
+        let err = call_tool(&agent, "chat_search", &json!({ "chat_id": "x" })).await;
+        assert_eq!(err["isError"], true);
+        let text = err["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("chat_search needs query or from; use chat_messages to page the history"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_search_unknown_chat_same_error_as_chat_messages() {
+        let (agent, _root) = crate::status::tests::test_agent().await;
+        let missing = "01NOOPENCHATONTHISBOX00000";
+        let a = call_tool(
+            &agent,
+            "chat_messages",
+            &json!({ "chat_id": missing, "limit": 1 }),
+        )
+        .await;
+        let b = call_tool(
+            &agent,
+            "chat_search",
+            &json!({ "chat_id": missing, "query": "x" }),
+        )
+        .await;
+        let ta = a["content"][0]["text"].as_str().unwrap();
+        let tb = b["content"][0]["text"].as_str().unwrap();
+        assert!(a["isError"].as_bool().unwrap());
+        assert!(b["isError"].as_bool().unwrap());
+        assert_eq!(ta, tb);
+        assert!(
+            ta.contains(&format!("no open chat {missing} on this box")),
+            "{ta}"
+        );
     }
 }
