@@ -311,7 +311,7 @@ struct SettingsView: View {
     // MARK: Row summaries
 
     private var devicesSummary: String? {
-        switch model.devices.count {
+        switch AuthDevice.visible(model.devices).count {
         case 0: return nil
         case 1: return "1 device"
         case let n: return "\(n) devices"
@@ -1183,7 +1183,7 @@ struct DevicesPage: View {
     @State private var errorDetailsOpen = false
 
     private var rows: [AuthDevice] {
-        model.devices.sorted { a, b in a.current && !b.current }
+        AuthDevice.visible(model.devices)
     }
 
     var body: some View {

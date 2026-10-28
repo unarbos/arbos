@@ -859,7 +859,7 @@ fn server_preview(state: &AppState, server: &ServerInfo) -> String {
         .filter(|c| c.server_id == server.id && c.last_ts > 0)
         .max_by_key(|c| c.last_ts);
     match newest {
-        Some(c) => format!("{} · {}", c.name, channel_last_line(c)),
+        Some(c) => format!("{} · {}", c.name, channel_last_line(state, c)),
         None => state
             .space_row(server)
             .map(|s| s.last_text.clone())
@@ -868,13 +868,38 @@ fn server_preview(state: &AppState, server: &ServerInfo) -> String {
     }
 }
 
-/// "Sam: hi" for a channel row.
-fn channel_last_line(row: &arbos_matrix::ChannelRow) -> String {
+/// "@sam: hi" for a channel row — a person by handle, as a group's `preview`
+/// labels them, "You" for my own row, an agent by name; a system line bare.
+/// The Matrix row's sender name is the handle for people
+/// (`arbos_matrix::message_row`), so it is never shown as if it were a name
+/// ([feedback server-member-names-2026-10-28]).
+fn channel_last_line(state: &AppState, row: &arbos_matrix::ChannelRow) -> String {
     let line = plain(row.last_text.lines().next().unwrap_or_default());
-    if row.last_sender_name.is_empty() {
+    let who = channel_preview_who(
+        &row.last_sender,
+        &row.last_sender_name,
+        &format!("user:{}", state.me_id()),
+    );
+    if who.is_empty() {
         line
     } else {
-        format!("{}: {line}", row.last_sender_name)
+        format!("{who}: {line}")
+    }
+}
+
+/// The label before a channel preview's text, from the newest row's member
+/// string and Matrix display name; `me` is my own member string.
+pub(crate) fn channel_preview_who(sender: &str, sender_name: &str, me: &str) -> String {
+    if sender.eq_ignore_ascii_case(me) {
+        return "You".into();
+    }
+    if sender_name.is_empty() || sender == "system" {
+        return String::new();
+    }
+    if sender.starts_with("user:") {
+        format!("@{sender_name}")
+    } else {
+        sender_name.to_owned()
     }
 }
 
@@ -1681,7 +1706,7 @@ fn server_channels(
         let preview = room
             .as_ref()
             .filter(|r| r.last_ts > 0)
-            .map(channel_last_line)
+            .map(|r| channel_last_line(state, r))
             .unwrap_or_else(|| "No messages yet".into());
         let time = room
             .as_ref()
@@ -2122,10 +2147,11 @@ fn render_row(
                                 .child(shell.agent_name_input.clone())
                                 .into_any_element()
                         } else {
-                            div()
+                            // The `@handle` beside it is bottom-aligned with this
+                            // box: an emoji-only name is lifted onto the baseline
+                            // ([feedback emoji-name-handle-offset-mac-2026-10-28]).
+                            identity::name(name, TEXT_BODY)
                                 .min_w_0()
-                                .truncate()
-                                .text_size(px(TEXT_BODY))
                                 .font_weight(if unread || streaming {
                                     FontWeight::SEMIBOLD
                                 } else {
@@ -2136,15 +2162,16 @@ fn render_row(
                                 } else {
                                     theme.text
                                 })
-                                .child(name)
                                 .into_any_element()
                         })
                         .when_some(handle, |el, h| {
+                            let handle_id = id.clone();
                             el.child(
                                 div()
                                     .flex_shrink_0()
                                     .text_size(px(TEXT_TINY))
                                     .text_color(theme.text_muted)
+                                    .debug_selector(move || format!("row-handle-{handle_id}"))
                                     .child(h),
                             )
                         })
@@ -3457,6 +3484,28 @@ mod row_bounds_tests {
 }
 
 #[cfg(test)]
+mod channel_preview_tests {
+    //! A server row's "#general · …" preview labels a person as a group's preview does
+    //! (`@handle:`), me as "You", an agent by name — never a bare handle as if it were a
+    //! name ([feedback server-member-names-2026-10-28]; the tester's shot read "general ·
+    //! A: bug").
+    use super::channel_preview_who;
+
+    #[test]
+    fn the_preview_labels_people_like_a_group_does() {
+        let me = "user:test_01ME";
+        assert_eq!(channel_preview_who("user:test_01scout", "A", me), "@A");
+        assert_eq!(channel_preview_who("user:test_01me", "affinity", me), "You");
+        assert_eq!(channel_preview_who("agent:01COMMS", "Comms", me), "Comms");
+        assert_eq!(channel_preview_who("system", "", me), "");
+        assert_eq!(channel_preview_who("system", "launchcrew", me), "");
+        assert_eq!(channel_preview_who("", "", me), "", "no row yet");
+        // The fixture names its senders outright (no member string).
+        assert_eq!(channel_preview_who("", "Sami", me), "Sami");
+    }
+}
+
+#[cfg(test)]
 mod status_cell_tests {
     use std::time::Duration;
 
@@ -3775,6 +3824,89 @@ mod status_cell_tests {
         assert!(
             !t.running,
             "Reduce Motion: nothing asks for frames, the ticker parks"
+        );
+    }
+
+    /// Where a row's `@handle` sits against its own preview line — the one
+    /// measure that is the same for every DM row whatever its name is drawn with.
+    fn handle_offset(vcx: &mut VisualTestContext, id: &'static str) -> (f32, f32) {
+        let handle = vcx
+            .debug_bounds(match id {
+                "dm" => "row-handle-dm",
+                "dm-emoji" => "row-handle-dm-emoji",
+                "dm-mixed" => "row-handle-dm-mixed",
+                _ => unreachable!(),
+            })
+            .unwrap_or_else(|| panic!("{id}: the DM row shows its @handle"));
+        let line = vcx
+            .debug_bounds(match id {
+                "dm" => "row-preview-line-dm",
+                "dm-emoji" => "row-preview-line-dm-emoji",
+                "dm-mixed" => "row-preview-line-dm-mixed",
+                _ => unreachable!(),
+            })
+            .unwrap_or_else(|| panic!("{id}: its preview line"));
+        (
+            f32::from(line.origin.y) - f32::from(handle.origin.y),
+            f32::from(handle.size.height),
+        )
+    }
+
+    /// [feedback emoji-name-handle-offset-mac-2026-10-28]: a DM whose person is
+    /// named with one emoji (and one with a mixed name) draws its `@handle` at
+    /// the same height as a text name's — and the rows stay the same height.
+    #[gpui::test]
+    fn an_emoji_name_keeps_the_dm_rows_handle_where_text_names_have_it(cx: &mut TestAppContext) {
+        let (_rt, state, shell, vcx) = mount(cx);
+        let now = crate::model::now_ms();
+        state.update(vcx, |s, cx| {
+            for (pid, name, handle) in [
+                ("dm-emoji", "🧙🏽\u{200d}♂\u{fe0f}", "dawizzaa"),
+                ("dm-mixed", "Cato 🌳", "cato"),
+            ] {
+                s.projects.push(Project {
+                    id: pid.into(),
+                    name: name.into(),
+                    kind: SpaceKind::Dm,
+                    people: vec![person("gh_9", handle, name)],
+                    ..Project::default()
+                });
+                let room = format!("room-{pid}");
+                let at = now - 30_000;
+                s.chats
+                    .insert(pid.into(), vec![chat(&room, pid, false, at)]);
+                s.messages.insert(
+                    room.clone(),
+                    vec![message("u", &room, "user", "done", "Or even better", at)],
+                );
+            }
+            cx.notify();
+        });
+        for _ in 0..3 {
+            shell.update(vcx, |_, cx| cx.notify());
+            vcx.run_until_parked();
+        }
+        let text = handle_offset(vcx, "dm");
+        let emoji = handle_offset(vcx, "dm-emoji");
+        let mixed = handle_offset(vcx, "dm-mixed");
+        assert_eq!(
+            emoji, text,
+            "emoji name: handle offset / height as for text"
+        );
+        assert_eq!(
+            mixed, text,
+            "mixed name: handle offset / height as for text"
+        );
+        let row_h = |vcx: &mut VisualTestContext, sel: &'static str| {
+            f32::from(vcx.debug_bounds(sel).expect(sel).size.height)
+        };
+        let text_h = row_h(vcx, "row-preview-line-dm");
+        assert_eq!(row_h(vcx, "row-preview-line-dm-emoji"), text_h);
+        assert_eq!(row_h(vcx, "row-preview-line-dm-mixed"), text_h);
+        assert!(
+            vcx.debug_bounds(crate::ui::identity::LIFTED_SELECTOR)
+                .is_some(),
+            "the emoji name is drawn lifted onto the baseline"
         );
     }
 }

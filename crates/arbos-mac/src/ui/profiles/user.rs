@@ -387,6 +387,8 @@ mod render_tests {
                 people: vec![
                     person("gh_2", "samir", "Sam Rivera"),
                     person("gh_3", "priya", "Priya Natarajan"),
+                    person("gh_4", "dawizzaa", "🧙🏽\u{200d}♂\u{fe0f}"),
+                    person("gh_5", "cato", "Cato 🌳"),
                 ],
                 ..Project::default()
             });
@@ -485,6 +487,48 @@ mod render_tests {
             Some("g1"),
             "nothing to select until the relay lists the DM"
         );
+    }
+
+    /// [feedback emoji-name-handle-offset-mac-2026-10-28]: the hero's `@handle`
+    /// line and the Message pill sit where they sit for a text name when the
+    /// name is one emoji (or text with an emoji); only the emoji-only name is
+    /// drawn lifted onto the baseline.
+    #[gpui::test]
+    fn an_emoji_name_keeps_the_handle_line_where_a_text_name_has_it(cx: &mut TestAppContext) {
+        let (_rt, state, shell, vcx) = mount(cx);
+        let mut seen = Vec::new();
+        for (handle, lifted) in [("samir", false), ("dawizzaa", true), ("cato", false)] {
+            open(&state, vcx, handle);
+            settle(&shell, vcx);
+            let line = vcx
+                .debug_bounds("hero-subtitle")
+                .unwrap_or_else(|| panic!("@{handle} line"));
+            let pill = vcx
+                .debug_bounds(MESSAGE_ID)
+                .unwrap_or_else(|| panic!("Message pill on @{handle}'s pane"));
+            assert_eq!(
+                vcx.debug_bounds(crate::ui::identity::LIFTED_SELECTOR)
+                    .is_some(),
+                lifted,
+                "@{handle}: lifted name = {lifted}"
+            );
+            seen.push((handle, line.origin.y, line.size.height, pill.origin.y));
+        }
+        let (_, text_y, text_h, text_pill) = seen[0];
+        for (handle, y, h, pill) in &seen[1..] {
+            assert_eq!(
+                *y, text_y,
+                "@{handle}: the handle line's top is a text name's"
+            );
+            assert_eq!(
+                *h, text_h,
+                "@{handle}: the handle line's height is a text name's"
+            );
+            assert_eq!(
+                *pill, text_pill,
+                "@{handle}: the pill under it is where a text name has it"
+            );
+        }
     }
 
     #[gpui::test]

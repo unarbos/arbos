@@ -1041,6 +1041,10 @@ struct ChatSession: View {
                                                 // DM or 1:1 agent chat you're already in (#1871).
                                                 inPrivateChat: people?.isGroup != true),
                         onReact: { emoji in
+                            // One toggle per overlay: a second report of the same pick
+                            // (the emoji keyboard reports an insert twice, or a cell tapped
+                            // again while the overlay fades) would undo the reaction.
+                            guard actionsRow != nil else { return }
                             closeActions()
                             model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: emoji)
                         },

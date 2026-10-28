@@ -30,6 +30,7 @@ use crate::app::{AppState, ProfilePage};
 use crate::model::{now_ms, Attachment, AttachmentKind, Chat, Id, Message, Part};
 use crate::ui::glass;
 use crate::ui::highlight;
+use crate::ui::identity;
 use crate::ui::link_tile;
 use crate::ui::mention;
 use crate::ui::sf_symbols;
@@ -436,7 +437,9 @@ pub(super) fn editable_name(
             let rim = theme.field_border;
             highlight::button_with(el.cursor_text(), theme, move |s| s.border_color(rim))
         })
-        .child(div().truncate().child(name.to_string()))
+        // The @handle line sits under this: an emoji-only name is lifted onto
+        // the baseline (`identity::name`) so it keeps a text name's distance.
+        .child(identity::name(name.to_string(), TEXT_BODY + 6.0))
         .when_some(on_click, |el, f| el.on_click(move |e, w, cx| f(e, w, cx)))
 }
 
