@@ -262,6 +262,15 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-right", composer::SelectWordRight, input),
         KeyBinding::new("alt-shift-left", composer::SelectWordLeft, input),
         KeyBinding::new("alt-shift-right", composer::SelectWordRight, input),
+        // Caret chords of NSTextView ([feedback composer-caret-shortcuts-2026-10-27],
+        // Jacob): ⌘← / ⌘→ = start / end of the *visual* (wrapped) line
+        // (`moveToLeftEndOfLine:` / `moveToRightEndOfLine:`), ⌘↑ / ⌘↓ = start /
+        // end of the whole draft (`moveToBeginningOfDocument:` /
+        // `moveToEndOfDocument:`), ⇧ extends the selection the same way
+        // (`…AndModifySelection:`), ⌘⌫ deletes to the visual line's start
+        // (`deleteToBeginningOfLine:`). All in the "ComposerInput" context only:
+        // with the composer unfocused the chords fall through to whatever else
+        // binds them (nothing today).
         KeyBinding::new("home", composer::Home, input),
         KeyBinding::new("end", composer::End, input),
         KeyBinding::new("shift-home", composer::SelectHome, input),
@@ -270,6 +279,11 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-right", composer::End, input),
         KeyBinding::new("cmd-shift-left", composer::SelectHome, input),
         KeyBinding::new("cmd-shift-right", composer::SelectEnd, input),
+        KeyBinding::new("cmd-up", composer::DocumentStart, input),
+        KeyBinding::new("cmd-down", composer::DocumentEnd, input),
+        KeyBinding::new("cmd-shift-up", composer::SelectDocumentStart, input),
+        KeyBinding::new("cmd-shift-down", composer::SelectDocumentEnd, input),
+        KeyBinding::new("cmd-backspace", composer::DeleteToLineStart, input),
         KeyBinding::new("cmd-a", composer::SelectAll, input),
         KeyBinding::new("ctrl-a", composer::SelectAll, input),
         KeyBinding::new("cmd-v", composer::Paste, input),
@@ -304,6 +318,15 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-}", shell::NextTab, None),
         KeyBinding::new("ctrl-t", shell::NewTab, None),
         KeyBinding::new("cmd-b", shell::ToggleRail, None),
+        // Chat-Markdown chords ([feedback chat-markdown-composer-2026-10-27]):
+        // ⌘B / ⌘I / ⌘⇧X wrap the selection in `**` / `*` / `~~` (or unwrap it)
+        // while the composer is focused; blurred, ⌘B keeps toggling the sidebar
+        // (the binding above) — Jacob's default, vetoable. Bound after it: a
+        // later binding wins when both match, and this one matches only in the
+        // "ComposerInput" context.
+        KeyBinding::new("cmd-b", composer::Bold, input),
+        KeyBinding::new("cmd-i", composer::Italic, input),
+        KeyBinding::new("cmd-shift-x", composer::Strike, input),
         KeyBinding::new("ctrl-b", shell::ToggleRail, None),
         // App-wide search (Jacob 2026-10-24): ⌘⇧F opens the command palette,
         // ⌘K is its alias (free before this).
@@ -446,6 +469,97 @@ mod keymap_tests {
                 first("shift-enter", &[plain]).as_deref(),
                 Some("composer::Newline")
             );
+        });
+    }
+
+    /// The caret chords ([feedback composer-caret-shortcuts-2026-10-27]) are
+    /// the focused composer's; outside it nothing takes them (no chat-list or
+    /// transcript binding swallows ⌘↑ / ⌘↓ before the input).
+    #[gpui::test]
+    fn caret_chords_route_to_the_focused_composer_only(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            bind_keys(cx);
+            let mut composer = gpui::KeyContext::default();
+            composer.add("ComposerInput");
+            let root = gpui::KeyContext::default();
+            let keymap = cx.key_bindings();
+            let first = |keys: &str, stack: &[gpui::KeyContext]| {
+                let stroke = Keystroke::parse(keys).expect("keystroke");
+                keymap
+                    .borrow()
+                    .bindings_for_input(&[stroke], stack)
+                    .0
+                    .first()
+                    .map(|b| b.action().name().to_string())
+            };
+            let chords = [
+                ("cmd-up", "composer::DocumentStart"),
+                ("cmd-down", "composer::DocumentEnd"),
+                ("cmd-left", "composer::Home"),
+                ("cmd-right", "composer::End"),
+                ("cmd-shift-up", "composer::SelectDocumentStart"),
+                ("cmd-shift-down", "composer::SelectDocumentEnd"),
+                ("cmd-shift-left", "composer::SelectHome"),
+                ("cmd-shift-right", "composer::SelectEnd"),
+                ("cmd-backspace", "composer::DeleteToLineStart"),
+                ("alt-left", "composer::WordLeft"),
+                ("alt-right", "composer::WordRight"),
+            ];
+            for (keys, action) in chords {
+                assert_eq!(
+                    first(keys, std::slice::from_ref(&composer)).as_deref(),
+                    Some(action),
+                    "{keys} in the composer"
+                );
+                assert_eq!(
+                    first(keys, std::slice::from_ref(&root)),
+                    None,
+                    "{keys} outside the composer is nobody's"
+                );
+            }
+        });
+    }
+
+    /// ⌘B / ⌘I / ⌘⇧X format the focused composer's selection ([feedback
+    /// chat-markdown-composer-2026-10-27]); with the composer blurred ⌘B is
+    /// still the sidebar toggle and ⌘I / ⌘⇧X are nobody's.
+    #[gpui::test]
+    fn format_chords_are_the_focused_composers_and_cmd_b_toggles_the_rail_outside(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            bind_keys(cx);
+            let mut composer = gpui::KeyContext::default();
+            composer.add("ComposerInput");
+            let root = gpui::KeyContext::default();
+            let keymap = cx.key_bindings();
+            let first = |keys: &str, stack: &[gpui::KeyContext]| {
+                let stroke = Keystroke::parse(keys).expect("keystroke");
+                keymap
+                    .borrow()
+                    .bindings_for_input(&[stroke], stack)
+                    .0
+                    .first()
+                    .map(|b| b.action().name().to_string())
+            };
+            for (keys, action) in [
+                ("cmd-b", "composer::Bold"),
+                ("cmd-i", "composer::Italic"),
+                ("cmd-shift-x", "composer::Strike"),
+            ] {
+                assert_eq!(
+                    first(keys, std::slice::from_ref(&composer)).as_deref(),
+                    Some(action),
+                    "{keys} in the composer"
+                );
+            }
+            assert_eq!(
+                first("cmd-b", std::slice::from_ref(&root)).as_deref(),
+                Some("shell::ToggleRail"),
+                "⌘B outside the composer still toggles the sidebar"
+            );
+            assert_eq!(first("cmd-i", std::slice::from_ref(&root)), None);
+            assert_eq!(first("cmd-shift-x", std::slice::from_ref(&root)), None);
         });
     }
 
