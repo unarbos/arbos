@@ -2747,6 +2747,8 @@ enum PaneKinds {
     static let person = ["Links", "Groups"]
     static let ownProfile = ["Profile", "Settings"]
     static let agent = ["Details", "Library", "Computer"]
+    /// A connected (outside) agent has no Arbos machine (#2142).
+    static let outsideAgent = ["Details", "Library"]
     static let group = ["Members", "Library"]
     static let server = ["Channels", "Members", "Settings"]
     static let channel = ["Profile", "Settings"]
