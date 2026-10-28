@@ -280,15 +280,16 @@ acquire() {
     # A P0 rig is not requeued either: the requeue copy only puts the same series at the back of the runner
     # (and the author's script runs on uncapped when the acquire exits 75 — cmd-outside-agents-02, 04:07).
     if [[ -n "$runner_cmd" ]] && (( ! p0 )) && (( $(date +%s) - t0 >= RIG_RUNNER_WAIT_MAX_S )); then
-      local again orig; orig="${runner_cmd%.running}"; again="/Users/Shared/arbos-run/cmd-zz~requeued-$(date +%s)-$(basename "${orig%.sh}").sh"
-      if [[ -f "$runner_cmd" ]] && { printf '# requeued by arbos-heavy-slot at %s: %s waited %ss for a heavy slot under the shared runner (cap %s); original %s\n' "$(ts)" "$name" "$RIG_RUNNER_WAIT_MAX_S" "$limit" "$(basename "$runner_cmd")"; cat "$runner_cmd"; } > "$again" 2>/dev/null; then
-        echo "$(ts) heavy-slot: $name waited ${RIG_RUNNER_WAIT_MAX_S}s under the shared runner ($n busy); giving up — command requeued at the back as $(basename "$again")" >&2
-        logger -t arbos-heavy-slot "rig $name gave up its slot wait after ${RIG_RUNNER_WAIT_MAX_S}s; requeued $(basename "$again")" 2>/dev/null || true
-      else
-        echo "$(ts) heavy-slot: $name waited ${RIG_RUNNER_WAIT_MAX_S}s under the shared runner ($n busy); giving up (could not requeue $runner_cmd)" >&2
-      fi
+      # No requeue copies any more (17:2x Oct 28): a rig script that ignores exit 75 kept running while its copy
+      # waited, requeued itself again, and so on — 32 cmd-zz~requeued-*-pd-before copies and duplicate runs took
+      # the Mac to load 558. Under the shared runner a rig that waited RIG_RUNNER_WAIT_MAX_S proceeds with a real
+      # uncapped slot instead (same as WAIT_MAX_S), so the work runs once and stays visible to the reclaim rules.
+      slot="$SLOTS_DIR/$(date +%s)-$$-uncapped-${name//\//_}.slot"
+      if mkdir "$slot" 2>/dev/null; then echo "$owner" > "$slot/pid"; echo "uncapped-$name" > "$slot/name"; date -u +%s > "$slot/since"; else slot=none; fi
+      echo "$(ts) heavy-slot: $name waited ${RIG_RUNNER_WAIT_MAX_S}s under the shared runner ($n busy); proceeding uncapped (slot $(basename "$slot"))" >&2
+      logger -t arbos-heavy-slot "rig $name proceeds uncapped after ${RIG_RUNNER_WAIT_MAX_S}s under the shared runner" 2>/dev/null || true
       [[ -n "$mark" ]] && rm -f "$mark" 2>/dev/null
-      echo none; return 75
+      echo "$slot"; return 0
     fi
     if (( $(date +%s) - t0 >= WAIT_MAX_S )); then
       # A real slot over the cap, so the boot guard and the reclaim rules still see this job.
