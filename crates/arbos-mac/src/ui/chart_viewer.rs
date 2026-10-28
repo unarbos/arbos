@@ -14,7 +14,7 @@ use arbos_core::chart::LayoutStyle;
 
 use super::chart_card::{self, icon_square, legend, ChartUi};
 use super::highlight;
-use super::icons::icon;
+use super::sf_symbols;
 use super::shell::Shell;
 use super::theme::{Appearance, Theme};
 use crate::app::AppState;
@@ -75,7 +75,11 @@ fn pill(
         .map(|el| highlight::washed(el, theme.surface_1, theme))
         .text_size(px(12.5))
         .text_color(color)
-        .child(icon(glyph, 14.0, tint.unwrap_or(theme.text_muted)))
+        .child(sf_symbols::glyph(
+            glyph,
+            14.0,
+            tint.unwrap_or(theme.text_muted),
+        ))
         .child(label.to_owned())
 }
 
@@ -161,7 +165,7 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
                 .child(
                     pill(
                         "chart-viewer-copy",
-                        if copied { "check" } else { "copy" },
+                        if copied { "checkmark" } else { "doc.on.doc" },
                         if copied { "Copied" } else { "Copy data" },
                         copied.then_some(theme.online),
                         &theme,
@@ -173,12 +177,17 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
                     }),
                 )
                 .child(
-                    pill("chart-viewer-save", "download", "Save PNG", None, &theme).on_click(
-                        move |_, _, cx| {
-                            cx.stop_propagation();
-                            chart_card::save_png(&spec_for_save, &title_for_save, &save_state, cx);
-                        },
-                    ),
+                    pill(
+                        "chart-viewer-save",
+                        "arrow.down.to.line",
+                        "Save PNG",
+                        None,
+                        &theme,
+                    )
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        chart_card::save_png(&spec_for_save, &title_for_save, &save_state, cx);
+                    }),
                 )
                 .child(
                     icon_square(

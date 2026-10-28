@@ -19,8 +19,8 @@ use gpui::{
 
 use crate::model::LinkPreview;
 
-use super::icons::icon;
 use super::link_tile::{self, Brand, Icon, Tone};
+use super::sf_symbols;
 use super::theme::Theme;
 
 /// Settings → Chat → Link previews: off hides every card on this Mac (plain links stay).
@@ -327,7 +327,7 @@ pub fn card(
                                 .justify_center()
                                 .pl(px(3.0))
                                 .debug_selector(|| "link-play".into())
-                                .child(icon("play", 22.0, gpui::white())),
+                                .child(sf_symbols::glyph("play.fill", 22.0, gpui::white())),
                         ),
                 );
             }
@@ -525,7 +525,11 @@ pub fn card(
                         (ui.on_remove)(mid.clone(), window, cx);
                     }
                 })
-                .child(icon("xmark", 10.0, Theme::with_alpha(gpui::white(), 0.85))),
+                .child(sf_symbols::glyph(
+                    "xmark",
+                    10.0,
+                    Theme::with_alpha(gpui::white(), 0.85),
+                )),
         );
     }
     card.into_any_element()

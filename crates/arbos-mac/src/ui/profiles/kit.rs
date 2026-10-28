@@ -22,7 +22,6 @@ use gpui::{
 
 use crate::ui::glass;
 use crate::ui::highlight::{self, Shape};
-use crate::ui::icons::icon;
 use crate::ui::identity;
 use crate::ui::sf_symbols;
 use crate::ui::theme::{Theme, CONTROL, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
@@ -187,7 +186,7 @@ fn leading_el(leading: Leading, theme: &Theme) -> Option<AnyElement> {
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(icon(glyph, 18.0, theme.text_muted))
+                .child(sf_symbols::glyph(glyph, 18.0, theme.text_muted))
                 .into_any_element(),
         ),
     }
@@ -291,7 +290,7 @@ pub fn row_state(
         })
         .children(trailing)
         .when(chevron, |el| {
-            el.child(icon("chevron-right", 13.0, theme.text_faint))
+            el.child(sf_symbols::glyph("chevron.right", 13.0, theme.text_faint))
         })
         .child(hairline_below(theme))
 }
@@ -659,7 +658,7 @@ mod tests {
                 .into_any_element()
             };
             let card = match self.0 {
-                Probe::TileRow => card(&theme).child(kit_row(Leading::Tile("gear"))),
+                Probe::TileRow => card(&theme).child(kit_row(Leading::Tile("gearshape"))),
                 Probe::AvatarRow => card(&theme).child(kit_row(Leading::Avatar(
                     div().size(px(AVATAR)).into_any_element(),
                 ))),
