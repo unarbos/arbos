@@ -539,6 +539,7 @@ impl Db {
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; PRAGMA secure_delete=ON;",
         )?;
         c.execute_batch(SCHEMA)?;
+        c.execute_batch(crate::outside::SCHEMA)?;
         // Forward-only, additive migrations (D50).
         let _ = c.execute(
             "ALTER TABLE projects ADD COLUMN color TEXT NOT NULL DEFAULT '#8b7cf6'",
