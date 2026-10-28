@@ -222,6 +222,9 @@ pub fn bar(shell: &Shell, cx: &mut Context<Shell>) -> Option<AnyElement> {
 
     let bar = glass::header_surface(bar, &theme);
     let bar = glass::header_frost(metrics::RADIUS, bar);
+    // A click anywhere outside the bar closes it without being swallowed
+    // (`Shell::click_outside`, capture phase, against these bounds).
+    let bounds = shell.chat_search_bounds.clone();
     Some(
         div()
             .w_full()
@@ -231,6 +234,9 @@ pub fn bar(shell: &Shell, cx: &mut Context<Shell>) -> Option<AnyElement> {
             .mb(px(metrics::BELOW))
             .px(px(16.0))
             .debug_selector(|| "chat-search-row".into())
+            .on_children_prepainted(move |children, _, _| {
+                bounds.set(children.first().copied());
+            })
             .child(bar)
             .into_any_element(),
     )
@@ -541,6 +547,128 @@ mod tests {
         assert!(
             state.read_with(&*vcx, |s, _| s.highlight_message.is_none()),
             "marks gone"
+        );
+    }
+
+    /// ⌘F is a toggle ([feedback search-toggle-click-outside-mac-2026-10-27]):
+    /// pressed on the open bar — with the field focused — it closes it like
+    /// ✕ / Esc: marks gone, composer focused. ⌘⇧F toggles the palette the
+    /// same way, and the two never stack.
+    #[gpui::test]
+    fn cmd_f_and_cmd_shift_f_toggle_their_search_closed_again(cx: &mut TestAppContext) {
+        let (_rt, _cmds, state, shell, vcx) = mount(cx);
+        vcx.dispatch_action(super::Open);
+        settle(&state, &shell, vcx);
+        vcx.simulate_input("canvas");
+        settle(&state, &shell, vcx);
+        assert!(state.read_with(&*vcx, |s, _| s.highlight_message.is_some()));
+        let field = shell.read_with(&*vcx, |sh, cx| {
+            sh.chat_search_input.read(cx).focus_handle(cx)
+        });
+        assert!(
+            vcx.update(|window, _| field.is_focused(window)),
+            "the field has the keyboard"
+        );
+        // ⌘F again, from inside the field: the chord reaches the shell, the bar closes.
+        vcx.dispatch_action(super::Open);
+        settle(&state, &shell, vcx);
+        assert!(
+            !state.read_with(&*vcx, |s, _| s.chat_search_open()),
+            "⌘F closes the open bar"
+        );
+        assert!(vcx.debug_bounds("chat-search-bar").is_none());
+        assert!(
+            state.read_with(&*vcx, |s, _| s.highlight_message.is_none()),
+            "marks cleared"
+        );
+        let composer = shell.read_with(&*vcx, |sh, cx| {
+            sh.composer.read(cx).input.read(cx).focus_handle(cx)
+        });
+        assert!(
+            vcx.update(|window, _| composer.is_focused(window)),
+            "the composer types again"
+        );
+
+        // The palette: ⌘⇧F opens, ⌘⇧F (field focused) closes.
+        vcx.dispatch_action(crate::ui::shell::OpenPalette);
+        settle(&state, &shell, vcx);
+        assert!(shell.read_with(&*vcx, |sh, _| sh.palette.open));
+        assert!(vcx.debug_bounds("palette-panel").is_some());
+        vcx.dispatch_action(crate::ui::shell::OpenPalette);
+        settle(&state, &shell, vcx);
+        assert!(
+            !shell.read_with(&*vcx, |sh, _| sh.palette.open),
+            "⌘⇧F closes the open palette"
+        );
+        assert!(vcx.debug_bounds("palette-panel").is_none());
+        assert!(vcx.update(|window, _| composer.is_focused(window)));
+    }
+
+    /// A click outside the bar closes it and is not swallowed: the sidebar's
+    /// "+" disc under that very click opens its sheet. A click inside the bar
+    /// keeps it. The palette: the same, through its see-through backdrop.
+    #[gpui::test]
+    fn a_click_outside_closes_the_bar_or_palette_and_still_lands_on_its_target(
+        cx: &mut TestAppContext,
+    ) {
+        let (_rt, _cmds, state, shell, vcx) = mount(cx);
+        // The palette: a click in the panel keeps it; a click on the "+" disc
+        // through the see-through backdrop dismisses it AND opens the sheet.
+        vcx.dispatch_action(crate::ui::shell::OpenPalette);
+        settle(&state, &shell, vcx);
+        let field = vcx
+            .debug_bounds("palette-field")
+            .expect("palette field drawn");
+        vcx.simulate_click(field.center(), gpui::Modifiers::default());
+        settle(&state, &shell, vcx);
+        assert!(
+            shell.read_with(&*vcx, |sh, _| sh.palette.open),
+            "a click in the panel keeps it"
+        );
+        let plus = vcx
+            .debug_bounds("sidebar-new")
+            .expect("+ disc drawn under the backdrop");
+        vcx.simulate_click(plus.center(), gpui::Modifiers::default());
+        settle(&state, &shell, vcx);
+        assert!(
+            !shell.read_with(&*vcx, |sh, _| sh.palette.open),
+            "click outside dismisses the palette"
+        );
+        assert!(
+            state.read_with(&*vcx, |s, _| s.new_chat_open),
+            "the + under the click still opened"
+        );
+        // Sheet away, keyboard back on the composer (the sheet's field left the tree).
+        state.update(vcx, |s, cx| s.close_new_chat(cx));
+        vcx.update(|window, cx| {
+            shell.update(cx, |sh, cx| {
+                crate::ui::composer::Composer::focus(&sh.composer, window, cx)
+            })
+        });
+        settle(&state, &shell, vcx);
+
+        // The bar, same rule.
+        vcx.dispatch_action(super::Open);
+        settle(&state, &shell, vcx);
+        vcx.simulate_input("canvas");
+        settle(&state, &shell, vcx);
+        let count = vcx.debug_bounds("chat-search-count").expect("count drawn");
+        vcx.simulate_click(count.center(), gpui::Modifiers::default());
+        settle(&state, &shell, vcx);
+        assert!(
+            state.read_with(&*vcx, |s, _| s.chat_search_open()),
+            "a click in the bar keeps it"
+        );
+        let plus = vcx.debug_bounds("sidebar-new").expect("+ disc drawn");
+        vcx.simulate_click(plus.center(), gpui::Modifiers::default());
+        settle(&state, &shell, vcx);
+        assert!(
+            !state.read_with(&*vcx, |s, _| s.chat_search_open()),
+            "click outside closes the bar"
+        );
+        assert!(
+            state.read_with(&*vcx, |s, _| s.new_chat_open),
+            "the + under the click still opened"
         );
     }
 

@@ -850,6 +850,7 @@ mod hidden_tests {
                     person("gh_3", "priya", "Priya Natarajan"),
                 ],
                 blocked_senders: vec!["user:gh_2".into()],
+                my_role: None,
                 ..Project::default()
             });
             let chat: Chat = serde_json::from_value(serde_json::json!({
