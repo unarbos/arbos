@@ -103,6 +103,20 @@ pub(crate) async fn convert_plain_error(path: &str, res: Response) -> (Response,
 /// A request slower than this is logged (`slow request`), whatever its status.
 pub(crate) const SLOW_REQUEST_MS: u128 = 5_000;
 
+/// Routes that are slow by design — long-polls and streams — and never make a `slow request`
+/// line: the Matrix client sync (sliding sync waits up to 30 s), the voice worker's call inbox
+/// (≤ 25 s), inference proxy streams, and the WebSocket upgrades (`/room`, `/local`), whose
+/// response is the socket's lifetime. The first hour on the relay was 62 lines of `/_matrix/
+/// client/…/sync` at 30 005 ms and nothing else.
+fn slow_by_design(path: &str) -> bool {
+    path.starts_with("/_matrix/")
+        || path.starts_with("/proxy/")
+        || path == "/proxy"
+        || path.starts_with("/room/")
+        || path.starts_with("/local/")
+        || (path.starts_with("/voice/calls/") && path.ends_with("/inbox"))
+}
+
 /// Who made a request, for the log: `user:<id>` / `box:<user>` / `admin`, `-` when the token
 /// resolves to nothing. Resolved only for the few requests that get a line.
 fn caller_label(state: &AppState, token: Option<&str>) -> String {
@@ -138,7 +152,7 @@ pub(crate) async fn rewrite_plain_api_errors(
             error = message.as_deref().unwrap_or("-"),
             "request failed"
         );
-    } else if ms > SLOW_REQUEST_MS {
+    } else if ms > SLOW_REQUEST_MS && !slow_by_design(&path) {
         tracing::warn!(
             %method, %path, status = status.as_u16(), ms,
             caller = %caller_label(&state, token.as_deref()),
@@ -313,6 +327,19 @@ mod tests {
         let converted = through_layer("/healthz", ok).await;
         assert_eq!(converted.status(), StatusCode::OK);
         assert_eq!(body_text(converted).await, "hello plain");
+    }
+
+    #[test]
+    fn long_polls_and_streams_are_slow_by_design() {
+        assert!(slow_by_design(
+            "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync"
+        ));
+        assert!(slow_by_design("/voice/calls/01ABC/inbox"));
+        assert!(slow_by_design("/proxy/v1/chat/completions"));
+        assert!(slow_by_design("/room/people/01ABC"));
+        assert!(!slow_by_design("/box/projects"));
+        assert!(!slow_by_design("/voice/calls/01ABC/events"));
+        assert!(!slow_by_design("/chats/01ABC/messages"));
     }
 
     #[test]
