@@ -774,6 +774,12 @@ pub enum ClientCommand {
         chat_id: Id,
         message_id: Id,
     },
+    /// Replace an own message's text in the chat doc (`edit_message_text`).
+    EditMessage {
+        chat_id: Id,
+        message_id: Id,
+        text: String,
+    },
     /// Remove a message's link preview for everyone (`preview: "off"` on the row, the part
     /// dropped; the relay decides with the delete rule) ([feedback link-embeds-mac-2026-10-27]).
     RemoveLinkPreview {
