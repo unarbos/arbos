@@ -1132,6 +1132,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::RemoveMessageGrant { .. }
         | ClientCommand::FetchAvatar { .. }
         | ClientCommand::DeleteProject { .. }
+        | ClientCommand::ConnectAgent { .. }
+        | ClientCommand::OutsideAgentStatus { .. }
+        | ClientCommand::OutsideAgentRotate { .. }
+        | ClientCommand::OutsideAgentRevoke { .. }
         | ClientCommand::DeletePeopleChat { .. }
         | ClientCommand::RenameGroup { .. }
         | ClientCommand::SetGroupImage { .. }
@@ -1935,6 +1939,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 description,
                 owner_person: None,
                 machine_info: None,
+                outside: None,
                 muted: false,
                 archived_at: None,
                 primary_chat: None,
@@ -5096,6 +5101,7 @@ fn seed_projects() -> Vec<Project> {
             description: None,
             owner_person: None,
             machine_info: None,
+            outside: None,
             muted: false,
             archived_at: None,
             primary_chat: None,
@@ -5134,6 +5140,7 @@ fn seed_projects() -> Vec<Project> {
             description: None,
             owner_person: None,
             machine_info: None,
+            outside: None,
             muted: false,
             archived_at: None,
             primary_chat: None,
@@ -5172,6 +5179,7 @@ fn seed_projects() -> Vec<Project> {
             description: None,
             owner_person: None,
             machine_info: None,
+            outside: None,
             muted: false,
             archived_at: None,
             primary_chat: None,
@@ -6496,6 +6504,7 @@ fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
         description: None,
         owner_person: None,
         machine_info: None,
+        outside: None,
         muted: false,
         archived_at: None,
         primary_chat: None,
@@ -6621,6 +6630,7 @@ fn seed_people_projects() -> Vec<Project> {
             description: None,
             owner_person: None,
             machine_info: None,
+            outside: None,
             muted: false,
             archived_at: None,
             primary_chat: None,
