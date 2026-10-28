@@ -3,7 +3,7 @@
  "lane": "b",
  "category": "browsing",
  "title": "Publish a one-page site from chat: the reply carries the public URL only after the tool returned it; no card, no 'published' claim without the URL (#2118, #2026 family)",
- "regression": "publish_site gated by the tool-send approval pattern (#2118 hotfix); a 'published' sentence needs the tool's public_url; run 10a (0.1.167): publish_site raised an approval card (refused by the eval) and the agent said so honestly — red until #2118's image",
+ "regression": "publish_site gated by the tool-send approval pattern (#2118 hotfix); a 'published' sentence needs the tool's public_url; run 10a (0.1.167): publish_site raised an approval card (refused by the eval) and the agent said so honestly — red until #2118's image; #2118 verified on 0.1.168 (no card, URL live)",
  "turns": [
   {
    "prompt": "Make a one-page site in this project called 'hello-eval' whose index.html says 'Hello from the long-task eval, run {RUN}' in an h1, publish it, and give me the public URL.",
