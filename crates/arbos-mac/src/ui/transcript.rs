@@ -1019,9 +1019,17 @@ impl Transcript {
     /// last, in transcript order whichever way the drag went, one blank line
     /// between messages (what Grok's copy gives).
     fn copy_selection(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        let span = self.selection.read(cx).span();
+        if let Some(message_id) = span
+            .as_ref()
+            .and_then(|span| self.whole_bubble_with_attachments(span, cx))
+        {
+            self.copy_message(&message_id, cx);
+            return;
+        }
         let text = {
             let selection = self.selection.read(cx);
-            match selection.span() {
+            match span {
                 Some(span) if !span.one_bubble() => copy_across(&span, &self.bubble_texts(cx)),
                 _ => selection.selected_text(),
             }
@@ -1578,39 +1586,89 @@ impl Transcript {
         cx.notify();
     }
 
-    /// Plain text of a message in this chat, for copy / control-click.
-    fn message_plain(&self, message_id: &Id, cx: &App) -> Option<String> {
+    /// The message a selection bubble key (`<message>#text`, `<row>.u`, see
+    /// `bubble_texts`) belongs to.
+    fn message_of_bubble(&self, key: &str) -> Option<Id> {
+        self.rows.iter().find_map(|row| {
+            let row_key = match &row.kind {
+                RowKind::Markdown { .. } | RowKind::NoAnswer { .. } => {
+                    format!("{}#text", row.message_id)
+                }
+                RowKind::User { .. } => format!("{}.u", row.id),
+                _ => return None,
+            };
+            (row_key == key).then(|| row.message_id.clone())
+        })
+    }
+
+    /// ⌘C with a whole bubble selected (triple-click, select-all in it) on a message
+    /// that carries pictures or files: the whole message, pictures included, is what
+    /// the user means ([feedback copy-image-messages-mac-2026-10-27]). `Some(id)`
+    /// names that message; `None` keeps the plain text copy.
+    fn whole_bubble_with_attachments(
+        &self,
+        span: &crate::ui::select::Span,
+        cx: &App,
+    ) -> Option<Id> {
+        if !span.one_bubble() {
+            return None;
+        }
+        let whole = span.start_index == 0
+            && span.end_index >= span.start.text.trim_end().len()
+            && !span.start.text.trim().is_empty();
+        if !whole {
+            return None;
+        }
+        let message_id = self.message_of_bubble(&span.start.key)?;
         let chat_id = self.chat_id.as_ref()?;
         self.state
             .read(cx)
             .messages
             .get(chat_id)
-            .and_then(|list| list.iter().find(|m| m.id == *message_id))
-            .map(|m| m.plain_text())
+            .and_then(|list| list.iter().find(|m| m.id == message_id))
+            .and_then(|m| m.body())
+            .filter(|b| !b.attachments.is_empty())
+            .map(|_| message_id)
     }
 
+    /// Copy of a message — the bubble menu's Copy, control-click, ⌘C on a whole
+    /// bubble: the whole message through `AppState::copy_message` (its text and
+    /// every picture / file it carries, [feedback copy-image-messages-mac-2026-10-27];
+    /// before, only `plain_text()` went out and a picture message copied nothing).
+    /// The bubble reads "Copied" for [`COPY_FEEDBACK_MS`] when it has anything to copy.
     pub(crate) fn copy_message(&mut self, message_id: &Id, cx: &mut Context<Self>) {
-        if let Some(text) = self.message_plain(message_id, cx) {
-            if !text.is_empty() {
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-                self.copied_feedback = Some((message_id.clone(), Instant::now()));
-                cx.notify();
-                cx.spawn(async move |this, cx| {
-                    cx.background_executor()
-                        .timer(Duration::from_millis(COPY_FEEDBACK_MS))
-                        .await;
-                    let _ = this.update(cx, |this, cx| {
-                        if this.copied_feedback.as_ref().is_some_and(|(_, at)| {
-                            at.elapsed() >= Duration::from_millis(COPY_FEEDBACK_MS)
-                        }) {
-                            this.copied_feedback = None;
-                            cx.notify();
-                        }
-                    });
-                })
-                .detach();
-            }
+        let Some(chat_id) = self.chat_id.clone() else {
+            return;
+        };
+        let has_body = self
+            .state
+            .read(cx)
+            .messages
+            .get(&chat_id)
+            .and_then(|list| list.iter().find(|m| m.id == *message_id))
+            .is_some_and(|m| m.body().is_some());
+        self.state
+            .update(cx, |s, cx| s.copy_message(&chat_id, message_id, cx));
+        if !has_body {
+            return;
         }
+        self.copied_feedback = Some((message_id.clone(), Instant::now()));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(COPY_FEEDBACK_MS))
+                .await;
+            let _ =
+                this.update(cx, |this, cx| {
+                    if this.copied_feedback.as_ref().is_some_and(|(_, at)| {
+                        at.elapsed() >= Duration::from_millis(COPY_FEEDBACK_MS)
+                    }) {
+                        this.copied_feedback = None;
+                        cx.notify();
+                    }
+                });
+        })
+        .detach();
     }
 
     /// A code card's Copy pill: the block's text to the clipboard and the pill

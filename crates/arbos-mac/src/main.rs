@@ -11,6 +11,7 @@ mod model;
 mod onboarding;
 mod palette;
 mod panic_log;
+mod pasteboard;
 mod search;
 mod search_index;
 mod sign_in;
@@ -371,9 +372,11 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-8", palette_ui::Pick8, Some("Palette")),
         KeyBinding::new("cmd-9", palette_ui::Pick9, Some("Palette")),
         KeyBinding::new("escape", shell::Escape, None),
-        // Media viewer: ← → page through the album (Esc closes via the shell).
+        // Media viewer: ← → page through the album (Esc closes via the shell); ⌘C
+        // copies the open picture ([feedback copy-image-messages-mac-2026-10-27]).
         KeyBinding::new("left", media_viewer::Prev, Some("MediaViewer")),
         KeyBinding::new("right", media_viewer::Next, Some("MediaViewer")),
+        KeyBinding::new("cmd-c", media_viewer::CopyItem, Some("MediaViewer")),
         KeyBinding::new("cmd-q", shell::Quit, None),
         // Send Feedback moved off ⌘⇧F when the palette took it (2026-10-24).
         KeyBinding::new("cmd-alt-f", feedback::SendFeedback, None),

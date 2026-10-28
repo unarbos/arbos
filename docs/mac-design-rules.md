@@ -1113,7 +1113,7 @@ the agent pane (Details · Library · Computer); `profiles/library.rs`.
 |---|---|---|
 | Grouping | one list, `when` descending, split by local day: **Today · Yesterday · weekday (last 7 days) · "Oct 18"** (the sidebar's words; "Oct 18, 2025" in another year); each day = `kit::section_title` + one `kit::card` | `group_days`, `day_label` |
 | Row | the kit's one-line row: **41** tall, inset 16, 10 right; **32** pt thumbnail (aspect-fill, radius 7) — a play glyph over a video, the extension ("PDF") on a `surface_2` tile for files, the link glyph for links; name 13 pt one line, tail-truncated; time 11.5 pt muted, compact ("now", "42m", "13h", "2d", "3w", "4mo"); the kit's divider (16 / 16, below) | `ROW_H`, `THUMB`, `rel_time` |
-| Hover | the shared inset pill (§ Rows: hover / selected / pressed; the armed row draws it lit from state); the time gives way to a **24 pt ⋯ disc** (no layout shift) that opens the row's menu at the click: Open · Forward · Download for attachments, Open link · Copy link for links | `MORE_DISC`, `menu_items` |
+| Hover | the shared inset pill (§ Rows: hover / selected / pressed; the armed row draws it lit from state); the time gives way to a **24 pt ⋯ disc** (no layout shift) that opens the row's menu at the click: Open · Copy · Forward · Download for attachments (Copy puts the picture or file itself on the pasteboard, [feedback copy-image-messages-mac-2026-10-27]), Open link · Copy link for links | `MORE_DISC`, `menu_items` |
 | Show more | after **5** rows a 36 pt "Show more ⌄" row unfolds the rest of that day in place ("Show less ⌃" folds it); per opened pane | `SHOW_MORE_AFTER`, `library_toggle_day` |
 | Preview card | after **300 ms** on a row: **300** wide, left **20** from the pane's edge, **8** above the row (under it when it would reach the window's top 8 pt band); padding 10, radius 12, a step over the card's fill (white in light) with the strong border and shadow; picture **278 × 156** radius 8 aspect-fill (files: the extension at 22 pt on the tile; links: a globe); type line 11.5 muted ("Image" / "Video" / "PDF" / "Link"); the full name 13 semibold on 17, up to 3 lines; the sender's 18 pt picture, name, "· Yesterday 10:06 PM" (`sidebar::stamp_label`) | `HOVER_DELAY_MS`, `CARD_*`, `card_above` |
 | Click | a row opens the viewer at its place in the chat-order album (files included: the viewer's Open / Download); a link opens in the browser — as before | `open` |
@@ -1620,3 +1620,32 @@ the Description row sits under Add members in the same card and vanishes when
 blank; Add members opens the picker aimed at the group with the Agents section
 above my agents, the others' agents after mine, people below) and
 `profiles::group::tests` (which description makes a row).
+
+## Copy copies the message, pictures included (Jacob 2026-10-27, [feedback copy-image-messages-mac-2026-10-27], iPhone [feedback copy-image-messages-ios-2026-10-27])
+
+Copy — the bubble menu's Copy, control-click, ⌘C with a whole bubble selected, the media
+viewer's Copy pill / ⌘C, the Library row's Copy — puts **the message** on the pasteboard,
+read through the one accessor Forward uses too (`Message::body()` / `Message.body`):
+
+- every picture is one pasteboard item carrying its **original bytes under its own
+  type** (PNG `public.png`, JPEG `public.jpeg`, GIF `com.compuserve.gif`, WebP, HEIC),
+  fetched from the relay as uploaded — never the thumbnail — plus a `public.png`
+  re-encode when the native type is not PNG and (Mac) a `public.tiff` representation, all
+  on the same item, so Preview, Notes, Messages, Slack and Finder each take the one they
+  read and a GIF stays a GIF;
+- the message's words ride on the **first** item as `public.utf8-plain-text`: a text
+  field receives the text, an image well the picture — one rich item, never two;
+- several pictures → several items in message order; a file that is not a picture → a
+  `public.file-url` item (Mac, staged under the temp dir) / its own data type (iPhone);
+- the Arbos composer reads every item back (⌘V / Paste): the pictures become attachment
+  chips, the words land at the caret;
+- a message whose picture is still uploading says "Still uploading — try again in a
+  moment"; a picture the relay would not give back says so in the notice and the rest
+  still copies.
+
+Mac: `pasteboard.rs` (`plan` → `write`/`read`, NSPasteboard on macOS, gpui's clipboard
+elsewhere), `AppState::copy_message` / `copy_attachment`, `ClientCommand::FetchCopyBlobs`.
+iPhone: `MessagePasteboard` (`items` → `UIPasteboard.setItems`), `AppModel.copyMessage` /
+`copyAttachment`, the composer's `paste` override. Pinned by `pasteboard::tests` and
+`MessagePasteboardTests` (text · picture only · mixed · several · GIF kept · file ·
+round trip).
