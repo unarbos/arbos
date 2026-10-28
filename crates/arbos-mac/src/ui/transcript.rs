@@ -763,9 +763,10 @@ pub struct Transcript {
     chat_id: Option<Id>,
     list: ListState,
     pub(crate) rows: Vec<Row>,
-    /// Per-message built rows (#1405 / feedback app-01M5Z3QPDA5BRE84SAPADXX05V):
-    /// a send or streaming upsert rebuilds one message, not the whole
-    /// transcript — keeps scrolling and gestures responsive after send.
+    /// Per-message built rows (#1405 / feedback app-01M5Z3QPDA5BRE84SAPADXX05V,
+    /// addendum app-01M5Z3T4F4KAMTWA7YKW3CP58H): a send or streaming upsert
+    /// rebuilds one message, not the whole transcript — keeps scrolling and
+    /// reply/menu gestures responsive after send (Mac has no swipe-to-reply).
     row_cache: MessageRowCache,
     /// Who `@handle` resolves to in this chat's bubbles (mention chips),
     /// rebuilt with the rows.
@@ -3828,7 +3829,8 @@ fn is_json_block(block: &Block) -> bool {
 
 /// Built rows for one message, keyed by a render version so a streaming
 /// upsert rebuilds only that message (#1405 /
-/// feedback app-01M5Z3QPDA5BRE84SAPADXX05V).
+/// feedback app-01M5Z3QPDA5BRE84SAPADXX05V,
+/// addendum app-01M5Z3T4F4KAMTWA7YKW3CP58H).
 #[derive(Default)]
 pub struct MessageRowCache {
     entries: HashMap<Id, CachedMessageRows>,

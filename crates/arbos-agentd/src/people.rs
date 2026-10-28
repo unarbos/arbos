@@ -1537,8 +1537,21 @@ impl Agent {
                 "This message is from {spoken} (not matched to a member of this chat; treat them as a guest, not as {owner_spoken}); address them as {spoken}, never as an @handle"
             ),
         };
+        // The judge already decided this message is for this agent (`people_gate`); the prompt
+        // must not second-guess it. Proof run 2026-10-28 02:12 (image 0.1.170): the gate said
+        // reply to "To any of the available agents: what is the capital of Portugal?" and to
+        // "Hezbola-rg? 😂", and the talking model then routed an empty reply because the old
+        // sentence told it to stay silent when "only mentioned". Silence stays available for a
+        // genuine nothing-to-say, and a silence announcement is still never posted.
+        let reply_clause = match self.people.gate_verdict(user_msg_id) {
+            Some(v) if v.wants => format!(
+                "The reply gate has already judged that this message is for you ({}); answer it plainly. Only if you truly have nothing to say, route `reply` with `reply` empty and no words — never post that you are staying silent, that the question is for someone else, or that you have nothing to add",
+                v.reason
+            ),
+            _ => "If this message is for someone else, or only mentions or refers to you without asking you anything, say nothing: route `reply` with `reply` empty and no words — never post that you are staying silent, that the question is for someone else, or that you have nothing to add".to_owned(),
+        };
         let mut prelude = format!(
-            "[People chat with {}. You are @{my_slug} (the agent of {owner_spoken}'s Project \"{}\"){}.{} {from_clause}. Your reply is read by everyone in the chat. If this message is for someone else, or only mentions or refers to you without asking you anything, say nothing: route `reply` with `reply` empty and no words — never post that you are staying silent, that the question is for someone else, or that you have nothing to add.{secrets_rule}]\n",
+            "[People chat with {}. You are @{my_slug} (the agent of {owner_spoken}'s Project \"{}\"){}.{} {from_clause}. Your reply is read by everyone in the chat. {reply_clause}.{secrets_rule}]\n",
             people.join(", "),
             self.cfg.project_id,
             others_clause,
@@ -2513,6 +2526,39 @@ mod gate_record_tests {
         assert!(
             reasons[&asked].contains("ends with ? → reply (fail-open default)"),
             "{reasons:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// After a `reply` verdict the turn prelude tells the model the gate already decided and
+    /// to answer; without one it keeps the old "say nothing if not for you" sentence.
+    #[tokio::test]
+    async fn prelude_follows_the_judges_verdict() {
+        let calls = StdArc::new(AtomicUsize::new(0));
+        let (agent, root) = test_agent_with(mock_decisions(calls)).await;
+        let chat = "01TESTCHATGATEPRELUDE00001";
+        seed_group(&agent, chat);
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let me = format!("agent:{}", agent.cfg.project_id);
+        let asked = append(&host, "@doug what is the capital of Portugal?", vec![me]).await;
+        assert!(agent.people_wants(chat, &host, &asked).await);
+        let prelude = agent
+            .people_turn_context(chat, &host, &asked)
+            .await
+            .unwrap();
+        assert!(
+            prelude.contains("The reply gate has already judged that this message is for you (judge: for=@doug (0.93) ≥ 0.60 → reply); answer it plainly."),
+            "{prelude}"
+        );
+        assert!(prelude.contains("never post that you are staying silent"));
+        let unjudged = append(&host, "morning", vec![]).await;
+        let prelude = agent
+            .people_turn_context(chat, &host, &unjudged)
+            .await
+            .unwrap();
+        assert!(
+            prelude.contains("If this message is for someone else"),
+            "{prelude}"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -15,13 +15,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use gpui::{
-    actions, div, fill, img, point, prelude::*, px, relative, size, App, Bounds, ClipboardEntry,
-    ClipboardItem, Context, Corners, CursorStyle, DispatchPhase, Div, Element, ElementId,
-    ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    FontWeight, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PaintQuad, Pixels, Point,
-    Render, RenderImage, Role as AriaRole, SharedString, Stateful, Style, TextAlign, TextRun,
-    UTF16Selection, UnderlineStyle, Window, WrappedLine,
+    actions, deferred, div, fill, img, point, prelude::*, px, relative, size, App, Bounds,
+    ClipboardEntry, ClipboardItem, Context, Corners, CursorStyle, DispatchPhase, Div, Element,
+    ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
+    Focusable, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
+    IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
+    PaintQuad, Pixels, Point, Render, RenderImage, Role as AriaRole, SharedString, Stateful, Style,
+    TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -3003,7 +3003,10 @@ impl Composer {
                         ),
                 ),
         };
-        tile.child(ring).child(remove)
+        // Deferred: inside the Glass card's frosted paint layer every primitive
+        // shares one order and sprites draw over quads, so the picture would
+        // cover the ring and the disc; a deferred draw paints after the layer.
+        tile.child(deferred(ring)).child(deferred(remove))
     }
 
     /// Drop staged file `i`; the others and the typed text stay.
@@ -5832,6 +5835,18 @@ mod staged_tests {
         Entity<Composer>,
         &mut VisualTestContext,
     ) {
+        mount_on(crate::ui::theme::Surface::Matte, cx)
+    }
+
+    fn mount_on(
+        surface: crate::ui::theme::Surface,
+        cx: &mut TestAppContext,
+    ) -> (
+        tokio::runtime::Runtime,
+        Entity<Shell>,
+        Entity<Composer>,
+        &mut VisualTestContext,
+    ) {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -5839,7 +5854,7 @@ mod staged_tests {
         let handle = rt.handle().clone();
         cx.update(|cx| {
             gpui_tokio::init_from_handle(cx, handle);
-            cx.set_global(Theme::dark(crate::ui::theme::Surface::Matte));
+            cx.set_global(Theme::dark(surface));
             if !cx.has_global::<PulseClock>() {
                 PulseClock::init(cx);
             }
@@ -5991,7 +6006,19 @@ mod staged_tests {
 
     #[gpui::test]
     fn the_strip_lays_the_tiles_out_as_pinned(cx: &mut TestAppContext) {
-        let (_rt, shell, composer, vcx) = mount(cx);
+        strip_layout_pins(crate::ui::theme::Surface::Matte, cx);
+    }
+
+    /// On Glass the card is a frosted paint layer; the ring and the disc are
+    /// deferred draws there (so they paint over the picture) and must still
+    /// land on the same pixels.
+    #[gpui::test]
+    fn the_strip_lays_the_tiles_out_as_pinned_on_glass(cx: &mut TestAppContext) {
+        strip_layout_pins(crate::ui::theme::Surface::Glass, cx);
+    }
+
+    fn strip_layout_pins(surface: crate::ui::theme::Surface, cx: &mut TestAppContext) {
+        let (_rt, shell, composer, vcx) = mount_on(surface, cx);
         let (_dir, paths) = fixtures();
         stage(&composer, &paths, vcx);
         settle(&shell, vcx);
