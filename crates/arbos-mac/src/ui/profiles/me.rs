@@ -21,6 +21,7 @@ use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::profiles::pane::{self, Hero, Picture, ProfilePane, Section};
 use crate::ui::profiles::{self, kit, machine};
+use crate::ui::sf_symbols;
 use crate::ui::shell::{fmt_uptime, human_bytes, SettingsPage, Shell};
 use crate::ui::theme::{
     AppearancePref, Surface, Theme, GLASS_OPACITY_MAX, GLASS_OPACITY_MIN, TEXT_BODY, TEXT_SMALL,
@@ -507,11 +508,11 @@ impl Shell {
                         }
                         machine::Row::Breakdown => card.child(
                             glass::hot_row("machine-breakdown", "Per-agent usage", &theme)
-                                .child(crate::ui::icons::icon(
+                                .child(sf_symbols::glyph(
                                     if breakdown_open {
-                                        "chevron-up"
+                                        "chevron.up"
                                     } else {
-                                        "chevron-right"
+                                        "chevron.right"
                                     },
                                     13.0,
                                     theme.text_faint,
@@ -1190,7 +1191,7 @@ impl Shell {
         if page != SettingsPage::Root {
             let back = glass::control_disc(
                 "settings-back",
-                "chevron-left",
+                "chevron.left",
                 crate::ui::theme::CONTROL_GLYPH,
                 &theme,
             )
@@ -1403,7 +1404,7 @@ impl Shell {
             body.push(Section::Card(vec![
                 page_row(
                     "settings-appearance",
-                    "circle-half",
+                    "circle.lefthalf.filled",
                     SettingsPage::Appearance,
                     Some(appearance_summary),
                     &theme,
@@ -1442,7 +1443,7 @@ impl Shell {
                 .into_any_element(),
                 page_row(
                     "settings-devices",
-                    "laptop",
+                    "laptopcomputer",
                     SettingsPage::Devices,
                     Some(devices_summary),
                     &theme,
@@ -1453,7 +1454,7 @@ impl Shell {
             // On this Mac (Routines · Channels · Skills hidden until implemented).
             body.push(Section::Card(vec![kit::nav_row(
                 "settings-local",
-                "window",
+                "macwindow",
                 "On this Mac",
                 Some(on_this_mac),
                 &theme,
@@ -1466,7 +1467,7 @@ impl Shell {
             body.push(Section::Card(vec![
                 page_row(
                     "settings-machine",
-                    "desktop",
+                    "desktopcomputer",
                     SettingsPage::Machine,
                     Some(shown.label().to_string()),
                     &theme,
@@ -1475,7 +1476,7 @@ impl Shell {
                 .into_any_element(),
                 page_row(
                     "settings-updates",
-                    "arrow-down",
+                    "arrow.down",
                     SettingsPage::Updates,
                     Some(if auto_update { "On" } else { "Off" }.into()),
                     &theme,
@@ -1488,7 +1489,7 @@ impl Shell {
             body.push(Section::Card(vec![
                 kit::nav_row(
                     "settings-feedback",
-                    "square-pencil",
+                    "square.and.pencil",
                     "Send feedback",
                     Some("⌘⌥F".into()),
                     &theme,
@@ -1497,7 +1498,7 @@ impl Shell {
                 .into_any_element(),
                 page_row(
                     "settings-about",
-                    "info",
+                    "info.circle",
                     SettingsPage::About,
                     Some(update.current_version.to_string()),
                     &theme,

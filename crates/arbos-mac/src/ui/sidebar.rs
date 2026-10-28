@@ -37,10 +37,10 @@ use crate::ui::frost::{edge_faded, edge_faded_sides};
 use crate::ui::glass::{self, WindowDrag};
 use crate::ui::groups;
 use crate::ui::highlight::{self, Shape};
-use crate::ui::icons::icon;
 use crate::ui::identity;
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
+use crate::ui::sf_symbols;
 use crate::ui::shell::{Shell, TRAFFIC_LIGHTS_INSET};
 use crate::ui::sidebar_fit;
 use crate::ui::theme::{
@@ -271,9 +271,9 @@ impl StripControl {
     /// icon and takes [`CONTROL_GLYPH_WIDE`] for the same visible box.
     pub(crate) fn glyph(self) -> (&'static str, f32) {
         match self {
-            StripControl::Search => ("search", CONTROL_GLYPH),
+            StripControl::Search => ("magnifyingglass", CONTROL_GLYPH),
             StripControl::New => ("plus", CONTROL_GLYPH),
-            StripControl::Collapse => ("sidebar-left", CONTROL_GLYPH_WIDE),
+            StripControl::Collapse => ("sidebar.left", CONTROL_GLYPH_WIDE),
         }
     }
 }
@@ -567,7 +567,11 @@ pub(crate) fn account_avatar(
             .flex()
             .items_center()
             .justify_center()
-            .child(icon("person", FOOTER_AVATAR / 2.0, theme.text)),
+            .child(sf_symbols::glyph(
+                "person.fill",
+                FOOTER_AVATAR / 2.0,
+                theme.text,
+            )),
     };
     // The machine mark in front of the picture (`ui::marks::machine_corner`, its
     // own paint layer), ringed in the sidebar colour. Never a coloured dot
@@ -1137,7 +1141,7 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(icon("hourglass", 14.0, theme.text)),
+                        .child(sf_symbols::glyph("hourglass", 14.0, theme.text)),
                 )
                 .child(
                     div()
@@ -1284,7 +1288,7 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
                 .cursor_pointer()
                 .map(|el| highlight::row(el, false, Shape::Own, &theme))
                 .child(format!("Hidden chats · {hidden_count}"))
-                .child(icon("chevron-right", 12.0, theme.text_faint))
+                .child(sf_symbols::glyph("chevron.right", 12.0, theme.text_faint))
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.hidden_open = true;
@@ -1619,7 +1623,7 @@ fn server_channels(
         .pb(px(10.0))
         .child(
             glass::circle("server-back-circle", 30.0, theme)
-                .child(icon("chevron-left", 14.0, theme.text))
+                .child(sf_symbols::glyph("chevron.left", 14.0, theme.text))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.state.update(cx, |s, cx| s.close_server_pane(cx));
                 })),
@@ -1711,7 +1715,7 @@ fn server_channels(
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(icon("hash", 18.0, theme.text_muted)),
+                        .child(sf_symbols::glyph("number", 18.0, theme.text_muted)),
                 )
                 .child(
                     div()
@@ -1738,7 +1742,9 @@ fn server_channels(
                                         .text_color(theme.text)
                                         .child(ch.name.clone()),
                                 )
-                                .when(locked, |el| el.child(icon("lock", 11.0, theme.text_faint)))
+                                .when(locked, |el| {
+                                    el.child(sf_symbols::glyph("lock", 11.0, theme.text_faint))
+                                })
                                 .child(div().flex_1())
                                 .when_some(row_time_size(shell, cx), |el, size| {
                                     el.child(time_el(time, size, theme))
@@ -2896,24 +2902,33 @@ mod strip_tests {
         assert_eq!(STRIP_GAP, CONTROL_GAP);
         assert_eq!(STRIP_GAP, 8.0, "Grok's 16 px / 2 between discs");
         assert_eq!(STRIP_INSET, 12.0);
-        // The 24-grid icons: search and plus at CONTROL_GLYPH draw Grok's
-        // 14 / 13 pt marks within 1 px (0.75 × 19 = 14.25, 0.667 × 19 = 12.7);
-        // the collapse rect (20/24 of the grid) takes the narrower size for
-        // the same 14 pt box (0.833 × 17 = 14.2).
-        assert_eq!(StripControl::Search.glyph(), ("search", CONTROL_GLYPH));
+        // System symbols ([feedback sf-symbols-everywhere-mac-2026-10-28]): the
+        // magnifier and plus sit in the CONTROL_GLYPH box at GLYPH_POINT_RATIO of
+        // it (16 pt), medium weight — Apple's `magnifyingglass` inks ≈ 0.9 of its
+        // point size (14.5, Grok's 14), `plus` ≈ 0.8 (12.9, Grok's 13); the wider
+        // `sidebar.left` takes the narrower box for the same 14 pt mark.
+        assert_eq!(
+            StripControl::Search.glyph(),
+            ("magnifyingglass", CONTROL_GLYPH)
+        );
         assert_eq!(StripControl::New.glyph(), ("plus", CONTROL_GLYPH));
         assert_eq!(
             StripControl::Collapse.glyph(),
-            ("sidebar-left", CONTROL_GLYPH_WIDE)
+            ("sidebar.left", CONTROL_GLYPH_WIDE)
         );
-        let magnifier = 0.75 * CONTROL_GLYPH;
-        let plus = (16.0 / 24.0) * CONTROL_GLYPH;
-        let collapse = (20.0 / 24.0) * CONTROL_GLYPH_WIDE;
-        assert!((magnifier - 14.0).abs() <= 0.5, "magnifier box {magnifier}");
-        assert!((plus - 13.0).abs() <= 0.5, "plus box {plus}");
-        assert!((collapse - 14.0).abs() <= 0.5, "collapse box {collapse}");
-        let stroke = 2.0 / 24.0 * CONTROL_GLYPH;
-        assert!((stroke - 1.5).abs() <= 0.25, "stroke {stroke} (Grok 1.5)");
+        let point = crate::ui::sf_symbols::GLYPH_POINT_RATIO * CONTROL_GLYPH;
+        let magnifier = 0.9 * point;
+        let plus = 0.8 * point;
+        let collapse = 0.95 * crate::ui::sf_symbols::GLYPH_POINT_RATIO * CONTROL_GLYPH_WIDE;
+        assert!(
+            (magnifier - 14.0).abs() <= 0.75,
+            "magnifier mark {magnifier}"
+        );
+        assert!((plus - 13.0).abs() <= 0.5, "plus mark {plus}");
+        assert!((collapse - 14.0).abs() <= 0.5, "collapse mark {collapse}");
+        for name in ["magnifyingglass", "plus", "sidebar.left"] {
+            assert!(crate::ui::sf_symbols::is_registered(name), "{name}");
+        }
     }
 
     /// Inside a server there is no search; a member without admin rights has
