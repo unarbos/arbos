@@ -509,7 +509,19 @@ struct AgentProfileView: View {
             AnyView(PaneRow(title: "Transport", value: info.transportLabel)),
             AnyView(PaneRow(title: "Protocol", value: info.proto)),
         ]))
-        out.append(.footnote("It reads and posts in the chats it is in, reacts, and shows typing and status. Secrets and members stay off."))
+        // The Can card (spec §4.3, the approved mockup): one switch per scope.
+        out.append(.title("Can"))
+        out.append(.card(OutsideAgentInfo.scopeRows.map { row -> AnyView in
+            let isOn = Binding<Bool>(
+                get: { model.outsideInfo[project.id]?.scope(row.name) ?? info.scope(row.name) },
+                set: { on in model.setOutsideScope(project.id, row.name, on: on) }
+            )
+            return AnyView(
+                PaneToggleRow(title: row.title, subtitle: row.subtitle, isOn: isOn)
+                    .accessibilityIdentifier("outside-scope-\(row.name)")
+            )
+        }))
+        out.append(.footnote("Changes apply at once. The agent sees only what is on."))
         let revoked = info.status == "revoked"
         if info.hasWake, !revoked {
             out.append(contentsOf: wakeSections(project, info))
