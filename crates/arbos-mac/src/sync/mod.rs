@@ -570,11 +570,6 @@ pub enum ClientCommand {
         chat_id: Id,
         active: bool,
     },
-    /// `POST /chats/{id}/agents {project_id}` (own project only).
-    AddAgent {
-        chat_id: Id,
-        project_id: Id,
-    },
     /// `DELETE /chats/{id}/agents/{project_id}` (owner of that project).
     RemoveAgent {
         chat_id: Id,
