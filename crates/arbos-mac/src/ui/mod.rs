@@ -6,7 +6,6 @@ pub mod avatar_picker;
 mod avatar_upload_preview_tests;
 pub mod avatars;
 pub mod backdrop;
-pub mod badge;
 pub mod blocked;
 pub mod callview;
 pub mod cards;
