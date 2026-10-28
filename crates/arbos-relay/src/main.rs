@@ -61,6 +61,7 @@ mod sites;
 mod skills;
 mod smoke;
 mod state;
+mod unfurl;
 mod upgrade;
 mod upgrade_carry;
 mod vault;
@@ -827,6 +828,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/room/{project}/{chat}/messages/{message_id}",
             delete(moderation::delete_message),
+        )
+        .route(
+            "/room/{project}/{chat}/messages/{message_id}/preview",
+            delete(moderation::remove_preview),
         )
         .route("/blob/{project}/{key}", get(blobs::get).put(blobs::put))
         .route("/link-icon", get(link_icons::get))
