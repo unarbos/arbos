@@ -39,27 +39,27 @@ struct LinkPreviewCard: View {
     private var faint: Color { own ? theme.userText.opacity(0.5) : theme.placeholder }
 
     var body: some View {
-        Button {
+        // Not a `Button` (`rowTap`): the reply swipe must start on the card too
+        // ([feedback swipe-reply-own-quoted-2026-10-28]).
+        VStack(alignment: .leading, spacing: 0) {
+            if preview.expanded { media }
+            HStack(alignment: .top, spacing: 10) {
+                if !preview.expanded, !preview.isPost, let image = preview.image {
+                    artView(image)
+                }
+                text
+            }
+            .padding(Self.pad)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: Self.radius, style: .continuous).fill(theme.bg.opacity(0.6)))
+        .overlay(RoundedRectangle(cornerRadius: Self.radius, style: .continuous).stroke(theme.separator, lineWidth: 0.5))
+        .clipShape(RoundedRectangle(cornerRadius: Self.radius, style: .continuous))
+        .rowTap {
             guard let url = preview.openURL else { return }
             openURL(url)
-        } label: {
-            VStack(alignment: .leading, spacing: 0) {
-                if preview.expanded { media }
-                HStack(alignment: .top, spacing: 10) {
-                    if !preview.expanded, !preview.isPost, let image = preview.image {
-                        artView(image)
-                    }
-                    text
-                }
-                .padding(Self.pad)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: Self.radius, style: .continuous).fill(theme.bg.opacity(0.6)))
-            .overlay(RoundedRectangle(cornerRadius: Self.radius, style: .continuous).stroke(theme.separator, lineWidth: 0.5))
-            .clipShape(RoundedRectangle(cornerRadius: Self.radius, style: .continuous))
-            .contentShape(RoundedRectangle(cornerRadius: Self.radius, style: .continuous))
         }
-        .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
         .accessibilityIdentifier("link-card")
         .accessibilityLabel(preview.oneLine)
         .accessibilityHint("Opens the link")

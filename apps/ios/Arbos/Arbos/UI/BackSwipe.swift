@@ -219,46 +219,14 @@ final class DirectionalSwipeRecognizer: UIGestureRecognizer {
     private var lastPoint = CGPoint.zero
     private var lastTime: TimeInterval = 0
     private var tracked: UITouch?
-    /// The view the tracked touch landed on (`UITouch.view`): the chain from it up to the
-    /// window holds the recognizers this swipe competes with (`cancelPresses`).
+    /// The view the tracked touch landed on (`UITouch.view`); the rig log walks the
+    /// recognizers from it up to the window (`SwipeLog.claim`).
     private(set) weak var touchView: UIView?
 
     override init(target: Any?, action: Selector?) {
         super.init(target: target, action: action)
         delaysTouchesBegan = false
         delaysTouchesEnded = false
-    }
-
-    /// Exclusivity policy for both swipe recognizers (the transcript's and the screen's):
-    /// the first of the scroll view's pan, this recognizer and its siblings to begin wins and
-    /// the others fail. Everything else — SwiftUI's own recognizers on the hosting views,
-    /// which carry taps, button presses and long presses — runs beside it: a `Button`
-    /// press (a reply bubble's quote header, a sender's name or avatar, a link card) begins
-    /// on touch-down, and an exclusive swipe that starts on it could never begin
-    /// ([feedback swipe-reply-own-quoted-2026-10-28]: no swipe-to-reply on an own bubble
-    /// with a quote block). When the swipe begins it cancels those presses (`cancelPresses`)
-    /// so the button does not fire on release.
-    static func staysExclusive(with other: UIGestureRecognizer) -> Bool {
-        other is UIPanGestureRecognizer || other is DirectionalSwipeRecognizer || other.view is UIScrollView
-    }
-
-    /// Cancel every recognizer that was already recognizing this touch and that
-    /// `staysExclusive(with:)` let run beside us — what UIKit would have done to us had it
-    /// begun first. Hover recognizers (pointer, not touch) and anything owned by a scroll
-    /// view or the window are left alone. Disabling a recognizer mid-gesture cancels it.
-    private func cancelPresses() {
-        var node = touchView
-        while let current = node, !(current is UIWindow) {
-            if !(current is UIScrollView) {
-                for gr in current.gestureRecognizers ?? [] where gr !== self && gr.isEnabled
-                    && (gr.state == .began || gr.state == .changed)
-                    && !Self.staysExclusive(with: gr) && !(gr is UIHoverGestureRecognizer) {
-                    gr.isEnabled = false
-                    gr.isEnabled = true
-                }
-            }
-            node = current.superview
-        }
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
@@ -298,10 +266,6 @@ final class DirectionalSwipeRecognizer: UIGestureRecognizer {
                 SwipeLog.claim(self)
                 #endif
                 state = .began
-                #if DEBUG
-                SwipeLog.event("began → state \(state.rawValue) (3 = began, 5 = failed: prevented by a competitor)")
-                #endif
-                cancelPresses()
             case .declined: state = .failed
             }
         case .began, .changed:
@@ -512,11 +476,17 @@ struct TranscriptSwipeHost: UIViewRepresentable {
             }
         }
 
-        /// Exclusive with the scroll pan and the screen's swipe (the first to begin wins);
-        /// SwiftUI's presses run beside us and are cancelled when we begin
-        /// (`DirectionalSwipeRecognizer.staysExclusive`).
+        /// Exclusive with every other recognizer (the scroll pan above all); SwiftUI's own
+        /// recognizer still asks for itself and keeps taps / long-press alive until we begin.
+        /// A SwiftUI `Button` is the exception: its press claims the touch on touch-down, so
+        /// a swipe that lands on one never begins and the button fires on lift instead —
+        /// that is why nothing tappable inside a message row is a `Button` (`rowTap`,
+        /// [feedback swipe-reply-own-quoted-2026-10-28]). Letting SwiftUI's recognizers run
+        /// beside this one was measured on the rig and rejected: the button still fired on
+        /// lift whatever was cancelled, and a failure requirement would hold the bubble's
+        /// long-press until the finger lifts.
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
-            !DirectionalSwipeRecognizer.staysExclusive(with: other)
+            false
         }
     }
 }
@@ -713,11 +683,8 @@ private struct BackSwipeHost: UIViewRepresentable {
             }
         }
 
-        /// Same policy as the transcript's swipe: exclusive with the scroll pan and the
-        /// transcript's swipe, beside SwiftUI's presses (an edge pop may start on a sender's
-        /// avatar button).
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
-            !DirectionalSwipeRecognizer.staysExclusive(with: other)
+            false
         }
     }
 }

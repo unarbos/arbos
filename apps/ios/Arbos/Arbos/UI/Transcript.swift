@@ -1490,25 +1490,21 @@ struct RowView: View, Equatable {
             let personLabel = ProfileToggle.label(name: personName, showing: model.profileShows(personTarget))
             let openPerson = { model.toggleProfile(personTarget) }
             HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
-                Button(action: openPerson) {
-                    PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
-                }
-                .buttonStyle(.plain)
-                .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
-                .accessibilityLabel(personLabel)
-                .accessibilityIdentifier("sender-avatar")
+                PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
+                    .rowTap(openPerson)
+                    .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
+                    .accessibilityLabel(personLabel)
+                    .accessibilityIdentifier("sender-avatar")
                 // Group / channel: the name inside the bubble, in the sender's colour,
                 // then the reply quote, then the text. No time in the bubble (drag to reveal).
                 VStack(alignment: .leading, spacing: 0) {
                     if named {
-                        Button(action: openPerson) {
-                            LiveSenderName(name: personName,
-                                           url: avatar, seed: model.personId(handle: handle) ?? handle, agent: false)
-                        }
-                        .buttonStyle(.plain)
-                        .padding(.bottom, Self.nameToTextGap)
-                        .accessibilityLabel(personLabel)
-                        .accessibilityIdentifier("bubble-name")
+                        LiveSenderName(name: personName,
+                                       url: avatar, seed: model.personId(handle: handle) ?? handle, agent: false)
+                            .rowTap(openPerson)
+                            .padding(.bottom, Self.nameToTextGap)
+                            .accessibilityLabel(personLabel)
+                            .accessibilityIdentifier("bubble-name")
                     }
                     if let quote {
                         quoteHeader(quote, color: theme.text)
@@ -1542,22 +1538,20 @@ struct RowView: View, Equatable {
             let memberLabel = ProfileToggle.label(name: agent.name, showing: model.profileShows(memberTarget))
             let openMember = { model.toggleProfile(memberTarget) }
             HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
-                Button(action: openMember) { memberAvatar(agent) }
+                memberAvatar(agent)
+                    .rowTap(openMember)
                     .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
-                    .buttonStyle(.plain)
                     .accessibilityLabel(memberLabel)
                     .accessibilityIdentifier("sender-avatar")
                 memberBubble(
                     agent,
                     content: VStack(alignment: .leading, spacing: 0) {
                         if named {
-                            Button(action: openMember) {
-                                memberName(agent)
-                            }
-                            .buttonStyle(.plain)
-                            .padding(.bottom, Self.nameToTextGap)
-                            .accessibilityLabel(memberLabel)
-                            .accessibilityIdentifier("bubble-name")
+                            memberName(agent)
+                                .rowTap(openMember)
+                                .padding(.bottom, Self.nameToTextGap)
+                                .accessibilityLabel(memberLabel)
+                                .accessibilityIdentifier("bubble-name")
                         }
                         if let quote {
                             quoteHeader(quote, color: theme.text)
@@ -1891,22 +1885,18 @@ struct RowView: View, Equatable {
             let personLabel = ProfileToggle.label(name: personName, showing: model.profileShows(personTarget))
             let openPerson = { model.toggleProfile(personTarget) }
             HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
-                Button(action: openPerson) {
-                    PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
-                }
-                .buttonStyle(.plain)
-                .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
-                .accessibilityLabel(personLabel)
-                .accessibilityIdentifier("sender-avatar")
+                PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
+                    .rowTap(openPerson)
+                    .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
+                    .accessibilityLabel(personLabel)
+                    .accessibilityIdentifier("sender-avatar")
                 VStack(alignment: .leading, spacing: 4) {
                     if named {
-                        Button(action: openPerson) {
-                            LiveSenderName(name: personName, url: avatar, seed: model.personId(handle: handle) ?? handle, agent: false)
-                        }
-                        .buttonStyle(.plain)
-                        .padding(.leading, 6)
-                        .accessibilityLabel(personLabel)
-                        .accessibilityIdentifier("bubble-name")
+                        LiveSenderName(name: personName, url: avatar, seed: model.personId(handle: handle) ?? handle, agent: false)
+                            .rowTap(openPerson)
+                            .padding(.leading, 6)
+                            .accessibilityLabel(personLabel)
+                            .accessibilityIdentifier("bubble-name")
                     }
                     card()
                 }
@@ -1920,15 +1910,15 @@ struct RowView: View, Equatable {
             let memberLabel = ProfileToggle.label(name: agent.name, showing: model.profileShows(memberTarget))
             let openMember = { model.toggleProfile(memberTarget) }
             HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
-                Button(action: openMember) { memberAvatar(agent) }
+                memberAvatar(agent)
+                    .rowTap(openMember)
                     .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
-                    .buttonStyle(.plain)
                     .accessibilityLabel(memberLabel)
                     .accessibilityIdentifier("sender-avatar")
                 VStack(alignment: .leading, spacing: 4) {
                     if named {
-                        Button(action: openMember) { memberName(agent) }
-                            .buttonStyle(.plain)
+                        memberName(agent)
+                            .rowTap(openMember)
                             .padding(.leading, 6)
                             .accessibilityLabel(memberLabel)
                             .accessibilityIdentifier("bubble-name")
@@ -1992,32 +1982,29 @@ struct RowView: View, Equatable {
         // Reply in DM (#1836): the quote names its chat; it is a link only when the viewer
         // can open that chat (a member), else just the words.
         let linkable = quote.source.map { model.isMember(ofChat: $0.chatId) } ?? true
-        return Button {
-            guard linkable else { return }
-            onQuoteTap?(quote)
-        } label: {
-            VStack(alignment: .leading, spacing: 2) {
-                if let src = quote.source {
-                    Text(src.label)
-                        .font(theme.font(Theme.tiny))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .accessibilityIdentifier("reply-quote-source")
-                }
-                HStack(spacing: 6) {
-                    Image(systemName: "bubble.left")
-                        .font(.system(size: 11, weight: .medium))
-                    Text("“\(quote.text)”")
-                        .font(theme.font(Theme.small))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                }
+        // Not a `Button` (`rowTap`): a button press claimed the touch and the reply swipe
+        // could never start on the quote line — DaWizzaa's own-quoted-bubble report
+        // ([feedback swipe-reply-own-quoted-2026-10-28]).
+        return VStack(alignment: .leading, spacing: 2) {
+            if let src = quote.source {
+                Text(src.label)
+                    .font(theme.font(Theme.tiny))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .accessibilityIdentifier("reply-quote-source")
             }
-            .foregroundStyle(color.opacity(0.72))
-            .contentShape(Rectangle())
+            HStack(spacing: 6) {
+                Image(systemName: "bubble.left")
+                    .font(.system(size: 11, weight: .medium))
+                Text("“\(quote.text)”")
+                    .font(theme.font(Theme.small))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
         }
-        .buttonStyle(.plain)
-        .disabled(!linkable)
+        .foregroundStyle(color.opacity(0.72))
+        .rowTap(enabled: linkable) { onQuoteTap?(quote) }
+        .accessibilityElement(children: .combine)
         .accessibilityIdentifier("reply-quote")
         .accessibilityLabel(quote.source.map { "\($0.label): \(quote.text)" } ?? "Replying to: \(quote.text)")
     }
@@ -3408,29 +3395,27 @@ struct FileCard: View {
                     .padding(.horizontal, Theme.bubbleHPad)
                     .padding(.top, Theme.bubbleVPad)
             }
-            Button {
-                viewer = MediaOpen.state(for: item, chatId: chatId, model: model)
-            } label: {
-                // Grok's file card (web-08, measured): 61 pt tall, 20×27 icon at 15 pt,
-                // text 16 pt after the icon, 17 pt title over a 15 pt muted subtitle.
-                HStack(spacing: 14) {
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(FileCard.kindColor(item, theme: theme))
-                        .frame(width: 21, height: 27)
-                        .overlay(Image(systemName: item.kind == .video ? "play.fill" : "doc.text").font(.system(size: 12, weight: .bold)).foregroundStyle(.black))
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(item.name).font(theme.font(Theme.body)).foregroundStyle(fromUser ? theme.userText : theme.text).lineLimit(1)
-                        Text(subtitle).font(theme.font(Theme.small)).foregroundStyle(fromUser ? theme.userText.opacity(0.7) : theme.muted).lineLimit(1)
-                    }
+            // Grok's file card (web-08, measured): 61 pt tall, 20×27 icon at 15 pt,
+            // text 16 pt after the icon, 17 pt title over a 15 pt muted subtitle.
+            // Not a `Button` (`rowTap`): the reply swipe must start on the card too.
+            HStack(spacing: 14) {
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(FileCard.kindColor(item, theme: theme))
+                    .frame(width: 21, height: 27)
+                    .overlay(Image(systemName: item.kind == .video ? "play.fill" : "doc.text").font(.system(size: 12, weight: .bold)).foregroundStyle(.black))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.name).font(theme.font(Theme.body)).foregroundStyle(fromUser ? theme.userText : theme.text).lineLimit(1)
+                    Text(subtitle).font(theme.font(Theme.small)).foregroundStyle(fromUser ? theme.userText.opacity(0.7) : theme.muted).lineLimit(1)
                 }
-                .padding(.leading, 15)
-                .padding(.trailing, Theme.bubbleHPad + 4)
-                .padding(.vertical, 13)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .disabled(item.blobRef == nil)
+            .padding(.leading, 15)
+            .padding(.trailing, Theme.bubbleHPad + 4)
+            .padding(.vertical, 13)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .rowTap(enabled: item.blobRef != nil) {
+                viewer = MediaOpen.state(for: item, chatId: chatId, model: model)
+            }
+            .accessibilityElement(children: .combine)
             .accessibilityLabel(item.blobRef == nil ? "\(item.name), unavailable" : "\(item.name), \(subtitle), tap to open")
             if let captionText {
                 Text(captionText)
@@ -3481,32 +3466,32 @@ struct VoiceMemoBubble: View {
     @StateObject private var player = MemoPlayer()
 
     var body: some View {
-        Button {
+        // Not a `Button` (`rowTap`): the reply swipe must start on the chip too.
+        HStack(spacing: 10) {
+            Circle().fill(theme.primary).frame(width: 32, height: 32)
+                .overlay(Image(systemName: player.playing ? "pause.fill" : "play.fill").font(.system(size: 13, weight: .bold)).foregroundStyle(theme.onPrimary).offset(x: player.playing ? 0 : 1))
+            HStack(spacing: 2) {
+                ForEach(0..<22, id: \.self) { i in
+                    let played: Bool = Double(i) / 22.0 < player.progress
+                    let barHeight: CGFloat = 6 + CGFloat((i * 7) % 13)
+                    Capsule()
+                        .fill((fromUser ? theme.userText : theme.text).opacity(played ? 1 : 0.35))
+                        .frame(width: 3, height: barHeight)
+                }
+            }
+            Text(player.durationLabel)
+                .font(theme.font(Theme.tiny, design: .monospaced))
+                .foregroundStyle(fromUser ? theme.userText.opacity(0.8) : theme.muted)
+        }
+        .padding(.horizontal, Theme.bubbleHPad)
+        .padding(.vertical, Theme.bubbleVPad)
+        .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(fromUser ? theme.bubbleUser : theme.bubbleAssistant))
+        .rowTap(enabled: blobRef != nil) {
             guard let ref = blobRef, let url = model.blobURL(projectId: projectId, key: ref) else { return }
             player.toggle(url: url, headers: model.authHeaders)
-        } label: {
-            HStack(spacing: 10) {
-                Circle().fill(theme.primary).frame(width: 32, height: 32)
-                    .overlay(Image(systemName: player.playing ? "pause.fill" : "play.fill").font(.system(size: 13, weight: .bold)).foregroundStyle(theme.onPrimary).offset(x: player.playing ? 0 : 1))
-                HStack(spacing: 2) {
-                    ForEach(0..<22, id: \.self) { i in
-                        let played: Bool = Double(i) / 22.0 < player.progress
-                        let barHeight: CGFloat = 6 + CGFloat((i * 7) % 13)
-                        Capsule()
-                            .fill((fromUser ? theme.userText : theme.text).opacity(played ? 1 : 0.35))
-                            .frame(width: 3, height: barHeight)
-                    }
-                }
-                Text(player.durationLabel)
-                    .font(theme.font(Theme.tiny, design: .monospaced))
-                    .foregroundStyle(fromUser ? theme.userText.opacity(0.8) : theme.muted)
-            }
-            .padding(.horizontal, Theme.bubbleHPad)
-            .padding(.vertical, Theme.bubbleVPad)
-            .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(fromUser ? theme.bubbleUser : theme.bubbleAssistant))
         }
-        .buttonStyle(.plain)
-        .disabled(blobRef == nil)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(blobRef == nil ? "Voice memo, unavailable" : "Voice memo, \(player.durationLabel), \(player.playing ? "pause" : "play")")
         .onAppear {
             if let ref = blobRef, let url = model.blobURL(projectId: projectId, key: ref) {
                 player.loadDuration(url: url, headers: model.authHeaders)
@@ -3719,5 +3704,19 @@ struct StreamingText: View {
 
     private func string(_ bytes: [UInt8], _ from: Int, _ to: Int) -> String {
         String(decoding: bytes[from..<to], as: UTF8.self)
+    }
+}
+
+extension View {
+    /// A tappable surface inside a message row that is **not** a `Button`. A SwiftUI button
+    /// press claims the touch on touch-down, so the transcript's exclusive reply swipe
+    /// (`TranscriptSwipeHost`) can never begin on it, and the button still fires on lift
+    /// after the pan — the swipe became a quote tap. A tap gesture stays out of the way
+    /// once the pan moves. Same rule as the picture tile; VoiceOver gets the button trait
+    /// and activates the tap ([feedback swipe-reply-own-quoted-2026-10-28]).
+    func rowTap(enabled: Bool = true, _ action: @escaping () -> Void) -> some View {
+        contentShape(Rectangle())
+            .onTapGesture { if enabled { action() } }
+            .accessibilityAddTraits(enabled ? .isButton : [])
     }
 }
