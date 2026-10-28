@@ -944,7 +944,8 @@ struct ChatSession: View {
                         items: MessageMenu.items(forMessage: true,
                                                 canEdit: canEditMessage(row),
                                                 canDelete: canDelete(row),
-                                                hasReplies: row.replyCount > 0),
+                                                hasReplies: row.replyCount > 0,
+                                                hasPreview: Transcript.linkPreviewsEnabled && messageById[row.messageId]?.linkPreview != nil),
                         onReact: { emoji in
                             closeActions()
                             model.toggleReaction(chatId: chatId, messageId: row.messageId, emoji: emoji)
@@ -2146,6 +2147,8 @@ struct ChatSession: View {
             model.replyInDM(to: m, in: chatId, projectId: isPeople ? nil : projectId)
         case .edit:
             beginEdit(row)
+        case .removePreview:
+            model.removeLinkPreview(chatId: chatId, messageId: row.messageId, projectId: isPeople ? nil : projectId)
         case .delete:
             // Deletes at once, for everyone (Jacob, feedback remove-delete-confirms-2026-10-24:
             // no "Delete message?" step); the menu only offers Delete where `canDelete` holds.
