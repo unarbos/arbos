@@ -1473,6 +1473,15 @@ final class AppModel: ObservableObject {
 
     // MARK: Pairing
 
+    #if DEBUG
+    /// Unit tests: talk to a loopback relay with a fixed token — no keychain, no auth probe,
+    /// no rooms. Used by `AddMembersActionTests` to drive `addMembers` end to end.
+    func installRelayForTests(url: String, token: String) {
+        api = RelayAPI(endpoint: RelayEndpoint(url)) { token }
+        credentials = DeviceCredentials(relayUrl: url, deviceId: "ios:test", deviceToken: token)
+    }
+    #endif
+
     func setRelayUrl(_ raw: String) {
         let endpoint = RelayEndpoint(raw)
         UserDefaults.standard.set(endpoint.httpUrl, forKey: "relayUrl")

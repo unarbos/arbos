@@ -147,7 +147,10 @@ pub fn render(shell: &Shell, window: &Window, cx: &mut Context<Shell>) -> Option
             ));
     } else {
         for emoji in REACTION_PALETTE {
-            let on = held.iter().any(|e| e == emoji);
+            let on = held.iter().any(|e| {
+                arbos_core::doc::normalize_reaction_emoji(e)
+                    == arbos_core::doc::normalize_reaction_emoji(emoji)
+            });
             let (chat, msg) = (chat_id.clone(), message_id.clone());
             bar = bar.child(cell(
                 format!("react-{emoji}"),

@@ -1019,6 +1019,7 @@ struct GroupDraft: Equatable {
 struct NewGroupView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
     let onDone: () -> Void
     /// People-chat id to add to; nil creates a new group.
     var addTo: String? = nil
@@ -1212,29 +1213,40 @@ struct NewGroupView: View {
             }
         }
         .background(theme.bg)
-        .navigationTitle(title)
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(theme.bg, for: .navigationBar)
-        .toolbarBackground(.visible, for: .navigationBar)
-        .toolbar {
-            if adding {
-                ToolbarItem(placement: .topBarLeading) { Button("Cancel") { onDone() }.foregroundStyle(theme.text) }
-            }
-            ToolbarItem(placement: .topBarTrailing) {
-                Button { if adding { add() } else { create() } } label: {
-                    Text(adding ? (creating ? "Adding…" : "Add") : (creating ? "Creating…" : "Create"))
-                        .font(theme.font(Theme.small, weight: .semibold))
-                        .foregroundStyle(theme.onPrimary)
-                        .padding(.horizontal, 12)
-                        .frame(height: 32)
-                        .background(Capsule().fill(theme.primary))
+        // A refused add or create draws in this sheet's note, not as a toast (the error-messages
+        // rule): the verbs `addMembers` / `addServerMembers` / `addSecretPeople` / `createGroup` fail with.
+        .claimFailures("people-sheet", ["add members", "add @", "add the agent", "add them", "create the group"])
+        // Our own bar ([feedback iphone-add-members-2026-10-26]): the system inline bar
+        // squeezed the Add pill to "A…" under "Add members to Arbonites" and the tap went
+        // with it. The controls keep their width; the title shrinks, then truncates.
+        .sheetHeader(title: title,
+                     leading: adding ? .cancel : .back,
+                     onLeading: { if adding { onDone() } else { dismiss() } },
+                     action: actionLabel,
+                     actionEnabled: canSubmit && !creating,
+                     onAction: { if adding { add() } else { create() } })
+        .task { await model.loadDirectory() }
+        .onAppear {
+            // Rig: `ARBOS_RIG_PICK=<agent name>,@<handle>,…` pre-picks rows; `ARBOS_RIG_AUTO_ADD=<ms>`
+            // then taps Add — the same `add()` the pill runs ([feedback iphone-add-members-2026-10-26] proof).
+            guard adding, let picks = DebugHooks.rigPick else { return }
+            Task {
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                for pick in picks {
+                    if pick.hasPrefix("@"), let p = candidates.first(where: { "@\($0.handle)".caseInsensitiveCompare(pick) == .orderedSame }) { toggle(p) }
+                    else if let a = agentCandidates.first(where: { $0.name.caseInsensitiveCompare(pick) == .orderedSame }) { toggleAgent(a) }
                 }
-                .buttonStyle(.plain)
-                .disabled(!canSubmit || creating)
-                .opacity(!canSubmit || creating ? 0.45 : 1)
+                if let ms = DebugHooks.rigAutoAddMs {
+                    try? await Task.sleep(nanoseconds: UInt64(ms) * 1_000_000)
+                    add()
+                }
             }
         }
-        .task { await model.loadDirectory() }
+    }
+
+    /// Add · Create, with their busy forms; counts the picks so "Add (2)" says what happens.
+    var actionLabel: String {
+        SheetAction.label(adding: adding, busy: creating, picks: picked.count + pickedAgents.count)
     }
 
     private func toggle(_ p: Person) {
@@ -1277,7 +1289,9 @@ struct NewGroupView: View {
             }
             return
         }
-        guard let chat = addToChat, canSubmit, !creating else { return }
+        guard canSubmit, !creating else { return }
+        // Never a silent return: a tap on a live Add always answers on this screen.
+        guard let chat = addToChat else { localError = UserError.refused("add members", "This group is not loaded yet — try again."); return }
         let plan = AddMembersPlan.make(chat: chat, meId: model.user?.id, picked: picked, pickedAgents: pickedAgents)
         guard !plan.isEmpty else { localError = UserError.refused("add members", "Pick someone who is not in the group yet."); return }
         creating = true
@@ -1408,9 +1422,8 @@ struct ProjectMembersSheet: View {
             }
             .scrollContentBackground(.hidden)
             .background(theme.bg)
-            .navigationTitle("Share \(project.name)")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+            .sheetHeader(title: "Share \(project.name)", leading: .none,
+                         action: "Done", actionStyle: .text, onAction: { dismiss() })
             .task {
                 await load()
                 await model.loadDirectory()

@@ -142,6 +142,14 @@ enum DebugHooks {
     static var agentPickerPicked: [String] {
         (value("ARBOS_RIG_AGENT_PICKED") ?? "").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
     }
+    /// `ARBOS_RIG_PICK=<agent name>,@<handle>,…`: the Add members picker pre-picks these rows
+    /// once it is up; `ARBOS_RIG_AUTO_ADD=<ms>` then runs Add that long after
+    /// ([feedback iphone-add-members-2026-10-26] live proof on a scratch group).
+    static var rigPick: [String]? {
+        let list = (value("ARBOS_RIG_PICK") ?? "").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        return list.isEmpty ? nil : list
+    }
+    static var rigAutoAddMs: Int? { value("ARBOS_RIG_AUTO_ADD").flatMap(Int.init) }
     /// `ARBOS_RIG_AGENT_PICKER=<query>`: the picker's "Add agent" sheet starts open with that
     /// query typed (empty = open, nothing typed).
     static var agentPickerQuery: String? { value("ARBOS_RIG_AGENT_PICKER") }

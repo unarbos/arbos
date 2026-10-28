@@ -693,6 +693,10 @@ enum Controls {
     /// Picture inside a title pill, `avatarInset` from the capsule's end on every side.
     static let avatar: CGFloat = 32
     static var avatarInset: CGFloat { (height - avatar) / 2 }
+    /// The confirm pill (Add · Create · Save) and the back disc inside a sheet's
+    /// `height`-tall header bar ([feedback iphone-add-members-2026-10-26]): a control
+    /// inside a bar, so it sits under the bar height like the `avatar` inside a pill.
+    static let sheetAction: CGFloat = 36
     /// Outline: `ComposerRim` (#1841's thin light rim) on every member of the family.
 
     /// Surfaces that keep their own size on purpose, each with its reason. A lint
@@ -739,8 +743,11 @@ enum Controls {
     enum Screen: String, CaseIterable {
         case home, hiddenChats, chatHeader, chatSearchBar, composer, bottomSearchBar, serverHeader
         case settingsProfileFields, personPaneMessagePill, newMessageSheetSearch, signIn, secretsFields, callHeader
+        /// Cancel · title · Add bar on the pickers and Create / Edit sheets (`SheetHeaderBar`).
+        case sheetHeader
         var members: [Member] {
             switch self {
+            case .sheetHeader: return [.bar]
             case .home: return [.disc, .disc]
             case .hiddenChats: return [.disc, .pill]
             case .chatHeader: return [.disc, .pill, .disc]

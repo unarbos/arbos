@@ -151,6 +151,9 @@
 		A1660000000000000000A031 /* HeaderGlassStructureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1660000000000000000A030 /* HeaderGlassStructureTests.swift */; };
 		A1F6000000000000000000C2 /* ChatSearchShortcut.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F6000000000000000000C1 /* ChatSearchShortcut.swift */; };
 		A1F6000000000000000000C4 /* ChatSearchShortcutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F6000000000000000000C3 /* ChatSearchShortcutTests.swift */; };
+		A1AD0000000000000000B002 /* SheetHeader.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1AD0000000000000000B001 /* SheetHeader.swift */; };
+		A1AD0000000000000000B004 /* SheetHeaderLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1AD0000000000000000B003 /* SheetHeaderLayoutTests.swift */; };
+		A1AD0000000000000000B006 /* AddMembersActionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1AD0000000000000000B005 /* AddMembersActionTests.swift */; };
 		A1670000000000000000A051 /* ControlTokenLintTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1670000000000000000A050 /* ControlTokenLintTests.swift */; };
 		A1680000000000000000A061 /* ListTopFadeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1680000000000000000A060 /* ListTopFadeTests.swift */; };
 		A1670000000000000000A041 /* ControlMetricsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1670000000000000000A040 /* ControlMetricsTests.swift */; };
@@ -365,6 +368,9 @@
 		A1660000000000000000A030 /* HeaderGlassStructureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeaderGlassStructureTests.swift; sourceTree = "<group>"; };
 		A1F6000000000000000000C1 /* ChatSearchShortcut.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSearchShortcut.swift; sourceTree = "<group>"; };
 		A1F6000000000000000000C3 /* ChatSearchShortcutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSearchShortcutTests.swift; sourceTree = "<group>"; };
+		A1AD0000000000000000B001 /* SheetHeader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SheetHeader.swift; sourceTree = "<group>"; };
+		A1AD0000000000000000B003 /* SheetHeaderLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SheetHeaderLayoutTests.swift; sourceTree = "<group>"; };
+		A1AD0000000000000000B005 /* AddMembersActionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddMembersActionTests.swift; sourceTree = "<group>"; };
 		A1670000000000000000A050 /* ControlTokenLintTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlTokenLintTests.swift; sourceTree = "<group>"; };
 		A1680000000000000000A060 /* ListTopFadeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ListTopFadeTests.swift; sourceTree = "<group>"; };
 		A1670000000000000000A040 /* ControlMetricsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlMetricsTests.swift; sourceTree = "<group>"; };
@@ -545,6 +551,7 @@
 			children = (
 				A1EE00000000000000000003 /* ErrorNote.swift */,
 				A1BB00000000000000000001 /* BackSwipe.swift */,
+				A1AD0000000000000000B001 /* SheetHeader.swift */,
 				A124D4FA40F4E5025A2B2C9D,
 				A1EE5A7A5FF12E4EF7FE7B27,
 				A1686D5A87F44B94E76A8761,
@@ -616,6 +623,8 @@
 				A1F7A0000000000000000003 /* ProfileToggleTests.swift */,
 				A1660000000000000000A030 /* HeaderGlassStructureTests.swift */,
 				A1F6000000000000000000C3 /* ChatSearchShortcutTests.swift */,
+				A1AD0000000000000000B003 /* SheetHeaderLayoutTests.swift */,
+				A1AD0000000000000000B005 /* AddMembersActionTests.swift */,
 				A1670000000000000000A050 /* ControlTokenLintTests.swift */,
 				A1680000000000000000A060 /* ListTopFadeTests.swift */,
 				A1670000000000000000A040 /* ControlMetricsTests.swift */,
@@ -925,6 +934,7 @@
 				A1C98CB150ED95D675AD1811 /* SecretsViews.swift in Sources */,
 				A16B7487AC090D4969019FDF /* SignInView.swift in Sources */,
 				A19E8F90C26169886405B87C /* Theme.swift in Sources */,
+				A1AD0000000000000000B002 /* SheetHeader.swift in Sources */,
 				A1AF934D450F6DEFF67E0212 /* Transcript.swift in Sources */,
 				A1BC00000000000000000002 /* MessageMenu.swift in Sources */,
 				A1BC00000000000000000006 /* MessageActions.swift in Sources */,
@@ -969,6 +979,8 @@
 				A1F7A0000000000000000004 /* ProfileToggleTests.swift in Sources */,
 				A1660000000000000000A031 /* HeaderGlassStructureTests.swift in Sources */,
 				A1F6000000000000000000C4 /* ChatSearchShortcutTests.swift in Sources */,
+				A1AD0000000000000000B004 /* SheetHeaderLayoutTests.swift in Sources */,
+				A1AD0000000000000000B006 /* AddMembersActionTests.swift in Sources */,
 				A1670000000000000000A051 /* ControlTokenLintTests.swift in Sources */,
 				A1680000000000000000A061 /* ListTopFadeTests.swift in Sources */,
 				A1670000000000000000A041 /* ControlMetricsTests.swift in Sources */,

@@ -293,27 +293,9 @@ struct NewChannelSheet: View {
                 .padding(.top, 28)
             }
             .background(theme.bg)
-            .navigationTitle("New channel")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(theme.bg, for: .navigationBar)
-            .toolbarBackground(.visible, for: .navigationBar)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Cancel") { dismiss() }.foregroundStyle(theme.text)
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { create() } label: {
-                        Text(creating ? "Creating…" : "Create")
-                            .font(theme.font(Theme.small, weight: .semibold))
-                            .foregroundStyle(theme.onPrimary)
-                            .padding(.horizontal, 12).frame(height: 32)
-                            .background(Capsule().fill(theme.primary))
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(slug.isEmpty || creating)
-                    .opacity(slug.isEmpty || creating ? 0.45 : 1)
-                }
-            }
+            .sheetHeader(title: "New channel", onLeading: { dismiss() },
+                         action: creating ? "Creating…" : "Create", actionEnabled: !slug.isEmpty && !creating,
+                         onAction: { create() })
             .onAppear { focused = true }
         }
         .tint(theme.text)
