@@ -353,6 +353,32 @@ extension PeopleChat {
     }
 }
 
+/// The Add members picker's one agent section ([feedback add-your-agent-row-removal-ios-2026-10-27];
+/// the Mac's `people::AGENTS_SECTION_LABEL` / `others_agents_in` are the twin): titled "Agents",
+/// my agents first (pickable), then the other members' agents already in the chat — greyed,
+/// already in; only their owner adds or removes them — so the section is the chat's whole agent
+/// roster. The separate "Add agent" / "Add your agent" rows are gone on both platforms.
+enum AddMembersAgents {
+    static let sectionTitle = "Agents"
+    static let peopleTitle = "People"
+
+    /// The other members' agents already in `chat` (not mine — mine are the pickable rows),
+    /// by name, narrowed by what was typed (name or @handle). Nothing outside Add members.
+    static func others(in chat: PeopleChat?, meId: String?, query: String) -> [ChatMember] {
+        guard let chat else { return [] }
+        let needle = query.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "@")).lowercased()
+        return chat.agents
+            .filter { $0.ownerId == nil || $0.ownerId != meId }
+            .filter { needle.isEmpty || $0.displayName.lowercased().contains(needle) || $0.handle.lowercased().contains(needle) }
+            .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+    }
+
+    /// The row's second line for another member's agent: `@handle · run by @owner`.
+    static func note(for agent: ChatMember) -> String? {
+        agent.ownerHandle.map { "run by @\($0)" }
+    }
+}
+
 /// The relay calls "Add" makes for one group: new people by handle, new agents
 /// by project id, both on `chatId` — never a new group. Whoever is already in
 /// (people, me, agents) is dropped so a stale pick never hits `already_member`.
