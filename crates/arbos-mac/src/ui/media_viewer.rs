@@ -143,6 +143,8 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
     let count = viewer.items.len();
     let kind = item.attachment.kind();
     // A profile picture reads the avatar cache by URL; a chat picture its blob thumbnail.
+    // A video shows its poster JPEG behind Play until the clip loads
+    // (feedback app-01M61H3VVBQZ6NCE708XB41NCC).
     let is_profile_picture = item.picture_url.is_some();
     let picture = match &item.picture_url {
         Some(url) => state.avatar(url),
@@ -152,6 +154,11 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
             .as_ref()
             .and_then(|k| state.thumbnails.get(k).cloned()),
     };
+    let video_poster = item
+        .attachment
+        .poster
+        .as_ref()
+        .and_then(|p| state.thumbnails.get(&p.blob_ref).cloned());
     // The avatar cache has no failure state: a profile picture shows "Loading…" until it lands.
     let failed = !is_profile_picture
         && (item
@@ -262,6 +269,24 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
                     .bg(white(0.06))
                     .into_any_element()
             } else {
+                let backdrop = match &video_poster {
+                    Some(image) => img(image.clone())
+                        .w_full()
+                        .h_full()
+                        .rounded(px(8.0))
+                        .object_fit(ObjectFit::Contain)
+                        .into_any_element(),
+                    None => div()
+                        .w_full()
+                        .h_full()
+                        .rounded(px(8.0))
+                        .bg(white(0.06))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(sf_symbols::glyph("video", 44.0, white(0.25)))
+                        .into_any_element(),
+                };
                 div()
                     .relative()
                     .w_full()
@@ -269,17 +294,7 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(
-                        div()
-                            .w_full()
-                            .h_full()
-                            .rounded(px(8.0))
-                            .bg(white(0.06))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(sf_symbols::glyph("video", 44.0, white(0.25))),
-                    )
+                    .child(backdrop)
                     .child(
                         div()
                             .absolute()

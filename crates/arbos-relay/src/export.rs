@@ -681,6 +681,7 @@ mod tests {
                     blob_ref: Some("att-1".into()),
                     url: None,
                     source: None,
+                    poster: None,
                 });
             }
             doc.append_user_message(&id, &format!("message {i}"), "dev1", &opts)

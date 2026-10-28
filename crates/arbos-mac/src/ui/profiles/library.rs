@@ -1208,6 +1208,7 @@ mod render_tests {
                 chart_part: None,
                 url: None,
                 source: None,
+                poster: None,
             },
         }
     }

@@ -111,6 +111,20 @@ final class ImageCaptionBubbleTests: XCTestCase {
         XCTAssertFalse(PhotoBubbleLayout.pictureIsFlush(picture: CGSize(width: 148, height: 320), bubbleWidth: 149))
     }
 
+    /// Video poster bubble size and duration label
+    /// (feedback app-01M61H3VVBQZ6NCE708XB41NCC).
+    func testVideoPosterBubbleSizeAndDurationLabel() throws {
+        let landscape = try XCTUnwrap(VideoPoster.bubbleSize(width: 1280, height: 720, maxWidth: min(280, cap)))
+        XCTAssertEqual(landscape, ImageBubble.fit(CGSize(width: 1280, height: 720), maxWidth: min(280, cap)))
+        let portrait = try XCTUnwrap(VideoPoster.bubbleSize(width: 720, height: 1280, maxWidth: min(280, cap)))
+        XCTAssertEqual(portrait, ImageBubble.fit(CGSize(width: 720, height: 1280), maxWidth: min(280, cap)))
+        XCTAssertNil(VideoPoster.bubbleSize(width: 0, height: 720, maxWidth: 280))
+        XCTAssertNil(VideoPoster.bubbleSize(width: 1280, height: 0, maxWidth: 280))
+        XCTAssertEqual(VideoPoster.durationLabel(ms: 7_000), "0:07")
+        XCTAssertEqual(VideoPoster.durationLabel(ms: 65_000), "1:05")
+        XCTAssertEqual(VideoPoster.durationLabel(ms: 3_903_000), "1:05:03")
+    }
+
     /// One body line as laid out: the system font's line height plus the bubble's line spacing.
     private var lineHeight: CGFloat { UIFont.systemFont(ofSize: Theme.body).lineHeight + Theme.bodyLineSpacing }
 

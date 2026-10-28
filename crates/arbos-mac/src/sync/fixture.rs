@@ -1340,6 +1340,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     chart_part: None,
                     url: None,
                     source: None,
+                    poster: None,
                 })
                 .collect();
             send_user(
@@ -1566,6 +1567,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 chart_part: None,
                 url: None,
                 source: None,
+                poster: None,
             }];
             send_user(
                 shared,
@@ -5243,6 +5245,12 @@ fn user_attachments(attachments: &[Attachment]) -> Vec<UserAttachment> {
                     id: s.id.clone(),
                     page_url: s.page_url.clone(),
                 }),
+            poster: a.poster.as_ref().map(|p| arbos_core::doc::VideoPoster {
+                blob_ref: p.blob_ref.clone(),
+                width: p.width,
+                height: p.height,
+                duration_ms: p.duration_ms,
+            }),
         })
         .collect()
 }
@@ -6004,6 +6012,7 @@ fn attachment(name: &str, mime: &str, kind: AttachmentKind, title: &str, bytes: 
             chart_part: None,
             url: None,
             source: None,
+            poster: None,
         },
     }
 }
@@ -6655,6 +6664,7 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
                 chart_part: None,
                 url: None,
                 source: None,
+                poster: None,
             }],
         );
         s.assistant(
