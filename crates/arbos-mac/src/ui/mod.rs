@@ -70,6 +70,7 @@ pub mod transcript;
 pub mod urlwrap;
 pub mod veil;
 pub mod vibrancy;
+pub mod video_player;
 pub mod voice;
 pub mod voicepicker;
 pub mod widgets;

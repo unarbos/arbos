@@ -382,9 +382,12 @@ pub enum SyncEvent {
         path: PathBuf,
     },
     /// Play / Quick Look from the media viewer finished fetching `key` (handed
-    /// to macOS, or failed with a notice) — the viewer's spinner stops.
+    /// to macOS, or failed with a notice) — the viewer's spinner stops. `path`
+    /// is the temp file when the fetch wrote one (videos play from it inline
+    /// on macOS; [feedback app-01M6147S9TPNBQA7KSDEY0K8C4]).
     AttachmentOpened {
         key: String,
+        path: Option<PathBuf>,
     },
     /// Relay link state (S14), app-wide and coarse.
     Link(Link),
@@ -1046,8 +1049,9 @@ pub enum ClientCommand {
         key: String,
         name: String,
     },
-    /// Media viewer: fetch `key` to a temp file and hand it to macOS — Quick
-    /// Look (`qlmanage -p`) for files, the default app (QuickTime Player) for video.
+    /// Media viewer: fetch `key` to a temp file. Files open in Quick Look
+    /// (`qlmanage -p`); videos play inline in the viewer on macOS (elsewhere
+    /// the default app) — [feedback app-01M6147S9TPNBQA7KSDEY0K8C4].
     OpenAttachment {
         project_id: Id,
         key: String,
