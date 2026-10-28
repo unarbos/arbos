@@ -31,6 +31,7 @@ use crate::model::{now_ms, Attachment, AttachmentKind, Chat, Id, Message, Part};
 use crate::ui::glass;
 use crate::ui::highlight;
 use crate::ui::icons::icon;
+use crate::ui::link_tile;
 use crate::ui::mention;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, CONTROL_GAP, CONTROL_GLYPH, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
@@ -705,30 +706,31 @@ pub(super) fn when_text(at: u64) -> String {
     }
 }
 
-/// Host for a link row (no scheme, path, or leading `www.`).
-fn link_host(url: &str) -> String {
-    url.trim_start_matches("https://")
+/// Host for a link row, shown as the row's title (no scheme, path, or leading `www.`).
+pub(crate) fn link_host(url: &str) -> String {
+    link_icon_host(url).trim_start_matches("www.").to_string()
+}
+
+/// The host a link's icon is keyed by at the relay (`GET /link-icon?domain=`): lower-case,
+/// no scheme, path or port, `www.` kept (it is a different site's icon in theory, and the
+/// bubbles' inline icons key on it the same way).
+pub(crate) fn link_icon_host(url: &str) -> String {
+    url.trim()
+        .trim_start_matches("https://")
         .trim_start_matches("http://")
-        .split('/')
+        .split(['/', '?', '#'])
         .next()
         .unwrap_or("")
-        .trim_start_matches("www.")
-        .to_string()
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
 }
 
-/// The site's own favicon — fetched through the avatar pipeline (ICO/PNG/JPEG).
-fn favicon_url(host: &str) -> Option<String> {
-    if host.is_empty()
-        || !host
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':'))
-    {
-        return None;
-    }
-    Some(format!("https://{host}/favicon.ico"))
-}
-
-/// Links tab: the site's favicon when we have it, else a letter tile; URL; who shared it.
+/// Links tab: the link tile (the bundled brand mark for a known host, the relay's icon for
+/// the rest, the host's letter meanwhile — [`link_tile`]); the host; URL; who shared it.
+/// Before [feedback link-icons-mac-tile-2026-10-27] this stretched `https://<host>/favicon.ico`
+/// — a 16 px picture — over the 36 pt tile.
 pub(super) fn link_list(
     items: &[Link],
     shell: &Shell,
@@ -740,49 +742,23 @@ pub(super) fn link_list(
     }
     let wants: Vec<String> = items
         .iter()
-        .filter_map(|l| favicon_url(&link_host(&l.url)))
+        .filter(|l| link_tile::Brand::for_url(&l.url).is_none())
+        .map(|l| link_icon_host(&l.url))
         .collect();
     shell.state.update(cx, |s, _| {
-        for url in wants {
-            s.want_avatar(url);
+        for host in wants {
+            s.want_link_icon(host);
         }
     });
     let state = shell.state.read(cx);
     let mut list = card(theme);
     for (i, l) in items.iter().enumerate() {
         let host = link_host(&l.url);
-        let letter = host
-            .chars()
-            .next()
-            .map(|c| c.to_uppercase().to_string())
-            .unwrap_or_else(|| "#".into());
-        let favicon = favicon_url(&host).and_then(|u| state.avatar(&u));
-        let leading = match favicon {
-            Some(img) => div()
-                .size(px(kit::AVATAR))
-                .rounded(px(10.0))
-                .overflow_hidden()
-                .bg(theme.surface_2)
-                .child(
-                    gpui::img(crate::ui::picture_fit::fit(&img, kit::AVATAR))
-                        .size(px(kit::AVATAR))
-                        .rounded(px(10.0))
-                        .object_fit(gpui::ObjectFit::Cover),
-                )
-                .into_any_element(),
-            None => div()
-                .size(px(kit::AVATAR))
-                .rounded(px(10.0))
-                .bg(crate::ui::groups::sender_color(&host, theme))
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(TEXT_BODY + 2.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.text)
-                .child(letter)
-                .into_any_element(),
-        };
+        let icon_host = link_icon_host(&l.url);
+        let icon = link_tile::icon_for(&l.url, &host, state.link_icon(&icon_host));
+        let leading = link_tile::tile(icon, kit::AVATAR, theme)
+            .debug_selector(move || format!("profile-link-tile-{i}"))
+            .into_any_element();
         let url = l.url.clone();
         list = list.child(
             list_row(
