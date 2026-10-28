@@ -73,12 +73,12 @@ struct SignInView: View {
                         .disabled(model.signingIn)
                         .padding(.horizontal, 24)
 
+                        // The sign-in note: under the button, before the hint (the shared element).
                         if let err = model.signInError {
-                            Text(err)
-                                .font(theme.font(Theme.small))
-                                .foregroundStyle(theme.danger)
-                                .multilineTextAlignment(.center)
-                                .padding(.horizontal, 28)
+                            ErrorNote(id: "sign-in-error", error: err, detailsOpen: $model.signInErrorDetailsOpen,
+                                      onTryAgain: { model.signInWithGitHub() },
+                                      onSignIn: { model.signInWithGitHub() })
+                                .padding(.horizontal, 24)
                         }
                         Text("Any GitHub account works. Your agents run on your own cloud machine.")
                             .font(theme.font(Theme.tiny))
@@ -117,10 +117,7 @@ struct SignInView: View {
                                         .foregroundStyle(theme.text)
                                 }
                             }
-                            .padding(.horizontal, 16)
-                            .frame(height: 50)
-                            .background(RoundedRectangle(cornerRadius: 25, style: .continuous).fill(theme.field))
-                            .overlay(RoundedRectangle(cornerRadius: 25, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                            .controlField()
                             Text("Self-hosting? Point the app at your own relay. Relays in pairing-code mode show a code field here.")
                                 .font(theme.font(Theme.tiny))
                                 .foregroundStyle(theme.muted)
@@ -188,10 +185,7 @@ struct PairingFields: View {
                         if digits != new || digits.count > 6 { code = String(digits.prefix(6)) }
                     }
             }
-            .padding(.horizontal, 16)
-            .frame(height: 50)
-            .background(RoundedRectangle(cornerRadius: 25, style: .continuous).fill(theme.field))
-            .overlay(RoundedRectangle(cornerRadius: 25, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+            .controlField()
             Button {
                 model.pair(code: code)
             } label: {
@@ -206,7 +200,9 @@ struct PairingFields: View {
             .disabled(code.count != 6 || model.pairingBusy)
             .opacity(code.count == 6 && !model.pairingBusy ? 1 : 0.45)
             if let err = model.pairingError {
-                Text(err).font(theme.font(Theme.small)).foregroundStyle(theme.danger).multilineTextAlignment(.center)
+                ErrorNote(id: "pairing-error", error: err, detailsOpen: $model.pairingErrorDetailsOpen,
+                          onTryAgain: { model.pair(code: code) },
+                          onSignIn: { model.pair(code: code) })
             }
             Text("This relay uses one-time codes: run `arbos-relay pair-code` on it.")
                 .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).multilineTextAlignment(.center)

@@ -14,7 +14,8 @@ struct FeedbackSheet: View {
     @State private var photoItem: PhotosPickerItem?
     @State private var sending = false
     @State private var sent: String?
-    @State private var error: String?
+    @State private var error: UserError?
+    @State private var errorDetailsOpen = false
     @State private var showFull = false
     @FocusState private var noteFocused: Bool
 
@@ -28,13 +29,18 @@ struct FeedbackSheet: View {
                     if let sent {
                         sentView(sent)
                     } else {
+                        // The sheet's note: at the top of the body, under the title (Jacob 2026-10-26).
+                        if let error {
+                            ErrorNote(id: "feedback-error", error: error, detailsOpen: $errorDetailsOpen, onTryAgain: send)
+                                .padding(.horizontal, 16)
+                        }
                         if let project {
                             HStack(spacing: 8) {
                                 AgentAvatar(project: project, theme: theme, size: 22, still: true)
                                 Text("About \(project.name)").font(theme.font(Theme.tiny, weight: .medium)).foregroundStyle(theme.muted)
                             }
                             .padding(.horizontal, 12).frame(height: 30)
-                            .background(Capsule().fill(theme.field))
+                            .background(Capsule().fill(theme.field)) // control-size: exception inlineChips
                         }
                         screenshotCard
                         noteField
@@ -42,9 +48,6 @@ struct FeedbackSheet: View {
                             .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                             .multilineTextAlignment(.center)
                             .padding(.horizontal, 28)
-                        if let error {
-                            Text(error).font(theme.font(Theme.tiny)).foregroundStyle(theme.danger).multilineTextAlignment(.center).padding(.horizontal, 24)
-                        }
                         Button(action: send) {
                             HStack(spacing: 8) {
                                 if sending { ProgressView().tint(theme.onPrimary).controlSize(.small) }
@@ -123,7 +126,7 @@ struct FeedbackSheet: View {
                         .scaledToFit()
                         .frame(height: 240)
                         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1)) // control-size: exception textAreas
                         .shadow(color: .black.opacity(0.35), radius: 14, y: 6)
                 }
                 .buttonStyle(.plain)
@@ -135,7 +138,7 @@ struct FeedbackSheet: View {
                     .buttonStyle(.plain)
                     .foregroundStyle(theme.text)
                     .padding(.horizontal, 12).frame(height: 32)
-                    .background(Capsule().fill(theme.field))
+                    .background(Capsule().fill(theme.field)) // control-size: exception inlineChips
                     Button { center.screenshot = nil } label: {
                         Label("Remove", systemImage: "trash").font(.system(size: Theme.tiny, weight: .medium))
                     }
@@ -153,7 +156,7 @@ struct FeedbackSheet: View {
                     }
                     .frame(maxWidth: .infinity).frame(height: 140)
                     .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(theme.card))
-                    .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(theme.fieldBorder, style: StrokeStyle(lineWidth: 1, dash: [6, 5])))
+                    .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(theme.fieldBorder, style: StrokeStyle(lineWidth: 1, dash: [6, 5]))) // control-size: exception textAreas
                 }
                 .buttonStyle(.plain)
                 .padding(.horizontal, 16)
@@ -176,14 +179,14 @@ struct FeedbackSheet: View {
                 .frame(minHeight: 110, maxHeight: 180)
                 .padding(.horizontal, 14).padding(.vertical, 6)
         }
-        .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(theme.field))
-        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+        .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(theme.field)) // control-size: exception textAreas
+        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1)) // control-size: exception textAreas
         .padding(.horizontal, 16)
     }
 
     private func sentView(_ id: String) -> some View {
         VStack(spacing: 14) {
-            GlassCircle(size: 72) {
+            GlassCircle(size: 72) { // control-size: exception illustrationDiscs
                 Image(systemName: "checkmark").font(.system(size: 30, weight: .semibold)).foregroundStyle(theme.online)
             }
             .padding(.top, 40)
@@ -217,8 +220,8 @@ struct FeedbackSheet: View {
             } catch {
                 let e = error as? RelayError
                 self.error = (e?.status == 404 || e?.status == 405)
-                    ? "This relay cannot take feedback yet. Try again after the next relay update."
-                    : "Could not send: \(error.localizedDescription)"
+                    ? UserError.refused("send your feedback", "This relay cannot take feedback yet. Try again after the next relay update.")
+                    : UserError.classify("send your feedback", error)
             }
             sending = false
         }

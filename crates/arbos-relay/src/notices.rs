@@ -13,7 +13,7 @@ use arbos_core::doc::ChatDoc;
 use arbos_core::ids::ulid;
 use arbos_core::wire::{self, Frame, FrameType};
 use bytes::Bytes;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::matrix::backfill::load_doc;
 use crate::people::PEOPLE_PROJECT;
@@ -109,16 +109,75 @@ pub async fn write_doc(
     Ok(seq)
 }
 
-/// Write `text` as a system line into a people chat's doc and broadcast the row. Returns the
-/// row's seq. Errors are the caller's to log: a notice must never fail the membership change
-/// it describes.
+/// Replace the room's stored history with a snapshot that starts **now**: the live state plus
+/// nothing older. After a secret redaction the rows and the old checkpoint still hold the
+/// removed text as past ops; this writes a shallow checkpoint at the current head and deletes
+/// every row it covers, so the relay keeps no copy. Devices that were offline across the
+/// redaction and push an update depending on history before this point are the one residual
+/// (documented) risk: Loro cannot merge an op whose dependencies were trimmed.
+pub fn compact_shallow(
+    state: &AppState,
+    project_id: Option<&str>,
+    chat_id: &str,
+) -> anyhow::Result<()> {
+    let room_name = wire::room_name(project_id.unwrap_or(PEOPLE_PROJECT), chat_id);
+    let Some(doc) = load_doc(state, chat_id, project_id)? else {
+        return Ok(());
+    };
+    let st = state.db.room_state(&room_name)?;
+    let bytes = doc.shallow_snapshot();
+    anyhow::ensure!(!bytes.is_empty(), "empty shallow snapshot");
+    let frontier = arbos_core::doc::encode_vv(&doc.oplog_vv());
+    anyhow::ensure!(
+        state
+            .db
+            .put_checkpoint(&room_name, st.head, &frontier, &bytes)?,
+        "head below floor"
+    );
+    let _ = state.db.flush_after_scrub();
+    Ok(())
+}
+
+/// The facts behind a membership line, so a client renders it from the live roster: the actor
+/// by user id (never the name of the moment — "Const added Aureum", 2026-10-26, when the
+/// profile had been renamed Jacob), the subjects by id. `text` stays on the row as the
+/// fallback for clients that predate the field.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Notice {
+    /// `added` | `removed` | `left` | `joined`.
+    pub kind: &'static str,
+    /// User id of the person who acted (or left / joined).
+    pub actor: String,
+    /// `{"kind": "user" | "agent", "id": …}` for each person or agent the line names.
+    pub subjects: Vec<Value>,
+}
+
+pub fn subject_user(id: &str) -> Value {
+    json!({ "kind": "user", "id": id })
+}
+pub fn subject_agent(project_id: &str) -> Value {
+    json!({ "kind": "agent", "id": project_id })
+}
+
+/// Write `text` as a system line into a people chat's doc, with `notice` (its facts) on the
+/// row, and broadcast it. Returns the row's seq. Errors are the caller's to log: a notice
+/// must never fail the membership change it describes.
 pub async fn post_people_notice(
     state: &AppState,
     chat_id: &str,
     text: &str,
+    notice: Notice,
 ) -> anyhow::Result<i64> {
     let seq = write_doc(state, None, chat_id, |doc| {
-        doc.append_system_line(&ulid(), text, RELAY_DEVICE, None)?;
+        let id = ulid();
+        doc.append_system_line(&id, text, RELAY_DEVICE, None)?;
+        doc.set_message_fields(
+            &id,
+            &[(
+                "notice",
+                serde_json::to_value(&notice).unwrap_or(Value::Null),
+            )],
+        );
         Ok(())
     })
     .await?;

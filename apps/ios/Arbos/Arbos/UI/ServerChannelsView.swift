@@ -119,8 +119,9 @@ struct ServerChannelsView: View {
     var body: some View {
         ZStack(alignment: .top) {
             theme.bg.ignoresSafeArea()
+            ScrollViewReader { proxy in
             List {
-                Color.clear.frame(height: 66)
+                Color.clear.frame(height: HomeChrome.barOnlyListTop)
                     .listRowInsets(EdgeInsets())
                     .listRowSeparator(.hidden)
                     .listRowBackground(Color.clear)
@@ -167,7 +168,11 @@ struct ServerChannelsView: View {
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
             .background(theme.bg)
+        .claimFailures("join-server", ["join the server"])
             .refreshable { await model.refreshServers() }
+            .rigListScroll(proxy, ids: server?.liveChannels.map(\.id) ?? [])
+            }
+            ListTopFade(screen: .serverChannels)
             header
         }
         // Custom back chevron; swipe right (edge pop or anywhere) goes back to Home —
@@ -198,7 +203,7 @@ struct ServerChannelsView: View {
             Button { dismiss() } label: {
                 GlassCircle {
                     Image(systemName: "chevron.left")
-                        .font(theme.font(17, weight: .semibold))
+                        .font(theme.font(Controls.glyph, weight: .semibold))
                         .foregroundStyle(theme.text)
                 }
             }
@@ -207,18 +212,18 @@ struct ServerChannelsView: View {
             .accessibilityIdentifier("server-back:\(serverId)")
             Spacer()
             GlassPill {
-                HStack(spacing: 8) {
+                HStack(spacing: Theme.headerPillGap) {
                     if let server {
-                        ServerAvatar(server: server, size: Theme.avatar)
+                        ServerAvatar(server: server, size: Controls.avatar)
                     }
                     Text(server?.name ?? "Server")
                         .font(.system(size: Theme.body, weight: .semibold))
                         .foregroundStyle(theme.text)
                         .lineLimit(1)
                 }
-                .padding(.leading, 10)
-                .padding(.trailing, 16)
-                .frame(height: Theme.control)
+                .padding(.leading, Controls.avatarInset)
+                .padding(.trailing, Controls.textInset)
+                .frame(height: Controls.height)
                 .contentShape(Capsule())
                 .onTapGesture { model.showProfile(.server(serverId: serverId)) }
                 .accessibilityAddTraits(.isButton)
@@ -229,7 +234,7 @@ struct ServerChannelsView: View {
                 Button { showNewChannel = true } label: {
                     GlassCircle {
                         Image(systemName: "plus")
-                            .font(theme.font(19, weight: .regular))
+                            .font(theme.font(Controls.glyph, weight: .regular))
                             .foregroundStyle(theme.text)
                     }
                 }
@@ -240,8 +245,7 @@ struct ServerChannelsView: View {
                 Color.clear.frame(width: Theme.control, height: Theme.control)
             }
         }
-        .padding(.horizontal, 20)
-        .padding(.top, 6)
+        .controlBar()
     }
 }
 
@@ -254,7 +258,6 @@ struct NewChannelSheet: View {
     @State private var name = ""
     @State private var restricted = false
     @State private var creating = false
-    @State private var errorText: String?
     @FocusState private var focused: Bool
 
     private var slug: String { AppModel.channelSlug(name) }
@@ -263,6 +266,9 @@ struct NewChannelSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 22) {
+                    // The sheet's note: under the header, before the first field.
+                    SheetErrorNote(id: "new-channel-error", onTryAgain: create)
+                        .padding(.horizontal, 16)
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Channel name").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                         HStack(spacing: 6) {
@@ -276,9 +282,7 @@ struct NewChannelSheet: View {
                                 .submitLabel(.done)
                                 .onSubmit { create() }
                         }
-                        .padding(.horizontal, 14).frame(height: Theme.fieldHeight)
-                        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
-                        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                        .controlField()
                         if !name.isEmpty, slug != name {
                             Text(slug.isEmpty ? "Use letters, digits and dashes." : "Will be #\(slug)")
                                 .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
@@ -292,13 +296,6 @@ struct NewChannelSheet: View {
                                 trailing: AnyView(Toggle("", isOn: $restricted).labelsHidden().tint(theme.primary)))
                     }
 
-                    if let errorText {
-                        Text(errorText)
-                            .font(theme.font(Theme.small))
-                            .foregroundStyle(theme.danger)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal, 20)
-                    }
                     Color.clear.frame(height: 24)
                 }
                 .padding(.top, 28)
@@ -333,21 +330,18 @@ struct NewChannelSheet: View {
         .presentationBackground(theme.bg)
         .presentationCornerRadius(28)
         .preferredColorScheme(theme.isDark ? .dark : .light)
+        .claimFailures("new-channel", ["create the channel"])
     }
 
     private func create() {
         guard !slug.isEmpty, !creating else { return }
         creating = true
-        errorText = nil
         Task {
             if let c = await model.createChannel(serverId: serverId, name: slug, restricted: restricted) {
                 dismiss()
                 model.open(channel: c)
-            } else {
-                // Copy onto this screen: RootView's alert is behind the sheet.
-                errorText = model.notice?.text ?? "Could not create the channel."
-                model.notice = nil
             }
+            // A refusal is the claimed failure, drawn by the note at the top of the sheet.
             creating = false
         }
     }
@@ -364,7 +358,6 @@ struct JoinServerView: View {
     @State private var joining = false
     @State private var searching = false
     @State private var openHits: [Server] = []
-    @State private var errorText: String?
     @FocusState private var focused: Bool
 
     /// The code at the end of `https://…/join/<code>` or `arbos://server/<code>`, or the bare code.
@@ -389,7 +382,7 @@ struct JoinServerView: View {
 
     var body: some View {
         VStack(spacing: 18) {
-            GlassCircle(size: 92) {
+            GlassCircle(size: 92) { // control-size: exception illustrationDiscs
                 Image(systemName: "link").font(.system(size: 34, weight: .medium)).foregroundStyle(theme.text)
             }
             .padding(.top, 28)
@@ -407,9 +400,7 @@ struct JoinServerView: View {
                 .submitLabel(.join)
                 .onSubmit(join)
                 .onChange(of: link) { _, _ in searchOpen() }
-                .padding(.horizontal, 16).frame(height: 50)
-                .background(RoundedRectangle(cornerRadius: 25, style: .continuous).fill(theme.field))
-                .overlay(RoundedRectangle(cornerRadius: 25, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                .controlField()
                 .padding(.horizontal, 24)
             Button(action: join) {
                 Text(joining ? "Joining…" : "Join")
@@ -421,11 +412,9 @@ struct JoinServerView: View {
             .disabled(code.isEmpty || joining || (!looksLikeInvite && openHits.isEmpty))
             .opacity(code.isEmpty || joining || (!looksLikeInvite && openHits.isEmpty) ? 0.45 : 1)
             .padding(.horizontal, 24)
-            if let errorText {
-                Text(errorText)
-                    .font(theme.font(Theme.small)).foregroundStyle(theme.danger)
-                    .multilineTextAlignment(.center).padding(.horizontal, 36)
-            }
+            // The note: under the Join button, before the open-server list — the shared element.
+            SheetErrorNote(id: "join-server-error", onTryAgain: join)
+                .padding(.horizontal, 24)
             if !openHits.isEmpty {
                 VStack(spacing: 0) {
                     ForEach(Array(openHits.enumerated()), id: \.element.id) { i, s in
@@ -468,13 +457,9 @@ struct JoinServerView: View {
         if looksLikeInvite {
             guard !code.isEmpty else { return }
             joining = true
-            errorText = nil
             Task {
                 if await model.joinServer(code: code) {
                     onDone()
-                } else {
-                    errorText = model.notice?.text ?? "Could not join the server."
-                    model.notice = nil
                 }
                 joining = false
             }
@@ -486,13 +471,9 @@ struct JoinServerView: View {
     private func joinOpen(_ s: Server) {
         guard !joining else { return }
         joining = true
-        errorText = nil
         Task {
             if await model.joinOpenServer(s.id) {
                 onDone()
-            } else {
-                errorText = model.notice?.text ?? "Could not join the server."
-                model.notice = nil
             }
             joining = false
         }

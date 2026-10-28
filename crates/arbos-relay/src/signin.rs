@@ -15,7 +15,7 @@
 
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
@@ -753,8 +753,9 @@ pub async fn device_revoke(
     }
 }
 
-/// Max JPEG for `PUT /me/avatar` (512×512 at high quality is well under this).
-const MAX_AVATAR_BYTES: usize = 2 * 1024 * 1024;
+/// Max picture for `PUT /me/avatar` (a 1024 px master — PNG mark or JPEG q92 photo — is well
+/// under this; see `avatar_image`).
+const MAX_AVATAR_BYTES: usize = crate::avatar_image::MAX_MASTER_BYTES;
 
 fn safe_avatar_user_id(id: &str) -> bool {
     !id.is_empty()
@@ -817,8 +818,8 @@ pub async fn patch_me(
     principal: Principal,
     Json(body): Json<PatchMeBody>,
 ) -> Response {
-    let user_id = match &principal {
-        Principal::Device { user_id, .. } => user_id.clone(),
+    let (user_id, device_id) = match &principal {
+        Principal::Device { user_id, id, .. } => (user_id.clone(), id.clone()),
         Principal::Box { .. } | Principal::Admin => {
             return api_error(StatusCode::FORBIDDEN, "forbidden", "device token required")
         }
@@ -881,6 +882,16 @@ pub async fn patch_me(
     };
 
     if name.is_some() || login.is_some() {
+        // Who renamed whom, on record: a display name that comes back after a rename
+        // ("Const" on gh_32490803, three times by 2026-10-26) must be traceable to the
+        // device that wrote it.
+        tracing::info!(
+            user = %user_id,
+            device = %device_id,
+            name = ?name,
+            login = ?login,
+            "profile updated"
+        );
         if let Err(e) = state
             .db
             .set_user_profile(&user_id, name.as_deref(), login.as_deref())
@@ -915,9 +926,12 @@ struct PutAvatarKeyBody {
     image_key: String,
 }
 
-/// `PUT /me/avatar`: raw JPEG body → public `{public_url}/avatars/{user_id}.jpg?v=…`. With a
-/// JSON body `{image_key}` the bytes come from my `users:{id}` blob slot instead (the avatar
-/// picker's generated preview). Either way the new picture fans out (`profile_updated`).
+/// `PUT /me/avatar`: raw JPEG or PNG body → public `{public_url}/avatars/{user_id}.jpg?v=…`
+/// (the `.jpg` name is historical — the route serves the stored type; PNG keeps a flat mark's
+/// edges lossless, see `avatar_image`). With a JSON body `{image_key}` the bytes come from my
+/// `users:{id}` blob slot instead (the avatar picker's generated preview). A picture larger than
+/// the 1024 px master is brought down to it on the way in. Either way the new picture fans out
+/// (`profile_updated`).
 pub async fn put_avatar(
     State(state): State<AppState>,
     principal: Principal,
@@ -936,45 +950,62 @@ pub async fn put_avatar(
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok());
-    let jpeg: Vec<u8> = if content_type.is_some_and(|t| t.starts_with("application/json")) {
+    let (kind, bytes): (ImageKind, Vec<u8>) = if content_type
+        .is_some_and(|t| t.starts_with("application/json"))
+    {
         let Ok(key) = serde_json::from_slice::<PutAvatarKeyBody>(&body) else {
             return api_error(StatusCode::BAD_REQUEST, "bad_request", "provide image_key");
         };
         let slot = format!("{}{user_id}", crate::images::USER_BLOB_PREFIX);
-        match crate::blobs::stored_image(&state, &slot, &key.image_key).await {
-            crate::blobs::StoredImage::Image(ImageKind::Jpeg) => {}
+        let kind = match crate::blobs::stored_image(&state, &slot, &key.image_key).await {
+            crate::blobs::StoredImage::Image(kind @ (ImageKind::Jpeg | ImageKind::Png)) => kind,
             crate::blobs::StoredImage::Image(other) => {
                 return api_error(
                     StatusCode::UNSUPPORTED_MEDIA_TYPE,
                     "not_jpeg",
-                    format!("Profile pictures are stored as JPEG; this is a {other}"),
+                    format!("Profile pictures are stored as JPEG or PNG; this is a {other}"),
                 );
             }
             crate::blobs::StoredImage::Missing => return crate::blobs::no_such_image(),
             crate::blobs::StoredImage::NotAnImage(why) => return not_an_image(&why),
-        }
+        };
         match crate::blobs::read(&state, &slot, &key.image_key).await {
-            Some(bytes) => bytes,
+            Some(bytes) => (kind, bytes),
             None => return crate::blobs::no_such_image(),
         }
     } else {
-        // Header and bytes must both say "image" (the shared gate); the file is then served
-        // as `{user}.jpg`, so of the image types only a JPEG is stored here — the apps re-encode.
-        match check_avatar(content_type, &body) {
-            Ok(ImageKind::Jpeg) => {}
+        // Header and bytes must both say "image" (the shared gate); the file is served with
+        // the type it is, and of the image types JPEG and PNG are stored here — the apps
+        // re-encode anything else (HEIC, GIF, WebP) into one of the two.
+        let kind = match check_avatar(content_type, &body) {
+            Ok(kind @ (ImageKind::Jpeg | ImageKind::Png)) => kind,
             Ok(other) => {
                 return api_error(
                     StatusCode::UNSUPPORTED_MEDIA_TYPE,
                     "not_jpeg",
                     format!(
-                        "Profile pictures are stored as JPEG; this is a {other}. Re-encode it first"
+                        "Profile pictures are stored as JPEG or PNG; this is a {other}. Re-encode it first"
                     ),
                 );
             }
             Err(why) => return not_an_image(&why),
-        }
-        body.to_vec()
+        };
+        (kind, body.to_vec())
     };
+    // An over-size upload (a 4000 px export, an older client's 1536 px JPEG) is brought down to
+    // the 1024 px master; anything already within it is stored byte for byte.
+    let jpeg = tokio::task::spawn_blocking(move || {
+        crate::avatar_image::normalize_upload(kind, &bytes).bytes
+    })
+    .await
+    .unwrap_or_default();
+    if jpeg.is_empty() {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "io",
+            "picture not processed",
+        );
+    }
     if jpeg.len() > MAX_AVATAR_BYTES {
         return api_error(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -1092,25 +1123,31 @@ pub fn profile_audience(state: &AppState, user_id: &str) -> Vec<String> {
     audience
 }
 
-/// `GET /avatars/{user_id}.jpg` — public (same role as a GitHub CDN avatar URL).
-pub async fn get_avatar(State(state): State<AppState>, Path(file): Path<String>) -> Response {
+/// `GET /avatars/{user_id}.jpg[?w=<px>]` — public (same role as a GitHub CDN avatar URL). The
+/// stored master (JPEG or PNG; the Content-Type follows the bytes, not the `.jpg` name), or with
+/// `w=` a Lanczos downscale at that bucket — the pixels a surface draws, so no client has to
+/// shrink a large texture on the GPU (`avatar_image`).
+pub async fn get_avatar(
+    State(state): State<AppState>,
+    Path(file): Path<String>,
+    Query(size): Query<crate::avatar_image::SizeQuery>,
+) -> Response {
     let user_id = file.strip_suffix(".jpg").unwrap_or(file.as_str());
     if !safe_avatar_user_id(user_id) {
         return api_error(StatusCode::NOT_FOUND, "not_found", "no such avatar");
     }
     let path = avatar_file(&state, user_id);
     match tokio::fs::read(&path).await {
-        Ok(bytes) => (
-            [
-                (header::CONTENT_TYPE, HeaderValue::from_static("image/jpeg")),
-                (
-                    header::CACHE_CONTROL,
-                    HeaderValue::from_static("public, max-age=86400"),
-                ),
-            ],
-            bytes,
-        )
-            .into_response(),
+        Ok(bytes) => {
+            let kind = crate::image_sniff::sniff(&bytes).unwrap_or(ImageKind::Jpeg);
+            crate::avatar_image::respond(
+                &state,
+                crate::avatar_image::Master { kind, bytes },
+                size.w,
+                Some("public, max-age=86400"),
+            )
+            .await
+        }
         Err(_) => api_error(StatusCode::NOT_FOUND, "not_found", "no such avatar"),
     }
 }
@@ -1486,11 +1523,11 @@ mod avatar_tests {
         let r = put(&state, &alice_dev, None, samples::JPEG).await;
         assert_eq!(r.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
 
-        // A real PNG: an image, but this endpoint stores JPEG only (the apps re-encode).
-        let r = put(&state, &alice_dev, Some("image/png"), samples::PNG).await;
+        // A GIF: an image, but this endpoint stores JPEG and PNG only (the apps re-encode).
+        let r = put(&state, &alice_dev, Some("image/gif"), samples::GIF).await;
         assert_eq!(r.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
         let msg = error_message(r).await;
-        assert!(msg.contains("JPEG"), "{msg}");
+        assert!(msg.contains("JPEG or PNG"), "{msg}");
 
         assert!(
             !avatar_file(&state, &alice).exists(),
@@ -1517,5 +1554,66 @@ mod avatar_tests {
             .avatar_url
             .unwrap_or_default();
         assert!(url.contains(&format!("/avatars/{alice}.jpg")), "{url}");
+    }
+
+    /// Jacob's 4000 px mark, end to end on the relay: a PNG upload is accepted, stored as a
+    /// 1024 px PNG master (lossless edges), served as `image/png` from the `.jpg` route, and
+    /// `?w=` hands back the bucketed size with shaded (not stair-stepped) edges.
+    #[tokio::test]
+    async fn a_large_png_mark_is_stored_as_a_png_master_and_served_by_size() {
+        use crate::avatar_image::synth::{edge_softness, gray_of, mark};
+        use image::GenericImageView as _;
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 43);
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(mark(2048))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+
+        let r = put(&state, &alice_dev, Some("image/png"), &png).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let stored = std::fs::read(avatar_file(&state, &alice)).unwrap();
+        assert_eq!(crate::image_sniff::sniff(&stored), Some(ImageKind::Png));
+        assert_eq!(
+            image::load_from_memory(&stored).unwrap().dimensions(),
+            (1024, 1024),
+            "brought down to the master size, kept PNG"
+        );
+
+        async fn get(state: &AppState, alice: &str, w: Option<u32>) -> (String, Vec<u8>) {
+            let r = get_avatar(
+                State(state.clone()),
+                Path(format!("{alice}.jpg")),
+                Query(crate::avatar_image::SizeQuery { w }),
+            )
+            .await;
+            assert_eq!(r.status(), StatusCode::OK);
+            let mime = r
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned();
+            let body = axum::body::to_bytes(r.into_body(), 1 << 24).await.unwrap();
+            (mime, body.to_vec())
+        }
+        let (mime, body) = get(&state, &alice, None).await;
+        assert_eq!(
+            mime, "image/png",
+            "the type follows the bytes, not the .jpg name"
+        );
+        assert_eq!(body, stored);
+
+        let (mime, body) = get(&state, &alice, Some(70)).await;
+        assert_eq!(mime, "image/png");
+        let img = image::load_from_memory(&body).unwrap();
+        assert_eq!(img.dimensions(), (96, 96), "70 rounds up to the 96 bucket");
+        assert!(edge_softness(&gray_of(&img), 96) > 0.8);
+
+        let (_, again) = get(&state, &alice, Some(96)).await;
+        assert_eq!(again, body, "the cached variant is the same bytes");
+        let (_, big) = get(&state, &alice, Some(4000)).await;
+        assert_eq!(big, stored, "above the largest bucket the master is served");
     }
 }

@@ -17,7 +17,12 @@ use serde_json::Value;
 uniffi::setup_scaffolding!();
 
 pub mod avatar;
+pub mod chart;
+pub mod highlight;
+pub mod markdown;
 pub mod matrix;
+pub mod search;
+pub mod settings_search;
 
 /// Frame decode, doc import, or writer failure. Sans-IO session has no transport errors.
 #[derive(Debug, Clone, thiserror::Error, uniffi::Error)]
@@ -99,9 +104,15 @@ pub enum RoomAction {
         code: String,
         message: String,
     },
-    /// A `not_available` push refusal on this connection (`batchId` from the error).
+    /// A `not_available` push refusal on this connection (`batchId` from the error) with the
+    /// relay's `reason` (`blocked_by` / `blocks_member` / `silenced` / `chat_unavailable`)
+    /// and, on a block, the other party.
     PushRefused {
         batch_id: Option<String>,
+        code: String,
+        reason: Option<String>,
+        by_handle: Option<String>,
+        by_name: Option<String>,
     },
     Presence {
         device: Option<String>,
@@ -157,7 +168,19 @@ impl From<ClientAction> for RoomAction {
                 after_ms: after.as_millis() as u64,
             },
             ClientAction::SessionError { code, message } => Self::SessionError { code, message },
-            ClientAction::PushRefused { batch_id } => Self::PushRefused { batch_id },
+            ClientAction::PushRefused {
+                batch_id,
+                code,
+                reason,
+                by_handle,
+                by_name,
+            } => Self::PushRefused {
+                batch_id,
+                code,
+                reason,
+                by_handle,
+                by_name,
+            },
             ClientAction::Presence {
                 device,
                 handle,
@@ -336,6 +359,19 @@ impl RoomSession {
 
     pub fn is_closed(&self) -> bool {
         self.lock().is_closed()
+    }
+
+    /// This connection stands refused (`not_available`); local commits queue until an ACK,
+    /// a reconnect or `retry_refused` clears it.
+    pub fn push_refused(&self) -> bool {
+        self.lock().push_refused()
+    }
+
+    /// The condition behind a refusal may have changed (a people-chat event for this room,
+    /// the user unblocked someone): resend every pending batch now with the same ids and
+    /// drop the refusal. True when a resend went out ([feedback 2005]).
+    pub fn retry_refused(&self, now_ms: u64) -> bool {
+        self.lock().retry_refused(now_ms)
     }
 
     pub fn drain_actions(&self) -> Vec<RoomAction> {

@@ -20,14 +20,16 @@
     "min": 3
    },
    "timeout_s": 60,
-   "expect_activity_change_s": 5,
-   "allow_timeout": true
+   "expect_activity_change_s": 6,
+   "allow_timeout": true,
+   "activity_note": "design target 5 s; measured with a 0.5 s poll whose GET /projects takes 0.3–0.5 s, so the first sample after a change lands up to ~1 s late — 6 s is the 5 s target plus that resolution (0.1.124–0.1.127 measured 4.8, 5.3, 5.2 s)",
+   "expect_activity_regex": "^(Steering|Changing course)"
   },
   {
    "prompt": "Done? What was the last number?",
    "pre_wait_s": 110,
    "reply_regex": "\\b20\\b",
-   "reply_regex_not": "(last|final) number[^.\\n]{0,40}\\b40\\b|\\b40 lines",
+   "reply_regex_not": "(last|final) number[^.\\n]{0,40}\\b40\\b|\\b40 lines|never started|no number was written|does not exist|rerun[0-9]",
    "timeout_s": 180,
    "verify": "f={D}/count.txt; test -f $f || { echo FAIL: no count.txt; exit 0; }; last=$(tail -1 $f | tr -dc 0-9); n=$(grep -c . $f); echo \"SHOW lines=$n last=$last\"; if [ \"$last\" = 20 ] && [ $n -le 22 ]; then echo PASS; else echo FAIL: last=$last lines=$n; fi"
   }
@@ -36,6 +38,6 @@
   "no_truncated_reply": true,
   "no_repeated_sentence": true
  },
- "regression": "steer path: the working row's activity changes within 5 s of a steer (agentd post_activity 'Steering: …'), result applied (bc-d117b386 #1598)",
+ "regression": "steer path: the working row's activity changes within 5 s of a steer (agentd post_activity 'Steering: …'), result applied (bc-d117b386 #1598); #1704 follow-up (steer seen, running writer never stopped → 40 lines)",
  "notes": "Turn 2 goes out 4 s after turn 1's first status so it lands while the agent's own turn is still running (the detached loop outlives the turn; on 0.1.120 the agent reported and finished at +17 s, and a steer after that is just a new turn, which the guide path never sees)."
 }

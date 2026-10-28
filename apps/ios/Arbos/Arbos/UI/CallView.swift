@@ -57,6 +57,8 @@ struct CallScreen: View {
     }
     private var useGroupLayout: Bool { calls.tiles.count + waitingExpected.count >= 2 || (isGroupCall && !waitingExpected.isEmpty && calls.tiles.count <= 1) }
 
+    @State private var errorDetailsOpen = false
+
     var body: some View {
         ZStack {
             theme.bg.ignoresSafeArea()
@@ -69,8 +71,8 @@ struct CallScreen: View {
                     }
                     HStack {
                         Button { collapse() } label: {
-                            GlassCircle(size: 40) {
-                                Image(systemName: "chevron.down").font(.system(size: 15, weight: .semibold)).foregroundStyle(theme.text)
+                            GlassCircle {
+                                Image(systemName: "chevron.down").font(.system(size: Controls.glyph, weight: .semibold)).foregroundStyle(theme.text)
                             }
                         }
                         .buttonStyle(.plain)
@@ -94,11 +96,13 @@ struct CallScreen: View {
                 controls.padding(.bottom, 40)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // The call's note (Jacob 2026-10-26): under the header, never over the controls.
             if let err = calls.error {
                 VStack {
+                    ErrorNote(id: "call-error", error: err, detailsOpen: $errorDetailsOpen)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 64)
                     Spacer()
-                    Text(err).font(theme.font(Theme.tiny)).foregroundStyle(theme.danger)
-                        .multilineTextAlignment(.center).padding(.horizontal, 32).padding(.bottom, 150)
                 }
             }
         }
@@ -145,7 +149,7 @@ struct CallScreen: View {
             if calls.screenShareOn { return "Sharing screen" }
             return primary?.micOn == false ? "Muted" : "Connected"
         case .ringing: return "Incoming…"
-        case .idle: return calls.error ?? "Call ended"
+        case .idle: return calls.errorText ?? "Call ended"
         }
     }
 
@@ -177,7 +181,7 @@ struct CallScreen: View {
             ZStack(alignment: .topTrailing) {
                 RoundedRectangle(cornerRadius: 28, style: .continuous)
                     .fill(theme.card)
-                    .overlay(RoundedRectangle(cornerRadius: 28, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                    .overlay(RoundedRectangle(cornerRadius: 28, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1)) // control-size: exception callControls
                     .overlay {
                         if let track = primary?.videoTrack, primary?.cameraOn == true {
                             SwiftUIVideoView(track, layoutMode: .fill)
@@ -188,7 +192,7 @@ struct CallScreen: View {
                                     CallPersonAvatar(person: p, size: 108)
                                         .overlay(speakingRing(primary?.isSpeaking == true, size: 108))
                                 } else {
-                                    GlassCircle(size: 108) { Image(systemName: "person.fill").font(.system(size: 40)).foregroundStyle(theme.muted) }
+                                    GlassCircle(size: 108) { Image(systemName: "person.fill").font(.system(size: 40)).foregroundStyle(theme.muted) } // control-size: exception callControls
                                 }
                                 Image(systemName: primary?.cameraOn == true ? "video.fill" : "waveform")
                                     .font(theme.font(22, weight: .semibold))
@@ -417,7 +421,7 @@ struct CallScreen: View {
         Button(action: action) {
             VStack(spacing: 8) {
                 ZStack {
-                    if on { Circle().fill(theme.text).frame(width: 64, height: 64) } else { GlassCircle(size: 64) { EmptyView() } }
+                    if on { Circle().fill(theme.text).frame(width: 64, height: 64) } else { GlassCircle(size: 64) { EmptyView() } } // control-size: exception callControls
                     Image(systemName: icon).font(.system(size: 22, weight: .medium)).foregroundStyle(on ? theme.bg : theme.text)
                 }
                 Text(label).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
@@ -484,7 +488,7 @@ struct IncomingCallView: View {
                     Spacer()
                     if let p = inc.from ?? inc.call.startedBy {
                         CallPersonAvatar(person: p, size: 128)
-                            .overlay(Circle().strokeBorder(theme.fieldBorder, lineWidth: 1).frame(width: 150, height: 150))
+                            .overlay(Circle().strokeBorder(theme.fieldBorder, lineWidth: 1).frame(width: 150, height: 150)) // control-size: exception callControls
                         Text(p.displayName).font(theme.font(28, weight: .semibold)).foregroundStyle(theme.text).padding(.top, 28)
                         Text("@\(p.handle)").font(theme.font(Theme.body)).foregroundStyle(theme.muted).padding(.top, 4)
                     }
@@ -538,7 +542,7 @@ struct CallBar: View {
             }
             .padding(.horizontal, 14).frame(height: 44)
             .background(Capsule().fill(theme.card))
-            .overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1))
+            .overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1)) // control-size: exception callControls
         }
         .buttonStyle(.plain)
     }

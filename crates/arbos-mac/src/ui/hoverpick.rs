@@ -13,6 +13,7 @@ use crate::app::AgentPick;
 use crate::model::{Effort, Id, Project};
 use crate::sync::fixture::MODELS;
 use crate::ui::composer::Composer;
+use crate::ui::highlight::{self, Shape};
 use crate::ui::icons::icon;
 use crate::ui::profiles::kit::{self, Leading};
 use crate::ui::shell::Shell;
@@ -21,6 +22,8 @@ use crate::ui::voicepicker;
 
 /// How tall the model / voice lists may grow before they scroll.
 const LIST_MAX_HEIGHT: f32 = 260.0;
+/// The dropped-down list's corners; its rows' highlight is concentric.
+pub(crate) const LIST_RADIUS: f32 = 10.0;
 
 /// One info-card row: caption over the current value, a chevron, and —
 /// while `open` — `panel` dropped down under it. A click toggles it open.
@@ -40,7 +43,7 @@ pub fn row(
     };
     // The pane kit's row: label left, the current value right, a chevron that
     // turns up while the list is open.
-    let header = kit::row(
+    let header = kit::row_state(
         ElementId::Name(SharedString::from(format!("{id}-head"))),
         Leading::None,
         caption.to_string(),
@@ -48,11 +51,11 @@ pub fn row(
         Some(value.into()),
         open.then(|| icon("chevron-up", 13.0, theme.text_faint).into_any_element()),
         !open,
+        open,
         theme,
     )
     .cursor_pointer()
-    .when(open, |el| el.bg(theme.surface_2))
-    .hover(|s| s.bg(theme.surface_2))
+    .group(kit::HOT)
     .on_click(cx.listener(move |this, _, window, cx| {
         if this.state.read(cx).agent_pick == Some(which) {
             this.close_agent_pick(Some(window), cx);
@@ -77,7 +80,7 @@ pub fn row(
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(header)
         .children(panel)
-        .when(open, |el| el.child(kit::hairline_below(kit::INSET, theme)))
+        .when(open, |el| el.child(kit::hairline_below(theme)))
 }
 
 impl Shell {
@@ -226,7 +229,7 @@ fn list_frame(id: &'static str, theme: &Theme) -> Stateful<Div> {
         .flex_col()
         .mx(px(10.0))
         .mb(px(10.0))
-        .rounded(px(10.0))
+        .rounded(px(LIST_RADIUS))
         .bg(theme.card())
         .border_1()
         .border_color(theme.border)
@@ -239,7 +242,7 @@ fn item(
     selected: bool,
     theme: &Theme,
 ) -> Stateful<Div> {
-    div()
+    let frame = div()
         .id(id)
         .flex()
         .items_center()
@@ -250,8 +253,8 @@ fn item(
         .text_size(px(TEXT_SMALL))
         .text_color(theme.text)
         .when(selected, |el| el.font_weight(FontWeight::MEDIUM))
-        .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
+        .cursor_pointer();
+    highlight::row(frame, false, Shape::Nested(LIST_RADIUS), theme)
         .child(div().flex_1().min_w_0().truncate().child(label.into()))
         .when(selected, |el| el.child(icon("check", 14.0, theme.accent)))
 }

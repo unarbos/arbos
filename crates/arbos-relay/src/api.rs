@@ -133,6 +133,9 @@ pub async fn pair(State(state): State<AppState>, Json(b): Json<PairBody>) -> Api
     .into_response())
 }
 
+/// `GET /devices` — the caller's own devices (the admin token sees every account's). Until
+/// 2026-10-26 this listed every device of every user to any signed-in device, and
+/// `DELETE /devices/{id}` revoked any of them: one test account could log every other user out.
 pub async fn list_devices(State(state): State<AppState>, principal: Principal) -> ApiResult {
     if principal.is_box() {
         return Err((
@@ -140,9 +143,14 @@ pub async fn list_devices(State(state): State<AppState>, principal: Principal) -
             "box tokens cannot list devices".into(),
         ));
     }
-    Ok(Json(state.db.list_devices().map_err(internal)?).into_response())
+    let devices = match principal.user_id() {
+        Some(uid) => state.db.devices_of_user(uid).map_err(internal)?,
+        None => state.db.list_devices().map_err(internal)?,
+    };
+    Ok(Json(devices).into_response())
 }
 
+/// `DELETE /devices/{id}` — revoke one of the caller's own devices (the admin token: any device).
 pub async fn revoke_device(
     State(state): State<AppState>,
     principal: Principal,
@@ -154,7 +162,20 @@ pub async fn revoke_device(
             "box tokens cannot revoke devices".into(),
         ));
     }
-    let ok = state.db.revoke_device(&id).map_err(internal)?;
+    if let Some(uid) = principal.user_id() {
+        let owner = state.db.device_user(&id).map_err(internal)?;
+        if owner.as_deref() != Some(uid) {
+            // Another user's device looks like no device at all: no enumeration oracle either.
+            return Ok(StatusCode::NOT_FOUND.into_response());
+        }
+    }
+    // Same revocation as `DELETE /auth/devices/{id}`: the legacy path only flagged the device row
+    // and left its refresh tokens live (14 such devices since Oct 14), so a "revoked" device could
+    // still mint access tokens.
+    let ok = state.db.revoke_device_fully(&id).map_err(internal)?;
+    if ok {
+        crate::matrix::servers::revoke_device(&state, &id).await;
+    }
     Ok(if ok {
         StatusCode::NO_CONTENT
     } else {
@@ -315,7 +336,18 @@ pub async fn create_project(
         state: "hibernated_light".into(),
         created_at: now,
         last_active_at: now,
-        spend_cap_daily: 25.0,
+        // An owner without a user cap gets no project caps either (Jacob, 2026-10-26).
+        spend_cap_daily: if state
+            .db
+            .user(&owner)
+            .ok()
+            .flatten()
+            .is_some_and(|u| u.daily_cap_usd.is_none())
+        {
+            crate::credits::PROJECT_CAP_UNLIMITED
+        } else {
+            25.0
+        },
         color: b.color.clone().unwrap_or_else(|| "#8b7cf6".into()),
         user_id: owner,
         workspace_state: "stopped".into(),
@@ -561,8 +593,9 @@ pub struct PatchProjectBody {
     /// Merged slot by slot: `{ "talking_model": { "id": "...", "effort": "low" } }` leaves the other slots alone.
     #[serde(default)]
     pub models: Option<Value>,
-    #[serde(default)]
-    pub spend_cap_daily: Option<f64>,
+    /// Daily cap in USD; present-and-null means no project cap (stored as the sentinel).
+    #[serde(default, deserialize_with = "deserialize_double_option_f64")]
+    pub spend_cap_daily: Option<Option<f64>>,
     /// Tree avatar slug; `null` resets to the deterministic default.
     #[serde(default, deserialize_with = "deserialize_double_option")]
     pub avatar: Option<Option<String>>,
@@ -598,6 +631,13 @@ where
     D: serde::Deserializer<'de>,
 {
     Option::<String>::deserialize(d).map(Some)
+}
+
+fn deserialize_double_option_f64<'de, D>(d: D) -> Result<Option<Option<f64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<f64>::deserialize(d).map(Some)
 }
 
 pub(crate) fn deserialize_double_option_i64<'de, D>(d: D) -> Result<Option<Option<i64>>, D::Error>
@@ -763,7 +803,8 @@ pub async fn patch_project(
             b.color.as_deref(),
             b.instructions.as_deref(),
             models.as_ref(),
-            b.spend_cap_daily,
+            b.spend_cap_daily
+                .map(|c| c.unwrap_or(crate::credits::PROJECT_CAP_UNLIMITED)),
             avatar_patch.as_ref().map(|a| a.as_deref()),
             color_patch.as_ref().map(|a| a.as_deref()),
             description.as_deref(),
@@ -1303,7 +1344,7 @@ pub async fn machine_start(State(state): State<AppState>, principal: Principal) 
         tracing::info!(user = %user_id, "machine start: secrets pause set by stop_machine lifted");
     }
     if state.db.user_box(&user_id).map_err(internal)?.is_none() {
-        let provider = boxes::default_provider(&state);
+        let provider = boxes::provider_for_user(&state, &user_id);
         match boxes::ensure_user_box(&state, &user_id, provider).await {
             Ok(_) => {}
             Err(e) if e.to_string() == crate::fleet::WAITLISTED => {
@@ -1509,28 +1550,56 @@ pub struct MigrateQuery {
     pub force: bool,
 }
 
-#[derive(Deserialize)]
-pub struct UserBoxBody {
-    /// Daytona snapshot name (fixes vCPU/RAM/disk); null clears the override.
-    pub snapshot: Option<String>,
-}
-
-/// `PUT /admin/users/{id}/box`: per-user box class. Applies to the next box create (stop and
-/// delete the current sandbox to re-create at the new class).
+/// `PUT /admin/users/{id}/box {"snapshot"?: name|null, "provider"?: daytona|process|docker|gvisor|null}`:
+/// per-user box class and/or provider. Both apply to the NEXT box create (stop and delete the
+/// current sandbox to re-create); a key that is absent is left as it is, `null` clears it.
 pub async fn admin_set_user_box(
     State(state): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
-    Json(b): Json<UserBoxBody>,
+    Json(b): Json<Value>,
 ) -> ApiResult {
     if !matches!(principal, Principal::Admin) {
         return Err((StatusCode::FORBIDDEN, "admin only".into()));
     }
-    state
-        .db
-        .set_user_snapshot(&id, b.snapshot.as_deref())
-        .map_err(internal)?;
-    Ok(Json(json!({ "user_id": id, "snapshot": b.snapshot })).into_response())
+    let mut out = json!({ "user_id": id });
+    let mut touched = false;
+    if let Some(snapshot) = b.get("snapshot") {
+        state
+            .db
+            .set_user_snapshot(&id, snapshot.as_str())
+            .map_err(internal)?;
+        out["snapshot"] = snapshot.clone();
+        touched = true;
+    }
+    if let Some(provider) = b.get("provider") {
+        let p = match provider {
+            Value::Null => None,
+            Value::String(s) => Some(Provider::parse(s).ok_or((
+                StatusCode::BAD_REQUEST,
+                "provider must be daytona|process|docker|gvisor or null".to_owned(),
+            ))?),
+            _ => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "provider must be a string or null".into(),
+                ))
+            }
+        };
+        state
+            .db
+            .set_user_provider(&id, p.map(Provider::as_str))
+            .map_err(internal)?;
+        out["provider"] = provider.clone();
+        touched = true;
+    }
+    if !touched {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "body needs \"snapshot\" and/or \"provider\"".into(),
+        ));
+    }
+    Ok(Json(out).into_response())
 }
 
 #[derive(Deserialize)]
@@ -1808,6 +1877,17 @@ pub struct BoxHelloBody {
     pub seed_sha: Option<String>,
 }
 
+/// The box's owner as the agent should know them: login, the profile name (a label) and
+/// `address_name` — the name the user set themselves, the only one agents use to address them.
+fn owner_json(state: &AppState, user_id: &str) -> Value {
+    match state.db.user_address(user_id) {
+        Ok(Some((login, name, address_name, former_names))) => {
+            json!({ "id": user_id, "login": login, "name": name, "address_name": address_name, "former_names": former_names })
+        }
+        _ => json!({ "id": user_id }),
+    }
+}
+
 /// One project as the box sees it: settings, chats, and the pushes queued for it.
 fn workspace_json(state: &AppState, p: &Project) -> Result<Value, (StatusCode, String)> {
     let chats = state.db.list_chats(&p.id).map_err(internal)?;
@@ -1874,12 +1954,16 @@ pub async fn box_hello(
         }
     }
     let projects = state.db.projects_of_user(user_id).map_err(internal)?;
+    let owner = owner_json(&state, user_id);
     let mut workspaces = Vec::new();
     for p in &projects {
-        workspaces.push(workspace_json(&state, p)?);
+        let mut w = workspace_json(&state, p)?;
+        w["owner"] = owner.clone();
+        workspaces.push(w);
     }
     Ok(Json(json!({
         "user_id": user_id,
+        "owner": owner,
         "workspaces": workspaces,
         "relay_version": env!("CARGO_PKG_VERSION"),
     }))
@@ -1894,6 +1978,7 @@ pub async fn box_projects(State(state): State<AppState>, principal: Principal) -
     };
     boxes::box_seen_http(&state, user_id).await;
     let projects = state.db.projects_of_user(user_id).map_err(internal)?;
+    let owner = owner_json(&state, user_id);
     let mut out = Vec::new();
     for p in &projects {
         let chats = state.db.list_chats(&p.id).map_err(internal)?;
@@ -1907,9 +1992,9 @@ pub async fn box_projects(State(state): State<AppState>, principal: Principal) -
             project["forked_from"] = json!(src);
         }
         let people_chats = crate::people::people_chats_of_project(&state, &p.id, user_id);
-        out.push(json!({ "project": project, "chats": chats, "people_chats": people_chats }));
+        out.push(json!({ "project": project, "chats": chats, "people_chats": people_chats, "owner": owner }));
     }
-    Ok(Json(json!({ "user_id": user_id, "workspaces": out })).into_response())
+    Ok(Json(json!({ "user_id": user_id, "owner": owner, "workspaces": out })).into_response())
 }
 
 /// `POST /box/keepalive`: box-level keep-alive (any workspace mid-turn keeps the box awake).
@@ -1974,7 +2059,13 @@ pub async fn push(
         .project(&id)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "no such project".to_owned()))?;
-    let _ = principal;
+    // The write side was open to any signed-in device or box until 2026-10-26 (#1951): a push is
+    // a message into that project's agent plus a wake of its box, so the caller must be allowed on
+    // the project — its owner's devices and boxes, or an invited member. Cross-user agent traffic
+    // goes through /agent-messages and its grants, never through here.
+    if !state.allows(&principal, &p.id) {
+        return Err((StatusCode::FORBIDDEN, "not your project".into()));
+    }
     state
         .db
         .enqueue_push(&p.id, &b.kind, &b.payload)
@@ -2501,7 +2592,10 @@ mod agent_avatar_version_tests {
             )
             .unwrap();
         let before = state.db.project(&project).unwrap().unwrap();
-        assert_eq!(before.avatar_version, 0, "fresh project is unstamped");
+        assert!(
+            before.avatar_version > 0,
+            "a fresh project is stamped at birth (its creation time), never 0"
+        );
 
         // Alice's phone picks a leaf.
         let r = patch_project(
@@ -2514,7 +2608,10 @@ mod agent_avatar_version_tests {
         .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
         let after = state.db.project(&project).unwrap().unwrap();
-        assert!(after.avatar_version > 0, "the change is stamped");
+        assert!(
+            after.avatar_version > before.avatar_version,
+            "the change is stamped above the birth stamp"
+        );
 
         // The project JSON and the roster copy carry the same stamp.
         let bytes = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
@@ -2596,8 +2693,12 @@ mod agent_avatar_version_tests {
         let project = project_of(&state, &alice, "Hezbola");
 
         // No picture yet: 404 for everyone.
-        let r = crate::images::project_avatar(State(state.clone()), Path(format!("{project}.jpg")))
-            .await;
+        let r = crate::images::project_avatar(
+            State(state.clone()),
+            Path(format!("{project}.jpg")),
+            Query(crate::avatar_image::SizeQuery::default()),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::NOT_FOUND);
 
         // Alice uploads a PNG into the agent's slot and makes it the picture.
@@ -2631,13 +2732,18 @@ mod agent_avatar_version_tests {
             State(state.clone()),
             bob_dev.clone(),
             Path((project.clone(), "avatar-1.png".to_owned())),
+            Query(crate::avatar_image::SizeQuery::default()),
         )
         .await;
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
 
         // But the picture route hands him the current picture, typed, cacheable.
-        let r = crate::images::project_avatar(State(state.clone()), Path(format!("{project}.jpg")))
-            .await;
+        let r = crate::images::project_avatar(
+            State(state.clone()),
+            Path(format!("{project}.jpg")),
+            Query(crate::avatar_image::SizeQuery::default()),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::OK);
         assert_eq!(
             r.headers()
@@ -2665,8 +2771,12 @@ mod agent_avatar_version_tests {
         )
         .await
         .unwrap();
-        let r = crate::images::project_avatar(State(state.clone()), Path(format!("{project}.jpg")))
-            .await;
+        let r = crate::images::project_avatar(
+            State(state.clone()),
+            Path(format!("{project}.jpg")),
+            Query(crate::avatar_image::SizeQuery::default()),
+        )
+        .await;
         assert_eq!(r.status(), StatusCode::NOT_FOUND);
     }
 }

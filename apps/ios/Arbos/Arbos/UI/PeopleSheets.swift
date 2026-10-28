@@ -57,23 +57,22 @@ struct NewChatSheet: View {
         query.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "@"))
     }
 
-    /// Own + shared agents (home list order by name). Empty query hides archived;
-    /// a search finds them again, same as the home list.
+    /// Own + shared agents (home list order by name) through the shared matcher
+    /// (name, @slug, description), best first. Empty query hides archived; a
+    /// search finds them again, same as the home list.
     private var agents: [Project] {
-        let q = trimmed.lowercased()
-        let base = model.projects.filter { q.isEmpty ? !model.isArchived($0.id) : true }
-        let filtered = q.isEmpty ? base : base.filter {
-            $0.name.lowercased().contains(q) || mentionSlug($0.name).contains(q)
-        }
-        return filtered.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        let base = model.projects.filter { trimmed.isEmpty ? !model.isArchived($0.id) : true }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        return PeoplePicker.agents(base, query: trimmed)
     }
 
-    /// Servers I am in that match the query, then open servers from search I am not in.
+    /// Servers I am in that match the query (shared matcher, best first), then
+    /// open servers from search I am not in.
     private var servers: [Server] {
-        let q = trimmed.lowercased()
-        guard !q.isEmpty, model.serversAvailable else { return [] }
-        let mine = model.servers.filter { $0.name.lowercased().contains(q) }
-            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        guard !trimmed.isEmpty, model.serversAvailable else { return [] }
+        let mine = PeoplePicker.servers(
+            model.servers.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending },
+            query: trimmed)
         var seen = Set(mine.map(\.id))
         var out = mine
         for s in remoteServers where !seen.contains(s.id) {
@@ -83,19 +82,10 @@ struct NewChatSheet: View {
         return out
     }
 
-    /// Directory hits first (alphabetical), then remote hits not already listed.
+    /// Directory + remote hits through the shared matcher (display name and
+    /// @handle, best first), one row per person, never me.
     private var people: [Person] {
-        let q = trimmed.lowercased()
-        let local = q.isEmpty ? model.directory : model.directory.filter {
-            $0.handle.lowercased().contains(q) || ($0.name ?? "").lowercased().contains(q)
-        }
-        var seen = Set(local.map(\.id))
-        var out = local
-        for p in remote where !seen.contains(p.id) && p.id != model.user?.id {
-            seen.insert(p.id)
-            out.append(p)
-        }
-        return out
+        PeoplePicker.people(directory: model.directory, remote: remote, me: model.user?.id, query: trimmed)
     }
 
     var body: some View {
@@ -261,7 +251,7 @@ struct NewChatSheet: View {
 
     private func actionRow(icon: String, title: String, subtitle: String) -> some View {
         HStack(spacing: SheetRow.gap) {
-            GlassCircle(size: SheetRow.avatar) {
+            GlassCircle(size: SheetRow.avatar) { // control-size: exception rowIconTiles
                 Image(systemName: icon).font(.system(size: 17, weight: .semibold)).foregroundStyle(theme.text)
             }
             VStack(alignment: .leading, spacing: 2) {
@@ -381,7 +371,7 @@ struct ServerPickRow: View {
                     .font(theme.font(11, weight: .medium))
                     .foregroundStyle(theme.online)
                     .padding(.horizontal, 9).padding(.vertical, 4)
-                    .background(Capsule().fill(theme.field))
+                    .background(Capsule().fill(theme.field)) // control-size: exception inlineChips
             }
         }
         .padding(.horizontal, SheetRow.paddingX)
@@ -433,7 +423,7 @@ struct PersonRow: View {
                     .font(theme.font(11, weight: .medium))
                     .foregroundStyle(person.status == "member" ? theme.online : theme.muted)
                     .padding(.horizontal, 9).padding(.vertical, 4)
-                    .background(Capsule().fill(theme.field))
+                    .background(Capsule().fill(theme.field)) // control-size: exception inlineChips
             }
         }
         .padding(.horizontal, SheetRow.paddingX)
@@ -515,7 +505,7 @@ struct CreateEntityView: View {
     @State private var option: AvatarPickerTab = CreateEntityView.initialOption
     @StateObject private var source = AvatarSourceState()
     @State private var creating = false
-    @State private var errorText: String?
+    @State private var localError: UserError?
     @State private var next = false
     @FocusState private var focused: Bool
 
@@ -543,6 +533,19 @@ struct CreateEntityView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+            // The sheet's note (Jacob 2026-10-26): under the header, before the hero — a refused
+            // create, or a failed generation (`source.error`); the body below moves down.
+            if let error = source.error ?? localError {
+                ErrorNote(id: "create-entity-error", error: error,
+                          detailsOpen: Binding(get: { source.detailsOpen }, set: { source.detailsOpen = $0 }),
+                          onTryAgain: source.error != nil ? generate : nil)
+                    .padding(.horizontal, 16.5)
+                    .padding(.top, 12)
+            } else {
+                SheetErrorNote(id: "create-entity-error", onTryAgain: go)
+                    .padding(.horizontal, 16.5)
+                    .padding(.top, 12)
+            }
             // The middle scrolls when the keyboard is up (the footer stays above the keyboard,
             // so the action is always reachable); at rest it is Grok's fixed layout.
             ScrollView(showsIndicators: false) {
@@ -568,12 +571,7 @@ struct CreateEntityView: View {
                                 .padding(.top, 8)
                                 .frame(height: 40, alignment: .top)
                         }
-                        if let errorText {
-                            Text(errorText)
-                                .font(.system(size: 13)).foregroundStyle(theme.danger)
-                                .multilineTextAlignment(.center).padding(.horizontal, 24).padding(.top, 8)
-                        }
-                        AvatarTabPill(tabs: Self.options, tab: $option) { source.errorText = nil }
+                        AvatarTabPill(tabs: Self.options, tab: $option) { source.error = nil }
                             .padding(.top, 246 - 218)
                             .accessibilityIdentifier("create-entity-options")
                         AvatarSourceBody(state: source, tab: option, keepsLine: "Create keeps this one.", uploadsLine: "Create uploads it.", generate: generate) {
@@ -587,6 +585,7 @@ struct CreateEntityView: View {
             .scrollDismissesKeyboard(.interactively)
             footer
         }
+        .claimFailures("create-entity", ["create the server", "create the agent", "create the group"])
         .background(sheetBg.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
         .navigationDestination(isPresented: $next) {
@@ -689,16 +688,8 @@ struct CreateEntityView: View {
     private func generate() {
         let text = source.prompt.trimmingCharacters(in: .whitespaces)
         guard !text.isEmpty, !source.generating else { return }
-        source.generating = true
-        source.errorText = nil
-        Task {
-            do {
-                source.generatedKey = try await model.generateDraftAvatar(prompt: text)
-            } catch {
-                source.errorText = error.localizedDescription
-            }
-            source.generating = false
-        }
+        let model = model
+        source.run { try await model.generateDraftAvatar(prompt: text) }
     }
 
     private func go() {
@@ -712,14 +703,12 @@ struct CreateEntityView: View {
             next = true
         case .server:
             creating = true
-            errorText = nil
+            localError = nil
             Task {
                 if await model.createServer(name: clean, leaf: Self.storedLeaf, picture: picture) {
                     onDone()
-                } else {
-                    errorText = model.notice?.text ?? "Could not create the server."
-                    model.notice = nil
                 }
+                // A refusal is the claimed failure drawn by the note above the hero.
                 creating = false
             }
         }
@@ -756,7 +745,13 @@ struct NewGroupView: View {
     @State private var pickedAgents: [Project] = []
     @State private var creating = false
     /// Shown on this screen — the root notice alert sits under the sheet and looks like a silent fail.
-    @State private var errorText: String?
+    @State private var localError: UserError?
+    /// The old string form of that state, kept so a sibling branch written against it
+    /// (`iphone-add-members-2026-10-26`) still compiles in the same integration tree; drawn as a refusal.
+    private var errorText: String? {
+        get { localError?.sentence }
+        nonmutating set { localError = newValue.map { UserError.refused("add members", $0) } }
+    }
 
     private var trimmed: String { query.trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "@")) }
 
@@ -765,19 +760,16 @@ struct NewGroupView: View {
     /// exist and can join groups unless deleted (home archive is hide-only).
     private var agentCandidates: [Project] {
         if addToServer != nil || addToSecret != nil { return [] }
-        let q = trimmed.lowercased()
-        let base = model.projects.filter { !$0.shared && (q.isEmpty ? !model.isArchived($0.id) : true) }
+        let base = model.projects.filter { !$0.shared && (trimmed.isEmpty ? !model.isArchived($0.id) : true) }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-        if q.isEmpty { return base }
-        return base.filter { $0.name.lowercased().contains(q) || mentionSlug($0.name).contains(q) }
+        return PeoplePicker.agents(base, query: trimmed)
     }
 
+    /// Directory + remote hits through the shared matcher (display name and @handle):
+    /// "aff" lists Affine and AffineTeam next to Andreas F @aff, not @aff alone
+    /// ([feedback shared-search-matcher-ios-2026-10-26]).
     private var candidates: [Person] {
-        let q = trimmed.lowercased()
-        var out = q.isEmpty ? model.directory : model.directory.filter { $0.handle.lowercased().contains(q) || ($0.name ?? "").lowercased().contains(q) }
-        var seen = Set(out.map(\.id))
-        for p in remote where !seen.contains(p.id) && p.id != model.user?.id { seen.insert(p.id); out.append(p) }
-        return out
+        PeoplePicker.people(directory: model.directory, remote: remote, me: model.user?.id, query: trimmed)
     }
 
     private var addToChat: PeopleChat? { addTo.flatMap { model.peopleChat($0) } }
@@ -843,14 +835,11 @@ struct NewGroupView: View {
             .padding(.horizontal, SheetSearchField.inset).padding(.vertical, 10)
             .onChange(of: query) { _, _ in search() }
 
-            if let errorText {
-                Text(errorText)
-                    .font(theme.font(Theme.small))
-                    .foregroundStyle(theme.danger)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 20)
-                    .padding(.bottom, 8)
-            }
+            // The sheet's note: under the search field, before the list (a refused add, nobody
+            // picked, the relay's reason) — the shared element.
+            SheetErrorNote(id: "people-sheet-error", local: localError)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
@@ -940,28 +929,25 @@ struct NewGroupView: View {
     private func toggle(_ p: Person) {
         guard !isIn(p) else { return }
         if let i = picked.firstIndex(of: p) { picked.remove(at: i) } else { picked.append(p) }
-        errorText = nil
+        localError = nil
     }
 
     private func toggleAgent(_ p: Project) {
         guard !isIn(p) else { return }
         if let i = pickedAgents.firstIndex(where: { $0.id == p.id }) { pickedAgents.remove(at: i) } else { pickedAgents.append(p) }
-        errorText = nil
+        localError = nil
     }
 
     /// Add members: every pick goes to the group — or server, or secret — this picker was opened for.
     private func add() {
         if let secret {
             let new = picked.filter { !isIn($0) }
-            guard !new.isEmpty else { errorText = "Pick someone who is not on the list yet"; return }
+            guard !new.isEmpty else { localError = UserError.refused("add them", "Pick someone who is not on the list yet."); return }
             creating = true
-            errorText = nil
+            localError = nil
             Task {
                 if await model.addSecretPeople(secretId: secret.id, handles: new.map(\.handle)) {
                     onDone()
-                } else {
-                    errorText = model.notice?.text ?? "Could not add them."
-                    model.notice = nil
                 }
                 creating = false
             }
@@ -969,15 +955,12 @@ struct NewGroupView: View {
         }
         if let s = server {
             let new = picked.filter { !isIn($0) }
-            guard !new.isEmpty else { errorText = "Pick someone who is not in the server yet"; return }
+            guard !new.isEmpty else { localError = UserError.refused("add members", "Pick someone who is not in the server yet."); return }
             creating = true
-            errorText = nil
+            localError = nil
             Task {
                 if await model.addServerMembers(serverId: s.id, userIds: new.map(\.id)) {
                     onDone()
-                } else {
-                    errorText = model.notice?.text ?? "Could not add them."
-                    model.notice = nil
                 }
                 creating = false
             }
@@ -985,15 +968,12 @@ struct NewGroupView: View {
         }
         guard let chat = addToChat, canSubmit, !creating else { return }
         let plan = AddMembersPlan.make(chat: chat, meId: model.user?.id, picked: picked, pickedAgents: pickedAgents)
-        guard !plan.isEmpty else { errorText = "Pick someone who is not in the group yet"; return }
+        guard !plan.isEmpty else { localError = UserError.refused("add members", "Pick someone who is not in the group yet."); return }
         creating = true
-        errorText = nil
+        localError = nil
         Task {
             if await model.addMembers(chatId: plan.chatId, handles: plan.handles, agentIds: plan.agentIds) {
                 onDone()
-            } else {
-                errorText = model.notice?.text ?? "Could not add them."
-                model.notice = nil
             }
             creating = false
         }
@@ -1012,15 +992,11 @@ struct NewGroupView: View {
     private func create() {
         guard canSubmit, !creating else { return }
         creating = true
-        errorText = nil
+        localError = nil
         let agentIds = pickedAgents.map(\.id)
         Task {
             if await model.createGroup(handles: picked.map(\.handle), agentIds: agentIds, title: draft?.title, leaf: draft?.leaf, picture: draft?.picture) {
                 onDone()
-            } else {
-                // Copy onto this screen: RootView's alert is behind the sheet.
-                errorText = model.notice?.text ?? "Could not create the group."
-                model.notice = nil
             }
             creating = false
         }
@@ -1045,20 +1021,12 @@ struct ProjectMembersSheet: View {
 
     private var memberIds: Set<String> { Set(members.map(\.id)) }
 
-    /// Directory + remote matches for the typed handle (excludes current members).
+    /// Directory + remote matches for what was typed (shared matcher on display
+    /// name and @handle), current members and me left out.
     private var suggestions: [Person] {
-        let q = trimmed.lowercased()
-        guard !q.isEmpty else { return [] }
-        let local = model.directory.filter {
-            $0.handle.lowercased().contains(q) || ($0.name ?? "").lowercased().contains(q)
-        }.filter { !memberIds.contains($0.id) && $0.id != model.user?.id }
-        var seen = Set(local.map(\.id))
-        var out = local
-        for p in remote where !seen.contains(p.id) && !memberIds.contains(p.id) && p.id != model.user?.id {
-            seen.insert(p.id)
-            out.append(p)
-        }
-        return out
+        guard !trimmed.isEmpty else { return [] }
+        return PeoplePicker.people(directory: model.directory, remote: remote, me: model.user?.id, query: trimmed)
+            .filter { !memberIds.contains($0.id) }
     }
 
     var body: some View {
@@ -1175,24 +1143,20 @@ struct ProjectMembersSheet: View {
 
 // MARK: - Shared sheet pieces
 
-/// The search field of the New Message / New group / Add person sheets. Grok's
-/// sheet field (iOS Plugins sheet; Mac ref 57): a 40 pt capsule with a hairline
-/// rim, a 16 pt magnifier 14 pt in, body-size placeholder, and side edges that
-/// line up with the row content below it (card inset 16 + row padding 14).
+/// The search field of the New Message / New group / Add person sheets: the
+/// control family's field ([feedback iphone-header-composer-sizing-2026-10-26]; was
+/// Grok's 40 pt sheet field), side edges lined up with the row content below it
+/// (card inset 16 + row padding 14).
 enum SheetSearchField {
-    static let height: CGFloat = 40
+    static let height: CGFloat = Controls.height
     static let inset: CGFloat = 30
-    static let iconSize: CGFloat = 16
+    static let iconSize: CGFloat = Controls.glyph
 }
 
 private struct SheetSearchFieldChrome: ViewModifier {
     let theme: Theme
     func body(content: Content) -> some View {
-        content
-            .padding(.horizontal, 14)
-            .frame(height: SheetSearchField.height)
-            .background(Capsule().fill(theme.field))
-            .overlay(Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1))
+        content.controlField()
     }
 }
 
@@ -1224,7 +1188,7 @@ struct GroupCallPickerSheet: View {
                     dismiss()
                 } label: {
                     HStack(spacing: SheetRow.gap) {
-                        GlassCircle(size: SheetRow.avatar) {
+                        GlassCircle(size: SheetRow.avatar) { // control-size: exception rowIconTiles
                             Image(systemName: "person.3.fill")
                                 .font(.system(size: 16, weight: .semibold))
                                 .foregroundStyle(theme.text)
@@ -1368,6 +1332,6 @@ struct MemberChip<Picture: View>: View {
                 .buttonStyle(.plain)
         }
         .padding(.leading, 4).padding(.trailing, 10).frame(height: 32)
-        .background(Capsule().fill(theme.field))
+        .background(Capsule().fill(theme.field)) // control-size: exception inlineChips
     }
 }

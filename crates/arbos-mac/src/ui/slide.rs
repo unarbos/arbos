@@ -210,6 +210,15 @@ impl Frame {
     pub fn animating(&self) -> bool {
         self.sidebar_sliding || self.pane_sliding
     }
+
+    /// The sidebar's visible width is between its full width and the rail's:
+    /// the rail morph's progress (0 = expanded, 1 = rail). `None` when the
+    /// sidebar is on its way to or from hidden (the narrow band).
+    pub fn rail_progress(&self, full: f32) -> Option<f32> {
+        let rail = crate::ui::rail::metrics::WIDTH;
+        (self.sidebar_visible >= rail - 0.5)
+            .then(|| crate::ui::rail::progress(self.sidebar_visible, full))
+    }
 }
 
 /// The frame-to-frame tracker: told what the state wants each frame, it
@@ -220,6 +229,8 @@ pub struct PaneSlides {
     pane: Option<Slide>,
     /// `(shown, full width)` as last drawn; `None` before the first frame.
     last_sidebar: Option<(bool, f32)>,
+    /// Collapsed to the rail as last drawn.
+    last_sidebar_rail: bool,
     last_pane: Option<(bool, f32)>,
     chat: Option<ChatSlide>,
 }
@@ -230,6 +241,11 @@ pub struct Want {
     pub viewport_width: f32,
     pub sidebar_shown: bool,
     pub sidebar_width: f32,
+    /// The sidebar is collapsed to the icon rail (`ui::rail`): shown, but
+    /// `rail::metrics::WIDTH` wide. Flipping this slides between the two
+    /// widths (the rail morph) on the same curves
+    /// ([feedback mac-sidebar-rail-2026-10-26]).
+    pub sidebar_rail: bool,
     /// The window is in the narrow band: the sidebar is an overlay there, not
     /// a column, so its coming and going never slides.
     pub narrow: bool,
@@ -244,10 +260,12 @@ impl PaneSlides {
     pub fn step(&mut self, want: Want, now: Instant) -> Frame {
         let sidebar_full = want.sidebar_width;
         let pane_full = want.pane_width;
-        let sidebar_target = if want.sidebar_shown {
-            sidebar_full
-        } else {
+        let sidebar_target = if !want.sidebar_shown {
             0.0
+        } else if want.sidebar_rail {
+            crate::ui::rail::metrics::WIDTH
+        } else {
+            sidebar_full
         };
         let pane_target = if want.pane_shown { pane_full } else { 0.0 };
 
@@ -255,10 +273,12 @@ impl PaneSlides {
         let sidebar_before = match (self.sidebar, self.last_sidebar) {
             (Some(s), _) => s.value(now),
             (None, Some((shown, w))) => {
-                if shown {
-                    w
-                } else {
+                if !shown {
                     0.0
+                } else if self.last_sidebar_rail {
+                    crate::ui::rail::metrics::WIDTH
+                } else {
+                    w
                 }
             }
             (None, None) => sidebar_target,
@@ -278,7 +298,10 @@ impl PaneSlides {
 
         let sidebar_changed = self
             .last_sidebar
-            .is_some_and(|(shown, _)| shown != want.sidebar_shown);
+            .is_some_and(|(shown, _)| shown != want.sidebar_shown)
+            || (self.last_sidebar.is_some()
+                && want.sidebar_shown
+                && self.last_sidebar_rail != want.sidebar_rail);
         if sidebar_changed && !snap && !want.narrow {
             self.start(
                 Side::Left,
@@ -309,6 +332,7 @@ impl PaneSlides {
             self.pane = None;
         }
         self.last_sidebar = Some((want.sidebar_shown, sidebar_full));
+        self.last_sidebar_rail = want.sidebar_rail;
         self.last_pane = Some((want.pane_shown, pane_full));
 
         // Finished slides come to rest at their target.
@@ -357,9 +381,13 @@ impl PaneSlides {
             Side::Left => &mut self.sidebar,
             Side::Right => &mut self.pane,
         };
+        let from = match side {
+            Side::Left => sidebar_before,
+            Side::Right => pane_before,
+        };
         *slot = Some(match *slot {
             Some(running) => running.retarget(target, full, now),
-            None => Slide::new(full - target, target, now),
+            None => Slide::new(from, target, now),
         });
         if self.chat.is_none() {
             let start_width = want.viewport_width - sidebar_before - pane_before;
@@ -442,11 +470,92 @@ mod tests {
             viewport_width: W,
             sidebar_shown,
             sidebar_width: SIDEBAR,
+            sidebar_rail: false,
             narrow: false,
             pane_shown,
             pane_width: PANE,
             reduce_motion: false,
         }
+    }
+
+    fn want_rail(rail: bool) -> Want {
+        Want {
+            sidebar_rail: rail,
+            ..want(true, false)
+        }
+    }
+
+    /// The collapse toggle ([feedback mac-sidebar-rail-2026-10-26]): the
+    /// sidebar slides from its full width to the 84 pt rail on the close
+    /// curve (170 ms) and back on the open curve (200 ms); the frame reports
+    /// the morph's progress for `ui::rail`.
+    #[test]
+    fn collapsing_slides_the_sidebar_down_to_the_rail_and_back() {
+        let rail = crate::ui::rail::metrics::WIDTH;
+        let t0 = Instant::now();
+        let mut slides = PaneSlides::default();
+        let f = slides.step(want_rail(false), t0);
+        assert_eq!(f.sidebar_visible, SIDEBAR);
+        assert_eq!(f.rail_progress(SIDEBAR), Some(0.0));
+        // Click: the width runs 296 → 84 over CLOSE_MS.
+        let f = slides.step(want_rail(true), ms(t0, 16));
+        assert!(f.sidebar_sliding);
+        assert_eq!(f.sidebar_visible, SIDEBAR);
+        assert_eq!(f.chat.expect("chat slide").start_width, W - SIDEBAR);
+        let mut last = SIDEBAR;
+        for i in 1..10 {
+            let f = slides.step(want_rail(true), ms(t0, 16 + i * 16));
+            assert!(f.sidebar_visible <= last, "frame {i}");
+            assert!(f.sidebar_visible >= rail);
+            let p = f.rail_progress(SIDEBAR).expect("a rail morph, not a hide");
+            assert!((0.0..=1.0).contains(&p));
+            last = f.sidebar_visible;
+        }
+        let f = slides.step(want_rail(true), ms(t0, 16 + CLOSE_MS + 1));
+        assert_eq!(f.sidebar_visible, rail);
+        assert!(!f.animating());
+        assert_eq!(f.rail_progress(SIDEBAR), Some(1.0));
+        // Click again: 84 → 296 over OPEN_MS, from the rail's width.
+        let t1 = ms(t0, 1000);
+        let f = slides.step(want_rail(false), t1);
+        assert!(f.sidebar_sliding);
+        assert_eq!(f.sidebar_visible, rail);
+        let f = slides.step(want_rail(false), ms(t1, OPEN_MS / 2));
+        assert!(f.sidebar_visible > rail && f.sidebar_visible < SIDEBAR);
+        let f = slides.step(want_rail(false), ms(t1, OPEN_MS + 1));
+        assert_eq!(f.sidebar_visible, SIDEBAR);
+        assert!(!f.animating());
+    }
+
+    /// Reduce Motion snaps the rail like everything else; a width drag while
+    /// collapsed never starts a slide.
+    #[test]
+    fn the_rail_snaps_under_reduce_motion_and_ignores_width_drags() {
+        let rail = crate::ui::rail::metrics::WIDTH;
+        let t0 = Instant::now();
+        let mut slides = PaneSlides::default();
+        slides.step(want_rail(false), t0);
+        let f = slides.step(
+            Want {
+                reduce_motion: true,
+                ..want_rail(true)
+            },
+            ms(t0, 16),
+        );
+        assert_eq!(f.sidebar_visible, rail);
+        assert!(!f.animating());
+        let f = slides.step(
+            Want {
+                sidebar_width: 360.0,
+                ..want_rail(true)
+            },
+            ms(t0, 32),
+        );
+        assert_eq!(
+            f.sidebar_visible, rail,
+            "the rail is the rail at any saved width"
+        );
+        assert!(!f.animating());
     }
 
     fn ms(t0: Instant, ms: u64) -> Instant {
@@ -557,10 +666,10 @@ mod tests {
 
     #[test]
     fn collapsing_the_sidebar_slides_it_out_and_capped_rows_glide_with_the_centre() {
-        // A 1300 pt window: 1004 → 1300, the rows are capped at both widths
-        // (876 + 2 × 16 = 908 ≤ 1004), so the transcript is centred and the
+        // A 1400 pt window: 1104 → 1400, the rows are capped at both widths
+        // (960 + 2 × 16 = 992 ≤ 1104), so the transcript is centred and the
         // final re-layout moves nothing.
-        let wide = 1300.0;
+        let wide = 1400.0;
         let t0 = Instant::now();
         let mut slides = PaneSlides::default();
         let mut w = want(true, false);
@@ -593,7 +702,7 @@ mod tests {
     #[test]
     fn at_the_default_width_the_transcript_anchors_away_from_the_moving_sidebar() {
         // 1180 pt window: 884 → 1180; the rows fill the column at 884 (852 <
-        // 876), so the transcript keeps its right edge and the sidebar slides
+        // 960), so the transcript keeps its right edge and the sidebar slides
         // away from (or over) its left end.
         let t0 = Instant::now();
         let mut slides = PaneSlides::default();

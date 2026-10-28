@@ -270,6 +270,9 @@ struct PeopleChat: Identifiable, Equatable {
     var archivedAt: Int64? = nil
     /// Banned people (owner/admin with mute-ban rights); Unban from the member list.
     var banned: [ChatMember] = []
+    /// Members I blocked, as `user:<id>` — the relay's `blockedSenders` hint ([feedback
+    /// blocked-state-ios-2026-10-26]): their rows are hidden for me alone (groups).
+    var blockedSenders: [String] = []
 
     /// True while I am muted from posting (honours timed mute).
     var isSilencedNow: Bool {
@@ -323,6 +326,7 @@ extension PeopleChat {
         self.silencedUntil = dto.me.silenced_until
         self.archivedAt = dto.archived_at.flatMap { $0 > 0 ? $0 : nil }
         self.banned = (dto.banned ?? []).map { ChatMember(dto: $0) }
+        self.blockedSenders = dto.blocked_senders ?? []
     }
 
     /// Is this person already in the chat? Me (`meId`) counts as in. A handle
@@ -366,6 +370,97 @@ struct AddMembersPlan: Equatable {
     }
 
     var isEmpty: Bool { handles.isEmpty && agentIds.isEmpty }
+}
+
+/// A membership notice this device shows before the relay's own row arrives (ARB-393): the
+/// adding phone writes "<me> added <names>" into its transcript the moment Add is tapped, so
+/// the line never waits on the round trip. The relay stays the author of record — when its
+/// system row with the same words lands, the local copy is dropped; a failed add or a row that
+/// never comes removes it after `ttlMs`. Mirrors crates/arbos-mac `model::OptimisticNotice`.
+struct OptimisticNotice: Equatable {
+    /// Row id prefix: a snapshot never carries these, so they are easy to tell apart.
+    static let idPrefix = "local-notice:"
+    /// How long an unconfirmed local notice may stay on screen.
+    static let ttlMs: Int64 = 60_000
+    /// The relay stamps its row with its own clock; a row this much older than the local one
+    /// still counts as the same notice.
+    static let skewMs: Int64 = 15_000
+
+    var id: Id
+    var text: String
+    var createdAt: Int64
+    /// The same facts the relay's row will carry (actor = me, subjects by id), so this copy
+    /// is worded from the live roster like that row and is matched to it by facts, not by
+    /// words a stale local `/me` name could get wrong ("Const added Aureum", 2026-10-26).
+    var notice: MembershipNotice? = nil
+
+    init(text: String, now: Int64, notice: MembershipNotice? = nil) {
+        id = Self.idPrefix + newId()
+        self.text = text
+        createdAt = now
+        self.notice = notice
+    }
+
+    /// "A", "A and B", "A, B and C" — the relay's `notices::join_names`, so the local line
+    /// reads exactly like the row that replaces it.
+    static func joinNames(_ names: [String]) -> String {
+        switch names.count {
+        case 0: return ""
+        case 1: return names[0]
+        case 2: return "\(names[0]) and \(names[1])"
+        default: return names.dropLast().joined(separator: ", ") + " and " + names[names.count - 1]
+        }
+    }
+
+    /// "<who> added <names>"; nil with nobody to name.
+    static func addedLine(who: String, names: [String]) -> String? {
+        names.isEmpty ? nil : "\(who) added \(joinNames(names))"
+    }
+
+    /// The transcript row for this notice: a centred system line like the relay's.
+    func message(chatId: Id) -> Message {
+        Message(
+            id: id, chatId: chatId, role: .system, sender: "system",
+            status: .done, turn: nil, decision: nil, subagentId: nil, subagentName: nil,
+            inReplyTo: nil, usage: [:], model: nil,
+            createdAt: createdAt, completedAt: createdAt, pending: false,
+            parts: [.text(id: "\(id)-t", text: text)], hiddenCount: 0,
+            notice: notice
+        )
+    }
+
+    /// The relay's row for this notice: a system line with the same facts (or, for a relay
+    /// that writes none, the same words), written no earlier than the local one (minus
+    /// clock skew).
+    func isConfirmed(by m: Message) -> Bool {
+        guard m.role == .system, !m.id.hasPrefix(Self.idPrefix), m.createdAt + Self.skewMs >= createdAt else {
+            return false
+        }
+        if let mine = notice, let theirs = m.notice { return mine == theirs }
+        return m.plainText.trimmingCharacters(in: .whitespacesAndNewlines) == text
+    }
+
+    /// Fold a chat's local notices into a fresh snapshot from the relay: a notice the snapshot
+    /// confirms (same words, relay row) or one past its TTL is dropped; the rest are re-inserted
+    /// in time order so they survive the list replacement. Returns how many were confirmed.
+    @discardableResult
+    static func reconcile(_ list: inout [Message], notices: inout [OptimisticNotice], chatId: Id, now: Int64) -> Int {
+        var confirmed = 0
+        notices.removeAll { n in
+            if list.contains(where: { n.isConfirmed(by: $0) }) {
+                confirmed += 1
+                return true
+            }
+            return now - n.createdAt >= ttlMs
+        }
+        // Snapshots never carry local rows; a stale copy from an earlier merge must not double up.
+        list.removeAll { $0.id.hasPrefix(idPrefix) }
+        for n in notices {
+            let at = (list.lastIndex { $0.createdAt <= n.createdAt }).map { $0 + 1 } ?? 0
+            list.insert(n.message(chatId: chatId), at: at)
+        }
+        return confirmed
+    }
 }
 
 struct ProjectMember: Identifiable, Equatable {

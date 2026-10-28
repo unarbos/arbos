@@ -20,16 +20,19 @@ use gpui::{
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
     FontWeight, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, PaintQuad, Pixels, Point,
-    Render, RenderImage, SharedString, Style, TextAlign, TextRun, UTF16Selection, UnderlineStyle,
-    Window, WrappedLine,
+    Render, RenderImage, Role as AriaRole, SharedString, Stateful, Style, TextAlign, TextRun,
+    UTF16Selection, UnderlineStyle, Window, WrappedLine,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::app::{decode_image, AppState, ComposerMode};
+use crate::app::{decode_thumbnail, AppState, ComposerMode};
 use crate::model::{AttachmentKind, CallKind, Message, Part, Role};
+use crate::search;
 use crate::ui::callview;
+use crate::ui::error_note;
 use crate::ui::frost::{frosted, PANEL_BLUR};
 use crate::ui::glass;
+use crate::ui::highlight;
 use crate::ui::icons::icon;
 use crate::ui::mention::{self, Mention, MentionToken, Mentions};
 use crate::ui::select::{self, word_range};
@@ -225,11 +228,12 @@ pub struct ComposerInput {
     /// Runs deferred, after this entity's update ends, so the owner may read
     /// and update the input freely.
     pub on_submit: Option<SubmitHandler>,
-    /// Tab / Down while the `@` mention menu is open: move the highlight down.
+    /// Down while the `@` mention menu is open: move the highlight down.
     pub on_mention_next: Option<MentionKeyHandler>,
-    /// Shift+Tab / Up while the `@` mention menu is open: move the highlight up.
+    /// Up / Shift+Tab while the `@` mention menu is open: move the highlight up.
     pub on_mention_prev: Option<MentionKeyHandler>,
-    /// Enter while the `@` mention menu is open: accept the highlighted row.
+    /// Tab or Enter while the `@` mention menu is open: accept the highlighted
+    /// (or hovered) row.
     pub on_mention_accept: Option<MentionKeyHandler>,
     /// Esc while the `@` mention menu is open: close it for this token.
     pub on_mention_escape: Option<MentionKeyHandler>,
@@ -630,7 +634,10 @@ impl ComposerInput {
     }
 
     fn accept_mention(&mut self, _: &AcceptMention, window: &mut Window, cx: &mut Context<Self>) {
-        self.defer_mention_key(self.on_mention_next.clone(), window, cx);
+        // Tab completes the highlighted / hovered row (same as Enter). Arrows
+        // and Shift+Tab still move the highlight ([feedback
+        // app-01M5WKBR85JVW1KKJH96FWZVK5]).
+        self.defer_mention_key(self.on_mention_accept.clone(), window, cx);
     }
 
     fn prev_mention(&mut self, _: &PrevMention, window: &mut Window, cx: &mut Context<Self>) {
@@ -883,10 +890,15 @@ impl ComposerInput {
         self.select_to(self.line_end(self.cursor_offset()), cx);
     }
 
+    /// ⌫ with nothing to delete (caret at the start, no selection) is not
+    /// ours: the action goes on up so the owner may act on it — the composer
+    /// removes the last staged attachment when the draft is empty
+    /// ([feedback composer-attachment-removal-2026-10-27]).
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             let prev = self.previous_boundary(self.cursor_offset());
             if self.cursor_offset() == prev {
+                cx.propagate();
                 return;
             }
             self.select_to(prev, cx)
@@ -894,10 +906,12 @@ impl ComposerInput {
         self.replace_text_in_range(None, "", window, cx)
     }
 
+    /// ⌦ at the end with nothing after the caret: same rule as `backspace`.
     fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             let next = self.next_boundary(self.cursor_offset());
             if self.cursor_offset() == next {
+                cx.propagate();
                 return;
             }
             self.select_to(next, cx)
@@ -2210,8 +2224,21 @@ impl StagedAttachment {
 }
 
 /// The composer card while files are pending (redesign mock e): 64 pt tiles.
-const STAGED_TILE: f32 = 64.0;
+pub(crate) const STAGED_TILE: f32 = 64.0;
 const CARD_RADIUS: f32 = 16.0;
+/// The staged strip ([feedback composer-attachment-removal-2026-10-27]): one
+/// horizontal row, `STAGED_GAP` between tiles, scrolls sideways past the card's
+/// width. Every tile is one rounded rect (`STAGED_RADIUS`, the theme's 1 pt
+/// hairline) with the remove disc inside its top-right corner — always drawn,
+/// `STAGED_REMOVE` across (the hit target), `STAGED_REMOVE_INSET` from the
+/// edges, so it never reaches the neighbour and nothing is clipped.
+pub(crate) const STAGED_GAP: f32 = 8.0;
+pub(crate) const STAGED_RADIUS: f32 = 10.0;
+pub(crate) const STAGED_REMOVE: f32 = 20.0;
+pub(crate) const STAGED_REMOVE_INSET: f32 = 4.0;
+/// A file chip's widest; its name truncates past this.
+const STAGED_CHIP_MAX_WIDTH: f32 = 320.0;
+pub(crate) const STAGED_REMOVE_LABEL: &str = "Remove attachment";
 
 pub struct Composer {
     state: Entity<AppState>,
@@ -2226,7 +2253,8 @@ pub struct Composer {
     /// S8 shake when the user hits Cmd+W on the pinned tab; also reused for
     /// the empty-send nudge.
     pub nudge_at: Option<u64>,
-    /// Highlighted row in the `@` mention menu (Tab / arrows move it).
+    /// Highlighted row in the `@` mention menu (arrows / hover move it;
+    /// Tab and Enter insert it).
     mention_selected: usize,
     /// Last `@token` query; when it changes, selection resets to the first row.
     mention_query_seen: Option<String>,
@@ -2441,109 +2469,171 @@ impl Composer {
         .detach();
     }
 
-    /// The card's top row while files are pending: 64 pt rounded image tiles
-    /// and file chips (icon tile · name · size); a × appears on hover and
-    /// removes the file (redesign mock e).
-    fn staged_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
-        let mut row = div()
+    /// The card's top strip while files are pending: 64 pt image tiles and
+    /// file chips (icon tile · name · size) in one horizontal row that scrolls
+    /// sideways when it overflows; each carries its always-visible remove
+    /// disc ([feedback composer-attachment-removal-2026-10-27]).
+    fn staged_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Stateful<Div> {
+        let mut strip = div()
+            .id("staged-strip")
+            .debug_selector(|| "composer-staged-strip".into())
             .flex()
-            .flex_wrap()
+            .flex_row()
             .items_start()
-            .gap(px(8.0))
+            .gap(px(STAGED_GAP))
+            .overflow_x_scroll()
             .px(px(12.0))
             .pt(px(12.0));
         for (i, staged) in self.attachments.iter().enumerate() {
-            let remove = div()
-                .id(ElementId::NamedInteger("staged-remove".into(), i as u64))
-                .absolute()
-                .top(px(4.0))
-                .right(px(4.0))
-                .size(px(18.0))
-                .rounded_full()
-                .bg(Theme::with_alpha(gpui::black(), 0.6))
+            strip = strip.child(self.staged_tile(i, staged, theme, cx));
+        }
+        strip
+    }
+
+    /// One staged file: a single rounded rect (`STAGED_RADIUS`, the theme's
+    /// hairline) — the square thumbnail for a picture, the icon · name · size
+    /// chip for anything else — with the remove disc inside its top-right
+    /// corner. The disc is always drawn (trackpad and keyboard users, not
+    /// hover-only), `STAGED_REMOVE` across, inset so it stays inside the
+    /// tile: no overlap with the neighbour, nothing to clip.
+    fn staged_tile(
+        &self,
+        i: usize,
+        staged: &StagedAttachment,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let remove = div()
+            .id(ElementId::NamedInteger("staged-remove".into(), i as u64))
+            .debug_selector(move || format!("composer-remove-attachment-{i}"))
+            .absolute()
+            .top(px(STAGED_REMOVE_INSET))
+            .right(px(STAGED_REMOVE_INSET))
+            .size(px(STAGED_REMOVE))
+            .rounded_full()
+            .bg(Theme::with_alpha(gpui::black(), 0.62))
+            .border_1()
+            .border_color(Theme::with_alpha(gpui::white(), 0.4))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            // A scrim disc over a picture: black washes, not the text-wash token
+            // (which would vanish on a dark thumbnail).
+            .hover(|s| s.bg(Theme::with_alpha(gpui::black(), 0.85))) // hover-fill: exception overlay
+            .role(AriaRole::Button)
+            .aria_label(STAGED_REMOVE_LABEL)
+            .tooltip(|_, cx| cx.new(|_| TextTip(STAGED_REMOVE_LABEL.into())).into())
+            .child(icon("xmark", 9.0, gpui::white()))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.remove_attachment(i, cx);
+            }));
+        let tile = div()
+            .id(ElementId::NamedInteger("staged".into(), i as u64))
+            .debug_selector(move || format!("composer-staged-tile-{i}"))
+            .relative()
+            .flex_shrink_0()
+            .h(px(STAGED_TILE))
+            .rounded(px(STAGED_RADIUS))
+            .bg(theme.surface_2);
+        // The hairline is an overlay ring on both kinds (not a box border): the
+        // picture never paints over it, and the remove disc's inset measures
+        // from the tile's outer edge on every tile.
+        let ring = div()
+            .absolute()
+            .inset_0()
+            .rounded(px(STAGED_RADIUS))
+            .border_1()
+            .border_color(theme.border_strong);
+        let tile = match staged.preview.clone() {
+            // The thumbnail is decoded small and covers the square tile; the
+            // renderer crops Cover through the atlas tile, so the corners are
+            // the tile's own and nothing spills past it.
+            Some(image) => tile.w(px(STAGED_TILE)).child(
+                img(image)
+                    .size(px(STAGED_TILE))
+                    .rounded(px(STAGED_RADIUS))
+                    .object_fit(ObjectFit::Cover),
+            ),
+            None => tile
                 .flex()
                 .items_center()
-                .justify_center()
-                .cursor_pointer()
-                .opacity(0.0)
-                .group_hover("staged-tile", |s| s.opacity(1.0))
-                .child(icon("xmark", 9.0, gpui::white()))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if i < this.attachments.len() {
-                        this.attachments.remove(i);
-                    }
-                    cx.notify();
-                }));
-            let tile = div()
-                .id(ElementId::NamedInteger("staged".into(), i as u64))
-                .group("staged-tile")
-                .relative()
-                .h(px(STAGED_TILE))
-                .rounded(px(10.0))
-                .overflow_hidden()
-                .bg(theme.surface_2)
-                .flex_shrink_0();
-            let tile = match staged.preview.clone() {
-                Some(image) => tile.w(px(STAGED_TILE)).child(
-                    img(image)
-                        .size(px(STAGED_TILE))
-                        .rounded(px(10.0))
-                        .object_fit(ObjectFit::Cover),
+                .gap(px(10.0))
+                .pl(px(10.0))
+                // Room for the remove disc at the top right.
+                .pr(px(STAGED_REMOVE + 2.0 * STAGED_REMOVE_INSET))
+                .max_w(px(STAGED_CHIP_MAX_WIDTH))
+                .child(
+                    div()
+                        .size(px(40.0))
+                        .flex_shrink_0()
+                        .rounded(px(8.0))
+                        .bg(theme.surface_1)
+                        .border_1()
+                        .border_color(theme.border)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(icon(
+                            if is_image_path(&staged.path) {
+                                "photo"
+                            } else {
+                                "doc"
+                            },
+                            16.0,
+                            theme.text_muted,
+                        )),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .min_w_0()
+                        .gap(px(2.0))
+                        .child(
+                            div()
+                                .text_size(px(TEXT_BODY))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.text)
+                                .truncate()
+                                .child(staged.file_name()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(TEXT_TINY))
+                                .text_color(theme.text_muted)
+                                .whitespace_nowrap()
+                                .child(staged.size_label()),
+                        ),
                 ),
-                None => tile
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .pl(px(10.0))
-                    // Room for the hover × at the top right.
-                    .pr(px(28.0))
-                    .max_w(px(320.0))
-                    .child(
-                        div()
-                            .size(px(40.0))
-                            .flex_shrink_0()
-                            .rounded(px(8.0))
-                            .bg(theme.surface_1)
-                            .border_1()
-                            .border_color(theme.border)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(icon(
-                                if is_image_path(&staged.path) {
-                                    "photo"
-                                } else {
-                                    "doc"
-                                },
-                                16.0,
-                                theme.text_muted,
-                            )),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .min_w_0()
-                            .gap(px(2.0))
-                            .child(
-                                div()
-                                    .text_size(px(TEXT_BODY))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme.text)
-                                    .truncate()
-                                    .child(staged.file_name()),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(TEXT_TINY))
-                                    .text_color(theme.text_muted)
-                                    .child(staged.size_label()),
-                            ),
-                    ),
-            };
-            row = row.child(tile.child(remove));
+        };
+        tile.child(ring).child(remove)
+    }
+
+    /// Drop staged file `i`; the others and the typed text stay.
+    fn remove_attachment(&mut self, i: usize, cx: &mut Context<Self>) {
+        if i < self.attachments.len() {
+            self.attachments.remove(i);
+            cx.notify();
         }
-        row
+    }
+
+    /// ⌫ / ⌦ reaching the composer from a field with nothing to delete: with
+    /// an empty draft the last staged attachment goes (the strip's own key
+    /// rule; the text field never sees a change). Returns whether one went.
+    fn delete_key_on_strip(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.attachments.is_empty() || !self.input.read(cx).text().is_empty() {
+            return false;
+        }
+        self.attachments.pop();
+        cx.notify();
+        true
+    }
+
+    #[cfg(test)]
+    fn staged_paths(&self) -> Vec<PathBuf> {
+        self.attachments.iter().map(|a| a.path.clone()).collect()
     }
 
     /// ⌘V with files (Finder copy) or an image (screenshot, copied picture):
@@ -2591,10 +2681,12 @@ impl Composer {
     /// agents of the current space, plus `@here` (everyone in this chat) and
     /// `@agents` (all agents here) for any member of a group or people chat
     /// (Jacob, 2026-10-24); a server channel keeps the owner-only collective
-    /// pings (the client has no member list for a server yet). Case-insensitive prefix on
-    /// the handle or on any word of the display name; handle matches first,
-    /// then name matches, alphabetical by handle; at most six rows. A handle
-    /// an agent and a person both carry (#1538) tags each of those two rows.
+    /// pings (the client has no member list for a server yet). The shared
+    /// matcher on the @handle and the display name (`arbos_core::search`,
+    /// [feedback shared-search-matcher-mac-2026-10-26]): exact > prefix >
+    /// word-start, name before handle, then alphabetical by handle; at most
+    /// six rows. A handle an agent and a person both carry (#1538) tags each
+    /// of those two rows.
     fn mention_candidates(&self, cx: &App) -> Vec<MentionCandidate> {
         let Some(query) = self.mention_query(cx) else {
             return Vec::new();
@@ -2641,9 +2733,9 @@ impl Composer {
             return Vec::new();
         }
         collectives(&mut out);
-        let mut members: Vec<(MentionCandidate, bool)> = Vec::new();
+        let mut members: Vec<(MentionCandidate, search::Match)> = Vec::new();
         for a in &space.agents {
-            let Some(by_handle) = mention_match(&query, &a.handle, &a.name) else {
+            let Some(matched) = mention_match(&query, &a.handle, &a.name) else {
                 continue;
             };
             members.push((
@@ -2656,14 +2748,14 @@ impl Composer {
                     tag: None,
                     description: None,
                 },
-                by_handle,
+                matched,
             ));
         }
         for p in &space.people {
             if p.handle.eq_ignore_ascii_case(&me_handle) {
                 continue;
             }
-            let Some(by_handle) = mention_match(&query, &p.handle, &p.display_name()) else {
+            let Some(matched) = mention_match(&query, &p.handle, &p.display_name()) else {
                 continue;
             };
             members.push((
@@ -2676,12 +2768,14 @@ impl Composer {
                     tag: None,
                     description: None,
                 },
-                by_handle,
+                matched,
             ));
         }
-        members.sort_by(|(a, a_handle), (b, b_handle)| {
-            b_handle
-                .cmp(a_handle)
+        // The shared matcher's order (exact > prefix > word-start, name before
+        // handle), then alphabetical by handle, agents first on a tie.
+        members.sort_by(|(a, a_match), (b, b_match)| {
+            a_match
+                .cmp(b_match)
                 .then_with(|| a.handle.to_lowercase().cmp(&b.handle.to_lowercase()))
                 .then_with(|| b.is_agent.cmp(&a.is_agent))
         });
@@ -2727,7 +2821,7 @@ impl Composer {
         }
     }
 
-    /// Tab / ↓ or Shift+Tab / ↑ through the `@` list. Returns true when the menu
+    /// ↓ or ↑ / Shift+Tab through the `@` list. Returns true when the menu
     /// was open and handled the key.
     fn mention_move(&mut self, delta: i32, cx: &mut Context<Self>) -> bool {
         let query = self.mention_query(cx);
@@ -2822,8 +2916,15 @@ impl Composer {
                 .px(px(8.0))
                 .rounded(px(6.0))
                 .cursor_pointer()
-                .when(i == selected, |el| el.bg(theme.surface_2))
-                .hover(|s| s.bg(theme.surface_2))
+                .map(|el| highlight::row(el, i == selected, highlight::Shape::Own, &theme))
+                // Hover owns the highlight so Tab / Enter insert that row
+                // ([feedback app-01M5WKBR85JVW1KKJH96FWZVK5]).
+                .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                    if *hovered && this.mention_selected != i {
+                        this.mention_selected = i;
+                        cx.notify();
+                    }
+                }))
                 .child(mention_picture(&c.picture, MENTION_ROW_PICTURE, &theme))
                 .child(
                     div()
@@ -2906,23 +3007,18 @@ const MENTION_MENU_FOOTER: f32 = 20.0;
 const MENTION_MENU_GAP: f32 = 8.0;
 const MENTION_ROWS_MAX: usize = 6;
 
-/// Does `query` (lower-case) match this entity? `Some(true)` on the handle,
-/// `Some(false)` on a word of the display name, `None` otherwise. An empty
-/// query matches everyone (by handle).
-fn mention_match(query: &str, handle: &str, name: &str) -> Option<bool> {
-    if query.is_empty() || handle.to_lowercase().starts_with(query) {
-        return Some(true);
-    }
-    let name = name.to_lowercase();
-    name.split(|c: char| !c.is_alphanumeric())
-        .any(|w| !w.is_empty() && w.starts_with(query))
-        .then_some(false)
+/// Does the typed `@query` match this entity? The shared matcher's verdict on
+/// the @handle and the display name (`arbos_core::search`: exact > prefix >
+/// word-start, name before handle, diacritics folded), `None` when neither
+/// matches. An empty query matches everyone.
+fn mention_match(query: &str, handle: &str, name: &str) -> Option<search::Match> {
+    search::match_entity(name, handle, None, &search::normalize_query(query))
 }
 
 /// A picker row's picture as an element: photo, D79 initials, D92 leaf or the neutral disc.
 fn mention_picture(picture: &mention::Picture, size: f32, theme: &Theme) -> gpui::AnyElement {
     match picture {
-        mention::Picture::Image(image) => img(image.clone())
+        mention::Picture::Image(image) => img(crate::ui::picture_fit::fit(image, size))
             .size(px(size))
             .flex_shrink_0()
             .rounded_full()
@@ -3008,11 +3104,12 @@ impl Render for Composer {
                 v.notice_for(active_chat.as_deref()).map(str::to_owned),
             )
         };
-        // Per-room push refusal (`not_available`): keep the link live, show one muted line.
-        let delivery_notice = state
+        // The composer's note: the last send / attachment / recording failure in this chat
+        // (the shared error element, directly above the field — Jacob 2026-10-26). A push
+        // refusal is chat-level and lives in the slot under the header, not here.
+        let send_error = state
             .active_chat_id()
-            .filter(|id| state.push_refused.contains(id))
-            .map(|_| "Messages in this chat are not being delivered".to_string());
+            .and_then(|id| state.send_error(&id).cloned().map(|slot| (id, slot)));
         let in_livekit = state.my_call.is_some();
         let has_text = !self.input.read(cx).text().trim().is_empty();
         // In a job tab (`jobtabs`) typing steers that job.
@@ -3186,12 +3283,11 @@ impl Render for Composer {
             .size(px(PLUS_BUTTON))
             .flex_shrink_0()
             .rounded_full()
-            .bg(theme.surface_2)
             .flex()
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .hover(|s| s.bg(theme.border_strong))
+            .map(|el| highlight::washed(el, theme.surface_2, &theme))
             .child(icon("plus", 16.0, theme.text_muted))
             .on_click(cx.listener(|this, _, _, cx| this.attach(cx)));
 
@@ -3206,7 +3302,7 @@ impl Render for Composer {
                 .justify_center()
                 .rounded_full()
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
+                .map(|el| highlight::button(el, &theme))
                 .child(icon("xmark", 11.0, theme.text_muted))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.voice.update(cx, |v, cx| v.cancel_memo(cx));
@@ -3263,6 +3359,7 @@ impl Render for Composer {
         // (`shell::file_drop_target`), not this field alone.
         let field_base = div()
             .id("composer-field")
+            .debug_selector(|| "composer-field".into())
             .flex_1()
             .min_w_0()
             .rounded(px(field_radius))
@@ -3327,7 +3424,17 @@ impl Render for Composer {
             .w_full()
             .flex()
             .flex_col()
-            .gap(px(8.0));
+            .gap(px(8.0))
+            // The strip's key rule: ⌫ / ⌦ the field had nothing to delete for
+            // (it propagates them) remove the last staged attachment while the
+            // draft is empty. Handled here, on the attachments' owner, not in
+            // the field's key routing.
+            .on_action(cx.listener(|this, _: &Backspace, _, cx| {
+                this.delete_key_on_strip(cx);
+            }))
+            .on_action(cx.listener(|this, _: &Delete, _, cx| {
+                this.delete_key_on_strip(cx);
+            }));
 
         // Reply preview (iPhone parity): set by the hover reply icon / the
         // bubble menu on a message. Always one fixed-height row, whatever
@@ -3369,7 +3476,7 @@ impl Render for Composer {
                     .justify_center()
                     .rounded_full()
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme.surface_2))
+                    .map(|el| highlight::button(el, &theme))
                     .child(icon("xmark", 10.0, theme.text_muted))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.state
@@ -3382,13 +3489,32 @@ impl Render for Composer {
         // One muted line about the voice path while it is doing something (or
         // when it had to fall back: no microphone, mock relay). The link has
         // no line here: the header's connection pill is its one place
-        // ([feedback connection-pill]). A push-refusal notice for this chat
-        // can show here too. Overlay just above the field so the pill does
+        // ([feedback connection-pill]). Overlay just above the field so the pill does
         // not jump when the note appears (a flow child above or below would
         // shift the bottom-pinned composer).
-        let note = voice_notice
-            .filter(|_| recording || transcribing || voice_mode)
-            .or(delivery_notice);
+        let note = voice_notice.filter(|_| recording || transcribing || voice_mode);
+        if let Some((chat, slot)) = send_error {
+            let chat_for_retry = chat.clone();
+            column = column.child(error_note::render(
+                "composer-error",
+                &slot.error,
+                slot.details_open,
+                error_note::Style::Inline,
+                &theme,
+                error_note::Handlers::new()
+                    .try_again(cx.listener(move |this, _, _, cx| {
+                        let chat = chat_for_retry.clone();
+                        this.state.update(cx, |s, cx| s.retry_send_error(chat, cx));
+                    }))
+                    .toggle_details(cx.listener(move |this, _, _, cx| {
+                        let chat = chat.clone();
+                        this.state.update(cx, |s, cx| {
+                            s.toggle_send_error_details(&chat);
+                            cx.notify();
+                        });
+                    })),
+            ));
+        }
         let mut field_wrap = div().relative().w_full();
         if let Some(note) = note {
             field_wrap = field_wrap.child(
@@ -3453,13 +3579,38 @@ fn is_image_path(path: &Path) -> bool {
     )
 }
 
-/// Decode a small thumbnail for the composer attachment pill (local file only).
+/// Decode a small thumbnail for a staged picture (local file only): the tile
+/// at 2 px/pt plus the room `ObjectFit::Cover` may crop, never the full
+/// pasted screenshot.
 fn image_preview_for(path: &Path) -> Option<Arc<RenderImage>> {
     if !is_image_path(path) {
         return None;
     }
     let bytes = std::fs::read(path).ok()?;
-    decode_image(&bytes).map(Arc::new)
+    decode_thumbnail(&bytes, STAGED_THUMBNAIL_PX).map(Arc::new)
+}
+
+/// Longest side of a staged thumbnail's bitmap: 4 × the 64 pt tile covers a
+/// 2 px/pt display with a 2:1 crop to spare.
+pub(crate) const STAGED_THUMBNAIL_PX: u32 = 4 * STAGED_TILE as u32;
+
+/// The remove disc's hover tooltip: one line in the theme's small type.
+struct TextTip(SharedString);
+
+impl Render for TextTip {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::of(cx);
+        div()
+            .px(px(8.0))
+            .py(px(4.0))
+            .rounded(px(6.0))
+            .bg(theme.surface_2)
+            .border_1()
+            .border_color(theme.border)
+            .text_size(px(TEXT_TINY))
+            .text_color(theme.text)
+            .child(self.0.clone())
+    }
 }
 
 /// What the round primary button does. A recording memo wins: the user needs
@@ -4072,6 +4223,22 @@ mod enter_tests {
         );
     }
 
+    #[gpui::test]
+    fn tab_with_an_open_mention_completes_the_highlighted_row(cx: &mut TestAppContext) {
+        // Tab inserts the highlighted handle ([feedback
+        // app-01M5WKBR85JVW1KKJH96FWZVK5]); it must not only move the highlight.
+        let (input, cx, submitted) = input_with_owner_callbacks(cx);
+        cx.simulate_input("hi @sa");
+        cx.dispatch_action(AcceptMention);
+        cx.run_until_parked();
+        assert_eq!(submitted.get(), 0, "Tab on an open @mention does not send");
+        let text = cx.update(|_, cx| input.read(cx).text().to_string());
+        assert!(
+            text.starts_with("hi @sam"),
+            "Tab completed the highlighted mention: {text:?}"
+        );
+    }
+
     /// Paste with an owner hook, as the chat composer has: text at the caret,
     /// files and images to the hook ([feedback desktop-paste-2026-10-23]).
     type PastedMedia = Rc<std::cell::RefCell<Vec<(Vec<PathBuf>, Vec<gpui::Image>)>>>;
@@ -4637,11 +4804,319 @@ mod mention_token_tests {
 
     #[test]
     fn candidates_match_the_handle_or_a_word_of_the_name() {
-        assert_eq!(mention_match("", "sam", "Sam Rivera"), Some(true));
-        assert_eq!(mention_match("sa", "sam", "Sam Rivera"), Some(true));
-        assert_eq!(mention_match("riv", "sam", "Sam Rivera"), Some(false));
-        assert_eq!(mention_match("k", "mira-k", "Mira Kaplan"), Some(false));
+        use arbos_core::search::{Match, MatchField, MatchKind};
+        let m = |kind, field| Some(Match { kind, field });
+        assert_eq!(
+            mention_match("", "sam", "Sam Rivera"),
+            Some(Match::EVERYTHING)
+        );
+        assert_eq!(
+            mention_match("sa", "sam", "Sam Rivera"),
+            m(MatchKind::Prefix, MatchField::Name)
+        );
+        assert_eq!(
+            mention_match("sam", "sam", "Sam Rivera"),
+            m(MatchKind::Exact, MatchField::Handle)
+        );
+        assert_eq!(
+            mention_match("riv", "sam", "Sam Rivera"),
+            m(MatchKind::WordStart, MatchField::Name)
+        );
+        assert_eq!(
+            mention_match("k", "mira-k", "Mira Kaplan"),
+            m(MatchKind::WordStart, MatchField::Name)
+        );
+        assert_eq!(
+            mention_match("Zoë", "zoe-m", "Zoe Martin"),
+            m(MatchKind::Prefix, MatchField::Name)
+        );
         assert_eq!(mention_match("x", "sam", "Sam Rivera"), None);
+        assert_eq!(mention_match("ivera", "sam", "Sam Rivera"), None);
         assert_eq!(mention_match("am", "sam", "Sam Rivera"), None);
+    }
+}
+
+#[cfg(test)]
+mod staged_tests {
+    //! The staged-attachment strip ([feedback composer-attachment-removal-2026-10-27]):
+    //! removing one keeps the others and the text, ⌫ / ⌦ on an empty draft
+    //! take the last one, and the tiles' layout is pinned (one tile each, 8
+    //! apart, the remove disc inside the top-right corner, nothing clipped).
+    use futures::future::BoxFuture;
+    use gpui::{point, Bounds, Entity, Modifiers, Pixels, TestAppContext, VisualTestContext};
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::model::{Chat, Project, SpaceKind};
+    use crate::sync::{ClientCommand, SyncEvent, SyncSource};
+    use crate::ui::motion::PulseClock;
+    use crate::ui::shell::Shell;
+
+    struct Idle;
+
+    impl SyncSource for Idle {
+        fn name(&self) -> &'static str {
+            "idle"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            _commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    /// A scratch dir with two pictures (a wide one and a tall one, so Cover
+    /// has something to crop) and one text file.
+    fn fixtures() -> (PathBuf, Vec<PathBuf>) {
+        let dir = std::env::temp_dir().join(format!(
+            "arbos-staged-{}-{}",
+            std::process::id(),
+            crate::model::now_ms()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let wide = dir.join("profile-card.png");
+        image::RgbaImage::from_pixel(300, 160, image::Rgba([40, 120, 220, 255]))
+            .save(&wide)
+            .expect("wide png");
+        let tall = dir.join("portrait.png");
+        image::RgbaImage::from_pixel(120, 260, image::Rgba([220, 80, 40, 255]))
+            .save(&tall)
+            .expect("tall png");
+        let doc = dir.join("notes.txt");
+        std::fs::write(&doc, "hello").expect("txt");
+        (dir, vec![wide, tall, doc])
+    }
+
+    fn mount(
+        cx: &mut TestAppContext,
+    ) -> (
+        tokio::runtime::Runtime,
+        Entity<Shell>,
+        Entity<Composer>,
+        &mut VisualTestContext,
+    ) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| {
+            gpui_tokio::init_from_handle(cx, handle);
+            cx.set_global(Theme::dark(crate::ui::theme::Surface::Matte));
+            if !cx.has_global::<PulseClock>() {
+                PulseClock::init(cx);
+            }
+        });
+        let state = cx.new(|cx| AppState::new(Box::new(Idle), cx));
+        let now = crate::model::now_ms();
+        state.update(cx, |s, cx| {
+            s.projects.push(Project {
+                id: "p1".into(),
+                name: "Arbonites".into(),
+                kind: SpaceKind::Group,
+                ..Project::default()
+            });
+            let chat: Chat = serde_json::from_value(serde_json::json!({
+                "id": "c1", "project_id": "p1", "title": "Arbonites", "is_pinned": true,
+                "is_system": false, "unread": false, "last_message_at": now,
+            }))
+            .expect("chat");
+            s.chats.insert("p1".into(), vec![chat]);
+            s.selected_project = Some("p1".into());
+            s.active_tab.insert("p1".into(), "c1".into());
+            cx.notify();
+        });
+        let (shell, vcx) = cx.add_window_view(|window, cx| Shell::new(state.clone(), window, cx));
+        vcx.run_until_parked();
+        let composer = shell.read_with(&*vcx, |sh, _| sh.composer.clone());
+        vcx.update(|window, cx| Composer::focus(&composer, window, cx));
+        settle(&shell, vcx);
+        (rt, shell, composer, vcx)
+    }
+
+    fn settle(shell: &Entity<Shell>, vcx: &mut VisualTestContext) {
+        for _ in 0..3 {
+            shell.update(vcx, |_, cx| cx.notify());
+            vcx.run_until_parked();
+        }
+    }
+
+    fn stage(composer: &Entity<Composer>, paths: &[PathBuf], vcx: &mut VisualTestContext) {
+        composer.update(vcx, |c, cx| c.add_paths(paths.iter().cloned(), cx));
+    }
+
+    fn staged(composer: &Entity<Composer>, vcx: &VisualTestContext) -> Vec<PathBuf> {
+        composer.read_with(vcx, |c, _| c.staged_paths())
+    }
+
+    fn text(composer: &Entity<Composer>, vcx: &VisualTestContext) -> String {
+        composer.read_with(vcx, |c, cx| c.input.read(cx).text().to_string())
+    }
+
+    fn centre(b: Bounds<Pixels>) -> gpui::Point<Pixels> {
+        point(b.left() + b.size.width / 2.0, b.top() + b.size.height / 2.0)
+    }
+
+    fn f(p: Pixels) -> f32 {
+        p.into()
+    }
+
+    #[gpui::test]
+    fn removing_one_attachment_keeps_the_others_and_the_text(cx: &mut TestAppContext) {
+        let (_rt, shell, composer, vcx) = mount(cx);
+        let (_dir, paths) = fixtures();
+        stage(&composer, &paths, vcx);
+        vcx.simulate_input("see the card");
+        settle(&shell, vcx);
+        assert_eq!(staged(&composer, vcx), paths);
+
+        let disc = vcx
+            .debug_bounds("composer-remove-attachment-1")
+            .expect("the middle tile's remove disc is drawn without hovering");
+        vcx.simulate_click(centre(disc), Modifiers::default());
+        settle(&shell, vcx);
+
+        assert_eq!(
+            staged(&composer, vcx),
+            vec![paths[0].clone(), paths[2].clone()],
+            "only the clicked one goes"
+        );
+        assert_eq!(
+            text(&composer, vcx),
+            "see the card",
+            "the draft is untouched"
+        );
+
+        // The discs re-index: the former third tile is now the second.
+        let disc = vcx
+            .debug_bounds("composer-remove-attachment-1")
+            .expect("second disc");
+        vcx.simulate_click(centre(disc), Modifiers::default());
+        settle(&shell, vcx);
+        assert_eq!(staged(&composer, vcx), vec![paths[0].clone()]);
+        assert_eq!(text(&composer, vcx), "see the card");
+    }
+
+    #[gpui::test]
+    fn backspace_on_an_empty_draft_removes_the_last_attachment(cx: &mut TestAppContext) {
+        let (_rt, shell, composer, vcx) = mount(cx);
+        let (_dir, paths) = fixtures();
+        stage(&composer, &paths, vcx);
+        settle(&shell, vcx);
+
+        vcx.dispatch_action(Backspace);
+        settle(&shell, vcx);
+        assert_eq!(
+            staged(&composer, vcx),
+            paths[..2].to_vec(),
+            "⌫ on an empty draft takes the last attachment"
+        );
+
+        vcx.dispatch_action(Delete);
+        settle(&shell, vcx);
+        assert_eq!(staged(&composer, vcx), paths[..1].to_vec(), "⌦ too");
+
+        // With text in the draft the keys edit the text, never the strip —
+        // even with the caret at the start where there is nothing to delete.
+        vcx.simulate_input("hi");
+        vcx.dispatch_action(Backspace);
+        settle(&shell, vcx);
+        assert_eq!(text(&composer, vcx), "h");
+        assert_eq!(staged(&composer, vcx), paths[..1].to_vec());
+        vcx.dispatch_action(Home);
+        vcx.dispatch_action(Backspace);
+        settle(&shell, vcx);
+        assert_eq!(
+            text(&composer, vcx),
+            "h",
+            "⌫ at the start of text is a no-op"
+        );
+        assert_eq!(
+            staged(&composer, vcx),
+            paths[..1].to_vec(),
+            "a non-empty draft never loses an attachment to ⌫"
+        );
+
+        // Empty the draft: the next ⌫ takes the last tile; one more does nothing.
+        vcx.dispatch_action(End);
+        vcx.dispatch_action(Backspace);
+        settle(&shell, vcx);
+        assert_eq!(text(&composer, vcx), "");
+        assert_eq!(staged(&composer, vcx), paths[..1].to_vec());
+        vcx.dispatch_action(Backspace);
+        settle(&shell, vcx);
+        assert!(staged(&composer, vcx).is_empty());
+        vcx.dispatch_action(Backspace);
+        settle(&shell, vcx);
+        assert!(staged(&composer, vcx).is_empty());
+        assert_eq!(text(&composer, vcx), "");
+    }
+
+    #[gpui::test]
+    fn the_strip_lays_the_tiles_out_as_pinned(cx: &mut TestAppContext) {
+        let (_rt, shell, composer, vcx) = mount(cx);
+        let (_dir, paths) = fixtures();
+        stage(&composer, &paths, vcx);
+        settle(&shell, vcx);
+
+        let strip = vcx
+            .debug_bounds("composer-staged-strip")
+            .expect("the strip is drawn");
+        let tiles: Vec<Bounds<Pixels>> = [
+            "composer-staged-tile-0",
+            "composer-staged-tile-1",
+            "composer-staged-tile-2",
+        ]
+        .into_iter()
+        .map(|s| vcx.debug_bounds(s).expect(s))
+        .collect();
+        let discs: Vec<Bounds<Pixels>> = [
+            "composer-remove-attachment-0",
+            "composer-remove-attachment-1",
+            "composer-remove-attachment-2",
+        ]
+        .into_iter()
+        .map(|s| vcx.debug_bounds(s).expect(s))
+        .collect();
+
+        for (i, tile) in tiles.iter().enumerate() {
+            assert_eq!(f(tile.size.height), STAGED_TILE, "tile {i} is 64 tall");
+            if i < 2 {
+                assert_eq!(
+                    f(tile.size.width),
+                    STAGED_TILE,
+                    "picture tile {i} is square"
+                );
+            } else {
+                assert!(
+                    f(tile.size.width) > STAGED_TILE,
+                    "the file chip is wider than a picture tile"
+                );
+            }
+            // One row, tops level, nothing outside the strip (nothing to clip).
+            assert_eq!(tile.top(), tiles[0].top(), "tile {i} shares the row");
+            assert!(tile.left() >= strip.left() && tile.right() <= strip.right());
+            assert!(tile.top() >= strip.top() && tile.bottom() <= strip.bottom());
+            // The remove disc: 20 across, inset 4 from the tile's top-right,
+            // fully inside its own tile.
+            let disc = discs[i];
+            assert_eq!(f(disc.size.width), STAGED_REMOVE);
+            assert_eq!(f(disc.size.height), STAGED_REMOVE);
+            assert_eq!(f(tile.right() - disc.right()), STAGED_REMOVE_INSET);
+            assert_eq!(f(disc.top() - tile.top()), STAGED_REMOVE_INSET);
+            assert!(disc.left() > tile.left() && disc.bottom() < tile.bottom());
+        }
+        for w in tiles.windows(2) {
+            assert_eq!(f(w[1].left() - w[0].right()), STAGED_GAP, "8 between tiles");
+        }
+        for (disc, next) in discs.iter().zip(tiles.iter().skip(1)) {
+            assert!(
+                disc.right() < next.left(),
+                "a disc never reaches its neighbour"
+            );
+        }
     }
 }

@@ -7,8 +7,96 @@
 // line ("Member · Carro @robertalanm"). Case and diacritics fold ("zoe" finds
 // "Zoë"), a leading `@` is ignored. Ranking: people, then titles, then members,
 // then message bodies. Mirrors crates/arbos-mac `search.rs`.
+//
+// Names, handles and titles go through the one shared matcher in the Rust core
+// (`arbos_core::search`, reached through ArbosFFI as `EntitySearch`): exact >
+// prefix > word-start, display name before handle, diacritics folded — the same
+// rule the Mac and every picker on both platforms use ([feedback
+// shared-search-matcher-ios-2026-10-26]). Message bodies are not entities and
+// keep the substring search here.
 
+import ArbosFFI
 import Foundation
+
+/// The shared search matcher (`arbos_core::search`) for every search box that
+/// lists people, agents, groups, servers or channels: the New message sheet,
+/// New group / Add members / Give a person access, the Secrets agent picker,
+/// @mention completion, the home search and the Forward sheet. Jacob, Mac
+/// v0.6.268, 2026-10-26: "aff" in "Give a person access" listed only "Andreas F
+/// @aff" because that sheet matched handles alone; this is the one rule now.
+enum EntitySearch {
+    /// Lower-case, diacritics stripped, trimmed (the core's fold).
+    static func fold(_ s: String) -> String { searchFold(text: s) }
+
+    /// The typed query as the matcher sees it: leading `@` dropped, folded,
+    /// whitespace collapsed. Empty means "show everything". Idempotent.
+    static func normalize(_ query: String) -> String { searchNormalizeQuery(query: query) }
+
+    /// How an entity matches the typed `query` — the best of its display name,
+    /// @handle and title (exact > prefix > word-start, name before handle before
+    /// title; `SearchMatch.order` is that tuple as one number, 0 best); nil when
+    /// none matches. An empty query matches everything.
+    static func match(name: String, handle: String, title: String? = nil, query: String) -> SearchMatch? {
+        searchMatch(name: name, handle: handle, title: title, query: query)
+    }
+
+    /// Does the entity match at all?
+    static func matches(name: String, handle: String, title: String? = nil, query: String) -> Bool {
+        match(name: name, handle: handle, title: title, query: query) != nil
+    }
+
+    /// How one text (a group title, a channel name) matches the typed `query`.
+    static func matchText(_ text: String, query: String) -> SearchMatchKind? {
+        searchMatchText(text: text, query: query)
+    }
+
+    /// The items that match `query`, best first (exact > prefix > word-start,
+    /// name before handle before title), input order inside a tie; an empty
+    /// query keeps every item in order.
+    static func rank<T>(_ items: [T], query: String, fields: (T) -> SearchCandidate) -> [(item: T, match: SearchMatch)] {
+        searchRank(candidates: items.map(fields), query: query).map { (item: items[Int($0.index)], match: $0.matched) }
+    }
+
+    /// `rank` without the verdicts.
+    static func filter<T>(_ items: [T], query: String, fields: (T) -> SearchCandidate) -> [T] {
+        rank(items, query: query, fields: fields).map(\.item)
+    }
+}
+
+/// The rows of the people / agent / server pickers (New message, New group,
+/// Add members, Add server members, Give a person access, the Secrets agent
+/// picker) for what was typed, through `EntitySearch`. Pure, so the tests pin
+/// them; every picker calls these instead of filtering on its own.
+enum PeoplePicker {
+    /// Directory first, then remote hits not already listed, never me; then the
+    /// shared matcher on display name and @handle, best first. An empty query
+    /// keeps everyone in that order.
+    static func people(directory: [Person], remote: [Person], me: String?, query: String) -> [Person] {
+        var seen: Set<String> = []
+        var pool: [Person] = []
+        for p in directory + remote where p.id != me {
+            if seen.insert(p.id).inserted { pool.append(p) }
+        }
+        return EntitySearch.filter(pool, query: query) { SearchCandidate(name: $0.displayName, handle: $0.handle, title: nil) }
+    }
+
+    /// Agents by name, @slug and description, best first, list order inside a tie.
+    static func agents(_ agents: [Project], query: String) -> [Project] {
+        EntitySearch.filter(agents, query: query) {
+            SearchCandidate(name: $0.name, handle: mentionSlug($0.name), title: $0.description.isEmpty ? nil : $0.description)
+        }
+    }
+
+    /// Servers by name, best first, list order inside a tie.
+    static func servers(_ servers: [Server], query: String) -> [Server] {
+        EntitySearch.filter(servers, query: query) { SearchCandidate(name: $0.name, handle: "", title: nil) }
+    }
+
+    /// Any titled rows (the Secrets agent picker's agents, a vault's items) by title.
+    static func titled<T>(_ items: [T], query: String, title: (T) -> String) -> [T] {
+        EntitySearch.filter(items, query: query) { SearchCandidate(name: title($0), handle: "", title: nil) }
+    }
+}
 
 enum HomeSearch {
     /// What the row matched on, best first.
@@ -65,14 +153,10 @@ enum HomeSearch {
         return fold(q)
     }
 
-    private static func contains(_ hay: String, _ q: String) -> Bool {
-        fold(hay).contains(q)
-    }
-
-    /// A DM row: the other person's display name or @handle, else a message.
+    /// A DM row: the other person's display name or @handle (the shared matcher), else a message.
     static func dmHit(name: String, handle: String, messages: () -> [MessageText], q: String) -> Hit? {
         if q.isEmpty { return Hit(kind: .title) }
-        if contains(name, q) || contains(handle, q) { return Hit(kind: .person) }
+        if EntitySearch.matches(name: name, handle: handle, query: q) { return Hit(kind: .person) }
         return messageHit(messages(), q: q)
     }
 
@@ -82,18 +166,19 @@ enum HomeSearch {
         var title: String
     }
 
-    /// A group, agent or shared-project row: its title, a member, a chat title under it, else a message.
-    static func titledHit(title: String, members: [Member], chats: [ChatTitle] = [], messages: () -> [MessageText], q: String) -> Hit? {
+    /// A group, agent or shared-project row: its title (or an agent's `description`,
+    /// the matcher's title field), a member, a chat title under it, else a message.
+    static func titledHit(title: String, description: String? = nil, members: [Member], chats: [ChatTitle] = [], messages: () -> [MessageText], q: String) -> Hit? {
         if q.isEmpty { return Hit(kind: .title) }
-        if contains(title, q) { return Hit(kind: .title) }
-        if let m = members.first(where: { !$0.isAgent && (contains($0.displayName, q) || contains($0.handle, q)) }) {
+        if EntitySearch.matches(name: title, handle: "", title: description, query: q) { return Hit(kind: .title) }
+        if let m = members.first(where: { !$0.isAgent && EntitySearch.matches(name: $0.displayName, handle: $0.handle, query: q) }) {
             let reason = m.displayName == m.handle ? "Member · @\(m.handle)" : "Member · \(m.displayName) @\(m.handle)"
             return Hit(kind: .member, reason: reason)
         }
-        if let a = members.first(where: { $0.isAgent && contains($0.displayName, q) }) {
+        if let a = members.first(where: { $0.isAgent && EntitySearch.matches(name: $0.displayName, handle: $0.handle, query: q) }) {
             return Hit(kind: .member, reason: "Agent · \(a.displayName)")
         }
-        if let c = chats.first(where: { !$0.title.trimmingCharacters(in: .whitespaces).isEmpty && contains($0.title, q) }) {
+        if let c = chats.first(where: { !$0.title.trimmingCharacters(in: .whitespaces).isEmpty && EntitySearch.matchText($0.title, query: q) != nil }) {
             return Hit(kind: .title, reason: "Chat · \(c.title.trimmingCharacters(in: .whitespaces))", chatId: c.id)
         }
         return messageHit(messages(), q: q)
@@ -101,8 +186,8 @@ enum HomeSearch {
 
     /// A server row: its name, or one of its channels (named in the reason).
     static func serverHit(name: String, channels: [String], q: String) -> Hit? {
-        if q.isEmpty || contains(name, q) { return Hit(kind: .title) }
-        if let c = channels.first(where: { contains($0, q) }) { return Hit(kind: .title, reason: "#\(c)") }
+        if q.isEmpty || EntitySearch.matchText(name, query: q) != nil { return Hit(kind: .title) }
+        if let c = channels.first(where: { EntitySearch.matchText($0, query: q) != nil }) { return Hit(kind: .title, reason: "#\(c)") }
         return nil
     }
 

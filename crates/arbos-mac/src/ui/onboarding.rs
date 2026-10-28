@@ -92,7 +92,7 @@ fn alpha(c: Hsla, a: f32) -> Hsla {
 
 /// The greeting bubble as the transcript lays it out: the transcript is
 /// bottom-anchored, so the only message sits just above the composer, left
-/// in the chat column (the composer's own: 16 pt margins, 876 cap — on a
+/// in the chat column (the composer's own: 16 pt margins, 960 cap — on a
 /// 1180×780 window left 312; bottom 74.5 above the window edge, 42.5 tall
 /// for one line).
 fn bubble_target(viewport: gpui::Size<Pixels>, sidebar_width: f32, text_px: f32) -> Bounds<Pixels> {

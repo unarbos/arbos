@@ -23,6 +23,7 @@ use gpui::{div, prelude::*, px, Context, Div, FontWeight, Hsla, MouseButton};
 use crate::ui::avatar_picker::{self, Picker, Tab};
 use crate::ui::avatars;
 use crate::ui::frost::{frosted, PANEL_BLUR};
+use crate::ui::highlight;
 use crate::ui::icons::icon;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Appearance, Theme};
@@ -190,10 +191,9 @@ pub fn sheet(shell: &Shell, kind: Kind, cx: &mut Context<Shell>) -> Div {
     let shift = kind.shift();
 
     let header = div()
-        .absolute()
-        .left_0()
-        .right_0()
-        .top_0()
+        .relative()
+        .flex_none()
+        .w_full()
         .h(px(HEADER))
         .border_b_1()
         .border_color(p.line)
@@ -220,7 +220,7 @@ pub fn sheet(shell: &Shell, kind: Kind, cx: &mut Context<Shell>) -> Div {
                 .justify_center()
                 .rounded_full()
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
+                .map(|el| highlight::button(el, &theme))
                 .child(icon("xmark", 10.0, hex(0xD2D2D2)))
                 .on_click(
                     cx.listener(move |this, _, window, cx| this.cancel_create(kind, window, cx)),
@@ -233,7 +233,7 @@ pub fn sheet(shell: &Shell, kind: Kind, cx: &mut Context<Shell>) -> Div {
         .absolute()
         .left_0()
         .right_0()
-        .top(px(PREVIEW_TOP))
+        .top(px(PREVIEW_TOP - HEADER))
         .flex()
         .justify_center()
         .child(preview(&picker, &typed, shell, cx));
@@ -242,7 +242,7 @@ pub fn sheet(shell: &Shell, kind: Kind, cx: &mut Context<Shell>) -> Div {
         .absolute()
         .left(px(FIELD_INSET))
         .right(px(FIELD_INSET))
-        .top(px(FIELD_TOP))
+        .top(px(FIELD_TOP - HEADER))
         .h(px(FIELD_H))
         .rounded(px(8.0))
         .border_1()
@@ -262,7 +262,7 @@ pub fn sheet(shell: &Shell, kind: Kind, cx: &mut Context<Shell>) -> Div {
             .absolute()
             .left(px(FIELD_INSET))
             .right(px(FIELD_INSET))
-            .top(px(FIELD_TOP + FIELD_H + 8.0))
+            .top(px(FIELD_TOP + FIELD_H + 8.0 - HEADER))
             .text_size(px(13.0))
             .line_height(px(16.0))
             .text_center()
@@ -277,7 +277,7 @@ pub fn sheet(shell: &Shell, kind: Kind, cx: &mut Context<Shell>) -> Div {
         .absolute()
         .left_0()
         .right_0()
-        .top(px(OPTIONS_TOP + shift))
+        .top(px(OPTIONS_TOP + shift - HEADER))
         .flex()
         .justify_center()
         .child(avatar_picker::tab_pill(
@@ -291,8 +291,8 @@ pub fn sheet(shell: &Shell, kind: Kind, cx: &mut Context<Shell>) -> Div {
         Tab::Upload => avatar_picker::upload_body(
             &picker,
             avatar_picker::Slots {
-                top: BODY_TOP + shift,
-                status_top: UPLOAD_HINT_TOP + shift,
+                top: BODY_TOP + shift - HEADER,
+                status_top: UPLOAD_HINT_TOP + shift - HEADER,
             },
             None,
             &p,
@@ -302,8 +302,8 @@ pub fn sheet(shell: &Shell, kind: Kind, cx: &mut Context<Shell>) -> Div {
             shell,
             &picker,
             avatar_picker::Slots {
-                top: BODY_TOP + shift,
-                status_top: GENERATE_STATUS_TOP + shift,
+                top: BODY_TOP + shift - HEADER,
+                status_top: GENERATE_STATUS_TOP + shift - HEADER,
             },
             None,
             &p,
@@ -337,7 +337,7 @@ pub fn sheet(shell: &Shell, kind: Kind, cx: &mut Context<Shell>) -> Div {
         .absolute()
         .left_0()
         .right_0()
-        .top(px(FOOTER_TOP + shift))
+        .top(px(FOOTER_TOP + shift - HEADER))
         .h(px(FOOTER_H))
         .border_t_1()
         .border_color(p.line)
@@ -373,14 +373,19 @@ pub fn sheet(shell: &Shell, kind: Kind, cx: &mut Context<Shell>) -> Div {
             .right(px(12.5))
         });
 
+    // A column: header · the note (a failed generation, Jacob 2026-10-26) · the body's fixed
+    // box with everything else in its absolute slots · (the footer is the box's last slot).
+    // Without a note the card is exactly `HEIGHT + shift`; a note grows it by itself.
+    let note = avatar_picker::error_slot(&picker, &theme, cx);
     let card = div()
         .id("create-entity-card")
         .debug_selector(|| "create-entity-card".into())
         .relative()
         .w(px(WIDTH))
-        .h(px(HEIGHT + shift))
         .max_w_full()
         .max_h_full()
+        .flex()
+        .flex_col()
         .rounded(px(RADIUS))
         .bg(p.bg)
         .border_1()
@@ -388,12 +393,20 @@ pub fn sheet(shell: &Shell, kind: Kind, cx: &mut Context<Shell>) -> Div {
         .shadow_lg()
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(header)
-        .child(preview)
-        .child(field)
-        .children(explainer)
-        .child(options)
-        .children(body)
-        .child(footer);
+        .children(note)
+        .child(
+            div()
+                .relative()
+                .flex_none()
+                .w_full()
+                .h(px(HEIGHT + shift - HEADER))
+                .child(preview)
+                .child(field)
+                .children(explainer)
+                .child(options)
+                .children(body)
+                .child(footer),
+        );
     // The same modal backdrop as the New Message sheet: a click outside closes.
     div()
         .absolute()

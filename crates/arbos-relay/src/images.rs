@@ -531,6 +531,20 @@ pub fn is_transient_upstream(status: u16) -> bool {
 /// What the person reads when the provider refused their words.
 pub const AVATAR_REFUSED_FRIENDLY: &str = "That prompt was refused — try a different one.";
 
+/// What the person reads when the provider did not answer within the budget.
+pub const AVATAR_TIMEOUT_FRIENDLY: &str = "Couldn't generate the image. The server took too long.";
+
+/// The budget ran out: a 504 with the clear line, the provider's words under `detail`.
+fn avatar_timed_out(project_id: &str, detail: impl Into<String>) -> Response {
+    let detail = detail.into();
+    tracing::warn!(project = %project_id, %detail, "avatar generation timed out");
+    (
+        StatusCode::GATEWAY_TIMEOUT,
+        Json(json!({ "error": { "type": "avatar_timeout", "message": AVATAR_TIMEOUT_FRIENDLY, "detail": detail } })),
+    )
+        .into_response()
+}
+
 /// The refusal: a 422 with the clear line, the provider's words under `detail`, one log line.
 fn avatar_refused(project_id: &str, detail: impl Into<String>) -> Response {
     let detail = detail.into();
@@ -552,9 +566,6 @@ fn avatar_unavailable(project_id: &str, detail: impl Into<String>) -> Response {
     )
         .into_response()
 }
-/// The stored picture: a 512 px JPEG, like the pictures the apps upload themselves.
-const AVATAR_SIDE: u32 = 512;
-
 fn avatar_error(status: StatusCode, kind: &str, message: impl Into<String>) -> Response {
     (
         status,
@@ -563,19 +574,10 @@ fn avatar_error(status: StatusCode, kind: &str, message: impl Into<String>) -> R
         .into_response()
 }
 
-/// PNG (or anything `image` decodes) → 512 px JPEG q85 for the blob store.
-pub fn avatar_jpeg(bytes: &[u8]) -> Result<Vec<u8>, String> {
-    let img = image::load_from_memory(bytes).map_err(|e| format!("decode: {e}"))?;
-    let img = img.resize(
-        AVATAR_SIDE,
-        AVATAR_SIDE,
-        image::imageops::FilterType::Triangle,
-    );
-    let rgb = image::DynamicImage::ImageRgb8(img.to_rgb8());
-    let mut out = Vec::new();
-    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85);
-    enc.encode_image(&rgb).map_err(|e| format!("encode: {e}"))?;
-    Ok(out)
+/// The provider's PNG (or anything `image` decodes) → the stored master: ≤ 1024 px, Lanczos,
+/// JPEG q92 for the photographic pictures the models paint, PNG when flat (`avatar_image`).
+pub fn avatar_master(bytes: &[u8]) -> Result<crate::avatar_image::Master, String> {
+    crate::avatar_image::master(bytes)
 }
 
 #[derive(serde::Deserialize)]
@@ -623,19 +625,22 @@ pub async fn avatar_generate(
     generate_into(&state, target, &body.prompt).await
 }
 
-/// `POST /chats/{id}/avatar/generate {prompt}` — the same for a people group's picture (any human
-/// member, like `PATCH /chats/{id}`); the picture lands in `people:{id}` and "Set avatar" sends
-/// `PATCH /chats/{id} {image_key}`. The member asking pays.
+/// `POST /chats/{id}/avatar/generate {prompt}` — the same for a people group's picture (the
+/// owner and admins, like `PATCH /chats/{id}`); the picture lands in `people:{id}` and "Set
+/// avatar" sends `PATCH /chats/{id} {image_key}`. The admin asking pays.
 pub async fn chat_avatar_generate(
     State(state): State<AppState>,
     principal: Principal,
     axum::extract::Path(chat_id): axum::extract::Path<String>,
     Json(body): Json<AvatarGenerateBody>,
 ) -> Response {
-    let (me, cm) = match crate::people::member_chat(&state, &principal, &chat_id) {
-        Ok(v) => v,
-        Err(r) => return *r,
-    };
+    // Owner / admins only, like `PATCH /chats/{id}`: the generated picture becomes the
+    // group's picture, so the same people decide.
+    let (me, cm) =
+        match crate::people::settings_chat(&state, &principal, &chat_id, &["avatar_generate"]) {
+            Ok(v) => v,
+            Err(r) => return *r,
+        };
     let slot = format!("{}{}", crate::people::PEOPLE_ACL_PREFIX, cm.chat.id);
     let target = AvatarTarget {
         slot: slot.clone(),
@@ -682,7 +687,12 @@ pub const USER_BLOB_PREFIX: &str = "users:";
 /// and drew the automatic leaf instead of the owner's picture (Jacob, 2026-10-25: "Hezbola,
 /// run by @unarbos, purple leaf"). Clients append `?v={avatar_version}`, so a change is a new
 /// URL and the day-long cache never serves the old bytes. 404 while the agent has no picture.
-pub async fn project_avatar(State(state): State<AppState>, Path(file): Path<String>) -> Response {
+/// `?w=<px>` serves the picture at that bucket (`avatar_image`).
+pub async fn project_avatar(
+    State(state): State<AppState>,
+    Path(file): Path<String>,
+    axum::extract::Query(size): axum::extract::Query<crate::avatar_image::SizeQuery>,
+) -> Response {
     let project_id = file.strip_suffix(".jpg").unwrap_or(file.as_str());
     let Ok(Some(p)) = state.db.project(project_id) else {
         return crate::signin::api_error(StatusCode::NOT_FOUND, "not_found", "no such agent");
@@ -698,32 +708,19 @@ pub async fn project_avatar(State(state): State<AppState>, Path(file): Path<Stri
     let Some(bytes) = crate::blobs::read(&state, &p.id, key).await else {
         return crate::signin::api_error(StatusCode::NOT_FOUND, "not_found", "no picture");
     };
-    let mime = match crate::blobs::stored_image(&state, &p.id, key).await {
-        crate::blobs::StoredImage::Image(kind) => match kind {
-            crate::image_sniff::ImageKind::Png => "image/png",
-            crate::image_sniff::ImageKind::Jpeg => "image/jpeg",
-            crate::image_sniff::ImageKind::Gif => "image/gif",
-            crate::image_sniff::ImageKind::Webp => "image/webp",
-            crate::image_sniff::ImageKind::Heic => "image/heic",
-        },
+    let kind = match crate::blobs::stored_image(&state, &p.id, key).await {
+        crate::blobs::StoredImage::Image(kind) => kind,
         crate::blobs::StoredImage::Missing | crate::blobs::StoredImage::NotAnImage(_) => {
             return crate::signin::api_error(StatusCode::NOT_FOUND, "not_found", "no picture")
         }
     };
-    (
-        [
-            (
-                axum::http::header::CONTENT_TYPE,
-                axum::http::HeaderValue::from_static(mime),
-            ),
-            (
-                axum::http::header::CACHE_CONTROL,
-                axum::http::HeaderValue::from_static("public, max-age=86400"),
-            ),
-        ],
-        bytes,
+    crate::avatar_image::respond(
+        &state,
+        crate::avatar_image::Master { kind, bytes },
+        size.w,
+        Some("public, max-age=86400"),
     )
-        .into_response()
+    .await
 }
 
 /// The image provider's last health probe: `GET {images_base}/models/{first avatar model}` with
@@ -937,25 +934,56 @@ async fn generate_into(state: &AppState, target: AvatarTarget, prompt: &str) -> 
         let mut picked: Option<(String, Value)> = None;
         let mut last_detail = String::from("no model answered");
         let backoff = &state.cfg.avatar_retry_backoff_ms;
+        // Every attempt gets `avatar_attempt_timeout`, the whole generate `avatar_total_timeout`
+        // (less than the apps' request timeout, so the person always gets the relay's answer
+        // and never their own client's "operation timed out").
+        let deadline = t0 + state.cfg.avatar_total_timeout;
+        let mut timed_out = false;
         'models: for candidate in &models {
             // Transient trouble (timeout, 429, 5xx) gets `backoff.len()` more tries on the same
             // model, then the next model; a refused prompt or any other 4xx stops here.
             let mut attempt = 0usize;
             loop {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    timed_out = true;
+                    break 'models;
+                }
+                // The verdict follows the last attempt: a timeout, or whatever it answered.
+                timed_out = false;
                 let sent = state
                     .http
                     .post(&url)
                     .bearer_auth(&key)
+                    .timeout(state.cfg.avatar_attempt_timeout.min(left))
                     .json(&avatar_request(candidate, &prompt))
                     .send()
                     .await;
                 let (status, bytes) = match sent {
                     Ok(r) => {
                         let status = r.status();
-                        (status, r.bytes().await.unwrap_or_default())
+                        let body = tokio::time::timeout(
+                            deadline.saturating_duration_since(Instant::now()),
+                            r.bytes(),
+                        )
+                        .await;
+                        match body {
+                            Ok(b) => (status, b.unwrap_or_default()),
+                            Err(_) => {
+                                last_detail = format!("{candidate}: timed out reading the answer");
+                                timed_out = true;
+                                break 'models;
+                            }
+                        }
                     }
                     Err(e) => {
                         last_detail = format!("{candidate}: {e}");
+                        if e.is_timeout() {
+                            timed_out = true;
+                        }
+                        if deadline.saturating_duration_since(Instant::now()).is_zero() {
+                            break 'models;
+                        }
                         if let Some(wait) = backoff.get(attempt) {
                             tracing::warn!(target = %target.slot, model = %candidate, error = %e, attempt, "avatar provider unreachable; retrying");
                             tokio::time::sleep(std::time::Duration::from_millis(*wait)).await;
@@ -1000,6 +1028,9 @@ async fn generate_into(state: &AppState, target: AvatarTarget, prompt: &str) -> 
             }
         }
         let Some((used, parsed)) = picked else {
+            if timed_out {
+                return avatar_timed_out(&target.slot, last_detail);
+            }
             return avatar_unavailable(&target.slot, last_detail);
         };
         model = format!("avatar:{used}");
@@ -1034,12 +1065,24 @@ async fn generate_into(state: &AppState, target: AvatarTarget, prompt: &str) -> 
         crate::credits::charge(state, &target.payer, usd, "inference", Some(&model));
         png
     };
-    let jpeg = match avatar_jpeg(&png) {
-        Ok(j) => j,
-        Err(e) => return avatar_unavailable(&target.slot, e),
+    let stored = match tokio::task::spawn_blocking(move || avatar_master(&png)).await {
+        Ok(Ok(m)) => m,
+        Ok(Err(e)) => return avatar_unavailable(&target.slot, e),
+        Err(e) => return avatar_unavailable(&target.slot, e.to_string()),
     };
-    let image_key = format!("avatar-gen-{}.jpg", arbos_core::ids::ulid().to_lowercase());
-    if let Err(e) = crate::blobs::store(state, &target.slot, &image_key, "image/jpeg", &jpeg).await
+    let image_key = format!(
+        "avatar-gen-{}.{}",
+        arbos_core::ids::ulid().to_lowercase(),
+        stored.ext()
+    );
+    if let Err(e) = crate::blobs::store(
+        state,
+        &target.slot,
+        &image_key,
+        stored.mime(),
+        &stored.bytes,
+    )
+    .await
     {
         return avatar_error(StatusCode::INTERNAL_SERVER_ERROR, "store", e);
     }
@@ -1114,6 +1157,22 @@ mod avatar_generate_tests {
                                 "message": format!("The model '{model}' does not exist."),
                                 "type": "image_generation_user_error", "param": "model", "code": "invalid_value" } })),
                         );
+                    }
+                    // A stalled provider: the first `flaky_503` calls hang 30 s (the caller's
+                    // attempt timeout must cut them), the rest answer.
+                    if prompt.contains("slow") {
+                        let stall = {
+                            let mut left = flaky_left.lock().unwrap();
+                            if *left > 0 {
+                                *left -= 1;
+                                true
+                            } else {
+                                false
+                            }
+                        };
+                        if stall {
+                            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                        }
                     }
                     if prompt.contains("forbidden") {
                         return (
@@ -1205,7 +1264,7 @@ mod avatar_generate_tests {
     }
 
     #[tokio::test]
-    async fn falls_through_to_the_next_model_and_stores_a_jpeg() {
+    async fn falls_through_to_the_next_model_and_stores_a_master() {
         // The default list is tried in order; the stub rejects the first the way OpenAI rejected
         // gpt-image-1 (no env override: these tests run in parallel threads).
         let (base, seen) = stub(&["gpt-image-1-mini"]).await;
@@ -1215,9 +1274,12 @@ mod avatar_generate_tests {
         assert_eq!(status, StatusCode::OK, "{v}");
         assert_eq!(v["model"], "gpt-image-2");
         let key = v["image_key"].as_str().unwrap();
+        // The stub paints a flat placeholder, so the master is PNG; a real painting is JPEG q92.
         assert!(matches!(
             crate::blobs::stored_image(&state, &pid, key).await,
-            crate::blobs::StoredImage::Image(crate::image_sniff::ImageKind::Jpeg)
+            crate::blobs::StoredImage::Image(
+                crate::image_sniff::ImageKind::Jpeg | crate::image_sniff::ImageKind::Png
+            )
         ));
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 2);
@@ -1247,6 +1309,92 @@ mod avatar_generate_tests {
             .as_str()
             .unwrap()
             .contains("does not exist"));
+    }
+
+    /// Group avatar Generate follows `PATCH /chats/{id}`: owner and admins only; a plain
+    /// member, the agent's box and a stranger get 403 and nothing is generated or paid.
+    #[tokio::test]
+    async fn group_generate_is_owner_and_admin_only() {
+        use crate::people::tests_support::project_of;
+        let (base, seen) = stub(&[]).await;
+        let state = state_against(&base);
+        let (owner, owner_dev) = person(&state, 90);
+        let (admin, admin_dev) = person(&state, 91);
+        let (member, member_dev) = person(&state, 92);
+        let (_, stranger_dev) = person(&state, 93);
+        for u in [&owner, &admin, &member] {
+            state.db.grant_credits(u, 5.0, "test", "test").unwrap();
+        }
+        let chat = crate::db_people::PeopleChat {
+            id: arbos_core::ids::ulid(),
+            kind: "group".into(),
+            created_by: owner.clone(),
+            created_at: arbos_core::ids::now_ms(),
+            title: Some("Arbonites".into()),
+            image_key: None,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
+            description: None,
+        };
+        state.db.insert_people_chat(&chat).unwrap();
+        for (uid, role) in [(&owner, "owner"), (&admin, "admin"), (&member, "member")] {
+            state
+                .db
+                .add_member(&chat.id, &format!("user:{uid}"), role, &owner, &json!({}))
+                .unwrap();
+        }
+        let project = project_of(&state, &member, "Scout");
+        state
+            .db
+            .add_member(
+                &chat.id,
+                &format!("agent:{project}"),
+                "agent",
+                &owner,
+                &json!({}),
+            )
+            .unwrap();
+        let call = |who: &Principal| {
+            let state = state.clone();
+            let who = who.clone();
+            let id = chat.id.clone();
+            async move {
+                chat_avatar_generate(
+                    State(state),
+                    who,
+                    Path(id),
+                    Json(AvatarGenerateBody {
+                        prompt: "a cat".into(),
+                    }),
+                )
+                .await
+                .status()
+            }
+        };
+        assert_eq!(call(&member_dev).await, StatusCode::FORBIDDEN);
+        assert_eq!(
+            call(&Principal::Box {
+                user_id: member.clone()
+            })
+            .await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(call(&stranger_dev).await, StatusCode::FORBIDDEN);
+        assert_eq!(call(&Principal::Admin).await, StatusCode::FORBIDDEN);
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "no upstream call for a refusal"
+        );
+        assert_eq!(call(&admin_dev).await, StatusCode::OK);
+        assert_eq!(call(&owner_dev).await, StatusCode::OK);
+        assert_eq!(seen.lock().unwrap().len(), 2);
+        let slot = format!("{}{}", crate::people::PEOPLE_ACL_PREFIX, chat.id);
+        let rows = state.db.audit(&slot, 100).unwrap();
+        assert_eq!(rows.len(), 6);
+        assert!(rows
+            .iter()
+            .all(|r| r["fields"] == json!(["avatar_generate"])));
+        assert_eq!(rows.iter().filter(|r| r["allowed"] == true).count(), 2);
     }
 
     #[tokio::test]
@@ -1290,9 +1438,12 @@ mod avatar_generate_tests {
         assert_eq!(status, StatusCode::OK, "{v}");
         let key = v["image_key"].as_str().unwrap();
         let slot = format!("{}{chat}", crate::people::PEOPLE_ACL_PREFIX);
+        // The stub paints a flat placeholder, so the master is PNG; a real painting is JPEG q92.
         assert!(matches!(
             crate::blobs::stored_image(&state, &slot, key).await,
-            crate::blobs::StoredImage::Image(crate::image_sniff::ImageKind::Jpeg)
+            crate::blobs::StoredImage::Image(
+                crate::image_sniff::ImageKind::Jpeg | crate::image_sniff::ImageKind::Png
+            )
         ));
         // Set avatar on the group accepts it (the same gate as an upload).
         let r = crate::people::chat_patch(
@@ -1367,9 +1518,12 @@ mod avatar_generate_tests {
             crate::matrix::servers::SERVER_BLOB_PREFIX,
             server.id
         );
+        // The stub paints a flat placeholder, so the master is PNG; a real painting is JPEG q92.
         assert!(matches!(
             crate::blobs::stored_image(&state, &slot, key).await,
-            crate::blobs::StoredImage::Image(crate::image_sniff::ImageKind::Jpeg)
+            crate::blobs::StoredImage::Image(
+                crate::image_sniff::ImageKind::Jpeg | crate::image_sniff::ImageKind::Png
+            )
         ));
         // Members read the slot (the apps fetch the picture); strangers do not.
         assert!(state.allows(&bob_dev, &slot));
@@ -1472,9 +1626,12 @@ mod avatar_generate_tests {
         let v: Value = serde_json::from_slice(&bytes).unwrap();
         let key = v["image_key"].as_str().unwrap().to_owned();
         let slot = format!("{USER_BLOB_PREFIX}{alice}");
+        // The stub paints a flat placeholder, so the master is PNG; a real painting is JPEG q92.
         assert!(matches!(
             crate::blobs::stored_image(&state, &slot, &key).await,
-            crate::blobs::StoredImage::Image(crate::image_sniff::ImageKind::Jpeg)
+            crate::blobs::StoredImage::Image(
+                crate::image_sniff::ImageKind::Jpeg | crate::image_sniff::ImageKind::Png
+            )
         ));
         assert!(state.allows(&alice_dev, &slot));
         assert!(!state.allows(&bob_dev, &slot));
@@ -1613,6 +1770,90 @@ mod avatar_generate_tests {
         assert!(!is_prompt_refusal(500, body), "a 5xx is never a refusal");
     }
 
+    /// Jacob's "nuke vampire" (2026-10-26 17:4x UTC): the provider stalled past the apps' 30 s,
+    /// the relay had no timeout, the client gave up and the dropped handler logged nothing. Now
+    /// every attempt has a timeout: one stall then an answer → the picture (one retry); stalls
+    /// past the whole budget → a clean 504 `avatar_timeout` with the plain line, well inside the
+    /// apps' 90 s.
+    #[tokio::test]
+    async fn a_stalled_provider_is_cut_and_retried_then_a_clean_504() {
+        // One stall, then the picture.
+        let (base, seen) = stub_with(&[], 1).await;
+        let mut state = state_against(&base);
+        {
+            let cfg = Arc::get_mut(&mut state.cfg).unwrap();
+            cfg.avatar_retry_backoff_ms = vec![0, 0];
+            cfg.avatar_attempt_timeout = std::time::Duration::from_millis(300);
+            cfg.avatar_total_timeout = std::time::Duration::from_secs(5);
+        }
+        let (dev, project) = funded_agent(&state, 95);
+        let t0 = Instant::now();
+        let r = avatar_generate(
+            State(state.clone()),
+            dev,
+            Path(project.clone()),
+            Json(AvatarGenerateBody {
+                prompt: "a slow sloth".into(),
+            }),
+        )
+        .await;
+        assert_eq!(
+            r.status(),
+            StatusCode::OK,
+            "the retry after the stall lands the picture"
+        );
+        assert_eq!(seen.lock().unwrap().len(), 2);
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(3),
+            "{:?}",
+            t0.elapsed()
+        );
+
+        // Every call stalls: the budget ends it with a 504 and the plain sentence.
+        let (base, seen) = stub_with(&[], 99).await;
+        let mut state = state_against(&base);
+        {
+            let cfg = Arc::get_mut(&mut state.cfg).unwrap();
+            cfg.avatar_retry_backoff_ms = vec![0, 0];
+            cfg.avatar_attempt_timeout = std::time::Duration::from_millis(300);
+            cfg.avatar_total_timeout = std::time::Duration::from_millis(1_000);
+        }
+        let (dev, project) = funded_agent(&state, 96);
+        let t0 = Instant::now();
+        let r = avatar_generate(
+            State(state.clone()),
+            dev,
+            Path(project.clone()),
+            Json(AvatarGenerateBody {
+                prompt: "a slow sloth".into(),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(3),
+            "{:?}",
+            t0.elapsed()
+        );
+        let bytes = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["error"]["type"], "avatar_timeout");
+        assert_eq!(v["error"]["message"], AVATAR_TIMEOUT_FRIENDLY);
+        assert!(v["error"]["detail"].as_str().unwrap().contains("gpt-image"));
+        assert!(
+            seen.lock().unwrap().len() >= 2,
+            "the budget allowed more than one attempt"
+        );
+        assert_eq!(
+            state
+                .db
+                .usage_count_since(&project, "openai-images", "avatar:", 0)
+                .unwrap(),
+            0,
+            "nothing metered"
+        );
+    }
+
     /// A transient provider failure (503 / 429 / a dropped connection) gets the backoff retries
     /// on the same model before the fall-through; the picture still arrives.
     #[tokio::test]
@@ -1707,9 +1948,12 @@ mod avatar_generate_tests {
         let (status, v) = generate(&state, &alice_dev, &pid).await;
         assert_eq!(status, StatusCode::OK, "{v}");
         let key = v["image_key"].as_str().unwrap();
+        // The stub paints a flat placeholder, so the master is PNG; a real painting is JPEG q92.
         assert!(matches!(
             crate::blobs::stored_image(&state, &pid, key).await,
-            crate::blobs::StoredImage::Image(crate::image_sniff::ImageKind::Jpeg)
+            crate::blobs::StoredImage::Image(
+                crate::image_sniff::ImageKind::Jpeg | crate::image_sniff::ImageKind::Png
+            )
         ));
         eprintln!("smoke: {} generated {key}", v["model"]);
     }

@@ -65,9 +65,19 @@ struct ProfileTopBar<Trailing: View>: View {
     @Environment(\.dismiss) private var dismiss
     /// Override when `dismiss` is a no-op (Settings as a tab root). Sheets keep the default.
     var onBack: (() -> Void)? = nil
+    /// Which page this bar fronts — its `ListTopFade` runs from the physical top edge under
+    /// the bar ([feedback iphone-list-top-fade-2026-10-26]).
+    var screen: ListTopFade.Screen = .agentPage
     @ViewBuilder var trailing: () -> Trailing
 
     var body: some View {
+        ZStack(alignment: .top) {
+            ListTopFade(screen: screen)
+            bar
+        }
+    }
+
+    private var bar: some View {
         HStack {
             Button { (onBack ?? { dismiss() })() } label: {
                 GlassCircle { Image(systemName: "chevron.left").font(.system(size: 17, weight: .semibold)).foregroundStyle(theme.text) }
@@ -95,6 +105,8 @@ struct ProfileTopBar<Trailing: View>: View {
 /// * danger row: centred red label, same height;
 /// * tabs: one capsule pill, `field` fill on the selected tab.
 enum PaneKit {
+    /// A pane page's content starts this far under the safe-area top (the bar is 16 + 48).
+    static let pageTop: CGFloat = 80
     static let rowHeight: CGFloat = 48
     static let inset: CGFloat = 16
     /// Picture → name on a row: Grok Bot's sidebar / members rows measure 11–12 pt
@@ -463,7 +475,7 @@ struct PanePillButton: View {
             }
             .foregroundStyle(theme.text)
             .padding(.horizontal, 22)
-            .frame(height: Theme.control)
+            .frame(height: Controls.height)
             .contentShape(Capsule())
         }
         .buttonStyle(PanePillStyle())
@@ -478,9 +490,8 @@ private struct PanePillStyle: ButtonStyle {
             .background {
                 ZStack {
                     if theme.isGlass { Capsule().fill(.ultraThinMaterial) }
-                    Capsule().fill(theme.field.opacity(theme.isGlass ? 0.85 : 1))
-                    if configuration.isPressed { Capsule().fill(theme.text.opacity(0.12)) }
-                    Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1)
+                    ControlSurface(shape: Capsule(), pressed: configuration.isPressed)
+                        .opacity(theme.isGlass ? ChatHeaderGlass.legacyTint : 1)
                 }
             }
     }
@@ -507,7 +518,7 @@ private struct PaneCrayon: ViewModifier {
                     .font(theme.font(13, weight: .semibold))
                     .foregroundStyle(theme.text)
                     .frame(width: 30, height: 30)
-                    .background(Circle().fill(theme.field))
+                    .background(Circle().fill(theme.field)) // control-size: exception rowIconTiles
                     .overlay(Circle().strokeBorder(theme.bg, lineWidth: 2))
             }
         }
@@ -828,6 +839,8 @@ struct UserProfileView: View {
     @State private var tab = "Links"
     @State private var sharedProjects: [Project] = []
     @State private var confirmBlock = false
+    /// Unblock asks first ([feedback blocked-state-ios-2026-10-26]).
+    @State private var confirmUnblock = false
 
     /// Stable user id: prefer a fresh card, then a handle lookup (agent-owner rows
     /// sometimes open this page with `id == handle`), then the value we were given.
@@ -858,7 +871,7 @@ struct UserProfileView: View {
             theme.bg.ignoresSafeArea()
             ScrollView {
                 VStack(spacing: 18) {
-                    Color.clear.frame(height: 80)
+                    Color.clear.frame(height: PaneKit.pageTop)
                     // The shared pane (D93): picture, name, @handle, the Message pill
                     // (Jacob 2026-10-25; not on my own pane, not once I blocked them);
                     // Links | Groups (the Mac's set); one Block user row. No last-seen,
@@ -870,7 +883,12 @@ struct UserProfileView: View {
                             })),
                             name: person.displayName,
                             subtitle: "@\(person.handle)",
-                            action: MessageButton.shows(isMe: isMe, blocked: blockedEntry != nil) ? AnyView(messageButton) : nil
+                            // Blocked ([feedback blocked-state-ios-2026-10-26]): the chip under
+                            // the @handle, and Unblock as the one action instead of Message.
+                            subtitleBelow: blockedEntry != nil && !isMe ? AnyView(BlockedChip()) : nil,
+                            action: blockedEntry != nil && !isMe
+                                ? AnyView(unblockButton)
+                                : (MessageButton.shows(isMe: isMe, blocked: blockedEntry != nil) ? AnyView(messageButton) : nil)
                         ),
                         tabs: PaneKinds.person,
                         selected: $tab,
@@ -883,7 +901,7 @@ struct UserProfileView: View {
                 }
             }
             .scrollIndicators(.visible)
-            ProfileTopBar { EmptyView() }
+            ProfileTopBar(screen: .personPage) { EmptyView() }
         }
         .confirmationDialog("Block @\(person.handle)?", isPresented: $confirmBlock, titleVisibility: .visible) {
             Button("Block", role: .destructive) {
@@ -891,6 +909,12 @@ struct UserProfileView: View {
                 if let m = dm?.humans.first(where: isPeer) { model.block(m) } else { model.block(handle: peerHandle) }
             }
         } message: { Text("They cannot message you or add you to chats.") }
+        .confirmationDialog(BlockedState.confirmTitle(handle: person.handle), isPresented: $confirmUnblock, titleVisibility: .visible) {
+            Button(BlockedState.unblock) {
+                // The pane stays open: the chip and the row go once the relay's list comes back.
+                if let entry = blockedEntry { model.unblock(entry) }
+            }
+        } message: { Text(BlockedState.confirmNote) }
         .task {
             await model.refreshBlocks()
             await model.refreshPeople()
@@ -923,10 +947,16 @@ struct UserProfileView: View {
         }
     }
 
-    /// Block user (red) or Unblock (accent), from the relay's block list.
+    /// The hero's Unblock once I blocked them ([feedback blocked-state-ios-2026-10-26]).
+    private var unblockButton: some View {
+        PanePillButton(glyph: "nosign", title: BlockedState.unblock) { confirmUnblock = true }
+            .accessibilityIdentifier("profile-unblock-pill")
+    }
+
+    /// Block user (red) or Unblock (accent), from the relay's block list; both ask first.
     @ViewBuilder private var blockRow: some View {
-        if let entry = blockedEntry {
-            PaneActionRow(title: BlockRow.title(blocked: true), color: theme.accent) { model.unblock(entry) }
+        if blockedEntry != nil {
+            PaneActionRow(title: BlockRow.title(blocked: true), color: theme.accent) { confirmUnblock = true }
         } else {
             PaneDangerRow(title: BlockRow.title(blocked: false)) { confirmBlock = true }
         }
@@ -1063,6 +1093,13 @@ struct GroupProfileView: View {
         return people?.humans.first(where: { $0.id == model.user?.id })?.role == "owner"
     }
 
+    /// May I change the group's name, picture and description? Owner and admins only —
+    /// the relay refuses everyone else (`PATCH /chats/{id}` 403 since 2026-10-27, after
+    /// members renamed Arbonites), so Edit group hides for plain members.
+    private var canEditGroupSettings: Bool {
+        projectId == nil && people?.isGroup == true && canManageMembers
+    }
+
     /// My human row in this people group (for mute/ban rights).
     private var myMember: ChatMember? {
         people?.humans.first(where: { $0.id == model.user?.id })
@@ -1154,7 +1191,7 @@ struct GroupProfileView: View {
             theme.bg.ignoresSafeArea()
             ScrollView {
                 VStack(spacing: 18) {
-                    Color.clear.frame(height: 80)
+                    Color.clear.frame(height: PaneKit.pageTop)
                     // The shared pane (D93): picture (crayon when a people group — it
                     // opens the edit sheet), name, member count, Members | Library.
                     // Leave / Delete group chat in the footer (same rule as the chat
@@ -1173,7 +1210,7 @@ struct GroupProfileView: View {
                     Color.clear.frame(height: 40)
                 }
             }
-            ProfileTopBar { EmptyView() }
+            ProfileTopBar(screen: .groupPage) { EmptyView() }
         }
     }
 
@@ -1431,11 +1468,17 @@ struct GroupProfileView: View {
     }
 
     /// The hero picture: the agent's leaf for a shared project; the group's
-    /// cluster or picked image (tap → the edit sheet) for a people group.
+    /// cluster or picked image for a people group — tap → the edit sheet for the
+    /// owner and admins, full-size view (when there is a picture) for everyone else.
     @ViewBuilder private var heroPicture: some View {
         if let project {
-            ViewablePicture(name: project.name, url: project.imageURL) {
+            ViewablePicture(name: project.name, url: model.projectImageURL(project)?.absoluteString) {
                 AgentAvatar(project: project, theme: theme, size: PaneKit.heroAvatar, idle: true)
+            }
+        } else if !canEditGroupSettings {
+            ViewablePicture(name: people?.title ?? "", url: groupImageURL) {
+                AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL, leaf: people?.leafPick, neutralName: people?.isNeutralAvatar == true ? people?.title : nil)
+                    .frame(width: PaneKit.heroAvatar, height: PaneKit.heroAvatar)
             }
         } else {
             Button { showEdit = true } label: {
@@ -1459,19 +1502,27 @@ struct GroupProfileView: View {
             }
             .buttonStyle(.plain)),
         ]
-        // People groups: description lives in Edit group (same sheet as name + picture).
+        // People groups: description lives in Edit group (same sheet as name + picture) for
+        // the owner and admins; plain members read it (no row while it is empty).
         if projectId == nil, people?.isGroup == true {
             let desc = people?.description ?? ""
-            list.append(AnyView(Button { showEdit = true } label: {
-                PaneRow(
-                    leading: .glyph("text.alignleft"),
-                    title: "Description",
-                    value: desc.isEmpty ? "Add a description" : desc,
-                    chevron: true
-                )
+            if canEditGroupSettings {
+                list.append(AnyView(Button { showEdit = true } label: {
+                    PaneRow(
+                        leading: .glyph("text.alignleft"),
+                        title: "Description",
+                        value: desc.isEmpty ? "Add a description" : desc,
+                        chevron: true
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(desc.isEmpty ? "Add a description" : "Edit description")))
+            } else if !desc.isEmpty {
+                list.append(AnyView(
+                    PaneRow(leading: .glyph("text.alignleft"), title: "Description", value: desc)
+                        .accessibilityLabel("Description: \(desc)")
+                ))
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel(desc.isEmpty ? "Add a description" : "Edit description")))
         }
         // People groups only (not a shared project): one-tap share of the invite link.
         if project == nil, people?.kind == "group" {
@@ -1662,6 +1713,15 @@ struct GroupProfileView: View {
         ) : nil
         // borderless (not .plain): .plain steals long-press on recent iOS,
         // so the remove context menu never appears (same as HomeView rows).
+        // Blocked ([feedback blocked-state-ios-2026-10-26]): the tag on the row, before the menu.
+        let isBlocked = r.agent == nil && !isMe && BlockedState.isBlocked(id: r.person.id, handle: r.person.handle, in: model.blocked)
+        let trailing: AnyView? = {
+            switch (isBlocked, manage) {
+            case (true, let manage?): return AnyView(HStack(spacing: 6) { BlockedTag(); manage })
+            case (true, nil): return AnyView(BlockedTag())
+            case (false, let manage): return manage
+            }
+        }()
         return Button {
             if let a = r.agent {
                 model.showProfile(.agent(projectId: a.id))
@@ -1676,7 +1736,7 @@ struct GroupProfileView: View {
                 leading: .avatar(avatar),
                 title: title,
                 subtitle: memberRowSubtitle(r, member: member, isSilenced: isSilenced),
-                trailing: manage
+                trailing: trailing
             )
         }
         .buttonStyle(.borderless)
@@ -2003,7 +2063,7 @@ struct ServerProfileView: View {
             theme.bg.ignoresSafeArea()
             ScrollView {
                 VStack(spacing: 18) {
-                    Color.clear.frame(height: 80)
+                    Color.clear.frame(height: PaneKit.pageTop)
                     if let server {
                         ProfilePane(
                             hero: hero(server),
@@ -2022,7 +2082,7 @@ struct ServerProfileView: View {
                     Color.clear.frame(height: 40)
                 }
             }
-            ProfileTopBar { EmptyView() }
+            ProfileTopBar(screen: .serverPage) { EmptyView() }
         }
     }
 
@@ -2536,7 +2596,7 @@ struct GroupEditSheet: View {
                         ZStack(alignment: .bottomTrailing) {
                             AvatarCluster(members: clusterMembers, size: 72, imageUrl: existingImageURL, leaf: people?.leafPick, neutralName: people?.isNeutralAvatar == true ? people?.title : nil)
                                 .frame(width: 112, height: 112)
-                            GlassCircle(size: 36) {
+                            GlassCircle(size: 36) { // control-size: exception rowIconTiles
                                 Image(systemName: "camera.fill")
                                     .font(theme.font(14, weight: .semibold))
                                     .foregroundStyle(theme.text)
@@ -2555,9 +2615,7 @@ struct GroupEditSheet: View {
                             .autocorrectionDisabled()
                             .focused($nameFocused)
                             .background(SelectAllOnDoubleTap())
-                            .padding(.horizontal, 14).frame(height: Theme.fieldHeight)
-                            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
-                            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                            .controlField()
                     }
                     .padding(.horizontal, 16)
 
@@ -2567,10 +2625,7 @@ struct GroupEditSheet: View {
                             .font(theme.font(Theme.body))
                             .foregroundStyle(theme.text)
                             .lineLimit(3...6)
-                            .padding(.horizontal, 14).padding(.vertical, 12)
-                            .frame(minHeight: Theme.fieldHeight, alignment: .topLeading)
-                            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
-                            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                            .controlFieldGrowing()
                     }
                     .padding(.horizontal, 16)
 
@@ -2856,7 +2911,7 @@ struct ChannelProfileView: View {
             theme.bg.ignoresSafeArea()
             ScrollView {
                 VStack(spacing: 18) {
-                    Color.clear.frame(height: 80)
+                    Color.clear.frame(height: PaneKit.pageTop)
                     if let channel, let server {
                         let restricted = model.channelRestricted(channel)
                         let count = max(server.memberCount, server.members.count)
@@ -2879,7 +2934,7 @@ struct ChannelProfileView: View {
                     Color.clear.frame(height: 40)
                 }
             }
-            ProfileTopBar { EmptyView() }
+            ProfileTopBar(screen: .channelPage) { EmptyView() }
         }
         .task {
             if let t = model.openServerHookTab { tab = t; model.openServerHookTab = nil }

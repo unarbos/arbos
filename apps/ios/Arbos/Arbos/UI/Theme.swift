@@ -109,16 +109,34 @@ struct Theme: Equatable {
     /// Screen width minus 76 pt: 16 pt own margin (the composer's `+` column
     /// starts 15 pt further in) + 60 pt on the other side. Grok dark, 420 pt
     /// screen, refs 01–03 at 3 px/pt: the assistant block runs x 16 → 360 in
-    /// every shot ([feedback agent-bubble-inset-2026-10-22]; was 71).
+    /// every shot ([feedback agent-bubble-inset-2026-10-22]; was 71). Agent
+    /// 1:1 chats only; people chats use `peopleBubbleInset`.
     static let bubbleInset: CGFloat = 76
+    /// People chats — DM, group, channel — use more of the screen on both
+    /// sides (Jacob, 2026-10-26, [feedback chat-density-ios-2026-10-26]: "use
+    /// more of the screen both ways, left and right per chat bubble"): the
+    /// 16 pt own margin stays, the far side keeps `bubbleOppositeMargin`
+    /// instead of 60, so on a 402 pt screen my bubble may reach 354 pt
+    /// (left edge ≥ 32) and an incoming one 300 pt after the lane (right
+    /// edge ≤ 370; was 253 → 342). The far-side margin is what keeps a bubble
+    /// reading as mine / theirs. Grok's 76 stays the agent-chat number — Grok
+    /// has no group chats to measure.
+    static let bubbleOppositeMargin: CGFloat = 32
+    static let peopleBubbleInset: CGFloat = 16 + bubbleOppositeMargin
+    /// The inset a transcript row subtracts from the screen for its bubble cap.
+    static func bubbleInset(people: Bool) -> CGFloat {
+        people ? peopleBubbleInset : bubbleInset
+    }
     static let body: CGFloat = 17
     /// Inline code sits a point under body so SF Mono matches the prose cap height.
     static let code: CGFloat = 16
     static let small: CGFloat = 15
     static let tiny: CGFloat = 13
-    static let control: CGFloat = 42
-    /// Settings / search / secrets text fields (not the chat composer, see `composerHeight`).
-    static let fieldHeight: CGFloat = 42
+    /// Round icon button (back, search, +, account): one diameter app-wide — `Controls.diameter`.
+    static let control: CGFloat = Controls.diameter
+    /// Text fields, pills and bars: one height app-wide — `Controls.height`.
+    static let fieldHeight: CGFloat = Controls.height
+    /// In-call strip chip ([feedback in-call-bar]); recorded exception, see `Controls.exceptions`.
     static let voiceButton: CGFloat = 36
 
     // MARK: Chat composer — Grok Bot, Jacob's 2026-10-25 target shot
@@ -127,15 +145,16 @@ struct Theme: Equatable {
     // tests in `ComposerMetricsTests` pin them. Grok changed its composer between
     // the 2026-10-15 refs (42 pt, no rim, 36 pt white circle) and this shot.
 
-    /// The `+` disc and the field are the same height: 144 px.
-    static let composerHeight: CGFloat = 48
-    static let plusButton: CGFloat = composerHeight
+    /// The `+` disc and the field are the same height: 144 px — and, since
+    /// [feedback iphone-header-composer-sizing-2026-10-26], the whole control family's.
+    static let composerHeight: CGFloat = Controls.height
+    static let plusButton: CGFloat = Controls.diameter
     /// `+` glyph: SF `plus`, regular; 54 px arms (22 pt regular draws 53, 22.5 draws 54).
     static let plusGlyph: CGFloat = 22.5
-    /// `+` disc → field: 30 px.
-    static let plusFieldGap: CGFloat = 10
-    /// The field's text starts 51 px in from its outer edge (the caret's centre).
-    static let composerTextInset: CGFloat = 17
+    /// `+` disc → field: 30 px (= `Controls.gap`).
+    static let plusFieldGap: CGFloat = Controls.gap
+    /// The field's text starts 51 px in from its outer edge (the caret's centre; = `Controls.textInset`).
+    static let composerTextInset: CGFloat = Controls.textInset
     /// One 22 pt body line centred in the 48 pt field.
     static let composerTextPadY: CGFloat = (composerHeight - 22) / 2
     /// The white action is a 120 × 96 px capsule (was a 36 pt circle), 24 px from the
@@ -147,6 +166,13 @@ struct Theme: Equatable {
     /// 22 + `micPillGap`).
     static let micHitWidth: CGFloat = 44
     static let micPillGap: CGFloat = 2
+    /// Pending-attachment chip: the remove ✕'s hit frame (the glyph is 10 pt; the
+    /// target is ≥ 20 pt, [feedback composer-attachment-removal-ios-2026-10-27]).
+    /// The chip's trailing inset shrinks by the frame's overhang so the glyph
+    /// keeps its 10 pt from the capsule's edge.
+    static let pendingRemoveHit: CGFloat = 24
+    static let pendingRemoveGlyph: CGFloat = 10
+    static let pendingChipTrailing: CGFloat = 10 - (pendingRemoveHit - pendingRemoveGlyph) / 2
     /// Mic glyph box (Grok's filled mic has no base bar; drawn by `MicGlyph`): 36 × 49 px.
     static let micGlyphWidth: CGFloat = 12
     static let micGlyphHeight: CGFloat = 49 / 3
@@ -165,15 +191,24 @@ struct Theme: Equatable {
     static let avatar: CGFloat = 28
     /// The avatar column (Mac `SENDER_DISC = PLUS_BUTTON`, Jacob [feedback
     /// AAvkkHYz3TOlou0Hu7u71Sc]): every round picture beside a people-chat bubble is
-    /// centred on the composer's `+`. The disc stayed 42 pt when the `+` grew to Grok's
-    /// 48 ([feedback iphone-composer-grok-parity-2026-10-25]: the ask covered the composer
-    /// and the status row, not the bubbles). The `+` moves with the keyboard (31 → 18 pt
-    /// inset), so the column follows it via `avatarColumnInset(composerInset:)` (keyboard
-    /// up: avatar 21–63, centre 42 = 18 + 48 / 2; down: 34–76, centre 55). The bubble
-    /// body follows after `memberAvatarGap`. Shared with
+    /// centred on the composer's `+`. The `+` moves with the keyboard (31 → 18 pt
+    /// inset), so the column follows it via `avatarColumnInset(composerInset:)`. The
+    /// bubble body follows after `memberAvatarGap`. Shared with
     /// feedback/sender-name-in-bubble-2026-10-23. Agent chats keep #1374's no-avatar rule.
-    static let memberAvatar: CGFloat = 42
-    static let memberAvatarGap: CGFloat = 13
+    ///
+    /// Size: Discord standard (Jacob, 2026-10-26, [feedback chat-density-ios-2026-10-26]:
+    /// "the pfp chat bubble takes up too much space — go for Discord standard size").
+    /// Discord draws its message avatar 40 pt in a 72 pt gutter on desktop (cozy) and
+    /// 32 pt on mobile; **36** is the pick between the two — it reads as Discord's size
+    /// beside our 17 pt text, keeps a face readable at 3x, and, centred on the 48 pt `+`,
+    /// its left edge lands 6 pt inside the `+` — the same edge as the status row's
+    /// picture (`presenceAvatarOffset`), so every picture in the chat shares one left
+    /// edge (keyboard up 24–60, down 37–73). Was 42 (the `+` before Grok's 48).
+    /// The gap to the bubble is the control family's `Controls.gap` (was 13), so the
+    /// body starts 54 pt after the transcript edge with the keyboard up (was 60; 70 from
+    /// the screen, was 76) and 67 with it down (was 73; 83 from the screen, was 89).
+    static let memberAvatar: CGFloat = 36
+    static let memberAvatarGap: CGFloat = Controls.gap
     /// Transcript edge → the avatar's left edge, for the composer's current side inset.
     static func avatarColumnInset(composerInset: CGFloat) -> CGFloat {
         composerInset + plusButton / 2 - memberAvatar / 2 - 16
@@ -186,6 +221,18 @@ struct Theme: Equatable {
     static let presenceAvatarOffset: CGFloat = 6
     static let presenceGap: CGFloat = 14
     static let presenceBottomGap: CGFloat = 68 / 3
+    /// The transcript's tail: the clear space under the last row, before the chat bar's
+    /// own top padding, so the last bubble never sits under the bar's fade.
+    static let transcriptTail: CGFloat = 28
+    /// The chat bar's padding over its first view (the status row or the composer).
+    static let chatBarTopPad: CGFloat = 8
+    /// Last bubble → the status picture's top: 42 px in the same Grok shot ([feedback
+    /// status-row-gap-ios-2026-10-26]). The row used to start under the tail and the
+    /// bar's pad (36 pt); it now rises `presenceLift` into the tail, so the bubble →
+    /// composer distance with the row showing is Grok's 62⅓ (14 + 25⅓ + 22⅔) and the
+    /// bar grows by 26 pt instead of 48 when the row appears.
+    static let presenceTopGap: CGFloat = 42 / 3
+    static var presenceLift: CGFloat { transcriptTail + chatBarTopPad - presenceTopGap }
     /// Transcript edge → the status row's picture, for the composer's current side inset.
     static func presenceInset(composerInset: CGFloat) -> CGFloat {
         composerInset + presenceAvatarOffset - 16
@@ -450,17 +497,16 @@ struct HeaderGlassBackground<S: InsettableShape>: View {
         switch material {
         case .liquidGlass:
             if #available(iOS 26.0, *) {
-                Color.clear.glassEffect(liquid, in: shape)
+                // The family's rim (`ComposerRim`) over the system glass: header and
+                // composer share one outline weight.
+                Color.clear.glassEffect(liquid, in: shape).overlay(ComposerRim(shape: shape))
             } else {
                 frosted
             }
         case .frosted:
             frosted
         case .solid:
-            ZStack {
-                shape.fill(theme.field)
-                shape.strokeBorder(theme.fieldBorder, lineWidth: 1)
-            }
+            ControlSurface(shape: shape)
         }
     }
 
@@ -477,11 +523,7 @@ struct HeaderGlassBackground<S: InsettableShape>: View {
         ZStack {
             shape.fill(.ultraThinMaterial)
             shape.fill(theme.field.opacity(ChatHeaderGlass.frostedTint))
-            shape.strokeBorder(
-                LinearGradient(
-                    colors: [Color.white.opacity(theme.isDark ? 0.30 : 0.70), Color.white.opacity(theme.isDark ? 0.08 : 0.25)],
-                    startPoint: .top, endPoint: .bottom),
-                lineWidth: 1)
+            ComposerRim(shape: shape)
         }
     }
 }
@@ -503,12 +545,12 @@ struct GlassCircle<Content: View>: View {
                     Circle().fill(.ultraThinMaterial)
                 }
                 Circle().fill(theme.field.opacity(theme.isGlass ? ChatHeaderGlass.legacyTint : 1))
-                Circle().strokeBorder(theme.fieldBorder, lineWidth: 1)
+                ComposerRim(shape: Circle())
             }
             content()
         }
         .frame(width: size, height: size)
-        // Grok's circles are 42 pt; the touch target stays ≥ 44 without moving layout.
+        // The touch target stays ≥ 44 for the small exception discs without moving layout.
         .contentShape(Circle().inset(by: -max(0, (44 - size) / 2)))
     }
 }
@@ -614,9 +656,299 @@ struct GlassPill<Content: View>: View {
                             Capsule().fill(.ultraThinMaterial)
                         }
                         Capsule().fill(theme.field.opacity(theme.isGlass ? ChatHeaderGlass.legacyTint : 1))
-                        Capsule().strokeBorder(theme.fieldBorder, lineWidth: 1)
+                        ComposerRim(shape: Capsule())
                     }
                 }
             }
     }
+}
+
+// MARK: - The iPhone control family ([feedback iphone-header-composer-sizing-2026-10-26])
+
+/// One set of sizes for every floating or round control on the iPhone: round icon
+/// buttons, name/title pills, text fields, search bars (Jacob 2026-10-26 08:49–08:52 CR;
+/// `docs/mac-design-rules.md` § "iPhone control family"). The numbers are the composer's
+/// (#1841, Grok Bot's 2026-10-25 shot): the `+` disc and the field set the family, the
+/// header, home, search and sheet controls follow. `ControlMetricsTests` pins the relations
+/// and `ControlTokenLintTests` fails the gate on a hand-sized control outside this file.
+///
+/// Mac sizes are untouched (Jacob 08:52): the Mac keeps its own `CONTROL` family.
+enum Controls {
+    /// Round icon button diameter = the composer `+`.
+    static let diameter: CGFloat = 48
+    /// Pill, text field and bar height = the composer field.
+    static let height: CGFloat = 48
+    /// Capsule corners; a field that grows keeps this radius (the composer's rule).
+    static let radius: CGFloat = height / 2
+    /// SF symbol inside a disc (chevron, magnifier, ellipsis, xmark): 17 in the old 42 → 19.
+    static let glyph: CGFloat = 19
+    /// A top bar's side inset: bar → screen edge (home used 20, chat 16 — one number now).
+    static let inset: CGFloat = 16
+    /// A top bar's gap to the safe-area top.
+    static let top: CGFloat = 6
+    /// Two adjacent controls (the composer's `+` → field).
+    static let gap: CGFloat = 10
+    /// Text start inside a pill or field (the composer's caret inset).
+    static let textInset: CGFloat = 17
+    /// Picture inside a title pill, `avatarInset` from the capsule's end on every side.
+    static let avatar: CGFloat = 32
+    static var avatarInset: CGFloat { (height - avatar) / 2 }
+    /// Outline: `ComposerRim` (#1841's thin light rim) on every member of the family.
+
+    /// Surfaces that keep their own size on purpose, each with its reason. A lint
+    /// exception marker in code (`// control-size: exception <case>`) must name one.
+    enum Exception: String, CaseIterable {
+        /// The composer's side inset follows the keyboard (31 down / 18 up, Grok's).
+        case composerSideInset
+        /// The composer `+` glyph is Grok's 22.5 pt plus; the family glyph is 19.
+        case plusGlyph
+        /// Call screen: 64 pt action discs, 108 pt avatar disc, 150 pt ring (Grok call UI).
+        case callControls
+        /// In-call strip chip and voice button: 36 pt (the strip is 48 tall).
+        case inCallStrip
+        /// Grok's 30 pt filter chips (All · Agents · People · Servers) and pane tab pills.
+        case filterChips
+        /// Row-leading 36 pt icon tiles (home banners, sheet rows, the camera badge on a hero).
+        case rowIconTiles
+        /// 72 / 92 / 112 pt illustration discs (primer, feedback done, link, hero pictures).
+        case illustrationDiscs
+        /// Grok's 36 pt scroll-to-bottom circle and the "New messages" chip in the transcript.
+        case transcriptJumpChip
+        /// Small inline chips and segmented controls (32 pt or less) inside cards.
+        case inlineChips
+        /// Full-width primary CTAs (sign-in, primer, create): 50 pt filled capsules, not fields.
+        case primaryCTA
+        /// Free-form text areas and cards (feedback note, description): 18 pt corners, grow.
+        case textAreas
+    }
+    static let exceptions: [Exception] = Exception.allCases
+
+    /// What a member of the family is, and its one size.
+    enum Member: Equatable, CaseIterable {
+        case disc, pill, field, bar
+        var size: CGFloat {
+            switch self {
+            case .disc: return Controls.diameter
+            case .pill, .field, .bar: return Controls.height
+            }
+        }
+    }
+
+    /// The main iPhone screens and the family members each one shows, left to right /
+    /// top to bottom — the structure the snapshot test (`ControlMetricsTests`) walks.
+    enum Screen: String, CaseIterable {
+        case home, hiddenChats, chatHeader, chatSearchBar, composer, bottomSearchBar, serverHeader
+        case settingsProfileFields, personPaneMessagePill, newMessageSheetSearch, signIn, secretsFields, callHeader
+        var members: [Member] {
+            switch self {
+            case .home: return [.disc, .disc]
+            case .hiddenChats: return [.disc, .pill]
+            case .chatHeader: return [.disc, .pill, .disc]
+            case .chatSearchBar: return [.bar]
+            case .composer: return [.disc, .field]
+            case .bottomSearchBar: return [.bar]
+            case .serverHeader: return [.disc, .pill, .disc]
+            case .settingsProfileFields: return [.field, .field]
+            case .personPaneMessagePill: return [.pill]
+            case .newMessageSheetSearch: return [.field]
+            case .signIn: return [.field, .field]
+            case .secretsFields: return [.field]
+            case .callHeader: return [.disc]
+            }
+        }
+        /// Side inset of the screen's bar; the composer follows the keyboard (`Exception.composerSideInset`).
+        var sideInset: CGFloat? {
+            switch self {
+            case .composer: return nil
+            default: return Controls.inset
+            }
+        }
+    }
+}
+
+/// A field or pill of the family: the `field` fill on the family capsule and the
+/// composer's rim. Use `.controlField()` / `.controlPill()`; the lint flags hand-built ones.
+struct ControlSurface<S: InsettableShape>: View {
+    @Environment(\.theme) private var theme
+    let shape: S
+    var pressed: Bool = false
+
+    var body: some View {
+        ZStack {
+            shape.fill(theme.field)
+            if pressed { shape.fill(theme.text.opacity(0.12)) }
+            ComposerRim(shape: shape)
+        }
+    }
+}
+
+extension View {
+    /// A one-line text field or search bar of the family: `Controls.height` tall,
+    /// `Controls.textInset` text start, capsule, `field` fill, composer rim.
+    func controlField() -> some View {
+        self
+            .padding(.horizontal, Controls.textInset)
+            .frame(height: Controls.height)
+            .background(ControlSurface(shape: Capsule()))
+            .contentShape(Capsule())
+    }
+
+    /// A text area of the family that grows from one line: the composer's rule, the
+    /// radius stays `Controls.radius` as it grows.
+    func controlFieldGrowing() -> some View {
+        self
+            .padding(.horizontal, Controls.textInset)
+            .padding(.vertical, (Controls.height - 22) / 2)
+            .frame(minHeight: Controls.height, alignment: .topLeading)
+            .background(ControlSurface(shape: RoundedRectangle(cornerRadius: Controls.radius, style: .circular)))
+    }
+
+    /// A text pill button of the family (Message, Add, Done): `Controls.height` tall.
+    func controlPill(pressed: Bool = false) -> some View {
+        self
+            .padding(.horizontal, Controls.textInset)
+            .frame(height: Controls.height)
+            .background(ControlSurface(shape: Capsule(), pressed: pressed))
+            .contentShape(Capsule())
+    }
+
+    /// A top bar of the family: the same side inset and top gap on every screen.
+    func controlBar() -> some View {
+        self.padding(.horizontal, Controls.inset).padding(.top, Controls.top)
+    }
+}
+
+// MARK: - List top fade ([feedback iphone-list-top-fade-2026-10-26], Jacob 2026-10-26 16:05 CR)
+
+/// The fade every floating top bar sits on. Jacob's TestFlight shot: scrolled chat rows read at
+/// full strength behind the status bar and around the All · Agents · People · Servers tabs —
+/// Home's fade was a 100 pt gradient that began at the safe-area top, under the status bar, and
+/// the tabs scrolled with the list. Now one layer for every list: it starts at the **physical top
+/// edge** (`ignoresSafeArea(.container, edges: .top)` on the fade, never on the list), is opaque
+/// through the status bar and the whole chrome (bar, and the tab bar where there is one), then
+/// fades out over `band` — the Mac's list / transcript top fade (`header::metrics::FADE_BAND`:
+/// text gone at the edge, full ≈ 50 pt down). On Glass the band is `.ultraThinMaterial` under the
+/// wash (the iOS 26 glass discs blur only their own capsule); on Matte it is the page colour.
+/// `ListTopFadeTests` asserts the layer's top inset is 0 and its height covers status bar + chrome
+/// on every screen in `Screen`.
+struct ListTopFade: View {
+    @Environment(\.theme) private var theme
+    let screen: Screen
+    /// Chrome below the bar that is not part of the screen's fixed declaration (the chat's
+    /// Search-in-chat bar, call strips, member chips).
+    var extra: CGFloat = 0
+
+    /// The wash over the material on Glass. The chat header used 0.78 (#1336), which still let a
+    /// row read at about half strength through the material under the tabs (first after-shot of
+    /// this fix); 0.94 keeps the frosted edge and hides the text.
+    static let glassWash: Double = 0.94
+
+    /// Every iPhone list with a floating top bar. `solid` is how far past the status bar the layer
+    /// stays opaque; `band` is the Mac-family gradient after it (the Mac's `FADE_BAND` = bar + 6:
+    /// rows gone at the edge, full where the content starts at rest).
+    enum Screen: String, CaseIterable {
+        case home, homeSearch, hiddenChats, serverChannels, chat, agentPage, personPage, groupPage, serverPage, channelPage, ownProfile, library
+        /// The bar's top gap: pane pages keep `ProfileTopBar`'s 16, the rest `Controls.top`.
+        var barTop: CGFloat {
+            switch self {
+            case .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library: return 16
+            case .home, .homeSearch, .hiddenChats, .serverChannels, .chat: return Controls.top
+            }
+        }
+        /// Fixed chrome under the bar: Home's filter tabs. The pane pages pin hero + tabs themselves.
+        var chrome: CGFloat {
+            switch self {
+            case .home: return HomeChrome.filterBand
+            case .homeSearch, .hiddenChats, .serverChannels, .chat, .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library: return 0
+            }
+        }
+        /// Opaque past the status bar. Home: through the disc row and the whole tab bar, so nothing
+        /// reads through behind the discs or around the tabs (Jacob's shot). Chat: 20 pt into the
+        /// header (its `headerBlur` since #1336). Bar-only lists and pane pages: the status bar alone.
+        var solid: CGFloat {
+            switch self {
+            case .home: return Controls.top + Controls.diameter + HomeChrome.filterBand
+            case .chat: return 20
+            case .homeSearch, .hiddenChats, .serverChannels, .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library: return 0
+            }
+        }
+        /// The gradient after `solid`, ending where the content starts at rest.
+        var band: CGFloat {
+            switch self {
+            case .home: return HomeChrome.listTop - solid
+            case .chat: return Controls.top + Controls.diameter + 6 - solid
+            case .homeSearch, .hiddenChats, .serverChannels: return HomeChrome.barOnlyListTop
+            case .agentPage, .personPage, .groupPage, .serverPage, .channelPage, .ownProfile, .library: return PaneKit.pageTop
+            }
+        }
+    }
+
+    /// The layer's geometry for a status-bar height: where it starts, how far it is opaque, how tall it is.
+    struct Spec: Equatable {
+        let topInset: CGFloat
+        let solid: CGFloat
+        let height: CGFloat
+    }
+
+    static func spec(_ screen: Screen, statusBar: CGFloat, extra: CGFloat = 0) -> Spec {
+        let solid = statusBar + screen.solid + extra
+        return Spec(topInset: 0, solid: solid, height: solid + screen.band)
+    }
+
+    var body: some View {
+        // The reader keeps the safe area, so its top inset is the status bar; the layer inside
+        // it ignores the top edge and so starts at the physical top (a reader that ignored the
+        // safe area itself would report an inset of 0 — the first after-shot's gap).
+        GeometryReader { geo in
+            let spec = Self.spec(screen, statusBar: geo.safeAreaInsets.top, extra: extra)
+            ZStack {
+                if theme.isGlass {
+                    Rectangle().fill(.ultraThinMaterial)
+                }
+                theme.bg.opacity(theme.isGlass ? Self.glassWash : 1)
+            }
+            .frame(height: spec.height)
+            .mask(
+                LinearGradient(
+                    stops: [
+                        .init(color: .black, location: 0),
+                        .init(color: .black, location: spec.solid / spec.height),
+                        .init(color: .clear, location: 1),
+                    ],
+                    startPoint: .top, endPoint: .bottom)
+            )
+            .frame(maxWidth: .infinity, alignment: .top)
+            .ignoresSafeArea(.container, edges: .top)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+extension View {
+    /// Rig: `ARBOS_LIST_SCROLL=<n>` scrolls the enclosing `ScrollViewReader`'s list so `ids[n]`
+    /// sits at the top, once the rows are on screen.
+    func rigListScroll<ID: Hashable>(_ proxy: ScrollViewProxy, ids: [ID]) -> some View {
+        onAppear {
+            guard let n = DebugHooks.listScroll, ids.indices.contains(n) else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                withAnimation(nil) { proxy.scrollTo(ids[n], anchor: .top) }
+            }
+        }
+    }
+}
+
+/// Home's fixed chrome under the account / `+` discs: the filter tabs
+/// ([feedback iphone-list-top-fade-2026-10-26]: the tabs no longer scroll with the list, so the
+/// fade can be opaque through them).
+extension HomeChrome {
+    /// Tab pill (32) with `filterTop` above and 4 below.
+    static let filterTop: CGFloat = 8
+    static let filterBand: CGFloat = filterTop + 32 + 4
+    /// Rows scrolling under the tabs vanish over this band; the first row sits at its end at rest.
+    static let fadeBand: CGFloat = 20
+    /// The list's first row starts this far under the safe-area top: bar + tabs + the fade band.
+    static let listTop: CGFloat = Controls.top + Controls.diameter + filterBand + fadeBand
+    /// Lists with a bar and nothing under it (hidden chats, server channels, search results).
+    static let barOnlyListTop: CGFloat = Controls.top + Controls.diameter + 12
 }

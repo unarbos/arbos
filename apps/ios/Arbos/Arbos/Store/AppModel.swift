@@ -67,6 +67,48 @@ struct Notice: Identifiable, Equatable {
     var text: String
 }
 
+/// A toast at the top of the screen (Jacob 2026-10-26, [feedback error-messages-ios-2026-10-26]):
+/// an info notice (`error` nil: "Forwarded to Studio", 6 s) or a failure drawn by `ErrorNote`
+/// (10 s; a touch holds it; × dismisses; Try again re-runs the action). `ToastHost` draws them.
+struct Toast: Identifiable, Equatable {
+    let id: UUID
+    var text: String
+    var error: UserError?
+    var detailsOpen = false
+    var held = false
+    /// Since when a touch holds it (the hold has a cap).
+    var heldSince: Date? = nil
+    var hasRetry = false
+    var at: Date
+    /// How many times this same failure arrived while the toast stood (1 = once); 2 and up
+    /// is a "×N" on the note instead of a second toast ([feedback toast-stack-ios-2026-10-27]).
+    var count: Int = 1
+
+    static let infoTTL: TimeInterval = 6
+    static let errorTTL: TimeInterval = 10
+    /// A held toast (touch on it, Details closed) is let go after this long.
+    static let holdMax: TimeInterval = 60
+    /// How many the slot shows at once; older ones fold into one "N more" line.
+    static let visibleMax = 3
+    var ttl: TimeInterval { error == nil ? Toast.infoTTL : Toast.errorTTL }
+
+    /// Two toasts are the same failure when they read the same sentence.
+    func sameAs(_ other: UserError) -> Bool { error?.sentence == other.sentence }
+}
+
+/// What the slot draws: the newest toasts, oldest first, and how many older ones are folded.
+struct ToastStack: Equatable {
+    var visible: [Toast]
+    var folded: Int
+}
+
+/// Which surface owns which failures while it is up (a sheet with a form open): a failure for
+/// one of its verbs is kept for that surface (`AppModel.claimedFailure`) instead of a toast.
+struct FailureClaim: Equatable {
+    var surface: String
+    var verbs: [String]
+}
+
 /// Last successful home registry, kept in the on-device store so reopening the
 /// app paints the agent list before the relay round-trip finishes.
 private struct RegistryCache: Codable {
@@ -242,7 +284,8 @@ final class AppModel: ObservableObject {
     private var notifiedPushIds: Set<String> = []
     @Published private(set) var authMode: AuthMode = .github
     @Published private(set) var signingIn = false
-    @Published private(set) var signInError: String?
+    @Published private(set) var signInError: UserError?
+    @Published var signInErrorDetailsOpen = false
     /// After a fresh GitHub sign-in, ask for display name + handle once (Settings can edit later).
     @Published var needsProfileSetup = false
     private let webAuth = WebAuth()
@@ -261,6 +304,8 @@ final class AppModel: ObservableObject {
     @Published var messages: [Id: [Message]] = [:] {
         didSet { bumpVersions(from: oldValue, to: messages) }
     }
+    /// Membership notices this device shows ahead of the relay's row (ARB-393), per chat.
+    private(set) var optimisticNotices: [Id: [OptimisticNotice]] = [:]
     /// Bumped whenever a chat's list (`messages` or `channelRows`) is replaced; views
     /// watch this instead of comparing the whole message array on every body.
     @Published private(set) var messagesVersion: [Id: Int] = [:]
@@ -360,6 +405,11 @@ final class AppModel: ObservableObject {
                 store.put(StoreKey.lastChat, Data(chatId.utf8))
             }
         }
+    }
+    /// A chat screen is on top of the stack: the toast slot is its header's, not the root's.
+    var chatIsUp: Bool {
+        if case .chat? = path.last { return true }
+        return false
     }
     /// True when the Debug fixture replaced the relay (screenshots).
     var isFixture = false
@@ -502,7 +552,7 @@ final class AppModel: ObservableObject {
         Task {
             do { try await api.setProjectArchived(projectId, archived: archived) } catch let e as RelayError where e.status == 404 {
                 // Older relay: the archive stays on this device.
-            } catch { notice = Notice(text: "\(archived ? "Archive" : "Unarchive") failed: \(error.localizedDescription)") }
+            } catch { fail(archived ? "archive the chat" : "unarchive the chat", error) }
         }
     }
 
@@ -519,7 +569,7 @@ final class AppModel: ObservableObject {
         Task {
             do { try await api.chatSettings(chatId: peopleChatId, archived: archived) } catch let e as RelayError where e.status == 404 {
                 // Older relay: the archive stays on this device.
-            } catch { notice = Notice(text: "\(archived ? "Archive" : "Unarchive") failed: \(error.localizedDescription)") }
+            } catch { fail(archived ? "archive the chat" : "unarchive the chat", error) }
         }
     }
 
@@ -532,7 +582,7 @@ final class AppModel: ObservableObject {
         Task {
             do { try await api.setServerArchived(serverId, archived: archived) } catch let e as RelayError where e.status == 404 {
                 // Older relay: the archive stays on this device.
-            } catch { notice = Notice(text: "\(archived ? "Archive" : "Unarchive") failed: \(error.localizedDescription)") }
+            } catch { fail(archived ? "archive the chat" : "unarchive the chat", error) }
         }
     }
 
@@ -644,7 +694,7 @@ final class AppModel: ObservableObject {
             guard !pinnedHomeIds.contains(key) else { return }
             // Cap at five so the top of Home stays a short favourites strip.
             guard pinnedHomeIds.count < Self.maxHomePins else {
-                notice = Notice(text: "You can pin up to five chats.")
+                failRefused("pin the chat", "You can pin up to five chats.")
                 return
             }
             // New pins land at the top; later Move to top / up / down adjusts order.
@@ -672,10 +722,34 @@ final class AppModel: ObservableObject {
     }
 
     @Published private(set) var machineError: String?
-    @Published var notice: Notice?
+    /// Compatibility shim: setting it posts an **info** toast (something that worked or a plain
+    /// status). A failure is `fail(_:_:)` — `ErrorUILintTests` keeps raw errors out of here.
+    @Published var notice: Notice? {
+        didSet {
+            guard let n = notice else { return }
+            notice = nil
+            notify(n.text)
+        }
+    }
+    /// The toast stack, newest last (`ToastHost`).
+    @Published private(set) var toasts: [Toast] = []
+    private var toastRetries: [UUID: () -> Void] = [:]
+    private var toastTimers: [UUID: Task<Void, Never>] = [:]
+    /// A surface with a form up takes its verbs' failures; the note it draws.
+    @Published var failureClaim: FailureClaim? {
+        didSet { if failureClaim != oldValue { claimedFailure = nil } }
+    }
+    @Published var claimedFailure: UserError?
+    @Published var claimedFailureDetailsOpen = false
+    /// Per chat: the last send / attachment / recording failure, drawn above the composer until
+    /// Try again, a new send, or the next successful send.
+    @Published private(set) var sendErrors: [Id: UserError] = [:]
+    @Published var sendErrorDetailsOpen: Set<Id> = []
     @Published private(set) var pairingBusy = false
-    @Published private(set) var pairingError: String?
-    @Published private(set) var registryError: String?
+    @Published private(set) var pairingError: UserError?
+    @Published var pairingErrorDetailsOpen = false
+    @Published private(set) var registryError: UserError?
+    @Published var registryErrorDetailsOpen = false
     /// Settings → Connectors (Google Gmail/Calendar, …). Empty until first refresh.
     @Published private(set) var connectors = ConnectorsView()
     @Published private(set) var connectorsBusy = false
@@ -684,11 +758,13 @@ final class AppModel: ObservableObject {
     /// Settings → Devices (`GET /auth/devices`, Oct 23).
     @Published var devices: [AuthDevice] = []
     @Published var devicesLoaded = false
-    @Published var devicesError: String?
+    @Published var devicesError: UserError?
     /// Agent profile → Secrets, per project.
     @Published var projectSecrets: [Id: ProjectSecrets] = [:]
     /// Standing shell approvals per agent (#1544), loaded when the agent pane opens.
     @Published var shellGrants: [Id: [ShellGrant]] = [:]
+    /// Secret hand-off request cards: approval id → saving / saved(env) / failed(sentence).
+    @Published var handoff: [String: HandoffState] = [:]
     /// Fixture only: the Vault page's item list (the relay answers this live).
     var fixtureVaultItems: [[String: Any]] = []
     @Published var secretsBusy = false
@@ -709,7 +785,10 @@ final class AppModel: ObservableObject {
     private var unacked: [Id: Set<Id>] = [:]
     /// Rooms whose pushes were refused with `not_available` on the live connection.
     /// Cleared by that room's next ACK (not by another room's ACK).
-    private var pushRefused: Set<Id> = []
+    @Published private(set) var pushRefused: Set<Id> = []
+    /// The relay's reason for each refused room, in plain words ([feedback blocked-state-ios-2026-10-26]);
+    /// the chat-level note under the header draws it. Cleared with the room's next ACK.
+    @Published private(set) var pushRefusalText: [Id: String] = [:]
     /// Rooms with a full re-read scheduled by `requestSnapshot` (one per coalesce window).
     private var snapshotPending: Set<Id> = []
     /// When each room's transcript was last re-read from its doc (`Date` seconds).
@@ -777,6 +856,10 @@ final class AppModel: ObservableObject {
     var isPaired: Bool { credentials != nil }
     var relayUrl: String { api.endpoint.httpUrl }
 
+    /// The model the avatar views resolve through (`AgentAvatar.shown`): the app has one; a
+    /// test's model becomes current while it exists.
+    private(set) weak static var current: AppModel?
+
     init() {
         LaunchClock.mark("app-init")
         // Drop the retired SessionRoom TestFlight switch so it does not linger.
@@ -837,6 +920,7 @@ final class AppModel: ObservableObject {
             adopt(tokens: toks, user: who, persist: false)
         }
         #endif
+        AppModel.current = self
         Task { await probeAuthMode() }
         PushManager.shared.visibleChatId = { [weak self] in
             guard let self, self.appActive else { return nil }
@@ -859,6 +943,13 @@ final class AppModel: ObservableObject {
                 let event = info["event"] as? String
                 if category == PushManager.callCategory || event == "started" || event == "ended" || event == "missed" {
                     CallManager.shared.handleCallAlert(info)
+                }
+                // Silent clear-on-read push (`type: clear`, the APNs form of
+                // `notifications_cleared`): same effect as the /me/pushes row, but it also
+                // reaches a backgrounded phone.
+                if (info["type"] as? String) == "clear", let cid = info["chat_id"] as? String, !cid.isEmpty {
+                    let badge = (info["badge"] as? NSNumber)?.int64Value ?? -1
+                    self?.applyRemoteClear(chatId: cid, relayTotal: badge)
                 }
                 await self?.refreshPeople(); await self?.refreshUnread()
             }
@@ -1034,7 +1125,7 @@ final class AppModel: ObservableObject {
             try doc.insertSystemLine(id: newId(), text: text, deviceId: deviceId, callId: callId)
             doc.commit()
         } catch {
-            notice = Notice(text: "Could not write the call line: \(error.localizedDescription)")
+            fail("write the call line", error)
         }
     }
 
@@ -1112,21 +1203,39 @@ final class AppModel: ObservableObject {
     var unreadTotal: Int {
         // Hidden plain chats (D78: not the agent's one chat) never badge.
         if !unreadCounts.isEmpty {
-            var total = unreadCounts.reduce(0) { $0 + (isHiddenChat($1.key) ? 0 : $1.value) }
-            // Live Loro rows can mark unread before /me/unread has the event.
-            for id in peopleUnread where !isHiddenChat(id) && (unreadCounts[id] ?? 0) == 0 {
-                total += 1
-            }
-            for list in chats.values {
-                for c in list where c.unread && !isHiddenChat(c.id) && (unreadCounts[c.id] ?? 0) == 0 {
-                    total += 1
-                }
-            }
-            return total
+            let flagged = peopleUnread.union(chats.values.flatMap { $0 }.filter { $0.unread }.map(\.id))
+            return Self.badgeTotal(remote: unreadCounts, flagged: flagged, hidden: { self.isHiddenChat($0) })
         }
         let people = peopleChats.reduce(0) { $0 + unreadCount(for: $1) }
         let projects = chats.values.flatMap { $0 }.filter { $0.unread && !isHiddenChat($0.id) }.count
         return people + projects
+    }
+
+    /// The app badge from the relay's per-chat counts (`GET /me/unread`) plus one for every
+    /// chat a live row flagged before `/me/unread` caught up; hidden chats never count.
+    nonisolated static func badgeTotal(remote: [String: Int], flagged: Set<String>, hidden: (String) -> Bool) -> Int {
+        var total = remote.reduce(0) { $0 + (hidden($1.key) ? 0 : $1.value) }
+        for id in flagged where !hidden(id) && (remote[id] ?? 0) == 0 {
+            total += 1
+        }
+        return total
+    }
+
+    /// A clear from another device (`notifications_cleared`) applied to the local unread
+    /// picture: the chat's remote count and local flag go, every other chat keeps its count.
+    nonisolated static func clearingChat(_ chatId: String, remote: inout [String: Int], flagged: inout Set<String>) {
+        if remote[chatId] != nil { remote[chatId] = 0 }
+        flagged.remove(chatId)
+    }
+
+    /// The badge right after a clear: the smaller of the relay's total (every chat, the read
+    /// one at 0 — what its `/me/unread` would say) and the local sum. Each side can only be
+    /// too high: the local sum when a live row lit a flag `/me/unread` has not confirmed, the
+    /// relay's when this device read a chat moments ago and its throttled `PUT /read` is
+    /// still pending, or for hidden plain chats (D78) the relay counts and the badge never
+    /// shows. A total the relay did not send (negative) falls back to the local sum.
+    nonisolated static func badgeAfterClear(relayTotal: Int64, localTotal: Int) -> Int {
+        relayTotal >= 0 ? Int(min(relayTotal, Int64(max(0, localTotal)))) : max(0, localTotal)
     }
 
     /// Unread rows of one agent chat for its dot: none for a hidden plain chat.
@@ -1186,7 +1295,7 @@ final class AppModel: ObservableObject {
                 adopt(tokens: toks, user: who)
                 needsProfileSetup = true
             } catch {
-                signInError = error.localizedDescription
+                signInError = UserError.classify("sign in", error)
             }
         }
     }
@@ -1207,7 +1316,7 @@ final class AppModel: ObservableObject {
         } catch let e as RelayError {
             return AuthError.humanize(e.type ?? "", e.message.isEmpty ? "Could not update profile" : e.message)
         } catch {
-            return error.localizedDescription
+            return UserError.classify("save your profile", error).sentence
         }
     }
 
@@ -1225,7 +1334,7 @@ final class AppModel: ObservableObject {
             return AuthError.humanize(e.type ?? "", e.message.isEmpty ? "Could not update privacy" : e.message)
         } catch {
             groupAddPolicy = previous
-            return error.localizedDescription
+            return UserError.classify("save the privacy setting", error).sentence
         }
     }
 
@@ -1234,14 +1343,16 @@ final class AppModel: ObservableObject {
         if let who { user = who }
         if persist {
             do { try Keychain.storeAuth(toks) } catch {
-                notice = Notice(text: "Session kept in memory only: \(error.localizedDescription)")
+                fail("save your sign-in to the keychain", error)
             }
         }
         let wasPaired = credentials != nil
         credentials = DeviceCredentials(relayUrl: toks.relayUrl, deviceId: toks.deviceId, deviceToken: toks.accessToken)
         if !wasPaired {
             // A sign-in through the browser (not a token refresh): a possible first login.
-            if who != nil { beginFirstLogin() }
+            // Rig (Debug): `ARBOS_SKIP_FIRST_LOGIN=1` lands on the lists at once — a shot of an
+            // existing account on a simulator whose test box has no agentd to greet it.
+            if who != nil, !DebugHooks.skipFirstLogin { beginFirstLogin() }
             startAfterPairing()
         }
     }
@@ -1260,7 +1371,7 @@ final class AppModel: ObservableObject {
             } catch {
                 if let e = error as? RelayError, e.status == 401 || e.status == 403 {
                     signOut(remote: false)
-                    signInError = "Your session ended. Sign in again."
+                    signInError = UserError.of("stay signed in", .authExpired, "token refresh refused")
                 }
                 return false
             }
@@ -1360,6 +1471,147 @@ final class AppModel: ObservableObject {
         startAfterPairing()
     }
 
+
+    // MARK: - toasts and failures (one element, one place — Jacob 2026-10-26)
+
+    /// An info toast: something that worked or a plain status. Never a failure. The same text
+    /// again while its toast stands restarts that toast instead of adding one.
+    func notify(_ text: String) {
+        if let i = toasts.firstIndex(where: { $0.error == nil && $0.text == text }) {
+            toasts[i].count += 1
+            toasts[i].at = Date()
+            armToast(toasts[i].id, after: toasts[i].ttl)
+            return
+        }
+        pushToast(Toast(id: UUID(), text: text, error: nil, at: Date()))
+    }
+
+    /// The newest `Toast.visibleMax` toasts (oldest first) and how many older ones are folded
+    /// away above them (Jacob 2026-10-27: at most three visible, the rest a count).
+    var toastStack: ToastStack {
+        let folded = max(0, toasts.count - Toast.visibleMax)
+        return ToastStack(visible: Array(toasts.dropFirst(folded)), folded: folded)
+    }
+
+    /// The "N more" line's ×: the whole slot goes.
+    func dismissAllToasts() {
+        for t in toasts { toastTimers[t.id]?.cancel(); toastTimers[t.id] = nil; toastRetries[t.id] = nil }
+        toasts.removeAll()
+    }
+
+    /// Something the user asked for did not happen: `verb` is what they tried ("save the
+    /// secret"), `error` whatever was thrown. Classified by `UserError`, drawn by `ErrorNote`
+    /// — inline by the surface that claimed the verb, else as an error toast.
+    func fail(_ verb: String, _ error: Error, retry: (() -> Void)? = nil) {
+        fail(UserError.classify(verb, error), retry: retry)
+    }
+
+    /// A failure already classified. The same failure again while its toast stands (same
+    /// sentence) bumps that toast's count and restarts its clock — one note per failure,
+    /// however often it repeats (eight "Couldn't load your secrets. You're offline." toasts
+    /// on the Mac, 2026-10-27, are the reason).
+    func fail(_ error: UserError, retry: (() -> Void)? = nil) {
+        if let claim = failureClaim, claim.verbs.contains(where: { error.verb.hasPrefix($0) }) {
+            claimedFailure = error
+            claimedFailureDetailsOpen = false
+            return
+        }
+        if let i = toasts.firstIndex(where: { $0.sameAs(error) }) {
+            toasts[i].count += 1
+            toasts[i].error = error
+            toasts[i].at = Date()
+            if let retry { toastRetries[toasts[i].id] = retry; toasts[i].hasRetry = true }
+            armToast(toasts[i].id, after: toasts[i].ttl)
+            return
+        }
+        let toast = Toast(id: UUID(), text: error.sentence, error: error, hasRetry: retry != nil, at: Date())
+        if let retry { toastRetries[toast.id] = retry }
+        pushToast(toast)
+    }
+
+    /// A local refusal (the form is not complete): the words as the why.
+    func failRefused(_ verb: String, _ why: String) {
+        fail(UserError.refused(verb, why))
+    }
+
+    private func pushToast(_ toast: Toast) {
+        toasts.append(toast)
+        armToast(toast.id, after: toast.ttl)
+    }
+
+    private func armToast(_ id: UUID, after ttl: TimeInterval) {
+        toastTimers[id]?.cancel()
+        toastTimers[id] = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(ttl * 1_000_000_000))
+            guard let self, !Task.isCancelled else { return }
+            if let t = self.toasts.first(where: { $0.id == id }), t.held {
+                // Details open: stays. A plain hold ends at the cap (a finger parked on the
+                // slot, or a release that never arrived, cannot pin a toast forever).
+                let since = t.heldSince ?? Date()
+                let left = Toast.holdMax - Date().timeIntervalSince(since)
+                if t.detailsOpen || left > 0 {
+                    self.armToast(id, after: t.detailsOpen ? ttl : max(left, 0.5))
+                    return
+                }
+            }
+            self.dismissToast(id)
+        }
+    }
+
+    func dismissToast(_ id: UUID) {
+        toasts.removeAll { $0.id == id }
+        toastRetries[id] = nil
+        toastTimers[id]?.cancel()
+        toastTimers[id] = nil
+    }
+
+    /// A touch on a toast holds it; letting go restarts its clock.
+    func holdToast(_ id: UUID, held: Bool) {
+        guard let i = toasts.firstIndex(where: { $0.id == id }) else { return }
+        if held, !toasts[i].held { toasts[i].heldSince = Date() }
+        toasts[i].held = held
+        if !held { toasts[i].heldSince = nil; armToast(id, after: toasts[i].ttl) }
+    }
+
+    func setToastDetails(_ id: UUID, open: Bool) {
+        guard let i = toasts.firstIndex(where: { $0.id == id }) else { return }
+        toasts[i].detailsOpen = open
+        if !toasts[i].held { toasts[i].heldSince = Date() }
+        toasts[i].held = true
+    }
+
+    /// Try again on an error toast: re-run its action and drop the toast.
+    func retryToast(_ id: UUID) {
+        let retry = toastRetries[id]
+        dismissToast(id)
+        retry?()
+    }
+
+    /// 401 / 403 on a toast's Sign in: back to the sign-in screen.
+    func signOutForReauth() {
+        unpair(forget: true)
+    }
+
+    /// The composer's note for `chatId`.
+    func setSendError(_ chatId: Id, _ error: UserError) {
+        sendErrors[chatId] = error
+        sendErrorDetailsOpen.remove(chatId)
+    }
+
+    func clearSendError(_ chatId: Id) {
+        sendErrors[chatId] = nil
+        sendErrorDetailsOpen.remove(chatId)
+    }
+
+    /// Try again on the composer's note: re-send the newest failed message in that chat (the
+    /// note clears either way).
+    func retrySendError(_ chatId: Id) {
+        clearSendError(chatId)
+        if let failed = messages[chatId]?.last(where: { $0.status == .error }) {
+            resendFailed(chatId: chatId, messageId: failed.id)
+        }
+    }
+
     func pair(code: String) {
         guard !pairingBusy else { return }
         pairingBusy = true
@@ -1371,15 +1623,15 @@ final class AppModel: ObservableObject {
                 do {
                     try Keychain.store(creds)
                 } catch {
-                    notice = Notice(text: "Token kept in memory only: \(error.localizedDescription)")
+                    fail("save your sign-in to the keychain", error)
                 }
                 credentials = creds
                 beginFirstLogin()
                 startAfterPairing()
             } catch {
                 pairingError = (error as? RelayError)?.isUnauthorized == true
-                    ? "That code was not accepted. Codes expire after 10 minutes."
-                    : error.localizedDescription
+                    ? UserError.refused("pair this iPhone", "That code was not accepted. Codes expire after 10 minutes.")
+                    : UserError.classify("pair this iPhone", error)
             }
         }
     }
@@ -1570,10 +1822,10 @@ final class AppModel: ObservableObject {
             if (error as? RelayError)?.isUnauthorized == true {
                 // Token revoked or relay re-initialised: pair again.
                 unpair(forget: true)
-                pairingError = "This device was signed out by the relay. Pair again."
+                pairingError = UserError.of("stay signed in", .authExpired, "This device was signed out by the relay. Pair again.")
                 return
             }
-            registryError = error.localizedDescription
+            registryError = UserError.classify("load your chats", error)
             link = .reconnecting
             // Only a verdict about reachability goes to the pill; an odd error
             // (bad JSON, a 404) says nothing about the link.
@@ -1621,6 +1873,12 @@ final class AppModel: ObservableObject {
         if let data = store.get(StoreKey.unread), let counts = try? JSONDecoder().decode([String: Int].self, from: data) {
             unreadCounts = counts
         }
+        // One copy of each agent's avatar everywhere, before the first frame: the record and
+        // the roster copies came back from two caches written at different times; the
+        // newest wins and every picture URL is rebuilt on the public versioned route (a
+        // pre-#1813 cache held the owner-only blob URL — Jacob's relaunch leaf, 2026-10-26).
+        reconcileAgentAvatars()
+        AvatarImageCache.shared.warm(urls: projects.compactMap(\.imageURL))
         if !projects.isEmpty || !peopleChats.isEmpty { contentOrigin = "store" }
         LaunchClock.mark("kv-loaded", detail: "projects=\(projects.count) people=\(peopleChats.count)")
     }
@@ -2012,9 +2270,7 @@ final class AppModel: ObservableObject {
             // used to leave people-chat messages stuck at pending opacity.
             guard let self, !isProjectDoc else { return }
             if self.pushRefused.remove(key) != nil {
-                if self.notice?.text == "Messages in this chat are not being delivered" {
-                    self.notice = nil
-                }
+                self.pushRefusalText.removeValue(forKey: key)
             }
             guard self.unacked[key] != nil else { return }
             self.unacked[key] = nil
@@ -2034,10 +2290,18 @@ final class AppModel: ObservableObject {
         room.onUnavailable = { [weak self] in
             Task { @MainActor in self?.handleRoomUnavailable(key: key) }
         }
-        room.onPushRefused = { [weak self] in
+        room.onPushRefused = { [weak self, weak room] in
             guard let self, !isProjectDoc else { return }
-            if self.pushRefused.insert(key).inserted {
-                self.notice = Notice(text: "Messages in this chat are not being delivered")
+            // The relay's reason, in plain words ([feedback blocked-state-ios-2026-10-26]):
+            // "<name> has blocked you in this chat." / "Couldn't post: you've blocked <name>…" /
+            // the mute line / the generic delivery line. A refusal that names a reason is taken
+            // even while the room already stood refused, so the words follow the relay's. The
+            // chat-level note under the header draws it (`ChatView.chatNote`), not a toast.
+            let why = room?.lastRefusal
+            let fresh = self.pushRefused.insert(key).inserted
+            if fresh || why?.reason != nil {
+                let text = why?.sentence ?? BlockedState.refusalSentence(reason: nil, name: nil, handle: nil)
+                self.pushRefusalText[key] = text
             }
         }
         rooms[key] = room
@@ -2094,6 +2358,7 @@ final class AppModel: ObservableObject {
         roomLinkSince[key] = nil
         unacked[key] = nil
         pushRefused.remove(key)
+        pushRefusalText[key] = nil
         roomCreatedAt[key] = nil
         roomRestoredCursors[key] = nil
         roomUnavailableFailures[key] = nil
@@ -2194,6 +2459,7 @@ final class AppModel: ObservableObject {
         for i in list.indices where list[i].role == .user {
             list[i].pending = pendingIds.contains(list[i].id)
         }
+        foldOptimisticNotices(chatId: chatId, into: &list)
         // Reassign the whole dictionary so `@Published` always fires. Subscript
         // writes alone have left ChatView's `@State` rows stale for live inbound
         // agent replies in an open people chat (desktop had the line; iPhone did not).
@@ -2289,6 +2555,8 @@ final class AppModel: ObservableObject {
             if last.pending { return }
             if last.role == .system { return }
             if let me = myUserId, last.sender == me { return }
+            // Hidden for me (someone I blocked): no dot, no banner.
+            if hidesMessage(last, chatId: chatId) { return }
             // Project-chat echoes from this device use sender "user".
             if peopleChat(chatId) == nil, last.role == .user, last.sender == "user" || last.sender.isEmpty {
                 return
@@ -2378,7 +2646,7 @@ final class AppModel: ObservableObject {
             if (error as? RelayError)?.status == 404 {
                 machineError = "This relay has no machine API yet"
             } else {
-                machineError = error.localizedDescription
+                machineError = UserError.classify("reach your machine", error).sentence
             }
         }
     }
@@ -2403,9 +2671,9 @@ final class AppModel: ObservableObject {
             do {
                 try await api.startMachine()
             } catch {
-                notice = Notice(text: "Start failed: \(error.localizedDescription)")
+                fail("start the machine", error)
                 machine.state = .error
-                machineError = error.localizedDescription
+                machineError = UserError.classify("start the machine", error).sentence
             }
             await refreshMachine()
         }
@@ -2421,7 +2689,7 @@ final class AppModel: ObservableObject {
                 machine.state = .stoppedByUser
                 machine.since = nowMs()
             } catch {
-                notice = Notice(text: "Stop failed: \(error.localizedDescription)")
+                fail("stop the machine", error)
             }
             await refreshMachine()
         }
@@ -2438,9 +2706,9 @@ final class AppModel: ObservableObject {
                 try await api.restartMachine()
                 machine.since = nowMs()
             } catch {
-                notice = Notice(text: "Restart failed: \(error.localizedDescription)")
+                fail("restart the machine", error)
                 machine.state = .error
-                machineError = error.localizedDescription
+                machineError = UserError.classify("restart the machine", error).sentence
             }
             await refreshMachine()
         }
@@ -2481,14 +2749,14 @@ final class AppModel: ObservableObject {
                     await refreshConnectorsOnce()
                     if connectors.connector(for: provider)?.status != .connected {
                         let err = connectors.connector(for: provider)?.lastError ?? ""
-                        notice = Notice(text: "Connect \(provider): \(err.isEmpty ? "token was not accepted" : err)")
+                        fail(UserError.refused("connect \(provider)", err.isEmpty ? "The token was not accepted." : err))
                     }
                     return
                 }
                 guard let urlStr = try await api.connectConnector(provider: provider),
                       let url = URL(string: urlStr) else {
                     connectorsBusy = false
-                    notice = Notice(text: "Connect \(provider): the relay sent no sign-in URL")
+                    fail(UserError.fromText("connect \(provider)", "the relay sent no sign-in URL"))
                     await refreshConnectorsOnce()
                     return
                 }
@@ -2502,7 +2770,7 @@ final class AppModel: ObservableObject {
                     if connectors.connector(for: provider)?.status == .connected { return }
                     if !ok {
                         let err = connectors.connector(for: provider)?.lastError ?? ""
-                        notice = Notice(text: "Connect \(provider): \(err.isEmpty ? "sign-in did not finish" : err)")
+                        fail(UserError.refused("connect \(provider)", err.isEmpty ? "The sign-in did not finish." : err))
                         return
                     }
                     // Token write can lag the redirect by a beat.
@@ -2519,7 +2787,7 @@ final class AppModel: ObservableObject {
                     let opened = await UIApplication.shared.open(url)
                     connectorsBusy = false
                     guard opened else {
-                        notice = Notice(text: "Connect \(provider): could not open the sign-in page")
+                        fail(UserError.fromText("connect \(provider)", "could not open the sign-in page"))
                         return
                     }
                     for wait in [0, 4, 8, 15, 30, 60] as [UInt64] {
@@ -2531,24 +2799,24 @@ final class AppModel: ObservableObject {
                     }
                 } catch {
                     connectorsBusy = false
-                    notice = Notice(text: Self.connectErrorText(provider: provider, error: error))
+                    fail(Self.connectError(provider: provider, error: error))
                     await refreshConnectorsOnce()
                 }
             } catch {
                 connectorsBusy = false
-                notice = Notice(text: Self.connectErrorText(provider: provider, error: error))
+                fail(Self.connectError(provider: provider, error: error))
                 await refreshConnectorsOnce()
             }
         }
     }
 
     /// Drop relay env-var names from the Settings alert when Google OAuth is missing.
-    private static func connectErrorText(provider: String, error: Error) -> String {
+    private static func connectError(provider: String, error: Error) -> UserError {
         let raw = error.localizedDescription
         if raw.localizedCaseInsensitiveContains("OAuth client not configured") {
-            return "Connect \(provider): OAuth client not configured on the relay."
+            return UserError.refused("connect \(provider)", "The OAuth client is not configured on the relay.")
         }
-        return "Connect \(provider): \(raw)"
+        return UserError.classify("connect \(provider)", error)
     }
 
     func disconnectConnector(id: Id) {
@@ -2562,7 +2830,7 @@ final class AppModel: ObservableObject {
             do {
                 try await api.disconnectConnector(id: id)
             } catch {
-                notice = Notice(text: "Disconnect: \(error.localizedDescription)")
+                fail("disconnect it", error)
             }
             await refreshConnectorsOnce()
         }
@@ -2623,11 +2891,13 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Search handles (prefix) for the new-chat sheet.
+    /// The relay's people search (a handle-prefix lookup) for the new-chat sheet;
+    /// the sheet itself lists the directory through the shared matcher
+    /// (`PeoplePicker.people`) and adds these on top. The fixture answers from
+    /// the directory through the same matcher.
     func searchPeople(_ q: String) async -> [Person] {
         if isFixture {
-            let needle = q.lowercased()
-            return directory.filter { $0.handle.lowercased().contains(needle) || ($0.name ?? "").lowercased().contains(needle) }
+            return PeoplePicker.people(directory: directory, remote: [], me: nil, query: q)
         }
         return (try? await api.searchUsers(q)) ?? []
     }
@@ -2690,7 +2960,7 @@ final class AppModel: ObservableObject {
             .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "@ ")) }
             .filter { !$0.isEmpty }
         guard !cleaned.isEmpty || !agentIds.isEmpty else {
-            notice = Notice(text: "Pick at least one person or agent")
+            failRefused("create the group", "Pick at least one person or agent.")
             return false
         }
         do {
@@ -2701,8 +2971,8 @@ final class AppModel: ObservableObject {
                 chat = try await createGroupViaDm(handles: cleaned)
             }
             if let picture, let jpeg = await draftJpeg(picture) {
-                let key = "group-avatar-\(Int(Date().timeIntervalSince1970 * 1000)).jpg"
-                if (try? await api.putBlob(projectId: "\(peopleSlot):\(chat.id)", key: key, mime: "image/jpeg", data: jpeg)) != nil,
+                let key = "group-avatar-\(Int(Date().timeIntervalSince1970 * 1000)).\(PictureMaster.ext(jpeg))"
+                if (try? await api.putBlob(projectId: "\(peopleSlot):\(chat.id)", key: key, mime: PictureMaster.mime(jpeg), data: jpeg)) != nil,
                    let patched = try? await api.patchPeopleChat(chat.id, imageKey: key) {
                     chat = patched
                 }
@@ -2711,7 +2981,7 @@ final class AppModel: ObservableObject {
                 do {
                     chat = try await api.addAgent(chatId: chat.id, projectId: pid)
                 } catch {
-                    notice = Notice(text: "Group created, but adding an agent failed: \(error.localizedDescription)")
+                    fail("add the agent to the new group", error)
                 }
             }
             if let i = peopleChats.firstIndex(where: { $0.id == chat.id }) {
@@ -2723,7 +2993,7 @@ final class AppModel: ObservableObject {
             path = [.chat(chatId: chat.id, projectId: peopleSlot)]
             return true
         } catch {
-            notice = Notice(text: "Could not create the group: \(error.localizedDescription)")
+            fail("create the group", error)
             return false
         }
     }
@@ -2748,7 +3018,7 @@ final class AppModel: ObservableObject {
                 if let kept = try await api.setProjectVision(projectId, enabled: enabled),
                    let i = projects.firstIndex(where: { $0.id == projectId }) { projects[i].visionEnabled = kept }
             } catch {
-                notice = Notice(text: "Camera vision: \(error.localizedDescription)")
+                fail("save the camera setting", error)
                 await refreshRegistry()
             }
         }
@@ -2794,7 +3064,7 @@ final class AppModel: ObservableObject {
                 let kept = try await api.setProjectVoice(projectId, voice: voice)
                 if let i = projects.firstIndex(where: { $0.id == projectId }) { projects[i].voice = kept }
             } catch {
-                notice = Notice(text: "Voice: \(error.localizedDescription)")
+                fail("save the voice", error)
                 await refreshRegistry()
             }
         }
@@ -2831,7 +3101,7 @@ final class AppModel: ObservableObject {
             do {
                 try await api.setRoutineEnabled(projectId, routineId: routineId, enabled: enabled)
             } catch {
-                notice = Notice(text: "Routine: \(error.localizedDescription)")
+                fail("save the routine", error)
             }
             await refreshRoutines(projectId)
         }
@@ -2854,7 +3124,7 @@ final class AppModel: ObservableObject {
         } catch {
             var r = BoxReport(debug: [String: Any](), now: nowMs())
             r.state = machine.state.rawValue
-            r.unreachableReason = error.localizedDescription
+            r.unreachableReason = UserError.classify("reach the machine", error).why
             boxReport = r
         }
     }
@@ -2872,7 +3142,7 @@ final class AppModel: ObservableObject {
         guard !isFixture else { return }
         Task {
             do { try await api.patchProject(projectId, name: name, color: color, icon: icon, avatar: avatar, avatarColor: avatarColor, description: description) }
-            catch { notice = Notice(text: "Could not save: \(error.localizedDescription)") }
+            catch { fail("save the file", error) }
         }
     }
 
@@ -2892,7 +3162,7 @@ final class AppModel: ObservableObject {
                     applyAgentAvatar(projectId, AgentAvatarFacts(imageKey: nil, avatarLeaf: leaf, avatarLeafColor: color, version: stamped), force: true)
                 }
             } catch {
-                notice = Notice(text: "Avatar: \(error.localizedDescription)")
+                fail("save the picture", error)
                 await refreshRegistry()
             }
         }
@@ -2910,7 +3180,9 @@ final class AppModel: ObservableObject {
             if navigate { path = [.chat(chatId: chat.id, projectId: peopleSlot)] }
             return chat
         } catch {
-            notice = Notice(text: (error as? RelayError)?.type == "not_available" ? "You can't message this person." : "Could not open the chat: \(error.localizedDescription)")
+            fail((error as? RelayError)?.type == "not_available"
+                 ? UserError.refused("open the chat", "You can't message this person.")
+                 : UserError.classify("open the chat", error))
             return nil
         }
     }
@@ -3016,7 +3288,7 @@ final class AppModel: ObservableObject {
                     _ = try await api.putBlob(projectId: "\(peopleSlot):\(chatId)", key: key, mime: a.mime, data: a.data)
                     uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: key, kind: Self.attachmentKind(mime: a.mime, name: a.name)))
                 } catch {
-                    notice = Notice(text: "Attachment upload failed: \(error.localizedDescription)")
+                    setSendError(chatId, UserError.classify("upload the attachment", error))
                 }
             }
             commitPeople(chatId: chatId, doc: doc, messageId: messageId, text: text, author: author,
@@ -3043,7 +3315,7 @@ final class AppModel: ObservableObject {
             try doc.pushCommand("send", payload: ["messageId": messageId], device: deviceId)
         } catch {
             clearUnacked(chatId: chatId, messageId: messageId)
-            notice = Notice(text: "Could not write the message: \(error.localizedDescription)")
+            setSendError(chatId, UserError.classify("send your message", error))
             return
         }
         #if DEBUG
@@ -3260,15 +3532,106 @@ final class AppModel: ObservableObject {
         )
     }
 
+    /// `notifications_cleared`: I read this chat on another device. The thread's delivered
+    /// notifications leave Notification Center, the chat stops being unread here (no `PUT
+    /// /read` — the relay already has the cursor), and the badge drops to the relay's total
+    /// (`/me/unread` re-syncs the per-chat counts on the next poll).
+    func applyRemoteClear(chatId: Id, relayTotal: Int64) {
+        PushManager.shared.clearDelivered(chatId: chatId)
+        var remote = unreadCounts
+        var flagged = peopleUnread
+        Self.clearingChat(chatId, remote: &remote, flagged: &flagged)
+        unreadCounts = remote
+        peopleUnread = flagged
+        if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
+            peopleChats[i].unread = false
+            peopleChats[i].readSeq = max(peopleChats[i].readSeq, peopleChats[i].headSeq)
+        }
+        for (pid, list) in chats {
+            if let i = list.firstIndex(where: { $0.id == chatId }), list[i].unread {
+                var updated = list
+                updated[i].unread = false
+                chats[pid] = updated
+            }
+        }
+        PushManager.shared.setBadge(Self.badgeAfterClear(relayTotal: relayTotal, localTotal: unreadTotal))
+    }
+
     func addAgent(chatId: String, projectId: Id) {
+        showMembershipNotice(chatId: chatId, names: projects.filter { $0.id == projectId }.map(\.name),
+                             subjects: [MembershipNotice.Subject(kind: "agent", id: projectId)])
         Task {
             do {
                 let chat = try await api.addAgent(chatId: chatId, projectId: projectId)
                 if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i] = chat }
             } catch {
-                notice = Notice(text: (error as? RelayError)?.type == "own_project_only" ? "You can only add your own agents." : "Add agent failed: \(error.localizedDescription)")
+                withdrawOptimisticNotices(chatId: chatId)
+                fail((error as? RelayError)?.type == "own_project_only"
+                     ? UserError.refused("add the agent", "You can only add your own agents.")
+                     : UserError.classify("add the agent", error))
             }
         }
+    }
+
+    /// The adding phone's own "<me> added <names>" line, on screen the moment Add is tapped
+    /// (ARB-393). The relay writes the row of record; `foldOptimisticNotices` swaps this copy
+    /// out when that row lands.
+    ///
+    /// `subjects`: who was added, by id, when every one of them is known — then the line is
+    /// worded from the live roster and matched to the relay's row by facts; nil (someone is
+    /// known by handle only) keeps the words-only line.
+    func showMembershipNotice(chatId: Id, names: [String], subjects: [MembershipNotice.Subject]? = nil) {
+        let name = user?.name?.trimmingCharacters(in: .whitespaces) ?? ""
+        let who = name.isEmpty ? (user?.login ?? "") : name
+        guard !who.isEmpty, let text = OptimisticNotice.addedLine(who: who, names: names) else { return }
+        var facts: MembershipNotice? = nil
+        if let me = user?.id, let subjects, !subjects.isEmpty {
+            facts = MembershipNotice(kind: "added", actor: me, subjects: subjects)
+        }
+        let n = OptimisticNotice(text: text, now: nowMs(), notice: facts)
+        optimisticNotices[chatId, default: []].append(n)
+        var next = messages
+        next[chatId, default: []].append(n.message(chatId: chatId))
+        messages = next
+    }
+
+    /// A fresh relay snapshot replaces the chat's list: keep the local notices it has not
+    /// confirmed yet, drop the ones it has (or that are past their TTL).
+    private func foldOptimisticNotices(chatId: Id, into list: inout [Message]) {
+        guard var notices = optimisticNotices[chatId] else { return }
+        OptimisticNotice.reconcile(&list, notices: &notices, chatId: chatId, now: nowMs())
+        if notices.isEmpty { optimisticNotices[chatId] = nil } else { optimisticNotices[chatId] = notices }
+    }
+
+    /// The add failed: nothing was added, so no local notice may claim it was.
+    private func withdrawOptimisticNotices(chatId: Id) {
+        guard optimisticNotices.removeValue(forKey: chatId) != nil else { return }
+        var next = messages
+        next[chatId]?.removeAll { $0.id.hasPrefix(OptimisticNotice.idPrefix) }
+        messages = next
+    }
+
+    /// Names the relay will use in its notice: a person by name, else @handle; an agent by its
+    /// project name.
+    private func membershipNames(handles: [String], agentIds: [Id]) -> [String] {
+        let people: [String] = handles.map { (h: String) -> String in
+            let n = personName(handle: h)?.trimmingCharacters(in: .whitespaces) ?? ""
+            return n.isEmpty ? "@\(h)" : n
+        }
+        let agents: [String] = agentIds.compactMap { (id: Id) -> String? in projects.first { $0.id == id }?.name }
+        return people + agents
+    }
+
+    /// The added members by id, or nil when a handle is not known here (then the line cannot
+    /// carry facts and stays words-only).
+    private func membershipSubjects(handles: [String], agentIds: [Id]) -> [MembershipNotice.Subject]? {
+        var out: [MembershipNotice.Subject] = []
+        for h in handles {
+            guard let id = personId(handle: h) else { return nil }
+            out.append(MembershipNotice.Subject(kind: "user", id: id))
+        }
+        out += agentIds.map { MembershipNotice.Subject(kind: "agent", id: $0) }
+        return out
     }
 
     func addPerson(chatId: String, handle: String) {
@@ -3278,10 +3641,11 @@ final class AppModel: ObservableObject {
                 if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i] = chat }
             } catch {
                 let e = error as? RelayError
-                notice = Notice(text: e?.type == "already_member" ? "@\(handle) is already in this chat."
-                                 : e?.type == "not_available" ? "You can't add this person."
-                                 : (e?.status == 404 || e?.status == 405 || e?.status == 501) ? "Adding people is not on this relay yet."
-                                 : "Add person failed: \(error.localizedDescription)")
+                let said: String? = e?.type == "already_member" ? "@\(handle) is already in this chat."
+                    : e?.type == "not_available" ? "You can't add this person."
+                    : (e?.status == 404 || e?.status == 405 || e?.status == 501) ? "Adding people is not on this relay yet."
+                    : nil
+                fail(said.map { UserError.refused("add @\(handle)", $0) } ?? UserError.classify("add @\(handle)", error))
             }
         }
     }
@@ -3291,7 +3655,7 @@ final class AppModel: ObservableObject {
         do {
             return try await api.createGroupInvite(chatId, expires: expires, maxUses: singleUse ? 1 : nil)
         } catch {
-            notice = Notice(text: "Could not make an invite link: \(error.localizedDescription)")
+            fail("make an invite link", error)
             return nil
         }
     }
@@ -3307,7 +3671,7 @@ final class AppModel: ObservableObject {
             try await api.revokeGroupInvite(chatId, inviteId: inviteId)
             return true
         } catch {
-            notice = Notice(text: "Could not revoke the link: \(error.localizedDescription)")
+            fail("revoke the link", error)
             return false
         }
     }
@@ -3327,9 +3691,10 @@ final class AppModel: ObservableObject {
             open(peopleChat: chat)
         } catch {
             let type = (error as? RelayError)?.type
-            notice = Notice(text: type == "not_available" ? "You can't join this group."
-                            : type == "not_found" || (error as? RelayError)?.status == 404 ? "That invite link is not valid."
-                            : "Could not join the group: \(error.localizedDescription)")
+            let said: String? = type == "not_available" ? "You can't join this group."
+                : type == "not_found" || (error as? RelayError)?.status == 404 ? "That invite link is not valid."
+                : nil
+            fail(said.map { UserError.refused("join the group", $0) } ?? UserError.classify("join the group", error))
         }
     }
 
@@ -3337,6 +3702,8 @@ final class AppModel: ObservableObject {
     /// `POST /chats/{id}/members`, agents by `POST /chats/{id}/agents`. All are
     /// tried; the first failure is reported once and the call returns false.
     func addMembers(chatId: String, handles: [String], agentIds: [Id]) async -> Bool {
+        showMembershipNotice(chatId: chatId, names: membershipNames(handles: handles, agentIds: agentIds),
+                             subjects: membershipSubjects(handles: handles, agentIds: agentIds))
         // One call for the batch (#1349): the relay adds everyone and writes one
         // "<me> added A, B and C" line. A relay that only knows `{handle}` answers 4xx;
         // then every add is tried on its own as before.
@@ -3347,19 +3714,20 @@ final class AppModel: ObservableObject {
         } catch let e as RelayError where [400, 404, 415, 422].contains(e.status) {
             // fall through to the per-item adds
         } catch {
-            notice = Notice(text: "Could not add members: \(error.localizedDescription)")
+            withdrawOptimisticNotices(chatId: chatId)
+            fail("add members", error)
             return false
         }
-        var failure: String?
+        var failure: UserError?
         for handle in handles {
             do {
                 let chat = try await api.addMember(chatId: chatId, handle: handle)
                 if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i] = chat }
             } catch {
                 let e = error as? RelayError
-                failure = failure ?? (e?.type == "already_member" ? "@\(handle) is already in this chat."
-                                      : e?.type == "not_available" ? "You can't add @\(handle)."
-                                      : "Could not add @\(handle): \(error.localizedDescription)")
+                failure = failure ?? (e?.type == "already_member" ? UserError.refused("add @\(handle)", "@\(handle) is already in this chat.")
+                                      : e?.type == "not_available" ? UserError.refused("add @\(handle)", "You can't add @\(handle).")
+                                      : UserError.classify("add @\(handle)", error))
             }
         }
         for projectId in agentIds {
@@ -3367,11 +3735,16 @@ final class AppModel: ObservableObject {
                 let chat = try await api.addAgent(chatId: chatId, projectId: projectId)
                 if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i] = chat }
             } catch {
-                failure = failure ?? ((error as? RelayError)?.type == "own_project_only" ? "You can only add your own agents."
-                                      : "Could not add the agent: \(error.localizedDescription)")
+                failure = failure ?? ((error as? RelayError)?.type == "own_project_only"
+                                      ? UserError.refused("add the agent", "You can only add your own agents.")
+                                      : UserError.classify("add the agent", error))
             }
         }
-        if let failure { notice = Notice(text: failure); return false }
+        if let failure {
+            withdrawOptimisticNotices(chatId: chatId)
+            fail(failure)
+            return false
+        }
         return true
     }
 
@@ -3392,9 +3765,10 @@ final class AppModel: ObservableObject {
                 // The relay writes "<me> removed @handle" into the chat (#1349).
             } catch {
                 let e = error as? RelayError
-                notice = Notice(text: e?.type == "owner_only" ? "Only an owner or admin can manage members."
-                                 : (ban ? "Ban failed: \(error.localizedDescription)"
-                                    : "Remove failed: \(error.localizedDescription)"))
+                let verb = ban ? "ban them" : "remove them"
+                fail(e?.type == "owner_only"
+                     ? UserError.refused(verb, "Only an owner or admin can manage members.")
+                     : UserError.classify(verb, error))
             }
         }
     }
@@ -3409,9 +3783,9 @@ final class AppModel: ObservableObject {
                 }
             } catch {
                 let e = error as? RelayError
-                notice = Notice(text: e?.type == "owner_only"
-                                 ? "Only an owner or an admin with mute and ban rights can unban."
-                                 : "Unban failed: \(error.localizedDescription)")
+                fail(e?.type == "owner_only"
+                     ? UserError.refused("unban them", "Only an owner or an admin with mute and ban rights can unban.")
+                     : UserError.classify("unban them", error))
             }
         }
     }
@@ -3435,8 +3809,9 @@ final class AppModel: ObservableObject {
                 }
             } catch {
                 let e = error as? RelayError
-                notice = Notice(text: e?.type == "owner_only" ? "Only an owner or an admin with mute rights can mute members."
-                                 : "Mute failed: \(error.localizedDescription)")
+                fail(e?.type == "owner_only"
+                     ? UserError.refused("mute them", "Only an owner or an admin with mute rights can mute members.")
+                     : UserError.classify("mute them", error))
             }
         }
     }
@@ -3451,8 +3826,9 @@ final class AppModel: ObservableObject {
                 }
             } catch {
                 let e = error as? RelayError
-                notice = Notice(text: e?.type == "owner_only" ? "Only the owner can change admin roles."
-                                 : "Role change failed: \(error.localizedDescription)")
+                fail(e?.type == "owner_only"
+                     ? UserError.refused("change the role", "Only the owner can change admin roles.")
+                     : UserError.classify("change the role", error))
             }
         }
     }
@@ -3469,8 +3845,9 @@ final class AppModel: ObservableObject {
                 }
             } catch {
                 let e = error as? RelayError
-                notice = Notice(text: e?.type == "owner_only" ? "Only the owner can set mute and ban rights."
-                                 : "Could not update mute and ban rights: \(error.localizedDescription)")
+                fail(e?.type == "owner_only"
+                     ? UserError.refused("change the mute and ban rights", "Only the owner can set mute and ban rights.")
+                     : UserError.classify("change the mute and ban rights", error))
             }
         }
     }
@@ -3482,7 +3859,7 @@ final class AppModel: ObservableObject {
                 if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {
                     peopleChats[i].members.removeAll { $0.isAgent && $0.id == projectId }
                 }
-            } catch { notice = Notice(text: "Remove agent failed: \(error.localizedDescription)") }
+            } catch { fail("remove the agent", error) }
         }
     }
 
@@ -3515,7 +3892,7 @@ final class AppModel: ObservableObject {
             }
             return true
         } catch {
-            notice = Notice(text: "Could not update group: \(error.localizedDescription)")
+            fail("update the group", error)
             return false
         }
     }
@@ -3528,15 +3905,15 @@ final class AppModel: ObservableObject {
 
     /// D92 amendment: upload an agent picture into the project's own blob slot and set it.
     func setProjectImage(projectId: Id, jpeg: Data) async -> Bool {
-        let key = "avatar-\(Int(Date().timeIntervalSince1970 * 1000)).jpg"
+        let key = "avatar-\(Int(Date().timeIntervalSince1970 * 1000)).\(PictureMaster.ext(jpeg))"
         if isFixture {
             return await setProjectImageKey(projectId: projectId, key: key)
         }
         do {
-            _ = try await api.putBlob(projectId: projectId, key: key, mime: "image/jpeg", data: jpeg)
+            _ = try await api.putBlob(projectId: projectId, key: key, mime: PictureMaster.mime(jpeg), data: jpeg)
             return await setProjectImageKey(projectId: projectId, key: key)
         } catch {
-            notice = Notice(text: "Could not upload the picture: \(error.localizedDescription)")
+            fail("upload the picture", error)
             return false
         }
     }
@@ -3557,7 +3934,7 @@ final class AppModel: ObservableObject {
             }
             return true
         } catch {
-            notice = Notice(text: "Picture not saved: \(error.localizedDescription)")
+            fail("save the picture", error)
             await refreshRegistry()
             return false
         }
@@ -3565,19 +3942,13 @@ final class AppModel: ObservableObject {
 
     /// D92 amendment: the Generate tab — the relay paints one picture and answers with its key.
     func generateProjectAvatar(projectId: Id, prompt: String) async throws -> String {
-        if isFixture {
-            try? await Task.sleep(nanoseconds: 1_200_000_000)
-            return "fixture-gen-\(prompt.lowercased().replacingOccurrences(of: " ", with: "-"))"
-        }
+        if isFixture { return try await Self.fixtureGenerate(prompt) }
         return try await api.generateProjectAvatar(projectId, prompt: prompt)
     }
 
     /// The same for a people group's picture (any member) — the key lands in `people:{chat}`.
     func generateGroupAvatar(chatId: String, prompt: String) async throws -> String {
-        if isFixture {
-            try? await Task.sleep(nanoseconds: 1_200_000_000)
-            return "fixture-gen-\(prompt.lowercased().replacingOccurrences(of: " ", with: "-"))"
-        }
+        if isFixture { return try await Self.fixtureGenerate(prompt) }
         return try await api.generateGroupAvatar(chatId, prompt: prompt)
     }
 
@@ -3603,24 +3974,24 @@ final class AppModel: ObservableObject {
             if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i] = chat }
             return true
         } catch {
-            notice = Notice(text: "Group picture not saved: \(error.localizedDescription)")
+            fail("save the group picture", error)
             return false
         }
     }
 
     /// Upload a group picture to `people:{chatId}` and patch `image_key`.
     func setGroupImage(chatId: String, jpeg: Data) async -> Bool {
-        let key = "group-avatar-\(Int(Date().timeIntervalSince1970 * 1000)).jpg"
+        let key = "group-avatar-\(Int(Date().timeIntervalSince1970 * 1000)).\(PictureMaster.ext(jpeg))"
         do {
-            _ = try await api.putBlob(projectId: "\(peopleSlot):\(chatId)", key: key, mime: "image/jpeg", data: jpeg)
+            _ = try await api.putBlob(projectId: "\(peopleSlot):\(chatId)", key: key, mime: PictureMaster.mime(jpeg), data: jpeg)
             return await patchPeopleChat(chatId, imageKey: key)
         } catch {
-            notice = Notice(text: "Could not upload group image: \(error.localizedDescription)")
+            fail("upload the group picture", error)
             return false
         }
     }
 
-    /// Settings profile picture: `PUT /me/avatar` JPEG, then update the local user.
+    /// Settings profile picture: `PUT /me/avatar` with the master (PNG or JPEG), then update the local user.
     func setUserAvatar(jpeg: Data) async -> Bool {
         do {
             let url = try await api.putMeAvatar(jpeg: jpeg)
@@ -3631,18 +4002,30 @@ final class AppModel: ObservableObject {
             }
             return true
         } catch {
-            notice = Notice(text: "Could not update profile picture: \(error.localizedDescription)")
+            fail("save your picture", error)
             return false
         }
+    }
+
+    /// The fixture's "generation": a key named after the prompt after 1.2 s. Rig (error-state
+    /// shots): a prompt with "timeout" fails with the relay's 504 sentence after 2 s, one with
+    /// "slow" paints 25 s first (the progress state).
+    static func fixtureGenerate(_ prompt: String) async throws -> String {
+        let lower = prompt.lowercased()
+        if lower.contains("slow") { try? await Task.sleep(nanoseconds: 25_000_000_000) }
+        if lower.contains("timeout") {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            throw RelayError(status: 504, message: "Couldn't generate the image. The server took too long.", type: "avatar_timeout",
+                             detail: "gpt-image-1-mini: operation timed out after 40 s (attempt 2 of 2); relay budget 75 s")
+        }
+        try? await Task.sleep(nanoseconds: 1_200_000_000)
+        return "fixture-gen-\(lower.replacingOccurrences(of: " ", with: "-"))"
     }
 
     /// The avatar picker's Generate tab for my own picture: the relay paints one picture into
     /// my `users:{id}` slot and answers with its key (not yet set).
     func generateMyAvatar(prompt: String) async throws -> String {
-        if isFixture {
-            try? await Task.sleep(nanoseconds: 1_200_000_000)
-            return "fixture-gen-\(prompt.lowercased().replacingOccurrences(of: " ", with: "-"))"
-        }
+        if isFixture { return try await Self.fixtureGenerate(prompt) }
         return try await api.generateMyAvatar(prompt: prompt)
     }
 
@@ -3665,7 +4048,7 @@ final class AppModel: ObservableObject {
             }
             return true
         } catch {
-            notice = Notice(text: "Could not update profile picture: \(error.localizedDescription)")
+            fail("save your picture", error)
             return false
         }
     }
@@ -3683,7 +4066,7 @@ final class AppModel: ObservableObject {
             saveAccountCache()
             return true
         } catch {
-            notice = Notice(text: "Picture not removed: \(error.localizedDescription)")
+            fail("remove your picture", error)
             return false
         }
     }
@@ -3714,7 +4097,7 @@ final class AppModel: ObservableObject {
         unpinHome(peopleChatId: chatId)
         path = []
         Task {
-            do { try await api.deleteChat(chatId) } catch { notice = Notice(text: "Delete failed: \(error.localizedDescription)") }
+            do { try await api.deleteChat(chatId) } catch { fail("delete it", error) }
         }
     }
 
@@ -3723,7 +4106,7 @@ final class AppModel: ObservableObject {
     func block(handle: String) {
         Task {
             do { try await api.block(handle: handle); blocked = (try? await api.blocks()) ?? blocked }
-            catch { notice = Notice(text: "Block failed: \(error.localizedDescription)") }
+            catch { fail("block them", error) }
         }
     }
 
@@ -3739,6 +4122,13 @@ final class AppModel: ObservableObject {
     /// A message the next ChatView should scroll to and tint (a search result opened
     /// from the bottom bar, [feedback iphone-bottom-search-bar-2026-10-25]).
     @Published var pendingReveal: MessageReveal?
+    /// The Settings page the next Settings sheet lands on (a Settings row opened
+    /// from search, [feedback search-settings-ios-2026-10-26]): Home presents the
+    /// sheet when this is set and clears it when the sheet closes.
+    @Published var pendingSettingsLanding: String?
+    /// The agent pane's settings row to drop open once the pane shows (a search
+    /// result for "voice" / "model" / "reasoning").
+    @Published var pendingAgentSetting: GlobalSearch.AgentSetting?
     /// App-wide search: message text, attachments and links per loaded chat, kept
     /// current lazily against `messagesVersion` (`GlobalSearch`).
     var searchIndex = SearchIndex()
@@ -3802,14 +4192,63 @@ final class AppModel: ObservableObject {
         return directory.first { $0.handle.caseInsensitiveCompare(handle) == .orderedSame }?.name
     }
 
-    func openPersonProfile(handle: String, avatarUrl: String?, chatId: String) {
-        if let m = peopleChat(chatId)?.members.first(where: { $0.handle == handle && !$0.isAgent }) {
-            showProfile(.user(ProfilePerson(m)))
-        } else if let p = directory.first(where: { $0.handle == handle }) {
-            showProfile(.user(ProfilePerson(p)))
-        } else {
-            showProfile(.user(ProfilePerson(id: handle, handle: handle, name: nil, avatarUrl: avatarUrl)))
+    /// The senders whose rows `chat` hides for me ([feedback blocked-state-ios-2026-10-26],
+    /// Jacob 2026-10-26: a group block hides the blocked person's messages from the blocker
+    /// alone): the relay's `blockedSenders` hint plus every member on my block list, as
+    /// `user:<id>`. Empty for a DM (its composer bar says Blocked instead).
+    func hiddenSenders(in chat: PeopleChat) -> Set<String> {
+        guard chat.isGroup else { return [] }
+        var out = Set(chat.blockedSenders)
+        for m in chat.humans where BlockedState.isBlocked(id: m.id, handle: m.handle, in: blocked) {
+            out.insert(m.id.hasPrefix("user:") ? m.id : "user:\(m.id)")
         }
+        return out
+    }
+
+    /// Tests: the relay's block list as `GET /blocks` would hand it over.
+    func setBlockedForTests(_ list: [Person]) { blocked = list }
+
+    /// Is this message hidden for me — from someone I blocked, in a people group?
+    func hidesMessage(_ m: Message, chatId: Id) -> Bool {
+        guard m.role == .user, let chat = peopleChat(chatId) else { return false }
+        return hiddenSenders(in: chat).contains(m.sender)
+    }
+
+    /// The one action behind every profile target in a chat — a sender name, the
+    /// avatar beside a bubble, an @mention chip, the header pill, a status-row
+    /// picture ([feedback profile-pane-toggle-ios-2026-10-26], `ProfileToggle`):
+    /// open the sheet on `target`; dismiss it when that same person or agent is
+    /// already up, whichever target opened it; swap it in place for someone else.
+    func toggleProfile(_ target: ProfileTarget) {
+        guard let next = ProfileToggle.next(showing: profilePath.last ?? profile, tapped: target) else {
+            profilePath = []
+            profile = nil
+            return
+        }
+        profilePath = []
+        profile = next
+    }
+
+    /// True while the sheet's top page is `target`'s subject (the label then
+    /// says "Close profile").
+    func profileShows(_ target: ProfileTarget) -> Bool {
+        (profilePath.last ?? profile)?.sameSubject(as: target) ?? false
+    }
+
+    /// The page a sender's handle opens: the chat's member, else the directory
+    /// entry, else a bare person from the row's own fields.
+    func personTarget(handle: String, avatarUrl: String?, chatId: String) -> ProfileTarget {
+        if let m = peopleChat(chatId)?.members.first(where: { $0.handle == handle && !$0.isAgent }) {
+            return .user(ProfilePerson(m))
+        } else if let p = directory.first(where: { $0.handle == handle }) {
+            return .user(ProfilePerson(p))
+        } else {
+            return .user(ProfilePerson(id: handle, handle: handle, name: nil, avatarUrl: avatarUrl))
+        }
+    }
+
+    func openPersonProfile(handle: String, avatarUrl: String?, chatId: String) {
+        toggleProfile(personTarget(handle: handle, avatarUrl: avatarUrl, chatId: chatId))
     }
 
     /// An agent that is not in my project list: the project carried by a
@@ -3961,7 +4400,7 @@ final class AppModel: ObservableObject {
             catch let e as RelayError where e.status == 404 {
                 // Already not blocked on the relay; the list below says so.
             }
-            catch { notice = Notice(text: "Unblock failed: \(error.localizedDescription)") }
+            catch { fail("unblock them", error) }
             await refreshBlocks()
         }
     }
@@ -3978,14 +4417,16 @@ final class AppModel: ObservableObject {
     func inviteToProject(_ projectId: Id, handle: String) async -> [ProjectMember]? {
         do { return try await api.addProjectMember(projectId, handle: handle) }
         catch {
-            notice = Notice(text: (error as? RelayError)?.type == "already_member" ? "@\(handle) is already a member." : "Invite failed: \(error.localizedDescription)")
+            fail((error as? RelayError)?.type == "already_member"
+                 ? UserError.refused("invite @\(handle)", "@\(handle) is already a member.")
+                 : UserError.classify("invite @\(handle)", error))
             return nil
         }
     }
 
     func removeProjectMember(_ projectId: Id, userId: String) async {
         do { try await api.removeProjectMember(projectId, userId: userId) }
-        catch { notice = Notice(text: "Remove failed: \(error.localizedDescription)") }
+        catch { fail("remove them", error) }
     }
 
     /// `/me/pushes`: unread flags, chat list refreshes and local notifications.
@@ -3999,23 +4440,31 @@ final class AppModel: ObservableObject {
             switch p.event {
             case .peopleMessage(let payload):
                 let cid = payload.chat_id
-                // Agent (or person) reached out in a chat we have not listed yet —
+                // Since 2026-10-26 the relay queues this for an agent's reply too (people chats
+                // and, with `project_id`, the agent's own project chats); before, only a
+                // person's row did, so an @agent answer never showed a banner here.
+                let projectId = payload.project_id ?? peopleSlot
+                let inPeople = payload.project_id == nil
+                // Agent (or person) reached out in a people chat we have not listed yet —
                 // refresh so open-from-notification can dial the room.
-                if peopleChat(cid) == nil { needChats = true }
+                if inPeople, peopleChat(cid) == nil { needChats = true }
                 if !isWatching(cid) {
-                    peopleUnread.insert(cid)
-                    unarchiveOnActivity(chatId: cid)
+                    if inPeople {
+                        peopleUnread.insert(cid)
+                        unarchiveOnActivity(chatId: cid)
+                    }
                     // Muted group: keep the unread flag, skip the local banner.
-                    if !isPeopleChatMuted(cid) {
+                    if !inPeople || !isPeopleChatMuted(cid) {
                         let sender = payload.sender
                         let from = sender.handle.isEmpty ? (payload.from_handle.isEmpty ? "someone" : payload.from_handle) : sender.handle
                         // §7c sender{} first; the chat's member list fills any gap.
                         let member = peopleChat(cid)?.members.first { $0.handle == from }
                         let agent = member?.isAgent == true ? member?.project : nil
                         let kind = sender.kind.isEmpty ? (agent != nil ? "agent" : "user") : sender.kind
+                        let body = (payload.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                         let info = MessagePush.userInfo(
-                            chatId: cid, projectId: peopleSlot, title: sender.name.isEmpty ? (member?.displayName ?? "@\(from)") : sender.name,
-                            body: "New message",
+                            chatId: cid, projectId: projectId, title: sender.name.isEmpty ? (member?.displayName ?? "@\(from)") : sender.name,
+                            body: body.isEmpty ? "New message" : body,
                             senderKind: kind, senderId: sender.id.isEmpty ? (member?.id ?? from) : sender.id,
                             senderName: sender.name.isEmpty ? (member?.displayName ?? from) : sender.name, senderHandle: from,
                             avatar: sender.avatar,
@@ -4066,6 +4515,12 @@ final class AppModel: ObservableObject {
                 await refreshSecrets()
             case .secretsPaused:
                 await refreshSecrets()
+            case .messageRedacted(let payload):
+                // Secret hand-off: the row itself arrives through room sync (and the store's
+                // next snapshot is shallow); here the delivered notifications that may still
+                // show the pasted key go, and the search index follows the message list.
+                PushManager.shared.clearDelivered(chatId: payload.chat_id)
+                syncSearchIndex()
             case .secretExpiring(let payload):
                 PushManager.post(
                     id: p.id, title: "Secrets",
@@ -4100,8 +4555,13 @@ final class AppModel: ObservableObject {
                 }
             case .spaceArchived(let payload):
                 applyRemoteArchive(spaceId: payload.space_id, kind: payload.kind, archived: payload.archived_at != nil)
+            case .channelMessage:
+                // Server channel banner: push-server-channels-ios-2026-10-26 (next item).
+                break
             case .peopleChatDeleted, .peopleInviteAccepted, .machineReady:
                 break
+            case .notificationsCleared(let payload):
+                applyRemoteClear(chatId: payload.chat_id, relayTotal: payload.badge)
             }
         }
         if needChats { await refreshPeople() }
@@ -4260,7 +4720,7 @@ final class AppModel: ObservableObject {
             doc.commit()
             Haptics.pick()
         } catch {
-            notice = Notice(text: "Could not update the reaction: \(error.localizedDescription)")
+            fail("update the reaction", error)
         }
     }
 
@@ -4310,8 +4770,9 @@ final class AppModel: ObservableObject {
                 Haptics.pick()
             } catch {
                 let e = error as? RelayError
-                notice = Notice(text: e?.status == 403 ? "You can only delete your own messages."
-                                 : "Could not delete the message: \(error.localizedDescription)")
+                fail(e?.status == 403
+                     ? UserError.refused("delete the message", "You can only delete your own messages.")
+                     : UserError.classify("delete the message", error))
             }
         }
     }
@@ -4348,7 +4809,7 @@ final class AppModel: ObservableObject {
             doc.commit()
             Haptics.pick()
         } catch {
-            notice = Notice(text: "Could not edit the message: \(error.localizedDescription)")
+            fail("edit the message", error)
         }
     }
 
@@ -4554,6 +5015,8 @@ final class AppModel: ObservableObject {
     /// so every client draws the quote header and agentd puts the quoted message in the turn.
     func send(chatId: Id, text: String, attachments: [PendingAttachment] = [], replyTo: Id? = nil,
               forwardedFrom: String? = nil) {
+        // A new send clears the composer's note (the next failure brings its own).
+        clearSendError(chatId)
         if JobTabs.isJobChat(chatId) {
             steerFromJobTab(chatId: chatId, text: text)
             return
@@ -4579,7 +5042,7 @@ final class AppModel: ObservableObject {
                     _ = try await api.putBlob(projectId: chat.projectId, key: key, mime: a.mime, data: a.data)
                     uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: key, kind: kind))
                 } catch {
-                    notice = Notice(text: "Attachment upload failed: \(error.localizedDescription)")
+                    setSendError(chatId, UserError.classify("upload the attachment", error))
                     uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: nil, kind: kind))
                 }
             }
@@ -4605,7 +5068,11 @@ final class AppModel: ObservableObject {
             let text = try await api.transcribe(projectId: projectId, data: memo.data, mime: memo.mime)
             return text.isEmpty ? nil : text
         } catch {
-            notice = Notice(text: "Could not transcribe the memo: \(error.localizedDescription)")
+            if let chat = visibleChatId {
+                setSendError(chat, UserError.classify("transcribe your memo", error))
+            } else {
+                fail("transcribe your memo", error)
+            }
             return nil
         }
     }
@@ -4660,6 +5127,43 @@ final class AppModel: ObservableObject {
     /// An approval card (S18) answered on the phone: for a secret request the relay row is the
     /// authority (`POST /secrets/requests/{id}/decide`), then the doc command `approve` /
     /// `reject` flips the card for agentd, exactly as the Mac does with `vaultRequestId`.
+    /// Secret hand-off request cards: where this device's save stands, by approval id.
+    enum HandoffState: Equatable {
+        case saving
+        /// Saved; the vault name.
+        case saved(String)
+        /// Drawn by the card's `ErrorNote` ("question-card-error").
+        case failed(UserError)
+    }
+
+    /// Secret hand-off request card → Save: the value leaves this device once, to
+    /// `POST /secrets` (source `chat`, the agent granted); the card is then answered with
+    /// the saved secret's id and names — never the value — so the agent learns only the name.
+    func saveSecretFromCard(chatId: Id, approvalId: String, projectId: Id, name: String, value: String, purpose: String) {
+        handoff[approvalId] = .saving
+        Task { @MainActor in
+            do {
+                let body: [String: Any] = [
+                    "name": name, "kind": "key", "value": value, "note": purpose,
+                    "agents": [["project_id": projectId, "note": purpose]],
+                    "source": ["kind": "chat", "project_id": projectId, "chat_id": chatId],
+                ]
+                let saved = try await api.createSecret(body)
+                markQuestionAnswered(chatId: chatId, questionId: "approval:\(approvalId)", answer: ["saved"])
+                if let doc = docs[chatId] {
+                    let payload: [String: Any] = ["approvalId": approvalId,
+                                                  "secret": ["id": saved.id, "name": saved.name, "env": saved.env]]
+                    try? doc.pushCommand("approve", payload: payload, device: deviceId)
+                    doc.commit()
+                }
+                handoff[approvalId] = .saved(saved.env)
+                await refreshSecrets()
+            } catch {
+                handoff[approvalId] = .failed(UserError.classify("save the secret", error))
+            }
+        }
+    }
+
     func decideApproval(chatId: Id, approvalId: String, choice: String) {
         let questionId = "approval:\(approvalId)"
         var secretRequestId: String?
@@ -4676,7 +5180,7 @@ final class AppModel: ObservableObject {
                     try await api.decideSecretRequest(rid, decision: choice)
                     await refreshSecrets()
                 } catch {
-                    notice = Notice(text: "Secrets: \(error.localizedDescription)")
+                    fail("save the secret", error)
                 }
             }
         }
@@ -4706,7 +5210,7 @@ final class AppModel: ObservableObject {
             do {
                 try await relay.revokeShellGrant(projectId, grantId: grantId)
             } catch {
-                notice = Notice(text: "Shell approvals: \(error.localizedDescription)")
+                fail("change the shell approvals", error)
             }
             await refreshShellGrants(projectId)
         }
@@ -4757,7 +5261,7 @@ final class AppModel: ObservableObject {
             }
         } catch {
             clearUnacked(chatId: chatId, messageId: messageId)
-            notice = Notice(text: "Could not write the message: \(error.localizedDescription)")
+            setSendError(chatId, UserError.classify("send your message", error))
             return
         }
         #if DEBUG
@@ -4871,7 +5375,7 @@ final class AppModel: ObservableObject {
                                        attachments: [Attachment], extra: [String: Any], replyTo: Id? = nil,
                                        forwardedFrom: String? = nil) {
         guard optimisticChatIds.contains(chatId) else {
-            notice = Notice(text: "Could not write the message: chat is not ready yet")
+            setSendError(chatId, UserError.fromText("send your message", "chat is not ready yet"))
             return
         }
         let messageId = newId()
@@ -5155,7 +5659,7 @@ final class AppModel: ObservableObject {
         guard let jobId = JobTabs.jobId(chatId) else { return }
         let ask = rollouts[jobId]?.askMessageId ?? jobRow(jobId)?.askMessageId
         guard let parent = jobParentChat(jobId), let ask else {
-            notice = Notice(text: "This task cannot be steered from here yet — reply to your request in the chat instead.")
+            failRefused("steer the task", "This task cannot be steered from here yet — reply to your request in the chat instead.")
             return
         }
         let messageId = newId()
@@ -5315,8 +5819,8 @@ final class AppModel: ObservableObject {
             do {
                 try await api.wake(projectId: projectId)
             } catch {
-                notice = Notice(text: "Wake failed: \(error.localizedDescription)")
-                setProjectState(projectId, .error, detail: error.localizedDescription)
+                fail("wake the machine", error)
+                setProjectState(projectId, .error, detail: UserError.classify("wake the machine", error).sentence)
                 machine.state = .error
             }
             await refreshMachine()
@@ -5371,7 +5875,7 @@ final class AppModel: ObservableObject {
             adoptOptimisticChat(localId: localId, real: real)
         } catch {
             abandonOptimisticChat(localId: localId, projectId: projectId,
-                                  reason: "New chat failed: \(error.localizedDescription)")
+                                  reason: UserError.classify("start the chat", error).raw)
         }
     }
 
@@ -5434,7 +5938,7 @@ final class AppModel: ObservableObject {
             path.removeLast()
         }
         if visibleChatId == localId { visibleChatId = nil }
-        notice = Notice(text: reason)
+        fail(UserError.fromText("start the chat", reason))
     }
 
     /// Whether to PUT /read now, skip (same value already sent), or wait out the
@@ -5546,7 +6050,7 @@ final class AppModel: ObservableObject {
             do {
                 try await api.setModel(projectId: projectId, model: model, effort: effort)
             } catch {
-                notice = Notice(text: "Model change not saved: \(error.localizedDescription)")
+                fail("change the model", error)
             }
         }
     }
@@ -5558,14 +6062,14 @@ final class AppModel: ObservableObject {
                 // The Create sheet's picture goes into the new agent's own slot first, so the
                 // list refresh already shows it.
                 if let picture, let id, let jpeg = await draftJpeg(picture) {
-                    let key = "avatar-\(Int(Date().timeIntervalSince1970 * 1000)).jpg"
-                    if (try? await api.putBlob(projectId: id, key: key, mime: "image/jpeg", data: jpeg)) != nil {
+                    let key = "avatar-\(Int(Date().timeIntervalSince1970 * 1000)).\(PictureMaster.ext(jpeg))"
+                    if (try? await api.putBlob(projectId: id, key: key, mime: PictureMaster.mime(jpeg), data: jpeg)) != nil {
                         _ = try? await api.setProjectImageKey(id, key: key)
                     }
                 }
                 await refreshRegistry()
             } catch {
-                notice = Notice(text: "New project failed: \(error.localizedDescription)")
+                fail("create the agent", error)
             }
         }
     }
@@ -5574,10 +6078,7 @@ final class AppModel: ObservableObject {
 
     /// Generate before the entity exists: into my own slot (`POST /me/avatar/generate`, #1789).
     func generateDraftAvatar(prompt: String) async throws -> String {
-        if isFixture {
-            try? await Task.sleep(nanoseconds: 1_200_000_000)
-            return "fixture-gen-\(prompt.lowercased().replacingOccurrences(of: " ", with: "-"))"
-        }
+        if isFixture { return try await Self.fixtureGenerate(prompt) }
         do {
             return try await api.generateMyAvatar(prompt: prompt)
         } catch let e as RelayError where e.status == 404 {
@@ -5604,7 +6105,7 @@ final class AppModel: ObservableObject {
             do {
                 return try await api.blobData(projectId: "users:\(me)", key: key)
             } catch {
-                notice = Notice(text: "Generated picture not copied: \(error.localizedDescription)")
+                fail("keep the generated picture", error)
                 return nil
             }
         }
@@ -5641,7 +6142,7 @@ final class AppModel: ObservableObject {
                     open(project: copy)
                 }
             } catch {
-                notice = Notice(text: "Duplicate failed: \(error.localizedDescription)")
+                fail("duplicate the agent", error)
             }
         }
     }
@@ -5675,7 +6176,7 @@ final class AppModel: ObservableObject {
                 try await api.deleteProject(projectId)
                 await refreshRegistry()
             } catch {
-                notice = Notice(text: "Delete failed: \(error.localizedDescription)")
+                fail("delete it", error)
                 await refreshRegistry()
             }
         }

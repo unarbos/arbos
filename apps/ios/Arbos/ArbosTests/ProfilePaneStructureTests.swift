@@ -164,6 +164,6 @@ final class MessageButtonTests: XCTestCase {
     /// The hero keeps its order with the pill: picture, name, subtitle, then the action.
     func testTheHeroActionSitsUnderTheSubtitle() {
         XCTAssertEqual(PaneKit.heroActionGap, 6)
-        XCTAssertEqual(Theme.control, 42, "the pill is the control family's height")
+        XCTAssertEqual(Theme.control, Controls.diameter, "the pill is the control family's height")
     }
 }

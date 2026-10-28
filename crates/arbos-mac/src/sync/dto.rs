@@ -355,6 +355,12 @@ impl From<&SecretDto> for Secret {
                 d.people.iter().map(SecretDirector::from).collect()
             },
             others_ask: d.others_ask.clone().unwrap_or_else(|| "refuse".into()),
+            source: d.source.as_ref().map(|src| crate::model::SecretSource {
+                kind: src.kind.clone(),
+                project_id: src.project_id.clone(),
+                project_name: src.project_name.clone(),
+                chat_id: src.chat_id.clone(),
+            }),
         }
     }
 }
@@ -432,6 +438,7 @@ fn secret_from_summary(s: &ProjectSecretSummaryDto) -> Secret {
         agents: Vec::new(),
         directors: Vec::new(),
         others_ask: "refuse".into(),
+        source: None,
     }
 }
 
@@ -696,6 +703,8 @@ pub(crate) fn project_from_dto(
         image_url: None,
         avatar_version: p.avatar_version.unwrap_or(0),
         message_grants: p.message_grants.iter().map(message_grant_from).collect(),
+        blocked_senders: Vec::new(),
+        my_role: None,
     }
 }
 
@@ -1019,6 +1028,8 @@ pub(crate) fn people_space_from(
             .map(|k| format!("{http_url}/blob/people:{id}/{k}?token={token}")),
         avatar_version: 0,
         message_grants: Vec::new(),
+        blocked_senders: dto.blocked_senders.clone(),
+        my_role: dto.me.role.clone().flatten(),
     };
     let chat = Chat {
         id: id.clone(),
@@ -1561,10 +1572,24 @@ mod tests {
         assert!(s.directors[0].enabled);
         assert_eq!(s.directors[0].last_asked_at, Some(1_700_000_003_000));
         assert_eq!(s.others_ask, "refuse");
+        // Secret hand-off: the fixture's secret came from Settings; one given in chat says so.
+        assert_eq!(s.source.as_ref().map(|x| x.kind.as_str()), Some("settings"));
+        assert!(s.source_label().is_none() && s.added_label().is_none());
+        let mut given = secret.clone();
+        given.source = Some(arbos_core::api::SecretSourceDto {
+            kind: "chat".into(),
+            project_id: Some("proj_secrets_fixture".into()),
+            project_name: Some("Research".into()),
+            chat_id: Some("chat_1".into()),
+        });
+        let g = Secret::from(&given);
+        assert_eq!(g.source_label(), Some("given in chat"));
+        assert_eq!(g.added_label().as_deref(), Some("In chat with Research"));
         // A relay from before #1442 sends only `directors[]` and no switch: still on, still refuse.
         let mut old = secret.clone();
         old.people.clear();
         old.others_ask = None;
+        old.source = None;
         old.directors[0].enabled = None;
         let s_old = Secret::from(&old);
         assert_eq!(s_old.directors.len(), 1);

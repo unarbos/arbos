@@ -93,14 +93,18 @@ final class LinkIcons: ObservableObject {
                 out.append(host)
             }
         }
-        for block in Markdown.blocks(text) {
-            switch block {
-            case .paragraph(let t), .heading(_, let t): scan(t)
-            case .bullets(let items), .numbered(let items): items.forEach(scan)
-            case .table(let header, let rows): header.forEach(scan); rows.forEach { $0.forEach(scan) }
-            case .code: break
+        func walk(_ blocks: [Block]) {
+            for block in blocks {
+                switch block {
+                case .paragraph(let t), .heading(_, let t): scan(t)
+                case .quote(let inner): walk(inner)
+                case .bullets(let items), .numbered(let items): items.forEach(scan)
+                case .table(let header, let rows): header.forEach(scan); rows.forEach { $0.forEach(scan) }
+                case .code, .math, .chart: break
+                }
             }
         }
+        walk(Markdown.blocks(text))
         return out
     }
 

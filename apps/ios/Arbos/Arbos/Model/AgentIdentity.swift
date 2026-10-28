@@ -52,7 +52,20 @@ extension AppModel {
 
     /// The shared resolver: which card a row is drawn from, and what every surface shows.
     func agentIdentity(sender: String, handle: String?, name: String?, chatId: Id?) -> AgentIdentity {
-        resolveAgent(sender: sender, handle: handle, name: name, cards: agentCards(chatId: chatId))
+        let cards = agentCards(chatId: chatId)
+        let resolved = resolveAgent(sender: sender, handle: handle, name: name, cards: cards)
+        if resolved.known { return resolved }
+        // A live row the box has not attributed yet (`sender: "agent"`, no handle, no name)
+        // in a people chat with one agent is that agent — the same rule as the Mac (Jacob,
+        // 2026-10-26: the working row drew a seeded leaf while the finished bubbles had the
+        // photo). Several agents on the roster: nothing is safe to assume.
+        let bare = agentSenderId(sender: sender).isEmpty || sender == "agent" || sender == "assistant"
+        if bare, (handle ?? "").trimmingCharacters(in: .whitespaces).isEmpty,
+           let chatId, let chat = peopleChat(chatId), chat.agents.count == 1 {
+            let only = chat.agents[0]
+            return resolveAgent(sender: only.id, handle: only.handle, name: only.project?.name ?? only.name, cards: cards)
+        }
+        return resolved
     }
 
     /// The agent a people-chat row is drawn from, as every surface draws it: the roster's
@@ -148,9 +161,16 @@ extension AppModel {
         return out
     }
 
-    /// The newest facts the model knows for an agent (highest stamp; the first copy among equals).
+    /// The newest facts the model knows for an agent: the highest stamp wins; among equal
+    /// stamps the first copy (my record, then the rosters in list order). The stamp is the only
+    /// truth — never "the one with a picture": that guess made a stale picture beat a reset
+    /// whose stamp tied (Jacob, 2026-10-26). The relay stamps every row, so two differing
+    /// states cannot share a stamp any more.
     func newestAgentAvatar(_ projectId: Id) -> AgentAvatarFacts? {
-        agentAvatarCopies(projectId).max { a, b in a.version < b.version }
+        agentAvatarCopies(projectId).reduce(nil) { best, c in
+            guard let b = best else { return c }
+            return c.version > b.version ? c : b
+        }
     }
 
     /// Write `facts` into every copy of the agent — the one apply path. A copy that already

@@ -189,7 +189,11 @@ pub fn resolve<'c>(
 }
 
 /// Of every copy of `hit`'s agent in `cards`, the one with the highest avatar stamp; the
-/// first in the caller's order among equals (so an unstamped world behaves as before).
+/// first in the caller's order among equals. The stamp is the only truth: a guess such as
+/// "the copy with a picture is the whole one" let a stale picture beat a reset whose stamp
+/// tied (Jacob, 2026-10-26); the relay stamps every row, so two differing states never share
+/// a stamp, and a copy that lost its picture on the way (the Mac store once dropped it) is
+/// fixed at the source, not here.
 fn newest_copy<'c>(hit: &'c AgentCard, cards: &[&'c AgentCard]) -> &'c AgentCard {
     cards
         .iter()
@@ -475,6 +479,26 @@ mod tests {
         let r = resolve(&bubble, [&stale_roster, &reset]);
         assert_eq!(r.image_key, None);
         assert_eq!(r.avatar_version, 1_700_000_200_000);
+
+        // Equal stamps and a disagreement (one copy with a picture, one without): the stamp
+        // is the only truth, so the caller's order decides — never "the one with a picture",
+        // which would resurrect a stale picture over a reset (Jacob, 2026-10-26).
+        let no_picture = card("01TEST", "TestAgent");
+        let picture = AgentCard {
+            image_key: Some("avatar-1.jpg".into()),
+            ..card("01TEST", "TestAgent")
+        };
+        assert_eq!(
+            resolve(&bubble, [&no_picture, &picture]).image_key,
+            None,
+            "a reset that reads first stays a reset"
+        );
+        assert_eq!(
+            resolve(&bubble, [&picture, &no_picture])
+                .image_key
+                .as_deref(),
+            Some("avatar-1.jpg")
+        );
 
         // Unstamped copies (an older relay) keep the caller's order: the roster wins.
         let unstamped = [

@@ -31,6 +31,7 @@ use crate::app::{AppState, ViewerItem};
 use crate::model::{now_ms, AttachmentKind, Person};
 use crate::ui::avatars;
 use crate::ui::glass::{self, MENU_CARD_BORDER, MENU_CARD_PADDING, MENU_GAP, MENU_ROW_HEIGHT};
+use crate::ui::highlight::{self, Shape};
 use crate::ui::icons::icon;
 use crate::ui::message_menu::place;
 use crate::ui::people;
@@ -529,7 +530,14 @@ fn row(
         .text_size(px(TEXT_SMALL))
         .text_color(theme.text)
         .cursor_pointer()
-        .when(hovered, |el| el.bg(theme.surface_2))
+        .group(kit::HOT)
+        // The armed row (state, after the hover delay) draws the pill lit;
+        // an unarmed one lights it from the group hover like every row.
+        .child(if hovered {
+            highlight::armed_layer(Shape::Nested(kit::CARD_RADIUS), theme)
+        } else {
+            highlight::layer(false, Shape::Nested(kit::CARD_RADIUS), theme)
+        })
         .child(thumb(&entry, theme))
         .child(
             div()
@@ -555,11 +563,17 @@ fn row(
                 .size(px(MORE_DISC))
                 .flex_shrink_0()
                 .rounded_full()
-                .bg(theme.border_strong)
                 .flex()
                 .items_center()
                 .justify_center()
-                .hover(|s| s.bg(theme.text_faint))
+                // The disc sits on the lit row: an opaque step over the card.
+                .map(|el| {
+                    highlight::washed(
+                        el,
+                        highlight::over(theme.pane_card, theme.border_strong),
+                        theme,
+                    )
+                })
                 .child(icon("ellipsis", 14.0, theme.text))
                 .on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
                     cx.stop_propagation();
@@ -579,7 +593,7 @@ fn row(
                 .child(rel_time(now, entry.when())),
         )
     };
-    el = el.child(kit::hairline_below(kit::INSET + THUMB + kit::GAP, theme));
+    el = el.child(kit::hairline_below(theme));
     if hover.is_some_and(|h| h.armed) {
         let above = shell
             .library
@@ -648,7 +662,7 @@ fn show_more(
         .text_size(px(TEXT_SMALL))
         .text_color(theme.text_muted)
         .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
+        .map(|el| highlight::row(el, false, Shape::Nested(kit::CARD_RADIUS), theme))
         .child(if expanded { "Show less" } else { "Show more" })
         .child(icon(
             if expanded {
@@ -706,7 +720,7 @@ fn sender_picture(sender: &Sender, state: &AppState, theme: &Theme) -> AnyElemen
             people::avatar(state.avatar(&p.avatar_url), p, CARD_AVATAR, theme).into_any_element()
         }
         Sender::Agent(pid) => match state.project(pid) {
-            Some(p) => avatars::project(p, CARD_AVATAR, theme).into_any_element(),
+            Some(p) => avatars::project_in(state, p, CARD_AVATAR, theme).into_any_element(),
             None => avatars::element(pid, "Agent", None, CARD_AVATAR, theme).into_any_element(),
         },
         Sender::Me => {
@@ -1125,6 +1139,7 @@ mod render_tests {
                 bytes: Some(212_000),
                 kind: Some(kind),
                 title: None,
+                chart_part: None,
             },
         }
     }

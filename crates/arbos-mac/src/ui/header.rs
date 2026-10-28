@@ -17,13 +17,16 @@ use gpui::{
 use crate::app::ProfilePage;
 use crate::model::{Chat, LinkState, Project, ServerChannel, ServerInfo};
 use crate::ui::avatars;
+use crate::ui::blocked;
 use crate::ui::composer::Composer;
 use crate::ui::glass::{self, WindowDrag};
 use crate::ui::groups;
+use crate::ui::highlight;
 use crate::ui::icons::icon;
 use crate::ui::identity;
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
+use crate::ui::profile_target;
 use crate::ui::shell::Shell;
 use crate::ui::sidebar::{self, machine_dot};
 use crate::ui::theme::{
@@ -54,7 +57,11 @@ pub fn render(
     // The pill wears a blue ring while its right pane is open (mockups b, f;
     // parity review 2026-10-20).
     let pane_open = match state.profile.as_ref() {
-        Some(ProfilePage::User { space_id, .. }) => space_id.as_deref() == Some(space.id.as_str()),
+        // The DM's person, whichever target opened them (a chip's page has no space).
+        Some(ProfilePage::User { handle, .. }) => space
+            .person()
+            .filter(|_| is_people && !space.is_people_group())
+            .is_some_and(|p| p.handle.eq_ignore_ascii_case(handle)),
         Some(ProfilePage::Group { space_id }) => space_id == &space.id,
         Some(ProfilePage::Agent { project_id }) => project_id == &space.id,
         Some(ProfilePage::Me)
@@ -98,26 +105,39 @@ pub fn render(
         .filter(|_| is_people && !space.is_people_group())
     {
         let image = state.avatar(&person.avatar_url);
-        let handle = person.handle.clone();
-        let sid = space.id.clone();
-        name_part(
-            people::avatar(image, person, AVATAR_HEADER, &theme),
-            name_label(person.display_name(), &theme).into_any_element(),
-            &theme,
-        )
-        .on_click(cx.listener(move |this, _, _, cx| {
+        let page = ProfilePage::User {
+            handle: person.handle.clone(),
+            space_id: Some(space.id.clone()),
+        };
+        // Blocked ([feedback blocked-state-mac-2026-10-26]): the tag after the name.
+        let label: AnyElement = if state.is_blocked(person) {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .min_w_0()
+                .child(name_label(person.display_name(), &theme))
+                .child(blocked::tag(&theme))
+                .into_any_element()
+        } else {
+            name_label(person.display_name(), &theme).into_any_element()
+        };
+        // The DM pill is a profile target too (`ui::profile_target`): the
+        // person's pane opens, a second click — here or on their name in a
+        // bubble — closes it.
+        let part = profile_target::mark(
+            name_part(
+                people::avatar(image, person, AVATAR_HEADER, &theme),
+                label,
+                &theme,
+            ),
+            &person.display_name(),
+            state.profile_shows(&page),
+        );
+        part.on_click(cx.listener(move |this, _, _, cx| {
             this.members_open = false;
-            this.add_agent_open = false;
-            let (handle, sid) = (handle.clone(), sid.clone());
-            this.state.update(cx, |s, cx| {
-                s.toggle_profile(
-                    ProfilePage::User {
-                        handle,
-                        space_id: Some(sid),
-                    },
-                    cx,
-                )
-            });
+            let page = page.clone();
+            this.state.update(cx, |s, cx| s.toggle_profile(page, cx));
         }))
     } else if space.is_people_group() {
         let sid = space.id.clone();
@@ -128,7 +148,6 @@ pub fn render(
         )
         .on_click(cx.listener(move |this, _, _, cx| {
             this.members_open = false;
-            this.add_agent_open = false;
             let sid = sid.clone();
             this.state.update(cx, |s, cx| {
                 s.toggle_profile(ProfilePage::Group { space_id: sid }, cx)
@@ -161,16 +180,30 @@ pub fn render(
         } else {
             name_label(space.name.clone(), &theme).into_any_element()
         };
-        // D92 amendment: the picture built before the clock takes `cx`.
-        let picture_disc = groups::picture(space, state, AVATAR_HEADER, &theme);
-        if avatar_state != avatars::AvatarState::Idle {
-            PulseClock::request(cx);
-        }
         // A project with other people: the group pane; my own agent: its
         // profile. Double-click the name to rename (owned agents only) — so
         // a single click opens the page only after the double-click window
         // (#1068).
         let groupish = space.is_groupish();
+        // The agent pill is a profile target (`ui::profile_target`): its
+        // click goes through `open_from_name` → `AppState::toggle_profile`
+        // after the double-click window, so it opens, closes and swaps like
+        // the agent's name in a bubble; the label and hand are the shared ones.
+        let page = if groupish {
+            ProfilePage::Group {
+                space_id: space.id.clone(),
+            }
+        } else {
+            ProfilePage::Agent {
+                project_id: space.id.clone(),
+            }
+        };
+        let showing = state.profile_shows(&page);
+        // D92 amendment: the picture built before the clock takes `cx`.
+        let picture_disc = groups::picture(space, state, AVATAR_HEADER, &theme);
+        if avatar_state != avatars::AvatarState::Idle {
+            PulseClock::request(cx);
+        }
         // The machine dot hangs off the disc's corner, inside the slot's box.
         let picture = div()
             .relative()
@@ -195,10 +228,10 @@ pub fn render(
                             .bg(machine_dot(machine, &theme)),
                     ),
             );
-        name_part(picture, name_el, &theme).on_click(cx.listener(
-            move |this, event: &gpui::ClickEvent, window, cx| {
+        let part = profile_target::mark(name_part(picture, name_el, &theme), &space.name, showing);
+        part.on_click(
+            cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                 this.members_open = false;
-                this.add_agent_open = false;
                 let p = pid.clone();
                 if !can_rename {
                     this.open_from_name(p, groupish, cx);
@@ -207,8 +240,8 @@ pub fn render(
                 } else {
                     this.name_clicked(p, groupish, cx);
                 }
-            },
-        ))
+            }),
+        )
     };
     pill = pill.child(name_part);
 
@@ -224,14 +257,16 @@ pub fn render(
 
     // ----- the bar: one frame for every chat kind ---------------------------------
     let sidebar_toggle = sidebar_hidden.then(|| sidebar_toggle(shell, &theme, cx));
-    bar_frame(sidebar_toggle, with_link_pill(pill, shell, cx))
+    let kind = ChatKind::of_space(space);
+    bar_frame(sidebar_toggle, with_link_pill(pill, kind, shell, cx))
 }
 
 /// The pill's frame, the same for every chat kind — agent, DM, group, server
-/// channel: `PILL_HEIGHT` tall, round, the header material for the theme
-/// (`glass::header_surface`: frost on Glass, `bubble_assistant` on Matte), a
-/// 2 pt accent ring while its right pane is open (mockups b, f; parity review
-/// 2026-10-20). `pr` is the right pad (tighter when a "+" follows the name).
+/// channel, job tab: `PILL_HEIGHT` tall, round, frosted glass on Glass and
+/// Matte alike (`glass::header_surface`; [feedback
+/// mac-header-pill-glass-matte-2026-10-26]), a 2 pt accent ring while its
+/// right pane is open (mockups b, f; parity review 2026-10-20). `pr` is the
+/// right pad (tighter when a "+" follows the name).
 pub(crate) fn pill_frame(theme: &Theme, pane_open: bool, pr: f32) -> Stateful<Div> {
     let pill = div()
         .id("header-title")
@@ -248,7 +283,58 @@ pub(crate) fn pill_frame(theme: &Theme, pane_open: bool, pr: f32) -> Stateful<Di
             gpui::transparent_black()
         })
         .min_w_0();
-    glass::header_surface(pill, theme.bubble_assistant, theme)
+    glass::header_surface(pill, theme)
+}
+
+/// The chat kinds the header serves. The connection capsule's rule is written
+/// per kind ([feedback offline-chip-group-header-2026-10-27]) so a new kind
+/// has to decide, not inherit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChatKind {
+    /// An agent's chat or job tab (`render` on a project space).
+    Agent,
+    /// A people DM (`render` on a `SpaceKind::Dm` space).
+    Dm,
+    /// A people group (`render` on a `SpaceKind::Group` space).
+    Group,
+    /// A server channel (`render_channel`).
+    Channel,
+}
+
+impl ChatKind {
+    #[cfg(test)]
+    pub(crate) const ALL: [ChatKind; 4] = [
+        ChatKind::Agent,
+        ChatKind::Dm,
+        ChatKind::Group,
+        ChatKind::Channel,
+    ];
+
+    pub(crate) fn of_space(space: &Project) -> ChatKind {
+        if space.is_people_group() {
+            ChatKind::Group
+        } else if space.is_people() {
+            ChatKind::Dm
+        } else {
+            ChatKind::Agent
+        }
+    }
+
+    /// Whether this kind of chat shows the connection capsule under its pill.
+    /// The capsule reports *this Mac's link to the relay for the open chat*
+    /// (`AppState::link_pill`: the chat's own room socket and the relay's
+    /// registry poll) — not a member's presence — and every kind talks to
+    /// the relay through a room: an agent's chat, a DM, a people group and a
+    /// server channel alike queue their sends while the link is down. So the
+    /// capsule is **shown for every kind**, in the same place
+    /// (`metrics::LINK_PILL_TOP`). An "Offline" under a group's pill is
+    /// correct; what was wrong in [feedback
+    /// offline-chip-group-header-2026-10-27] was the clip that cut it in half.
+    pub(crate) fn shows_link_pill(self) -> bool {
+        match self {
+            ChatKind::Agent | ChatKind::Dm | ChatKind::Group | ChatKind::Channel => true,
+        }
+    }
 }
 
 /// The pill plus, hanging under it, the connection pill ([feedback
@@ -259,11 +345,25 @@ pub(crate) fn pill_frame(theme: &Theme, pane_open: bool, pr: f32) -> Stateful<Di
 /// "messages queue locally" line. It is an absolute child of the pill slot,
 /// so it takes no room in `bar_frame`: the bar keeps `metrics::HEIGHT`, the pill stays at
 /// `metrics::PILL_TOP`, the drag catchment and the fade band are unchanged,
-/// and it floats over the list like the bar itself.
-fn with_link_pill(pill: Stateful<Div>, shell: &Shell, cx: &mut Context<Shell>) -> AnyElement {
-    let theme = Theme::of(cx).clone();
-    // On Glass the list blurs through the pill ([feedback mac-header-glass-2026-10-25]).
-    let pill = glass::header_frost(metrics::PILL_HEIGHT / 2.0, &theme, pill);
+/// and it floats over the list like the bar itself. Its box reaches
+/// `metrics::LINK_PILL_OVERHANG` below the bar, so the bar must not clip its
+/// children and the shell's floating overlay is `metrics::OVERLAY_HEIGHT`
+/// tall ([feedback offline-chip-group-header-2026-10-27]: both clipped at
+/// `HEIGHT` and only the top half of "Offline" peeked out under the pill).
+/// It steps aside while the ⌘F bar is open: that bar takes the slot under
+/// the pill (`chat_search::metrics::TOP`).
+fn with_link_pill(
+    pill: Stateful<Div>,
+    kind: ChatKind,
+    shell: &Shell,
+    cx: &mut Context<Shell>,
+) -> AnyElement {
+    // The list blurs through the pill on both surfaces ([feedback
+    // mac-header-glass-2026-10-25], [feedback mac-header-pill-glass-matte-2026-10-26]).
+    let pill = glass::header_frost(metrics::PILL_HEIGHT / 2.0, pill);
+    if !kind.shows_link_pill() || shell.state.read(cx).chat_search_open() {
+        return pill;
+    }
     let Some(status) = link_pill(shell, cx) else {
         return pill;
     };
@@ -321,6 +421,7 @@ fn link_pill(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
             .pr(px(11.0))
             .rounded_full()
             .bg(theme.bubble_assistant)
+            .debug_selector(|| "chat-header-link-pill".into())
             .child(
                 div()
                     .size(px(6.0))
@@ -344,9 +445,9 @@ fn link_pill(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
 fn sidebar_toggle(shell: &Shell, theme: &Theme, cx: &mut Context<Shell>) -> AnyElement {
     let _ = shell.state.read(cx).sidebar_overlay;
     let disc = glass::control_disc("header-sidebar", "sidebar-left", CONTROL_GLYPH_WIDE, theme);
-    // The header's material ([feedback mac-header-glass-2026-10-25]): frost on
-    // Glass, the strip disc's `surface_2` on Matte.
-    let disc = glass::header_surface(disc, theme.surface_2, theme)
+    // The header's material ([feedback mac-header-glass-2026-10-25]): frosted
+    // glass on both surfaces, like the pill beside it.
+    let disc = glass::header_surface(disc, theme)
         // The bar is a window-drag region; a control is not part of it.
         .on_mouse_down(
             gpui::MouseButton::Left,
@@ -362,7 +463,7 @@ fn sidebar_toggle(shell: &Shell, theme: &Theme, cx: &mut Context<Shell>) -> AnyE
                 s.toggle_rail(narrow, cx)
             });
         }));
-    glass::header_frost(CONTROL / 2.0, theme, disc)
+    glass::header_frost(CONTROL / 2.0, disc)
 }
 
 /// Geometry every chat header shares — one number each, read by the tests.
@@ -400,6 +501,30 @@ pub mod metrics {
     /// child of the pill slot and takes no room in the bar.
     pub const LINK_PILL_HEIGHT: f32 = 22.0;
     pub const LINK_PILL_GAP: f32 = 3.0;
+    /// Its top, from the window edge: under the pill with the gap (51).
+    pub const LINK_PILL_TOP: f32 = PILL_TOP + PILL_HEIGHT + LINK_PILL_GAP;
+    /// How far its box reaches below the bar (13 at 60 / 36 / 3 / 22). The
+    /// bar is `HEIGHT` tall and must not clip its children; the shell's
+    /// floating header overlay is `OVERLAY_HEIGHT` tall so the capsule is
+    /// drawn whole ([feedback offline-chip-group-header-2026-10-27]: both
+    /// clipped at `HEIGHT` and the word showed its top half).
+    pub const LINK_PILL_OVERHANG: f32 = max(LINK_PILL_TOP + LINK_PILL_HEIGHT - HEIGHT, 0.0);
+    /// The floating header's box: the bar plus the capsule's overhang. Only
+    /// the capsule lives in the extra band — it has no hitbox, and the drag
+    /// catchment under the bar (`DRAG_OVERHANG`) already covers it.
+    pub const OVERLAY_HEIGHT: f32 = HEIGHT + LINK_PILL_OVERHANG;
+
+    const fn max(a: f32, b: f32) -> f32 {
+        if a > b {
+            a
+        } else {
+            b
+        }
+    }
+    /// The toast slot (`shell::render_notices`): just below the pill — under the connection
+    /// pill when it hangs there — centred on the chat column (Jacob 2026-10-27, [feedback
+    /// toast-stack-mac-2026-10-27]).
+    pub const TOAST_SLOT_TOP: f32 = LINK_PILL_TOP + LINK_PILL_HEIGHT + 8.0;
 }
 
 /// The frame of every chat header — agent, DM, group, server channel: the top
@@ -407,6 +532,9 @@ pub mod metrics {
 /// sidebar is hidden), the pill centred on the family's line, the whole bar a
 /// window-drag region (the pill and the toggle stop the drag themselves). The
 /// list runs under it and fades (`metrics::FADE_BAND`), so there is no hairline.
+/// The bar does not clip: the connection capsule hangs `metrics::LINK_PILL_OVERHANG`
+/// below it ([feedback offline-chip-group-header-2026-10-27]); its own box is
+/// pinned to `HEIGHT` by `h` + `max_h`, so nothing inside can stretch it.
 pub(crate) fn bar_frame(left: Option<AnyElement>, pill: AnyElement) -> Div {
     let side = px(CONTROL + 8.0);
     // Content box under the bottom pad — side slots centre their control in it.
@@ -426,7 +554,6 @@ pub(crate) fn bar_frame(left: Option<AnyElement>, pill: AnyElement) -> Div {
         .pl(px(12.0))
         .pr(px(10.0))
         .pb(px(metrics::BOTTOM_PAD))
-        .overflow_hidden()
         .window_drag()
         .debug_selector(|| "chat-header-bar".into())
         // The left slot is always there (empty when the sidebar is open) so the
@@ -502,7 +629,6 @@ pub fn render_channel(
     )
     .on_click(cx.listener(move |this, _, _, cx| {
         this.members_open = false;
-        this.add_agent_open = false;
         let page = page.clone();
         this.state.update(cx, |s, cx| s.toggle_profile(page, cx));
     }));
@@ -518,7 +644,10 @@ pub fn render_channel(
 
     let sidebar_toggle = sidebar_hidden.then(|| sidebar_toggle(shell, &theme, cx));
     let _ = overlay;
-    bar_frame(sidebar_toggle, with_link_pill(pill, shell, cx))
+    bar_frame(
+        sidebar_toggle,
+        with_link_pill(pill, ChatKind::Channel, shell, cx),
+    )
 }
 
 /// "+" inside the agent pill: starts a new chat with this agent (same as ⌘T).
@@ -534,7 +663,7 @@ fn new_chat_plus(cx: &mut Context<Shell>) -> Stateful<Div> {
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
+        .map(|el| highlight::button(el, &theme))
         .child(icon("plus", 13.0, theme.text_muted))
         // Mouse-down stops the header's window-drag region; click creates the chat.
         .on_mouse_down(
@@ -564,7 +693,7 @@ fn name_part(picture: impl IntoElement, name: AnyElement, theme: &Theme) -> Stat
         .h_full()
         .cursor_pointer()
         .rounded_full()
-        .hover(|s| s.bg(theme.surface_2))
+        .map(|el| highlight::button(el, theme))
         .pr(px(4.0))
 }
 
@@ -602,16 +731,18 @@ fn tab_segment(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Optio
             .pl(px(9.0))
             .pr(px(7.0))
             .rounded_full()
-            .bg(if open {
-                theme.surface_2
-            } else {
-                theme.surface_1
-            })
             .text_size(px(TEXT_SMALL))
             .font_weight(FontWeight::MEDIUM)
             .text_color(theme.text)
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .map(|el| {
+                let base = if open {
+                    theme.surface_2
+                } else {
+                    theme.surface_1
+                };
+                highlight::washed(el, base, &theme)
+            })
             .child(
                 div()
                     .text_size(px(TEXT_SMALL))
@@ -674,6 +805,7 @@ fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl
     let new_tab = state.can_new_tab();
     let active = state.active_tab.get(&space.id).cloned();
     let tabs: Vec<Chat> = state.visible_tabs(&space.id).into_iter().cloned().collect();
+    let agent_images = crate::ui::avatars::project_images(state);
     let mut previous: Vec<Chat> = state
         .archived_tabs(&space.id)
         .into_iter()
@@ -713,16 +845,11 @@ fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl
             .h(px(36.0))
             .pl(px(10.0))
             .pr(px(8.0))
-            .rounded(px(9.0))
+            .rounded(px(glass::MENU_ROW_RADIUS))
             .text_size(px(TEXT_SMALL))
             .text_color(theme.text)
-            .bg(if is_active || menu_here {
-                theme.surface_2
-            } else {
-                gpui::transparent_black()
-            })
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .map(|el| highlight::row(el, is_active || menu_here, highlight::Shape::Own, &theme))
             .when(menu_here, |el| {
                 el.children(anchored_menu.take().map(|(_, menu)| menu))
             })
@@ -752,7 +879,7 @@ fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl
             list = list.child(row);
             continue;
         }
-        if let Some(glyphs) = groups::tab_glyphs(&chat, &projects, &theme) {
+        if let Some(glyphs) = groups::tab_glyphs(&chat, &projects, &agent_images, &theme) {
             row = row.child(glyphs);
         }
         // A job tab (`jobtabs`): the job's glyph before the title — the spinner while it
@@ -810,7 +937,7 @@ fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl
                     .group_hover(SharedString::from(format!("tab-row-{key}")), |s| {
                         s.opacity(1.0)
                     })
-                    .hover(|s| s.bg(theme.border_strong))
+                    .map(|el| highlight::button(el, &theme))
                     .child(icon("xmark", 9.0, theme.text_muted))
                     .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -899,15 +1026,14 @@ fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl
                     .h(px(36.0))
                     .pl(px(34.0))
                     .pr(px(12.0))
-                    .rounded(px(9.0))
+                    .rounded(px(glass::MENU_ROW_RADIUS))
                     .text_size(px(TEXT_SMALL))
                     .text_color(theme.text_muted)
                     .cursor_pointer()
+                    .map(|el| highlight::row(el, menu_here, highlight::Shape::Own, &theme))
                     .when(menu_here, |el| {
-                        el.bg(theme.surface_2)
-                            .children(anchored_menu.take().map(|(_, menu)| menu))
+                        el.children(anchored_menu.take().map(|(_, menu)| menu))
                     })
-                    .hover(|s| s.bg(theme.surface_2))
                     .on_mouse_down(
                         gpui::MouseButton::Right,
                         cx.listener(move |this, _, _, cx| {
@@ -1220,8 +1346,8 @@ mod header_tests {
                         .top_0()
                         .left_0()
                         .right_0()
-                        .h(px(metrics::HEIGHT))
-                        .max_h(px(metrics::HEIGHT))
+                        .h(px(metrics::OVERLAY_HEIGHT))
+                        .max_h(px(metrics::OVERLAY_HEIGHT))
                         .overflow_hidden()
                         .child(bar_frame(None, pill)),
                 )
@@ -1316,47 +1442,116 @@ mod header_tests {
     }
 }
 
-/// [feedback mac-header-glass-2026-10-25]: the header pill and disc wear the
-/// header material — frost on Glass, solid on Matte — for every chat kind,
-/// and the frosted wrap leaves the bar's geometry untouched. The iPhone twin
-/// is `HeaderGlassStructureTests`.
+/// [feedback mac-header-glass-2026-10-25] and [feedback
+/// mac-header-pill-glass-matte-2026-10-26]: the header pill and disc are
+/// frosted glass for every chat kind on BOTH surfaces — #1830 left Matte
+/// solid, and Jacob's Mac is on Matte (his AffineTeam group, v0.6.268) — and
+/// the frosted wrap leaves the bar's geometry untouched. The iPhone twin is
+/// `HeaderGlassStructureTests`.
 #[cfg(test)]
 mod glass_tests {
     use gpui::{div, prelude::*, px, TestAppContext};
 
     use super::{bar_frame, metrics, pill_frame};
-    use crate::ui::glass::{self, HeaderMaterial};
+    use crate::ui::glass;
     use crate::ui::theme::{Appearance, Surface, Theme, CONTROL};
 
-    const KINDS: [&str; 4] = ["agent", "dm", "group", "channel"];
+    /// The chat kinds the header serves, with the pill's right pad for each
+    /// (4 after an agent's "+", 10 otherwise). A job tab is an agent tab:
+    /// the same `render`, the same pill.
+    const KINDS: [(&str, f32); 5] = [
+        ("agent", 4.0),
+        ("job tab", 4.0),
+        ("dm", 10.0),
+        ("group", 10.0),
+        ("channel", 10.0),
+    ];
+    const SURFACES: [Surface; 2] = [Surface::Glass, Surface::Matte];
+    const APPEARANCES: [Appearance; 2] = [Appearance::Dark, Appearance::Light];
 
     #[test]
-    fn glass_gives_every_kind_a_translucent_pill_and_disc_matte_keeps_them_solid() {
-        for appearance in [Appearance::Dark, Appearance::Light] {
-            let glass = Theme::with(appearance, Surface::Glass);
-            let matte = Theme::with(appearance, Surface::Matte);
-            for _kind in KINDS {
-                for solid in [glass.bubble_assistant, glass.surface_2] {
-                    let g = glass::header_style(solid, &glass);
-                    assert_eq!(g.material, HeaderMaterial::Frosted);
-                    assert!(g.blur, "the list blurs through the control on Glass");
+    fn every_kind_gets_a_frosted_pill_and_disc_on_glass_and_on_matte() {
+        for appearance in APPEARANCES {
+            for surface in SURFACES {
+                let theme = Theme::with(appearance, surface);
+                let style = glass::header_style(&theme);
+                for (kind, _) in KINDS {
                     assert!(
-                        g.fill.a < 1.0,
-                        "a see-through fill on Glass ({appearance:?})"
+                        style.is_frosted(),
+                        "{kind} on {appearance:?} {surface:?}: frosted glass, not a flat fill"
                     );
-                    assert_ne!(g.fill, solid, "not the Matte fill");
-                    let m = glass::header_style(solid, &matte);
-                    assert_eq!(m.material, HeaderMaterial::Solid);
-                    assert!(!m.blur);
-                    assert_eq!(m.fill, solid, "Matte keeps today's fill");
+                    assert!(
+                        style.fill.a < 1.0,
+                        "{kind} on {appearance:?} {surface:?}: the list shows through"
+                    );
+                    // Not the solids the pill and the disc were filled with
+                    // before #1830 (Glass) and before this item (Matte).
+                    assert_ne!(style.fill, theme.bubble_assistant, "{kind}: old pill fill");
+                    assert_ne!(style.fill, theme.surface_2, "{kind}: old disc fill");
+                    assert!(style.rim.a > 0.0, "{kind}: a visible rim");
+                    assert!(style.highlight.a > 0.0, "{kind}: a top highlight");
                 }
             }
-            // The pill and the disc share one fill and one rim on Glass.
-            assert_eq!(
-                glass::header_style(glass.bubble_assistant, &glass).fill,
-                glass::header_style(glass.surface_2, &glass).fill
-            );
+            // One material on both surfaces: Grok Bot's pill over its flat
+            // black transcript is the reference, so the Matte header gets the
+            // very fill, rim and highlight the Glass header has.
+            let glass = glass::header_style(&Theme::with(appearance, Surface::Glass));
+            let matte = glass::header_style(&Theme::with(appearance, Surface::Matte));
+            assert_eq!(glass, matte, "{appearance:?}: the same glass on Matte");
         }
+    }
+
+    /// [feedback mac-header-pill-see-through-2026-10-26]: the dark pill is
+    /// see-through — a thin fill and a light blur, so the transcript shows
+    /// through it and it is read as glass by its rim (Grok Bot's pill over a
+    /// black page is ≈ +12/255 lighter than the page) — while white text on
+    /// it keeps ≥ 4.5:1 over the brightest backdrop the pill ever sits on
+    /// (the chat column's 85 % page wash over a white desktop, ≈ `#373737`).
+    #[test]
+    fn the_dark_pill_is_see_through_and_its_text_still_reads() {
+        let theme = Theme::with(Appearance::Dark, Surface::Glass);
+        let style = glass::header_style(&theme);
+        assert!(
+            style.fill.a <= 0.35,
+            "a thin fill, the list shows through: {}",
+            style.fill.a
+        );
+        // Through a function so clippy does not fold the comparison away.
+        let blur = std::hint::black_box(glass::HEADER_BLUR);
+        assert!(blur <= 6.0, "a light blur keeps the text behind legible");
+        assert!(style.rim.a >= 0.25, "the rim carries the shape");
+        let lum = |c: gpui::Hsla| {
+            let rgb = c.to_rgb();
+            let ch = |v: f32| {
+                if v <= 0.039_28 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * ch(rgb.r) + 0.7152 * ch(rgb.g) + 0.0722 * ch(rgb.b)
+        };
+        let over = |top: gpui::Hsla, under: gpui::Hsla| {
+            let (t, u) = (top.to_rgb(), under.to_rgb());
+            gpui::Rgba {
+                r: t.a * t.r + (1.0 - t.a) * u.r,
+                g: t.a * t.g + (1.0 - t.a) * u.g,
+                b: t.a * t.b + (1.0 - t.a) * u.b,
+                a: 1.0,
+            }
+            .into()
+        };
+        for backdrop in [theme.bg, gpui::rgb(0x373737).into()] {
+            let pill = over(style.fill, backdrop);
+            let contrast = (lum(theme.text) + 0.05) / (lum(pill) + 0.05);
+            assert!(contrast >= 4.5, "white on the pill: {contrast:.2}:1");
+        }
+        // Over the flat Matte page the pill is a step above it, not a plate.
+        let lift = (over(style.fill, theme.bg).to_rgb().r - theme.bg.to_rgb().r) * 255.0;
+        assert!(
+            (6.0..=24.0).contains(&lift),
+            "pill lift over its page: {lift:.1}/255"
+        );
     }
 
     struct GlassBar {
@@ -1372,14 +1567,13 @@ mod glass_tests {
         ) -> impl IntoElement {
             let theme = Theme::of(cx).clone();
             let pill = pill_frame(&theme, false, self.pr).w(px(140.0));
-            let pill = glass::header_frost(metrics::PILL_HEIGHT / 2.0, &theme, pill);
+            let pill = glass::header_frost(metrics::PILL_HEIGHT / 2.0, pill);
             let left = self.folded.then(|| {
                 let disc = glass::header_surface(
                     div().id("toggle").size(px(CONTROL)).rounded_full(),
-                    theme.surface_2,
                     &theme,
                 );
-                glass::header_frost(CONTROL / 2.0, &theme, disc)
+                glass::header_frost(CONTROL / 2.0, disc)
             });
             div().w(px(884.0)).h(px(400.0)).child(
                 div()
@@ -1389,30 +1583,385 @@ mod glass_tests {
         }
     }
 
-    /// Headless render on Glass: the frosted pill and disc draw, and the bar
-    /// keeps `metrics` for every kind (pads differ per kind: 4 with a "+", 10 without).
+    /// Headless render on Glass and on Matte, dark and light: the frosted
+    /// pill and disc draw for every kind, folded and not, and the bar keeps
+    /// `metrics` (sizes and placements are not this item's to move).
     #[gpui::test]
-    fn frosted_header_renders_and_keeps_the_bar_geometry(cx: &mut TestAppContext) {
-        for appearance in [Appearance::Dark, Appearance::Light] {
-            cx.update(|cx| cx.set_global(Theme::with(appearance, Surface::Glass)));
-            for (kind, pr) in KINDS.iter().zip([4.0, 10.0, 10.0, 10.0]) {
-                for folded in [false, true] {
-                    let (_view, vcx) = cx.add_window_view(|_, _| GlassBar { folded, pr });
-                    vcx.run_until_parked();
-                    let bar = vcx.debug_bounds("chat-header-bar").expect("bar drawn");
-                    let pill = vcx.debug_bounds("chat-header-pill").expect("pill drawn");
-                    let h: f32 = bar.size.height.into();
-                    let top: f32 = (pill.origin.y - bar.origin.y).into();
-                    let ph: f32 = pill.size.height.into();
-                    assert_eq!(h, metrics::HEIGHT, "{kind} bar height, folded={folded}");
-                    assert_eq!(top, metrics::PILL_TOP, "{kind} pill top, folded={folded}");
-                    assert_eq!(
-                        ph,
-                        metrics::PILL_HEIGHT,
-                        "{kind} pill height, folded={folded}"
-                    );
+    fn frosted_header_renders_on_both_surfaces_and_keeps_the_bar_geometry(cx: &mut TestAppContext) {
+        for appearance in APPEARANCES {
+            for surface in SURFACES {
+                cx.update(|cx| cx.set_global(Theme::with(appearance, surface)));
+                for (kind, pr) in KINDS {
+                    for folded in [false, true] {
+                        let (_view, vcx) = cx.add_window_view(|_, _| GlassBar { folded, pr });
+                        vcx.run_until_parked();
+                        let bar = vcx.debug_bounds("chat-header-bar").expect("bar drawn");
+                        let pill = vcx.debug_bounds("chat-header-pill").expect("pill drawn");
+                        let h: f32 = bar.size.height.into();
+                        let top: f32 = (pill.origin.y - bar.origin.y).into();
+                        let ph: f32 = pill.size.height.into();
+                        let pw: f32 = pill.size.width.into();
+                        let at = format!("{kind} on {appearance:?} {surface:?}, folded={folded}");
+                        assert_eq!(h, metrics::HEIGHT, "bar height, {at}");
+                        assert_eq!(top, metrics::PILL_TOP, "pill top, {at}");
+                        assert_eq!(ph, metrics::PILL_HEIGHT, "pill height, {at}");
+                        assert_eq!(pw, 140.0, "pill width, {at}");
+                        let cx_pill: f32 = (pill.origin.x + pill.size.width / 2.0).into();
+                        let cx_bar: f32 = (bar.origin.x + bar.size.width / 2.0).into();
+                        assert!((cx_pill - cx_bar).abs() <= 1.0, "pill centred, {at}");
+                    }
                 }
             }
         }
+    }
+}
+
+/// [feedback offline-chip-group-header-2026-10-27]: the connection capsule
+/// under the pill — "Offline", "Relay down", … — is shown for every chat kind
+/// (`ChatKind::shows_link_pill`), whole, under the pill with its gap, and the
+/// header's clip boxes leave room for it. Jacob's shot (Arbonites group, Dark
+/// Glass): the top half of "Offline" peeking out under the pill's lower edge —
+/// the bar and the floating overlay both cut at `HEIGHT`. The real `Shell`
+/// over a real `AppState`, headless, one chat of each kind.
+#[cfg(test)]
+mod link_pill_tests {
+    use futures::future::BoxFuture;
+    use gpui::{AppContext as _, Bounds, Entity, Pixels, TestAppContext, VisualTestContext};
+    use tokio::sync::mpsc;
+
+    use super::{metrics, ChatKind};
+    use crate::app::{AppState, LINK_PILL_GRACE_MS};
+    use crate::model::{ChannelSel, Chat, LinkState, Message, Person, Project, SpaceKind};
+    use crate::model::{ServerChannel, ServerInfo};
+    use crate::sync::{ClientCommand, SyncEvent, SyncSource};
+    use crate::ui::chat_search;
+    use crate::ui::motion::PulseClock;
+    use crate::ui::shell::Shell;
+    use crate::ui::theme::{Surface, Theme};
+
+    struct Idle;
+
+    impl SyncSource for Idle {
+        fn name(&self) -> &'static str {
+            "idle"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            _commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    /// The room every kind's centre reads (`AppState::active_chat_id`).
+    const ROOM: &str = "room-1";
+
+    fn message(id: &str, role: &str, sender: &str, text: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "chatId": ROOM, "role": role, "sender": sender, "status": "done",
+            "createdAt": at, "completedAt": at,
+            "parts": [{ "id": format!("{id}-t"), "kind": "text", "text": text }],
+        }))
+        .expect("message")
+    }
+
+    fn person(id: &str, handle: &str, name: &str) -> Person {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "handle": handle, "name": name, "status": "active",
+        }))
+        .expect("person")
+    }
+
+    /// One chat of `kind` open in the centre, two bubbles in it (so the header
+    /// floats over the list like Jacob's), the link Live.
+    fn mount(
+        cx: &mut TestAppContext,
+        kind: ChatKind,
+    ) -> (
+        tokio::runtime::Runtime,
+        Entity<AppState>,
+        Entity<Shell>,
+        &mut VisualTestContext,
+    ) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| {
+            gpui_tokio::init_from_handle(cx, handle);
+            cx.set_global(Theme::dark(Surface::Glass));
+            if !cx.has_global::<PulseClock>() {
+                PulseClock::init(cx);
+            }
+        });
+        let state = cx.new(|cx| AppState::new(Box::new(Idle), cx));
+        let now = crate::model::now_ms();
+        state.update(cx, |s, cx| {
+            let rows = vec![
+                message(
+                    "m1",
+                    "user",
+                    "user",
+                    "Anyone up for a surf at six?",
+                    now - 60_000,
+                ),
+                message(
+                    "m2",
+                    "user",
+                    "gh_2",
+                    "In. Bringing the long board.",
+                    now - 50_000,
+                ),
+            ];
+            match kind {
+                ChatKind::Agent | ChatKind::Dm | ChatKind::Group => {
+                    let (space_kind, name, people) = match kind {
+                        ChatKind::Agent => (SpaceKind::Project, "Affine", vec![]),
+                        ChatKind::Dm => (
+                            SpaceKind::Dm,
+                            "Sam Rivera",
+                            vec![person("gh_2", "sam", "Sam Rivera")],
+                        ),
+                        ChatKind::Group | ChatKind::Channel => (
+                            SpaceKind::Group,
+                            "Arbonites",
+                            vec![
+                                person("gh_2", "sam", "Sam Rivera"),
+                                person("gh_3", "ken", "Ken Miyachi"),
+                            ],
+                        ),
+                    };
+                    s.projects.push(Project {
+                        id: "s1".into(),
+                        name: name.into(),
+                        kind: space_kind,
+                        people,
+                        ..Project::default()
+                    });
+                    let chat: Chat = serde_json::from_value(serde_json::json!({
+                        "id": ROOM, "project_id": "s1", "title": "Main", "is_pinned": true,
+                        "is_system": false, "unread": false, "last_message_at": now,
+                    }))
+                    .expect("chat");
+                    s.chats.insert("s1".into(), vec![chat]);
+                    s.messages.insert(ROOM.into(), rows);
+                    s.selected_project = Some("s1".into());
+                    s.active_tab.insert("s1".into(), ROOM.into());
+                }
+                ChatKind::Channel => {
+                    s.servers.push(ServerInfo {
+                        id: "srv".into(),
+                        name: "Arbos".into(),
+                        my_role: "member".into(),
+                        channels: vec![ServerChannel {
+                            id: "ch".into(),
+                            server_id: "srv".into(),
+                            name: "general".into(),
+                            room_id: Some(ROOM.into()),
+                            ..ServerChannel::default()
+                        }],
+                        ..ServerInfo::default()
+                    });
+                    s.channel_rows.insert(ROOM.into(), rows);
+                    s.selected_channel = Some(ChannelSel {
+                        server_id: "srv".into(),
+                        channel_id: "ch".into(),
+                        room_id: Some(ROOM.into()),
+                    });
+                }
+            }
+            cx.notify();
+        });
+        let (shell, vcx) = cx.add_window_view(|window, cx| Shell::new(state.clone(), window, cx));
+        vcx.run_until_parked();
+        (rt, state, shell, vcx)
+    }
+
+    fn settle(state: &Entity<AppState>, shell: &Entity<Shell>, vcx: &mut VisualTestContext) {
+        state.update(vcx, |_, cx| cx.notify());
+        for _ in 0..12 {
+            shell.update(vcx, |_, cx| cx.notify());
+            vcx.run_until_parked();
+        }
+    }
+
+    /// This chat's room socket reports `state`, long enough ago that the grace
+    /// period has passed (`AppState::link_pill`).
+    fn set_link(state: &Entity<AppState>, vcx: &mut VisualTestContext, link: LinkState) {
+        state.update(vcx, |s, cx| {
+            let since = crate::model::now_ms() - LINK_PILL_GRACE_MS - 1_000;
+            s.room_links.insert(ROOM.into(), (link, since));
+            cx.notify();
+        });
+    }
+
+    struct Frame {
+        bar: Bounds<Pixels>,
+        pill: Bounds<Pixels>,
+        overlay: Bounds<Pixels>,
+        capsule: Option<Bounds<Pixels>>,
+    }
+
+    fn frame(vcx: &mut VisualTestContext) -> Frame {
+        Frame {
+            bar: vcx.debug_bounds("chat-header-bar").expect("bar drawn"),
+            pill: vcx.debug_bounds("chat-header-pill").expect("pill drawn"),
+            overlay: vcx
+                .debug_bounds("chat-header-overlay")
+                .expect("the header floats over the list"),
+            capsule: vcx.debug_bounds("chat-header-link-pill"),
+        }
+    }
+
+    fn close(a: f32, b: f32) -> bool {
+        (a - b).abs() <= 0.5
+    }
+
+    /// The rule as code: every kind shows the capsule — it is the chat's
+    /// relay link, which every kind has — and the geometry leaves room for it.
+    #[test]
+    fn every_kind_shows_the_capsule_and_the_header_leaves_room_for_it() {
+        for kind in ChatKind::ALL {
+            assert!(
+                kind.shows_link_pill(),
+                "{kind:?}: the connection capsule is this chat's relay link, shown for every kind"
+            );
+        }
+        let m = [
+            metrics::HEIGHT,
+            metrics::LINK_PILL_TOP,
+            metrics::LINK_PILL_HEIGHT,
+            metrics::LINK_PILL_OVERHANG,
+            metrics::OVERLAY_HEIGHT,
+            metrics::DRAG_OVERHANG,
+        ];
+        let [height, top, h, overhang, overlay, drag] = std::hint::black_box(m);
+        assert_eq!(
+            top,
+            metrics::PILL_TOP + metrics::PILL_HEIGHT + metrics::LINK_PILL_GAP
+        );
+        assert_eq!(top, 51.0, "under the pill with its 3 pt gap");
+        assert_eq!(
+            overhang, 13.0,
+            "the capsule reaches 13 pt below the 60 pt bar"
+        );
+        assert!(
+            top + h > height,
+            "the capsule does not fit inside the bar — the overlay must grow"
+        );
+        assert_eq!(overlay, height + overhang);
+        assert!(
+            overlay >= top + h,
+            "the floating overlay holds the whole capsule"
+        );
+        assert!(
+            overhang <= drag,
+            "the capsule stays inside the drag catchment under the bar"
+        );
+    }
+
+    /// Each kind, headless: the link goes Offline → the capsule is drawn whole
+    /// under the pill (top = pill bottom + gap, centred on the pill, inside the
+    /// overlay's clip box), the bar is still `HEIGHT`, the pill did not move;
+    /// the link comes back → the capsule is gone and nothing else changed.
+    #[gpui::test]
+    fn the_capsule_hangs_whole_under_the_pill_for_every_kind(cx: &mut TestAppContext) {
+        for kind in ChatKind::ALL {
+            let (_rt, state, shell, vcx) = mount(cx, kind);
+            settle(&state, &shell, vcx);
+            let live = frame(vcx);
+            assert!(live.capsule.is_none(), "{kind:?}: live link, no capsule");
+            assert!(
+                close(live.bar.size.height.into(), metrics::HEIGHT),
+                "{kind:?}: bar height"
+            );
+
+            set_link(&state, vcx, LinkState::Offline);
+            settle(&state, &shell, vcx);
+            let offline = frame(vcx);
+            let capsule = offline
+                .capsule
+                .unwrap_or_else(|| panic!("{kind:?}: the Offline capsule is drawn"));
+            assert_eq!(offline.pill, live.pill, "{kind:?}: the pill did not move");
+            assert_eq!(offline.bar, live.bar, "{kind:?}: the bar did not change");
+            let pill_bottom: f32 = offline.pill.bottom().into();
+            let top: f32 = capsule.top().into();
+            let bottom: f32 = capsule.bottom().into();
+            assert!(
+                close(top - pill_bottom, metrics::LINK_PILL_GAP),
+                "{kind:?}: capsule top {top} is {} under the pill (want {})",
+                top - pill_bottom,
+                metrics::LINK_PILL_GAP
+            );
+            assert!(
+                close(top - f32::from(offline.bar.top()), metrics::LINK_PILL_TOP),
+                "{kind:?}: capsule at {} from the bar top (want {})",
+                top - f32::from(offline.bar.top()),
+                metrics::LINK_PILL_TOP
+            );
+            assert!(
+                close(capsule.size.height.into(), metrics::LINK_PILL_HEIGHT),
+                "{kind:?}: capsule height {:?}",
+                capsule.size.height
+            );
+            // The clip: the whole capsule lies inside the overlay's box, so
+            // `overflow_hidden` there cuts nothing. (Before: overlay bottom 60,
+            // capsule 51–73 — the top half of the word.)
+            let overlay_bottom: f32 = offline.overlay.bottom().into();
+            assert!(
+                bottom <= overlay_bottom + 0.5,
+                "{kind:?}: capsule bottom {bottom} is clipped by the overlay at {overlay_bottom}"
+            );
+            assert!(
+                bottom > f32::from(offline.bar.bottom()),
+                "{kind:?}: the capsule hangs below the bar (bar bottom {:?})",
+                offline.bar.bottom()
+            );
+            let pill_cx: f32 = (offline.pill.origin.x + offline.pill.size.width / 2.0).into();
+            let cap_cx: f32 = (capsule.origin.x + capsule.size.width / 2.0).into();
+            assert!(
+                (pill_cx - cap_cx).abs() <= 1.0,
+                "{kind:?}: capsule centred on the pill ({cap_cx} vs {pill_cx})"
+            );
+
+            set_link(&state, vcx, LinkState::Live);
+            settle(&state, &shell, vcx);
+            let back = frame(vcx);
+            assert!(back.capsule.is_none(), "{kind:?}: live again, no capsule");
+            assert_eq!(back.pill, live.pill, "{kind:?}: the pill is where it was");
+        }
+    }
+
+    /// ⌘F takes the slot under the pill, so the capsule steps aside while the
+    /// bar is open and returns when it closes.
+    #[gpui::test]
+    fn the_capsule_steps_aside_while_the_search_bar_is_open(cx: &mut TestAppContext) {
+        let (_rt, state, shell, vcx) = mount(cx, ChatKind::Group);
+        set_link(&state, vcx, LinkState::Offline);
+        settle(&state, &shell, vcx);
+        assert!(frame(vcx).capsule.is_some(), "offline: the capsule shows");
+
+        vcx.dispatch_action(chat_search::Open);
+        settle(&state, &shell, vcx);
+        assert!(state.read_with(&*vcx, |s, _| s.chat_search_open()));
+        assert!(
+            vcx.debug_bounds("chat-search-bar").is_some(),
+            "the search bar is drawn"
+        );
+        assert!(
+            frame(vcx).capsule.is_none(),
+            "the search bar has the slot under the pill: no capsule over it"
+        );
+
+        vcx.dispatch_action(chat_search::Close);
+        settle(&state, &shell, vcx);
+        assert!(!state.read_with(&*vcx, |s, _| s.chat_search_open()));
+        assert!(
+            frame(vcx).capsule.is_some(),
+            "search closed: the capsule is back"
+        );
     }
 }

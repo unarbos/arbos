@@ -15,10 +15,13 @@ use crate::model::{
     ago, person_usage, secret_env_name, secret_usage, ConnectedVault, Id, NewSecret,
     ProjectSecrets, Secret, SecretActivity, SecretRequest, SecretsView,
 };
+use crate::ui::agent_picker::{self, AgentPicker};
 use crate::ui::avatars;
 use crate::ui::composer::ComposerInput;
+use crate::ui::error_note;
 use crate::ui::frost::{frosted, MENU_BLUR};
 use crate::ui::glass;
+use crate::ui::highlight::{self, Shape};
 use crate::ui::icons::icon;
 use crate::ui::profiles::kit;
 use crate::ui::theme::{Theme, PANEL_RADIUS, RAIL_WIDTH, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
@@ -27,6 +30,28 @@ pub enum SecretsEvent {
     /// "‹ Settings": return to the settings sheet.
     Back,
 }
+
+/// The failures the Secrets pane draws inline while one of its forms is up (the verbs
+/// `sync::relay` reports them under).
+const SECRETS_VERBS: &[&str] = &[
+    "save the secret",
+    "replace the value",
+    "delete the secret",
+    "change who may use it",
+    "revoke the access",
+    "change that person's access",
+    "remove that person",
+    "add @",
+    "change the pause",
+    "answer the request",
+    "connect 1Password",
+    "replace the token",
+    "change the vault access",
+    "save the item name",
+    "disconnect the vault",
+    "load your secrets",
+    "load the agent's secrets",
+];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Page {
@@ -69,8 +94,10 @@ pub struct SecretsPanel {
     add_kind: AddKind,
     /// Add form: "Real value in the agent's environment" from the start.
     add_inject: bool,
-    /// Agents picked in the Add / Connect / Give-access forms.
-    picked: Vec<Id>,
+    /// The agents picked in the Add / Connect / Give-access forms and the "Add agent"
+    /// dropdown — one component for the four pickers (`ui::agent_picker`). The agent
+    /// page's "Give access to a secret…" list reuses `picked` for secret ids.
+    pub(crate) agent_picker: AgentPicker,
     /// Inline pickers open on the Secret / Agent pages.
     giving: bool,
     replacing: bool,
@@ -84,10 +111,19 @@ pub struct SecretsPanel {
     hosts_input: Entity<ComposerInput>,
     token_input: Entity<ComposerInput>,
     error: Option<String>,
+    local_details_open: bool,
     /// Rig: a secret env name to open as soon as the list arrives.
     pending_env: Option<String>,
+    /// Rig: with `pending_env`, open that secret's "Give a person access" sheet too.
+    pending_people: bool,
     /// Rig: open the first vault as soon as the list arrives.
     pending_vault: bool,
+    /// Rig: `ARBOS_RIG_AGENT_PICKED=<name>,<name>` — these agents start as chips of the
+    /// open form (applied once the registry lists them).
+    rig_picked: Option<String>,
+    /// Rig: `ARBOS_RIG_AGENT_PICKER=<query>` — the "Add agent" dropdown starts open with
+    /// that query typed (empty = open, nothing typed).
+    rig_query: Option<String>,
     /// Shown as a page inside the Settings sheet (#1086) rather than as the
     /// bottom-left popover; the sheet's header carries the back button.
     pub(crate) embedded: bool,
@@ -131,7 +167,7 @@ impl SecretsPanel {
             page: Page::List,
             add_kind: AddKind::Key,
             add_inject: false,
-            picked: Vec::new(),
+            agent_picker: AgentPicker::new(cx),
             giving: false,
             replacing: false,
             confirm: None,
@@ -143,8 +179,12 @@ impl SecretsPanel {
             hosts_input,
             token_input,
             error: None,
+            local_details_open: false,
             pending_env: None,
+            pending_people: false,
             pending_vault: false,
+            rig_picked: std::env::var("ARBOS_RIG_AGENT_PICKED").ok(),
+            rig_query: std::env::var("ARBOS_RIG_AGENT_PICKER").ok(),
             embedded: false,
             focus_handle: cx.focus_handle(),
         }
@@ -173,6 +213,13 @@ impl SecretsPanel {
         self.page = Page::List;
         self.state.update(cx, |s, cx| s.secrets_refresh(cx));
         cx.notify();
+    }
+
+    /// Rig: one secret's page by env name with its "Give a person access" sheet
+    /// open once the relay (or fixture) has listed it.
+    pub fn show_secret_people(&mut self, env: String, cx: &mut Context<Self>) {
+        self.pending_people = true;
+        self.show_secret_env(env, cx);
     }
 
     /// Rig: the New secret form.
@@ -234,8 +281,9 @@ impl SecretsPanel {
             .any(|i| i.read(cx).focus_handle(cx).is_focused(window))
     }
 
-    fn inputs(&self) -> [&Entity<ComposerInput>; 7] {
+    fn inputs(&self) -> [&Entity<ComposerInput>; 8] {
         [
+            &self.agent_picker.search,
             &self.name_input,
             &self.url_input,
             &self.user_input,
@@ -248,13 +296,135 @@ impl SecretsPanel {
 
     fn reset_form(&mut self, cx: &mut Context<Self>) {
         self.error = None;
-        self.picked.clear();
+        self.agent_picker.reset(cx);
         self.giving = false;
         self.replacing = false;
         self.confirm = None;
         for input in self.inputs() {
             input.update(cx, |i, cx| i.clear(cx));
         }
+    }
+
+    /// The agents the open page's picker must not offer again: the ones with access on
+    /// a secret's or a vault's page (the forms that create something exclude nothing).
+    fn agent_picker_exclude(&self, cx: &App) -> Vec<Id> {
+        let state = self.state.read(cx);
+        match &self.page {
+            Page::Secret(id) => state
+                .secrets
+                .secret(id)
+                .map(|s| {
+                    s.agents
+                        .iter()
+                        .filter(|a| a.enabled)
+                        .map(|a| a.project_id.clone())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            Page::Vault(id) => state
+                .secrets
+                .vaults
+                .iter()
+                .find(|v| v.id == *id)
+                .map(|v| {
+                    v.agents
+                        .iter()
+                        .filter(|a| a.enabled)
+                        .map(|a| a.project_id.clone())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            Page::List | Page::Add | Page::Agent(_) | Page::Connect => Vec::new(),
+        }
+    }
+
+    /// ↩ in the picker's search field: the highlighted candidate becomes a chip.
+    pub(crate) fn agent_picker_accept(&mut self, cx: &mut Context<Self>) {
+        if !self.agent_picker.open {
+            return;
+        }
+        let exclude = self.agent_picker_exclude(cx);
+        let query = self.agent_picker.query(cx);
+        let pick = {
+            let state = self.state.read(cx);
+            agent_picker::candidates(&state.projects, &self.agent_picker.picked, &exclude, &query)
+                .get(self.agent_picker.highlight)
+                .map(|p| p.id.clone())
+        };
+        if let Some(id) = pick {
+            self.agent_picker.add(id, cx);
+        }
+        cx.notify();
+    }
+
+    /// ↑ / ↓ in the picker's search field: move the highlight, clamped to the list.
+    pub(crate) fn agent_picker_move(&mut self, delta: i32, cx: &mut Context<Self>) {
+        if !self.agent_picker.open {
+            return;
+        }
+        let exclude = self.agent_picker_exclude(cx);
+        let query = self.agent_picker.query(cx);
+        let n = {
+            let state = self.state.read(cx);
+            agent_picker::candidates(&state.projects, &self.agent_picker.picked, &exclude, &query)
+                .len()
+        };
+        if n == 0 {
+            self.agent_picker.highlight = 0;
+        } else {
+            let cur = self.agent_picker.highlight.min(n - 1) as i32;
+            self.agent_picker.highlight = (cur + delta).clamp(0, n as i32 - 1) as usize;
+        }
+        cx.notify();
+    }
+
+    /// Rig hooks for the agent picker shots, applied once the registry is known and a
+    /// form that carries the picker is open.
+    fn apply_picker_rig(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let on_form = matches!(self.page, Page::Add | Page::Connect)
+            || (matches!(self.page, Page::Secret(_) | Page::Vault(_)) && self.giving);
+        if !on_form || self.state.read(cx).projects.is_empty() {
+            return;
+        }
+        if let Some(names) = self.rig_picked.take() {
+            let ids: Vec<Id> = {
+                let state = self.state.read(cx);
+                names
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|n| !n.is_empty())
+                    .filter_map(|n| {
+                        state
+                            .projects
+                            .iter()
+                            .find(|p| p.name.eq_ignore_ascii_case(n))
+                            .map(|p| p.id.clone())
+                    })
+                    .collect()
+            };
+            for id in ids {
+                if !self.agent_picker.picked.contains(&id) {
+                    self.agent_picker.picked.push(id);
+                }
+            }
+        }
+        if let Some(q) = self.rig_query.take() {
+            self.agent_picker.open(window, cx);
+            if !q.is_empty() {
+                self.agent_picker
+                    .search
+                    .update(cx, |i, cx| i.set_text(q, cx));
+            }
+        }
+    }
+
+    /// Esc / a click elsewhere: fold the "Add agent" dropdown. `true` when one was open.
+    pub fn close_agent_picker(&mut self, cx: &mut Context<Self>) -> bool {
+        let was = self.agent_picker.close(cx);
+        if was {
+            cx.notify();
+        }
+        was
     }
 
     fn go(&mut self, page: Page, cx: &mut Context<Self>) {
@@ -327,7 +497,7 @@ impl SecretsPanel {
             fields,
             note: self.note_input.read(cx).text().trim().to_string(),
             hosts: self.hosts_from(cx),
-            agents: self.picked.clone(),
+            agents: self.agent_picker.picked.clone(),
             inject_env: self.add_inject,
         };
         self.add_inject = false;
@@ -363,7 +533,7 @@ impl SecretsPanel {
             return;
         }
         let note = self.note_input.read(cx).text().trim().to_string();
-        let agents = self.picked.clone();
+        let agents = self.agent_picker.picked.clone();
         self.state
             .update(cx, |s, cx| s.vault_connect(token, agents, note, cx));
         self.go(Page::List, cx);
@@ -411,7 +581,10 @@ impl SecretsPanel {
             .min_h(px(52.0))
             .px(px(16.0))
             .py(px(8.0))
-            .child(kit::hairline_below(16.0, theme))
+            // Lights for rows that join `kit::HOT` (vault / secret rows, the
+            // switch rows); a plain detail row never does.
+            .child(highlight::layer(false, Shape::Nested(PANEL_RADIUS), theme))
+            .child(kit::hairline_below(theme))
             .child(glass::icon_tile(glyph, theme).when(dim, |el| el.opacity(0.55)))
             .child(
                 div()
@@ -456,7 +629,7 @@ impl SecretsPanel {
             .text_size(px(TEXT_BODY))
             .text_color(theme.text)
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), theme))
             .child(
                 div()
                     .size(px(30.0))
@@ -500,7 +673,7 @@ impl SecretsPanel {
             .text_size(px(TEXT_BODY))
             .text_color(if danger { theme.danger } else { theme.text })
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), theme))
             .child(label.into())
     }
 
@@ -549,80 +722,14 @@ impl SecretsPanel {
             .h(px(26.0))
             .px(px(10.0))
             .rounded_full()
-            .bg(theme.field)
             .flex()
             .items_center()
             .text_size(px(TEXT_TINY))
             .font_weight(FontWeight::MEDIUM)
             .text_color(if danger { theme.danger } else { theme.text })
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .map(|el| highlight::washed(el, theme.field, theme))
             .child(label.into())
-    }
-
-    /// Agent chips: `( Research ✓ ) ( Comms )`, toggling `self.picked`.
-    fn agent_chips(
-        &self,
-        prefix: &str,
-        exclude: &[Id],
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Div {
-        let projects: Vec<_> = self
-            .state
-            .read(cx)
-            .projects
-            .iter()
-            .filter(|p| !p.is_guest() && !exclude.contains(&p.id))
-            .cloned()
-            .collect();
-        let mut row = div().flex().flex_wrap().gap(px(6.0));
-        if projects.is_empty() {
-            return row.child(
-                div()
-                    .text_size(px(TEXT_SMALL))
-                    .text_color(theme.text_muted)
-                    .child("No agents yet"),
-            );
-        }
-        for p in projects {
-            let on = self.picked.contains(&p.id);
-            let pid = p.id.clone();
-            row = row.child(
-                div()
-                    .id(format!("{prefix}-chip-{}", p.id))
-                    .h(px(30.0))
-                    .pl(px(5.0))
-                    .pr(px(11.0))
-                    .rounded_full()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .bg(if on { theme.primary } else { theme.field })
-                    .border_1()
-                    .border_color(if on {
-                        theme.primary
-                    } else {
-                        theme.field_border
-                    })
-                    .text_size(px(TEXT_SMALL))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(if on { theme.on_primary } else { theme.text })
-                    .cursor_pointer()
-                    .child(avatars::project(&p, 20.0, theme))
-                    .child(p.name.clone())
-                    .when(on, |el| el.child(icon("check", 11.0, theme.on_primary)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(i) = this.picked.iter().position(|x| *x == pid) {
-                            this.picked.remove(i);
-                        } else {
-                            this.picked.push(pid.clone());
-                        }
-                        cx.notify();
-                    })),
-            );
-        }
-        row
     }
 
     fn switch_row(
@@ -633,7 +740,7 @@ impl SecretsPanel {
     ) -> Stateful<Div> {
         let _ = id;
         row.cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .group(kit::HOT)
             .child(glass::switch(on, theme))
     }
 
@@ -648,7 +755,7 @@ impl SecretsPanel {
                     .px(px(16.0))
                     .py(px(8.0))
                     .relative()
-                    .child(kit::hairline_below(16.0, theme))
+                    .child(kit::hairline_below(theme))
                     .child(
                         div()
                             .text_size(px(TEXT_SMALL))
@@ -718,7 +825,7 @@ impl SecretsPanel {
             .px(px(16.0))
             .py(px(10.0))
             .relative()
-            .child(kit::hairline_below(16.0, theme))
+            .child(kit::hairline_below(theme))
             .child(
                 div()
                     .text_size(px(TEXT_BODY))
@@ -816,7 +923,7 @@ impl SecretsPanel {
                         theme,
                     )
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme.surface_2))
+                    .group(kit::HOT)
                     .child(icon("chevron-right", 13.0, theme.text_faint))
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.go(Page::Vault(vid.clone()), cx)),
@@ -856,15 +963,19 @@ impl SecretsPanel {
                     format!("secret-{}", s.id),
                     s.glyph(),
                     s.env.clone(),
-                    Some(format!(
-                        "{who} · {}",
-                        secret_usage(s.last_used_at, None, true)
-                    )),
+                    Some(match s.source_label() {
+                        // Secret hand-off: "Arbos · given in chat · never used".
+                        Some(given) => format!(
+                            "{who} · {given} · {}",
+                            secret_usage(s.last_used_at, None, true)
+                        ),
+                        None => format!("{who} · {}", secret_usage(s.last_used_at, None, true)),
+                    }),
                     paused,
                     theme,
                 )
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
+                .group(kit::HOT)
                 .child(icon("chevron-right", 13.0, theme.text_faint))
                 .on_click(
                     cx.listener(move |this, _, _, cx| this.go(Page::Secret(sid.clone()), cx)),
@@ -903,6 +1014,7 @@ impl SecretsPanel {
 
     fn render_secret(&self, s: &Secret, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let mut body = div().flex().flex_col().gap(px(18.0));
+        let images = avatars::project_images(self.state.read(cx));
         let (paused, projects, acts) = {
             let st = self.state.read(cx);
             let acts: Vec<SecretActivity> = st
@@ -951,6 +1063,10 @@ impl SecretsPanel {
         if s.name != s.env {
             g = g.child(Self::value_row("Name", s.name.clone(), theme));
         }
+        // Secret hand-off: where it came from ("In chat with Arbos").
+        if let Some(added) = s.added_label() {
+            g = g.child(Self::value_row("Added", added, theme));
+        }
         if let Some(u) = s.username.as_deref().filter(|u| !u.is_empty()) {
             g = g.child(Self::value_row("Username", u.to_string(), theme));
         }
@@ -973,7 +1089,7 @@ impl SecretsPanel {
                 .px(px(16.0))
                 .py(px(10.0))
                 .relative()
-                .child(kit::hairline_below(16.0, theme));
+                .child(kit::hairline_below(theme));
             if s.kind == "login" {
                 form = form
                     .child(Self::field(
@@ -1001,14 +1117,6 @@ impl SecretsPanel {
                     Some("Sent once and encrypted. The old value keeps working for 24 hours."),
                     theme,
                 ));
-            }
-            if let Some(e) = &self.error {
-                form = form.child(
-                    div()
-                        .text_size(px(TEXT_TINY))
-                        .text_color(theme.danger)
-                        .child(e.clone()),
-                );
             }
             let sid2 = sid.clone();
             form = form.child(
@@ -1070,11 +1178,8 @@ impl SecretsPanel {
         let ask = s.ask_every_time;
         let sid_ask = sid.clone();
         g = g.child(
-            glass::row("Ask every time", theme)
-                .id("secret-ask")
+            glass::hot_row("secret-ask", "Ask every time", theme)
                 .border_b_0()
-                .cursor_pointer()
-                .hover(|st| st.bg(theme.surface_2))
                 .child(glass::switch(ask, theme))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let id = sid_ask.clone();
@@ -1143,8 +1248,20 @@ impl SecretsPanel {
             }
             sub.push(secret_usage(a.last_used_at, a.disabled_at, a.enabled));
             let avatar = match projects.iter().find(|p| p.id == a.project_id) {
-                Some(p) => avatars::project(p, 30.0, theme),
-                None => avatars::agent(&a.project_id, &a.name, None, None, None, 30.0, theme),
+                Some(p) => avatars::project_with(images.get(&p.id).cloned(), p, 30.0, theme),
+                None => avatars::agent_picture(
+                    &arbos_core::avatar::identity::resolve(
+                        &avatars::AgentQuery {
+                            sender: &a.project_id,
+                            handle: None,
+                            name: Some(&a.name),
+                        },
+                        &[],
+                    ),
+                    None,
+                    30.0,
+                    theme,
+                ),
             };
             let (sid_a, pid_a, on) = (sid.clone(), a.project_id.clone(), a.enabled);
             g = g.child(
@@ -1157,9 +1274,9 @@ impl SecretsPanel {
                     .px(px(16.0))
                     .py(px(8.0))
                     .relative()
-                    .child(kit::hairline_below(16.0, theme))
+                    .child(kit::hairline_below(theme))
                     .cursor_pointer()
-                    .hover(|st| st.bg(theme.surface_2))
+                    .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), theme))
                     .child(avatar)
                     .child(
                         div()
@@ -1210,7 +1327,14 @@ impl SecretsPanel {
                     .gap(px(8.0))
                     .px(px(16.0))
                     .py(px(10.0))
-                    .child(self.agent_chips("give", &have, theme, cx))
+                    .child(agent_picker::render(
+                        self,
+                        &self.state.clone(),
+                        "give",
+                        &have,
+                        theme,
+                        cx,
+                    ))
                     .child(Self::field(
                         "Note for the agent",
                         self.note_input.clone(),
@@ -1227,7 +1351,7 @@ impl SecretsPanel {
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         let note =
                                             this.note_input.read(cx).text().trim().to_string();
-                                        let picked = this.picked.clone();
+                                        let picked = this.agent_picker.picked.clone();
                                         for pid in picked {
                                             let id = sid_g.clone();
                                             let n = (!note.is_empty()).then(|| note.clone());
@@ -1236,7 +1360,7 @@ impl SecretsPanel {
                                             });
                                         }
                                         this.giving = false;
-                                        this.picked.clear();
+                                        this.agent_picker.reset(cx);
                                         this.note_input.update(cx, |i, cx| i.clear(cx));
                                         cx.notify();
                                     })),
@@ -1246,7 +1370,7 @@ impl SecretsPanel {
                                     .h(px(30.0))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.giving = false;
-                                        this.picked.clear();
+                                        this.agent_picker.reset(cx);
                                         cx.notify();
                                     })),
                             ),
@@ -1257,7 +1381,7 @@ impl SecretsPanel {
                 Self::add_row("secret-give", "Give another agent access…", theme).on_click(
                     cx.listener(|this, _, _, cx| {
                         this.giving = true;
-                        this.picked.clear();
+                        this.agent_picker.reset(cx);
                         cx.notify();
                     }),
                 ),
@@ -1296,9 +1420,9 @@ impl SecretsPanel {
                     .px(px(16.0))
                     .py(px(8.0))
                     .relative()
-                    .child(kit::hairline_below(16.0, theme))
+                    .child(kit::hairline_below(theme))
                     .cursor_pointer()
-                    .hover(|st| st.bg(theme.surface_2))
+                    .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), theme))
                     .child(avatars::element(
                         &d.user_id,
                         &d.display_name(),
@@ -1502,6 +1626,69 @@ impl SecretsPanel {
         body
     }
 
+    /// The claimed relay failure first, else the form's validation (a refusal with the words).
+    fn note(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<Div> {
+        let claimed = self.state.read(cx).claimed_failure.clone();
+        let (slot, claimed_one) = match (claimed, &self.error) {
+            (Some(slot), _) => (slot, true),
+            (None, Some(words)) => (crate::app::refused(self.verb(), words), false),
+            (None, None) => return None,
+        };
+        let mut handlers = error_note::Handlers::new();
+        if claimed_one {
+            handlers = handlers
+                .toggle_details(cx.listener(|this, _, _, cx| {
+                    this.state.update(cx, |s, cx| {
+                        s.toggle_claimed_failure_details();
+                        cx.notify();
+                    });
+                }))
+                .try_again(cx.listener(|this, _, _, cx| this.retry_last(cx)));
+        } else {
+            handlers = handlers.toggle_details(cx.listener(|this, _, _, cx| {
+                this.local_details_open = !this.local_details_open;
+                cx.notify();
+            }));
+        }
+        let open = if claimed_one {
+            slot.details_open
+        } else {
+            self.local_details_open
+        };
+        Some(div().child(error_note::render(
+            "secrets-error",
+            &slot.error,
+            open,
+            error_note::Style::Inline,
+            theme,
+            handlers,
+        )))
+    }
+
+    /// What the open form does, for the validation note's sentence.
+    fn verb(&self) -> &'static str {
+        match self.page {
+            Page::Add => "save the secret",
+            Page::Connect => "connect 1Password",
+            Page::Vault(_) => "replace the token",
+            Page::Secret(_) => "save the secret",
+            Page::Agent(_) | Page::List => "save the change",
+        }
+    }
+
+    /// Try again on a claimed failure: the form's own action, once more.
+    fn retry_last(&mut self, cx: &mut Context<Self>) {
+        self.state.update(cx, |s, cx| {
+            s.clear_claimed_failure();
+            cx.notify();
+        });
+        match self.page {
+            Page::Add => self.submit_add(cx),
+            Page::Connect => self.submit_connect(cx),
+            Page::Vault(_) | Page::Secret(_) | Page::Agent(_) | Page::List => {}
+        }
+    }
+
     fn render_add(&self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let kind = self.add_kind;
         let segs = div()
@@ -1610,7 +1797,14 @@ impl SecretsPanel {
                             .text_color(theme.text_muted)
                             .child("Agents"),
                     )
-                    .child(self.agent_chips("add", &[], theme, cx)),
+                    .child(agent_picker::render(
+                        self,
+                        &self.state.clone(),
+                        "add",
+                        &[],
+                        theme,
+                        cx,
+                    )),
             )
             .child(Self::field(
                 "Where it may be used (optional)",
@@ -1669,14 +1863,6 @@ impl SecretsPanel {
                         }),
                 ),
         );
-        if let Some(err) = &self.error {
-            form = form.child(
-                div()
-                    .text_size(px(TEXT_TINY))
-                    .text_color(theme.danger)
-                    .child(err.clone()),
-            );
-        }
         form.child(
             div()
                 .flex()
@@ -1804,7 +1990,7 @@ impl SecretsPanel {
                 );
             }
             for s in candidates {
-                let on = self.picked.contains(&s.id);
+                let on = self.agent_picker.picked.contains(&s.id);
                 let sid = s.id.clone();
                 chips = chips.child(
                     div()
@@ -1829,10 +2015,11 @@ impl SecretsPanel {
                         .child(s.env.clone())
                         .when(on, |el| el.child(icon("check", 11.0, theme.on_primary)))
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            if let Some(i) = this.picked.iter().position(|x| *x == sid) {
-                                this.picked.remove(i);
+                            let picked = &mut this.agent_picker.picked;
+                            if let Some(i) = picked.iter().position(|x| *x == sid) {
+                                picked.remove(i);
                             } else {
-                                this.picked.push(sid.clone());
+                                picked.push(sid.clone());
                             }
                             cx.notify();
                         })),
@@ -1863,7 +2050,7 @@ impl SecretsPanel {
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         let note =
                                             this.note_input.read(cx).text().trim().to_string();
-                                        for sid in this.picked.clone() {
+                                        for sid in this.agent_picker.picked.clone() {
                                             let pid = pid.clone();
                                             let n = (!note.is_empty()).then(|| note.clone());
                                             this.state.update(cx, |st, cx| {
@@ -1871,7 +2058,7 @@ impl SecretsPanel {
                                             });
                                         }
                                         this.giving = false;
-                                        this.picked.clear();
+                                        this.agent_picker.reset(cx);
                                         this.note_input.update(cx, |i, cx| i.clear(cx));
                                         cx.notify();
                                     })),
@@ -1881,7 +2068,7 @@ impl SecretsPanel {
                                     .h(px(30.0))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.giving = false;
-                                        this.picked.clear();
+                                        this.agent_picker.reset(cx);
                                         cx.notify();
                                     })),
                             ),
@@ -1892,7 +2079,7 @@ impl SecretsPanel {
                 Self::add_row("agent-give", "Give access to a secret…", theme).on_click(
                     cx.listener(|this, _, _, cx| {
                         this.giving = true;
-                        this.picked.clear();
+                        this.agent_picker.reset(cx);
                         cx.notify();
                     }),
                 ),
@@ -1973,7 +2160,7 @@ impl SecretsPanel {
                         .child(text.to_string()),
                 )
         };
-        let mut form = div()
+        let form = div()
             .flex()
             .flex_col()
             .gap(px(12.0))
@@ -2010,17 +2197,9 @@ impl SecretsPanel {
                     .flex_col()
                     .gap(px(5.0))
                     .child(div().text_size(px(TEXT_TINY)).text_color(theme.text_muted).child("Agents that may use this vault"))
-                    .child(self.agent_chips("connect", &[], theme, cx)),
+                    .child(agent_picker::render(self, &self.state.clone(), "connect", &[], theme, cx)),
             )
             .child(Self::field("Note", self.note_input.clone(), Some(VAULT_NOTE_HINT), theme));
-        if let Some(err) = &self.error {
-            form = form.child(
-                div()
-                    .text_size(px(TEXT_TINY))
-                    .text_color(theme.danger)
-                    .child(err.clone()),
-            );
-        }
         form.child(
             div()
                 .flex()
@@ -2066,10 +2245,23 @@ impl SecretsPanel {
         body = body.child(g);
         let mut g = Self::group(theme);
         let projects = self.state.read(cx).projects.clone();
+        let images = avatars::project_images(self.state.read(cx));
         for a in &v.agents {
             let avatar = match projects.iter().find(|p| p.id == a.project_id) {
-                Some(p) => avatars::project(p, 30.0, theme),
-                None => avatars::agent(&a.project_id, &a.name, None, None, None, 30.0, theme),
+                Some(p) => avatars::project_with(images.get(&p.id).cloned(), p, 30.0, theme),
+                None => avatars::agent_picture(
+                    &arbos_core::avatar::identity::resolve(
+                        &avatars::AgentQuery {
+                            sender: &a.project_id,
+                            handle: None,
+                            name: Some(&a.name),
+                        },
+                        &[],
+                    ),
+                    None,
+                    30.0,
+                    theme,
+                ),
             };
             let (vid, pid, on) = (v.id.clone(), a.project_id.clone(), a.enabled);
             g = g.child(
@@ -2082,9 +2274,9 @@ impl SecretsPanel {
                     .px(px(16.0))
                     .py(px(8.0))
                     .relative()
-                    .child(kit::hairline_below(16.0, theme))
+                    .child(kit::hairline_below(theme))
                     .cursor_pointer()
-                    .hover(|st| st.bg(theme.surface_2))
+                    .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), theme))
                     .child(avatar)
                     .child(
                         div()
@@ -2133,7 +2325,14 @@ impl SecretsPanel {
                     .gap(px(8.0))
                     .px(px(16.0))
                     .py(px(10.0))
-                    .child(self.agent_chips("vault-give", &have, theme, cx))
+                    .child(agent_picker::render(
+                        self,
+                        &self.state.clone(),
+                        "vault-give",
+                        &have,
+                        theme,
+                        cx,
+                    ))
                     .child(
                         div()
                             .flex()
@@ -2142,14 +2341,14 @@ impl SecretsPanel {
                                 glass::primary_button("vault-give-save", "Save", theme)
                                     .h(px(30.0))
                                     .on_click(cx.listener(move |this, _, _, cx| {
-                                        for pid in this.picked.clone() {
+                                        for pid in this.agent_picker.picked.clone() {
                                             let id = vid.clone();
                                             this.state.update(cx, |st, cx| {
                                                 st.vault_access(id, pid, true, cx)
                                             });
                                         }
                                         this.giving = false;
-                                        this.picked.clear();
+                                        this.agent_picker.reset(cx);
                                         cx.notify();
                                     })),
                             )
@@ -2158,7 +2357,7 @@ impl SecretsPanel {
                                     .h(px(30.0))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.giving = false;
-                                        this.picked.clear();
+                                        this.agent_picker.reset(cx);
                                         cx.notify();
                                     })),
                             ),
@@ -2169,7 +2368,7 @@ impl SecretsPanel {
                 Self::add_row("vault-give", "Give another agent access…", theme).on_click(
                     cx.listener(|this, _, _, cx| {
                         this.giving = true;
-                        this.picked.clear();
+                        this.agent_picker.reset(cx);
                         cx.notify();
                     }),
                 ),
@@ -2204,9 +2403,9 @@ impl SecretsPanel {
                     .px(px(16.0))
                     .py(px(8.0))
                     .relative()
-                    .child(kit::hairline_below(16.0, theme))
+                    .child(kit::hairline_below(theme))
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme.surface_2))
+                    .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), theme))
                     .child(
                         div()
                             .flex_1()
@@ -2287,14 +2486,6 @@ impl SecretsPanel {
                 Some("Stored encrypted. Arbos never shows it again."),
                 theme,
             ));
-            if let Some(e) = &self.error {
-                form = form.child(
-                    div()
-                        .text_size(px(TEXT_TINY))
-                        .text_color(theme.danger)
-                        .child(e.clone()),
-                );
-            }
             form = form.child(
                 div()
                     .flex()
@@ -2422,13 +2613,19 @@ impl Focusable for SecretsPanel {
 }
 
 impl Render for SecretsPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let view = self.state.read(cx).secrets.clone();
+        self.apply_picker_rig(window, cx);
         if let Some(env) = self.pending_env.clone() {
             if let Some(s) = view.secrets.iter().find(|s| s.env == env) {
                 self.pending_env = None;
                 self.page = Page::Secret(s.id.clone());
+                if std::mem::take(&mut self.pending_people) {
+                    let id = s.id.clone();
+                    self.state
+                        .update(cx, |st, cx| st.open_secret_people_picker(id, cx));
+                }
             }
         }
         if self.pending_vault {
@@ -2532,6 +2729,21 @@ impl Render for SecretsPanel {
             },
         };
 
+        // The page's note — under the header, before the first field (Jacob 2026-10-26): the
+        // relay's refusal of a save / connect / delete (claimed from the toast stack while a
+        // form is up) or the form's own validation, through the one shared element.
+        let form_open = matches!(
+            self.page,
+            Page::Add | Page::Connect | Page::Secret(_) | Page::Vault(_) | Page::Agent(_)
+        );
+        let claim = form_open.then_some(crate::app::FailureClaim {
+            surface: "secrets",
+            verbs: SECRETS_VERBS,
+        });
+        if self.state.read(cx).failure_claim != claim {
+            self.state.update(cx, |s, _| s.set_failure_claim(claim));
+        }
+        let note = self.note(&theme, cx);
         let card = div()
             .id("secrets-popover")
             .track_focus(&self.focus_handle)
@@ -2540,6 +2752,7 @@ impl Render for SecretsPanel {
             .gap(px(10.0))
             .p(px(12.0))
             .child(header)
+            .children(note)
             .child(
                 div()
                     .id("secrets-scroll")
@@ -2567,5 +2780,334 @@ impl Render for SecretsPanel {
             .bottom(px(14.0))
             .child(frosted(PANEL_RADIUS, MENU_BLUR, card))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod picker_tests {
+    //! The real `Shell` headless with the Secrets page open: the four agent pickers (New
+    //! secret, Connect 1Password, a secret's "Give another agent access…", a vault's) draw
+    //! the one component — chips for the granted agents, one "Add agent" button, a dropdown
+    //! that filters through the matcher and hides the agents with access — and ↩ / × add and
+    //! remove chips ([feedback secrets-agent-picker-mac-2026-10-26]).
+    use futures::future::BoxFuture;
+    use gpui::{
+        point, px, size, AppContext, Bounds, Entity, Modifiers, Pixels, TestAppContext,
+        VisualTestContext,
+    };
+    use tokio::sync::mpsc;
+
+    use super::Page;
+    use crate::app::AppState;
+    use crate::model::{AccountView, ConnectedVault, Project, Secret, SecretsView};
+    use crate::sync::{ClientCommand, SyncEvent, SyncSource};
+    use crate::ui::agent_picker::{ADD_SELECTOR, DROPDOWN_SELECTOR, EMPTY_SELECTOR};
+    use crate::ui::motion::PulseClock;
+    use crate::ui::shell::{SettingsPage, Shell};
+    use crate::ui::theme::Theme;
+
+    struct Idle;
+
+    impl SyncSource for Idle {
+        fn name(&self) -> &'static str {
+            "idle"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            _commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    const AGENTS: [(&str, &str); 6] = [
+        ("a1", "Affine"),
+        ("a2", "Arbos"),
+        ("a3", "ArbosTest"),
+        ("a4", "Doug agent"),
+        ("a5", "Hezbola"),
+        ("a6", "Arbonites"),
+    ];
+
+    fn secret_with_access(id: &str, env: &str, agents: &[(&str, &str)]) -> Secret {
+        let agents: Vec<serde_json::Value> = agents
+            .iter()
+            .map(|(pid, name)| {
+                serde_json::json!({ "project_id": pid, "name": name, "access_id": format!("acc-{pid}"), "enabled": true })
+            })
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "id": id, "name": env, "env": env, "kind": "key", "agents": agents
+        }))
+        .expect("secret fixture")
+    }
+
+    fn vault_with_access(id: &str, agents: &[(&str, &str)]) -> ConnectedVault {
+        let agents: Vec<serde_json::Value> = agents
+            .iter()
+            .map(|(pid, name)| {
+                serde_json::json!({ "project_id": pid, "name": name, "access_id": format!("vacc-{pid}"), "enabled": true })
+            })
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "id": id, "provider": "onepassword", "name": "Research", "items_count": 3, "status": "ok", "agents": agents
+        }))
+        .expect("vault fixture")
+    }
+
+    fn mount(
+        cx: &mut TestAppContext,
+    ) -> (
+        tokio::runtime::Runtime,
+        Entity<AppState>,
+        Entity<Shell>,
+        &mut VisualTestContext,
+    ) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| {
+            gpui_tokio::init_from_handle(cx, handle);
+            cx.set_reduce_motion(true);
+            cx.set_global(Theme::dark(crate::ui::theme::Surface::Matte));
+            if !cx.has_global::<PulseClock>() {
+                PulseClock::init(cx);
+            }
+        });
+        let state = cx.new(|cx| AppState::new(Box::new(Idle), cx));
+        state.update(cx, |s, cx| {
+            s.account = Some(AccountView {
+                id: "gh_1".into(),
+                login: "unconst".into(),
+                name: "Jacob".into(),
+                avatar_url: String::new(),
+                device_name: "test".into(),
+                balance_usd: 0.0,
+                spent_today_usd: 0.0,
+                daily_cap_usd: None,
+            });
+            for (id, name) in AGENTS {
+                s.projects.push(Project {
+                    id: id.into(),
+                    name: name.into(),
+                    ..Project::default()
+                });
+            }
+            s.selected_project = Some("a1".into());
+            s.secrets = SecretsView {
+                loaded: true,
+                secrets: vec![secret_with_access("s1", "STRIPE_KEY", &[("a2", "Arbos")])],
+                vaults: vec![vault_with_access(
+                    "v1",
+                    &[("a1", "Affine"), ("a2", "Arbos")],
+                )],
+                ..SecretsView::default()
+            };
+            cx.notify();
+        });
+        let (shell, vcx) = cx.add_window_view(|window, cx| Shell::new(state.clone(), window, cx));
+        // Tall enough that every form's Agents block is on screen without scrolling the pane.
+        vcx.simulate_resize(size(px(1180.0), px(1400.0)));
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            shell.update(cx, |sh, cx| {
+                sh.open_settings_page(SettingsPage::Secrets, window, cx)
+            })
+        });
+        vcx.run_until_parked();
+        (rt, state, shell, vcx)
+    }
+
+    fn settle(shell: &Entity<Shell>, vcx: &mut VisualTestContext) {
+        for _ in 0..3 {
+            shell.update(vcx, |_, cx| cx.notify());
+            vcx.run_until_parked();
+        }
+    }
+
+    fn centre(b: Bounds<Pixels>) -> gpui::Point<Pixels> {
+        point(b.left() + b.size.width / 2.0, b.top() + b.size.height / 2.0)
+    }
+
+    fn secrets_page(shell: &Entity<Shell>, vcx: &mut VisualTestContext, page: Page, giving: bool) {
+        shell.update(vcx, |sh, cx| {
+            sh.secrets.update(cx, |p, cx| {
+                p.page = page;
+                p.giving = giving;
+                cx.notify();
+            });
+        });
+        settle(shell, vcx);
+    }
+
+    /// `debug_bounds` wants a `'static` selector; the row ids are few and fixed.
+    fn row_selector(i: usize) -> &'static str {
+        Box::leak(format!("agent-picker-row-{i}").into_boxed_str())
+    }
+
+    fn rows(vcx: &mut VisualTestContext) -> usize {
+        (0..20)
+            .take_while(|i| vcx.debug_bounds(row_selector(*i)).is_some())
+            .count()
+    }
+
+    fn picked(shell: &Entity<Shell>, vcx: &mut VisualTestContext) -> Vec<String> {
+        shell.read_with(&*vcx, |sh, cx| {
+            sh.secrets.read(cx).agent_picker.picked.clone()
+        })
+    }
+
+    #[gpui::test]
+    fn new_secret_filters_through_the_matcher_and_enter_adds_a_chip(cx: &mut TestAppContext) {
+        let (_rt, _state, shell, vcx) = mount(cx);
+        secrets_page(&shell, vcx, Page::Add, false);
+        assert!(
+            vcx.debug_bounds(EMPTY_SELECTOR).is_some(),
+            "empty state hint"
+        );
+        assert!(
+            vcx.debug_bounds(DROPDOWN_SELECTOR).is_none(),
+            "closed at rest"
+        );
+        let add = vcx
+            .debug_bounds(ADD_SELECTOR)
+            .expect("one Add agent button");
+        assert_eq!(f32::from(add.size.height), 30.0, "the chip family's height");
+
+        vcx.simulate_click(centre(add), Modifiers::default());
+        settle(&shell, vcx);
+        let dd = vcx
+            .debug_bounds(DROPDOWN_SELECTOR)
+            .expect("the dropdown is up");
+        assert!(
+            dd.top() >= add.bottom() || dd.bottom() <= add.top(),
+            "under the chips row (or over it when the window has no room below): {dd:?} vs {add:?}"
+        );
+        assert!(
+            (f32::from(dd.left()) - f32::from(add.left())).abs() < 1.0,
+            "anchored at the row's left edge"
+        );
+        assert_eq!(f32::from(dd.size.width), 308.0, "the content width");
+        assert_eq!(rows(vcx), AGENTS.len(), "no query: every agent of mine");
+
+        vcx.simulate_input("ar");
+        settle(&shell, vcx);
+        assert_eq!(rows(vcx), 3, "“ar” → Arbos, ArbosTest, Arbonites");
+
+        vcx.dispatch_action(crate::ui::composer::Down);
+        vcx.run_until_parked();
+        vcx.dispatch_action(crate::ui::composer::Send);
+        settle(&shell, vcx);
+        assert_eq!(
+            picked(&shell, vcx),
+            vec!["a3".to_string()],
+            "↓ then ↩ added ArbosTest"
+        );
+        assert!(
+            vcx.debug_bounds(DROPDOWN_SELECTOR).is_none(),
+            "one agent per visit: the list folds"
+        );
+        assert!(
+            vcx.debug_bounds("agent-picker-chip-a3").is_some(),
+            "its chip is drawn"
+        );
+        assert!(vcx.debug_bounds(EMPTY_SELECTOR).is_none());
+
+        // The chip's × removes it again.
+        let x = vcx
+            .debug_bounds("agent-picker-chip-x-a3")
+            .expect("× on the chip");
+        vcx.simulate_click(centre(x), Modifiers::default());
+        settle(&shell, vcx);
+        assert!(picked(&shell, vcx).is_empty(), "× removed the grant");
+        assert!(vcx.debug_bounds("agent-picker-chip-a3").is_none());
+    }
+
+    #[gpui::test]
+    fn escape_folds_the_dropdown_and_a_picked_agent_leaves_the_list(cx: &mut TestAppContext) {
+        let (_rt, _state, shell, vcx) = mount(cx);
+        secrets_page(&shell, vcx, Page::Add, false);
+        let add = vcx.debug_bounds(ADD_SELECTOR).expect("Add agent");
+        vcx.simulate_click(centre(add), Modifiers::default());
+        settle(&shell, vcx);
+        let row = vcx.debug_bounds("agent-picker-row-0").expect("first row");
+        vcx.simulate_click(centre(row), Modifiers::default());
+        settle(&shell, vcx);
+        assert_eq!(
+            picked(&shell, vcx),
+            vec!["a1".to_string()],
+            "a click adds Affine"
+        );
+
+        let add = vcx.debug_bounds(ADD_SELECTOR).expect("Add agent");
+        vcx.simulate_click(centre(add), Modifiers::default());
+        settle(&shell, vcx);
+        assert_eq!(
+            rows(vcx),
+            AGENTS.len() - 1,
+            "Affine is a chip now, not a row"
+        );
+        vcx.dispatch_action(crate::ui::shell::Escape);
+        settle(&shell, vcx);
+        assert!(
+            vcx.debug_bounds(DROPDOWN_SELECTOR).is_none(),
+            "esc folds the list"
+        );
+        assert_eq!(
+            picked(&shell, vcx),
+            vec!["a1".to_string()],
+            "the chip stays"
+        );
+    }
+
+    #[gpui::test]
+    fn every_secrets_picker_is_the_component_and_hides_the_agents_with_access(
+        cx: &mut TestAppContext,
+    ) {
+        let (_rt, _state, shell, vcx) = mount(cx);
+        // Connect 1Password: nothing has access yet, every agent is offered.
+        secrets_page(&shell, vcx, Page::Connect, false);
+        let add = vcx
+            .debug_bounds(ADD_SELECTOR)
+            .expect("Connect form: Add agent");
+        vcx.simulate_click(centre(add), Modifiers::default());
+        settle(&shell, vcx);
+        assert_eq!(rows(vcx), AGENTS.len());
+        vcx.dispatch_action(crate::ui::shell::Escape);
+        settle(&shell, vcx);
+
+        // A secret's page, "Give another agent access…": Arbos has access → not offered.
+        secrets_page(&shell, vcx, Page::Secret("s1".into()), true);
+        let add = vcx
+            .debug_bounds(ADD_SELECTOR)
+            .expect("secret page: Add agent");
+        vcx.simulate_click(centre(add), Modifiers::default());
+        settle(&shell, vcx);
+        assert_eq!(rows(vcx), AGENTS.len() - 1, "Arbos already has access");
+        vcx.simulate_input("arbos");
+        settle(&shell, vcx);
+        assert_eq!(rows(vcx), 1, "“arbos” → ArbosTest only (Arbos is hidden)");
+        vcx.dispatch_action(crate::ui::shell::Escape);
+        settle(&shell, vcx);
+
+        // A vault's page: Affine and Arbos have access → four left.
+        secrets_page(&shell, vcx, Page::Vault("v1".into()), true);
+        let add = vcx
+            .debug_bounds(ADD_SELECTOR)
+            .expect("vault page: Add agent");
+        vcx.simulate_click(centre(add), Modifiers::default());
+        settle(&shell, vcx);
+        assert_eq!(
+            rows(vcx),
+            AGENTS.len() - 2,
+            "Affine and Arbos already have access"
+        );
+        vcx.dispatch_action(crate::ui::shell::Escape);
+        settle(&shell, vcx);
+        assert!(vcx.debug_bounds(DROPDOWN_SELECTOR).is_none());
     }
 }

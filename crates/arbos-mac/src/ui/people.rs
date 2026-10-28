@@ -13,11 +13,13 @@ use crate::app::AppState;
 use crate::model::{AgentMember, Person, Project};
 use crate::ui::avatars;
 use crate::ui::composer::ComposerInput;
+use crate::ui::error_note;
 use crate::ui::frost::{frosted, MENU_BLUR};
 use crate::ui::glass;
-use crate::ui::groups::project_color;
+use crate::ui::highlight::{self, Shape};
 use crate::ui::icons::icon;
 use crate::ui::identity;
+use crate::ui::profiles::kit;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
@@ -34,8 +36,6 @@ pub const CARD_INSET: f32 = 16.0;
 pub const ROW_PADDING_X: f32 = 14.0;
 pub const ROW_GLYPH: f32 = 40.0;
 pub const ROW_GAP: f32 = identity::ROW_GAP;
-/// Where the text column starts inside the card; the hairlines between rows start there too.
-pub const ROW_TEXT_INSET: f32 = ROW_PADDING_X + ROW_GLYPH + ROW_GAP;
 
 /// Members of a space with their decoded avatars (list rows, headers).
 pub type PeopleWithAvatars = Vec<(Person, Option<Arc<RenderImage>>)>;
@@ -52,7 +52,7 @@ pub fn avatar(image: Option<Arc<RenderImage>>, person: &Person, size: f32, theme
         .justify_center();
     match image {
         Some(image) => base.child(
-            gpui::img(image)
+            gpui::img(crate::ui::picture_fit::fit(&image, size))
                 .size(px(size))
                 .rounded_full()
                 .object_fit(gpui::ObjectFit::Cover),
@@ -62,9 +62,15 @@ pub fn avatar(image: Option<Arc<RenderImage>>, person: &Person, size: f32, theme
     }
 }
 
-/// A shared agent's avatar: its initials disc (D79).
-pub fn agent_glyph(agent: &AgentMember, size: f32, theme: &Theme) -> Div {
-    crate::ui::avatars::agent_member(agent, size, theme)
+/// A shared agent's avatar, through the resolver (its picture, else its leaf).
+pub fn agent_glyph(
+    state: &AppState,
+    chat: Option<&Project>,
+    agent: &AgentMember,
+    size: f32,
+    theme: &Theme,
+) -> Div {
+    crate::ui::avatars::member_picture(state, chat, agent, size, theme)
 }
 
 /// The "New Message" sheet (iPhone / Telegram layout): Cancel · title, a
@@ -102,18 +108,27 @@ pub fn new_chat_sheet(
     let servers_available = s.servers_available;
     // Servers hold people only: no agent rows in their picker.
     let my_agents: Vec<Project> = if group_mode && !add_to.as_ref().is_some_and(|t| t.is_server) {
-        let q = typed.to_lowercase();
-        s.my_projects()
-            .filter(|p| {
-                q.is_empty()
-                    || p.name.to_lowercase().contains(&q)
-                    || Project::mention_slug(&p.name).contains(&q)
-            })
-            .cloned()
-            .collect()
+        agent_picker_rows(s.my_projects().cloned().collect(), &query)
     } else {
         Vec::new()
     };
+    // Add members on a group: the Agents section also lists the other members'
+    // agents already in it (greyed, already in — only their owner adds or
+    // removes them), after mine, so the section is the chat's whole agent
+    // roster ([feedback add-your-agent-row-removal-mac-2026-10-27]).
+    let others_agents: Vec<OtherAgentRow> = s
+        .add_members_group()
+        .map(|group| {
+            others_agents_in(group, &me_handle, &typed)
+                .into_iter()
+                .map(|a| {
+                    let ident = avatars::member_identity(Some(group), &s.projects, &a);
+                    let image = ident.image_key.as_deref().and_then(|url| s.avatar(url));
+                    (a, ident, image)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let agent_names: std::collections::HashMap<String, String> = s
         .my_projects()
         .map(|p| (p.id.clone(), p.name.clone()))
@@ -160,6 +175,25 @@ pub fn new_chat_sheet(
         .pb(px(18.0))
         .min_h_0()
         .overflow_y_scroll();
+    // A refusal (no such user, nobody picked, the relay said no) is the shared error note at
+    // the top of the body, before the search field — one place for every people sheet.
+    if let Some(slot) = error.as_ref() {
+        body = body.child(div().mx(px(CARD_INSET)).child(error_note::render(
+            "people-sheet-error",
+            &slot.error,
+            slot.details_open,
+            error_note::Style::Inline,
+            &theme,
+            error_note::Handlers::new().toggle_details(cx.listener(|this, _, _, cx| {
+                this.state.update(cx, |s, cx| {
+                    if let Some(slot) = s.people_error.as_mut() {
+                        slot.toggle_details();
+                    }
+                    cx.notify();
+                });
+            })),
+        )));
+    }
 
     if group_mode {
         body = new_group_body(
@@ -170,10 +204,10 @@ pub fn new_chat_sheet(
             &picked_agents,
             &agent_names,
             &my_agents,
+            &others_agents,
             &results,
             &typed,
             busy,
-            error,
             add_to.as_ref(),
             &me_handle,
             state,
@@ -191,7 +225,7 @@ pub fn new_chat_sheet(
                 .px(px(ROW_PADDING_X))
                 .py(px(10.0))
                 .cursor_pointer()
-                .hover(|st| st.bg(theme.surface_2))
+                .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), &theme))
                 .child(
                     glass::circle("new-agent-glyph", ROW_GLYPH, &theme)
                         .child(icon("sparkles", 17.0, theme.text)),
@@ -230,7 +264,7 @@ pub fn new_chat_sheet(
                 .px(px(ROW_PADDING_X))
                 .py(px(10.0))
                 .cursor_pointer()
-                .hover(|st| st.bg(theme.surface_2))
+                .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), &theme))
                 .child(
                     glass::circle("new-group-glyph", ROW_GLYPH, &theme)
                         .child(icon("people", 17.0, theme.text)),
@@ -263,9 +297,7 @@ pub fn new_chat_sheet(
                 .flex_shrink_0()
                 .mx(px(CARD_INSET))
                 .child(agent_row);
-            group = group
-                .child(div().h(px(0.5)).ml(px(ROW_TEXT_INSET)).bg(theme.border))
-                .child(group_row);
+            group = group.child(kit::divider(&theme)).child(group_row);
             // D88 rule 8: servers, when this relay runs them.
             if servers_available {
                 let server_row = |id: &'static str,
@@ -281,7 +313,7 @@ pub fn new_chat_sheet(
                         .px(px(ROW_PADDING_X))
                         .py(px(10.0))
                         .cursor_pointer()
-                        .hover(|st| st.bg(theme.surface_2))
+                        .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), &theme))
                         .child(
                             glass::circle(
                                 ElementId::Name(SharedString::from(format!("{id}-glyph"))),
@@ -314,15 +346,13 @@ pub fn new_chat_sheet(
                             this.open_server_sheet(sheet.clone(), window, cx);
                         }))
                 };
-                group = group
-                    .child(div().h(px(0.5)).ml(px(ROW_TEXT_INSET)).bg(theme.border))
-                    .child(server_row(
-                        "new-server",
-                        "hash",
-                        "New server",
-                        "Channels for a crowd, with an invite link",
-                        crate::app::ServerSheet::NewServer,
-                    ));
+                group = group.child(kit::divider(&theme)).child(server_row(
+                    "new-server",
+                    "hash",
+                    "New server",
+                    "Channels for a crowd, with an invite link",
+                    crate::app::ServerSheet::NewServer,
+                ));
                 // "Join a server" (paste a link) is gone (Jacob 2026-10-22): invite links
                 // open the app through arbos.life/s/<code>; people are added by name.
             }
@@ -332,17 +362,6 @@ pub fn new_chat_sheet(
         // People.
         let mut list = glass::group(&theme).mx(px(CARD_INSET));
         let mut any = false;
-        if let Some(err) = error {
-            any = true;
-            list = list.child(
-                div()
-                    .px(px(14.0))
-                    .py(px(10.0))
-                    .text_size(px(TEXT_SMALL))
-                    .text_color(theme.danger)
-                    .child(err),
-            );
-        }
         if results.is_empty() && !typed.is_empty() && !busy {
             any = true;
             list = list.child(
@@ -383,11 +402,10 @@ pub fn new_chat_sheet(
                     .gap(px(ROW_GAP))
                     .px(px(ROW_PADDING_X))
                     .py(px(9.0))
-                    .when(i + 1 < count, |el| {
-                        el.border_b_1().border_color(theme.border)
-                    })
+                    .relative()
+                    .when(i + 1 < count, |el| el.child(kit::hairline_below(&theme)))
                     .cursor_pointer()
-                    .hover(|st| st.bg(theme.surface_2))
+                    .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), &theme))
                     .child(avatar(image, &person, ROW_GLYPH, &theme))
                     .child(
                         div()
@@ -583,10 +601,10 @@ fn new_group_body(
     picked_agents: &[String],
     agent_names: &std::collections::HashMap<String, String>,
     my_agents: &[Project],
+    others_agents: &[OtherAgentRow],
     results: &[(Person, Option<Arc<RenderImage>>)],
     typed: &str,
     busy: bool,
-    error: Option<String>,
     add_to: Option<&crate::app::AddTarget>,
     _me_handle: &str,
     state: &Entity<AppState>,
@@ -601,6 +619,7 @@ fn new_group_body(
             .gap(px(8.0))
             .overflow_x_scroll();
         let projects = state.read(cx).projects.clone();
+        let images = avatars::project_images(state.read(cx));
         for pid in picked_agents {
             let id = pid.clone();
             let label = agent_names
@@ -612,7 +631,10 @@ fn new_group_body(
             let picture = projects
                 .iter()
                 .find(|p| &p.id == pid)
-                .map(|p| avatars::project(p, CHIP_AVATAR, theme).into_any_element())
+                .map(|p| {
+                    avatars::project_with(images.get(&p.id).cloned(), p, CHIP_AVATAR, theme)
+                        .into_any_element()
+                })
                 .unwrap_or_else(|| div().size(px(CHIP_AVATAR)).into_any_element());
             chips = chips.child(member_chip(
                 format!("group-chip-agent-{pid}"),
@@ -642,19 +664,11 @@ fn new_group_body(
         body = body.child(chips);
     }
     body = body.child(search);
-    if let Some(err) = error {
-        body = body.child(
-            div()
-                .px(px(30.0))
-                .text_size(px(TEXT_SMALL))
-                .text_color(theme.danger)
-                .text_center()
-                .child(err),
-        );
-    }
 
-    if !my_agents.is_empty() {
-        let count = my_agents.len();
+    let agents_shown = !my_agents.is_empty() || !others_agents.is_empty();
+    if agents_shown {
+        let count = my_agents.len() + others_agents.len();
+        let images = avatars::project_images(state.read(cx));
         let mut list = glass::group(theme).mx(px(16.0));
         for (i, project) in my_agents.iter().enumerate() {
             let pid = project.id.clone();
@@ -666,19 +680,23 @@ fn new_group_body(
                         "group-agent-{}",
                         project.id
                     ))))
+                    .debug_selector(|| format!("group-agent-{pid}"))
                     .flex()
                     .items_center()
                     .gap(px(identity::ROW_GAP))
                     .px(px(14.0))
                     .py(px(9.0))
-                    .when(i + 1 < count, |el| {
-                        el.border_b_1().border_color(theme.border)
-                    })
+                    .relative()
+                    .when(i + 1 < count, |el| el.child(kit::hairline_below(theme)))
                     .when(already, |el| el.opacity(0.5))
-                    .when(!already, |el| {
-                        el.cursor_pointer().hover(|st| st.bg(theme.surface_2))
-                    })
-                    .child(avatars::project(project, 40.0, theme))
+                    .map(|el| highlight::row(el, selected, Shape::Nested(PANEL_RADIUS), theme))
+                    .when(!already, |el| el.cursor_pointer())
+                    .child(avatars::project_with(
+                        images.get(&project.id).cloned(),
+                        project,
+                        40.0,
+                        theme,
+                    ))
                     .child(
                         div()
                             .flex()
@@ -708,11 +726,57 @@ fn new_group_body(
                     }),
             );
         }
+        for (i, (agent, ident, image)) in others_agents.iter().enumerate() {
+            let last = i + 1 == others_agents.len();
+            let selector = format!("group-agent-{}", agent.project_id);
+            list = list.child(
+                div()
+                    .id(ElementId::Name(SharedString::from(selector.clone())))
+                    .debug_selector(move || selector)
+                    .flex()
+                    .items_center()
+                    .gap(px(identity::ROW_GAP))
+                    .px(px(14.0))
+                    .py(px(9.0))
+                    .relative()
+                    .when(!last, |el| el.child(kit::hairline_below(theme)))
+                    .opacity(0.5)
+                    .child(avatars::agent_picture(ident, image.clone(), 40.0, theme))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(px(TEXT_BODY))
+                                    .text_color(theme.text)
+                                    .truncate()
+                                    .child(agent.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(TEXT_SMALL))
+                                    .text_color(theme.text_muted)
+                                    .child(format!(
+                                        "@{} · run by @{}",
+                                        agent.handle, agent.owner_handle
+                                    )),
+                            ),
+                    )
+                    .child(pick_mark(true, theme)),
+            );
+        }
         body = body.child(
             div()
                 .flex()
                 .flex_col()
-                .child(glass::section_label("Your agents", theme).px(px(30.0)))
+                .child(
+                    glass::section_label(AGENTS_SECTION_LABEL, theme)
+                        .debug_selector(|| AGENTS_SECTION_ID.into())
+                        .px(px(30.0)),
+                )
                 .child(list),
         );
     }
@@ -758,24 +822,21 @@ fn new_group_body(
                 .iter()
                 .any(|p| p.id == person.id || p.handle == person.handle);
         let person_clone = person.clone();
+        let selector = format!("group-person-{}", person.id);
         list = list.child(
             div()
-                .id(ElementId::Name(SharedString::from(format!(
-                    "group-person-{}",
-                    person.id
-                ))))
+                .id(ElementId::Name(SharedString::from(selector.clone())))
+                .debug_selector(move || selector)
                 .flex()
                 .items_center()
                 .gap(px(identity::ROW_GAP))
                 .px(px(14.0))
                 .py(px(9.0))
-                .when(i + 1 < count, |el| {
-                    el.border_b_1().border_color(theme.border)
-                })
+                .relative()
+                .when(i + 1 < count, |el| el.child(kit::hairline_below(theme)))
                 .when(already, |el| el.opacity(0.5))
-                .when(!already, |el| {
-                    el.cursor_pointer().hover(|st| st.bg(theme.surface_2))
-                })
+                .map(|el| highlight::row(el, selected, Shape::Nested(PANEL_RADIUS), theme))
+                .when(!already, |el| el.cursor_pointer())
                 .child(avatar(image.clone(), person, 40.0, theme))
                 .child(
                     div()
@@ -807,12 +868,8 @@ fn new_group_body(
         );
     }
     if any {
-        let label = if my_agents.is_empty() {
-            if typed.is_empty() {
-                "Arbos users"
-            } else {
-                "People"
-            }
+        let label = if !agents_shown && typed.is_empty() {
+            "Arbos users"
         } else {
             "People"
         };
@@ -844,117 +901,6 @@ fn pick_mark(selected: bool, theme: &Theme) -> Div {
             .border_1()
             .border_color(Theme::with_alpha(theme.text_muted, 0.5))
     }
-}
-
-/// Under "+ Add agent": my projects not yet in the chat.
-pub fn add_agent_picker(
-    space: &Project,
-    state: &Entity<AppState>,
-    right: f32,
-    cx: &mut Context<Shell>,
-) -> Div {
-    let theme = Theme::of(cx).clone();
-    let s = state.read(cx);
-    let chat_id = space.id.clone();
-    let candidates: Vec<Project> = s
-        .my_projects()
-        .filter(|p| !space.agents.iter().any(|a| a.project_id == p.id))
-        .cloned()
-        .collect();
-    let mut card = div()
-        .w(px(260.0))
-        .flex()
-        .flex_col()
-        .gap(px(2.0))
-        .p(px(6.0))
-        .rounded(px(PANEL_RADIUS))
-        .bg(theme.card())
-        .border_1()
-        .border_color(theme.border_strong)
-        .shadow_lg()
-        .child(
-            div()
-                .px(px(8.0))
-                .py(px(4.0))
-                .text_size(px(11.0))
-                .text_color(theme.text_faint)
-                .child("ADD ONE OF YOUR AGENTS"),
-        );
-    if candidates.is_empty() {
-        card = card.child(
-            div()
-                .px(px(8.0))
-                .py(px(6.0))
-                .text_size(px(12.0))
-                .text_color(theme.text_muted)
-                .child("Every project of yours is already here."),
-        );
-    }
-    for p in candidates {
-        let pid = p.id.clone();
-        let chat = chat_id.clone();
-        let color = project_color(&p.color, theme.accent);
-        card = card.child(
-            div()
-                .id(ElementId::Name(SharedString::from(format!(
-                    "add-agent-{}",
-                    p.id
-                ))))
-                .flex()
-                .items_center()
-                .gap(px(8.0))
-                .px(px(8.0))
-                .py(px(6.0))
-                .rounded(px(6.0))
-                .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
-                .child(
-                    div()
-                        .size(px(22.0))
-                        .rounded(px(6.0))
-                        .bg(Theme::with_alpha(color, 0.18))
-                        .border_1()
-                        .border_color(Theme::with_alpha(color, 0.8))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(12.0))
-                        .text_color(theme.text)
-                        .child(p.icon.clone()),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .text_size(px(12.5))
-                        .text_color(theme.text)
-                        .child(p.name.clone()),
-                )
-                .child(
-                    div()
-                        .text_size(px(10.5))
-                        .text_color(theme.text_faint)
-                        .child(format!("@{}", Project::mention_slug(&p.name))),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.add_agent_open = false;
-                    this.state
-                        .update(cx, |s, cx| s.add_agent(chat.clone(), pid.clone(), cx));
-                })),
-        );
-    }
-    card = card.child(
-        div()
-            .px(px(8.0))
-            .pt(px(4.0))
-            .text_size(px(10.5))
-            .text_color(theme.text_faint)
-            .child("Mention it (@slug) to get an answer. Everyone here can ask it anything your project can do."),
-    );
-    div()
-        .absolute()
-        .top(px(crate::ui::theme::TAB_BAR_HEIGHT + 48.0))
-        .right(px(right))
-        .child(frosted(PANEL_RADIUS, MENU_BLUR, card))
 }
 
 /// Member list: people (Block / Remove), agents (owner handle, Remove when mine), Leave.
@@ -1001,7 +947,7 @@ pub fn members_popover(
                 theme.text_muted
             })
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .map(|el| highlight::button(el, theme))
             .child(label)
     };
     // Me first.
@@ -1054,7 +1000,7 @@ pub fn members_popover(
                         .gap(px(8.0))
                         .rounded(px(6.0))
                         .cursor_pointer()
-                        .hover(|st| st.bg(theme.surface_2))
+                        .map(|el| highlight::row(el, false, Shape::Own, &theme))
                         .child(avatar(image, p, 22.0, &theme))
                         .child(
                             div()
@@ -1130,8 +1076,8 @@ pub fn members_popover(
                         ))))
                         .rounded(px(6.0))
                         .cursor_pointer()
-                        .hover(|st| st.bg(theme.surface_2))
-                        .child(agent_glyph(a, 22.0, &theme))
+                        .map(|el| highlight::row(el, false, Shape::Own, &theme))
+                        .child(agent_glyph(s, Some(space), a, 22.0, &theme))
                         .on_click({
                             let pid = a.project_id.clone();
                             cx.listener(move |this, _, _, cx| {
@@ -1342,7 +1288,7 @@ pub fn project_members_popover(
                         .gap(px(8.0))
                         .rounded(px(6.0))
                         .cursor_pointer()
-                        .hover(|st| st.bg(theme.surface_2))
+                        .map(|el| highlight::row(el, false, Shape::Own, &theme))
                         .child(avatar(image, p, 22.0, &theme))
                         .child(
                             div()
@@ -1383,9 +1329,10 @@ pub fn project_members_popover(
                             .py(px(2.0))
                             .rounded(px(5.0))
                             .text_size(px(11.0))
+                            // error-ui: exception destructive-action (Remove, not a message)
                             .text_color(theme.danger)
                             .cursor_pointer()
-                            .hover(|st| st.bg(theme.surface_2))
+                            .map(|el| highlight::button(el, &theme))
                             .child("Remove")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.members_open = false;
@@ -1417,6 +1364,89 @@ pub fn project_members_popover(
         .child(frosted(PANEL_RADIUS, MENU_BLUR, card))
 }
 
+/// The Add members picker's Agents section: its label (drawn upper-cased by
+/// `glass::section_label`) and debug selector. Yours first, then the other
+/// members' agents already in the chat, greyed.
+pub const AGENTS_SECTION_LABEL: &str = "Agents";
+pub const AGENTS_SECTION_ID: &str = "add-members-agents-section";
+
+/// Another member's agent already in the group, with its resolved identity and picture.
+pub type OtherAgentRow = (
+    AgentMember,
+    avatars::AgentIdentity,
+    Option<Arc<RenderImage>>,
+);
+
+/// The other members' agents already in `group` (not mine — mine are the
+/// pickable rows), by name, narrowed by what was typed (name or @handle).
+pub fn others_agents_in(group: &Project, me_handle: &str, typed: &str) -> Vec<AgentMember> {
+    let needle = typed.trim().trim_start_matches('@').to_lowercase();
+    let mut out: Vec<AgentMember> = group
+        .agents
+        .iter()
+        .filter(|a| a.owner_handle != me_handle)
+        .filter(|a| {
+            needle.is_empty()
+                || a.name.to_lowercase().contains(&needle)
+                || a.handle.to_lowercase().contains(&needle)
+        })
+        .cloned()
+        .collect();
+    out.sort_by_key(|a| a.name.to_lowercase());
+    out
+}
+
+/// The agent rows of the New group / Add members picker for what was typed:
+/// my agents through the shared matcher (name, @slug, description), best
+/// first, list order inside a tie; an empty query keeps them all.
+pub fn agent_picker_rows(agents: Vec<Project>, query: &str) -> Vec<Project> {
+    use arbos_core::search::{filter, normalize_query, Fields};
+    filter(agents, &normalize_query(query), |p| {
+        Fields::new(p.name.clone(), Project::mention_slug(&p.name))
+            .with_title(p.description.clone().unwrap_or_default())
+    })
+}
+
+#[cfg(test)]
+mod agent_picker_tests {
+    //! [feedback shared-search-matcher-mac-2026-10-26]: the agent rows of the
+    //! group picker used a lower-cased substring; now the shared matcher.
+    use super::*;
+
+    fn agent(name: &str, description: &str) -> Project {
+        Project {
+            id: format!("p-{name}"),
+            name: name.into(),
+            description: (!description.is_empty()).then(|| description.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn names(v: &[Project]) -> Vec<&str> {
+        v.iter().map(|p| p.name.as_str()).collect()
+    }
+
+    #[test]
+    fn agents_match_name_slug_or_description_ranked() {
+        let all = vec![
+            agent("Comms", "Research assistant"),
+            agent("Research Bot", ""),
+            agent("Affine Research", ""),
+            agent("Doug", ""),
+        ];
+        assert_eq!(
+            names(&agent_picker_rows(all.clone(), "res")),
+            ["Research Bot", "Affine Research", "Comms"]
+        );
+        assert_eq!(
+            names(&agent_picker_rows(all.clone(), "@affine-res")),
+            ["Affine Research"]
+        );
+        assert_eq!(names(&agent_picker_rows(all.clone(), "")), names(&all));
+        assert!(agent_picker_rows(all, "zzq").is_empty());
+    }
+}
+
 #[cfg(test)]
 mod first_paint_tests {
     //! The New Message sheet's create rows and people rows share one geometry
@@ -1431,8 +1461,9 @@ mod first_paint_tests {
         assert_eq!(ROW_GAP, identity::ROW_GAP, "the shared picture + name gap");
         assert_eq!(ROW_GAP, 10.0);
         assert_eq!(
-            ROW_TEXT_INSET, 64.0,
-            "text column and hairlines start 64 pt into the card"
+            ROW_PADDING_X + ROW_GLYPH + ROW_GAP,
+            64.0,
+            "text column starts 64 pt into the card (the dividers are the kit's, 16 / 16)"
         );
     }
 

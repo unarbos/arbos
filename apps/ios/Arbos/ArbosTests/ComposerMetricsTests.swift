@@ -24,8 +24,9 @@ final class ComposerMetricsTests: XCTestCase {
         XCTAssertEqual(Theme.composerInset, 31, "keyboard down keeps the 2026-10-15 reading")
         let fieldWidth = 420 - Theme.composerInsetKeyboard * 2 - Theme.plusButton - Theme.plusFieldGap
         XCTAssertEqual(fieldWidth, 326)
-        // Other text fields (Settings, search, secrets) did not grow with the composer.
-        XCTAssertEqual(Theme.fieldHeight, 42)
+        // Since [feedback iphone-header-composer-sizing-2026-10-26] every other field, pill
+        // and disc is the composer's size (`Controls`, `ControlMetricsTests`).
+        XCTAssertEqual(Theme.fieldHeight, Theme.composerHeight)
     }
 
     func testPlusGlyphIsGroksSize() {
@@ -138,6 +139,25 @@ final class ComposerMetricsTests: XCTestCase {
         XCTAssertLessThanOrEqual(PresenceRow.chipHeight, PresenceRow.height)
     }
 
+    /// [feedback status-row-gap-ios-2026-10-26]: the row rises into the transcript's tail
+    /// so the picture sits Grok's 42 px under the last bubble (the same 2026-10-25 shot:
+    /// bubble bottom → picture 42 px, picture → composer 68 px, bubble → composer 187 px),
+    /// instead of starting under the tail and the bar's pad (36 pt, 109 px).
+    func testStatusRowRisesIntoTheTranscriptTail() {
+        XCTAssertEqual(Theme.presenceTopGap * 3, 42, accuracy: 0.001)
+        XCTAssertEqual(Theme.transcriptTail, 28)
+        XCTAssertEqual(Theme.chatBarTopPad, 8)
+        // Last bubble → picture top = tail + pad − lift.
+        XCTAssertEqual(Theme.transcriptTail + Theme.chatBarTopPad - Theme.presenceLift, Theme.presenceTopGap, accuracy: 0.001)
+        // The row never rises past the tail into the last bubble, and never sinks below the pad.
+        XCTAssertLessThanOrEqual(Theme.presenceLift, Theme.transcriptTail)
+        XCTAssertGreaterThanOrEqual(Theme.presenceLift, 0)
+        // Bubble → composer with the row showing: Grok's 187 px (icon crop ± 2 px).
+        XCTAssertEqual((Theme.presenceTopGap + Theme.presenceAvatar + Theme.presenceBottomGap) * 3, 187, accuracy: 3)
+        // The bar grows by the row's height less the lift when the row appears.
+        XCTAssertEqual(Theme.presenceAvatar + Theme.presenceBottomGap - Theme.presenceLift, 26, accuracy: 0.001)
+    }
+
     func testEveryMetricLandsOnAPixel() {
         for (name, value) in [
             ("plusButton", Theme.plusButton), ("composerHeight", Theme.composerHeight),
@@ -148,8 +168,40 @@ final class ComposerMetricsTests: XCTestCase {
             ("micGlyphHeight", Theme.micGlyphHeight), ("composerBottomKeyboard", Theme.composerBottomKeyboard),
             ("presenceAvatar", Theme.presenceAvatar), ("presenceAvatarOffset", Theme.presenceAvatarOffset),
             ("presenceGap", Theme.presenceGap), ("presenceBottomGap", Theme.presenceBottomGap),
+            ("presenceTopGap", Theme.presenceTopGap), ("presenceLift", Theme.presenceLift),
         ] {
             assertOnPixel(value, name)
         }
+    }
+
+    // MARK: Pending attachments ([feedback composer-attachment-removal-ios-2026-10-27])
+
+    private func pendingTrio() -> [AppModel.PendingAttachment] {
+        [.init(name: "profile-card.png", mime: "image/png", data: Data([1])),
+         .init(name: "portrait.png", mime: "image/png", data: Data([2])),
+         .init(name: "notes.txt", mime: "text/plain", data: Data([3]))]
+    }
+
+    func testRemovingOnePendingAttachmentKeepsTheOthers() {
+        let trio = pendingTrio()
+        let left = ChatSession.removingPending(trio[1].id, from: trio)
+        XCTAssertEqual(left.map(\.name), ["profile-card.png", "notes.txt"])
+        XCTAssertEqual(ChatSession.removingPending(UUID(), from: trio).count, 3, "an unknown id removes nothing")
+    }
+
+    func testBackspaceOnAnEmptyDraftRemovesTheLastPendingAttachment() {
+        let trio = pendingTrio()
+        let two = ChatSession.removingLastPending(from: trio, draftEmpty: true)
+        XCTAssertEqual(two.map(\.name), ["profile-card.png", "portrait.png"])
+        XCTAssertEqual(ChatSession.removingLastPending(from: trio, draftEmpty: false).count, 3,
+                       "with text in the draft the key edits text, never the strip")
+        XCTAssertTrue(ChatSession.removingLastPending(from: [], draftEmpty: true).isEmpty)
+    }
+
+    func testPendingRemoveHitTargetIsAtLeastTwentyPoints() {
+        XCTAssertGreaterThanOrEqual(Theme.pendingRemoveHit, 20)
+        // The glyph keeps 10 pt from the capsule's edge whatever the hit frame.
+        XCTAssertEqual(Theme.pendingChipTrailing + (Theme.pendingRemoveHit - Theme.pendingRemoveGlyph) / 2, 10)
+        XCTAssertGreaterThanOrEqual(Theme.pendingChipTrailing, 0)
     }
 }

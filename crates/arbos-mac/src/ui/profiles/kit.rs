@@ -7,7 +7,9 @@
 //!   iPhone's `PaneCard`; light: a grey card on the white pane), 16 pt side
 //!   margins, a `section_title` over it where Grok labels a card;
 //! * row: 41 pt minimum (51 with a subtitle), 16 pt inset, 12 pt gap,
-//!   hairline under the label;
+//!   hairline between rows inset 16 at both ends — the row's own padding
+//!   (Jacob, 2026-10-26: a divider that starts under the label but runs to
+//!   the card's right edge reads lopsided);
 //! * leading: a 30 pt icon tile (settings), a 36 pt avatar (people, agents,
 //!   groups) or nothing;
 //! * detail: `TEXT_SMALL` muted, right-aligned; subtitle: `TEXT_SMALL` muted
@@ -19,10 +21,15 @@ use gpui::{
 };
 
 use crate::ui::glass;
+use crate::ui::highlight::{self, Shape};
 use crate::ui::icons::icon;
 use crate::ui::identity;
-use crate::ui::sidebar::{DISC_HOVER_LIFT, DISC_PRESSED_LIFT};
 use crate::ui::theme::{Theme, CONTROL, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
+
+/// The group a clickable row joins so its highlight pill lights: every
+/// [`row`] carries the pill as its first child; `.group(HOT)` (plus
+/// `cursor_pointer()`) is what makes it react. A value row never joins.
+pub const HOT: &str = highlight::GROUP;
 
 /// Row height, side inset, gap between leading and text. Grok Bot's pane
 /// cards ([feedback info-pane-chrome-2026-10-24], `grok-right-pane-details.png`
@@ -51,14 +58,24 @@ pub const SECTION_TITLE_BOTTOM: f32 = 8.0;
 pub const SECTION_TITLE_LINE: f32 = 16.0;
 /// The avatar size on people / agent / group rows.
 pub const AVATAR: f32 = 36.0;
-/// The hairline starts under the label: inset + leading + gap.
-fn separator_inset(leading: &Leading) -> f32 {
-    match leading {
-        Leading::None => INSET,
-        Leading::Tile(_) => INSET + 30.0 + GAP,
-        Leading::Avatar(_) | Leading::Glyph(_) => INSET + AVATAR + GAP,
-    }
+/// The divider between two grouped rows stops this far from the card's
+/// edges — **the same at both ends**, and it is the row's content padding
+/// ([feedback mac-settings-card-dividers-2026-10-26]). Before, the line
+/// started under the label (past the icon tile or avatar) and ran to the
+/// card's right edge; on the agent's Settings card Jacob read that as
+/// lopsided. One number for every grouped list, whatever leads the row.
+pub const DIVIDER_INSET: f32 = INSET;
+
+/// `(leading, trailing)` inset of a grouped row's divider. Pure, so the rule
+/// — equal at both ends and equal to the row padding — is testable without
+/// a window; [`hairline_below`] and [`section`] draw from it.
+pub fn divider_insets() -> (f32, f32) {
+    (DIVIDER_INSET, DIVIDER_INSET)
 }
+
+/// The debug selector every shared divider carries, so a headless render
+/// can measure it against its card.
+pub const DIVIDER_SELECTOR: &str = "grouped-row-divider";
 
 /// What sits at a row's leading edge.
 pub enum Leading {
@@ -85,19 +102,38 @@ pub fn card(theme: &Theme) -> Div {
 }
 
 /// The one separator every grouped row uses: a 1 pt hairline hung 1 pt
-/// *below* the row's box (`.relative()` on the row). Between rows it lands on
-/// the next row's first pixel; under the last row the card's clip swallows it,
-/// and nothing sits above the first — separators only between rows, inside
-/// the card (Jacob, 2026-10-21). Drawn as a bottom border it would stay inside
-/// the box and show under a card's last row.
-pub fn hairline_below(inset: f32, theme: &Theme) -> Div {
+/// *below* the row's box (`.relative()` on the row), inset [`DIVIDER_INSET`]
+/// from both card edges. Between rows it lands on the next row's first pixel;
+/// under the last row the card's clip swallows it, and nothing sits above the
+/// first — separators only between rows, inside the card (Jacob, 2026-10-21).
+/// Drawn as a bottom border it would stay inside the box and show under a
+/// card's last row. No per-caller inset: every grouped list in the app draws
+/// the same line, so no card can drift back to a lopsided one.
+pub fn hairline_below(theme: &Theme) -> Div {
+    let (leading, trailing) = divider_insets();
     div()
         .absolute()
-        .left(px(inset))
-        .right(px(0.0))
+        .left(px(leading))
+        .right(px(trailing))
         .bottom(px(-1.0))
         .h(px(1.0))
         .bg(theme.border)
+        .debug_selector(|| DIVIDER_SELECTOR.into())
+}
+
+/// The same line as an in-flow element, for a card that lays its own rows
+/// out and puts the separator between two of them itself (the New message
+/// and New channel sheets, [`section`]). Same insets, same colour, same
+/// selector — a card never draws a divider of its own.
+pub fn divider(theme: &Theme) -> Div {
+    let (leading, trailing) = divider_insets();
+    div()
+        .flex_shrink_0()
+        .ml(px(leading))
+        .mr(px(trailing))
+        .h(px(1.0))
+        .bg(theme.border)
+        .debug_selector(|| DIVIDER_SELECTOR.into())
 }
 
 /// What a grouped section is made of, in order: rows with exactly one
@@ -122,14 +158,15 @@ pub fn section_parts(rows: usize) -> Vec<SectionPart> {
 
 /// A grouped card whose separators are explicit elements placed by
 /// [`section_parts`]: rows that carry no hairline of their own (plain
-/// content, custom rows) get exactly `rows - 1` lines, inside the card.
-pub fn section(rows: Vec<AnyElement>, inset: f32, theme: &Theme) -> Div {
+/// content, custom rows) get exactly `rows - 1` lines, inside the card, at
+/// the same insets as [`hairline_below`].
+pub fn section(rows: Vec<AnyElement>, theme: &Theme) -> Div {
     let mut rows: Vec<Option<AnyElement>> = rows.into_iter().map(Some).collect();
     let mut out = card(theme);
     for part in section_parts(rows.len()) {
         out = match part {
             SectionPart::Row(i) => out.children(rows[i].take()),
-            SectionPart::Separator => out.child(div().ml(px(inset)).h(px(1.0)).bg(theme.border)),
+            SectionPart::Separator => out.child(divider(theme)),
         };
     }
     out
@@ -157,9 +194,12 @@ fn leading_el(leading: Leading, theme: &Theme) -> Option<AnyElement> {
 
 /// One row: leading, title (+ optional subtitle), optional right detail,
 /// optional trailing element, chevron when it pushes a page. The hairline
-/// sits under the label, 1 pt below the row: between rows it lands on the
-/// next row's first pixel, under the last row the card's clip swallows it
-/// (D80 / the iPhone's `PaneCardLayout`: no line under the last row).
+/// hangs 1 pt below the row at the row's padding on both sides: between rows
+/// it lands on the next row's first pixel, under the last row the card's clip
+/// swallows it (D80 / the iPhone's `PaneCardLayout`: no line under the last
+/// row). The highlight pill ([`highlight::row`], inset 4, radius
+/// `CARD_RADIUS - 4`) is the row's first child; it lights for rows that join
+/// [`HOT`].
 #[allow(clippy::too_many_arguments)]
 pub fn row(
     id: impl Into<ElementId>,
@@ -171,7 +211,25 @@ pub fn row(
     chevron: bool,
     theme: &Theme,
 ) -> Stateful<Div> {
-    let sep = separator_inset(&leading);
+    row_state(
+        id, leading, title, subtitle, detail, trailing, chevron, false, theme,
+    )
+}
+
+/// [`row`] with a selected state: the pill at its selected step at rest (the
+/// open hoverpick anchor, the server pane's current channel).
+#[allow(clippy::too_many_arguments)]
+pub fn row_state(
+    id: impl Into<ElementId>,
+    leading: Leading,
+    title: impl Into<SharedString>,
+    subtitle: Option<SharedString>,
+    detail: Option<SharedString>,
+    trailing: Option<AnyElement>,
+    chevron: bool,
+    selected: bool,
+    theme: &Theme,
+) -> Stateful<Div> {
     // Mock b: names on people / agent / file rows are medium; mock g: settings
     // labels are regular.
     let title_weight = match leading {
@@ -191,6 +249,12 @@ pub fn row(
         .py(px(6.0))
         .text_size(px(TEXT_BODY))
         .text_color(theme.text)
+        // First child: paints under the content; lights only for `HOT` rows.
+        .child(highlight::layer(
+            selected,
+            Shape::Nested(CARD_RADIUS),
+            theme,
+        ))
         .children(leading)
         .child(
             div()
@@ -228,7 +292,7 @@ pub fn row(
         .when(chevron, |el| {
             el.child(icon("chevron-right", 13.0, theme.text_faint))
         })
-        .child(hairline_below(sep, theme))
+        .child(hairline_below(theme))
 }
 
 /// A row that pushes a page: tile, label, detail, chevron, hover.
@@ -250,7 +314,7 @@ pub fn nav_row(
         theme,
     )
     .cursor_pointer()
-    .hover(|s| s.bg(theme.surface_2))
+    .group(HOT)
 }
 
 /// Label left, value right (not interactive).
@@ -286,7 +350,7 @@ pub fn action_row(
     color: Hsla,
     theme: &Theme,
 ) -> Stateful<Div> {
-    div()
+    let frame = div()
         .id(id)
         .flex()
         .items_center()
@@ -295,17 +359,15 @@ pub fn action_row(
         .px(px(INSET))
         .text_size(px(TEXT_BODY))
         .text_color(color)
-        .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
-        .child(label.to_string())
+        .cursor_pointer();
+    highlight::row(frame, false, Shape::Nested(CARD_RADIUS), theme).child(label.to_string())
 }
 
 /// The hero's action pill ("Message" on a person's pane,
 /// [feedback profile-message-button-mac-2026-10-25]): one of the Grok button
 /// family — [`CONTROL`] 36 tall, a capsule on the discs' `surface_2` fill,
-/// glyph and 13 pt semibold label in `text`; hover and pressed lift the fill
-/// in lightness like the footer disc (the chip rule: brighter under the
-/// pointer, brighter still while down).
+/// glyph and 13 pt semibold label in `text`; hover and pressed are the
+/// highlight token's two steps over the fill (`highlight::washed`).
 pub const PILL_PAD_X: f32 = 18.0;
 pub const PILL_GLYPH: f32 = 17.0;
 pub const PILL_GAP: f32 = 7.0;
@@ -316,16 +378,13 @@ pub fn pill_button(
     label: &str,
     theme: &Theme,
 ) -> Stateful<Div> {
-    let hover = Theme::lighter(theme.surface_2, DISC_HOVER_LIFT);
-    let pressed = Theme::lighter(theme.surface_2, DISC_PRESSED_LIFT);
-    div()
+    let frame = div()
         .id(id)
         .debug_selector(move || id.to_owned())
         .h(px(CONTROL))
         .px(px(PILL_PAD_X))
         .flex_shrink_0()
         .rounded_full()
-        .bg(theme.surface_2)
         .flex()
         .items_center()
         .justify_center()
@@ -333,9 +392,8 @@ pub fn pill_button(
         .text_size(px(TEXT_SMALL))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme.text)
-        .cursor_pointer()
-        .hover(move |s| s.bg(hover))
-        .active(move |s| s.bg(pressed))
+        .cursor_pointer();
+    highlight::washed(frame, theme.surface_2, theme)
         .child(icon(glyph, PILL_GLYPH, theme.text))
         .child(label.to_string())
 }
@@ -404,11 +462,13 @@ pub fn confirm_button(
                 .hover(|s| s.opacity(0.88))
         })
         .when(!danger, |el| {
-            el.bg(theme.field)
-                .border_1()
-                .border_color(theme.field_border)
-                .text_color(theme.text)
-                .hover(|s| s.bg(theme.surface_2))
+            highlight::washed(
+                el.border_1()
+                    .border_color(theme.field_border)
+                    .text_color(theme.text),
+                theme.field,
+                theme,
+            )
         })
         .child(label)
 }
@@ -429,7 +489,7 @@ pub fn confirm_row(
         .gap(px(8.0))
         .px(px(INSET))
         .py(px(10.0))
-        .child(hairline_below(INSET, theme))
+        .child(hairline_below(theme))
         .child(
             div()
                 .text_size(px(TEXT_SMALL))
@@ -485,6 +545,162 @@ mod tests {
         }
     }
 
+    /// [feedback mac-settings-card-dividers-2026-10-26]: the divider is inset
+    /// the same at both ends, and that inset is the row's content padding.
+    /// Before, it started under the label and ran to the card's right edge.
+    #[test]
+    fn the_divider_is_inset_equally_at_both_ends_by_the_row_padding() {
+        let (leading, trailing) = divider_insets();
+        assert_eq!(leading, trailing, "leading inset == trailing inset");
+        assert_eq!(leading, INSET, "divider inset == row content padding");
+        assert_eq!(DIVIDER_INSET, INSET);
+    }
+
+    /// Every grouped card draws the kit's divider, never one of its own.
+    /// Scans the Mac UI sources for the hand-rolled idioms this fix removed:
+    /// a hairline with only a left margin (`.ml(px(..)) … .bg(theme.border)`),
+    /// an absolute hairline pinned `left(..)` / `right(0)`, the 0.5 pt sheet
+    /// line, and a list row's `border_b_1()` under `i + 1 < count`.
+    #[test]
+    fn no_card_outside_the_kit_draws_its_own_divider() {
+        let ui = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/ui");
+        let mut files = Vec::new();
+        collect_rs(&ui, &mut files);
+        assert!(files.len() > 20, "found {} ui sources", files.len());
+        let mut offenders = Vec::new();
+        for path in files {
+            if path.ends_with("profiles/kit.rs") {
+                continue;
+            }
+            let src = std::fs::read_to_string(&path).expect("read ui source");
+            let flat: String = src.chars().filter(|c| !c.is_whitespace()).collect();
+            let rel = path
+                .strip_prefix(&ui)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            for (idx, _) in flat.match_indices(".bg(theme.border)") {
+                let back = &flat[idx.saturating_sub(140)..idx];
+                let left_only = back.contains(".ml(px(") && !back.contains(".mr(px(");
+                let pinned = back.contains(".left(px(") && back.contains(".right(px(0.0))");
+                let half_point = back.contains("h(px(0.5))");
+                if left_only || pinned || half_point {
+                    offenders.push(format!("{rel}: hairline at offset {idx}"));
+                }
+            }
+            if flat.contains("<count,|el|{el.border_b_1()")
+                || flat.contains("<count,|el|el.border_b_1()")
+            {
+                offenders.push(format!("{rel}: list row with its own bottom border"));
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "cards must use kit::hairline_below / kit::divider:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    fn collect_rs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("read ui dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                collect_rs(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum Probe {
+        TileRow,
+        AvatarRow,
+        GlassRow,
+        Section,
+    }
+
+    struct DividerCard(Probe);
+
+    impl gpui::Render for DividerCard {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
+            let plain = |label: &str| {
+                div()
+                    .h(px(ROW_MIN_H))
+                    .px(px(INSET))
+                    .child(label.to_string())
+                    .into_any_element()
+            };
+            let kit_row = |leading: Leading| {
+                row(
+                    "probe",
+                    leading,
+                    "Model",
+                    None,
+                    Some("Low".into()),
+                    None,
+                    true,
+                    &theme,
+                )
+                .into_any_element()
+            };
+            let card = match self.0 {
+                Probe::TileRow => card(&theme).child(kit_row(Leading::Tile("gear"))),
+                Probe::AvatarRow => card(&theme).child(kit_row(Leading::Avatar(
+                    div().size(px(AVATAR)).into_any_element(),
+                ))),
+                Probe::GlassRow => card(&theme).child(glass::row("Credits", &theme)),
+                Probe::Section => section(vec![plain("One"), plain("Two")], &theme),
+            };
+            div()
+                .w(px(320.0))
+                .h(px(300.0))
+                .flex()
+                .flex_col()
+                .child(card.debug_selector(|| "divider-probe-card".into()))
+        }
+    }
+
+    /// Headless render of every divider the kit draws — under a tile row, an
+    /// avatar row, a `glass::row` and between `section` rows: each line stops
+    /// `INSET` short of the card's left edge **and** of its right edge, and is
+    /// 1 pt tall. Before this fix the tile row's line started at 58 and the
+    /// rest at 16, and all of them ran to the card's right edge.
+    #[gpui::test]
+    fn every_shared_divider_stops_at_the_row_padding_on_both_sides(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let theme = crate::ui::theme::Theme::for_pref(
+                crate::ui::theme::AppearancePref::Dark,
+                crate::ui::theme::Surface::Matte,
+                cx,
+            );
+            cx.set_global(theme);
+        });
+        let f = |p: gpui::Pixels| -> f32 { p.into() };
+        for (name, probe) in [
+            ("tile row", Probe::TileRow),
+            ("avatar row", Probe::AvatarRow),
+            ("glass row", Probe::GlassRow),
+            ("section", Probe::Section),
+        ] {
+            let (_view, vcx) = cx.add_window_view(|_, _| DividerCard(probe));
+            vcx.run_until_parked();
+            let card = vcx.debug_bounds("divider-probe-card").expect("card");
+            let line = vcx.debug_bounds(DIVIDER_SELECTOR).expect("divider");
+            let leading = f(line.origin.x) - f(card.origin.x);
+            let trailing = f(card.right()) - f(line.right());
+            assert_eq!(leading, INSET, "{name}: leading inset");
+            assert_eq!(trailing, INSET, "{name}: trailing inset");
+            assert_eq!(leading, trailing, "{name}: symmetric");
+            assert_eq!(f(line.size.height), 1.0, "{name}: 1 pt line");
+        }
+    }
+
     /// Headless GPUI render: a 1-row and a 3-row section draw without a panic
     /// and keep their part counts (the structure the window paints from).
     #[gpui::test]
@@ -515,12 +731,8 @@ mod tests {
                 div()
                     .flex()
                     .flex_col()
-                    .child(section(vec![row("Only")], INSET, &theme))
-                    .child(section(
-                        vec![row("One"), row("Two"), row("Three")],
-                        INSET,
-                        &theme,
-                    ))
+                    .child(section(vec![row("Only")], &theme))
+                    .child(section(vec![row("One"), row("Two"), row("Three")], &theme))
             }
         }
         let (_view, vcx) = cx.add_window_view(|_, _| Sections);
