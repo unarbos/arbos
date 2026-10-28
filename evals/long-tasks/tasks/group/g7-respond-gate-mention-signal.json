@@ -2,7 +2,7 @@
   "id": "g7-respond-gate-mention-signal",
   "lane": "a",
   "category": "group",
-  "title": "@mention is a signal, not a wake: thanks and passing-along mentions stay silent; a mentioned question is answered by that agent only",
+  "title": "A person's @mention always wakes the agent, but thanks and passing-along mentions still get no post; a mentioned question is answered by that agent only",
   "turns": [
     {
       "prompt": "@lane-a what is 12 × 12? Just the number.",
@@ -44,5 +44,5 @@
       "title": "eval respond gate mentions"
     }
   ],
-  "regression": "Jacob 2026-10-26/27: an @mention is a consideration signal, never an automatic wake; 'thanks @x' and a mention passing information along are silence; the agent named as the object of a request to another agent does not answer that request."
+  "regression": "Jacob 2026-10-26/27: 'thanks @x' and a mention passing information along are silence; the agent named as the object of a request to another agent does not answer that request. Since 2026-10-28 a person's @mention always wakes the agent (the judge never vetoes it); the woken agent itself posts nothing for these lines."
 }
