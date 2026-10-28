@@ -138,6 +138,7 @@
 		A1E100000000000000000002 /* HiddenWorkerRowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E100000000000000000001 /* HiddenWorkerRowTests.swift */; };
 		A1E100000000000000000032 /* JobTabsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E100000000000000000031 /* JobTabsTests.swift */; };
 		A1E100000000000000000042 /* ComposerMetricsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E100000000000000000041 /* ComposerMetricsTests.swift */; };
+		A1E100000000000000000052 /* HiddenJobRowAttachmentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E100000000000000000051 /* HiddenJobRowAttachmentTests.swift */; };
 		A1F100000000000000000002 /* NoAnswerLineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F100000000000000000001 /* NoAnswerLineTests.swift */; };
 		A1F100000000000000000004 /* MarkdownTableTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F100000000000000000003 /* MarkdownTableTests.swift */; };
 		A1F100000000000000000008 /* LinkIconTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F100000000000000000007 /* LinkIconTests.swift */; };
@@ -360,6 +361,7 @@
 		A1E100000000000000000001 /* HiddenWorkerRowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HiddenWorkerRowTests.swift; sourceTree = "<group>"; };
 		A1E100000000000000000031 /* JobTabsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JobTabsTests.swift; sourceTree = "<group>"; };
 		A1E100000000000000000041 /* ComposerMetricsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerMetricsTests.swift; sourceTree = "<group>"; };
+		A1E100000000000000000051 /* HiddenJobRowAttachmentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HiddenJobRowAttachmentTests.swift; sourceTree = "<group>"; };
 		A1F100000000000000000001 /* NoAnswerLineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoAnswerLineTests.swift; sourceTree = "<group>"; };
 		A1F100000000000000000003 /* MarkdownTableTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownTableTests.swift; sourceTree = "<group>"; };
 		A1F100000000000000000007 /* LinkIconTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkIconTests.swift; sourceTree = "<group>"; };
@@ -674,6 +676,7 @@
 				A1E100000000000000000001 /* HiddenWorkerRowTests.swift */,
 				A1E100000000000000000031 /* JobTabsTests.swift */,
 				A1E100000000000000000041 /* ComposerMetricsTests.swift */,
+				A1E100000000000000000051 /* HiddenJobRowAttachmentTests.swift */,
 				A1F100000000000000000001 /* NoAnswerLineTests.swift */,
 				A1F100000000000000000003 /* MarkdownTableTests.swift */,
 				A1F100000000000000000007 /* LinkIconTests.swift */,
@@ -1034,6 +1037,7 @@
 				A1E100000000000000000002 /* HiddenWorkerRowTests.swift in Sources */,
 				A1E100000000000000000032 /* JobTabsTests.swift in Sources */,
 				A1E100000000000000000042 /* ComposerMetricsTests.swift in Sources */,
+				A1E100000000000000000052 /* HiddenJobRowAttachmentTests.swift in Sources */,
 				A1BB00000000000000000004 /* BackSwipeTests.swift in Sources */,
 				A1F100000000000000000002 /* NoAnswerLineTests.swift in Sources */,
 				A1F100000000000000000004 /* MarkdownTableTests.swift in Sources */,

@@ -282,8 +282,33 @@ enum Transcript {
             if message.voice { continue }
             // A background job's row (duplex §2.3, `job` + `hidden`) is wordless by design:
             // its status parts feed the presence line and the tasks sheet, never a bubble —
-            // not while it runs, not the "no answer" stock line when it ends.
-            if message.hidden || message.job != nil { continue }
+            // not while it runs, not the "no answer" stock line when it ends. One exception:
+            // a file or picture the worker delivered onto that row (agentd ≤ 0.1.150 put
+            // `deliver_file` there — Jacob's SN120 chart, 2026-10-27, "the chart is in the
+            // card above" over nothing) still draws as its card, so a posted file is never
+            // invisible on a box that has not upgraded.
+            if message.hidden || message.job != nil {
+                // The card carries the agent's avatar and name like its bubbles do
+                // ([feedback forward-attachments-ios-2026-10-27]). A worker row from an older
+                // box says a bare `agent` with no handle; then the agent's own ack or result
+                // row answering the same ask lends its attribution.
+                let who = hiddenRowAgent(message, in: messages)
+                let inLane = people && who.senderHandle != nil
+                let whoId: String? = who.sender.hasPrefix("agent:") ? String(who.sender.dropFirst(6)) : nil
+                let cards = message.parts.compactMap { part -> (String, Attachment)? in
+                    if case .attachment(let id, let a) = part { return (id, a) }
+                    return nil
+                }
+                for (ix, (id, a)) in cards.enumerated() {
+                    rows.append(attachmentRow(id: "\(message.id)#\(id)", message: message, a: a,
+                                              projectId: projectId, fromUser: false, agentNames: agentNames,
+                                              lane: inLane,
+                                              sender: inLane ? .agent(id: whoId, handle: who.senderHandle ?? "",
+                                                                      name: who.senderName, avatar: who.senderAvatar) : nil,
+                                              named: multiParty && inLane && ix == 0))
+                }
+                continue
+            }
             // A background worker's spawn row (`worker: true`, Grok parity trait 15) draws nothing at
             // all — no hand-off line, no legacy status line, no date separator. Its `activity` reaches
             // the working line through `AppModel.currentActivity`. Skipping only the hand-off name
@@ -842,6 +867,18 @@ enum Transcript {
         default:
             return nil
         }
+    }
+
+    /// Who a hidden job row's card is drawn under: the row itself when it names its agent
+    /// (`agent:<id>` + handle), else the agent's ack / result row answering the same ask —
+    /// agentd ≤ 0.1.150 wrote worker rows as a bare `agent` with no handle.
+    static func hiddenRowAgent(_ message: Message, in messages: [Message]) -> Message {
+        if message.sender.hasPrefix("agent:"), message.senderHandle != nil { return message }
+        guard let ask = message.inReplyTo, !ask.isEmpty else { return message }
+        return messages.first {
+            $0.id != message.id && ($0.role == .assistant || $0.role == .project)
+                && $0.inReplyTo == ask && $0.sender.hasPrefix("agent:") && $0.senderHandle != nil
+        } ?? message
     }
 
     private static func attachmentRow(id: String, message: Message, a: Attachment, projectId: Id, fromUser: Bool,
