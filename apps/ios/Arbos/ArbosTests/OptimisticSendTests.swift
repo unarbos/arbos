@@ -41,7 +41,7 @@ final class OptimisticSendTests: XCTestCase {
         let built = rows(model, chatId, multiParty: true)
         let last = try XCTUnwrap(built.last)
         XCTAssertEqual(last.messageId, own.id)
-        guard case .user(let text, let delivery, _) = last.kind else {
+        guard case .user(let text, let delivery, _, _) = last.kind else {
             return XCTFail("tail row is \(last.kind), expected my bubble")
         }
         XCTAssertEqual(text, "launch call moved to ten")

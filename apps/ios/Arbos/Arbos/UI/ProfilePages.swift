@@ -805,10 +805,34 @@ struct ChatItemsList: View {
     private func rowLabel(_ item: ChatItem) -> some View {
         let when = Date(timeIntervalSince1970: Double(item.at) / 1000).formatted(date: .abbreviated, time: .omitted)
         return PaneRow(
-            leading: .glyph(item.kind == .voice ? "waveform" : item.kind == .link ? "link" : "doc.fill"),
+            leading: item.kind == .link
+                ? .avatar(AnyView(LinkRowTile(url: item.url)))
+                : .glyph(item.kind == .voice ? "waveform" : "doc.fill"),
             title: item.title,
             subtitle: item.kind == .link ? item.subtitle : "\(item.fromHandle.map { "@\($0) · " } ?? "")\(when)"
         )
+    }
+}
+
+/// A Links row's leading tile: the brand mark for a known host, else the relay's icon for the
+/// host once `LinkIcons` has it (asked for here, once), else the host's letter
+/// ([feedback link-icons-ios-tile-2026-10-27]; before, every link row drew the same `link`
+/// glyph). Observes the icon store so the tile fills in when the picture arrives.
+struct LinkRowTile: View {
+    @ObservedObject private var icons = LinkIcons.shared
+    let url: URL?
+    var size: CGFloat = PaneKit.avatar
+
+    /// The host an icon is keyed by at the relay: lower-case, `www.` kept, no port.
+    static func iconHost(_ url: URL?) -> String {
+        url?.host?.lowercased() ?? ""
+    }
+
+    var body: some View {
+        let host = Self.iconHost(url)
+        let brand = url.flatMap(LinkBrand.of(url:))
+        let picture = brand == nil && !host.isEmpty ? icons.picture(for: host) : nil
+        LinkTile(url: url, host: host, picture: picture, size: size)
     }
 }
 
