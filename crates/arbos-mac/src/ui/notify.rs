@@ -39,7 +39,7 @@ pub enum NotifyKind {
 impl NotifyKind {
     /// A message from someone (agent reply or a person's line): the banner is
     /// titled with the sender, like a chat app, not with the event.
-    fn is_message(self) -> bool {
+    pub fn is_message(self) -> bool {
         matches!(
             self,
             NotifyKind::TurnFinished | NotifyKind::DirectMessage | NotifyKind::CrossProject
@@ -93,6 +93,29 @@ impl NotifyEvent {
             image: None,
         }
     }
+}
+
+/// A message in a group: the banner is titled with the group and names the sender in the
+/// body — "Arbonites" / "Doug: Five." — the same shape as the iPhone and the relay's APNs
+/// payload (2026-10-27). Returns `(title, body)`.
+pub fn group_frame(group: &str, sender: &str, detail: &str) -> (String, String) {
+    (group.to_owned(), format!("{sender}: {detail}"))
+}
+
+/// A server channel message: "Server › #channel" / "Sender: text".
+pub fn channel_frame(
+    server: &str,
+    channel: &str,
+    sender: &str,
+    text: Option<&str>,
+) -> (String, String) {
+    (
+        format!("{server} › #{channel}"),
+        format!(
+            "{sender}: {}",
+            text.filter(|t| !t.is_empty()).unwrap_or("New message")
+        ),
+    )
 }
 
 /// What actually reaches the OS.
@@ -1176,6 +1199,25 @@ mod tests {
         );
         assert!(withdrawn_ids("", delivered).is_empty());
         assert!(withdrawn_ids("01NOPE", delivered).is_empty());
+    }
+
+    #[test]
+    fn group_and_channel_banners_say_where_the_message_is_from() {
+        let (title, body) = group_frame("Arbonites", "Doug", "Five.");
+        assert_eq!(title, "Arbonites");
+        assert_eq!(body, "Doug: Five.");
+        let (title, body) = channel_frame("Arbos HQ", "general", "@sam", Some("ping"));
+        assert_eq!(title, "Arbos HQ › #general");
+        assert_eq!(body, "@sam: ping");
+        let (_, body) = channel_frame("Arbos HQ", "general", "@sam", None);
+        assert_eq!(body, "@sam: New message");
+        // Through the coalescer: the group is the title, the sender stays in the body.
+        let mut c = Coalescer::default();
+        let mut e = ev(NotifyKind::DirectMessage, &body);
+        e.sender = Some(title.clone());
+        let n = c.offer(e, 0, OFF).unwrap();
+        assert_eq!(n.title, "Arbos HQ › #general");
+        assert_eq!(n.body, "@sam: New message");
     }
 
     #[test]
