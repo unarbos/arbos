@@ -1436,6 +1436,12 @@ struct AppearancePage: View {
                     }
                 }
             }
+            // Link previews ([feedback link-embeds-ios-2026-10-27]): the cards under links in
+            // chat, on or off on this iPhone; off leaves every link plain.
+            SettingsGroup(header: "Link previews", footer: "A card with the title and picture under links in chat. Previews are fetched by Arbos, never by your phone.") {
+                SettingsChoiceRow(title: "On", selected: model.linkPreviews) { model.linkPreviews = true }
+                SettingsChoiceRow(title: "Off", selected: !model.linkPreviews) { model.linkPreviews = false }
+            }
         }
     }
 }

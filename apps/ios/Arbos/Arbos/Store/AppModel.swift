@@ -140,6 +140,14 @@ final class AppModel: ObservableObject {
     @Published var appearanceSetting: String = UserDefaults.standard.string(forKey: "appearance") ?? Appearance.default.rawValue {
         didSet { UserDefaults.standard.set(appearanceSetting, forKey: "appearance") }
     }
+    /// Settings → Appearance → Link previews ([feedback link-embeds-ios-2026-10-27]): on unless
+    /// switched off; off leaves every link plain. Mirrored into the row builder's static.
+    @Published var linkPreviews: Bool = (UserDefaults.standard.object(forKey: "linkPreviews") as? Bool) ?? true {
+        didSet {
+            UserDefaults.standard.set(linkPreviews, forKey: "linkPreviews")
+            Transcript.linkPreviewsEnabled = linkPreviews
+        }
+    }
     /// Sum of SessionRoom reconnect / state_timeout counters (About page),
     /// plus the most recent non-nil room `lastError`.
     var sharedRoomStats: (reconnects: Int, timeouts: Int, lastError: String?) {
@@ -878,6 +886,9 @@ final class AppModel: ObservableObject {
     private(set) weak static var current: AppModel?
 
     init() {
+        // The row builder's switch mirrors the saved setting from the first row on (no `self`
+        // here: stored properties are still initialising).
+        Transcript.linkPreviewsEnabled = (UserDefaults.standard.object(forKey: "linkPreviews") as? Bool) ?? true
         LaunchClock.mark("app-init")
         // Drop the retired SessionRoom TestFlight switch so it does not linger.
         UserDefaults.standard.removeObject(forKey: "sharedRoomSession")
@@ -4790,6 +4801,38 @@ final class AppModel: ObservableObject {
                 fail(e?.status == 403
                      ? UserError.refused("delete the message", "You can only delete your own messages.")
                      : UserError.classify("delete the message", error))
+            }
+        }
+    }
+
+    /// Long-press → Remove preview: the relay drops the message's link preview for everyone
+    /// (`preview: "off"`, the delete rule); the card goes at once here, the row follows.
+    func removeLinkPreview(chatId: Id, messageId: Id, projectId: Id? = nil) {
+        guard !messageId.isEmpty else { return }
+        if var list = messages[chatId], let i = list.firstIndex(where: { $0.id == messageId }) {
+            list[i].preview = "off"
+            messages[chatId] = list
+        }
+        #if DEBUG
+        if isFixture { Haptics.pick(); return }
+        #endif
+        let room: String
+        if peopleChat(chatId) != nil {
+            room = "people/\(chatId)"
+        } else if let projectId, projectId != peopleSlot {
+            room = "\(projectId)/\(chatId)"
+        } else {
+            room = "people/\(chatId)"
+        }
+        Task {
+            do {
+                try await api.removeLinkPreview(room: room, messageId: messageId)
+                Haptics.pick()
+            } catch {
+                let e = error as? RelayError
+                fail(e?.status == 403
+                     ? UserError.refused("remove the preview", "You can only remove previews on your own messages.")
+                     : UserError.classify("remove the preview", error))
             }
         }
     }
