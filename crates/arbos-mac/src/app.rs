@@ -439,6 +439,9 @@ pub struct MediaViewer {
     pub forward_open: bool,
     /// Blob key being fetched for Play / Quick Look (one at a time).
     pub busy: Option<String>,
+    /// Temp file of the video playing inline in the viewer (macOS AVPlayerView;
+    /// [feedback app-01M6147S9TPNBQA7KSDEY0K8C4]). Cleared on close / page.
+    pub playing: Option<std::path::PathBuf>,
 }
 
 impl MediaViewer {
@@ -2110,10 +2113,19 @@ impl AppState {
                 crate::ui::attachments::reveal(&path);
                 cx.notify();
             }
-            SyncEvent::AttachmentOpened { key } => {
+            SyncEvent::AttachmentOpened { key, path } => {
                 if let Some(viewer) = self.media_viewer.as_mut() {
                     if viewer.busy.as_ref() == Some(&key) {
                         viewer.busy = None;
+                        // Video Play on macOS: keep the temp file and show it
+                        // inline (AVPlayerView) instead of handing off to QuickTime.
+                        if let Some(path) = path.filter(|_| {
+                            viewer
+                                .current()
+                                .is_some_and(|i| i.attachment.kind() == AttachmentKind::Video)
+                        }) {
+                            viewer.playing = Some(path);
+                        }
                     }
                 }
                 cx.notify();
@@ -7491,6 +7503,7 @@ impl AppState {
             slot: self.selected_project.clone().unwrap_or_default(),
             forward_open: false,
             busy: None,
+            playing: None,
         });
         self.media_viewer_generation += 1;
         cx.notify();
@@ -7530,6 +7543,7 @@ impl AppState {
             slot,
             forward_open: false,
             busy: None,
+            playing: None,
         });
         self.media_viewer_generation += 1;
         self.ensure_viewer_pictures();
@@ -7552,6 +7566,7 @@ impl AppState {
         let last = viewer.items.len() as i32 - 1;
         let next = (viewer.index as i32 + delta).clamp(0, last.max(0));
         if next as usize != viewer.index {
+            viewer.playing = None;
             viewer.index = next as usize;
             self.ensure_viewer_pictures();
             cx.notify();
@@ -7648,8 +7663,10 @@ impl AppState {
         self.copy_attachment(slot, &attachment, cx);
     }
 
-    /// Viewer → Play / Quick Look: fetch the bytes to a temp file and hand them
-    /// to macOS (`qlmanage -p` for files, `open` for video → QuickTime Player).
+    /// Viewer → Play / Quick Look: fetch the bytes to a temp file. Files open
+    /// in Quick Look; videos play inline in the viewer on macOS (AVPlayerView)
+    /// instead of handing off to QuickTime ([feedback
+    /// app-01M6147S9TPNBQA7KSDEY0K8C4]).
     pub fn media_viewer_open_external(&mut self, cx: &mut Context<Self>) {
         let Some(viewer) = self.media_viewer.as_mut() else {
             return;
@@ -7663,10 +7680,14 @@ impl AppState {
         if key.starts_with("local:") || viewer.busy.is_some() {
             return;
         }
+        if viewer.playing.is_some() && item.attachment.kind() == AttachmentKind::Video {
+            return;
+        }
         let quick_look = item.attachment.kind() != AttachmentKind::Video;
         let name = item.attachment.name.clone();
         let project_id = viewer.slot.clone();
         viewer.busy = Some(key.clone());
+        viewer.playing = None;
         self.command(ClientCommand::OpenAttachment {
             project_id,
             key,
