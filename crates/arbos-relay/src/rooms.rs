@@ -654,6 +654,14 @@ async fn handle_frame(
                             // moves to it, so no device of theirs sees it as unread.
                             let _ = state.db.advance_user_cursor(user_id, &chat.chat_id, seq);
                             crate::notify::on_row_from_device(state, chat.clone(), user_id, seq);
+                            // Outside agents in this chat (#2140): announced by the app in a
+                            // moment, else read from the doc.
+                            crate::outside::on_row(
+                                state,
+                                chat.clone(),
+                                user_id,
+                                arbos_core::ids::now_ms(),
+                            );
                             chat_ref = Some(chat);
                         }
                     }
@@ -728,7 +736,10 @@ async fn handle_frame(
                 serde_json::from_value(f.header).unwrap_or(wire::WakeHeader {
                     reason: "open".into(),
                 });
-            boxes::ensure_awake_project(state, project_id, &w.reason).await;
+            // An outside agent's room never wakes the owner's box (#2140).
+            if !crate::outside::is_outside(state, project_id) {
+                boxes::ensure_awake_project(state, project_id, &w.reason).await;
+            }
             let (st, since) = state.project_box_state(project_id).await;
             sink.send(frame(
                 FrameType::Status,
