@@ -16,8 +16,8 @@ use gpui::{
 
 use crate::app::{AppEvent, AppState, DetailsTarget};
 use crate::model::{
-    now_ms, Attachment, AttachmentKind, Chat, Id, Message, MessageStatus, Part, Person, Project,
-    ReplyRef, Role, SpaceKind, StatusKind, TurnKind,
+    now_ms, Attachment, AttachmentKind, Chat, Id, LinkPreview, Message, MessageStatus, Part,
+    Person, Project, ReplyRef, Role, SpaceKind, StatusKind, TurnKind,
 };
 use crate::ui::approve::{approval_card, ApprovalView};
 use crate::ui::attachments;
@@ -393,6 +393,7 @@ fn one_line_blocks(blocks: Vec<Block>, out: &mut String) {
                 .collect(),
             Block::Math { source } => vec![math::plain(&source)],
             Block::Chart { spec, .. } => vec![crate::ui::chart_card::one_line_title(&spec)],
+            Block::LinkPreview { preview, .. } => vec![preview.one_line()],
         };
         for piece in pieces {
             // Spans are joined before splitting so "`site/launch/`;" stays one
@@ -511,6 +512,10 @@ pub enum RowKind {
         /// "Secret saved as NAME" ghost — muted fill, key glyph, no text to select or copy.
         /// The secret's name.
         ghost: Option<String>,
+        /// The relay's link preview for this message, drawn as a card under the text
+        /// (or as the whole bubble when the text was only the link): `(part id, preview)`
+        /// ([feedback link-embeds-mac-2026-10-27]).
+        preview: Option<Box<(String, LinkPreview)>>,
     },
     Markdown {
         block: Block,
@@ -1623,14 +1628,89 @@ impl Transcript {
     }
 
     /// The code cards' Copy wiring for this frame.
+    /// `code_copy` for one message: Remove preview is offered where the relay would let this
+    /// user delete the message (the same #1526 rule the bubble menu uses).
+    fn code_copy_for(&self, message_id: &Id, cx: &Context<Self>) -> CodeCopy {
+        let mut copy = self.code_copy(cx);
+        copy.moderates = self.chat_id.as_ref().is_some_and(|chat| {
+            let state = self.state.read(cx);
+            let space_id = state.space_of_chat(chat);
+            match (
+                state.project(&space_id),
+                state.messages_of(chat).iter().find(|m| &m.id == message_id),
+            ) {
+                (Some(space), Some(message)) => crate::model::may_delete_message(
+                    space,
+                    &state.me_id(),
+                    &state.me_handle(),
+                    message,
+                ),
+                _ => false,
+            }
+        });
+        copy
+    }
+
     fn code_copy(&self, cx: &Context<Self>) -> CodeCopy {
         let this = cx.entity().downgrade();
         let hover = this.clone();
         let save_state = self.state.clone();
         let expand_state = self.state.clone();
         let chat_id = self.chat_id.clone();
+        let links = {
+            // The preview pictures this chat has decoded (keys `lp-…`), snapshotted here so
+            // the cards need no app context at paint time.
+            let thumbs: Rc<HashMap<String, std::sync::Arc<gpui::RenderImage>>> = Rc::new(
+                self.state
+                    .read(cx)
+                    .thumbnails
+                    .iter()
+                    .filter(|(k, _)| k.starts_with("lp-") || k.starts_with("li-"))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            );
+            // The relay's host icons (`AppState::link_icon`), same snapshot idea.
+            let host_icons: Rc<
+                HashMap<
+                    String,
+                    (
+                        std::sync::Arc<gpui::RenderImage>,
+                        crate::ui::link_tile::Tone,
+                    ),
+                >,
+            > = Rc::new({
+                let state = self.state.read(cx);
+                state
+                    .link_icons
+                    .keys()
+                    .filter_map(|h| {
+                        state
+                            .link_icon(h)
+                            .map(|(img, tone)| (h.clone(), (img.clone(), tone)))
+                    })
+                    .collect()
+            });
+            let open_state = self.state.clone();
+            let remove_state = self.state.clone();
+            let remove_chat = self.chat_id.clone();
+            Rc::new(crate::ui::link_card::LinkUi {
+                thumbnail: Rc::new(move |key| thumbs.get(key).cloned()),
+                host_icon: Rc::new(move |host| host_icons.get(host).cloned()),
+                on_open: Rc::new(move |url, _, cx| {
+                    open_state.update(cx, |s, cx| s.open_link(&url, cx));
+                }),
+                on_remove: Rc::new(move |message_id, _, cx| {
+                    if let Some(chat) = remove_chat.clone() {
+                        remove_state
+                            .update(cx, |s, cx| s.remove_link_preview(chat, message_id, cx));
+                    }
+                }),
+            })
+        };
         CodeCopy {
             copied: copied_pill(&self.code_copied, Instant::now()),
+            links: Some(links),
+            moderates: false,
             on_copy: Some(Rc::new(move |id, code, _, cx| {
                 let _ = this.update(cx, |t, cx| t.copy_code(id, code, cx));
             })),
@@ -2273,7 +2353,7 @@ impl Transcript {
                     now,
                     theme,
                     &selectable.bubble(format!("{message_id}#text"), bubble_text.text),
-                    &self.code_copy(cx),
+                    &self.code_copy_for(message_id, cx),
                 ),
             ));
         // Every block row of the reply shares one hover key, so the rail shows
@@ -2395,6 +2475,7 @@ impl Transcript {
                 quote,
                 forwarded_from,
                 ghost,
+                preview,
             } => {
                 // My bubble is dark in both appearances: white text, a
                 // stronger highlight than the soft one on the grey bubbles.
@@ -2415,16 +2496,42 @@ impl Transcript {
                 // Triple-backtick fences render as code cards (same as agent
                 // replies); other text stays plain so "# heading" is still literal.
                 // Bare `http(s)://…` URLs are still accented and clickable.
+                let code_copy = self.code_copy_for(&row.message_id, cx);
+                let link_only = text.is_empty() && preview.is_some();
                 let body = match &ghost {
                     Some(name) => secret_ghost_body(name, from.as_ref(), &theme),
+                    None if link_only => div().into_any_element(),
                     None => user_message_body(
                         &row.id,
                         &text,
                         text_color,
                         &theme,
                         &bubble_selectable,
-                        &self.code_copy(cx),
+                        &code_copy,
                     ),
+                };
+                // The link preview card under the text — or as the bubble's whole body
+                // when the message was only the link ([feedback link-embeds-mac-2026-10-27]).
+                let body = match &preview {
+                    Some(p) => {
+                        let card = crate::ui::link_card::card(
+                            &row.id,
+                            &row.message_id,
+                            &p.1,
+                            &theme,
+                            code_copy.links.as_ref(),
+                            crate::ui::link_card::Place {
+                                own: from.is_none(),
+                                removable: code_copy.moderates,
+                            },
+                        );
+                        let mut col = div().flex().flex_col().w_full();
+                        if !link_only {
+                            col = col.child(body).child(div().h(px(8.0)));
+                        }
+                        col.child(card).into_any_element()
+                    }
+                    None => body,
                 };
                 // Someone else's bubble in a group / channel: their name inside
                 // it (their colour); the time is hover-only; my own bubble carries
@@ -2480,6 +2587,8 @@ impl Transcript {
                     }))
                     .px(px(BUBBLE_PAD_X))
                     .py(px(BUBBLE_PAD_Y))
+                    // A card-only bubble keeps a tight even inset around the card.
+                    .when(link_only, |b| b.px(px(6.0)).py(px(6.0)))
                     .rounded(px(BUBBLE_RADIUS))
                     .bg(theme.bubble)
                     .text_color(theme.bubble_text())
@@ -3414,6 +3523,7 @@ fn block_text_len(block: &Block) -> usize {
         }
         Block::Math { source } => source.len(),
         Block::Chart { table, .. } => table.len(),
+        Block::LinkPreview { preview, .. } => preview.title.len(),
     }
 }
 
@@ -3616,7 +3726,8 @@ fn is_json_block(block: &Block) -> bool {
         | Block::Numbered(_)
         | Block::Table { .. }
         | Block::Math { .. }
-        | Block::Chart { .. } => return false,
+        | Block::Chart { .. }
+        | Block::LinkPreview { .. } => return false,
     };
     let t = text.trim();
     (t.starts_with('{') || t.starts_with('['))
@@ -3920,10 +4031,22 @@ pub fn build_rows_with_cache(
                 });
                 // `@handle` → `@Display Name` so the chip shows the name and a copy
                 // carries it (mention chips, Oct 23).
-                let text = match &ghost {
+                let mut text = match &ghost {
                     Some(name) => format!("Secret saved as {name}"),
                     None => mentions.display(&message.plain_text()),
                 };
+                // The link preview card; a message that was only the link shows the card
+                // alone (iMessage's rule), the full URL stays one hover away on the card.
+                let preview = ghost
+                    .is_none()
+                    .then(|| link_preview_of(message))
+                    .flatten()
+                    .map(|(id, p)| Box::new((id.clone(), p.clone())));
+                if let Some(p) = &preview {
+                    if is_link_only(&text, &p.1) {
+                        text = String::new();
+                    }
+                }
                 let attachment_parts: Vec<(String, Attachment)> = message
                     .parts
                     .iter()
@@ -4033,7 +4156,7 @@ pub fn build_rows_with_cache(
                         },
                     });
                 }
-                if show_text || attachment_parts.is_empty() {
+                if show_text || attachment_parts.is_empty() || preview.is_some() {
                     // A cross-chat reply (Reply in DM) quotes its own snapshot;
                     // an in-chat reply quotes the row it points at.
                     let quote = message
@@ -4061,6 +4184,7 @@ pub fn build_rows_with_cache(
                                 delivery,
                                 &forwarded_from,
                                 &ghost,
+                                &preview,
                             ),
                             false,
                         ),
@@ -4077,6 +4201,7 @@ pub fn build_rows_with_cache(
                             quote,
                             forwarded_from,
                             ghost,
+                            preview,
                         },
                     });
                 }
@@ -4229,6 +4354,7 @@ pub fn build_rows_with_cache(
                     .iter()
                     .filter(|p| matches!(p, Part::Chart { .. }))
                     .count();
+                let link_preview = link_preview_of(message).map(|(id, _)| id.clone());
                 let total_blocks: usize = polished
                     .iter()
                     .map(|(_, text)| {
@@ -4238,7 +4364,8 @@ pub fn build_rows_with_cache(
                             .count()
                     })
                     .sum::<usize>()
-                    + chart_parts;
+                    + chart_parts
+                    + usize::from(link_preview.is_some());
                 let fill = total_blocks > 1;
                 // Every block of every text part is one bubble for selection.
                 let bubble_blocks: Vec<Block> = polished
@@ -4356,6 +4483,44 @@ pub fn build_rows_with_cache(
                             });
                             block_ix += 1;
                         }
+                        // The link preview card: one block under the prose
+                        // ([feedback link-embeds-mac-2026-10-27]); hidden once the sender
+                        // removed it (`preview: "off"`) or the switch is off.
+                        Part::LinkPreview { id, preview }
+                            if link_preview.as_deref() == Some(id.as_str()) =>
+                        {
+                            had_prose = true;
+                            let first = block_ix == 0;
+                            let last = block_ix + 1 == total_blocks;
+                            let block = Block::LinkPreview {
+                                part_id: id.clone(),
+                                preview: preview.clone(),
+                            };
+                            let bubble = BubbleText::single(block_plain(&block, false));
+                            let named = sender_named && first;
+                            rows.push(Row {
+                                version: hash_version(
+                                    &(&block, first, last, fill, &reply_quote, named),
+                                    false,
+                                ),
+                                id: format!("{}#{}", message.id, id),
+                                message_id: message.id.clone(),
+                                kind: RowKind::Markdown {
+                                    block,
+                                    live: false,
+                                    bubble,
+                                    first,
+                                    last,
+                                    fill,
+                                    time: clock_label(message.created_at),
+                                    lane: lane.clone(),
+                                    quote: if first { reply_quote.clone() } else { None },
+                                    named,
+                                },
+                            });
+                            block_ix += 1;
+                        }
+                        Part::LinkPreview { .. } => {}
                         // The chart's fallback picture: an older app shows it, this one
                         // draws the chart instead.
                         Part::Attachment { attachment, .. }
@@ -4869,6 +5034,8 @@ fn block_segments(block: &Block, literal: bool) -> Vec<Segment> {
         )],
         // A copy of the bubble carries the chart's data as its markdown table.
         Block::Chart { table, .. } => vec![seg(String::new(), table.clone())],
+        // A copy of the bubble carries the card as its title and site.
+        Block::LinkPreview { preview, .. } => vec![seg(String::new(), preview.one_line())],
     }
 }
 
@@ -5054,6 +5221,25 @@ fn secret_ghost_body(name: &str, from: Option<&Person>, theme: &Theme) -> AnyEle
                 ),
         )
         .into_any_element()
+}
+
+/// The message's link preview, when the global switch is on and the sender has not removed
+/// it ([feedback link-embeds-mac-2026-10-27]).
+pub fn link_preview_of(message: &Message) -> Option<(&Id, &LinkPreview)> {
+    if !crate::ui::link_card::enabled() {
+        return None;
+    }
+    message.link_preview()
+}
+
+/// Was the message nothing but the link the card stands for? Then the card is the bubble.
+pub fn is_link_only(text: &str, preview: &LinkPreview) -> bool {
+    let t = text.trim();
+    !t.is_empty()
+        && !t.contains(char::is_whitespace)
+        && (t == preview.url.trim()
+            || t == preview.canonical_url.trim()
+            || t.trim_end_matches('/') == preview.url.trim().trim_end_matches('/'))
 }
 
 fn user_message_body(
@@ -5569,6 +5755,22 @@ fn render_block_in(
         Block::Chart { part_id, spec, .. } => {
             crate::ui::chart_card::card(row_id, part_id, spec, theme, copy)
         }
+        // A link preview card under the prose: an agent's or another person's bubble, so
+        // never "own"; removable when this chat is mine to moderate.
+        Block::LinkPreview { preview, .. } => {
+            let message_id = row_id.split('#').next().unwrap_or(row_id);
+            crate::ui::link_card::card(
+                row_id,
+                message_id,
+                preview,
+                theme,
+                copy.links.as_ref(),
+                crate::ui::link_card::Place {
+                    own: false,
+                    removable: copy.moderates,
+                },
+            )
+        }
         // Display math: typeset, a size up, centred on its own line (KaTeX's
         // display mode in Grok Bot).
         Block::Math { source } => {
@@ -5688,6 +5890,12 @@ pub struct CodeCopy {
     /// The chart cards' actions (hover repaint, Save PNG, Expand); Copy data goes through
     /// `on_copy` with the card's own square id ([feedback chart-bubble-mac-2026-10-26]).
     pub chart: Option<Rc<crate::ui::chart_card::ChartUi>>,
+    /// The link preview cards' wiring (pictures, open, Remove preview)
+    /// ([feedback link-embeds-mac-2026-10-27]).
+    pub links: Option<Rc<crate::ui::link_card::LinkUi>>,
+    /// I moderate this chat (my own project, or a group I own): Remove preview shows on
+    /// others' cards too.
+    pub moderates: bool,
 }
 
 /// How long the Copy pill reads "Copied" (Jacob: ~1.5 s).
@@ -6556,6 +6764,7 @@ mod selection_tests {
                     });
                 })),
                 chart: None,
+                ..Default::default()
             };
             div().w(px(600.0)).child(render_block(
                 "m1#t.0",
@@ -10993,6 +11202,7 @@ mod chart_tests {
                     }),
                     on_expand: Rc::new(move |part_id, _, _, _| expanded.borrow_mut().push(part_id)),
                 })),
+                ..Default::default()
             };
             div()
                 .w(px(536.0))
@@ -11107,5 +11317,366 @@ mod chart_tests {
         assert!(v2.copied_now());
         v2.copied_at = Some(now_ms() - crate::ui::chart_viewer::COPIED_MS - 1);
         assert!(!v2.copied_now());
+    }
+}
+
+/// Link previews ([feedback link-embeds-mac-2026-10-27]): the `link_preview` part parses,
+/// becomes a card under the text (or the whole bubble for a bare link), is hidden by
+/// `preview: "off"` and the global switch, and the card draws its parts.
+#[cfg(test)]
+mod link_preview_tests {
+    use super::*;
+
+    fn part(extra: serde_json::Value) -> serde_json::Value {
+        let mut v = serde_json::json!({
+            "id": "lp", "kind": "link_preview", "specVersion": 1,
+            "url": "https://open.spotify.com/track/7eiYNCojnoUVnz14kjBcQH?si=163bbf4a6caf4b39",
+            "canonicalUrl": "https://open.spotify.com/track/7eiYNCojnoUVnz14kjBcQH",
+            "provider": "spotify", "providerName": "Spotify", "type": "song",
+            "title": "Midnight City", "subtitle": "M83 · Hurry Up, We're Dreaming",
+            "facts": ["Song", "4:03"], "siteHost": "open.spotify.com",
+            "image": { "ref": "lp-abc.jpg", "width": 300, "height": 300, "mime": "image/jpeg", "art": true },
+            "layout": "compact", "fetchedAt": 1_700_000_000_000u64
+        });
+        if let Some(o) = extra.as_object() {
+            for (k, val) in o {
+                v[k] = val.clone();
+            }
+        }
+        v
+    }
+
+    fn user_message(text: &str, preview_field: Option<&str>) -> Message {
+        let mut m = serde_json::json!({
+            "id": "m1", "chatId": "c1", "role": "user", "sender": "user:gh_me", "status": "done",
+            "createdAt": 1_700_000_001_000u64,
+            "parts": [ { "id": "t", "kind": "text", "text": text }, part(serde_json::json!({})) ],
+        });
+        if let Some(p) = preview_field {
+            m["preview"] = serde_json::json!(p);
+        }
+        serde_json::from_value(m).expect("message")
+    }
+
+    fn rows_of(m: Message) -> Vec<Row> {
+        let spoken = HashSet::new();
+        let failed = HashMap::new();
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        build_rows(
+            &[m],
+            false,
+            speech,
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+        )
+    }
+
+    /// The global Link previews switch is process-wide: the tests that read or flip it take
+    /// this lock so the parallel runner cannot interleave them.
+    fn switch_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn user_row(rows: &[Row]) -> (String, Option<Box<(String, LinkPreview)>>) {
+        rows.iter()
+            .find_map(|r| match &r.kind {
+                RowKind::User { text, preview, .. } => Some((text.clone(), preview.clone())),
+                _ => None,
+            })
+            .expect("a user row")
+    }
+
+    #[test]
+    fn the_part_parses_and_unknown_fields_are_ignored() {
+        let m = user_message("x", None);
+        let Part::LinkPreview { id, preview } = &m.parts[1] else {
+            panic!("link preview part")
+        };
+        assert_eq!(id, "lp");
+        assert_eq!(preview.provider, "spotify");
+        assert_eq!(preview.kind, "song");
+        assert_eq!(preview.title, "Midnight City");
+        assert_eq!(preview.facts, ["Song", "4:03"]);
+        assert_eq!(
+            preview.image.as_ref().map(|i| i.blob_ref.as_str()),
+            Some("lp-abc.jpg")
+        );
+        assert!(preview.image.as_ref().is_some_and(|i| i.art));
+        assert_eq!(preview.site_host.as_deref(), Some("open.spotify.com"));
+        assert!(preview.site_icon.is_none(), "reserved for the shared tile");
+        assert!(!preview.expanded());
+        assert_eq!(preview.one_line(), "Midnight City — Spotify");
+        let m: Message = serde_json::from_value(serde_json::json!({
+            "id": "m9", "role": "user", "status": "done",
+            "parts": [ { "id": "z", "kind": "link_preview", "title": "T", "newerField": { "a": 1 } } ],
+        }))
+        .unwrap();
+        assert!(matches!(&m.parts[0], Part::LinkPreview { preview, .. } if preview.title == "T"));
+    }
+
+    #[test]
+    fn text_plus_link_keeps_the_text_and_a_bare_link_becomes_the_card() {
+        let _switch = switch_lock();
+        let (text, preview) = user_row(&rows_of(user_message(
+            "listen to this https://open.spotify.com/track/7eiYNCojnoUVnz14kjBcQH?si=163bbf4a6caf4b39",
+            None,
+        )));
+        assert!(text.starts_with("listen to this https://"), "{text}");
+        assert!(preview.is_some());
+
+        let (text, preview) = user_row(&rows_of(user_message(
+            "https://open.spotify.com/track/7eiYNCojnoUVnz14kjBcQH?si=163bbf4a6caf4b39",
+            None,
+        )));
+        assert_eq!(text, "", "a bare link shows the card alone");
+        assert_eq!(preview.as_ref().map(|p| p.0.as_str()), Some("lp"));
+
+        // The canonical form of the same link counts as bare too.
+        let (text, _) = user_row(&rows_of(user_message(
+            "https://open.spotify.com/track/7eiYNCojnoUVnz14kjBcQH",
+            None,
+        )));
+        assert_eq!(text, "");
+    }
+
+    #[test]
+    fn preview_off_and_the_global_switch_hide_the_card() {
+        let _switch = switch_lock();
+        let (text, preview) = user_row(&rows_of(user_message(
+            "https://open.spotify.com/track/7eiYNCojnoUVnz14kjBcQH",
+            Some("off"),
+        )));
+        assert!(preview.is_none());
+        assert!(text.starts_with("https://"), "the plain link is back");
+
+        crate::ui::link_card::set_enabled(false);
+        let (_, preview) = user_row(&rows_of(user_message(
+            "https://open.spotify.com/track/7eiYNCojnoUVnz14kjBcQH",
+            None,
+        )));
+        crate::ui::link_card::set_enabled(true);
+        assert!(preview.is_none());
+    }
+
+    #[test]
+    fn an_agents_link_preview_is_the_bubbles_last_block() {
+        let _switch = switch_lock();
+        let m: Message = serde_json::from_value(serde_json::json!({
+            "id": "m2", "chatId": "c1", "role": "assistant", "sender": "box:1", "status": "done",
+            "createdAt": 1_700_000_002_000u64,
+            "parts": [
+                { "id": "t", "kind": "text", "text": "Mira posted the count this morning: https://x.com/mira/status/1" },
+                part(serde_json::json!({ "provider": "x", "providerName": "X", "type": "post", "title": "Mira Kaplan", "subtitle": "@mirakaplan", "description": "Subnet 120 just crossed 1,000 validators.", "facts": ["Oct 27, 2026"], "image": serde_json::Value::Null, "layout": "compact" })),
+            ],
+        }))
+        .unwrap();
+        let rows = rows_of(m);
+        let kinds: Vec<String> = rows
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::Markdown {
+                    block, first, last, ..
+                } => Some(format!(
+                    "{}:{}{}",
+                    match block {
+                        Block::LinkPreview { .. } => "link",
+                        Block::Paragraph(_) => "para",
+                        _ => "other",
+                    },
+                    if *first { "F" } else { "" },
+                    if *last { "L" } else { "" }
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kinds, ["para:F", "link:L"], "{kinds:?}");
+        let row = rows
+            .iter()
+            .find(|r| r.id == "m2#lp")
+            .expect("the card's row");
+        if let RowKind::Markdown {
+            block: Block::LinkPreview { preview, .. },
+            bubble,
+            ..
+        } = &row.kind
+        {
+            assert_eq!(preview.kind, "post");
+            assert_eq!(
+                bubble.text.as_ref(),
+                "Mira Kaplan — X",
+                "a copy carries title and site"
+            );
+        } else {
+            panic!("link block");
+        }
+    }
+
+    #[test]
+    fn is_link_only_matches_the_typed_or_canonical_url_alone() {
+        let p = LinkPreview {
+            url: "https://a.test/x?si=1".into(),
+            canonical_url: "https://a.test/x".into(),
+            ..Default::default()
+        };
+        assert!(is_link_only("https://a.test/x?si=1", &p));
+        assert!(is_link_only("  https://a.test/x  ", &p));
+        assert!(is_link_only("https://a.test/x?si=1/", &p));
+        assert!(!is_link_only("see https://a.test/x?si=1", &p));
+        assert!(!is_link_only("", &p));
+    }
+
+    struct Host {
+        selection: Entity<TextSelection>,
+        removable: bool,
+        own: bool,
+        expanded: bool,
+        opened: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+        removed: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    }
+
+    impl gpui::Render for Host {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+            let mut v = part(serde_json::json!({}));
+            if self.expanded {
+                v["layout"] = serde_json::json!("expanded");
+                v["type"] = serde_json::json!("video");
+                v["duration"] = serde_json::json!("18:24");
+                v["image"] = serde_json::json!({ "ref": "lp-yt.jpg", "width": 1280, "height": 720, "mime": "image/jpeg", "art": false });
+            }
+            let preview: LinkPreview = serde_json::from_value(v).unwrap();
+            let _ = Selectable::new(&self.selection, theme.accent_soft, cx);
+            let opened = self.opened.clone();
+            let removed = self.removed.clone();
+            let ui = Rc::new(crate::ui::link_card::LinkUi {
+                thumbnail: Rc::new(|_| None),
+                host_icon: Rc::new(|_| None),
+                on_open: Rc::new(move |url, _, _| opened.borrow_mut().push(url)),
+                on_remove: Rc::new(move |mid, _, _| removed.borrow_mut().push(mid)),
+            });
+            div()
+                .w(px(536.0))
+                .debug_selector(|| "link-host".into())
+                .child(crate::ui::link_card::card(
+                    "m1#user",
+                    "m1",
+                    &preview,
+                    &theme,
+                    Some(&ui),
+                    crate::ui::link_card::Place {
+                        own: self.own,
+                        removable: self.removable,
+                    },
+                ))
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn host(
+        cx: &mut gpui::TestAppContext,
+        removable: bool,
+        expanded: bool,
+    ) -> (
+        Entity<Host>,
+        &mut gpui::VisualTestContext,
+        std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+        std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    ) {
+        cx.update(|cx| {
+            let theme = crate::ui::theme::Theme::for_pref(
+                crate::ui::theme::AppearancePref::Dark,
+                crate::ui::theme::Surface::Matte,
+                cx,
+            );
+            cx.set_global(theme);
+        });
+        let opened = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let removed = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let (o, r) = (opened.clone(), removed.clone());
+        let (view, vcx) = cx.add_window_view(move |_, cx| Host {
+            selection: cx.new(TextSelection::new),
+            removable,
+            own: true,
+            expanded,
+            opened: o,
+            removed: r,
+        });
+        vcx.run_until_parked();
+        (view, vcx, opened, removed)
+    }
+
+    #[gpui::test]
+    fn the_compact_card_is_capped_at_400_with_56pt_art_and_opens_on_click(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_view, vcx, opened, removed) = host(cx, true, false);
+        let card = vcx.debug_bounds("link-card").expect("card drawn");
+        assert_eq!(
+            f32::from(card.size.width),
+            crate::ui::link_card::CARD_MAX_WIDTH,
+            "capped, not the 536 pt bubble"
+        );
+        let art = vcx.debug_bounds("link-art").expect("art");
+        assert_eq!(f32::from(art.size.width), crate::ui::link_card::ART);
+        assert_eq!(f32::from(art.size.height), crate::ui::link_card::ART);
+        vcx.debug_bounds("link-footer").expect("footer");
+        vcx.debug_bounds("link-tile")
+            .expect("the site-icon tile slot");
+        assert!(
+            vcx.debug_bounds("link-media").is_none(),
+            "compact: no picture on top"
+        );
+        let remove = vcx
+            .debug_bounds("link-remove")
+            .expect("× present on a removable card");
+        assert!(f32::from(remove.size.width) == crate::ui::link_card::REMOVE_DISC);
+        // A click on the text opens the canonical link.
+        let text = vcx.debug_bounds("link-text").unwrap();
+        vcx.simulate_click(text.center(), gpui::Modifiers::default());
+        vcx.run_until_parked();
+        assert_eq!(
+            opened.borrow().as_slice(),
+            ["https://open.spotify.com/track/7eiYNCojnoUVnz14kjBcQH"]
+        );
+        assert!(removed.borrow().is_empty());
+        // A click on the × removes and does not open.
+        vcx.simulate_click(remove.center(), gpui::Modifiers::default());
+        vcx.run_until_parked();
+        assert_eq!(removed.borrow().as_slice(), ["m1"]);
+        assert_eq!(opened.borrow().len(), 1, "the × swallows its click");
+    }
+
+    #[gpui::test]
+    fn the_expanded_card_puts_the_picture_on_top_with_play_and_duration(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (_view, vcx, _, _) = host(cx, false, true);
+        let card = vcx.debug_bounds("link-card").expect("card");
+        let media = vcx.debug_bounds("link-media").expect("picture on top");
+        assert_eq!(
+            f32::from(media.size.height),
+            crate::ui::link_card::MEDIA_HEIGHT
+        );
+        assert!(
+            (f32::from(card.size.width) - f32::from(media.size.width)).abs() <= 2.0,
+            "the picture spans the card inside its hairline"
+        );
+        let text = vcx.debug_bounds("link-text").unwrap();
+        assert!(text.top() >= media.bottom(), "text under the picture");
+        vcx.debug_bounds("link-play").expect("▶ on a video");
+        vcx.debug_bounds("link-duration").expect("duration chip");
+        assert!(vcx.debug_bounds("link-art").is_none());
+        assert!(
+            vcx.debug_bounds("link-remove").is_none(),
+            "no × when not removable"
+        );
     }
 }
