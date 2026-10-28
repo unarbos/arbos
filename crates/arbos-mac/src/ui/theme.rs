@@ -234,6 +234,13 @@ pub const CHROME_WASH_FLOOR: f32 = 0.25;
 /// Floating cards' floor (menus, sheets, pickers; fixed 0.85 before): a menu
 /// is read, so it stays a surface even over a friendly desktop.
 pub const CARD_WASH_FLOOR: f32 = 0.55;
+/// The search popups' floor ([feedback search-popup-single-layer-2026-10-28],
+/// Jacob 2026-10-28: "double transparency on search pop up is annoying"): the
+/// ⌘K palette hangs over a busy transcript and nothing of it may read
+/// through. With [`crate::ui::glass::POPUP_BLUR`] under it the tint only has
+/// to flatten what the blur leaves — a stronger wash than a menu's, still a
+/// glass plate, not a solid card.
+pub const POPUP_WASH_FLOOR: f32 = 0.80;
 /// Glass shell tint: how opaque the window wash is over the blur (Settings →
 /// Appearance → Opacity). Default is [`GLASS_ALPHA`] / [`GLASS_ALPHA_LIGHT`].
 /// Floor 0 % (#1425; it was 0.30 before, which Jacob hit — the thumb stopped
@@ -420,6 +427,9 @@ pub enum GlassRegion {
     /// Floating cards — menus, sheets, pickers (`card()`); they hang over the
     /// chat column, so they read its band.
     Card,
+    /// The search popups — the ⌘K palette (`popup()`): one frosted plate over
+    /// the chat column, thick enough that the transcript never reads through.
+    Popup,
 }
 
 /// The user's glass opacity (0.00–1.00). Saved as a float string in
@@ -870,6 +880,16 @@ impl Theme {
         self.adaptive_wash(GlassRegion::Card)
     }
 
+    /// A search popup's plate ([feedback search-popup-single-layer-2026-10-28]):
+    /// the card tint at the popup floor on Glass (under [`crate::ui::glass::POPUP_BLUR`]),
+    /// the flat card on Matte — one material either way.
+    pub fn popup(&self) -> Hsla {
+        if !self.is_frost() {
+            return self.surface_1;
+        }
+        self.adaptive_wash(GlassRegion::Popup)
+    }
+
     /// The chat column over glass: a wash of the page colour — white in light,
     /// `bg` in dark — so the conversation is a readable surface and bubbles,
     /// timestamps and the composer stay legible while the sidebar and pane
@@ -910,7 +930,7 @@ impl Theme {
     pub fn wash_tint(&self, region: GlassRegion) -> Hsla {
         match region {
             GlassRegion::Sidebar => self.sidebar,
-            GlassRegion::Card => self.surface_1,
+            GlassRegion::Card | GlassRegion::Popup => self.surface_1,
             GlassRegion::Chat | GlassRegion::Pane => self.shell_tint(),
         }
     }
@@ -922,6 +942,7 @@ impl Theme {
             GlassRegion::Sidebar => CHROME_WASH_FLOOR,
             GlassRegion::Chat | GlassRegion::Pane => CHAT_WASH_FLOOR,
             GlassRegion::Card => CARD_WASH_FLOOR,
+            GlassRegion::Popup => POPUP_WASH_FLOOR,
         }
     }
 
@@ -930,7 +951,7 @@ impl Theme {
         let b = self.backdrop?;
         Some(match region {
             GlassRegion::Sidebar => b.left,
-            GlassRegion::Chat | GlassRegion::Card => b.center,
+            GlassRegion::Chat | GlassRegion::Card | GlassRegion::Popup => b.center,
             GlassRegion::Pane => b.right,
         })
     }
@@ -1237,6 +1258,7 @@ mod glass_contrast_tests {
             GlassRegion::Chat => theme.chat_wash(),
             GlassRegion::Pane => theme.pane(),
             GlassRegion::Card => theme.card(),
+            GlassRegion::Popup => theme.popup(),
         };
         composite(wash, under)
     }
@@ -1257,11 +1279,12 @@ mod glass_contrast_tests {
         );
     }
 
-    const REGIONS: [GlassRegion; 4] = [
+    const REGIONS: [GlassRegion; 5] = [
         GlassRegion::Sidebar,
         GlassRegion::Chat,
         GlassRegion::Pane,
         GlassRegion::Card,
+        GlassRegion::Popup,
     ];
 
     /// With the desktop sampled, every region reads over every desktop at
