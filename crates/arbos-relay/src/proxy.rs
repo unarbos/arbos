@@ -738,18 +738,49 @@ pub async fn decisions(
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned);
     let key = decisions_cache_key(&body);
-    let hit = state
-        .decisions_cache
-        .lock()
-        .ok()
-        .and_then(|mut c| c.get(&key));
-    if let Some(cached) = hit {
+    let served = |cached: Bytes| {
         let mut h = HeaderMap::new();
         h.insert("content-type", HeaderValue::from_static("application/json"));
         h.insert("x-arbos-proxied", HeaderValue::from_static("1"));
         h.insert("x-arbos-decision-cache", HeaderValue::from_static("hit"));
-        return (StatusCode::OK, h, Body::from(cached)).into_response();
+        (StatusCode::OK, h, Body::from(cached)).into_response()
+    };
+    let lookup = |state: &AppState| {
+        state
+            .decisions_cache
+            .lock()
+            .ok()
+            .and_then(|mut c| c.get(&key))
+    };
+    if let Some(cached) = lookup(&state) {
+        return served(cached);
     }
+    // Single flight: identical requests arriving together wait for the first answer.
+    let gate = state
+        .decisions_inflight
+        .lock()
+        .await
+        .entry(key.clone())
+        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+    let _permit = gate.lock().await;
+    if let Some(cached) = lookup(&state) {
+        state.decisions_inflight.lock().await.remove(&key);
+        return served(cached);
+    }
+    let resp = forward_decisions(&state, principal, headers, body, project_override, &key).await;
+    state.decisions_inflight.lock().await.remove(&key);
+    resp
+}
+
+async fn forward_decisions(
+    state: &AppState,
+    principal: Principal,
+    headers: HeaderMap,
+    body: Bytes,
+    project_override: Option<String>,
+    key: &str,
+) -> Response {
     let resp = forward(
         state.clone(),
         principal,
@@ -774,7 +805,7 @@ pub async fn decisions(
         .is_some_and(|v| v.get("answers").is_some())
     {
         if let Ok(mut c) = state.decisions_cache.lock() {
-            c.put(key, bytes.clone());
+            c.put(key.to_owned(), bytes.clone());
         }
     }
     let mut h = parts.headers;
@@ -1315,6 +1346,81 @@ mod tests {
         )
         .await;
         assert_eq!(other.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    /// Three agents of one box judge the same message within milliseconds: the identical
+    /// requests arrive together, before any answer is cached. Only the first goes upstream;
+    /// the other two wait for it and get the same bytes (2026-10-28 06:30: without this, three
+    /// upstream calls answered 0.85 / 0.82 / 0.77 and two agents each thought they had the best
+    /// score).
+    #[tokio::test]
+    async fn concurrent_identical_decision_requests_make_one_upstream_call() {
+        use crate::state::test_support::test_state;
+        use crate::state::AuthMode;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc as StdArc;
+        let calls = StdArc::new(AtomicUsize::new(0));
+        let c2 = calls.clone();
+        let app = axum::Router::new().route(
+            "/openrouter/api/alpha/decisions",
+            axum::routing::post(move || {
+                let c2 = c2.clone();
+                async move {
+                    let n = c2.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    axum::Json(json!({ "model": "typesafe/jev-1.14-test", "answers": { "addressee": { "type": "choice", "choice": "nobody", "probabilities": { "nobody": 0.9 }, "confidence": 0.9 } }, "usage": { "input_tokens": 10, "output_tokens": 1, "cost": 0.00001, "call": n } }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let mut state = test_state(AuthMode::Github);
+        let mut cfg = (*state.cfg).clone();
+        cfg.openrouter_key = Some("sk-test".into());
+        cfg.openai_base = format!("http://127.0.0.1:{port}/openrouter/api/v1");
+        state.cfg = std::sync::Arc::new(cfg);
+        let body = Bytes::from_static(
+            br#"{"model":"typesafe/jev-1.14","state":{"message":{"text":"same"}},"questions":{}}"#,
+        );
+        let mut tasks = Vec::new();
+        for _ in 0..3 {
+            let st = state.clone();
+            let b = body.clone();
+            tasks.push(tokio::spawn(async move {
+                let r = decisions(State(st), Principal::Admin, HeaderMap::new(), b).await;
+                let status = r.status();
+                let cache = r
+                    .headers()
+                    .get("x-arbos-decision-cache")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned);
+                let bytes = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+                (status, cache, bytes)
+            }));
+        }
+        let mut bodies = Vec::new();
+        let mut hits = 0;
+        for t in tasks {
+            let (status, cache, bytes) = t.await.unwrap();
+            assert_eq!(status, StatusCode::OK);
+            if cache.as_deref() == Some("hit") {
+                hits += 1;
+            }
+            bodies.push(bytes);
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "one upstream call for three identical requests"
+        );
+        assert_eq!(hits, 2);
+        assert!(
+            bodies.iter().all(|b| *b == bodies[0]),
+            "every caller got the same answer"
+        );
     }
 
     #[test]
