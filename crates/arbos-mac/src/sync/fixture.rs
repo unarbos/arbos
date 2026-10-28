@@ -1546,6 +1546,18 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 let _ = doc.core.transact(|d| d.delete_message(&message_id));
             }
         }
+        ClientCommand::EditMessage {
+            chat_id,
+            message_id,
+            text,
+        } => {
+            let docs = shared.docs.lock().unwrap();
+            if let Some(doc) = docs.get(&chat_id) {
+                let _ = doc
+                    .core
+                    .transact(|d| d.edit_message_text(&message_id, &text));
+            }
+        }
         ClientCommand::RemoveLinkPreview {
             chat_id,
             message_id,
