@@ -356,10 +356,11 @@ final class EmojiTextField: UITextField {
 }
 
 extension View {
-    /// A message bubble long-presses into the actions overlay; any other row
-    /// (date / system / channel line) keeps a plain Copy context menu.
+    /// A message bubble: long-press → actions overlay; double-tap → ❤️ reaction.
+    /// Any other row (date / system / channel line) keeps a plain Copy context menu.
     @ViewBuilder
     func messageRowGestures(isMessage: Bool, onLongPress: @escaping () -> Void,
+                            onDoubleTap: @escaping () -> Void,
                             onCopyMenu: @escaping (MessageMenuItem) -> Void) -> some View {
         if isMessage {
             // simultaneous so the chat ScrollView keeps vertical pans that start
@@ -370,6 +371,12 @@ extension View {
                 LongPressGesture(minimumDuration: 0.35)
                     .onEnded { _ in if !ChartTouch.holding { onLongPress() } },
                 enabled: ChatGestures.longPress
+            )
+            // Double-tap toggles a heart under the bubble (Telegram / iMessage;
+            // [feedback app-01M5VCGAPAXY6NN8TNSWAWJ52Z]).
+            .simultaneousGesture(
+                TapGesture(count: 2)
+                    .onEnded { onDoubleTap() }
             )
         } else {
             contextMenu { MessageMenuContent(items: MessageMenu.copyOnly, action: onCopyMenu) }

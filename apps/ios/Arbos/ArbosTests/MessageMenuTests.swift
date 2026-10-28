@@ -51,6 +51,19 @@ final class MessageMenuTests: XCTestCase {
         XCTAssertEqual(MessageMenu.items(forMessage: false, canEdit: true), [.copy])
     }
 
+    /// #1871: already in a private / 1:1 chat — no Reply in DM (it would open the same chat).
+    func testPrivateChatOmitsReplyInDM() {
+        XCTAssertEqual(
+            MessageMenu.items(forMessage: true, inPrivateChat: true),
+            [.copy, .reply, .forward, .delete]
+        )
+        XCTAssertEqual(
+            MessageMenu.items(forMessage: true, canEdit: true, canDelete: true, hasReplies: true, inPrivateChat: true),
+            [.copy, .reply, .viewThread, .forward, .edit, .delete]
+        )
+        XCTAssertFalse(MessageMenu.items(forMessage: true, inPrivateChat: true).contains(.replyInDM))
+    }
+
 
     /// #1389: a long-press on any block of a bubble reaches the one menu, and
     /// its Copy is the whole message — every paragraph, the list, the code

@@ -5677,6 +5677,11 @@ final class AppModel: ObservableObject {
     /// that DM takes it on appear (Mac `pending_dm_reply`).
     @Published var pendingDMReply: (chatId: Id, ref: ReplyRef)?
 
+    /// Bubble menu → Forward: open the picked chat with this text drafted and
+    /// `forwardedFrom` armed for the next send (feedback app-01M5YF7JWEZXPD1JSKBH9TMCES).
+    /// The ChatView of that chat takes it on appear.
+    @Published var pendingForwardDraft: (chatId: Id, text: String, from: String?)?
+
     /// The cross-chat reference for `message` in `chatId`: its address plus a snapshot of
     /// who wrote it and what it said (crdt-sync §6.2 `replyRef`).
     func replyRef(for message: Message, in chatId: Id, projectId: Id?) -> ReplyRef {
