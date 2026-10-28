@@ -571,6 +571,12 @@ final class RelayAPI {
         return try await decode(FeedbackSubmitReplyDto.self, "POST", "/feedback", body: body).id
     }
 
+    /// `POST /perf/report` (JSON, device token): one MetricKit payload in its envelope
+    /// (`PerfDiagnostics.envelope`) → `{id}`. Anonymous on the relay side.
+    func sendPerfReport(_ body: [String: Any]) async throws {
+        _ = try await json("POST", "/perf/report", body: body)
+    }
+
     /// `POST /feedback/capture/{id}` (device token): the answer to a `feedback_capture` push from
     /// the user's agent (`submit_feedback`). `{image: base64 JPEG/PNG, mime, width, height,
     /// platform: "ios", app_version, os, device, screen}`; or `{skipped: "<why>"}` with no image.

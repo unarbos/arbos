@@ -181,18 +181,10 @@ struct ServerChannelsView: View {
         .sheet(isPresented: $showNewChannel) {
             NewChannelSheet(serverId: serverId).environmentObject(model).environment(\.theme, theme)
         }
-        .confirmationDialog(
-            deletingChannel.map { "Delete #\($0.name)?" } ?? "Delete channel?",
-            isPresented: Binding(get: { deletingChannel != nil }, set: { if !$0 { deletingChannel = nil } }),
-            titleVisibility: .visible
-        ) {
-            Button("Delete", role: .destructive) {
-                if let c = deletingChannel { Task { _ = await model.deleteChannel(c) } }
-                deletingChannel = nil
-            }
-            Button("Cancel", role: .cancel) { deletingChannel = nil }
-        } message: {
-            Text("Deletes the channel and its messages for everyone in the server.")
+        .confirm(item: $deletingChannel, spec: { c in
+            ConfirmSpec(title: "Delete #\(c.name)?", message: "Deletes the channel and its messages for everyone in the server.", action: "Delete")
+        }) { c in
+            Task { _ = await model.deleteChannel(c) }
         }
         // `AppModel.forgetServer` empties the path when the server goes (deleted, left, removed).
     }

@@ -32,7 +32,6 @@ use crate::ui::icons::icon;
 use crate::ui::motion::PulseClock;
 use crate::ui::routines::rel_time;
 use crate::ui::shell::Shell;
-use crate::ui::sidebar::machine_dot;
 use crate::ui::theme::{Theme, TEXT_SMALL};
 
 use super::kit::{self, Leading};
@@ -763,12 +762,10 @@ fn computer_sections(
     // plus the box's own `/box/state` through `GET /machine/debug`; someone
     // else's agent: what its project carries (state, class).
     let mut body: Vec<Section> = Vec::new();
-    let dot = |state: MachineState| {
-        div()
-            .size(px(10.0))
-            .rounded_full()
-            .bg(machine_dot(state, theme))
-            .into_any_element()
+    // The Status row's trailing mark (Jacob, 2026-10-27: never a coloured dot):
+    // the spinner while the machine wakes, the red `!` on a fault, nothing at rest.
+    let dot = |state: MachineState, cx: &mut gpui::App| -> Option<gpui::AnyElement> {
+        crate::ui::marks::machine_mark_element(state, 10.0, theme, cx)
     };
     for block in computer_order(mine, report) {
         match block {
@@ -794,7 +791,7 @@ fn computer_sections(
                         "Status",
                         None,
                         Some(status.into()),
-                        Some(dot(shown)),
+                        dot(shown, cx),
                         false,
                         theme,
                     )
