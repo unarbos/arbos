@@ -13,17 +13,30 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 /// `~/Library/Logs/Arbos/panic.log` (macOS), `$XDG_STATE_HOME/arbos/panic.log` elsewhere.
+///
+/// In test builds the path is under [`std::env::temp_dir`] (`arbos-test-<pid>/panic.log`) so a
+/// deliberate test panic never lands in the real Logs folder and is not uploaded on the next
+/// launch of an installed app.
 pub fn log_path() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    if cfg!(target_os = "macos") {
-        home.join("Library/Logs/Arbos/panic.log")
-    } else {
-        std::env::var_os("XDG_STATE_HOME")
+    #[cfg(test)]
+    {
+        std::env::temp_dir()
+            .join(format!("arbos-test-{}", std::process::id()))
+            .join("panic.log")
+    }
+    #[cfg(not(test))]
+    {
+        let home = std::env::var_os("HOME")
             .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".local/state"))
-            .join("arbos/panic.log")
+            .unwrap_or_else(std::env::temp_dir);
+        if cfg!(target_os = "macos") {
+            home.join("Library/Logs/Arbos/panic.log")
+        } else {
+            std::env::var_os("XDG_STATE_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join(".local/state"))
+                .join("arbos/panic.log")
+        }
     }
 }
 
@@ -129,18 +142,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_entry_is_reported_once_and_the_next_one_again() {
-        let dir = std::env::temp_dir().join(format!("arbos-panic-log-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        // Point HOME/XDG at the temp dir for this test (the path helpers read the env).
-        std::env::set_var("XDG_STATE_HOME", &dir);
-        std::env::set_var("HOME", &dir);
+    fn test_build_log_path_is_under_temp_dir_not_home() {
         let path = log_path();
+        let temp = std::env::temp_dir();
+        assert!(
+            path.starts_with(&temp),
+            "test log_path must be under temp_dir ({temp:?}), got {path:?}"
+        );
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            assert!(
+                !path.starts_with(&home),
+                "test log_path must not be under HOME ({home:?}), got {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_entry_is_reported_once_and_the_next_one_again() {
+        let path = log_path();
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir).unwrap();
+        }
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(reported_marker());
         assert_eq!(take_unreported(), None, "no log, nothing to report");
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
             &path,
             format!("{ENTRY_START}2026-10-26T15:00:00Z ====\nversion 0.6.268\nat a.rs:1:1\nindex out of bounds\n   0: frame\n\n"),
@@ -159,6 +184,7 @@ mod tests {
         .unwrap();
         let second = take_unreported().expect("the new entry");
         assert!(second.contains("second") && !second.contains("index out of bounds"));
-        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(reported_marker());
     }
 }
