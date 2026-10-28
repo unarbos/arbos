@@ -9970,6 +9970,28 @@ impl AppState {
         cx.notify();
     }
 
+    /// Details pane → Can → a switch: one scope on or off (`PATCH /outside-agents/{id}`). The
+    /// row flips at once; the relay's answer confirms the effective set.
+    pub fn set_outside_scope(
+        &mut self,
+        project_id: Id,
+        scope: &str,
+        on: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
+            if let Some(o) = p.outside.as_mut() {
+                o.scopes.insert(scope.to_owned(), on);
+            }
+        }
+        self.command(ClientCommand::OutsideAgentScope {
+            project_id,
+            scope: scope.to_owned(),
+            on,
+        });
+        cx.notify();
+    }
+
     /// Details pane: refresh the connection line when the pane opens on an outside agent.
     pub fn refresh_outside_status(&mut self, project_id: Id) {
         self.command(ClientCommand::OutsideAgentStatus { project_id });
