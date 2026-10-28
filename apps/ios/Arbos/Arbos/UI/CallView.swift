@@ -434,13 +434,9 @@ struct CallScreen: View {
             }
             .padding(.horizontal, 12)
         }
-        .confirmationDialog("Share screen", isPresented: $showShareOptions, titleVisibility: .visible) {
-            Button("Choose what to share…") {
-                Task { await calls.toggleScreenShare() }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Pick a screen or app to share with everyone on the call.")
+        .confirm(ConfirmSpec(title: "Share screen", message: "Pick a screen or app to share with everyone on the call.",
+                             action: "Choose what to share…", destructive: false), isPresented: $showShareOptions) {
+            Task { await calls.toggleScreenShare() }
         }
     }
 

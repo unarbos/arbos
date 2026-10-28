@@ -22,7 +22,6 @@ use crate::ui::people;
 use crate::ui::profiles::pane::{self, Hero, Picture, ProfilePane, Section};
 use crate::ui::profiles::{self, kit, machine};
 use crate::ui::shell::{fmt_uptime, human_bytes, SettingsPage, Shell};
-use crate::ui::sidebar;
 use crate::ui::theme::{
     AppearancePref, Surface, Theme, GLASS_OPACITY_MAX, GLASS_OPACITY_MIN, TEXT_BODY, TEXT_SMALL,
     TEXT_TINY,
@@ -244,7 +243,6 @@ impl Shell {
             let breakdown_open = self.machine_breakdown_open;
             let plan = machine::plan(&machine, report.as_ref(), breakdown_open);
             let live = report.as_ref().filter(|r| r.reachable);
-            let dot = sidebar::machine_dot(shown, &theme);
             let uptime = machine
                 .since
                 .filter(|_| shown == MachineState::Awake)
@@ -360,14 +358,11 @@ impl Shell {
                                 .flex()
                                 .items_center()
                                 .gap(px(7.0))
-                                .child(div().size(px(8.0)).rounded_full().bg(Theme::with_alpha(
-                                    dot,
-                                    if shown == MachineState::Waking {
-                                        0.4 + 0.6 * PulseClock::phase(cx, 1100)
-                                    } else {
-                                        1.0
-                                    },
-                                )))
+                                // The spinner while it wakes, the red `!` on a fault, nothing
+                                // at rest (Jacob, 2026-10-27: never a coloured dot).
+                                .children(crate::ui::marks::machine_mark_element(
+                                    shown, 9.0, &theme, cx,
+                                ))
                                 .child(value(
                                     match &uptime {
                                         Some(up) => format!("{} · {up}", shown.label()),

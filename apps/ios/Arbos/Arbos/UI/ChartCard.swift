@@ -166,6 +166,135 @@ enum ChartPalette {
 
 // MARK: - Geometry
 
+/// How the plot's touch surface decides what a moving finger is (iphone-scroll-perf #2122 rule:
+/// nothing competing with the transcript scroll may be a SwiftUI drag, which cannot fail once it
+/// starts). A mostly horizontal pan is a scrub; anything else is declined at once so the list
+/// scrolls. The other way to read a value is a hold: `ChartScrubHost` begins a scrub after
+/// `holdDuration` with the finger still, and from then on the finger moves freely.
+enum ChartScrub {
+    /// Movement before `claim` is first asked (points).
+    static let minimumDistance: CGFloat = 8
+    /// A finger this long without moving starts a scrub whatever it does next.
+    static let holdDuration: TimeInterval = 0.3
+
+    static func claim(_ translation: CGSize) -> SwipeClaim {
+        abs(translation.width) > abs(translation.height) * 1.15 ? .claimed : .declined
+    }
+}
+
+/// The plot's touch surface: a `DirectionalSwipeRecognizer` (`ChartScrub.claim`), a long press
+/// that scrubs after `ChartScrub.holdDuration`, and a tap that clears the readout. All three are
+/// exclusive with the transcript's scroll pan — the first to begin wins — and each one stamps
+/// `ChartTouch.lastDown` so the row's long press stays quiet.
+struct ChartScrubHost: UIViewRepresentable {
+    var onScrub: (CGPoint) -> Void
+    var onTap: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(onScrub: onScrub, onTap: onTap) }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = TouchSurface()
+        view.backgroundColor = .clear
+        view.isAccessibilityElement = false
+        context.coordinator.attach(to: view)
+        return view
+    }
+
+    /// The recognizers' view; under `ARBOS_TRACE_CHART` it also prints raw touch arrival.
+    final class TouchSurface: UIView {
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            if DebugHooks.traceChart {
+                NSLog("[arbos chart] surface window=%d frame=%@ enabled=%d", window == nil ? 0 : 1, NSCoder.string(for: frame), isUserInteractionEnabled ? 1 : 0)
+            }
+        }
+
+        override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+            let hit = super.hitTest(point, with: event)
+            if DebugHooks.traceChart, event?.type == .touches {
+                NSLog("[arbos chart] hitTest at=%@ -> %@", NSCoder.string(for: point), hit == nil ? "nil" : String(describing: type(of: hit!)))
+            }
+            return hit
+        }
+
+        override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+            if DebugHooks.traceChart, let t = touches.first {
+                NSLog("[arbos chart] touch down at=%@ in=%@", NSCoder.string(for: t.location(in: self)), NSCoder.string(for: bounds.size))
+            }
+            super.touchesBegan(touches, with: event)
+        }
+    }
+
+    func updateUIView(_ view: UIView, context: Context) {
+        context.coordinator.onScrub = onScrub
+        context.coordinator.onTap = onTap
+    }
+
+    /// Fill whatever the overlay proposes; a plain `UIView` has no size of its own.
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UIView, context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? 0, height: proposal.height ?? 0)
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var onScrub: (CGPoint) -> Void
+        var onTap: () -> Void
+
+        init(onScrub: @escaping (CGPoint) -> Void, onTap: @escaping () -> Void) {
+            self.onScrub = onScrub
+            self.onTap = onTap
+        }
+
+        func attach(to view: UIView) {
+            let swipe = DirectionalSwipeRecognizer(target: self, action: #selector(scrubbed(_:)))
+            swipe.minimumDistance = ChartScrub.minimumDistance
+            swipe.decide = { _, translation in ChartScrub.claim(translation) }
+            swipe.delegate = self
+            view.addGestureRecognizer(swipe)
+            let hold = UILongPressGestureRecognizer(target: self, action: #selector(scrubbed(_:)))
+            hold.minimumPressDuration = ChartScrub.holdDuration
+            hold.delegate = self
+            view.addGestureRecognizer(hold)
+            let tap = UITapGestureRecognizer(target: self, action: #selector(tapped))
+            tap.delegate = self
+            view.addGestureRecognizer(tap)
+        }
+
+        @objc private func scrubbed(_ gr: UIGestureRecognizer) {
+            if DebugHooks.traceChart {
+                NSLog("[arbos chart] %@ state=%d at=%@ in=%@", String(describing: type(of: gr)), gr.state.rawValue, NSCoder.string(for: gr.location(in: gr.view)), NSCoder.string(for: gr.view?.bounds.size ?? .zero))
+            }
+            switch gr.state {
+            case .began, .changed:
+                ChartTouch.lastDown = Date()
+                onScrub(gr.location(in: gr.view))
+            case .possible, .ended, .cancelled, .failed:
+                break
+            @unknown default:
+                break
+            }
+        }
+
+        @objc private func tapped() {
+            if DebugHooks.traceChart { NSLog("[arbos chart] tap") }
+            onTap()
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            false
+        }
+    }
+}
+
+/// When a chart scrub last reported a point. The message row's long press is a
+/// `simultaneousGesture` (so the chat still scrolls from a bubble), which means it also fires
+/// 0.35 s into a touch-and-hold on the chart; the row asks `holding` and stays quiet while the
+/// reader is holding a value (`messageRowGestures`). A timestamp, not a flag: a cancelled
+/// gesture never reports its end, and a flag would stick.
+enum ChartTouch {
+    static var lastDown: Date = .distantPast
+    static var holding: Bool { Date().timeIntervalSince(lastDown) < 0.6 }
+}
+
 enum ChartCardMetrics {
     static let radius: CGFloat = 12
     static let pad: CGFloat = 12
@@ -402,7 +531,30 @@ struct ChartPlot: View {
 
     // ----- line / area / scatter / bar -----
 
+    /// The y-axis title sits above the plot as its own row: Swift Charts' `chartYAxisLabel` widens
+    /// the leading axis column to the title's width, which on a 260-pt card pushed the plot ~90 pt
+    /// right (the Mac card draws it the same way).
     private var xy: some View {
+        // The top tick label is centred on the plot's top gridline, so half of it rises above the
+        // chart's frame; the gap below the title leaves it room.
+        VStack(alignment: .leading, spacing: 0) {
+            if let l = yAxisTitle {
+                Text(l)
+                    .font(theme.font(font - 0.5))
+                    .foregroundStyle(theme.placeholder)
+                    .padding(.bottom, font * 0.75)
+                    .accessibilityIdentifier("chart-y-label")
+            }
+            xyChart
+        }
+    }
+
+    private var yAxisTitle: String? {
+        guard let l = model.y.label else { return nil }
+        return model.y.unit.isEmpty ? l : "\(l) (\(model.y.unit))"
+    }
+
+    private var xyChart: some View {
         Chart {
             ForEach(Array(model.annotations.enumerated()), id: \.offset) { _, a in
                 switch a.kind {
@@ -517,27 +669,27 @@ struct ChartPlot: View {
         .chartXAxisLabel(position: .bottom, alignment: .center) {
             if let l = model.x.label { Text(l).font(theme.font(font - 0.5)).foregroundStyle(theme.placeholder) }
         }
-        .chartYAxisLabel(position: .topLeading) {
-            if let l = model.y.label {
-                Text(model.y.unit.isEmpty ? l : "\(l) (\(model.y.unit))").font(theme.font(font - 0.5)).foregroundStyle(theme.placeholder)
-            }
-        }
         .chartLegend(.hidden)
         .chartOverlay { proxy in
             GeometryReader { geo in
-                Rectangle().fill(.clear).contentShape(Rectangle())
-                    .gesture(
-                        DragGesture(minimumDistance: 0)
-                            .onChanged { g in
-                                guard let frame = proxy.plotFrame else { return }
-                                let xPos = g.location.x - geo[frame].origin.x
-                                guard let x: Double = proxy.value(atX: xPos) else { return }
-                                let near = model.columnNear(x)
-                                if near != selected { Haptics.pick() }
-                                selected = near
-                            }
-                    )
-                    .onTapGesture { selected = nil }
+                ChartScrubHost(
+                    onScrub: { point in
+                        let frame = proxy.plotFrame
+                        let xPos = frame.map { point.x - geo[$0].origin.x }
+                        let x: Double? = xPos.flatMap { proxy.value(atX: $0) }
+                        let near = x.flatMap { model.columnNear($0) }
+                        if DebugHooks.traceChart {
+                            NSLog("[arbos chart] scrub point=%@ plot=%@ xPos=%@ x=%@ near=%@ columns=%d", NSCoder.string(for: point),
+                                  frame.map { NSCoder.string(for: geo[$0]) } ?? "nil", xPos.map { "\($0)" } ?? "nil", x.map { "\($0)" } ?? "nil",
+                                  near.map { "\($0)" } ?? "nil", model.columns.count)
+                        }
+                        guard x != nil else { return }
+                        if near != selected { Haptics.pick() }
+                        selected = near
+                    },
+                    onTap: { selected = nil }
+                )
+                .frame(width: geo.size.width, height: geo.size.height)
                 if let sel = selected, sel < model.columns.count, let frame = proxy.plotFrame {
                     let plot = geo[frame]
                     let px = proxy.position(forX: model.columns[sel].x) ?? 0
@@ -590,12 +742,12 @@ struct ChartPlot: View {
         .chartLegend(.hidden)
         .chartOverlay { proxy in
             GeometryReader { geo in
-                Rectangle().fill(.clear).contentShape(Rectangle())
-                    .gesture(DragGesture(minimumDistance: 0).onChanged { g in
+                ChartScrubHost(
+                    onScrub: { point in
                         guard let frame = proxy.plotFrame else { return }
                         let plot = geo[frame]
                         let c = CGPoint(x: plot.midX, y: plot.midY)
-                        let dx = g.location.x - c.x, dy = g.location.y - c.y
+                        let dx = point.x - c.x, dy = point.y - c.y
                         var a = atan2(dx, -dy)
                         if a < 0 { a += 2 * .pi }
                         var acc = 0.0
@@ -607,8 +759,10 @@ struct ChartPlot: View {
                         }
                         if hit != selected { Haptics.pick() }
                         selected = hit
-                    })
-                    .onTapGesture { selected = nil }
+                    },
+                    onTap: { selected = nil }
+                )
+                .frame(width: geo.size.width, height: geo.size.height)
                 if let sel = selected, sel < model.columns.count {
                     ChartReadout(model: model, column: sel, font: font)
                         .frame(maxWidth: 176)

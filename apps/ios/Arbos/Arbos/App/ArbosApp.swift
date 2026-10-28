@@ -51,6 +51,9 @@ struct RootView: View {
             PerfLog.shared.startIfRequested()
             PerfLog.shared.observe(model)
             TouchPerf.installIfRequested()
+            #endif
+            PerfDiagnostics.shared.start(model: model)
+            #if DEBUG
             if DebugHooks.perfChanges { setlinebuf(stdout) }
             #endif
             if DebugHooks.show == "onboarding" {
