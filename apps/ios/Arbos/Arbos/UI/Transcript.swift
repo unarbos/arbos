@@ -190,7 +190,7 @@ enum RowKind: Equatable {
     /// `caption` is the description bar under the picture when the send carried text.
     /// `lane`: in a people chat someone else's (person or agent) picture sits after the
     /// sender's avatar lane, like their bubble (Mac `RowKind::Attachment.lane`).
-    case image(item: MediaItem, fromUser: Bool, caption: String?, lane: Bool)
+    case image(item: MediaItem, fromUser: Bool, caption: String?, lane: Bool, source: AttachmentSource?)
     /// "Forwarded from <name>" under a forwarded attachment (media-viewer-2026-10-23).
     case forwardHint(text: String, fromUser: Bool)
     case error(code: String, message: String)
@@ -776,7 +776,7 @@ enum Transcript {
                                    projectName: { agentNames[$0] })
         if kind == .image {
             return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
-                       kind: .image(item: item, fromUser: fromUser, caption: caption, lane: lane))
+                       kind: .image(item: item, fromUser: fromUser, caption: caption, lane: lane, source: a.source))
         }
         // Video shows as a file card in the bubble (poster + Play live in the viewer).
         // A typed description rides the card as a caption bar (pictures/videos only).
@@ -1610,7 +1610,7 @@ struct RowView: View, Equatable {
                     .frame(maxWidth: maxBubble, alignment: fromUser ? .trailing : .leading)
                 if !fromUser { Spacer(minLength: 0) }
             }
-        case .image(let item, let fromUser, let caption, let lane):
+        case .image(let item, let fromUser, let caption, let lane, let source):
             // Same left edge and cap as an incoming bubble: after the avatar lane in a
             // people chat ([feedback ADUIX9xlGQxCSzeXke7JVBw], Mac Attachment.lane).
             HStack(spacing: 0) {
@@ -1618,7 +1618,7 @@ struct RowView: View, Equatable {
                 if lane { Color.clear.frame(width: Theme.memberLane(composerInset: composerInset), height: 1) }
                 ImageBubble(item: item, chatId: chatId, fromUser: fromUser,
                             maxWidth: lane ? maxBubble - Theme.memberLane(composerInset: composerInset) : maxBubble,
-                            caption: caption, mentions: mentions)
+                            caption: caption, mentions: mentions, source: source)
                     .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: fromUser) }
                 if !fromUser { Spacer(minLength: 0) }
             }
@@ -1752,7 +1752,7 @@ struct RowView: View, Equatable {
         case .other, .member: return Theme.memberLane(composerInset: composerInset)
         case .question(_, _, _, _, _, _, let lane, _, _): return lane ? Theme.memberLane(composerInset: composerInset) : 0
         case .secretGhost(_, let mine, _, _, _): return mine ? 0 : Theme.memberLane(composerInset: composerInset)
-        case .image(_, _, _, let lane): return lane ? Theme.memberLane(composerInset: composerInset) : 0
+        case .image(_, _, _, let lane, _): return lane ? Theme.memberLane(composerInset: composerInset) : 0
         default: return 0
         }
     }
@@ -2724,8 +2724,13 @@ struct ImageBubble: View {
     let maxWidth: CGFloat
     var caption: String? = nil
     var mentions: MentionTable? = nil
+    /// GIF-picker attribution (`Attachment.source`); opens `pageUrl` when tapped.
+    var source: AttachmentSource? = nil
 
     @State private var image: UIImage?
+    /// First frame only — shown while the bubble is off screen so the animation pauses.
+    @State private var stillFrame: UIImage?
+    @State private var animate = false
     @State private var failed = false
     @State private var viewer: MediaViewerState?
 
@@ -2776,25 +2781,39 @@ struct ImageBubble: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Image, tap to view")
-            if let captionText {
-                // The same text as a text bubble: body size, body line spacing, links
-                // and mention chips (Jacob: "normal font size").
-                Markdown.inlineText(captionText, color: fromUser ? theme.userText : theme.text, link: theme.accent,
-                                    codeChip: fromUser ? theme.userCodeChip : theme.codeChip, mentions: mentions)
-                    .font(theme.font(Theme.body))
-                    .lineSpacing(Theme.bodyLineSpacing)
-                    .tint(theme.accent)
-                    .multilineTextAlignment(.leading)
-                    .padding(.horizontal, Theme.bubbleHPad)
-                    .padding(.vertical, Theme.bubbleVPad)
-                    .accessibilityIdentifier("photo-caption")
-                    .accessibilityLabel("Description")
+            if captionText != nil || source != nil {
+                VStack(alignment: .leading, spacing: 2) {
+                    if let captionText {
+                        // The same text as a text bubble: body size, body line spacing, links
+                        // and mention chips (Jacob: "normal font size").
+                        Markdown.inlineText(captionText, color: fromUser ? theme.userText : theme.text, link: theme.accent,
+                                            codeChip: fromUser ? theme.userCodeChip : theme.codeChip, mentions: mentions)
+                            .font(theme.font(Theme.body))
+                            .lineSpacing(Theme.bodyLineSpacing)
+                            .tint(theme.accent)
+                            .multilineTextAlignment(.leading)
+                            .accessibilityIdentifier("photo-caption")
+                            .accessibilityLabel("Description")
+                    }
+                    // GIF-picker attribution (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG).
+                    // `SwiftUI.Link`: model `Link` is the chat connection state.
+                    if let source, let url = URL(string: source.pageUrl), !source.pageUrl.isEmpty {
+                        SwiftUI.Link("via \(source.provider)", destination: url)
+                            .font(theme.font(11))
+                            .foregroundStyle(theme.muted)
+                            .accessibilityIdentifier("photo-via-source")
+                    }
+                }
+                .padding(.horizontal, Theme.bubbleHPad)
+                .padding(.vertical, Theme.bubbleVPad)
             }
         }
         .background(fill)
         .clipShape(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous))
         .accessibilityIdentifier("photo-bubble")
         .task(id: item.blobRef) { await load() }
+        .onAppear { animate = stillFrame != nil }
+        .onDisappear { animate = false }
         .fullScreenCover(item: $viewer) { v in
             MediaViewer(album: v.items, index: v.index, onClose: { viewer = nil })
                 .environmentObject(model)
@@ -2811,8 +2830,8 @@ struct ImageBubble: View {
         return GeometryReader { g in
             let flush = PhotoBubbleLayout.pictureIsFlush(picture: picture, bubbleWidth: g.size.width)
             ZStack {
-                if let image {
-                    Image(uiImage: image)
+                if let shown = (animate ? image : stillFrame) ?? image {
+                    Image(uiImage: shown)
                         .resizable()
                         .scaledToFit()
                 } else if failed || item.blobRef == nil {
@@ -2834,12 +2853,92 @@ struct ImageBubble: View {
     }
 
     private func load() async {
-        if let (data, _) = await MediaFetch.bytes(for: item, model: model), let img = UIImage(data: data) {
-            image = ImageTrim.trimmed(img)
+        guard let (data, _) = await MediaFetch.bytes(for: item, model: model) else {
+            failed = true
+            return
+        }
+        // Animated GIF / WebP: every frame, no ImageTrim (feedback
+        // app-01M5TGH18WV3QCK5KZT6XKG7FG). Still pictures keep the trim.
+        if let animated = AnimatedImageFrames.animatedImage(from: data) {
+            image = animated
+            stillFrame = animated.images?.first ?? animated
+            animate = true
+            failed = false
+        } else if let img = UIImage(data: data) {
+            let trimmed = ImageTrim.trimmed(img)
+            image = trimmed
+            stillFrame = nil
+            animate = false
             failed = false
         } else {
             failed = true
         }
+    }
+}
+
+/// GIF / animated WebP frames for chat bubbles and tests
+/// (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG). Caps match the Mac decoder.
+enum AnimatedImageFrames {
+    static let maxFrames = 300
+    static let maxDecodedBytes = 20 * 1024 * 1024
+
+    /// Frame list + total duration for an animated GIF/WebP, or `nil` for a
+    /// still (PNG, JPEG, single-frame WebP) or when the caps force a still.
+    static func frames(from data: Data) -> (images: [UIImage], duration: TimeInterval)? {
+        guard looksAnimated(data) else { return nil }
+        guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let count = CGImageSourceGetCount(src)
+        guard count > 1 else { return nil }
+
+        var images: [UIImage] = []
+        var total: TimeInterval = 0
+        var decoded = 0
+        images.reserveCapacity(min(count, maxFrames))
+        for i in 0..<count {
+            if images.count >= maxFrames { return nil }
+            guard let cg = CGImageSourceCreateImageAtIndex(src, i, nil) else { continue }
+            let bytes = cg.bytesPerRow * cg.height
+            if decoded + bytes > maxDecodedBytes { return nil }
+            decoded += bytes
+            let delay = frameDelay(source: src, index: i)
+            total += delay
+            images.append(UIImage(cgImage: cg))
+        }
+        guard images.count > 1 else { return nil }
+        return (images, max(total, 0.1))
+    }
+
+    /// Animated `UIImage`, or `nil` when `data` is still / over cap.
+    static func animatedImage(from data: Data) -> UIImage? {
+        guard let (images, duration) = frames(from: data) else { return nil }
+        return UIImage.animatedImage(with: images, duration: duration)
+    }
+
+    private static func looksAnimated(_ data: Data) -> Bool {
+        if data.count >= 6, data.starts(with: Data("GIF8".utf8)) { return true }
+        if data.count >= 12 {
+            let riff = data.prefix(4) == Data("RIFF".utf8)
+            let webp = data.subdata(in: 8..<12) == Data("WEBP".utf8)
+            if riff && webp { return true }
+        }
+        return false
+    }
+
+    private static func frameDelay(source: CGImageSource, index: Int) -> TimeInterval {
+        let props = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any]
+        if let gif = props?[kCGImagePropertyGIFDictionary] as? [CFString: Any] {
+            let unclamped = gif[kCGImagePropertyGIFUnclampedDelayTime] as? Double
+            let clamped = gif[kCGImagePropertyGIFDelayTime] as? Double
+            let d = unclamped ?? clamped ?? 0.1
+            return d < 0.02 ? 0.1 : d
+        }
+        if let webp = props?[kCGImagePropertyWebPDictionary] as? [CFString: Any] {
+            let unclamped = webp[kCGImagePropertyWebPUnclampedDelayTime] as? Double
+            let clamped = webp[kCGImagePropertyWebPDelayTime] as? Double
+            let d = unclamped ?? clamped ?? 0.1
+            return d < 0.02 ? 0.1 : d
+        }
+        return 0.1
     }
 }
 
