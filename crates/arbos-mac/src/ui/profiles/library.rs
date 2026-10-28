@@ -33,6 +33,7 @@ use crate::ui::avatars;
 use crate::ui::glass::{self, MENU_CARD_BORDER, MENU_CARD_PADDING, MENU_GAP, MENU_ROW_HEIGHT};
 use crate::ui::highlight::{self, Shape};
 use crate::ui::icons::icon;
+use crate::ui::link_tile;
 use crate::ui::message_menu::place;
 use crate::ui::people;
 use crate::ui::shell::Shell;
@@ -47,6 +48,8 @@ pub const ROW_H: f32 = kit::ROW_MIN_H;
 /// The thumbnail / type tile and its corners (mock: 32, radius 7).
 pub const THUMB: f32 = 32.0;
 pub const THUMB_RADIUS: f32 = 7.0;
+/// The link tile in the hover preview's picture frame (the 36 pt globe it replaces, as a tile).
+pub const PREVIEW_TILE: f32 = 72.0;
 /// Right padding of a row: the ⋯ disc sits 10 from the card's edge.
 pub const ROW_PAD_RIGHT: f32 = 10.0;
 /// The hover ⋯ disc.
@@ -461,6 +464,23 @@ pub(super) fn sections(
     let now = now_ms();
     let today = Local::now().date_naive();
     let days = group_days(entries, |(e, _)| local_date(e.when()), today);
+    // The Links rows' tiles want the relay's icon for hosts without a bundled brand mark
+    // ([feedback link-icons-mac-adopt-2026-10-27]); asked once per host per session.
+    let wants: Vec<String> = days
+        .iter()
+        .flat_map(|(_, rows)| rows.iter())
+        .filter_map(|(e, _)| match e {
+            Entry::Link(l) if link_tile::Brand::for_url(&l.url).is_none() => {
+                Some(super::link_icon_host(&l.url))
+            }
+            _ => None,
+        })
+        .collect();
+    shell.state.update(cx, |s, _| {
+        for host in wants {
+            s.want_link_icon(host);
+        }
+    });
     let cx: &Context<Shell> = cx;
     let state = shell.state.read(cx);
     let epoch = state.profile_opened;
@@ -538,7 +558,7 @@ fn row(
         } else {
             highlight::layer(false, Shape::Nested(kit::CARD_RADIUS), theme)
         })
-        .child(thumb(&entry, theme))
+        .child(thumb(&entry, state, theme))
         .child(
             div()
                 .flex_1()
@@ -679,8 +699,9 @@ fn show_more(
 }
 
 /// The 32 pt leading: the picture (aspect-fill), a play glyph over a video
-/// without one, the type on a tile for files, the link glyph for links.
-fn thumb(entry: &Entry, theme: &Theme) -> Div {
+/// without one, the type on a tile for files, the link tile for links (brand
+/// mark, the relay's icon, or the host's letter — `link_tile`).
+fn thumb(entry: &Entry, state: &AppState, theme: &Theme) -> Div {
     let tile = div()
         .size(px(THUMB))
         .flex_shrink_0()
@@ -709,8 +730,19 @@ fn thumb(entry: &Entry, theme: &Theme) -> Div {
                 None => tile.child(icon("doc", 16.0, theme.text_muted)),
             },
         },
-        Entry::Link(_) => tile.child(icon("link", 15.0, theme.text_muted)),
+        Entry::Link(l) => link_tile::tile(link_icon(l, state), THUMB, theme),
     }
+}
+
+/// The link tile's icon for a Library link: its brand, else the relay's picture when it has
+/// arrived, else the host's letter.
+fn link_icon<'a>(l: &Link, state: &'a AppState) -> link_tile::Icon<'a> {
+    let icon_host = super::link_icon_host(&l.url);
+    link_tile::icon_for(
+        &l.url,
+        &super::link_host(&l.url),
+        state.link_icon(&icon_host),
+    )
 }
 
 /// The sender's 18 pt picture for the card's last line.
@@ -788,7 +820,7 @@ fn preview(entry: &Entry, state: &AppState, theme: &Theme) -> AnyElement {
                 None => frame.child(icon("doc", 36.0, theme.text_muted)),
             },
         },
-        Entry::Link(_) => frame.child(icon("globe", 36.0, theme.text_muted)),
+        Entry::Link(l) => frame.child(link_tile::tile(link_icon(l, state), PREVIEW_TILE, theme)),
     };
     let when = sidebar::stamp_label(entry.when());
     glass::popover(
@@ -1302,6 +1334,31 @@ mod render_tests {
         vcx.simulate_click(centre(less), Modifiers::default());
         settle(&shell, vcx);
         assert!(vcx.debug_bounds("library-row-6").is_none(), "folded again");
+    }
+
+    /// [feedback link-icons-mac-adopt-2026-10-27]: the newest row is the arbos.life link; its
+    /// leading is the link tile with the bundled Arbos mark (32 → mark 18, centred), not the
+    /// shared `link` glyph.
+    #[gpui::test]
+    fn the_link_row_draws_the_brand_tile(cx: &mut TestAppContext) {
+        let (_rt, _state, shell, vcx) = mount(cx);
+        settle(&shell, vcx);
+        let row = vcx.debug_bounds("library-row-0").expect("the link row");
+        let mark = vcx
+            .debug_bounds(link_tile::MARK_SELECTOR)
+            .expect("the brand mark on the link row");
+        assert_eq!(f32::from(mark.size.width), link_tile::mark_side(THUMB));
+        assert_eq!(f32::from(mark.size.width), 18.0);
+        assert!(
+            mark.top() >= row.top() && mark.bottom() <= row.bottom(),
+            "the mark sits inside the link row"
+        );
+        let inset = f32::from(mark.left() - row.left());
+        assert_eq!(
+            inset,
+            kit::INSET + (THUMB - link_tile::mark_side(THUMB)) / 2.0,
+            "tile at the row inset, mark centred in the tile"
+        );
     }
 
     #[gpui::test]

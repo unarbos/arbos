@@ -24,14 +24,15 @@
 use std::sync::Arc;
 
 use gpui::{
-    div, prelude::*, px, Context, CursorStyle, Div, DragMoveEvent, ElementId, Focusable as _,
-    FontWeight, MouseButton, Render, RenderImage, SharedString, Window,
+    div, prelude::*, px, AnyElement, App, Context, CursorStyle, Div, DragMoveEvent, ElementId,
+    Focusable as _, FontWeight, MouseButton, Render, RenderImage, SharedString, Window,
 };
 
 use crate::app::AppState;
 use crate::model::{Id, MachineState, Message, Project, Role, ServerInfo};
 use crate::search;
 use crate::ui::avatars;
+use crate::ui::badge;
 use crate::ui::composer::Composer;
 use crate::ui::frost::{edge_faded, edge_faded_sides};
 use crate::ui::glass::{self, WindowDrag};
@@ -176,9 +177,13 @@ pub(crate) const FOOTER_ROW_HEIGHT: f32 = 44.0;
 pub(crate) const FOOTER_ROW_PAD_Y: f32 = FOOTER_BOTTOM - (FOOTER_ROW_HEIGHT - FOOTER_AVATAR) / 2.0;
 /// The machine dot scales with the avatar (28 → 36 carried 7 / 11 to 9 / 13):
 /// a 9 pt dot in a 13 pt ring of the sidebar colour, 2 pt past the avatar's
-/// bottom-right edge.
+/// bottom-right edge — drawn by `ui::badge` from the avatar's size; the
+/// numbers stay here as the measured pins.
+#[cfg(test)]
 pub(crate) const FOOTER_DOT: f32 = 9.0;
+#[cfg(test)]
 pub(crate) const FOOTER_DOT_RING: f32 = 13.0;
+#[cfg(test)]
 pub(crate) const FOOTER_DOT_OVERHANG: f32 = 2.0;
 
 /// Grok Bot's update button at the footer's right end
@@ -233,6 +238,7 @@ pub(crate) fn footer_frame(row: impl IntoElement, disc: Option<impl IntoElement>
 pub(crate) fn footer_row_frame() -> gpui::Stateful<Div> {
     div()
         .id("sidebar-account")
+        .group(FOOTER_GROUP)
         .flex_1()
         .min_w_0()
         .h(px(FOOTER_ROW_HEIGHT))
@@ -573,38 +579,26 @@ pub(crate) fn account_avatar(
             .justify_center()
             .child(icon("person", FOOTER_AVATAR / 2.0, theme.text)),
     };
-    div()
-        .relative()
-        .size(px(FOOTER_AVATAR))
-        .flex_shrink_0()
+    // The dot in front of the picture, ringed in the footer's colour — the
+    // sidebar at rest, the card fill while the footer row is under the
+    // pointer (`ui::badge`; the footer row is the hover group).
+    let dot = Theme::with_alpha(
+        machine_dot(machine, theme),
+        if machine == MachineState::Waking {
+            0.4 + 0.6 * PulseClock::phase(cx, 1100)
+        } else {
+            1.0
+        },
+    );
+    let badge = badge::Badge::new(dot, badge::ring::sidebar(theme))
+        .hover(FOOTER_GROUP, badge::ring::hovered(theme));
+    badge::badged(FOOTER_AVATAR, picture, Some(badge))
         .debug_selector(|| "sidebar-account-avatar".into())
-        .child(picture)
-        .child(
-            div()
-                .absolute()
-                .right(px(-FOOTER_DOT_OVERHANG))
-                .bottom(px(-FOOTER_DOT_OVERHANG))
-                .size(px(FOOTER_DOT_RING))
-                .rounded_full()
-                .bg(theme.sidebar)
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    div()
-                        .size(px(FOOTER_DOT))
-                        .rounded_full()
-                        .bg(Theme::with_alpha(
-                            machine_dot(machine, theme),
-                            if machine == MachineState::Waking {
-                                0.4 + 0.6 * PulseClock::phase(cx, 1100)
-                            } else {
-                                1.0
-                            },
-                        )),
-                ),
-        )
 }
+
+/// The footer row's hover group: the ring under my machine dot follows the
+/// row's hover fill.
+pub(crate) const FOOTER_GROUP: &str = "sidebar-footer";
 
 pub(crate) struct RowView {
     pub(crate) space: Project,
@@ -616,7 +610,6 @@ pub(crate) struct RowView {
     pub(crate) time: String,
     pub(crate) person_image: Option<Arc<RenderImage>>,
     pub(crate) guests: people::PeopleWithAvatars,
-    pub(crate) avatar_state: avatars::AvatarState,
 }
 
 /// A server in the chat list (D88 rule 1): the same row as a group — disc, name, preview,
@@ -763,7 +756,6 @@ pub(crate) fn list_entries(shell: &Shell, cx: &Context<Shell>) -> Vec<ListEntry>
                     (person, img)
                 })
                 .collect(),
-            avatar_state: state.avatar_state(&p.id),
             space: p.clone(),
         };
         rows.push((
@@ -801,54 +793,52 @@ fn chat_picture(
     cx: &Context<Shell>,
 ) -> Div {
     let space = &row.space;
+    // Corner badges go through `ui::badge` so they paint in front of the
+    // picture inside the frosted sidebar, ringed in the row's own colour (the
+    // selected card, else the sidebar; the row's hover tint while hovered).
+    let ring = if row.selected {
+        badge::ring::selected(theme)
+    } else {
+        badge::ring::sidebar(theme)
+    };
+    let group = SharedString::from(format!("row-{}", space.id));
+    let hover_ring = if row.selected {
+        badge::ring::selected(theme)
+    } else {
+        badge::ring::hovered(theme)
+    };
     if let Some(person) = space
         .person()
         .filter(|_| space.is_people() && !space.is_people_group())
     {
-        let mut pic = div()
-            .relative()
-            .size(px(size))
-            .flex_shrink_0()
-            .child(people::avatar(
-                row.person_image.clone(),
-                person,
-                size,
-                theme,
-            ));
-        if let Some(agent) = space.agents.first() {
-            // The agent's picture through the shared identity (#1592): the one its bubbles,
-            // the presence row and the member list show — uploaded picture included.
-            let state = shell.state.read(cx);
-            let a = avatars::member_identity(Some(space), &state.projects, agent);
-            let image = a.image_key.as_deref().and_then(|url| state.avatar(url));
-            pic = pic.child(
-                div()
-                    .absolute()
-                    .right(px(-3.0))
-                    .bottom(px(-3.0))
-                    .p(px(2.0))
-                    .rounded_full()
-                    .bg(theme.bg)
-                    .child(avatars::agent_picture(&a, image, size / 2.0, theme)),
-            );
-        }
-        return pic;
+        let picture = people::avatar(row.person_image.clone(), person, size, theme);
+        let Some(agent) = space.agents.first() else {
+            return badge::badged(size, picture, None);
+        };
+        // The agent's picture through the shared identity (#1592): the one its bubbles,
+        // the presence row and the member list show — uploaded picture included.
+        let state = shell.state.read(cx);
+        let a = avatars::member_identity(Some(space), &state.projects, agent);
+        let image = a.image_key.as_deref().and_then(|url| state.avatar(url));
+        let mini = div()
+            .p(px(badge::RING_WIDTH))
+            .rounded_full()
+            .bg(ring)
+            // hover-fill: exception badge-ring
+            .group_hover(group, move |s| s.bg(hover_ring))
+            .child(avatars::agent_picture(&a, image, size / 2.0, theme));
+        return badge::corner(size, picture, mini, 3.0);
     }
-    let mut pic = div()
-        .relative()
-        .size(px(size))
-        .flex_shrink_0()
-        .child(groups::picture(space, shell.state.read(cx), size, theme));
-    if !row.guests.is_empty() {
-        pic = pic.child(
-            div()
-                .absolute()
-                .right(px(-4.0))
-                .bottom(px(-2.0))
-                .child(people::avatar_stack(&row.guests, 16.0, 2, theme)),
-        );
+    let picture = groups::picture(space, shell.state.read(cx), size, theme);
+    if row.guests.is_empty() {
+        return badge::badged(size, picture, None);
     }
-    pic
+    badge::corner(
+        size,
+        picture,
+        people::avatar_stack(&row.guests, 16.0, 2, ring, Some((group, hover_ring)), theme),
+        3.0,
+    )
 }
 
 /// "#general · Sam: hi" for a server row: its newest channel's last line.
@@ -1979,7 +1969,6 @@ fn render_row(
         time,
         person_image: _,
         guests: _,
-        avatar_state,
     } = row;
     let id: Id = space.id.clone();
     let menu_id: Id = space.id.clone();
@@ -1991,7 +1980,12 @@ fn render_row(
         .renaming_project
         .as_ref()
         .is_some_and(|p| p == &space.id);
-    if typing || avatar_state != avatars::AvatarState::Idle {
+    // The typing pulse rides the 30 fps pulse clock as before. A *working* row
+    // asks for nothing here any more: nothing in the row read `avatar_state`
+    // (the tree animation is retired, D79), and that request made every working
+    // row redraw the window at 30 fps for nothing — the spinner has its own
+    // shared 11 fps ticker (`ui::working`).
+    if typing {
         PulseClock::request(cx);
     }
     let phase = PulseClock::phase(cx, 900);
@@ -2020,6 +2014,8 @@ fn render_row(
             "row-{}",
             space.id
         ))))
+        // The row is a hover group: its corner badge's ring follows the fill.
+        .group(SharedString::from(format!("row-{}", space.id)))
         .flex()
         .items_center()
         .gap(px(identity::ROW_GAP))
@@ -2139,7 +2135,10 @@ fn render_row(
                         })
                         .child(div().flex_1())
                         .when_some(row_time_size(shell, cx), |el, size| {
-                            el.child(time_el(time, size, theme))
+                            el.child(
+                                time_el(time, size, theme)
+                                    .debug_selector(|| format!("row-time-{id}")),
+                            )
                         }),
                 )
                 .child(
@@ -2147,6 +2146,7 @@ fn render_row(
                         .flex()
                         .items_center()
                         .gap(px(6.0))
+                        .debug_selector(|| format!("row-preview-line-{id}"))
                         .child(
                             div()
                                 .flex_1()
@@ -2156,22 +2156,90 @@ fn render_row(
                                 .text_color(theme.text_muted)
                                 .child(preview),
                         )
-                        // No "agent is working" dot on rows (Jacob, 2026-10-22): the
-                        // working state lives in the header / activity line. A person
-                        // typing keeps its green pulse; unread keeps its accent dot.
-                        .when(typing, |el| {
-                            el.child(
-                                div()
-                                    .size(px(7.0))
-                                    .rounded_full()
-                                    .bg(Theme::with_alpha(theme.online, 0.35 + 0.65 * phase)),
-                            )
-                        })
-                        .when(!typing && unread, |el| {
-                            el.child(div().size(px(8.0)).rounded_full().bg(theme.accent))
-                        }),
+                        // The status cell under the time (Jacob, 2026-10-27): a
+                        // person typing keeps the green pulse; the braille spinner
+                        // while the chat's agent works (one shared ticker); else the
+                        // unread accent dot; else nothing.
+                        .children(row_status_cell(
+                            RowStatus::of(streaming, typing, unread),
+                            &id,
+                            phase,
+                            theme,
+                            cx,
+                        )),
                 ),
         )
+}
+
+/// What the status cell under a row's time shows (Jacob, 2026-10-27,
+/// [feedback working-braille-spinner-mac-2026-10-27]). One cell, one glyph:
+/// a person typing keeps today's green pulse (the spinner is the *agent's*
+/// working sign, never a human's — coordinator veto 2026-10-27); the spinner
+/// while the chat's agent works; the unread dot otherwise; a quiet read chat
+/// shows nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowStatus {
+    /// A person is typing: the 7 pt `online` pulse, as before.
+    Typing,
+    /// The chat's agent is working: the braille spinner.
+    Working,
+    /// Unread messages: the accent dot.
+    Unread,
+    /// Nothing.
+    Quiet,
+}
+
+impl RowStatus {
+    pub fn of(streaming: bool, typing: bool, unread: bool) -> Self {
+        if typing {
+            RowStatus::Typing
+        } else if streaming {
+            RowStatus::Working
+        } else if unread {
+            RowStatus::Unread
+        } else {
+            RowStatus::Quiet
+        }
+    }
+}
+
+/// The unread dot's diameter — and the spinner cell's width, so both end
+/// flush under the time.
+pub const UNREAD_DOT: f32 = 8.0;
+/// The typing pulse's diameter (unchanged from before the spinner).
+pub const TYPING_DOT: f32 = 7.0;
+
+fn row_status_cell(
+    status: RowStatus,
+    id: &Id,
+    phase: f32,
+    theme: &Theme,
+    cx: &mut App,
+) -> Option<AnyElement> {
+    match status {
+        RowStatus::Typing => Some(
+            div()
+                .size(px(TYPING_DOT))
+                .rounded_full()
+                .bg(Theme::with_alpha(theme.online, 0.35 + 0.65 * phase))
+                .debug_selector(|| format!("row-status-typing-{id}"))
+                .into_any_element(),
+        ),
+        RowStatus::Working => Some(
+            crate::ui::working::glyph(theme, cx)
+                .debug_selector(|| format!("row-status-working-{id}"))
+                .into_any_element(),
+        ),
+        RowStatus::Unread => Some(
+            div()
+                .size(px(UNREAD_DOT))
+                .rounded_full()
+                .bg(theme.accent)
+                .debug_selector(|| format!("row-status-unread-{id}"))
+                .into_any_element(),
+        ),
+        RowStatus::Quiet => None,
+    }
 }
 
 /// The right-click menu of a sidebar row, anchored at the click. An agent
@@ -2952,6 +3020,7 @@ mod footer_tests {
         FOOTER_DOT_RING, FOOTER_HEIGHT, FOOTER_INSET, FOOTER_ROW_HEIGHT, FOOTER_ROW_INSET,
         FOOTER_ROW_PAD_X, FOOTER_ROW_PAD_Y, STRIP_BUTTON, STRIP_GAP, STRIP_INSET,
     };
+    use crate::ui::badge;
     use crate::ui::theme::{Theme, CONTROL, CONTROL_LINE, HEADER_HEIGHT};
 
     /// Grok Bot's footer, measured on Jacob's Oct-2026 refs
@@ -3005,6 +3074,12 @@ mod footer_tests {
         );
         assert_eq!(FOOTER_DOT_RING - FOOTER_DOT, 4.0, "2 pt ring");
         assert_eq!(FOOTER_DOT_OVERHANG, 2.0);
+        // The shared badge draws them at exactly these sizes.
+        let m = badge::metrics(FOOTER_AVATAR);
+        assert_eq!(
+            (m.dot, m.ring, m.overhang),
+            (FOOTER_DOT, FOOTER_DOT_RING, FOOTER_DOT_OVERHANG)
+        );
         // 28 → 36 scaled the 7 / 11 dot to 9 / 14; the ring stays 2 pt.
         assert_eq!(FOOTER_DOT, (7.0f32 * 36.0 / 28.0).round());
     }
@@ -3022,19 +3097,13 @@ mod footer_tests {
             _: &mut gpui::Window,
             _: &mut gpui::Context<Self>,
         ) -> impl IntoElement {
-            let avatar = div()
-                .relative()
-                .size(px(FOOTER_AVATAR))
-                .flex_shrink_0()
-                .debug_selector(|| "avatar".into())
-                .child(
-                    div()
-                        .absolute()
-                        .right(px(-FOOTER_DOT_OVERHANG))
-                        .bottom(px(-FOOTER_DOT_OVERHANG))
-                        .size(px(FOOTER_DOT_RING))
-                        .debug_selector(|| "dot-ring".into()),
-                );
+            // The real badge (`ui::badge`), as `account_avatar` draws it.
+            let avatar = badge::badged(
+                FOOTER_AVATAR,
+                div().size(px(FOOTER_AVATAR)).rounded_full(),
+                Some(badge::Badge::new(gpui::green(), gpui::black())),
+            )
+            .debug_selector(|| "avatar".into());
             let row = footer_row_frame()
                 .child(avatar)
                 .child(div().flex_1().min_w_0().child("Jacob Steeves"));
@@ -3074,7 +3143,9 @@ mod footer_tests {
             grok::AVATAR_LINE,
             "avatar centre line"
         );
-        let ring = vcx.debug_bounds("dot-ring").expect("dot ring drawn");
+        let ring = vcx
+            .debug_bounds(badge::RING_SELECTOR)
+            .expect("dot ring drawn");
         let ring_right: f32 = ring.right().into();
         let ring_bottom: f32 = ring.bottom().into();
         assert_eq!(
@@ -3350,5 +3421,318 @@ mod row_bounds_tests {
                 assert!(offset < -(ROW_H * 2.0), "the list scrolled ({offset})");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod status_cell_tests {
+    use std::time::Duration;
+
+    use futures::future::BoxFuture;
+    use gpui::{AppContext as _, Bounds, Entity, Pixels, TestAppContext, VisualTestContext};
+    use tokio::sync::mpsc;
+
+    use super::{RowStatus, UNREAD_DOT};
+    use crate::app::AppState;
+    use crate::model::{Chat, Message, Person, Project, SpaceKind};
+    use crate::sync::{ClientCommand, SyncEvent, SyncSource};
+    use crate::ui::motion::PulseClock;
+    use crate::ui::shell::Shell;
+    use crate::ui::theme::{Surface, Theme};
+    use crate::ui::working::{WorkingClock, CELL_H, CELL_W, FRAME_MS};
+
+    struct Idle;
+
+    impl SyncSource for Idle {
+        fn name(&self) -> &'static str {
+            "idle"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            _commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    /// The rule as code: a person typing keeps the green pulse (the spinner
+    /// is never a human's sign), the agent's spinner beats unread, unread
+    /// beats quiet.
+    #[test]
+    fn the_cell_shows_one_thing_in_this_order() {
+        assert_eq!(RowStatus::of(false, true, true), RowStatus::Typing);
+        assert_eq!(RowStatus::of(true, true, false), RowStatus::Typing);
+        assert_eq!(RowStatus::of(true, false, true), RowStatus::Working);
+        assert_eq!(RowStatus::of(false, false, true), RowStatus::Unread);
+        assert_eq!(RowStatus::of(false, false, false), RowStatus::Quiet);
+        assert_eq!(CELL_W, UNREAD_DOT, "the cell is the dot's width");
+    }
+
+    fn message(id: &str, chat: &str, role: &str, status: &str, text: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "chatId": chat, "role": role, "sender": role, "status": status,
+            "createdAt": at, "completedAt": at,
+            "parts": [{ "id": format!("{id}-t"), "kind": "text", "text": text }],
+        }))
+        .expect("message")
+    }
+
+    fn chat(id: &str, project: &str, unread: bool, at: u64) -> Chat {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "project_id": project, "title": "Main", "is_pinned": true,
+            "is_system": false, "unread": unread, "last_message_at": at,
+        }))
+        .expect("chat")
+    }
+
+    fn person(id: &str, handle: &str, name: &str) -> Person {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "handle": handle, "name": name, "status": "active",
+        }))
+        .expect("person")
+    }
+
+    /// Four rows: an agent working (`working`), an agent with unread
+    /// (`unread`), a quiet read agent (`quiet`), a DM whose person is typing
+    /// (`dm`). The quiet one is selected so the others keep their state.
+    fn mount(
+        cx: &mut TestAppContext,
+    ) -> (
+        tokio::runtime::Runtime,
+        Entity<AppState>,
+        Entity<Shell>,
+        &mut VisualTestContext,
+    ) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| {
+            gpui_tokio::init_from_handle(cx, handle);
+            cx.set_global(Theme::dark(Surface::Matte));
+            if !cx.has_global::<PulseClock>() {
+                PulseClock::init(cx);
+            }
+            WorkingClock::init(cx);
+        });
+        let state = cx.new(|cx| AppState::new(Box::new(Idle), cx));
+        let now = crate::model::now_ms();
+        state.update(cx, |s, cx| {
+            for (pid, name, kind, people) in [
+                ("working", "Affine", SpaceKind::Project, vec![]),
+                ("unread", "Lium", SpaceKind::Project, vec![]),
+                ("quiet", "Arbos", SpaceKind::Project, vec![]),
+                (
+                    "dm",
+                    "Sam Rivera",
+                    SpaceKind::Dm,
+                    vec![person("gh_2", "sam", "Sam Rivera")],
+                ),
+            ] {
+                s.projects.push(Project {
+                    id: pid.into(),
+                    name: name.into(),
+                    kind,
+                    people,
+                    ..Project::default()
+                });
+                let room = format!("room-{pid}");
+                let at = now - 60_000;
+                let mut rows = vec![
+                    message(
+                        "u",
+                        &room,
+                        "user",
+                        "done",
+                        "Can you look at the surf report?",
+                        at,
+                    ),
+                    message("a", &room, "assistant", "done", "On it.", at + 1_000),
+                ];
+                if pid == "working" {
+                    rows.push(message(
+                        "w",
+                        &room,
+                        "assistant",
+                        "streaming",
+                        "",
+                        now - 2_000,
+                    ));
+                }
+                s.chats.insert(
+                    pid.into(),
+                    vec![chat(&room, pid, pid == "unread", at + 1_000)],
+                );
+                s.messages.insert(room.clone(), rows);
+                if pid == "dm" {
+                    // Typing marks are keyed by the space id (`typing_in(&p.id)`).
+                    s.typing
+                        .insert(pid.into(), vec![("sam".to_string(), now + 60_000)]);
+                }
+            }
+            s.selected_project = Some("quiet".into());
+            cx.notify();
+        });
+        let (shell, vcx) = cx.add_window_view(|window, cx| Shell::new(state.clone(), window, cx));
+        vcx.run_until_parked();
+        (rt, state, shell, vcx)
+    }
+
+    fn close(a: f32, b: f32) -> bool {
+        (a - b).abs() <= 0.5
+    }
+
+    fn right(b: Bounds<Pixels>) -> f32 {
+        f32::from(b.right())
+    }
+
+    fn centre_y(b: Bounds<Pixels>) -> f32 {
+        f32::from(b.origin.y) + f32::from(b.size.height) / 2.0
+    }
+
+    /// The spinner sits exactly where the dot sat: its right edge is the time
+    /// label's right edge (the unread dot's too), it is centred on the preview
+    /// line, and it is the fixed cell. The unread row keeps its accent dot,
+    /// the quiet row shows nothing, the typing DM keeps its green pulse.
+    #[gpui::test]
+    fn the_spinner_sits_under_the_time_where_the_dot_was(cx: &mut TestAppContext) {
+        let (_rt, _state, _shell, vcx) = mount(cx);
+        let spinner = vcx
+            .debug_bounds("row-status-working-working")
+            .expect("the working agent's row draws the spinner");
+        let time = vcx
+            .debug_bounds("row-time-working")
+            .expect("its time label");
+        let line = vcx
+            .debug_bounds("row-preview-line-working")
+            .expect("its preview line");
+        assert_eq!(f32::from(spinner.size.width), CELL_W, "cell width");
+        assert_eq!(f32::from(spinner.size.height), CELL_H, "cell height");
+        assert!(
+            close(right(spinner), right(time)),
+            "spinner right {} = time right {}",
+            right(spinner),
+            right(time)
+        );
+        assert!(
+            close(centre_y(spinner), centre_y(line)),
+            "spinner centre {} = preview line centre {}",
+            centre_y(spinner),
+            centre_y(line)
+        );
+        assert!(
+            f32::from(spinner.origin.y)
+                > f32::from(time.origin.y) + f32::from(time.size.height) - 1.0,
+            "under the time, not beside it"
+        );
+
+        let dot = vcx
+            .debug_bounds("row-status-unread-unread")
+            .expect("the unread agent's row keeps its dot");
+        assert_eq!(f32::from(dot.size.width), UNREAD_DOT);
+        assert!(
+            close(
+                right(dot),
+                right(vcx.debug_bounds("row-time-unread").expect("time"))
+            ),
+            "the dot ends under its time too"
+        );
+        assert!(
+            close(right(dot), right(spinner)),
+            "dot and spinner share the right edge under the time"
+        );
+        assert!(
+            vcx.debug_bounds("row-status-working-unread").is_none(),
+            "an unread row that is not working shows no spinner"
+        );
+
+        assert!(vcx.debug_bounds("row-status-working-quiet").is_none());
+        assert!(vcx.debug_bounds("row-status-unread-quiet").is_none());
+
+        assert!(
+            vcx.debug_bounds("row-status-working-dm").is_none(),
+            "a person typing never shows the agent's spinner"
+        );
+        let pulse = vcx
+            .debug_bounds("row-status-typing-dm")
+            .expect("a person typing keeps the green pulse");
+        assert_eq!(f32::from(pulse.size.width), super::TYPING_DOT);
+    }
+
+    /// One spinning row (the typing DM pulses, it does not spin), one ticker;
+    /// the cell's box never moves while the glyph turns; Reduce Motion keeps
+    /// the cell (still glyph) and no ticker.
+    #[gpui::test]
+    fn rows_share_one_ticker_and_the_cell_never_moves(cx: &mut TestAppContext) {
+        let (_rt, _state, _shell, vcx) = mount(cx);
+        let first = vcx
+            .debug_bounds("row-status-working-working")
+            .expect("spinner drawn");
+        let t = vcx.update(|_, cx| WorkingClock::trace(cx));
+        assert!(t.running, "spinners on screen → ticker running");
+        assert_eq!(t.starts, 1, "one ticker");
+        let ticks0 = t.ticks;
+        for _ in 0..10 {
+            vcx.executor()
+                .advance_clock(Duration::from_millis(FRAME_MS));
+            vcx.run_until_parked();
+            let b = vcx
+                .debug_bounds("row-status-working-working")
+                .expect("spinner drawn");
+            assert_eq!(b, first, "the cell's box is the same every frame");
+        }
+        let t = vcx.update(|_, cx| WorkingClock::trace(cx));
+        assert_eq!(t.starts, 1, "still one ticker");
+        assert_eq!(
+            t.ticks - ticks0,
+            10,
+            "ten frames for ten periods, not twenty"
+        );
+        assert_eq!(
+            t.drawn_last_frame, 1,
+            "one spinner cell on screen: the working agent's (the DM pulses)"
+        );
+        // The typing DM's pulse rides the 30 fps clock, so the window draws
+        // more than once per 90 ms period here; the ticker itself adds one.
+        assert!(t.draws_last_tick >= 1);
+
+        // Nobody typing: the ticker alone draws the Shell once per period.
+        _state.update(vcx, |s, cx| {
+            s.typing.clear();
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        for _ in 0..3 {
+            vcx.executor()
+                .advance_clock(Duration::from_millis(FRAME_MS));
+            vcx.run_until_parked();
+        }
+        let t = vcx.update(|_, cx| WorkingClock::trace(cx));
+        assert_eq!(t.drawn_last_frame, 1);
+        assert_eq!(
+            t.draws_last_tick, 1,
+            "the ticker alone draws the Shell once per period"
+        );
+        assert_eq!(t.starts, 1, "still the one ticker");
+
+        vcx.update(|_, cx| cx.set_reduce_motion(true));
+        for _ in 0..3 {
+            vcx.executor()
+                .advance_clock(Duration::from_millis(FRAME_MS));
+            vcx.run_until_parked();
+        }
+        assert_eq!(
+            vcx.debug_bounds("row-status-working-working"),
+            Some(first),
+            "Reduce Motion keeps the still glyph in the same cell"
+        );
+        let t = vcx.update(|_, cx| WorkingClock::trace(cx));
+        assert!(
+            !t.running,
+            "Reduce Motion: nothing asks for frames, the ticker parks"
+        );
     }
 }
