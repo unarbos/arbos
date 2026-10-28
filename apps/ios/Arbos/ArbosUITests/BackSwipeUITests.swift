@@ -230,18 +230,21 @@ final class BackSwipeUITests: XCTestCase {
         XCTAssertTrue(back.exists, "the chat did not go back")
     }
 
-    /// A tap on the quote block of my own reply is still the quote's (jump to the original):
-    /// it starts no reply and leaves the chat where it is. (The scroll-and-tint itself is
-    /// not observable through XCUI in a short DM; the rig's shots show it.)
-    func testTapOnTheQuoteOfAnOwnReplyStartsNoReply() {
+    /// A tap on the quote block of my own reply is still the quote's: the original (d3)
+    /// is revealed — it reads as selected while it is tinted — and no reply starts.
+    func testTapOnTheQuoteOfAnOwnReplyRevealsTheOriginalAndStartsNoReply() {
         let app = launch(["ARBOS_OPEN_PEOPLE": "fx-dm-unconst"])
         let back = chatBack(app, "fx-dm-unconst")
         XCTAssertTrue(back.waitForExistence(timeout: appear), "the @unconst DM opened")
         let quote = app.descendants(matching: .any)["bubble:d4"].descendants(matching: .any)["reply-quote"]
         XCTAssertTrue(quote.waitForExistence(timeout: settle), "my reply to unconst shows its quote block")
         XCTAssertTrue(quote.isHittable, "the quote block takes taps")
+        let original = app.descendants(matching: .any)["bubble:d3"]
+        XCTAssertFalse(original.isSelected, "the original is not tinted before the tap")
         quote.tap()
-        sleep(1)
+        let tinted = NSPredicate(format: "isSelected == true")
+        let wait = XCTNSPredicateExpectation(predicate: tinted, object: original)
+        XCTAssertEqual(XCTWaiter().wait(for: [wait], timeout: 1.4), .completed, "the quoted line is revealed (tinted) by the tap")
         XCTAssertFalse(app.descendants(matching: .any)["composer-reply-preview"].exists, "a tap on the quote starts no reply")
         XCTAssertFalse(app.keyboards.firstMatch.exists, "a tap on the quote does not focus the composer")
         XCTAssertTrue(back.exists, "the chat did not go back")

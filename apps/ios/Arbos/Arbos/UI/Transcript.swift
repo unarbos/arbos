@@ -1422,6 +1422,8 @@ struct RowView: View, Equatable {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(canReply ? "bubble:\(row.messageId)" : "row:\(row.id)")
+        // The row a quote tap just revealed reads as selected while it is tinted.
+        .accessibilityAddTraits(highlighted ? .isSelected : [])
     }
 
     @ViewBuilder
@@ -1474,6 +1476,10 @@ struct RowView: View, Equatable {
                 .overlay(alignment: .topTrailing) { replyCountBadge(userBubble: true) }
                 .frame(maxWidth: maxBubble, alignment: .trailing)
                 .opacity(delivery.opacity)
+                // A container, not a leaf: the identifier alone made the bubble one opaque
+                // element and hid the quote button (and a link card) inside it from
+                // VoiceOver and the UI tests ([feedback swipe-reply-own-quoted-2026-10-28]).
+                .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("own-bubble-\(delivery)")
             }
         case .other(let text, let handle, let avatar, let named, let quote, let preview):
