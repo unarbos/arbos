@@ -73,7 +73,7 @@ pub(super) fn page(
             )
             .into(),
         ),
-        subtitle_color: theme.text_muted,
+        subtitle_color: theme.label_muted(),
         subtitle_click: None,
         subtitle_element: None,
         editor: None,
@@ -126,7 +126,7 @@ fn name_field(shell: &Shell, theme: &Theme) -> Div {
         .flex()
         .items_center()
         .rounded(px(8.0))
-        .bg(theme.field)
+        .bg(theme.field_fill())
         .border_1()
         .border_color(theme.primary)
         .text_size(px(TEXT_BODY))
@@ -347,7 +347,7 @@ fn settings_tab(
                         .flex()
                         .items_center()
                         .rounded(px(8.0))
-                        .bg(theme.field)
+                        .bg(theme.field_fill())
                         .border_1()
                         .border_color(theme.primary)
                         .text_size(px(TEXT_BODY))
@@ -522,7 +522,7 @@ fn danger_footer(
                     .child(
                         div()
                             .text_size(px(TEXT_SMALL))
-                            .text_color(theme.text_muted)
+                            .text_color(theme.label_muted())
                             .child(
                                 "Deletes the channel and its messages for everyone in the server.",
                             ),

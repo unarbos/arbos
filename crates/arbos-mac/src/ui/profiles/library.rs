@@ -590,7 +590,7 @@ fn row(
                 .map(|el| {
                     highlight::washed(
                         el,
-                        highlight::over(theme.pane_card, theme.border_strong),
+                        highlight::over(theme.pane_card_fill(), theme.border_strong),
                         theme,
                     )
                 })
@@ -608,7 +608,7 @@ fn row(
                 .min_w(px(MORE_DISC))
                 .pr(px(6.0))
                 .text_size(px(TEXT_TINY))
-                .text_color(theme.text_muted)
+                .text_color(theme.label_muted())
                 .whitespace_nowrap()
                 .child(rel_time(now, entry.when())),
         )
@@ -680,7 +680,7 @@ fn show_more(
         .h(px(SHOW_MORE_H))
         .px(px(kit::INSET))
         .text_size(px(TEXT_SMALL))
-        .text_color(theme.text_muted)
+        .text_color(theme.label_muted())
         .cursor_pointer()
         .map(|el| highlight::row(el, false, Shape::Nested(kit::CARD_RADIUS), theme))
         .child(if expanded { "Show less" } else { "Show more" })
@@ -691,7 +691,7 @@ fn show_more(
                 "chevron.down"
             },
             11.0,
-            theme.text_muted,
+            theme.label_muted(),
         ))
         .on_click(cx.listener(move |this, _, _, cx| {
             this.library_toggle_day(epoch, label.clone(), cx);
@@ -707,7 +707,7 @@ fn thumb(entry: &Entry, state: &AppState, theme: &Theme) -> Div {
         .flex_shrink_0()
         .rounded(px(THUMB_RADIUS))
         .overflow_hidden()
-        .bg(theme.surface_2)
+        .bg(theme.control_fill())
         .flex()
         .items_center()
         .justify_center();
@@ -720,18 +720,18 @@ fn thumb(entry: &Entry, state: &AppState, theme: &Theme) -> Div {
                     .object_fit(ObjectFit::Cover),
             ),
             (AttachmentKind::Image, None) => {
-                tile.child(sf_symbols::glyph("photo", 16.0, theme.text_faint))
+                tile.child(sf_symbols::glyph("photo", 16.0, theme.label_faint()))
             }
             (AttachmentKind::Video, None) => {
-                tile.child(sf_symbols::glyph("video", 16.0, theme.text_faint))
+                tile.child(sf_symbols::glyph("video", 16.0, theme.label_faint()))
             }
             _ => match extension(&f.attachment.name) {
                 Some(e) => tile
                     .text_size(px(10.0))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.text_muted)
+                    .text_color(theme.label_muted())
                     .child(e),
-                None => tile.child(sf_symbols::glyph("doc", 16.0, theme.text_muted)),
+                None => tile.child(sf_symbols::glyph("doc", 16.0, theme.label_muted())),
             },
         },
         Entry::Link(l) => link_tile::tile(link_icon(l, state), THUMB, theme),
@@ -780,9 +780,12 @@ fn sender_picture(sender: &Sender, state: &AppState, theme: &Theme) -> AnyElemen
     }
 }
 
-/// The card's fill: a step over the pane card in the dark, white in the light.
+/// The card's fill: a step over the pane card in the dark, white in the light;
+/// on Glass the floating-card wash every menu and picker wears.
 fn card_fill(theme: &Theme) -> gpui::Hsla {
-    if theme.is_light() {
+    if theme.is_frost() {
+        theme.card()
+    } else if theme.is_light() {
         theme.surface_1
     } else {
         Theme::lighter(theme.pane_card, 0.03)
@@ -798,7 +801,7 @@ fn preview(entry: &Entry, state: &AppState, theme: &Theme) -> AnyElement {
         .h(px(CARD_IMAGE_H))
         .rounded(px(CARD_IMAGE_RADIUS))
         .overflow_hidden()
-        .bg(theme.surface_2)
+        .bg(theme.control_fill())
         .border_1()
         .border_color(theme.border)
         .flex()
@@ -814,18 +817,18 @@ fn preview(entry: &Entry, state: &AppState, theme: &Theme) -> AnyElement {
                     .object_fit(ObjectFit::Cover),
             ),
             (AttachmentKind::Image, None) => {
-                frame.child(sf_symbols::glyph("photo", 36.0, theme.text_faint))
+                frame.child(sf_symbols::glyph("photo", 36.0, theme.label_faint()))
             }
             (AttachmentKind::Video, None) => {
-                frame.child(sf_symbols::glyph("video", 36.0, theme.text_faint))
+                frame.child(sf_symbols::glyph("video", 36.0, theme.label_faint()))
             }
             _ => match extension(&f.attachment.name) {
                 Some(e) => frame
                     .text_size(px(22.0))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.text_muted)
+                    .text_color(theme.label_muted())
                     .child(e),
-                None => frame.child(sf_symbols::glyph("doc", 36.0, theme.text_muted)),
+                None => frame.child(sf_symbols::glyph("doc", 36.0, theme.label_muted())),
             },
         },
         Entry::Link(l) => frame.child(link_tile::tile(link_icon(l, state), PREVIEW_TILE, theme)),
@@ -849,7 +852,7 @@ fn preview(entry: &Entry, state: &AppState, theme: &Theme) -> AnyElement {
                     .mt(px(10.0))
                     .text_size(px(TEXT_TINY))
                     .line_height(px(14.0))
-                    .text_color(theme.text_muted)
+                    .text_color(theme.label_muted())
                     .child(entry.kind_label()),
             )
             .child(
@@ -870,7 +873,7 @@ fn preview(entry: &Entry, state: &AppState, theme: &Theme) -> AnyElement {
                     .gap(px(7.0))
                     .text_size(px(TEXT_TINY))
                     .line_height(px(14.0))
-                    .text_color(theme.text_muted)
+                    .text_color(theme.label_muted())
                     .child(sender_picture(entry.sender(), state, theme))
                     .child(
                         div()
