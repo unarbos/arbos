@@ -557,6 +557,12 @@ struct Attachment: Codable, Equatable {
         }
     }
 
+    /// Stored on the relay: a `ref` that is not a `local:` key still uploading.
+    var isOnRelay: Bool {
+        guard let ref = blobRef else { return false }
+        return !ref.isEmpty && !ref.hasPrefix("local:")
+    }
+
     /// "1.8 MB" style size, empty when unknown (Mac `size_label`).
     var sizeLabel: String {
         guard let b = bytes else { return "" }
@@ -1145,6 +1151,27 @@ struct MembershipNotice: Equatable {
     }
 }
 
+/// What a message says and shows, as one thing (`Message.body`): the prose, every attachment
+/// that is on the relay (a chart's fallback picture excluded), and every chart with its
+/// fallback — the Mac `MessageBody`.
+struct MessageBody: Equatable {
+    var text: String
+    var attachments: [Attachment]
+    var charts: [ChartBody]
+
+    var hasMedia: Bool { !attachments.isEmpty || !charts.isEmpty }
+}
+
+/// A chart bubble as a message carries it: the `chart` part's fields plus its fallback
+/// picture when the message has one.
+struct ChartBody: Equatable {
+    var id: Id
+    var specVersion: Int
+    var spec: String
+    var table: String
+    var fallback: Attachment?
+}
+
 struct Message: Identifiable, Equatable {
     var id: Id
     var chatId: Id
@@ -1231,6 +1258,47 @@ struct Message: Identifiable, Equatable {
     /// when the chart it stands in for is really here.)
     func hasChartPart(_ partId: String) -> Bool {
         parts.contains { if case .chart(let id, _, _, _, _) = $0 { return id == partId } else { return false } }
+    }
+
+    /// The message's body, in part order — the one accessor Forward, Copy and any other
+    /// "take this message" action read, so they all see the same parts (the Mac
+    /// `Message::body()`, [feedback forward-attachments-ios-2026-10-27]). `nil` when there
+    /// is nothing to take: no words, no attachment on the relay, no chart. A picture-only
+    /// message has a body like any other.
+    var body: MessageBody? {
+        let text = plainText.trimmingCharacters(in: .whitespacesAndNewlines)
+        var fallbackIds = Set<String>()
+        for part in parts {
+            if case .chart(_, _, _, _, let fallback) = part, let fallback { fallbackIds.insert(fallback) }
+        }
+        var attachments: [Attachment] = []
+        var charts: [ChartBody] = []
+        for part in parts {
+            switch part {
+            case .attachment(let id, let a) where !fallbackIds.contains(id) && a.isOnRelay:
+                attachments.append(a)
+            case .chart(let id, let specVersion, let spec, let table, let fallback):
+                let picture = fallback.flatMap { f in
+                    parts.lazy.compactMap { p -> Attachment? in
+                        if case .attachment(let aid, let a) = p, aid == f, a.isOnRelay { return a }
+                        return nil
+                    }.first
+                }
+                charts.append(ChartBody(id: id, specVersion: specVersion, spec: spec, table: table, fallback: picture))
+            default:
+                break
+            }
+        }
+        guard !text.isEmpty || !attachments.isEmpty || !charts.isEmpty else { return nil }
+        return MessageBody(text: text, attachments: attachments, charts: charts)
+    }
+
+    /// Does the message hold an attachment whose upload has not finished (a `local:` key)?
+    var hasUploadingAttachment: Bool {
+        parts.contains {
+            if case .attachment(_, let a) = $0, let ref = a.blobRef { return ref.hasPrefix("local:") }
+            return false
+        }
     }
 
     var plainText: String {

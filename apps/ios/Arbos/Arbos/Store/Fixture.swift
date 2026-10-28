@@ -265,6 +265,20 @@ extension AppModel {
         ]
         // Mira's second line replies to her first (quote header on another person's bubble).
         messages["fx-group-launch"]?[2].replyTo = "g1"
+        // Scout's photo (Jacob, 2026-10-27, [feedback forward-attachments-ios-2026-10-27]): an
+        // agent's picture-only message in a group right before its words — it must carry the
+        // same avatar and name as the bubble under it. Appended after g7 so earlier indices hold.
+        var commsPicture = assistant("g8", "fx-group-launch", "", at: now - 32 * 60_000)
+        commsPicture.sender = "agent:fx-comms"
+        commsPicture.senderHandle = "comms"
+        commsPicture.senderName = "Comms"
+        commsPicture.parts = [.attachment(id: "g8a", attachment: Attachment(name: "signups-week.png", mime: "image/png",
+                                                                             blobRef: "fixture-g8a", kind: "image"))]
+        var commsWords = assistant("g9", "fx-group-launch", "Slide 4 now reads 1,284 signups this week (+18 %).", at: now - 31 * 60_000)
+        commsWords.sender = "agent:fx-comms"
+        commsWords.senderHandle = "comms"
+        commsWords.senderName = "Comms"
+        messages["fx-group-launch", default: []].append(contentsOf: [commsPicture, commsWords])
         // #1592 rig: a question to someone else's agent and its first bubble — the shape of
         // Jacob's Arbonites screenshot ("@testagent how many messages …" / "On it.").
         if DebugHooks.fixtureForeignAgent {
