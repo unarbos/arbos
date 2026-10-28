@@ -6,10 +6,23 @@
 //! the blob to a temp file; this module attaches the player. Closing the
 //! viewer, paging away, or a `None` sync tears it down. Elsewhere the stub
 //! does nothing — Linux builds keep the previous "open with the system" path.
+//!
+//! Poster frames at send ([feedback app-01M61H3VVBQZ6NCE708XB41NCC]): macOS
+//! grabs one JPEG near 0.5 s with `AVAssetImageGenerator`; elsewhere returns
+//! `None` so Linux builds stay green.
 
 use std::path::Path;
 
 use gpui::Window;
+
+/// A JPEG frame grabbed from a local video file for the chat bubble / viewer.
+#[derive(Clone, Debug)]
+pub struct PosterGrab {
+    pub jpeg: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub duration_ms: u64,
+}
 
 /// Keep the native player in sync with the media viewer's playing path.
 /// `path = Some` shows / replaces the player; `None` removes it.
@@ -17,18 +30,33 @@ pub fn sync(window: &mut Window, path: Option<&Path>) {
     platform::sync(window, path);
 }
 
+/// One frame near 0.5 s as a JPEG (longer side ≤ 840). `None` on failure or
+/// non-macOS so a video still sends without a poster.
+pub fn grab_poster(path: &Path) -> Option<PosterGrab> {
+    platform::grab_poster(path)
+}
+
 #[cfg(target_os = "macos")]
 mod platform {
     use std::cell::RefCell;
     use std::path::{Path, PathBuf};
+    use std::ptr;
 
     use objc2::rc::Retained;
     use objc2::{MainThreadMarker, MainThreadOnly};
-    use objc2_app_kit::{NSAutoresizingMaskOptions, NSView, NSWindowOrderingMode};
-    use objc2_av_foundation::AVPlayer;
+    use objc2_app_kit::{
+        NSAutoresizingMaskOptions, NSBitmapImageFileType, NSBitmapImageRep, NSView,
+        NSWindowOrderingMode,
+    };
+    use objc2_av_foundation::{AVAsset, AVAssetImageGenerator, AVPlayer};
     use objc2_av_kit::{AVPlayerView, AVPlayerViewControlsStyle};
-    use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, NSURL};
+    use objc2_core_foundation::CGSize;
+    use objc2_core_graphics::CGImage;
+    use objc2_core_media::{CMTimeGetSeconds, CMTimeMakeWithSeconds};
+    use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize, NSString, NSURL};
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    use super::PosterGrab;
 
     /// Match `media_viewer`'s picture room so Close, chevrons and the bottom
     /// pills stay hittable around the player.
@@ -36,6 +64,10 @@ mod platform {
     const INSET_BOTTOM: f64 = 90.0;
     /// `EDGE` (28) + chevron (36) + gap (20) — the body's left/right inset.
     const INSET_SIDE: f64 = 84.0;
+    /// Longer side of the poster JPEG (feedback app-01M61H3VVBQZ6NCE708XB41NCC).
+    const POSTER_MAX_SIDE: f64 = 840.0;
+    /// Grab near half a second so the first frame is not a black fade-in.
+    const POSTER_TIME_SECS: f64 = 0.5;
 
     struct Active {
         path: PathBuf,
@@ -143,11 +175,70 @@ mod platform {
             });
         });
     }
+
+    /// Encode a `CGImage` as JPEG via `NSBitmapImageRep`.
+    fn cgimage_jpeg(image: &CGImage) -> Option<(Vec<u8>, u32, u32)> {
+        let width = CGImage::width(Some(image)) as u32;
+        let height = CGImage::height(Some(image)) as u32;
+        if width == 0 || height == 0 {
+            return None;
+        }
+        // `initWithCGImage` / `representationUsingType` are the AppKit path for
+        // CGImage → JPEG; we own the retained rep and data.
+        let rep = NSBitmapImageRep::initWithCGImage(NSBitmapImageRep::alloc(), image);
+        // SAFETY: empty properties dictionary is valid for JPEG encoding.
+        let data = unsafe {
+            rep.representationUsingType_properties(
+                NSBitmapImageFileType::JPEG,
+                &NSDictionary::new(),
+            )
+        }?;
+        Some((data.to_vec(), width, height))
+    }
+
+    pub(super) fn grab_poster(path: &Path) -> Option<PosterGrab> {
+        let ns_path = NSString::from_str(&path.to_string_lossy());
+        let url = NSURL::fileURLWithPath(&ns_path);
+        // SAFETY: AVAsset / AVAssetImageGenerator are used on a blocking
+        // worker for a local file; we own every retained object we create.
+        let asset = unsafe { AVAsset::assetWithURL(&url) };
+        let duration = unsafe { asset.duration() };
+        let duration_secs = unsafe { CMTimeGetSeconds(duration) };
+        if !duration_secs.is_finite() || duration_secs <= 0.0 {
+            return None;
+        }
+        let duration_ms = (duration_secs * 1000.0).round().max(0.0) as u64;
+        let time_secs = POSTER_TIME_SECS.min(duration_secs * 0.5);
+        let time = unsafe { CMTimeMakeWithSeconds(time_secs, 600) };
+
+        let gen = unsafe { AVAssetImageGenerator::assetImageGeneratorWithAsset(&asset) };
+        unsafe {
+            gen.setAppliesPreferredTrackTransform(true);
+            gen.setMaximumSize(CGSize::new(POSTER_MAX_SIDE, POSTER_MAX_SIDE));
+        }
+        let cg = unsafe {
+            gen.copyCGImageAtTime_actualTime_error(time, ptr::null_mut())
+                .ok()?
+        };
+        let (jpeg, width, height) = cgimage_jpeg(&cg)?;
+        Some(PosterGrab {
+            jpeg,
+            width,
+            height,
+            duration_ms,
+        })
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
 mod platform {
     use std::path::Path;
 
+    use super::PosterGrab;
+
     pub(super) fn sync(_window: &mut gpui::Window, _path: Option<&Path>) {}
+
+    pub(super) fn grab_poster(_path: &Path) -> Option<PosterGrab> {
+        None
+    }
 }

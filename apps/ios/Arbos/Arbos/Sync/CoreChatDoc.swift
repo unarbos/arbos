@@ -117,7 +117,16 @@ final class CoreChatDoc {
     ) throws {
         let opts = UserMessageOptsRecord(
             attachments: attachments.map {
-                UserAttachmentRecord(name: $0.name, mime: $0.mime, kind: $0.kind, blobRef: $0.blobRef)
+                UserAttachmentRecord(
+                    name: $0.name,
+                    mime: $0.mime,
+                    kind: $0.kind,
+                    blobRef: $0.blobRef,
+                    poster: $0.poster.map {
+                        VideoPosterRecord(blobRef: $0.ref, width: UInt32($0.width),
+                                          height: UInt32($0.height), durationMs: UInt64($0.durationMs))
+                    }
+                )
             },
             mentions: mentions,
             replyTo: replyTo,

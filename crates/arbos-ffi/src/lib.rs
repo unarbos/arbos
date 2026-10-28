@@ -467,6 +467,26 @@ pub struct Touched {
     pub other: bool,
 }
 
+/// A JPEG poster frame on a video attachment (maps to core `VideoPoster`).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct VideoPosterRecord {
+    pub blob_ref: String,
+    pub width: u32,
+    pub height: u32,
+    pub duration_ms: u64,
+}
+
+impl From<VideoPosterRecord> for doc::VideoPoster {
+    fn from(r: VideoPosterRecord) -> Self {
+        Self {
+            blob_ref: r.blob_ref,
+            width: r.width,
+            height: r.height,
+            duration_ms: r.duration_ms,
+        }
+    }
+}
+
 /// One attachment on a client user message (maps to core `UserAttachment`).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct UserAttachmentRecord {
@@ -474,6 +494,9 @@ pub struct UserAttachmentRecord {
     pub mime: String,
     pub kind: Option<String>,
     pub blob_ref: Option<String>,
+    /// Poster frame for a video; old clients / messages leave it unset.
+    #[uniffi(default = None)]
+    pub poster: Option<VideoPosterRecord>,
 }
 
 impl From<UserAttachmentRecord> for doc::UserAttachment {
@@ -485,6 +508,7 @@ impl From<UserAttachmentRecord> for doc::UserAttachment {
             blob_ref: r.blob_ref,
             // GIF-picker attribution is written by a later path; clients leave it unset.
             source: None,
+            poster: r.poster.map(Into::into),
         }
     }
 }
@@ -1094,6 +1118,7 @@ mod tests {
                     mime: "image/jpeg".into(),
                     kind: Some("image".into()),
                     blob_ref: Some("blob:1".into()),
+                    poster: None,
                 }],
                 mentions: vec!["user:a".into(), "user:b".into()],
                 reply_to: Some("m0".into()),

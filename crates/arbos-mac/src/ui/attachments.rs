@@ -91,6 +91,29 @@ pub fn picture_size(w: f32, h: f32) -> (f32, f32) {
     (dw.round(), dh.round())
 }
 
+/// Bubble size for a video poster (`width` × `height`). `None` when either
+/// side is missing → keep today's file card
+/// (feedback app-01M61H3VVBQZ6NCE708XB41NCC).
+pub fn video_poster_bubble_size(width: u32, height: u32) -> Option<(f32, f32)> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some(picture_size(width as f32, height as f32))
+}
+
+/// Duration under a video poster: `0:07`, `1:05`, `1:05:03`.
+pub fn duration_label(ms: u64) -> String {
+    let total = ms / 1000;
+    let s = total % 60;
+    let m = (total / 60) % 60;
+    let h = total / 3600;
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
 /// The ↓ disc: 28 pt, black 55 %, white glyph; the caller shows it on hover.
 fn download_disc(id: SharedString, muted: bool, theme: &Theme) -> gpui::Stateful<Div> {
     let (bg, fg) = if muted {
@@ -123,7 +146,15 @@ pub fn card(
     state: Entity<AppState>,
     theme: &Theme,
 ) -> AnyElement {
-    if attachment.kind() == AttachmentKind::Image {
+    if attachment.kind() == AttachmentKind::Image
+        || (attachment.is_video()
+            && attachment
+                .poster
+                .as_ref()
+                .is_some_and(|p| video_poster_bubble_size(p.width, p.height).is_some()))
+    {
+        // Video with a poster: photo bubble at the poster's ratio, play badge,
+        // duration (feedback app-01M61H3VVBQZ6NCE708XB41NCC).
         picture_bubble(
             row_id,
             attachment,
@@ -139,7 +170,8 @@ pub fn card(
 }
 
 /// A picture: aspect-fit at its own ratio, bubble radius, slim outline. Hover
-/// shows the ↓ disc top-right; the whole bubble opens the viewer.
+/// shows the ↓ disc top-right; the whole bubble opens the viewer. A video with
+/// a poster adds a centred play badge and the duration bottom-left.
 fn picture_bubble(
     row_id: &str,
     attachment: &Attachment,
@@ -149,15 +181,24 @@ fn picture_bubble(
     state: Entity<AppState>,
     theme: &Theme,
 ) -> AnyElement {
-    let key = attachment.blob_ref.clone();
+    let video = attachment
+        .poster
+        .as_ref()
+        .filter(|_| attachment.is_video())
+        .filter(|p| video_poster_bubble_size(p.width, p.height).is_some());
+    let download_key = attachment.blob_ref.clone();
     let name = attachment.name.clone();
     let group = SharedString::from(format!("{row_id}-picture"));
-    let (w, h) = match &preview {
-        Preview::Ready(image) => {
-            let size = image.size(0);
-            picture_size(size.width.0 as f32, size.height.0 as f32)
+    let (w, h) = if let Some(p) = video {
+        video_poster_bubble_size(p.width, p.height).unwrap_or(PICTURE_PLACEHOLDER)
+    } else {
+        match &preview {
+            Preview::Ready(image) => {
+                let size = image.size(0);
+                picture_size(size.width.0 as f32, size.height.0 as f32)
+            }
+            _ => PICTURE_PLACEHOLDER,
         }
-        _ => PICTURE_PLACEHOLDER,
     };
     let mut bubble = div()
         .id(SharedString::from(row_id.to_owned()))
@@ -196,7 +237,11 @@ fn picture_bubble(
                 .flex_col()
                 .items_center()
                 .gap(px(6.0))
-                .child(sf_symbols::glyph("photo", 22.0, theme.text_faint))
+                .child(sf_symbols::glyph(
+                    if video.is_some() { "video" } else { "photo" },
+                    22.0,
+                    theme.text_faint,
+                ))
                 .child(
                     div()
                         .text_size(px(11.0))
@@ -205,11 +250,48 @@ fn picture_bubble(
                 ),
         ),
     };
+    if let Some(poster) = video {
+        // Centred play badge + duration bottom-left (no autoplay in the list).
+        let duration_ms = poster.duration_ms;
+        bubble = bubble
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .size(px(44.0))
+                            .rounded_full()
+                            .bg(Theme::with_alpha(gpui::black(), 0.47))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(sf_symbols::glyph("play.fill", 18.0, gpui::white())),
+                    ),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left(px(8.0))
+                    .bottom(px(8.0))
+                    .px(px(6.0))
+                    .py(px(2.0))
+                    .rounded(px(4.0))
+                    .bg(Theme::with_alpha(gpui::black(), 0.55))
+                    .text_size(px(11.0))
+                    .text_color(gpui::white())
+                    .child(duration_label(duration_ms)),
+            );
+    }
     if let Some(open) = open {
         bubble = bubble.cursor_pointer().on_click(move |_, _, cx| open(cx));
     }
     // The ↓ disc fades in with the hover; a click saves without opening the viewer.
-    if let Some(key) = key.filter(|k| !k.starts_with("local:")) {
+    // Videos download the clip (not the poster JPEG).
+    if let Some(key) = download_key.filter(|k| !k.starts_with("local:")) {
         let state = state.clone();
         bubble = bubble.child(
             div()
@@ -442,6 +524,26 @@ mod tests {
         assert!(h <= PICTURE_MAX_HEIGHT);
         // Unknown size → the placeholder.
         assert_eq!(picture_size(0.0, 0.0), PICTURE_PLACEHOLDER);
+    }
+
+    /// Video poster bubble size and duration label
+    /// (feedback app-01M61H3VVBQZ6NCE708XB41NCC).
+    #[test]
+    fn video_poster_bubble_size_and_duration_label() {
+        assert_eq!(
+            video_poster_bubble_size(1280, 720),
+            Some(picture_size(1280.0, 720.0))
+        );
+        assert_eq!(
+            video_poster_bubble_size(720, 1280),
+            Some(picture_size(720.0, 1280.0))
+        );
+        // Missing dimensions → file card.
+        assert_eq!(video_poster_bubble_size(0, 720), None);
+        assert_eq!(video_poster_bubble_size(1280, 0), None);
+        assert_eq!(duration_label(7_000), "0:07");
+        assert_eq!(duration_label(65_000), "1:05");
+        assert_eq!(duration_label(3_903_000), "1:05:03");
     }
 
     #[test]

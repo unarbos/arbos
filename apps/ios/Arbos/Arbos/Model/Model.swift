@@ -2,6 +2,7 @@
 // crdt-sync §6). Mirrors `crates/arbos-mac/src/model.rs`; the sync layer
 // fills these in and the views only read them.
 
+import CoreGraphics
 import Foundation
 import ArbosFFI
 
@@ -494,6 +495,45 @@ struct AttachmentSource: Equatable {
     var pageUrl: String
 }
 
+/// A JPEG poster frame for a video (`{ ref, width, height, durationMs }`).
+/// Old messages and a failed grab have none
+/// (feedback app-01M61H3VVBQZ6NCE708XB41NCC).
+struct VideoPoster: Equatable {
+    var ref: String
+    var width: Int
+    var height: Int
+    var durationMs: Int64
+
+    /// Duration under the bubble: `0:07`, `1:05`, `1:05:03`.
+    var durationLabel: String { Self.durationLabel(ms: durationMs) }
+
+    static func durationLabel(ms: Int64) -> String {
+        let total = max(0, ms) / 1000
+        let s = total % 60
+        let m = (total / 60) % 60
+        let h = total / 3600
+        if h > 0 { return String(format: "%d:%02d:%02d", h, m, s) }
+        return String(format: "%d:%02d", m, s)
+    }
+
+    /// Bubble size from the poster's width × height (`ImageBubble.fit`); `nil`
+    /// when either side is missing → keep the file card.
+    static func bubbleSize(width: Int, height: Int, maxWidth: CGFloat) -> CGSize? {
+        guard width > 0, height > 0 else { return nil }
+        let natural = CGSize(width: width, height: height)
+        let maxHeight: CGFloat = 320
+        let minWidth: CGFloat = 120
+        let scale = min(maxWidth / natural.width, maxHeight / natural.height)
+        var w = min(natural.width * scale, maxWidth)
+        var h = min(natural.height * scale, maxHeight)
+        if w < minWidth {
+            h = min(h * minWidth / w, maxHeight)
+            w = minWidth
+        }
+        return CGSize(width: w.rounded(), height: h.rounded())
+    }
+}
+
 struct Attachment: Codable, Equatable {
     var name: String
     var mime: String
@@ -507,14 +547,16 @@ struct Attachment: Codable, Equatable {
     var chartPart: String? = nil
     /// GIF-picker attribution; when set the bubble shows "via \<provider\>".
     var source: AttachmentSource? = nil
+    /// Poster frame for a video; when set the bubble shows the picture + Play.
+    var poster: VideoPoster? = nil
 
     enum CodingKeys: String, CodingKey {
-        case name, mime, kind, bytes, chartPart, source
+        case name, mime, kind, bytes, chartPart, source, poster
         case blobRef = "ref"
     }
 
     init(name: String, mime: String, blobRef: String?, kind: String? = nil, bytes: Int64? = nil,
-         chartPart: String? = nil, source: AttachmentSource? = nil) {
+         chartPart: String? = nil, source: AttachmentSource? = nil, poster: VideoPoster? = nil) {
         self.name = name
         self.mime = mime
         self.blobRef = blobRef
@@ -522,6 +564,7 @@ struct Attachment: Codable, Equatable {
         self.bytes = bytes
         self.chartPart = chartPart
         self.source = source
+        self.poster = poster
     }
 
     init(from decoder: Decoder) throws {
@@ -539,6 +582,31 @@ struct Attachment: Codable, Equatable {
         } else {
             source = nil
         }
+        if let raw = try c.decodeIfPresent(PosterDTO.self, forKey: .poster) {
+            poster = VideoPoster(ref: raw.ref, width: raw.width, height: raw.height, durationMs: raw.durationMs)
+        } else {
+            poster = nil
+        }
+    }
+
+    private struct PosterDTO: Codable {
+        var ref: String
+        var width: Int
+        var height: Int
+        var durationMs: Int64
+    }
+
+    /// Parse a poster map from a doc / JSON dictionary.
+    static func poster(from map: [String: Any]?) -> VideoPoster? {
+        guard let map,
+              let ref = Message.str(map["ref"]), !ref.isEmpty,
+              let width64 = Message.int(map["width"]), width64 > 0,
+              let height64 = Message.int(map["height"]), height64 > 0
+        else { return nil }
+        let durationMs = Message.int(map["durationMs"])
+            ?? Message.int(map["duration_ms"])
+            ?? 0
+        return VideoPoster(ref: ref, width: Int(width64), height: Int(height64), durationMs: durationMs)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -553,6 +621,12 @@ struct Attachment: Codable, Equatable {
             try c.encode(
                 ["provider": source.provider, "id": source.id, "pageUrl": source.pageUrl],
                 forKey: .source
+            )
+        }
+        if let poster {
+            try c.encode(
+                PosterDTO(ref: poster.ref, width: poster.width, height: poster.height, durationMs: poster.durationMs),
+                forKey: .poster
             )
         }
     }
@@ -1535,7 +1609,8 @@ enum DocJSON {
                     kind: str(a["kind"]).flatMap { $0 == "attachment" ? nil : $0 },
                     bytes: (a["bytes"] as? NSNumber)?.int64Value,
                     chartPart: str(a["chartPart"]),
-                    source: source
+                    source: source,
+                    poster: Attachment.poster(from: a["poster"] as? [String: Any])
                 )
             )
         case "chart":

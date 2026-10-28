@@ -3326,11 +3326,14 @@ final class AppModel: ObservableObject {
         markUnacked(chatId: chatId, messageId: messageId)
         Task {
             var uploaded: [Attachment] = []
+            let slot = "\(peopleSlot):\(chatId)"
             for a in attachments {
                 let key = AppModel.blobKey(for: a.name)
+                let kind = Self.attachmentKind(mime: a.mime, name: a.name)
                 do {
-                    _ = try await api.putBlob(projectId: "\(peopleSlot):\(chatId)", key: key, mime: a.mime, data: a.data)
-                    uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: key, kind: Self.attachmentKind(mime: a.mime, name: a.name)))
+                    _ = try await api.putBlob(projectId: slot, key: key, mime: a.mime, data: a.data)
+                    let poster = await Self.uploadVideoPoster(api: api, projectId: slot, pending: a, kind: kind)
+                    uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: key, kind: kind, poster: poster))
                 } catch {
                     setSendError(chatId, UserError.classify("upload the attachment", error))
                 }
@@ -5162,7 +5165,8 @@ final class AppModel: ObservableObject {
                 let kind = Self.attachmentKind(mime: a.mime, name: a.name)
                 do {
                     _ = try await api.putBlob(projectId: chat.projectId, key: key, mime: a.mime, data: a.data)
-                    uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: key, kind: kind))
+                    let poster = await Self.uploadVideoPoster(api: api, projectId: chat.projectId, pending: a, kind: kind)
+                    uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: key, kind: kind, poster: poster))
                 } catch {
                     setSendError(chatId, UserError.classify("upload the attachment", error))
                     uploaded.append(Attachment(name: a.name, mime: a.mime, blobRef: nil, kind: kind))
@@ -5182,6 +5186,22 @@ final class AppModel: ObservableObject {
         if mime.lowercased().hasPrefix("audio/") { return "audio" }
         if mime.lowercased().hasPrefix("video/") { return "video" }
         return nil
+    }
+
+    /// Grab a poster JPEG for a video and PUT it as its own blob. A failed grab
+    /// returns `nil` so the video still sends
+    /// (feedback app-01M61H3VVBQZ6NCE708XB41NCC).
+    private static func uploadVideoPoster(api: RelayAPI, projectId: String,
+                                          pending: PendingAttachment, kind: String?) async -> VideoPoster? {
+        guard kind == "video" || pending.mime.lowercased().hasPrefix("video/") else { return nil }
+        guard let grab = MediaFetch.grabVideoPoster(data: pending.data, name: pending.name) else { return nil }
+        let posterKey = AppModel.blobKey(for: "\(pending.name)-poster.jpg")
+        do {
+            _ = try await api.putBlob(projectId: projectId, key: posterKey, mime: "image/jpeg", data: grab.jpeg)
+            return VideoPoster(ref: posterKey, width: grab.width, height: grab.height, durationMs: grab.durationMs)
+        } catch {
+            return nil
+        }
     }
 
     /// Voice memo → text through the relay. The audio is only an STT input; callers send

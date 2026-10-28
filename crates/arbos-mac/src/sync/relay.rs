@@ -4386,6 +4386,12 @@ fn user_attachment_from_part(att: Attachment) -> UserAttachment {
             id: s.id,
             page_url: s.page_url,
         }),
+        poster: att.poster.map(|p| arbos_core::doc::VideoPoster {
+            blob_ref: p.blob_ref,
+            width: p.width,
+            height: p.height,
+            duration_ms: p.duration_ms,
+        }),
     }
 }
 
@@ -4441,13 +4447,14 @@ fn enqueue_send(
 
 /// Put one outgoing attachment under `blob_slot` (a file read from disk, or a
 /// relay blob copied from its source slot) and describe it for the row. A failed
-/// read or upload is reported and leaves the part without a `ref`.
+/// read or upload is reported and leaves the part without a `ref`. A video from
+/// disk also grabs a poster JPEG (failed grab → video without a poster).
 async fn upload_outgoing(
     shared: &Arc<Shared>,
     blob_slot: &str,
     outgoing: Outgoing,
 ) -> UserAttachment {
-    let (name, mime, kind, bytes) = match outgoing {
+    let (name, mime, kind, bytes, poster_grab, copy_poster) = match outgoing {
         Outgoing::Path(path) => {
             let name = path
                 .file_name()
@@ -4455,10 +4462,22 @@ async fn upload_outgoing(
                 .unwrap_or("attachment")
                 .to_string();
             let mime = mime_for(&path).to_string();
+            let want_poster = mime.starts_with("video/")
+                || crate::model::AttachmentKind::from_name_and_mime(&name, &mime)
+                    == crate::model::AttachmentKind::Video;
+            let poster_grab = if want_poster {
+                let path = path.clone();
+                tokio::task::spawn_blocking(move || crate::ui::video_player::grab_poster(&path))
+                    .await
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            };
             let bytes = tokio::fs::read(&path)
                 .await
                 .map_err(|err| format!("Could not read {}: {err}", path.display()));
-            (name, mime, None, bytes)
+            (name, mime, None, bytes, poster_grab, None)
         }
         Outgoing::Copy {
             from_slot,
@@ -4471,11 +4490,20 @@ async fn upload_outgoing(
                     .map_err(|err| format!("Could not read {}: {err}", attachment.name)),
                 None => Err(format!("{} has no file on the relay", attachment.name)),
             };
+            let copy_poster = match attachment.poster.as_ref() {
+                Some(p) => match fetch_blob_bytes(shared, &from_slot, &p.blob_ref).await {
+                    Ok((_, jpeg)) => Some((p.as_ref().clone(), jpeg)),
+                    Err(_) => None,
+                },
+                None => None,
+            };
             (
                 attachment.name,
                 attachment.mime,
                 attachment.kind.map(attachment_kind_str),
                 bytes,
+                None,
+                copy_poster,
             )
         }
     };
@@ -4507,12 +4535,75 @@ async fn upload_outgoing(
             None
         }
     };
+    let poster = if let Some(grab) = poster_grab {
+        upload_poster_jpeg(
+            shared,
+            blob_slot,
+            &name,
+            grab.jpeg,
+            grab.width,
+            grab.height,
+            grab.duration_ms,
+        )
+        .await
+    } else if let Some((p, jpeg)) = copy_poster {
+        upload_poster_jpeg(
+            shared,
+            blob_slot,
+            &name,
+            jpeg,
+            p.width,
+            p.height,
+            p.duration_ms,
+        )
+        .await
+    } else {
+        None
+    };
     UserAttachment {
         name,
         mime,
         kind,
         blob_ref,
         source: None,
+        poster,
+    }
+}
+
+/// PUT a poster JPEG under `blob_slot` and return the map written on the video.
+async fn upload_poster_jpeg(
+    shared: &Arc<Shared>,
+    blob_slot: &str,
+    name: &str,
+    jpeg: Vec<u8>,
+    width: u32,
+    height: u32,
+    duration_ms: u64,
+) -> Option<arbos_core::doc::VideoPoster> {
+    let poster_key = format!(
+        "att-{}-{}-poster.jpg",
+        new_id().to_lowercase(),
+        safe_name(name)
+    );
+    let put = shared
+        .http
+        .put(format!(
+            "{}/blob/{}/{}",
+            shared.http_url, blob_slot, poster_key
+        ))
+        .bearer_auth(shared.token())
+        .header("content-type", "image/jpeg")
+        .body(jpeg)
+        .send()
+        .await;
+    match put {
+        Ok(r) if r.status().is_success() => Some(arbos_core::doc::VideoPoster {
+            blob_ref: poster_key,
+            width,
+            height,
+            duration_ms,
+        }),
+        _ => None,
     }
 }
 
@@ -4838,6 +4929,7 @@ async fn upload_voice_memo(shared: &Shared, blob_slot: &str, wav: Arc<Vec<u8>>) 
             title: None,
             chart_part: None,
             source: None,
+            poster: None,
         },
     }
 }

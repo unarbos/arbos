@@ -865,7 +865,14 @@ enum Transcript {
                        kind: .image(item: item, fromUser: fromUser, caption: caption, lane: lane, source: a.source,
                                     forwardedFrom: forwardedFrom, sender: sender, named: named))
         }
-        // Video shows as a file card in the bubble (poster + Play live in the viewer).
+        // Video with a poster: photo bubble at the poster's ratio + Play + duration.
+        // Without a poster: today's file card
+        // (feedback app-01M61H3VVBQZ6NCE708XB41NCC).
+        if kind == .video, let poster = a.poster, poster.width > 0, poster.height > 0 {
+            return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
+                       kind: .image(item: item, fromUser: fromUser, caption: caption, lane: lane, source: nil,
+                                    forwardedFrom: forwardedFrom, sender: sender, named: named))
+        }
         // A typed description rides the card as a caption bar (pictures/videos only).
         return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
                    kind: .file(item: item, subtitle: subtitle(for: a),
@@ -2933,6 +2940,9 @@ struct ImageBubble: View {
     private var bubbleWidth: CGFloat { min(280, maxWidth) }
     private var fill: Color { fromUser ? theme.bubbleUser : theme.bubbleAssistant }
     private var captionText: String? { Self.captionText(caption) }
+    /// Video with a poster: load the poster JPEG through this bubble's loader.
+    private var isVideoPoster: Bool { item.kind == .video && item.poster != nil }
+    private var loadRef: String? { isVideoPoster ? item.poster?.ref : item.blobRef }
 
     /// The caption as shown: trimmed, nil when blank.
     static func captionText(_ caption: String?) -> String? {
@@ -2942,12 +2952,16 @@ struct ImageBubble: View {
     }
 
     private var size: CGSize {
+        if let poster = item.poster, item.kind == .video,
+           let sized = VideoPoster.bubbleSize(width: poster.width, height: poster.height, maxWidth: bubbleWidth) {
+            return sized
+        }
         if let image, image.size.width > 0, image.size.height > 0 {
             return Self.fit(image.size, maxWidth: bubbleWidth)
         }
         // Not decoded yet (a lazily re-realised row, or the bitmap evicted): the remembered
         // natural size keeps the row's height steady while the picture comes back.
-        if let ref = item.blobRef, let known = ChatImageCache.naturalSize(for: ref), known.width > 0, known.height > 0 {
+        if let ref = loadRef, let known = ChatImageCache.naturalSize(for: ref), known.width > 0, known.height > 0 {
             return Self.fit(known, maxWidth: bubbleWidth)
         }
         return Self.placeholder
@@ -2984,7 +2998,7 @@ struct ImageBubble: View {
                 .contentShape(Rectangle())
                 .onTapGesture(perform: openViewer)
                 .accessibilityAddTraits(.isButton)
-                .accessibilityLabel("Image, tap to view")
+                .accessibilityLabel(isVideoPoster ? "Video, tap to view" : "Image, tap to view")
             if captionText != nil || source != nil {
                 VStack(alignment: .leading, spacing: 2) {
                     if let captionText {
@@ -3014,8 +3028,8 @@ struct ImageBubble: View {
         }
         .background(fill)
         .clipShape(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous))
-        .accessibilityIdentifier("photo-bubble")
-        .task(id: item.blobRef) { await load() }
+        .accessibilityIdentifier(isVideoPoster ? "video-poster-bubble" : "photo-bubble")
+        .task(id: loadRef) { await load() }
         .onAppear { animate = stillFrame != nil }
         .onDisappear { animate = false }
         .fullScreenCover(item: $viewer) { v in
@@ -3029,6 +3043,7 @@ struct ImageBubble: View {
     /// when that is the picture's own width the picture is flush (a picture-only
     /// bubble, or a caption no wider than the picture); when the bubble is wider the
     /// picture sits centred, `pictureInset` down, with `pictureRadius` corners.
+    /// A video poster adds a centred play badge and the duration bottom-left.
     private var pictureTile: some View {
         let picture = size
         return GeometryReader { g in
@@ -3038,12 +3053,33 @@ struct ImageBubble: View {
                     Image(uiImage: shown)
                         .resizable()
                         .scaledToFit()
-                } else if failed || item.blobRef == nil {
-                    Image(systemName: "photo")
+                } else if failed || loadRef == nil {
+                    Image(systemName: isVideoPoster ? "video" : "photo")
                         .font(theme.font(28))
                         .foregroundStyle(fromUser ? theme.userText.opacity(0.7) : theme.muted)
                 } else {
                     ProgressView().tint(fromUser ? theme.userText.opacity(0.7) : theme.muted)
+                }
+                if isVideoPoster {
+                    Circle()
+                        .fill(Color.black.opacity(0.47))
+                        .frame(width: 44, height: 44)
+                        .overlay {
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 18, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .offset(x: 1)
+                        }
+                    if let poster = item.poster {
+                        Text(poster.durationLabel)
+                            .font(theme.font(11, weight: .medium))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                            .padding(8)
+                    }
                 }
             }
             .frame(width: picture.width, height: picture.height)
@@ -3065,12 +3101,18 @@ struct ImageBubble: View {
 
     private func load() async {
         // Decoded before (this row realised again, or the same picture elsewhere): no bytes,
-        // no decode, no placeholder flash.
-        if let ref = item.blobRef, let hit = ChatImageCache.decoded(for: ref) {
+        // no decode, no placeholder flash. Videos load the poster JPEG through the same path.
+        if let ref = loadRef, let hit = ChatImageCache.decoded(for: ref) {
             show(hit)
             return
         }
-        guard let (data, _) = await MediaFetch.bytes(for: item, model: model) else {
+        var fetchItem = item
+        if isVideoPoster, let poster = item.poster {
+            fetchItem.blobRef = poster.ref
+            fetchItem.mime = "image/jpeg"
+            fetchItem.kind = .image
+        }
+        guard let (data, _) = await MediaFetch.bytes(for: fetchItem, model: model) else {
             failed = true
             return
         }
@@ -3081,7 +3123,7 @@ struct ImageBubble: View {
             failed = true
             return
         }
-        if let ref = item.blobRef { ChatImageCache.store(decoded, for: ref) }
+        if let ref = loadRef { ChatImageCache.store(decoded, for: ref) }
         show(decoded)
     }
 

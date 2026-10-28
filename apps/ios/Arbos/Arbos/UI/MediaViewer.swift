@@ -1,4 +1,5 @@
 import ArbosFFI
+import AVFoundation
 import AVKit
 import Photos
 import QuickLook
@@ -33,6 +34,9 @@ struct MediaItem: Identifiable, Equatable {
     /// instead of a chat blob — no Download / Forward, and `caption` under the name.
     var pictureURL: String? = nil
     var caption: String? = nil
+    /// Poster frame for a video bubble / viewer
+    /// (feedback app-01M61H3VVBQZ6NCE708XB41NCC).
+    var poster: VideoPoster? = nil
 
     /// The line under the name: the caption of a profile picture, else when it was shared.
     var subline: String { caption ?? whenLabel }
@@ -91,7 +95,7 @@ enum MediaAlbum {
     static func item(id: String, message m: Message, attachment a: Attachment, kind: MediaItem.Kind, slot: String,
                      projectName: (String) -> String?) -> MediaItem {
         MediaItem(id: id, name: a.name, mime: a.mime, kind: kind, blobRef: a.blobRef, slot: slot,
-                  by: senderName(m, projectName: projectName), at: m.createdAt)
+                  by: senderName(m, projectName: projectName), at: m.createdAt, poster: a.poster)
     }
 
     /// Who shared it, for the caption: name, else `@handle`, else "You" / the agent.
@@ -630,8 +634,9 @@ private struct ZoomableImagePage: View {
     }
 }
 
-/// Video: a dark poster with Play; the file is fetched with the device bearer
-/// (AVPlayer cannot send `Authorization`) and plays inline with the system controls.
+/// Video: poster (or a dark glyph) with Play; the file is fetched with the device
+/// bearer (AVPlayer cannot send `Authorization`) and plays inline. Aspect follows
+/// the poster when present (feedback app-01M61H3VVBQZ6NCE708XB41NCC).
 private struct VideoPage: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -642,20 +647,38 @@ private struct VideoPage: View {
     @State private var player: AVPlayer?
     @State private var loading = false
     @State private var failed = false
+    @State private var posterImage: UIImage?
+
+    private var aspect: CGFloat {
+        if let poster = item.poster, poster.width > 0, poster.height > 0 {
+            return CGFloat(poster.width) / CGFloat(poster.height)
+        }
+        if let posterImage, posterImage.size.height > 0 {
+            return posterImage.size.width / posterImage.size.height
+        }
+        return 16 / 9
+    }
 
     var body: some View {
         ZStack {
             if let player {
                 VideoPlayer(player: player)
-                    .aspectRatio(16 / 9, contentMode: .fit)
+                    .aspectRatio(aspect, contentMode: .fit)
                     .onAppear { player.play() }
                     .onDisappear { player.pause() }
             } else {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(Color.white.opacity(0.06))
-                    .aspectRatio(16 / 9, contentMode: .fit)
+                    .aspectRatio(aspect, contentMode: .fit)
                     .overlay {
-                        Image(systemName: "film").font(.system(size: 44)).foregroundStyle(.white.opacity(0.25))
+                        if let posterImage {
+                            Image(uiImage: posterImage)
+                                .resizable()
+                                .scaledToFit()
+                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        } else {
+                            Image(systemName: "film").font(.system(size: 44)).foregroundStyle(.white.opacity(0.25))
+                        }
                     }
                     .overlay {
                         VStack(spacing: 14) {
@@ -682,6 +705,19 @@ private struct VideoPage: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .modifier(DismissDrag(progress: $dismissProgress, onClose: onClose, enabled: player == nil))
+        .task(id: item.poster?.ref) { await loadPoster() }
+    }
+
+    @MainActor
+    private func loadPoster() async {
+        guard let poster = item.poster else { return }
+        var fetch = item
+        fetch.blobRef = poster.ref
+        fetch.mime = "image/jpeg"
+        fetch.kind = .image
+        guard let (data, _) = await MediaFetch.bytes(for: fetch, model: model),
+              let image = UIImage(data: data) else { return }
+        posterImage = image
     }
 
     @MainActor
@@ -898,6 +934,24 @@ enum MediaFetch {
         } catch {
             return nil
         }
+    }
+
+    /// One frame near 0.5 s as a JPEG (longer side ≤ 840) for a video send
+    /// (feedback app-01M61H3VVBQZ6NCE708XB41NCC). `nil` on failure → send without a poster.
+    static func grabVideoPoster(data: Data, name: String) -> (jpeg: Data, width: Int, height: Int, durationMs: Int64)? {
+        guard let file = tempFile(data, name: name) else { return nil }
+        let asset = AVURLAsset(url: file)
+        let duration = CMTimeGetSeconds(asset.duration)
+        guard duration.isFinite, duration > 0 else { return nil }
+        let durationMs = Int64((duration * 1000).rounded())
+        let gen = AVAssetImageGenerator(asset: asset)
+        gen.appliesPreferredTrackTransform = true
+        gen.maximumSize = CGSize(width: 840, height: 840)
+        let time = CMTime(seconds: min(0.5, duration * 0.5), preferredTimescale: 600)
+        guard let cg = try? gen.copyCGImage(at: time, actualTime: nil) else { return nil }
+        let image = UIImage(cgImage: cg)
+        guard let jpeg = image.jpegData(compressionQuality: 0.85) else { return nil }
+        return (jpeg, Int(cg.width), Int(cg.height), durationMs)
     }
 }
 

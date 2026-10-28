@@ -418,6 +418,7 @@ impl ViewerItem {
                 title: None,
                 chart_part: None,
                 source: None,
+                poster: None,
             },
             by: name.to_owned(),
             when: 0,
@@ -4578,7 +4579,8 @@ impl AppState {
         }
         // Optimistic echo: the row shows at once; the source's frame with the
         // same id replaces it (§3.6). Image files get a local thumbnail so the
-        // card shows a picture immediately, not "No preview".
+        // card shows a picture immediately, not "No preview". Videos grab a
+        // poster frame the same way (feedback app-01M61H3VVBQZ6NCE708XB41NCC).
         let mut parts: Vec<Part> = Vec::new();
         for path in &attachments {
             let name = path
@@ -4589,6 +4591,7 @@ impl AppState {
             let mime = mime_for_path(path).to_string();
             let att_id = new_id();
             let mut blob_ref = None;
+            let mut poster = None;
             let bytes = if let Ok(data) = std::fs::read(path) {
                 let probe = crate::model::Attachment {
                     name: name.clone(),
@@ -4599,6 +4602,7 @@ impl AppState {
                     title: None,
                     chart_part: None,
                     source: None,
+                    poster: None,
                 };
                 if probe.is_image() {
                     if let Some((image, trimmed)) = decode_image_pair(&data) {
@@ -4609,6 +4613,24 @@ impl AppState {
                         }
                         self.thumbnails_requested.insert(key.clone());
                         blob_ref = Some(key);
+                    }
+                } else if probe.is_video() {
+                    if let Some(grab) = crate::ui::video_player::grab_poster(path) {
+                        if let Some((image, trimmed)) = decode_image_pair(&grab.jpeg) {
+                            let key = format!("local:{att_id}:poster");
+                            self.thumbnails.insert(key.clone(), Arc::new(image));
+                            if let Some(t) = trimmed {
+                                self.thumbnails_trimmed.insert(key.clone(), Arc::new(t));
+                            }
+                            self.thumbnails_requested.insert(key.clone());
+                            blob_ref = Some(format!("local:{att_id}"));
+                            poster = Some(Box::new(crate::model::VideoPoster {
+                                blob_ref: key,
+                                width: grab.width,
+                                height: grab.height,
+                                duration_ms: grab.duration_ms,
+                            }));
+                        }
                     }
                 }
                 Some(data.len() as u64)
@@ -4626,6 +4648,7 @@ impl AppState {
                     title: None,
                     chart_part: None,
                     source: None,
+                    poster,
                 },
             });
         }
@@ -4641,6 +4664,7 @@ impl AppState {
                     title: None,
                     chart_part: None,
                     source: None,
+                    poster: None,
                 },
             });
         }
@@ -7574,6 +7598,8 @@ impl AppState {
     }
 
     /// Ask for the current item's picture and its neighbours' so paging is instant.
+    /// Videos fetch their poster JPEG when they have one
+    /// (feedback app-01M61H3VVBQZ6NCE708XB41NCC).
     fn ensure_viewer_pictures(&mut self) {
         let Some(viewer) = self.media_viewer.as_ref() else {
             return;
@@ -7582,8 +7608,15 @@ impl AppState {
         let keys: Vec<String> = [viewer.index.wrapping_sub(1), viewer.index, viewer.index + 1]
             .into_iter()
             .filter_map(|ix| viewer.items.get(ix))
-            .filter(|i| i.attachment.kind() == AttachmentKind::Image)
-            .filter_map(|i| i.attachment.blob_ref.clone())
+            .filter_map(|i| {
+                if i.attachment.kind() == AttachmentKind::Image {
+                    i.attachment.blob_ref.clone()
+                } else if i.attachment.is_video() {
+                    i.attachment.poster.as_ref().map(|p| p.blob_ref.clone())
+                } else {
+                    None
+                }
+            })
             .filter(|k| !k.starts_with("local:"))
             .collect();
         for key in keys {
@@ -10314,13 +10347,17 @@ impl AppState {
 
     /// Reuse the optimistic `local:…` decode when a server frame replaces the
     /// echo: copy it onto the real blob key, or keep the local key when the
-    /// upload left `blob_ref` empty so the card still shows a picture.
+    /// upload left `blob_ref` empty so the card still shows a picture. Video
+    /// posters use a separate `local:…:poster` key carried onto `poster.ref`.
     fn carry_local_previews(&mut self, old: &Message, new: &mut Message) {
-        let old_keys: Vec<Option<String>> = old
+        let old_meta: Vec<(Option<String>, Option<String>)> = old
             .parts
             .iter()
             .filter_map(|p| match p {
-                Part::Attachment { attachment, .. } => Some(attachment.blob_ref.clone()),
+                Part::Attachment { attachment, .. } => Some((
+                    attachment.blob_ref.clone(),
+                    attachment.poster.as_ref().map(|p| p.blob_ref.clone()),
+                )),
                 _ => None,
             })
             .collect();
@@ -10329,30 +10366,48 @@ impl AppState {
             let Part::Attachment { attachment, .. } = part else {
                 continue;
             };
-            let old_key = old_keys.get(i).cloned().flatten();
+            let Some((old_key, old_poster)) = old_meta.get(i).cloned() else {
+                i += 1;
+                continue;
+            };
             i += 1;
-            let Some(old_key) = old_key else {
-                continue;
-            };
-            if !old_key.starts_with("local:") {
-                continue;
-            }
-            let Some(image) = self.thumbnails.get(&old_key).cloned() else {
-                continue;
-            };
-            match attachment.blob_ref.clone() {
-                Some(new_key) if new_key != old_key => {
-                    self.thumbnails.entry(new_key.clone()).or_insert(image);
-                    if let Some(t) = self.thumbnails_trimmed.get(&old_key).cloned() {
-                        self.thumbnails_trimmed.entry(new_key.clone()).or_insert(t);
+            if let Some(old_key) = old_key.filter(|k| k.starts_with("local:")) {
+                if let Some(image) = self.thumbnails.get(&old_key).cloned() {
+                    match attachment.blob_ref.clone() {
+                        Some(new_key) if new_key != old_key => {
+                            self.thumbnails.entry(new_key.clone()).or_insert(image);
+                            if let Some(t) = self.thumbnails_trimmed.get(&old_key).cloned() {
+                                self.thumbnails_trimmed.entry(new_key.clone()).or_insert(t);
+                            }
+                            self.thumbnails_requested.insert(new_key.clone());
+                            self.thumbnails_failed.remove(&new_key);
+                        }
+                        None => {
+                            attachment.blob_ref = Some(old_key);
+                        }
+                        Some(_) => {}
                     }
-                    self.thumbnails_requested.insert(new_key.clone());
-                    self.thumbnails_failed.remove(&new_key);
                 }
-                None => {
-                    attachment.blob_ref = Some(old_key);
+            }
+            if let Some(old_poster) = old_poster.filter(|k| k.starts_with("local:")) {
+                if let Some(image) = self.thumbnails.get(&old_poster).cloned() {
+                    match attachment.poster.as_ref().map(|p| p.blob_ref.clone()) {
+                        Some(new_key) if new_key != old_poster => {
+                            self.thumbnails.entry(new_key.clone()).or_insert(image);
+                            if let Some(t) = self.thumbnails_trimmed.get(&old_poster).cloned() {
+                                self.thumbnails_trimmed.entry(new_key.clone()).or_insert(t);
+                            }
+                            self.thumbnails_requested.insert(new_key.clone());
+                            self.thumbnails_failed.remove(&new_key);
+                        }
+                        None => {
+                            if let Some(p) = attachment.poster.as_mut() {
+                                p.blob_ref = old_poster;
+                            }
+                        }
+                        Some(_) => {}
+                    }
                 }
-                Some(_) => {}
             }
         }
     }
@@ -10403,6 +10458,9 @@ impl AppState {
                         if attachment.kind() == AttachmentKind::Image =>
                     {
                         attachment.blob_ref.clone()
+                    }
+                    Part::Attachment { attachment, .. } if attachment.is_video() => {
+                        attachment.poster.as_ref().map(|p| p.blob_ref.clone())
                     }
                     _ => None,
                 };

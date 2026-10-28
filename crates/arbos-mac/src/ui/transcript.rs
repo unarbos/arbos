@@ -3066,7 +3066,14 @@ impl Transcript {
                 time,
                 forwarded_from,
             } => {
-                let preview = match attachment.blob_ref.as_ref() {
+                // Videos with a poster load the poster JPEG; pictures load their blob.
+                let preview_key = attachment
+                    .poster
+                    .as_ref()
+                    .filter(|_| attachment.is_video())
+                    .map(|p| p.blob_ref.clone())
+                    .or_else(|| attachment.blob_ref.clone());
+                let preview = match preview_key.as_ref() {
                     None => attachments::Preview::Unavailable,
                     Some(k) => {
                         let state = self.state.read(cx);

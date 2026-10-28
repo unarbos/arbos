@@ -148,6 +148,7 @@ mod core_writer_tests {
                         kind: Some("image".into()),
                         blob_ref: Some("ref1".into()),
                         source: None,
+                        poster: None,
                     }],
                     reply_to: Some("other".into()),
                     ..UserMessageOpts::default()

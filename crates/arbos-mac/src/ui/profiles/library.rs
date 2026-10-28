@@ -1204,6 +1204,7 @@ mod render_tests {
                 title: None,
                 chart_part: None,
                 source: None,
+                poster: None,
             },
         }
     }
