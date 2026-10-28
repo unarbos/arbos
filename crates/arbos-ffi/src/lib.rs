@@ -483,6 +483,8 @@ impl From<UserAttachmentRecord> for doc::UserAttachment {
             mime: r.mime,
             kind: r.kind,
             blob_ref: r.blob_ref,
+            // GIF-picker attribution is written by a later path; clients leave it unset.
+            source: None,
         }
     }
 }
