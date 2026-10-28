@@ -26,6 +26,7 @@ pub mod spaces;
 pub mod worker;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -310,10 +311,49 @@ impl Job {
     }
 }
 
+/// Process-lifetime counters of what the `Resync` safety net found (`GET /admin/matrix/status`
+/// → `resync`). `unannounced` is the one to watch: rows the resync was the only path for.
+#[derive(Debug, Default)]
+pub struct Counters {
+    pub resync_passes: AtomicU64,
+    pub resync_queued: AtomicU64,
+    pub resync_pending_skipped: AtomicU64,
+    pub resync_announced: AtomicU64,
+    pub resync_unannounced_expected: AtomicU64,
+    pub resync_unannounced: AtomicU64,
+}
+
+impl Counters {
+    pub fn note_resync(&self, r: &backfill::Resync) {
+        let add = |c: &AtomicU64, n: usize| {
+            c.fetch_add(n as u64, Ordering::Relaxed);
+        };
+        add(&self.resync_passes, 1);
+        add(&self.resync_queued, r.queued);
+        add(&self.resync_pending_skipped, r.pending_skipped);
+        add(&self.resync_announced, r.announced);
+        add(&self.resync_unannounced_expected, r.unannounced_expected);
+        add(&self.resync_unannounced, r.unannounced);
+    }
+
+    pub fn json(&self) -> Value {
+        let get = |c: &AtomicU64| c.load(Ordering::Relaxed);
+        json!({
+            "passes": get(&self.resync_passes),
+            "queued": get(&self.resync_queued),
+            "pending_skipped": get(&self.resync_pending_skipped),
+            "announced": get(&self.resync_announced),
+            "unannounced_solo_project": get(&self.resync_unannounced_expected),
+            "unannounced": get(&self.resync_unannounced),
+        })
+    }
+}
+
 /// Shared handle: config, the worker wake-up, and the outbox API the rest of the relay calls.
 pub struct Matrix {
     pub cfg: Config,
     pub wake: Notify,
+    pub counters: Counters,
 }
 
 impl Matrix {
@@ -321,6 +361,7 @@ impl Matrix {
         Arc::new(Self {
             cfg,
             wake: Notify::new(),
+            counters: Counters::default(),
         })
     }
 
@@ -494,6 +535,7 @@ impl Matrix {
             "outbox": { "pending": q.pending, "failed": q.failed, "done": q.done, "oldest_pending_ms": q.oldest_pending_at },
             "rooms": state.db.matrix_room_count().unwrap_or(0),
             "events": state.db.matrix_event_count().unwrap_or(0),
+            "resync": self.counters.json(),
         })
     }
 }
