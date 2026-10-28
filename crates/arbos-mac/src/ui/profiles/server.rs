@@ -16,8 +16,8 @@ use crate::app::{ProfilePage, ServerSheet};
 use crate::model::{Person, ServerChannel, ServerInfo};
 use crate::ui::glass;
 use crate::ui::highlight;
-use crate::ui::icons::icon;
 use crate::ui::people;
+use crate::ui::sf_symbols;
 use crate::ui::shell::Shell;
 use crate::ui::sidebar::server_picture;
 use crate::ui::theme::{Theme, TEXT_BODY, TEXT_SMALL};
@@ -255,7 +255,7 @@ fn channels_tab(
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(icon("hash", 18.0, theme.text_muted)),
+                            .child(sf_symbols::glyph("number", 18.0, theme.text_muted)),
                     )
                     .child(
                         div()
@@ -317,7 +317,7 @@ fn channels_tab(
                         .opacity(0.0)
                         .group_hover(group, |s| s.opacity(1.0))
                         .map(|el| highlight::button(el, theme))
-                        .child(icon("xmark", 11.0, theme.text_muted))
+                        .child(sf_symbols::glyph("xmark", 11.0, theme.text_muted))
                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
@@ -337,7 +337,7 @@ fn channels_tab(
         list.push(
             kit::row_state(
                 ElementId::Name(SharedString::from(format!("profile-channel-{key}"))),
-                kit::Leading::Glyph("hash"),
+                kit::Leading::Glyph("number"),
                 ch.name.clone(),
                 subtitle,
                 None,
@@ -413,7 +413,7 @@ fn channels_tab(
             rows.push(
                 kit::row(
                     ElementId::Name(SharedString::from(format!("channel-archived-{}", ch.id))),
-                    kit::Leading::Glyph("archive"),
+                    kit::Leading::Glyph("archivebox"),
                     ch.name.clone(),
                     ch.restricted.then(|| "Admins only post".into()),
                     None,
@@ -453,7 +453,7 @@ fn members_tab(
         list.push(
             kit::row(
                 ADD_MEMBERS_ID,
-                kit::Leading::Glyph("person-plus"),
+                kit::Leading::Glyph("person.badge.plus"),
                 "Add members",
                 None,
                 None,
@@ -515,8 +515,8 @@ fn members_tab(
                                 .group_hover(group.clone(), |s| s.opacity(1.0))
                         })
                         .map(|el| highlight::button(el, theme))
-                        .child(icon(
-                            "crown",
+                        .child(sf_symbols::glyph(
+                            "crown.fill",
                             12.0,
                             if is_admin {
                                 theme.warn
@@ -550,7 +550,7 @@ fn members_tab(
                         .opacity(0.0)
                         .group_hover(group, |s| s.opacity(1.0))
                         .map(|el| highlight::button(el, theme))
-                        .child(icon("xmark", 11.0, theme.text_muted))
+                        .child(sf_symbols::glyph("xmark", 11.0, theme.text_muted))
                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
@@ -705,7 +705,7 @@ fn settings_tab(
             .justify_center()
             .cursor_pointer()
             .map(|el| highlight::button(el, theme))
-            .child(icon("xmark", 11.0, theme.text_muted))
+            .child(sf_symbols::glyph("xmark", 11.0, theme.text_muted))
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();

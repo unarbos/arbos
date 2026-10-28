@@ -12,8 +12,8 @@
 use gpui::{div, prelude::*, px, Div, FontWeight, SharedString, Stateful};
 
 use crate::model::Person;
-use crate::ui::icons::icon;
 use crate::ui::profiles::kit;
+use crate::ui::sf_symbols;
 use crate::ui::theme::{Theme, COMPOSER_HEIGHT, TEXT_SMALL, TEXT_TINY};
 
 /// The small capsule after a name: 16 pt tall, 10.5 pt semibold.
@@ -73,7 +73,7 @@ pub fn chip(theme: &Theme) -> Div {
         // error-ui: exception status mark (the Blocked chip is a state, not a failure)
         .text_color(theme.danger)
         .debug_selector(|| "blocked-chip".into())
-        .child(icon("nosign", CHIP_GLYPH, theme.danger))
+        .child(sf_symbols::glyph("nosign", CHIP_GLYPH, theme.danger))
         .child(TAG_LABEL)
 }
 
@@ -152,7 +152,7 @@ pub fn hidden_row(row_id: &str, count: usize, who: &str, theme: &Theme) -> (Div,
         .gap(px(6.0))
         .text_size(px(TEXT_SMALL))
         .text_color(theme.text_muted)
-        .child(icon("nosign", 12.0, theme.text_muted))
+        .child(sf_symbols::glyph("nosign", 12.0, theme.text_muted))
         .child(hidden_line(count, who))
         .child("·");
     let unblock = div()
@@ -197,7 +197,7 @@ pub fn composer_bar(person: &Person, theme: &Theme) -> (Div, Stateful<Div>) {
         .items_center()
         .gap(px(10.0))
         .debug_selector(|| "composer-blocked".into())
-        .child(icon("nosign", 14.0, theme.text_muted))
+        .child(sf_symbols::glyph("nosign", 14.0, theme.text_muted))
         .child(
             div()
                 .flex_1()

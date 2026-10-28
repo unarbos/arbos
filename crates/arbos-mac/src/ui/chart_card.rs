@@ -22,7 +22,7 @@ use arbos_core::chart::{
 };
 
 use super::highlight;
-use super::icons::icon;
+use super::sf_symbols;
 use super::theme::{Appearance, Theme};
 use super::transcript::CodeCopy;
 
@@ -159,7 +159,7 @@ pub fn icon_square(
         .justify_center()
         .cursor_pointer()
         .map(|el| highlight::button(el, theme))
-        .child(icon(glyph, ICON_GLYPH, color))
+        .child(sf_symbols::glyph(glyph, ICON_GLYPH, color))
 }
 
 /// The card: title · subtitle, the three icon squares, the legend, the plot.
@@ -206,7 +206,7 @@ pub fn card(row_id: &str, part_id: &str, spec: &str, theme: &Theme, copy: &CodeC
         icons = icons.child(
             icon_square(
                 copy_id.clone(),
-                if copied { "check" } else { "copy" },
+                if copied { "checkmark" } else { "doc.on.doc" },
                 copied.then_some(theme.online),
                 theme,
             )
@@ -222,7 +222,7 @@ pub fn card(row_id: &str, part_id: &str, spec: &str, theme: &Theme, copy: &CodeC
         icons = icons.child(
             icon_square(
                 SharedString::from(format!("{row_id}#chart-save")),
-                "download",
+                "arrow.down.to.line",
                 None,
                 theme,
             )
@@ -238,7 +238,7 @@ pub fn card(row_id: &str, part_id: &str, spec: &str, theme: &Theme, copy: &CodeC
         icons = icons.child(
             icon_square(
                 SharedString::from(format!("{row_id}#chart-expand")),
-                "expand",
+                "arrow.up.left.and.arrow.down.right",
                 None,
                 theme,
             )

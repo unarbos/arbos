@@ -20,8 +20,8 @@ use crate::chat_search::Sender;
 use crate::ui::avatars;
 use crate::ui::glass;
 use crate::ui::highlight;
-use crate::ui::icons::icon;
 use crate::ui::select::SearchMarks;
+use crate::ui::sf_symbols;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, TEXT_SMALL};
 
@@ -135,7 +135,11 @@ pub fn bar(shell: &Shell, cx: &mut Context<Shell>) -> Option<AnyElement> {
                 cx.stop_propagation();
             }),
         )
-        .child(icon("search", metrics::GLYPH, theme.text_muted));
+        .child(sf_symbols::glyph(
+            "magnifyingglass",
+            metrics::GLYPH,
+            theme.text_muted,
+        ));
 
     if let Some(sender) = search.query.sender.clone() {
         bar = bar.child(pinned_chip(&sender, &theme, cx));
@@ -185,7 +189,7 @@ pub fn bar(shell: &Shell, cx: &mut Context<Shell>) -> Option<AnyElement> {
         .child(
             nav(
                 "chat-search-prev",
-                "chevron-left",
+                "chevron.left",
                 has_hits || pages,
                 &theme,
             )
@@ -194,7 +198,7 @@ pub fn bar(shell: &Shell, cx: &mut Context<Shell>) -> Option<AnyElement> {
             })),
         )
         .child(
-            nav("chat-search-next", "chevron-right", has_hits, &theme).on_click(cx.listener(
+            nav("chat-search-next", "chevron.right", has_hits, &theme).on_click(cx.listener(
                 |this, _, _, cx| {
                     this.state.update(cx, |s, cx| s.chat_search_step(1, cx));
                 },
@@ -212,7 +216,7 @@ pub fn bar(shell: &Shell, cx: &mut Context<Shell>) -> Option<AnyElement> {
                 .cursor_pointer()
                 .map(|el| highlight::washed(el, theme.text_muted, &theme))
                 .debug_selector(|| "chat-search-close".into())
-                .child(icon("xmark", 9.0, theme.bg))
+                .child(sf_symbols::glyph("xmark", 9.0, theme.bg))
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.close_chat_search(window, cx);
@@ -254,7 +258,7 @@ fn nav(id: &'static str, glyph: &str, on: bool, theme: &Theme) -> Stateful<gpui:
         .when(on, |el| highlight::button(el.cursor_pointer(), theme))
         .debug_selector(move || id.into())
         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(icon(
+        .child(sf_symbols::glyph(
             glyph,
             metrics::NAV_GLYPH,
             if on { theme.text } else { theme.text_faint },
@@ -291,7 +295,7 @@ fn pinned_chip(sender: &Sender, theme: &Theme, cx: &mut Context<Shell>) -> AnyEl
     chip_base("chat-search-sender", sender, theme)
         .bg(Theme::with_alpha(theme.accent, metrics::CHIP_ALPHA))
         .text_color(theme.accent)
-        .child(icon("xmark", 9.0, theme.accent))
+        .child(sf_symbols::glyph("xmark", 9.0, theme.accent))
         .cursor_pointer()
         .on_click(cx.listener(|this, _, window, cx| {
             this.state

@@ -62,7 +62,7 @@ pub(super) fn page(
         .into_any_element()
     };
     let hero = Hero {
-        picture: Picture::Glyph("hash"),
+        picture: Picture::Glyph("number"),
         name,
         badge: restricted.then_some("lock"),
         subtitle: Some(
@@ -471,7 +471,11 @@ fn danger_footer(
     let (sid, cid) = (server.id.clone(), channel.id.clone());
     let mut rows: Vec<AnyElement> = vec![kit::row(
         "channel-archive",
-        kit::Leading::Tile(if archived { "tray-up" } else { "archive" }),
+        kit::Leading::Tile(if archived {
+            "tray.and.arrow.up"
+        } else {
+            "archivebox"
+        }),
         if archived {
             "Unarchive channel"
         } else {

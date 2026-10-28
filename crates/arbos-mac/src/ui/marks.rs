@@ -12,7 +12,7 @@ use gpui::{
 };
 
 use crate::model::MachineState;
-use crate::ui::icons::icon;
+use crate::ui::sf_symbols;
 use crate::ui::theme::Theme;
 use crate::ui::working;
 
@@ -67,8 +67,8 @@ pub fn machine_mark(state: MachineState) -> MachineMark {
 }
 
 /// The fault glyph at `size` (the red exclamation, the error note's mark).
-pub fn fault_glyph(size: f32, theme: &Theme) -> gpui::Svg {
-    icon("exclamation", size, theme.danger)
+pub fn fault_glyph(size: f32, theme: &Theme) -> gpui::Div {
+    sf_symbols::glyph("exclamationmark.circle", size, theme.danger)
 }
 
 /// The machine mark drawn: `None` when the state is at rest, so a corner slot

@@ -17,8 +17,8 @@
 use gpui::{div, prelude::*, px, AnyElement, App, Div};
 
 use crate::model::{duration_s, size_mb, BoxReport, BoxWorkspace, Machine, MachineState};
-use crate::ui::icons::icon;
 use crate::ui::profiles::kit;
+use crate::ui::sf_symbols;
 use crate::ui::theme::{Theme, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
 /// Used share at which a gauge turns amber and the warning card appears — agentd's own disk
@@ -479,12 +479,11 @@ pub fn warning_row(w: &Warning, theme: &Theme) -> Div {
         .gap(px(12.0))
         .px(px(kit::INSET))
         .py(px(10.0))
-        .child(
-            div()
-                .flex_shrink_0()
-                .mt(px(1.0))
-                .child(icon("exclamation", 22.0, theme.warn)),
-        )
+        .child(div().flex_shrink_0().mt(px(1.0)).child(sf_symbols::glyph(
+            "exclamationmark.circle",
+            22.0,
+            theme.warn,
+        )))
         .child(
             div()
                 .flex_1()

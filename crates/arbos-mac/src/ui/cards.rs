@@ -21,6 +21,8 @@ pub fn spinner(theme: &Theme, cx: &mut App) -> Div {
 /// `grok-right-pane-details.png`). One step per eighth of the clock's period.
 pub fn activity_spinner(size: f32, theme: &Theme, cx: &App) -> gpui::Svg {
     let step = (PulseClock::ramp(cx, 800) * 8.0).floor() / 8.0;
+    // icon: custom — Grok's eight-spoke dial with fading spokes, rotated per step; SF has no
+    // multi-opacity spinner glyph (`rays` is uniform), so this stays the pack's one custom path.
     crate::ui::icons::icon("spinner", size, theme.accent).with_transformation(
         gpui::Transformation::rotate(gpui::radians(step * std::f32::consts::TAU)),
     )

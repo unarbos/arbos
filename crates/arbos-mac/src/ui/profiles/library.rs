@@ -32,10 +32,10 @@ use crate::model::{now_ms, AttachmentKind, Person};
 use crate::ui::avatars;
 use crate::ui::glass::{self, MENU_CARD_BORDER, MENU_CARD_PADDING, MENU_GAP, MENU_ROW_HEIGHT};
 use crate::ui::highlight::{self, Shape};
-use crate::ui::icons::icon;
 use crate::ui::link_tile;
 use crate::ui::message_menu::place;
 use crate::ui::people;
+use crate::ui::sf_symbols;
 use crate::ui::shell::Shell;
 use crate::ui::sidebar;
 use crate::ui::theme::{Theme, TEXT_SMALL, TEXT_TINY};
@@ -594,7 +594,7 @@ fn row(
                         theme,
                     )
                 })
-                .child(icon("ellipsis", 14.0, theme.text))
+                .child(sf_symbols::glyph("ellipsis", 14.0, theme.text))
                 .on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
                     cx.stop_propagation();
                     this.open_library_menu(target.clone(), e.position(), cx);
@@ -684,11 +684,11 @@ fn show_more(
         .cursor_pointer()
         .map(|el| highlight::row(el, false, Shape::Nested(kit::CARD_RADIUS), theme))
         .child(if expanded { "Show less" } else { "Show more" })
-        .child(icon(
+        .child(sf_symbols::glyph(
             if expanded {
-                "chevron-up"
+                "chevron.up"
             } else {
-                "chevron-down"
+                "chevron.down"
             },
             11.0,
             theme.text_muted,
@@ -719,15 +719,19 @@ fn thumb(entry: &Entry, state: &AppState, theme: &Theme) -> Div {
                     .rounded(px(THUMB_RADIUS))
                     .object_fit(ObjectFit::Cover),
             ),
-            (AttachmentKind::Image, None) => tile.child(icon("photo", 16.0, theme.text_faint)),
-            (AttachmentKind::Video, None) => tile.child(icon("video", 16.0, theme.text_faint)),
+            (AttachmentKind::Image, None) => {
+                tile.child(sf_symbols::glyph("photo", 16.0, theme.text_faint))
+            }
+            (AttachmentKind::Video, None) => {
+                tile.child(sf_symbols::glyph("video", 16.0, theme.text_faint))
+            }
             _ => match extension(&f.attachment.name) {
                 Some(e) => tile
                     .text_size(px(10.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.text_muted)
                     .child(e),
-                None => tile.child(icon("doc", 16.0, theme.text_muted)),
+                None => tile.child(sf_symbols::glyph("doc", 16.0, theme.text_muted)),
             },
         },
         Entry::Link(l) => link_tile::tile(link_icon(l, state), THUMB, theme),
@@ -809,15 +813,19 @@ fn preview(entry: &Entry, state: &AppState, theme: &Theme) -> AnyElement {
                     .rounded(px(CARD_IMAGE_RADIUS))
                     .object_fit(ObjectFit::Cover),
             ),
-            (AttachmentKind::Image, None) => frame.child(icon("photo", 36.0, theme.text_faint)),
-            (AttachmentKind::Video, None) => frame.child(icon("video", 36.0, theme.text_faint)),
+            (AttachmentKind::Image, None) => {
+                frame.child(sf_symbols::glyph("photo", 36.0, theme.text_faint))
+            }
+            (AttachmentKind::Video, None) => {
+                frame.child(sf_symbols::glyph("video", 36.0, theme.text_faint))
+            }
             _ => match extension(&f.attachment.name) {
                 Some(e) => frame
                     .text_size(px(22.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.text_muted)
                     .child(e),
-                None => frame.child(icon("doc", 36.0, theme.text_muted)),
+                None => frame.child(sf_symbols::glyph("doc", 36.0, theme.text_muted)),
             },
         },
         Entry::Link(l) => frame.child(link_tile::tile(link_icon(l, state), PREVIEW_TILE, theme)),
