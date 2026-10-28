@@ -147,8 +147,16 @@ fn resolve_legacy(state: &AppState, token: &str) -> Option<Principal> {
 
 /// Token from `Authorization: Bearer …` or `?token=` (WebSocket dials, crdt-sync §10.2).
 pub fn token_from_parts(parts: &Parts) -> Option<String> {
-    if let Some(v) = parts
-        .headers
+    token_from(&parts.headers, &parts.uri)
+}
+
+/// [`token_from_parts`] for a whole request (the request layer, before the handler runs).
+pub fn token_from_parts_ref(req: &axum::extract::Request) -> Option<String> {
+    token_from(req.headers(), req.uri())
+}
+
+fn token_from(headers: &axum::http::HeaderMap, uri: &axum::http::Uri) -> Option<String> {
+    if let Some(v) = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
     {
@@ -156,7 +164,7 @@ pub fn token_from_parts(parts: &Parts) -> Option<String> {
             return Some(t.trim().to_owned());
         }
     }
-    let q = parts.uri.query()?;
+    let q = uri.query()?;
     q.split('&')
         .find_map(|kv| kv.strip_prefix("token=").map(|t| t.to_owned()))
 }

@@ -1122,23 +1122,10 @@ pub(crate) mod tests {
             .expect("member");
         assert_eq!(mine["handle"].as_str(), Some("feedbackguy"));
         assert_eq!(mine["project"]["name"].as_str(), Some("FeedbackGuy"));
-        assert!(crate::people::addressed(
-            &arbos_core::doc::MessageView {
-                id: "m1".into(),
-                role: "user".into(),
-                status: "done".into(),
-                parts: vec![serde_json::json!({
-                    "kind": "text",
-                    "text": "@feedbackguy you alive?"
-                })],
-                rest: serde_json::json!({ "sender": "user:u1" }),
-            },
-            &agent.cfg.project_id,
-            &info.slug,
-            false,
-            false,
-            false,
-        ));
+        assert_eq!(
+            crate::people::mention_role("@feedbackguy you alive?", &info.slug),
+            crate::people::MentionRole::Addressed
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
