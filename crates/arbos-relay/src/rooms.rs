@@ -134,6 +134,39 @@ async fn room_oplog_vv(
     Ok(vv)
 }
 
+/// The newest `n` message rows of a room's stored doc (projected JSON, oldest first), from the
+/// same cache the version-vector readers use. The link-preview scan reads the tail this way
+/// so a busy room is not rebuilt from its rows on every message.
+pub async fn room_tail_rows(
+    state: &AppState,
+    room_name: &str,
+    n: usize,
+) -> anyhow::Result<Vec<serde_json::Value>> {
+    let room = state.room(room_name).await;
+    let tail = |doc: &arbos_core::doc::ChatDoc| {
+        let list = doc.messages_list();
+        let len = list.len();
+        (len.saturating_sub(n)..len)
+            .filter_map(|i| doc.projected_row(i))
+            .collect::<Vec<_>>()
+    };
+    {
+        let mut guard = room.doc_cache.lock().unwrap();
+        if let Some(cached) = guard.as_mut() {
+            advance_room_doc(state, room_name, cached)?;
+            return Ok(tail(&cached.doc));
+        }
+    }
+    let state_c = state.clone();
+    let name = room_name.to_owned();
+    let built = tokio::task::spawn_blocking(move || build_room_doc(&state_c, &name))
+        .await
+        .map_err(|e| anyhow::anyhow!("room doc rebuild: {e}"))??;
+    let rows = tail(&built.doc);
+    *room.doc_cache.lock().unwrap() = Some(built);
+    Ok(rows)
+}
+
 /// Per-socket row ordering (see `run`).
 struct Delivery {
     /// True from connect / HELLO until this socket's ROWS_REQ reply ended with ROWS_DONE.
@@ -583,6 +616,13 @@ async fn handle_frame(
                     bytes: row,
                     seq,
                 });
+                if !p.heal {
+                    // A link in a finished message gets its preview card (#2064), off the
+                    // socket task.
+                    if let Some((_, chat_id)) = room_name.rsplit_once('/') {
+                        crate::unfurl::on_row(state, project_id, chat_id, is_box);
+                    }
+                }
                 if p.heal {
                     // History, not a new message: no read-cursor move, no notification, no
                     // wake. The Matrix mirror resync picks the rows up on its own.
