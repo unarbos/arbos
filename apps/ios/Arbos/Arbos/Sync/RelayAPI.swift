@@ -320,6 +320,41 @@ final class RelayAPI {
         return (v as? [String: Any])?["id"] as? String
     }
 
+    // MARK: Outside agents (#2142) — an agent that runs elsewhere, hosted by the relay
+
+    /// `POST /outside-agents {name, transport}` → the new agent's key, shown once.
+    func connectAgent(name: String, transport: String) async throws -> ConnectReveal {
+        let v = try await json("POST", "/outside-agents", body: ["name": name, "transport": transport])
+        guard let reveal = ConnectReveal(json: v, rotated: false) else {
+            throw RelayError(status: 500, message: "The relay answered without a key.")
+        }
+        return reveal
+    }
+
+    /// `GET /outside-agents/{id}` → its connection; `nil` for an agent that is not outside.
+    func outsideAgent(_ projectId: Id) async throws -> OutsideAgentInfo? {
+        do {
+            let v = try await json("GET", "/outside-agents/\(projectId)")
+            return OutsideAgentInfo(json: (v as? [String: Any])?["agent"])
+        } catch let e as RelayError where e.status == 404 {
+            return nil
+        }
+    }
+
+    /// `POST /outside-agents/{id}/rotate` → a fresh key; the old one stops at once.
+    func rotateOutsideKey(_ projectId: Id) async throws -> ConnectReveal {
+        let v = try await json("POST", "/outside-agents/\(projectId)/rotate", body: [String: Any]())
+        guard let reveal = ConnectReveal(json: v, rotated: true) else {
+            throw RelayError(status: 500, message: "The relay answered without a key.")
+        }
+        return reveal
+    }
+
+    /// `DELETE /outside-agents/{id}`: revoke the key; the agent and its messages stay.
+    func revokeOutsideAgent(_ projectId: Id) async throws {
+        _ = try await request("DELETE", "/outside-agents/\(projectId)")
+    }
+
     /// Soft-delete an owned agent (`DELETE /projects/{id}`).
     func deleteProject(_ projectId: Id) async throws {
         _ = try await request("DELETE", "/projects/\(projectId)")
@@ -1392,5 +1427,83 @@ final class RelayAPI {
             NSLog("GoalDto: \(error)")
             throw RelayError(status: 0, message: "Bad goal reply")
         }
+    }
+}
+
+// MARK: - Outside agents (#2142)
+
+/// The connection of an outside agent (`GET /outside-agents/{id}` → `agent`).
+struct OutsideAgentInfo: Equatable {
+    /// `connected` | `away` | `never` | `revoked`.
+    var status: String
+    var connected: Bool
+    /// `acp` | `grok` | `custom`.
+    var transport: String
+    /// `asp/1`.
+    var proto: String
+    var lastSeenAt: Int64?
+
+    init?(json: Any?) {
+        guard let d = json as? [String: Any] else { return nil }
+        status = d["status"] as? String ?? "never"
+        connected = d["connected"] as? Bool ?? false
+        transport = d["transport"] as? String ?? "custom"
+        proto = d["protocol"] as? String ?? "asp/1"
+        if let t = d["last_seen_at"] as? NSNumber { lastSeenAt = t.int64Value } else { lastSeenAt = nil }
+    }
+
+    /// The transport as the Details pane names it.
+    var transportLabel: String {
+        switch transport {
+        case "acp": return "ACP · on your Mac"
+        case "grok": return "Grok · HTTPS"
+        default: return "Custom · HTTPS / WebSocket"
+        }
+    }
+
+    /// "Connected · 12 s ago", "Away · 40 min ago", "Waiting for the first heartbeat", "Disconnected".
+    func statusLine(now: Int64 = Int64(Date().timeIntervalSince1970 * 1000)) -> String {
+        func ago(_ t: Int64) -> String {
+            let s = max(0, (now - t) / 1000)
+            if s < 60 { return "\(s) s ago" }
+            if s < 3600 { return "\(s / 60) min ago" }
+            if s < 86_400 { return "\(s / 3600) h ago" }
+            return "\(s / 86_400) d ago"
+        }
+        switch (status, lastSeenAt) {
+        case ("revoked", _): return "Disconnected"
+        case ("connected", let t?): return "Connected · \(ago(t))"
+        case ("connected", nil): return "Connected"
+        case ("away", let t?): return "Away · \(ago(t))"
+        case ("away", nil): return "Away"
+        default: return "Waiting for the first heartbeat"
+        }
+    }
+}
+
+/// What the reveal screen shows once: the key and the link, plus the live connection.
+struct ConnectReveal: Equatable {
+    var projectId: Id
+    var name: String
+    var transport: String
+    var key: String
+    var link: String
+    var relayURL: String
+    var chatId: Id?
+    var rotated: Bool
+    var info: OutsideAgentInfo?
+
+    init?(json: Any, rotated: Bool) {
+        guard let d = json as? [String: Any], let agent = d["agent"] as? [String: Any],
+              let id = agent["project_id"] as? String, let key = d["key"] as? String else { return nil }
+        projectId = id
+        name = agent["name"] as? String ?? ""
+        transport = agent["transport"] as? String ?? "custom"
+        self.key = key
+        link = d["link"] as? String ?? ""
+        relayURL = d["relay_url"] as? String ?? ""
+        chatId = d["chat_id"] as? String
+        self.rotated = rotated
+        info = OutsideAgentInfo(json: agent)
     }
 }
