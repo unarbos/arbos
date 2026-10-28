@@ -704,6 +704,7 @@ pub(crate) fn project_from_dto(
         avatar_version: p.avatar_version.unwrap_or(0),
         message_grants: p.message_grants.iter().map(message_grant_from).collect(),
         blocked_senders: Vec::new(),
+        my_role: None,
     }
 }
 
@@ -1028,6 +1029,7 @@ pub(crate) fn people_space_from(
         avatar_version: 0,
         message_grants: Vec::new(),
         blocked_senders: dto.blocked_senders.clone(),
+        my_role: dto.me.role.clone().flatten(),
     };
     let chat = Chat {
         id: id.clone(),
