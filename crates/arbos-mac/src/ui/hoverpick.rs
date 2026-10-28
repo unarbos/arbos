@@ -14,8 +14,8 @@ use crate::model::{Effort, Id, Project};
 use crate::sync::fixture::MODELS;
 use crate::ui::composer::Composer;
 use crate::ui::highlight::{self, Shape};
-use crate::ui::icons::icon;
 use crate::ui::profiles::kit::{self, Leading};
+use crate::ui::sf_symbols;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, TEXT_SMALL, TEXT_TINY};
 use crate::ui::voicepicker;
@@ -49,7 +49,7 @@ pub fn row(
         caption.to_string(),
         None,
         Some(value.into()),
-        open.then(|| icon("chevron-up", 13.0, theme.text_faint).into_any_element()),
+        open.then(|| sf_symbols::glyph("chevron.up", 13.0, theme.text_faint).into_any_element()),
         !open,
         open,
         theme,
@@ -256,7 +256,9 @@ fn item(
         .cursor_pointer();
     highlight::row(frame, false, Shape::Nested(LIST_RADIUS), theme)
         .child(div().flex_1().min_w_0().truncate().child(label.into()))
-        .when(selected, |el| el.child(icon("check", 14.0, theme.accent)))
+        .when(selected, |el| {
+            el.child(sf_symbols::glyph("checkmark", 14.0, theme.accent))
+        })
 }
 
 /// The Model dropdown: a search field, then the matching models.
@@ -278,7 +280,7 @@ pub fn model_panel(shell: &Shell, project: &Project, cx: &mut Context<Shell>) ->
         .border_b_1()
         .border_color(theme.border)
         .cursor_text()
-        .child(icon("search", 13.0, theme.text_muted))
+        .child(sf_symbols::glyph("magnifyingglass", 13.0, theme.text_muted))
         .child(
             div()
                 .flex_1()

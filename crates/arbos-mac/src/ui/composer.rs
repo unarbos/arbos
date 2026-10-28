@@ -34,9 +34,9 @@ use crate::ui::error_note;
 use crate::ui::frost::{frosted, PANEL_BLUR};
 use crate::ui::glass;
 use crate::ui::highlight;
-use crate::ui::icons::icon;
 use crate::ui::mention::{self, Mention, MentionToken, Mentions};
 use crate::ui::select::{self, word_range};
+use crate::ui::sf_symbols;
 use crate::ui::theme::{
     Theme, COMPOSER_HEIGHT, LINE_HEIGHT, PANEL_RADIUS, PLUS_BUTTON, SEND_BUTTON, TEXT_BODY,
     TEXT_SMALL, TEXT_TINY,
@@ -3013,7 +3013,7 @@ impl Composer {
             .role(AriaRole::Button)
             .aria_label(STAGED_REMOVE_LABEL)
             .tooltip(|_, cx| cx.new(|_| TextTip(STAGED_REMOVE_LABEL.into())).into())
-            .child(icon("xmark", 9.0, gpui::white()))
+            .child(sf_symbols::glyph("xmark", 9.0, gpui::white()))
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
                 this.remove_attachment(i, cx);
@@ -3064,7 +3064,7 @@ impl Composer {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(icon(
+                        .child(sf_symbols::glyph(
                             if is_image_path(&staged.path) {
                                 "photo"
                             } else {
@@ -3684,9 +3684,9 @@ impl Render for Composer {
                 .justify_center()
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.88))
-                .child(icon(
+                .child(sf_symbols::glyph(
                     glyph,
-                    if glyph == "stop" { 14.0 } else { 16.0 },
+                    if glyph == "stop.fill" { 14.0 } else { 16.0 },
                     if action == ButtonAction::StopMemo {
                         gpui::white()
                     } else if red {
@@ -3740,7 +3740,7 @@ impl Render for Composer {
                 theme.surface_2
             })
             .hover(|s| s.opacity(0.88))
-            .child(icon(
+            .child(sf_symbols::glyph(
                 "mic",
                 16.0,
                 if recording {
@@ -3780,7 +3780,7 @@ impl Render for Composer {
             .justify_center()
             .cursor_pointer()
             .map(|el| highlight::washed(el, theme.surface_2, &theme))
-            .child(icon("plus", 16.0, theme.text_muted))
+            .child(sf_symbols::glyph("plus", 16.0, theme.text_muted))
             .on_click(cx.listener(|this, _, _, cx| this.attach(cx)));
 
         let field_body = if recording {
@@ -3795,7 +3795,7 @@ impl Render for Composer {
                 .rounded_full()
                 .cursor_pointer()
                 .map(|el| highlight::button(el, &theme))
-                .child(icon("xmark", 11.0, theme.text_muted))
+                .child(sf_symbols::glyph("xmark", 11.0, theme.text_muted))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.voice.update(cx, |v, cx| v.cancel_memo(cx));
                 }));
@@ -3966,7 +3966,7 @@ impl Render for Composer {
                     .rounded_full()
                     .cursor_pointer()
                     .map(|el| highlight::button(el, &theme))
-                    .child(icon("xmark", 10.0, theme.text_muted))
+                    .child(sf_symbols::glyph("xmark", 10.0, theme.text_muted))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.state
                             .update(cx, |s, cx| s.clear_editing(&clear_chat, cx));
@@ -4002,7 +4002,7 @@ impl Render for Composer {
                         .rounded_full()
                         .cursor_pointer()
                         .map(|el| highlight::button(el, &theme))
-                        .child(icon("xmark", 10.0, theme.text_muted))
+                        .child(sf_symbols::glyph("xmark", 10.0, theme.text_muted))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.state
                                 .update(cx, |s, cx| s.clear_reply_to(&clear_chat, cx));
@@ -4087,9 +4087,9 @@ enum ButtonAction {
 impl ButtonAction {
     fn glyph(self) -> &'static str {
         match self {
-            ButtonAction::Send => "arrow-up",
+            ButtonAction::Send => "arrow.up",
             ButtonAction::Guide => "",
-            ButtonAction::Stop | ButtonAction::StopMemo => "stop",
+            ButtonAction::Stop | ButtonAction::StopMemo => "stop.fill",
             ButtonAction::Call => "phone",
         }
     }
@@ -4257,7 +4257,7 @@ pub fn edit_preview_bar(line: &str, theme: &Theme, clear: impl IntoElement) -> g
         .child(
             div()
                 .flex_shrink_0()
-                .child(icon("pencil", 12.0, theme.text_muted)),
+                .child(sf_symbols::glyph("pencil", 12.0, theme.text_muted)),
         )
         .child(
             div()
@@ -4303,11 +4303,11 @@ pub fn reply_preview_bar(
         .px(px(14.0))
         .rounded(px(14.0))
         .bg(theme.bubble_assistant)
-        .child(
-            div()
-                .flex_shrink_0()
-                .child(icon("reply", 12.0, theme.text_muted)),
-        )
+        .child(div().flex_shrink_0().child(sf_symbols::glyph(
+            "arrowshape.turn.up.left",
+            12.0,
+            theme.text_muted,
+        )))
         .child(
             div()
                 .flex_shrink_0()
@@ -4596,7 +4596,7 @@ mod tests {
                 assert!(mic_mounted(has_text, true));
             }
         }
-        assert_eq!(ButtonAction::StopMemo.glyph(), "stop");
+        assert_eq!(ButtonAction::StopMemo.glyph(), "stop.fill");
     }
 
     #[test]

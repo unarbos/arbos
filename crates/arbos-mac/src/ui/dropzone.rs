@@ -19,7 +19,7 @@ use gpui::{
     FileDropEvent, FontWeight, MouseUpEvent, Stateful, WeakEntity, Window,
 };
 
-use crate::ui::icons::icon;
+use crate::ui::sf_symbols;
 use crate::ui::theme::{Theme, TEXT_BODY, TEXT_SMALL};
 
 /// The outline's inset from the pane edges, and its corner radius.
@@ -142,7 +142,7 @@ pub fn overlay(theme: &Theme) -> Div {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(icon("arrow-down", 22.0, gpui::white())),
+                        .child(sf_symbols::glyph("arrow.down", 22.0, gpui::white())),
                 )
                 .child(
                     div()

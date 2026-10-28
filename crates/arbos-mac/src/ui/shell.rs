@@ -39,7 +39,6 @@ use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
 use crate::ui::glass::{self, WindowDrag};
 use crate::ui::header;
 use crate::ui::highlight;
-use crate::ui::icons::icon;
 use crate::ui::local::{LocalEvent, LocalPanel};
 use crate::ui::media_viewer;
 use crate::ui::member_menu;
@@ -56,6 +55,7 @@ use crate::ui::reactions;
 use crate::ui::routines::{RoutinesEvent, RoutinesPanel};
 use crate::ui::secrets::{SecretsEvent, SecretsPanel};
 use crate::ui::servers;
+use crate::ui::sf_symbols;
 use crate::ui::sidebar;
 use crate::ui::skills::{self, SkillsPanel};
 use crate::ui::slide::{self, ChatSlide, PaneSlides};
@@ -3240,7 +3240,11 @@ impl Shell {
                     highlight::washed(el.cursor_pointer(), fill, &theme)
                 })
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(icon("cloud-download", sidebar::FOOTER_DISC_GLYPH, glyph))
+                .child(sf_symbols::glyph(
+                    "icloud.and.arrow.down",
+                    sidebar::FOOTER_DISC_GLYPH,
+                    glyph,
+                ))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if !busy {
                         this.state.update(cx, |s, cx| s.install_update(cx));
@@ -4573,7 +4577,7 @@ impl Shell {
                     .gap(px(12.0))
                     .child(
                         glass::circle("notify-glyph", 40.0, &theme)
-                            .child(icon("bell", 17.0, theme.text)),
+                            .child(sf_symbols::glyph("bell", 17.0, theme.text)),
                     )
                     .child(
                         div()
@@ -4681,7 +4685,7 @@ impl Shell {
                             .justify_center()
                             .cursor_pointer()
                             .hover(|s| s.opacity(0.7))
-                            .child(icon("xmark", 12.0, theme.text_muted))
+                            .child(sf_symbols::glyph("xmark", 12.0, theme.text_muted))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.state.update(cx, |s, cx| {
                                     s.dismiss_all_notices();
