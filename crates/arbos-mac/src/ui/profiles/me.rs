@@ -74,7 +74,7 @@ impl Shell {
             String::new()
         };
         let devices_view = state.devices.clone();
-        let devices_summary = match state.devices.items.len() {
+        let devices_summary = match devices::live(&state.devices.items).count() {
             0 => String::new(),
             1 => "1 device".to_string(),
             n => format!("{n} devices"),
@@ -1083,7 +1083,7 @@ impl Shell {
                 ));
             } else if !view.loaded && view.items.is_empty() {
                 body = body.child(kit::empty("Loading…", &theme));
-            } else if view.items.is_empty() {
+            } else if devices::live(&view.items).next().is_none() {
                 body = body.child(kit::empty("No devices yet", &theme));
             } else {
                 let mut rows: Vec<gpui::AnyElement> = Vec::new();
