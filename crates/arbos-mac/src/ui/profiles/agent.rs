@@ -46,6 +46,9 @@ use super::{chats_of, collect, editable_name, hero_picture, HeroClick, HERO_AVAT
 /// (the agent's box). Every pane keeps the structure (hero, pill, options),
 /// not a tab count.
 pub(super) const TABS: [&str; 3] = ["Details", "Library", "Computer"];
+/// A connected (outside) agent has no Arbos machine: Details · Library (#2141; the
+/// Connection and Key cards sit under Details, `connect_agent::details_sections`).
+pub(super) const OUTSIDE_TABS: [&str; 2] = ["Details", "Library"];
 /// Jacob 2026-10-25 ([feedback agent-details-remove-sections-mac-2026-10-25]):
 /// the Details tab hides its Coding and Routines cards for now. Temporary —
 /// flip this to bring them back; the Computer tab, the routines calls and the
@@ -125,7 +128,12 @@ pub(super) fn page(
     let voice_text = crate::ui::voicepicker::current_label(&project, &state.voices);
     let pick = state.agent_pick;
     let renaming = state.profile_editing_name && mine;
-    let tab = state.profile_tab;
+    let outside = project.outside.clone();
+    // An outside agent has no Computer tab: a stale index lands on Details.
+    let tab = match state.profile_tab {
+        TAB_COMPUTER if outside.is_some() => 0,
+        t => t,
+    };
     let editing_description = state.profile_editing_description && mine;
     let pid: Id = project.id.clone();
     // Library tab: what the agent's chats hold (read while `state` is borrowed).
@@ -278,6 +286,12 @@ pub(super) fn page(
             &theme,
             cx,
         ),
+        _ if outside.is_some() => crate::ui::connect_agent::details_sections(
+            &pid,
+            outside.as_ref().expect("outside"),
+            &theme,
+            cx,
+        ),
         TAB_COMPUTER => computer_sections(
             &project,
             mine,
@@ -385,7 +399,11 @@ pub(super) fn page(
                 project_id: project.id.clone(),
             },
             hero,
-            tabs: &TABS,
+            tabs: if outside.is_some() {
+                &OUTSIDE_TABS
+            } else {
+                &TABS
+            },
             selected: tab,
             body,
             footer,
