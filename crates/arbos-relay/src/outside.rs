@@ -35,6 +35,7 @@ use crate::api::{internal, ApiResult};
 use crate::auth::Principal;
 use crate::db::{Chat, Project};
 use crate::notify::{ChatRef, Sender};
+use crate::outside_wake::{self, LastWake, Nudge};
 use crate::people;
 use crate::signin::api_error;
 use crate::state::AppState;
@@ -69,6 +70,9 @@ CREATE TABLE IF NOT EXISTS asp_events (
 );
 CREATE INDEX IF NOT EXISTS asp_events_project ON asp_events(project_id, id);
 "#;
+/// Additive migration for rows made before the scopes column (run after [`SCHEMA`]).
+pub const MIGRATIONS: &[&str] =
+    &["ALTER TABLE outside_agents ADD COLUMN scopes TEXT NOT NULL DEFAULT '{}'"];
 
 /// One outside agent row.
 #[derive(Debug, Clone)]
@@ -82,9 +86,67 @@ pub struct OutsideAgent {
     pub last_seen_at: Option<i64>,
     pub connected_at: Option<i64>,
     pub agent_info: Value,
+    /// Wake URL (`outside_wake`): the URL is plain, the header value never leaves the DB.
+    pub wake_url: Option<String>,
+    pub wake_auth_set: bool,
+    pub wake_last: Option<LastWake>,
+    /// Owner overrides per scope name (`{"files.read": true}`); [`Scopes::effective`] fills the rest.
+    pub scopes: Value,
+}
+
+/// The nine permission switches (spec §4.3) with their defaults.
+pub const SCOPES: &[(&str, bool)] = &[
+    ("chat.read", true),
+    ("chat.post", true),
+    ("chat.react", true),
+    ("presence", true),
+    ("approval.request", true),
+    ("secret.use", false),
+    ("members.manage", false),
+    ("files.read", false),
+    ("calls.join", false),
+];
+
+impl OutsideAgent {
+    /// Every scope with the owner's override applied over the default.
+    pub fn effective_scopes(&self) -> serde_json::Map<String, Value> {
+        let mut out = serde_json::Map::new();
+        for (name, default) in SCOPES {
+            let on = self
+                .scopes
+                .get(*name)
+                .and_then(Value::as_bool)
+                .unwrap_or(*default);
+            out.insert((*name).to_owned(), Value::Bool(on));
+        }
+        out
+    }
+
+    pub fn allows(&self, scope: &str) -> bool {
+        let default = SCOPES
+            .iter()
+            .find(|(n, _)| *n == scope)
+            .map(|(_, d)| *d)
+            .unwrap_or(false);
+        self.scopes
+            .get(scope)
+            .and_then(Value::as_bool)
+            .unwrap_or(default)
+    }
 }
 
 impl OutsideAgent {
+    /// What the owner API and the apps' Connection card see of the Wake URL (no secret).
+    pub fn wake_json(&self) -> Value {
+        json!({
+            "url": self.wake_url,
+            "url_set": self.wake_url.is_some(),
+            "auth_set": self.wake_auth_set,
+            "header": outside_wake::HEADER,
+            "last": self.wake_last.as_ref().map(LastWake::json),
+        })
+    }
+
     pub fn connected(&self) -> bool {
         self.revoked_at.is_none() && self.last_seen_at.is_some_and(|t| now_ms() - t <= ONLINE_MS)
     }
@@ -117,11 +179,14 @@ impl OutsideAgent {
             "last_seen_at": self.last_seen_at,
             "connected_at": self.connected_at,
             "agent": self.agent_info,
+            "wake": self.wake_json(),
+            "scopes": Value::Object(self.effective_scopes()),
         })
     }
 }
 
 fn row_to_agent(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutsideAgent> {
+    let wake_last_at: Option<i64> = r.get(12)?;
     Ok(OutsideAgent {
         project_id: r.get(0)?,
         user_id: r.get(1)?,
@@ -132,10 +197,20 @@ fn row_to_agent(r: &rusqlite::Row<'_>) -> rusqlite::Result<OutsideAgent> {
         last_seen_at: r.get(6)?,
         connected_at: r.get(7)?,
         agent_info: serde_json::from_str(&r.get::<_, String>(8)?).unwrap_or(Value::Null),
+        scopes: serde_json::from_str(&r.get::<_, String>(9)?).unwrap_or_else(|_| json!({})),
+        wake_url: r.get::<_, Option<String>>(10)?.filter(|u| !u.is_empty()),
+        wake_auth_set: r
+            .get::<_, Option<String>>(11)?
+            .is_some_and(|a| !a.is_empty()),
+        wake_last: wake_last_at.map(|at| LastWake {
+            at,
+            status: r.get::<_, Option<u16>>(13).unwrap_or(None),
+            error: r.get::<_, Option<String>>(14).unwrap_or(None),
+        }),
     })
 }
 
-const AGENT_COLS: &str = "project_id, user_id, transport, created_at, revoked_at, rotated_at, last_seen_at, connected_at, agent_info";
+const AGENT_COLS: &str = "project_id, user_id, transport, created_at, revoked_at, rotated_at, last_seen_at, connected_at, agent_info, scopes, wake_url, wake_auth, wake_last_at, wake_last_status, wake_last_error";
 
 impl crate::db::Db {
     pub fn outside_agent(&self, project_id: &str) -> anyhow::Result<Option<OutsideAgent>> {
@@ -251,6 +326,32 @@ impl crate::db::Db {
         })
     }
 
+    /// Merge `patch` (scope name → bool) into the owner's overrides.
+    pub fn set_outside_scopes(
+        &self,
+        project_id: &str,
+        patch: &serde_json::Map<String, Value>,
+    ) -> anyhow::Result<()> {
+        let Some(agent) = self.outside_agent(project_id)? else {
+            anyhow::bail!("no such connected agent");
+        };
+        let mut cur = agent.scopes.as_object().cloned().unwrap_or_default();
+        for (k, v) in patch {
+            if SCOPES.iter().any(|(n, _)| n == k) {
+                if let Some(b) = v.as_bool() {
+                    cur.insert(k.clone(), Value::Bool(b));
+                }
+            }
+        }
+        self.with(|c| {
+            c.execute(
+                "UPDATE outside_agents SET scopes = ?2 WHERE project_id = ?1",
+                params![project_id, Value::Object(cur).to_string()],
+            )?;
+            Ok(())
+        })
+    }
+
     pub fn insert_asp_event(&self, project_id: &str, payload: &Value) -> anyhow::Result<i64> {
         self.with(|c| {
             c.execute(
@@ -350,13 +451,35 @@ fn open_streams() -> &'static StdMutex<OpenStreams> {
     S.get_or_init(|| StdMutex::new(HashMap::new()))
 }
 
-/// Store one event for the agent and wake whoever is parked on its inbox.
+#[cfg(test)]
+pub(crate) fn deliver_for_test(state: &AppState, project_id: &str, payload: Value) {
+    deliver(state, project_id, payload);
+}
+
+/// Does this queued event ask the agent to act: a `wake: true` row or a chat it was added to?
+fn wakes(payload: &Value) -> bool {
+    payload["wake"].as_bool() == Some(true) || payload["type"] == "member.added"
+}
+
+/// Store one event for the agent, wake whoever is parked on its inbox, and nudge its Wake URL
+/// when the event asks the agent to act.
 fn deliver(state: &AppState, project_id: &str, mut payload: Value) {
     payload["ts"] = json!(now_ms());
     match state.db.insert_asp_event(project_id, &payload) {
         Ok(id) => {
             tracing::debug!(project = %project_id, id, kind = %payload["type"], "asp event queued");
             waiter(project_id).notify_waiters();
+            if wakes(&payload) {
+                outside_wake::nudge(
+                    state,
+                    Nudge {
+                        agent: project_id.to_owned(),
+                        chat: payload["chat"]["id"].as_str().map(str::to_owned),
+                        event_id: id,
+                        kind: payload["type"].as_str().unwrap_or_default().to_owned(),
+                    },
+                );
+            }
         }
         Err(e) => tracing::warn!(project = %project_id, error = %e, "asp event not stored"),
     }
@@ -446,6 +569,20 @@ pub fn on_announce(
     };
     // Remember the id: a row fallback racing this announce must not deliver it again.
     let _ = mark_seen(&chat.chat_id, message_id);
+    if targets.is_empty() {
+        return;
+    }
+    // Pictures, files, GIFs and chart PNGs on the row, and the message it replies to (the
+    // announce carries text only).
+    let doc = crate::matrix::backfill::load_doc(state, &chat.chat_id, chat.project_id.as_deref())
+        .ok()
+        .flatten();
+    let attachments = doc
+        .as_ref()
+        .and_then(|doc| doc.message(message_id))
+        .map(|row| attachments_of(&row, chat))
+        .unwrap_or_default();
+    let reply_to = reply_json(state, doc.as_ref(), chat, reply_to);
     for (p, wake, chat_json) in targets {
         // Its own message, announced by the relay on its behalf: not news to it.
         if sender.kind == "agent" && sender.id == p.id {
@@ -477,10 +614,165 @@ pub fn on_announce(
                     },
                     "reply_to": reply_to,
                     "mentions": mentions,
+                    "attachments": attachments,
                 },
                 "wake": wake,
             }),
         );
+    }
+}
+
+/// The blob slot of a chat: the project id for an agent's own chats, `people:<chat>` for DMs and
+/// groups — the same slot the apps read `GET /blob/{slot}/{key}` from.
+fn slot_of(chat: &ChatRef) -> String {
+    match &chat.project_id {
+        Some(pid) => pid.clone(),
+        None => format!("{}{}", people::PEOPLE_ACL_PREFIX, chat.chat_id),
+    }
+}
+
+/// `attachments[]` of one row for the agent: every attachment part (pictures, files, GIFs and
+/// the PNG fallback of a chart part), `blob` = `<slot>/<key>` for `GET /asp/files/{slot}/{key}`.
+pub fn attachments_of(row: &arbos_core::doc::MessageView, chat: &ChatRef) -> Vec<Value> {
+    let slot = slot_of(chat);
+    let text = row.text();
+    row.parts
+        .iter()
+        .filter(|p| p["kind"] == "attachment")
+        .filter_map(|p| {
+            let a = p.get("attachment")?;
+            let key = a["ref"].as_str().filter(|r| !r.is_empty())?;
+            let mime = a["mime"].as_str().unwrap_or("application/octet-stream");
+            // The app's tag (image, video, audio, pdf, doc, sheet, slides, file) when it set
+            // one, else from the mime; a GIF is always "gif" so a bot can tell it apart.
+            let kind = if mime.eq_ignore_ascii_case("image/gif") {
+                "gif".to_owned()
+            } else {
+                a["kind"].as_str().map(str::to_owned).unwrap_or_else(|| {
+                    if mime.starts_with("image/") {
+                        "image".into()
+                    } else if mime.starts_with("video/") {
+                        "video".into()
+                    } else if mime.starts_with("audio/") {
+                        "audio".into()
+                    } else {
+                        "file".into()
+                    }
+                })
+            };
+            Some(json!({
+                "blob": format!("{slot}/{key}"),
+                "kind": kind,
+                "mime": mime,
+                "name": a["name"].as_str().unwrap_or(""),
+                "size": a["bytes"].as_i64().or_else(|| a["size"].as_i64()),
+                "width": a["width"].as_i64(),
+                "height": a["height"].as_i64(),
+                "caption": if text.trim().is_empty() { Value::Null } else { json!(text) },
+                "duration_ms": a["durationMs"].as_i64().or_else(|| a["duration_ms"].as_i64()),
+                "chart": a.get("chartPart").is_some(),
+                "title": a["title"].as_str(),
+                "source": a.get("source").cloned().unwrap_or(Value::Null),
+            }))
+        })
+        .collect()
+}
+
+/// How much of the parent's text a `reply_to` carries.
+const REPLY_TEXT_MAX: usize = 500;
+
+/// `reply_to` of an event or row: the parent message `{id, from, text (≤ 500 chars),
+/// attachments}` so the agent sees what is being answered (Scout, 2026-10-28); `{id}` alone when
+/// the parent is not in this chat's doc; `null` for a message that replies to nothing.
+pub fn reply_json(
+    state: &AppState,
+    doc: Option<&arbos_core::doc::ChatDoc>,
+    chat: &ChatRef,
+    reply_to: Option<&str>,
+) -> Value {
+    let Some(id) = reply_to.filter(|r| !r.is_empty()) else {
+        return Value::Null;
+    };
+    let Some(parent) = doc.and_then(|d| d.message(id)) else {
+        return json!({ "id": id });
+    };
+    let full = parent.text();
+    let text = if full.chars().count() > REPLY_TEXT_MAX {
+        let cut: String = full.chars().take(REPLY_TEXT_MAX).collect();
+        format!("{cut}…")
+    } else {
+        full
+    };
+    json!({
+        "id": id,
+        "from": from_json(state, &parent, chat),
+        "text": text,
+        "attachments": attachments_of(&parent, chat),
+    })
+}
+
+/// One row in the shape `message.received.message` uses (history and events agree); `doc` is
+/// the chat it sits in, for the parent of its `reply_to`.
+pub fn message_json(
+    state: &AppState,
+    row: &arbos_core::doc::MessageView,
+    chat: &ChatRef,
+    doc: &arbos_core::doc::ChatDoc,
+) -> Value {
+    let mentions: Vec<String> = row.rest["mentions"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    json!({
+        "id": row.id,
+        "role": row.role,
+        "text": row.text(),
+        "from": from_json(state, row, chat),
+        "reply_to": reply_json(state, Some(doc), chat, row.rest["replyTo"].as_str()),
+        "mentions": mentions,
+        "attachments": attachments_of(row, chat),
+        "created_at": row.rest["createdAt"].as_i64(),
+    })
+}
+
+/// Who wrote a row, as `message.from` names them.
+fn from_json(state: &AppState, row: &arbos_core::doc::MessageView, chat: &ChatRef) -> Value {
+    let raw = row.rest["sender"].as_str().unwrap_or("");
+    if let Some(uid) = raw.strip_prefix("user:") {
+        let s = Sender::user(state, uid);
+        json!({ "kind": "user", "id": uid, "name": s.name, "handle": s.handle })
+    } else if let Some(pid) = raw.strip_prefix("agent:") {
+        let p = state.db.project(pid).ok().flatten();
+        json!({ "kind": "agent", "id": pid,
+                "name": row.rest["senderName"].as_str().map(str::to_owned).or_else(|| p.as_ref().map(|p| p.name.clone())).unwrap_or_default(),
+                "handle": p.as_ref().map(|p| people::agent_slug(&p.name)).unwrap_or_default() })
+    } else if row.role == "assistant" {
+        // An agent's own chat: the project itself.
+        let p = chat
+            .project_id
+            .as_deref()
+            .and_then(|pid| state.db.project(pid).ok().flatten());
+        json!({ "kind": "agent", "id": chat.project_id, "name": p.as_ref().map(|p| p.name.clone()).unwrap_or_default(),
+                "handle": p.as_ref().map(|p| people::agent_slug(&p.name)).unwrap_or_default() })
+    } else if row.role == "user" {
+        // An agent's own chat: user rows are the owner's.
+        let owner = chat
+            .project_id
+            .as_deref()
+            .and_then(|pid| state.user_of(pid));
+        match owner {
+            Some(uid) => {
+                let s = Sender::user(state, &uid);
+                json!({ "kind": "user", "id": uid, "name": s.name, "handle": s.handle })
+            }
+            None => json!({ "kind": "user" }),
+        }
+    } else {
+        json!({ "kind": "system" })
     }
 }
 
@@ -762,6 +1054,15 @@ pub async fn list(State(state): State<AppState>, principal: Principal) -> ApiRes
     Ok(Json(json!({ "agents": out })).into_response())
 }
 
+/// `owned` for sibling modules (the session log reader).
+pub(crate) fn owned_for(
+    state: &AppState,
+    principal: &Principal,
+    project_id: &str,
+) -> Result<(OutsideAgent, Project), (StatusCode, String)> {
+    owned(state, principal, project_id)
+}
+
 fn owned(
     state: &AppState,
     principal: &Principal,
@@ -791,10 +1092,12 @@ pub async fn get(
     Path(id): Path<String>,
 ) -> ApiResult {
     let (agent, project) = owned(&state, &principal, &id)?;
+    let log = state.db.asp_log_summary(&project.id).unwrap_or(Value::Null);
     Ok(Json(json!({
         "agent": agent.json(Some(&project)),
         "link": link_for(&state, &project.id),
         "relay_url": state.cfg.public_url,
+        "log": log,
     }))
     .into_response())
 }
@@ -842,6 +1145,140 @@ pub async fn revoke(
     waiter(&project.id).notify_waiters();
     tracing::info!(project = %project.id, "outside agent revoked");
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// Absent ≠ null: `Some(None)` clears, `None` leaves the field alone.
+fn double_option<'de, T, D>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Deserialize::deserialize(d).map(Some)
+}
+
+/// `PATCH /outside-agents/{id}`: optional fields, each applied only when present; `null` clears.
+#[derive(Deserialize, Default)]
+pub struct PatchBody {
+    /// Scope name → on/off; a partial object merges into the owner's overrides.
+    #[serde(default)]
+    pub scopes: Option<serde_json::Map<String, Value>>,
+    /// Wake URL (`https://…`); `null` clears it and forgets the last delivery.
+    #[serde(default, deserialize_with = "double_option")]
+    pub wake_url: Option<Option<String>>,
+    /// The `Authorization` header value the Wake URL expects, verbatim; `null` clears.
+    #[serde(default, deserialize_with = "double_option")]
+    pub wake_auth: Option<Option<String>>,
+}
+
+/// `PATCH /outside-agents/{id} {scopes?, wake_url?, wake_auth?}` — the owner's switches (the
+/// relay admin may set them too) and the Wake URL; answers the agent as `GET` does. The header
+/// value is stored and never returned; the URL is shown back.
+pub async fn patch(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Json(b): Json<PatchBody>,
+) -> ApiResult {
+    let (agent, project) = match &principal {
+        Principal::Admin => {
+            let project = state
+                .db
+                .project(&id)
+                .map_err(internal)?
+                .ok_or((StatusCode::NOT_FOUND, "no such agent".to_owned()))?;
+            let agent = state
+                .db
+                .outside_agent(&id)
+                .map_err(internal)?
+                .ok_or((StatusCode::NOT_FOUND, "no such connected agent".to_owned()))?;
+            (agent, project)
+        }
+        _ => owned(&state, &principal, &id)?,
+    };
+    if let Some(scopes) = &b.scopes {
+        if let Some(bad) = scopes.keys().find(|k| !SCOPES.iter().any(|(n, _)| n == *k)) {
+            return Err((StatusCode::BAD_REQUEST, format!("unknown scope {bad}")));
+        }
+        state
+            .db
+            .set_outside_scopes(&project.id, scopes)
+            .map_err(internal)?;
+        let changed = Value::Object(scopes.clone()).to_string();
+        tracing::info!(project = %project.id, scopes = %changed, "outside agent scopes changed");
+    }
+    if (b.wake_url.is_some() || b.wake_auth.is_some()) && agent.revoked_at.is_some() {
+        return Err((StatusCode::CONFLICT, "access is revoked".into()));
+    }
+    let url = match b.wake_url {
+        Some(Some(raw)) if !raw.trim().is_empty() => Some(Some(
+            outside_wake::check_url(&raw).map_err(|e| (StatusCode::BAD_REQUEST, e.to_owned()))?,
+        )),
+        Some(_) => Some(None),
+        None => None,
+    };
+    let auth = match b.wake_auth {
+        Some(Some(raw)) if !raw.trim().is_empty() => Some(Some(
+            outside_wake::check_auth(&raw).map_err(|e| (StatusCode::BAD_REQUEST, e.to_owned()))?,
+        )),
+        Some(_) => Some(None),
+        None => None,
+    };
+    if let Some(url) = &url {
+        if agent.wake_url != *url {
+            state
+                .db
+                .set_wake_url(&project.id, url.as_deref())
+                .map_err(internal)?;
+        }
+    }
+    if let Some(auth) = &auth {
+        state
+            .db
+            .set_wake_auth(&project.id, auth.as_deref())
+            .map_err(internal)?;
+    }
+    if url.is_some() || auth.is_some() {
+        tracing::info!(
+            project = %project.id,
+            url_set = url.as_ref().map(|u| u.is_some()),
+            auth_set = auth.as_ref().map(|a| a.is_some()),
+            "outside agent wake settings changed"
+        );
+    }
+    let agent = state
+        .db
+        .outside_agent(&project.id)
+        .map_err(internal)?
+        .ok_or_else(|| internal("row vanished"))?;
+    Ok(Json(json!({
+        "agent": agent.json(Some(&project)),
+        "link": link_for(&state, &project.id),
+        "relay_url": state.cfg.public_url,
+    }))
+    .into_response())
+}
+
+fn wake_result_json(last: &LastWake) -> Value {
+    json!({
+        "ok": last.error.is_none(),
+        "status": last.status,
+        "error": last.error,
+        "at": last.at,
+    })
+}
+
+/// `POST /outside-agents/{id}/wake/test` (owner; the Connection card's "Send test wake"): one
+/// `wake.test` nudge now, no debounce, no retry → `{ok, status, error, at}`.
+pub async fn wake_test(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+) -> ApiResult {
+    let (_, project) = owned(&state, &principal, &id)?;
+    let last = outside_wake::send_now(&state, &project.id, &Nudge::test(&project.id))
+        .await
+        .map_err(|e| (StatusCode::CONFLICT, e))?;
+    Ok(Json(wake_result_json(&last)).into_response())
 }
 
 // ---- agent API -----------------------------------------------------------------------------------
@@ -907,7 +1344,7 @@ impl FromRequestParts<AppState> for AgentPrincipal {
     }
 }
 
-fn chat_json_for(state: &AppState, project: &Project, chat_id: &str) -> Option<Value> {
+pub(crate) fn chat_json_for(state: &AppState, project: &Project, chat_id: &str) -> Option<Value> {
     if let Ok(Some(c)) = state.db.chat(&project.id, chat_id) {
         return Some(
             json!({ "id": c.id, "kind": "agent", "project_id": project.id, "title": c.title }),
@@ -950,11 +1387,23 @@ pub async fn me(State(state): State<AppState>, me: AgentPrincipal) -> Response {
             "handle": handle_of(&me.project),
             "transport": me.agent.transport,
             "owner": owner.map(|o| json!({ "id": o.id, "name": o.name, "handle": o.handle })),
+            "scopes": Value::Object(me.agent.effective_scopes()),
         },
         "chats": chats,
         "inbox_head": state.db.asp_events_head(&me.project.id).unwrap_or(0),
+        "wake_url_set": me.agent.wake_url.is_some() && me.agent.wake_auth_set,
+        "wake_header": outside_wake::HEADER,
+        "last_wake": me.agent.wake_last.as_ref().map(LastWake::json),
     }))
     .into_response()
+}
+
+/// `POST /asp/wake/test` (agent key) — the same test nudge the Connection card's button sends.
+pub async fn asp_wake_test(State(state): State<AppState>, me: AgentPrincipal) -> Response {
+    match outside_wake::send_now(&state, &me.project.id, &Nudge::test(&me.project.id)).await {
+        Ok(last) => Json(wake_result_json(&last)).into_response(),
+        Err(e) => api_error(StatusCode::CONFLICT, "no_wake_url", &e),
+    }
 }
 
 #[derive(Deserialize)]
@@ -965,6 +1414,9 @@ pub struct InboxQuery {
     pub wait: u64,
     #[serde(default)]
     pub limit: Option<i64>,
+    /// Rows of context to attach to each wake event (0 = none; ≤ 20; `chat.read`).
+    #[serde(default)]
+    pub context: usize,
 }
 
 fn events_json(events: Vec<(i64, Value)>, since: i64) -> Value {
@@ -986,20 +1438,32 @@ pub async fn inbox(
     me: AgentPrincipal,
     Query(q): Query<InboxQuery>,
 ) -> Response {
+    if !me.agent.allows("chat.read") {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "scope",
+            "reading is switched off for this agent",
+        );
+    }
     let limit = q.limit.unwrap_or(100).clamp(1, 500);
     let wait = q.wait.min(WAIT_MAX_S);
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(wait);
+    let n = waiter(&me.project.id);
     loop {
-        let events = state
+        // Register interest *before* reading the table: `notify_waiters` wakes only waiters that
+        // already exist, so an event stored between the read and the wait would otherwise park
+        // this call until `wait` runs out (up to 25 s) instead of answering at once.
+        let notified = n.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        let mut events = state
             .db
             .asp_events_after(&me.project.id, q.since, limit)
             .unwrap_or_default();
         if !events.is_empty() || wait == 0 {
+            crate::outside_sidecar::attach_context(&state, &me.project, &mut events, q.context);
             return Json(events_json(events, q.since)).into_response();
         }
-        let n = waiter(&me.project.id);
-        let notified = n.notified();
-        tokio::pin!(notified);
         tokio::select! {
             _ = &mut notified => {}
             _ = tokio::time::sleep_until(deadline) => {
@@ -1047,7 +1511,7 @@ pub async fn events(
     Json(json!({ "results": results })).into_response()
 }
 
-type EventResult = Result<Value, (&'static str, String)>;
+pub(crate) type EventResult = Result<Value, (&'static str, String)>;
 
 fn field<'a>(e: &'a Value, k: &str) -> Option<&'a str> {
     e.get(k).and_then(|v| v.as_str()).filter(|s| !s.is_empty())
@@ -1101,7 +1565,7 @@ fn settle_send(doc: &ChatDoc, reply_to: Option<&str>, status: CommandStatus) {
     }
 }
 
-async fn apply_event(state: &AppState, me: &AgentPrincipal, e: &Value) -> EventResult {
+pub(crate) async fn apply_event(state: &AppState, me: &AgentPrincipal, e: &Value) -> EventResult {
     let ty = field(e, "type").ok_or(("bad_request", "type required".to_owned()))?;
     let pid = me.project.id.clone();
     match ty {
@@ -1110,6 +1574,12 @@ async fn apply_event(state: &AppState, me: &AgentPrincipal, e: &Value) -> EventR
             Ok(json!({ "ok": true, "type": ty }))
         }
         "typing" | "status" => {
+            if !me.agent.allows("presence") {
+                return Err((
+                    "scope",
+                    "typing and status are switched off for this agent".to_owned(),
+                ));
+            }
             let chat_id = field(e, "chat").ok_or(("bad_request", "chat required".to_owned()))?;
             let chat = chat_json_for(state, &me.project, chat_id)
                 .ok_or(("forbidden", "not a chat of this agent".to_owned()))?;
@@ -1160,6 +1630,9 @@ async fn apply_event(state: &AppState, me: &AgentPrincipal, e: &Value) -> EventR
             Ok(json!({ "ok": true, "type": ty }))
         }
         "message.post" | "message.start" => {
+            if !me.agent.allows("chat.post") {
+                return Err(("scope", "posting is switched off for this agent".to_owned()));
+            }
             let chat_id = field(e, "chat").ok_or(("bad_request", "chat required".to_owned()))?;
             let chat = chat_json_for(state, &me.project, chat_id)
                 .ok_or(("forbidden", "not a chat of this agent".to_owned()))?;
@@ -1232,6 +1705,9 @@ async fn apply_event(state: &AppState, me: &AgentPrincipal, e: &Value) -> EventR
             Ok(json!({ "ok": true, "type": ty, "message": msg_id, "chat": chat_id }))
         }
         "message.delta" | "message.end" => {
+            if !me.agent.allows("chat.post") {
+                return Err(("scope", "posting is switched off for this agent".to_owned()));
+            }
             let chat_id = field(e, "chat").ok_or(("bad_request", "chat required".to_owned()))?;
             let chat = chat_json_for(state, &me.project, chat_id)
                 .ok_or(("forbidden", "not a chat of this agent".to_owned()))?;
@@ -1293,6 +1769,47 @@ async fn apply_event(state: &AppState, me: &AgentPrincipal, e: &Value) -> EventR
             }
             Ok(json!({ "ok": true, "type": ty, "message": msg_id, "chat": chat_id }))
         }
+        "message.react" => {
+            if !me.agent.allows("chat.react") {
+                return Err((
+                    "scope",
+                    "reacting is switched off for this agent".to_owned(),
+                ));
+            }
+            let chat_id = field(e, "chat").ok_or(("bad_request", "chat required".to_owned()))?;
+            let chat = chat_json_for(state, &me.project, chat_id)
+                .ok_or(("forbidden", "not a chat of this agent".to_owned()))?;
+            let msg_id = field(e, "message")
+                .ok_or(("bad_request", "message required".to_owned()))?
+                .to_owned();
+            let emoji = field(e, "emoji")
+                .ok_or(("bad_request", "emoji required".to_owned()))?
+                .to_owned();
+            if emoji.chars().count() > 16 {
+                return Err(("bad_request", "emoji too long".to_owned()));
+            }
+            let on = e.get("on").and_then(|v| v.as_bool()).unwrap_or(true);
+            let project_id = chat["project_id"].as_str().map(str::to_owned);
+            let sender = format!("agent:{pid}");
+            let (m, em) = (msg_id.clone(), emoji.clone());
+            crate::notices::write_doc_as(
+                state,
+                project_id.as_deref(),
+                chat_id,
+                &device_of(&pid),
+                move |doc| {
+                    if doc.message(&m).is_none() {
+                        anyhow::bail!("no such message");
+                    }
+                    doc.set_reaction(&m, &em, &sender, on)?;
+                    Ok(())
+                },
+            )
+            .await
+            .map_err(|e| ("write_failed", e.to_string()))?;
+            let _ = state.db.touch_outside_agent(&pid, None);
+            Ok(json!({ "ok": true, "type": ty, "message": msg_id, "chat": chat_id, "on": on }))
+        }
         other => Err(("unknown_type", format!("unknown event type {other}"))),
     }
 }
@@ -1316,11 +1833,24 @@ pub async fn socket(
     me: AgentPrincipal,
     Query(q): Query<InboxQuery>,
 ) -> Response {
+    if !me.agent.allows("chat.read") {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "scope",
+            "reading is switched off for this agent",
+        );
+    }
     ws.max_message_size(64 * 1024)
-        .on_upgrade(move |socket| run_socket(socket, state, me, q.since))
+        .on_upgrade(move |socket| run_socket(socket, state, me, q.since, q.context))
 }
 
-async fn run_socket(socket: WebSocket, state: AppState, me: AgentPrincipal, mut cursor: i64) {
+async fn run_socket(
+    socket: WebSocket,
+    state: AppState,
+    me: AgentPrincipal,
+    mut cursor: i64,
+    context: usize,
+) {
     let (mut sink, mut stream) = socket.split();
     let pid = me.project.id.clone();
     let hello = json!({
@@ -1336,12 +1866,18 @@ async fn run_socket(socket: WebSocket, state: AppState, me: AgentPrincipal, mut 
         return;
     }
     let mut lease = tokio::time::interval(std::time::Duration::from_secs(45));
+    let n = waiter(&pid);
     loop {
+        // Same ordering as the inbox: interest first, then the read, then the wait.
+        let notified = n.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         // Drain what is queued first.
-        let events = state
+        let mut events = state
             .db
             .asp_events_after(&pid, cursor, 100)
             .unwrap_or_default();
+        crate::outside_sidecar::attach_context(&state, &me.project, &mut events, context);
         for (id, mut e) in events {
             e["id"] = json!(id);
             cursor = id;
@@ -1369,9 +1905,6 @@ async fn run_socket(socket: WebSocket, state: AppState, me: AgentPrincipal, mut 
                 .await;
             return;
         }
-        let n = waiter(&pid);
-        let notified = n.notified();
-        tokio::pin!(notified);
         tokio::select! {
             _ = &mut notified => {}
             _ = lease.tick() => {
@@ -1411,6 +1944,127 @@ async fn run_socket(socket: WebSocket, state: AppState, me: AgentPrincipal, mut 
     }
 }
 
+/// May this agent read blobs in `slot`? Its own project's slot, or `people:<chat>` for a people
+/// chat it sits in.
+fn slot_allowed(state: &AppState, project: &Project, slot: &str) -> bool {
+    if slot == project.id {
+        return true;
+    }
+    match slot.strip_prefix(people::PEOPLE_ACL_PREFIX) {
+        Some(chat_id) => chat_json_for(state, project, chat_id).is_some(),
+        None => false,
+    }
+}
+
+/// `GET /asp/files/{slot}/{key}` — the bytes of a picture / file / GIF / chart PNG named in an
+/// event's `attachments[].blob`, for agents with `files.read`; only blobs of the agent's chats.
+pub async fn file(
+    State(state): State<AppState>,
+    me: AgentPrincipal,
+    Path((slot, key)): Path<(String, String)>,
+    Query(size): Query<crate::avatar_image::SizeQuery>,
+) -> Response {
+    if !me.agent.allows("files.read") {
+        return api_error(StatusCode::FORBIDDEN, "scope", "files are switched off for this agent — the owner can turn on \"Open files shared in chat\"");
+    }
+    if !slot_allowed(&state, &me.project, &slot) {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "not a file of this agent's chats",
+        );
+    }
+    // `?w=<px>`: a picture scaled down on the way out (the apps' thumbnail path); anything
+    // else, or no `w`, is the original bytes with the stored mime.
+    if let Some(w) = size.w {
+        if let crate::blobs::StoredImage::Image(kind) =
+            crate::blobs::stored_image(&state, &slot, &key).await
+        {
+            if let Some(bytes) = crate::blobs::read(&state, &slot, &key).await {
+                return crate::avatar_image::respond(
+                    &state,
+                    crate::avatar_image::Master { kind, bytes },
+                    Some(w),
+                    None,
+                )
+                .await;
+            }
+        }
+    }
+    crate::blobs::serve(&state, &slot, &key).await
+}
+
+#[derive(Deserialize)]
+pub struct HistoryQuery {
+    /// A message id: rows strictly before it (default: the newest rows).
+    #[serde(default)]
+    pub before: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// `GET /asp/chats/{id}/messages?before=<message id>&limit=<n ≤ 100>` — history of one of the
+/// agent's chats, oldest first, each row in the `message.received.message` shape (`chat.read`).
+pub async fn history(
+    State(state): State<AppState>,
+    me: AgentPrincipal,
+    Path(chat_id): Path<String>,
+    Query(q): Query<HistoryQuery>,
+) -> Response {
+    if !me.agent.allows("chat.read") {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "scope",
+            "reading is switched off for this agent",
+        );
+    }
+    let Some(chat) = chat_json_for(&state, &me.project, &chat_id) else {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "not a chat of this agent",
+        );
+    };
+    let chat_ref = match chat["project_id"].as_str() {
+        Some(pid) => ChatRef::project(pid, &chat_id),
+        None => ChatRef::people(&chat_id),
+    };
+    let limit = q.limit.unwrap_or(50).clamp(1, 100);
+    let doc = match crate::matrix::backfill::load_doc(
+        &state,
+        &chat_id,
+        chat_ref.project_id.as_deref(),
+    ) {
+        Ok(Some(doc)) => doc,
+        Ok(None) => return Json(
+            json!({ "chat": chat, "messages": [], "has_more": false, "next_before": Value::Null }),
+        )
+        .into_response(),
+        Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
+    };
+    let rows = doc.messages();
+    let rows: Vec<_> = rows
+        .into_iter()
+        .filter(|m| m.role == "user" || m.role == "assistant" || m.role == "project")
+        .collect();
+    let end = match &q.before {
+        Some(b) => rows.iter().position(|m| &m.id == b).unwrap_or(rows.len()),
+        None => rows.len(),
+    };
+    let start = end.saturating_sub(limit);
+    let messages: Vec<Value> = rows[start..end]
+        .iter()
+        .map(|m| message_json(&state, m, &chat_ref, &doc))
+        .collect();
+    Json(json!({
+        "chat": chat,
+        "messages": messages,
+        "has_more": start > 0,
+        "next_before": rows.get(start).map(|m| m.id.clone()).filter(|_| start > 0),
+    }))
+    .into_response()
+}
+
 /// `GET /asp/connect/{id}` — the link on the reveal screen: a plain page that says what to do
 /// with the key (no secret in it; the key never travels in a URL).
 pub async fn connect_page(State(state): State<AppState>, Path(id): Path<String>) -> Response {
@@ -1425,15 +2079,30 @@ pub async fn connect_page(State(state): State<AppState>, Path(id): Path<String>)
     let relay = state.cfg.public_url.trim_end_matches('/').to_owned();
     let body = format!(
         "Connect {name} to Arbos\n\n\
+         Agent instructions (paste into your agent): {relay}/llms.txt\n\
+         Sidecar installer:                           {relay}/sidecar/install.sh\n\n\
          Relay:   {relay}\n\
          Agent:   {id}\n\n\
          Every call carries the key the Arbos app showed you once:  Authorization: Bearer arbk_…\n\n\
          Read:    GET  {relay}/asp/inbox?since=0&wait=25      (events; `next` is the next `since`)\n\
          Live:    WS   {relay}/asp/socket?since=0              (same events, pushed)\n\
+         History: GET  {relay}/asp/chats/<chat id>/messages?before=<message id>&limit=50   (same row shape, oldest first)\n\
+         Reply:   message.reply_to is the parent message {{id, from, text (first 500 chars), attachments}} when the message answers one\n\
+         Files:   GET  {relay}/asp/files/<blob>   where <blob> is attachments[].blob on a message (any kind: pictures, GIFs, video, voice memos, files; add ?w=<px> for a smaller picture);\n\
+                  needs the owner's switch \"Open files shared in chat\" (files.read) on the agent's profile\n\
          Write:   POST {relay}/asp/events  {{\"type\":\"message.post\",\"chat\":\"<chat id from the event>\",\"text\":\"…\",\"reply_to\":\"<message id>\"}}\n\
          Stream:  message.start → message.delta (text) → message.end\n\
          Typing:  {{\"type\":\"typing\",\"chat\":\"…\",\"on\":true}}   Status: {{\"type\":\"status\",\"chat\":\"…\",\"text\":\"reading Stripe\"}}\n\
          Alive:   {{\"type\":\"presence.heartbeat\"}} every 60 s (any call renews the lease)\n\n\
+         Wake URL (Grok Bot routine with a webhook trigger, or any bot with an HTTPS endpoint):\n\
+         in Arbos open the agent's profile → Connection → Wake URL, paste the webhook URL and the\n\
+         exact Authorization header value the routine panel shows, Save, then Send test wake.\n\
+         When a message needs an answer the relay POSTs there at once (no message text):\n\
+         {{\"agent\":\"{id}\",\"chat\":\"<chat id>\",\"event_id\":N,\"type\":\"message.received\"}}\n\
+         with headers  Authorization: <your value>  and  X-Arbos-Signature: sha256=<hex HMAC-SHA256 of the body, key = that value>.\n\
+         On a nudge: GET {relay}/asp/inbox?since=<last next>  and answer the events with wake=true.\n\
+         At most one nudge per 5 s per agent; keep a slow poll (every 5 min) as the fallback.\n\
+         Test from the agent side: POST {relay}/asp/wake/test (same key) → {{ok,status,error}}.\n\n\
          Claude Code / Codex on a Mac: cargo install --git https://github.com/unarbos/arbos arbos-acp\n\
          then ARBOS_AGENT_KEY=arbk_… arbos-acp --relay {relay} --agent claude-agent-acp\n"
     );
@@ -1459,6 +2128,7 @@ pub async fn spawn_sweeper(state: AppState) {
                     tracing::info!(pruned = n, "asp events pruned");
                 }
             }
+            let _ = state.db.prune_asp_log();
         }
     });
 }
@@ -1670,6 +2340,211 @@ mod tests {
             .is_some());
     }
 
+    /// A picture on a row reaches the agent as `attachments[]` with a fetchable blob id; files
+    /// are off by default, the owner's PATCH turns them on; history rows share the shape.
+    #[tokio::test]
+    async fn attachments_scopes_and_history() {
+        use crate::people::tests_support::{group, person, project_of};
+        use crate::state::test_support::test_state;
+        use crate::state::AuthMode;
+        use arbos_core::doc::{UserAttachment, UserMessageOpts};
+
+        let state = test_state(AuthMode::Github);
+        let (owner, _) = person(&state, 7101);
+        let (other, _) = person(&state, 7102);
+        let pid = project_of(&state, &owner, "Grok Bot");
+        state
+            .db
+            .insert_outside_agent(&pid, &owner, "grok", &hash(&mint_key()))
+            .unwrap();
+        let g = group(&state, &[&owner, &other]);
+        state
+            .db
+            .add_member(&g, &format!("agent:{pid}"), "agent", &owner, &json!({}))
+            .unwrap();
+        // A person posts a picture with a caption, as the apps write it.
+        let msg_id = ulid();
+        let m2 = msg_id.clone();
+        let o2 = other.clone();
+        crate::notices::write_doc(&state, None, &g, move |doc| {
+            doc.append_user_message(
+                &m2,
+                "the chart from the call",
+                "dev:test",
+                &UserMessageOpts {
+                    attachments: vec![UserAttachment {
+                        name: "chart.png".into(),
+                        mime: "image/png".into(),
+                        kind: Some("image".into()),
+                        blob_ref: Some("abc123".into()),
+                        source: None,
+                    }],
+                    sender: Some(format!("user:{o2}")),
+                    ..Default::default()
+                },
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let me = Sender::user(&state, &other);
+        on_announce(
+            &state,
+            &ChatRef::people(&g),
+            &me,
+            &msg_id,
+            "the chart from the call",
+            None,
+            &[],
+        );
+        let events = state.db.asp_events_after(&pid, 0, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        let att = &events[0].1["message"]["attachments"];
+        assert_eq!(att.as_array().map(|a| a.len()), Some(1));
+        assert_eq!(att[0]["blob"], format!("people:{g}/abc123"));
+        assert_eq!(att[0]["kind"], "image");
+        assert_eq!(att[0]["mime"], "image/png");
+        assert_eq!(att[0]["name"], "chart.png");
+        assert_eq!(att[0]["caption"], "the chart from the call");
+
+        // Every attachment kind goes through: a GIF the app tagged "image", a voice memo, a PDF.
+        let mid = ulid();
+        let (m3, o4) = (mid.clone(), other.clone());
+        crate::notices::write_doc(&state, None, &g, move |doc| {
+            doc.append_user_message(
+                &m3,
+                "",
+                "dev:test",
+                &UserMessageOpts {
+                    attachments: vec![
+                        UserAttachment {
+                            name: "nope.gif".into(),
+                            mime: "image/gif".into(),
+                            kind: Some("image".into()),
+                            blob_ref: Some("g1".into()),
+                            source: None,
+                        },
+                        UserAttachment {
+                            name: "memo.m4a".into(),
+                            mime: "audio/mp4".into(),
+                            kind: Some("audio".into()),
+                            blob_ref: Some("a1".into()),
+                            source: None,
+                        },
+                        UserAttachment {
+                            name: "deck.pdf".into(),
+                            mime: "application/pdf".into(),
+                            kind: None,
+                            blob_ref: Some("p1".into()),
+                            source: None,
+                        },
+                        UserAttachment {
+                            name: "clip.mp4".into(),
+                            mime: "video/mp4".into(),
+                            kind: Some("video".into()),
+                            blob_ref: Some("v1".into()),
+                            source: None,
+                        },
+                    ],
+                    sender: Some(format!("user:{o4}")),
+                    ..Default::default()
+                },
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let doc = crate::matrix::backfill::load_doc(&state, &g, None)
+            .unwrap()
+            .unwrap();
+        let row = doc.message(&mid).unwrap();
+        let kinds: Vec<String> = attachments_of(&row, &ChatRef::people(&g))
+            .iter()
+            .map(|a| a["kind"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(kinds, ["gif", "audio", "file", "video"]);
+        let all = attachments_of(&row, &ChatRef::people(&g));
+        assert_eq!(all[2]["mime"], "application/pdf");
+        assert_eq!(all[0]["caption"], Value::Null);
+
+        // Scopes: files off by default, PATCH merges, unknown names are ignored by the db layer.
+        let agent = state.db.outside_agent(&pid).unwrap().unwrap();
+        assert!(!agent.allows("files.read"));
+        assert!(agent.allows("chat.read") && agent.allows("chat.post"));
+        let mut patch = serde_json::Map::new();
+        patch.insert("files.read".into(), json!(true));
+        state.db.set_outside_scopes(&pid, &patch).unwrap();
+        let agent = state.db.outside_agent(&pid).unwrap().unwrap();
+        assert!(agent.allows("files.read"));
+        assert_eq!(agent.effective_scopes().len(), SCOPES.len());
+        assert_eq!(agent.json(None)["scopes"]["files.read"], true);
+        assert_eq!(agent.json(None)["scopes"]["secret.use"], false);
+        assert!(slot_allowed(
+            &state,
+            &state.db.project(&pid).unwrap().unwrap(),
+            &format!("people:{g}")
+        ));
+        assert!(!slot_allowed(
+            &state,
+            &state.db.project(&pid).unwrap().unwrap(),
+            "people:nope"
+        ));
+
+        // History rows: same shape as the event's `message`.
+        let doc = crate::matrix::backfill::load_doc(&state, &g, None)
+            .unwrap()
+            .unwrap();
+        let rows = doc.messages();
+        let chat_ref = ChatRef::people(&g);
+        let j = message_json(&state, &rows[0], &chat_ref, &doc);
+        assert_eq!(j["id"], msg_id);
+        assert_eq!(j["from"]["kind"], "user");
+        assert_eq!(j["from"]["id"], other);
+        assert_eq!(j["attachments"][0]["blob"], format!("people:{g}/abc123"));
+        assert_eq!(j["text"], "the chart from the call");
+        assert_eq!(j["reply_to"], Value::Null);
+
+        // A reply: the event's `reply_to` carries the parent — its sender, text and picture.
+        let reply_id = ulid();
+        let (r2, parent, o3) = (reply_id.clone(), msg_id.clone(), owner.clone());
+        crate::notices::write_doc(&state, None, &g, move |doc| {
+            doc.append_user_message(
+                &r2,
+                "is this the final one?",
+                "dev:test",
+                &UserMessageOpts {
+                    sender: Some(format!("user:{o3}")),
+                    ..Default::default()
+                },
+            )?;
+            doc.set_message_fields(&r2, &[("replyTo", json!(parent))]);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let me = Sender::user(&state, &owner);
+        on_announce(
+            &state,
+            &ChatRef::people(&g),
+            &me,
+            &reply_id,
+            "is this the final one?",
+            Some(&msg_id),
+            &[],
+        );
+        let events = state.db.asp_events_after(&pid, 1, 10).unwrap();
+        let r = &events[0].1["message"]["reply_to"];
+        assert_eq!(r["id"], msg_id);
+        assert_eq!(r["from"]["id"], other);
+        assert_eq!(r["text"], "the chart from the call");
+        assert_eq!(r["attachments"][0]["blob"], format!("people:{g}/abc123"));
+        // An unknown parent keeps the id alone.
+        assert_eq!(
+            reply_json(&state, Some(&doc), &chat_ref, Some("nope")),
+            json!({ "id": "nope" })
+        );
+    }
+
     #[test]
     fn status_words() {
         let mut a = OutsideAgent {
@@ -1682,6 +2557,10 @@ mod tests {
             last_seen_at: None,
             connected_at: None,
             agent_info: Value::Null,
+            scopes: json!({}),
+            wake_url: None,
+            wake_auth_set: false,
+            wake_last: None,
         };
         assert_eq!(a.status(), "never");
         a.last_seen_at = Some(now_ms());

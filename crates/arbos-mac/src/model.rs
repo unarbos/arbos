@@ -199,9 +199,107 @@ pub struct OutsideInfo {
     pub last_seen_at: Option<i64>,
     #[serde(default)]
     pub connected_at: Option<i64>,
+    /// The nine switches (spec §4.3), effective values: `"files.read" → true`.
+    #[serde(default)]
+    pub scopes: std::collections::HashMap<String, bool>,
+    /// The Wake URL (`agent.wake`), absent on a relay without it.
+    #[serde(default)]
+    pub wake: Option<WakeInfo>,
 }
 
+/// An outside agent's Wake URL as the relay reports it: the URL is shown back, the
+/// `Authorization` value never is (`auth_set` only).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct WakeInfo {
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub url_set: bool,
+    #[serde(default)]
+    pub auth_set: bool,
+    /// `Authorization`.
+    #[serde(default)]
+    pub header: String,
+    #[serde(default)]
+    pub last: Option<WakeLast>,
+}
+
+/// The last nudge the relay sent to the Wake URL.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct WakeLast {
+    #[serde(default)]
+    pub at: i64,
+    #[serde(default)]
+    pub status: Option<u16>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+impl WakeLast {
+    /// "Delivered · HTTP 200 · 12 s ago" / "Failed · HTTP 500: boom · 3 min ago".
+    pub fn line(&self, now: i64) -> String {
+        let when = ago_seconds(now, self.at);
+        match (&self.error, self.status) {
+            (None, Some(s)) => format!("Delivered · HTTP {s} · {when}"),
+            (None, None) => format!("Delivered · {when}"),
+            (Some(e), _) => format!("Failed · {e} · {when}"),
+        }
+    }
+}
+
+/// "12 s ago", "3 min ago", "2 h ago", "4 d ago" — the connection lines' clock, with seconds
+/// (unlike [`ago`], which starts at "just now").
+fn ago_seconds(now: i64, t: i64) -> String {
+    let s = ((now - t).max(0) / 1000).max(0);
+    if s < 60 {
+        format!("{s} s ago")
+    } else if s < 3600 {
+        format!("{} min ago", s / 60)
+    } else if s < 86_400 {
+        format!("{} h ago", s / 3600)
+    } else {
+        format!("{} d ago", s / 86_400)
+    }
+}
+
+/// The switches of the Can card, in the mockup's order: wire name, title, subtitle.
+pub const OUTSIDE_SCOPES: [(&str, &str, Option<&str>); 9] = [
+    (
+        "chat.read",
+        "Read messages",
+        Some("in chats it is a member of"),
+    ),
+    ("chat.post", "Post, edit and delete its own messages", None),
+    ("chat.react", "React", None),
+    ("presence", "Show typing and status", None),
+    (
+        "approval.request",
+        "Ask you to approve actions",
+        Some("approval cards in chat"),
+    ),
+    (
+        "secret.use",
+        "Use your secrets",
+        Some("by name only, never the value"),
+    ),
+    ("members.manage", "Add members or agents", None),
+    (
+        "files.read",
+        "Open files shared in chat",
+        Some("pictures, files, GIFs it was sent"),
+    ),
+    ("calls.join", "Join voice calls", None),
+];
+
 impl OutsideInfo {
+    /// A switch's value; a relay without scopes yet reads as the spec defaults.
+    pub fn scope(&self, name: &str) -> bool {
+        self.scopes.get(name).copied().unwrap_or(matches!(
+            name,
+            "chat.read" | "chat.post" | "chat.react" | "presence" | "approval.request"
+        ))
+    }
+
     /// The transport as the Details pane names it.
     pub fn transport_label(&self) -> &'static str {
         match self.transport.as_str() {
@@ -214,18 +312,7 @@ impl OutsideInfo {
     /// "Connected · 12 s ago", "Away · 40 min ago", "Waiting for the first heartbeat",
     /// "Disconnected".
     pub fn status_line(&self, now: i64) -> String {
-        let ago = |t: i64| {
-            let s = ((now - t).max(0) / 1000).max(0);
-            if s < 60 {
-                format!("{s} s ago")
-            } else if s < 3600 {
-                format!("{} min ago", s / 60)
-            } else if s < 86_400 {
-                format!("{} h ago", s / 3600)
-            } else {
-                format!("{} d ago", s / 86_400)
-            }
-        };
+        let ago = |t: i64| ago_seconds(now, t);
         match (self.status.as_str(), self.last_seen_at) {
             ("revoked", _) => "Disconnected".to_owned(),
             ("connected", Some(t)) => format!("Connected · {}", ago(t)),
@@ -3195,6 +3282,10 @@ pub struct DeviceView {
     pub created_at: i64,
     #[serde(default)]
     pub last_seen_at: Option<i64>,
+    /// Set once the device signed out or was revoked; such a row is no
+    /// longer a session and the Devices list leaves it out.
+    #[serde(default)]
+    pub revoked_at: Option<i64>,
     /// The device that made the request — this Mac.
     #[serde(default)]
     pub current: bool,

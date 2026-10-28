@@ -208,23 +208,35 @@ pub fn render(shell: &Shell, window: &Window, cx: &mut Context<Shell>) -> Option
     )
 }
 
-fn cell(
-    id: impl Into<gpui::ElementId>,
+pub(crate) fn cell(
+    id: impl Into<gpui::SharedString>,
     content: impl IntoElement,
     on: bool,
     theme: &Theme,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> gpui::Stateful<Div> {
+    // A fixed CELL box; hover is paint only — the token's wash, composited over
+    // the accent fill of a held emoji so the fill does not blink away under
+    // the pointer ([feedback reaction-pill-hover-jitter-2026-10-28]).
+    let id = id.into();
+    let selector = format!("reaction-cell#{id}");
     div()
         .id(id)
+        .debug_selector(move || selector.clone())
         .size(px(CELL))
+        .flex_shrink_0()
         .flex()
         .items_center()
         .justify_center()
         .rounded_full()
         .cursor_pointer()
-        .when(on, |el| el.bg(Theme::with_alpha(theme.accent, 0.22)))
-        .map(|el| highlight::button(el, theme))
+        .map(|el| {
+            if on {
+                highlight::washed(el, Theme::with_alpha(theme.accent, 0.22), theme)
+            } else {
+                highlight::button(el, theme)
+            }
+        })
         .child(content)
         .on_click(on_click)
 }

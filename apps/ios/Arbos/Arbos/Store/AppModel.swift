@@ -468,6 +468,8 @@ final class AppModel: ObservableObject {
     var channelAtStart: Set<Id> = []
     /// Channels with an `openRoom` / `loadOlder` in flight.
     var channelLoading: Set<Id> = []
+    /// Servers whose member list was asked for this session (`wantServerRosters`).
+    var serverRostersRequested: Set<Id> = []
     /// `matrixStart` in flight (one at a time).
     var matrixStarting = false
 
@@ -4229,15 +4231,28 @@ final class AppModel: ObservableObject {
         for c in peopleChats {
             if let m = c.members.first(where: { !$0.isAgent && $0.handle.caseInsensitiveCompare(handle) == .orderedSame }) { return m.id }
         }
+        if let m = serverMember(handle: handle) { return m.id }
         return directory.first { $0.handle.caseInsensitiveCompare(handle) == .orderedSame }?.id
     }
 
+    /// A person's display name by handle: me, the people chats' members, the servers' members
+    /// (a channel bubble's sender need not share a group with me — [feedback
+    /// server-member-names-2026-10-28]), then the directory. `nil` = no name known.
     func personName(handle: String) -> String? {
         if let me = user, me.login.caseInsensitiveCompare(handle) == .orderedSame { return me.name }
         for c in peopleChats {
             if let m = c.members.first(where: { !$0.isAgent && $0.handle.caseInsensitiveCompare(handle) == .orderedSame }) { return m.name }
         }
+        if let name = serverMember(handle: handle)?.name, !name.isEmpty { return name }
         return directory.first { $0.handle.caseInsensitiveCompare(handle) == .orderedSame }?.name
+    }
+
+    /// A server member by handle, across every server's roster.
+    func serverMember(handle: String) -> ServerMember? {
+        for s in servers {
+            if let m = s.members.first(where: { $0.handle.caseInsensitiveCompare(handle) == .orderedSame }) { return m }
+        }
+        return nil
     }
 
     /// The senders whose rows `chat` hides for me ([feedback blocked-state-ios-2026-10-26],
@@ -4291,6 +4306,9 @@ final class AppModel: ObservableObject {
             return .user(ProfilePerson(m))
         } else if let p = directory.first(where: { $0.handle == handle }) {
             return .user(ProfilePerson(p))
+        } else if let m = serverMember(handle: handle) {
+            return .user(ProfilePerson(id: m.id, handle: m.handle, name: m.name, avatarUrl: m.avatarUrl,
+                                       lastSeenAt: m.lastSeenAt, online: m.online, avatarColorIndex: m.avatarColorIndex))
         } else {
             return .user(ProfilePerson(id: handle, handle: handle, name: nil, avatarUrl: avatarUrl))
         }
@@ -6253,6 +6271,22 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Details → Can → a switch. The row flips at once; the relay's answer confirms it.
+    func setOutsideScope(_ projectId: Id, _ scope: String, on: Bool) {
+        outsideInfo[projectId]?.scopes[scope] = on
+        guard !isFixture else { return }
+        Task {
+            do {
+                if let info = try await api.setOutsideScope(projectId, scope, on: on) {
+                    outsideInfo[projectId] = info
+                }
+            } catch {
+                outsideInfo[projectId]?.scopes[scope] = !on
+                fail("change what the agent may do", error)
+            }
+        }
+    }
+
     func revokeOutsideAgent(_ projectId: Id) async {
         do {
             try await api.revokeOutsideAgent(projectId)
@@ -6260,6 +6294,40 @@ final class AppModel: ObservableObject {
         } catch {
             fail("revoke the agent's access", error)
         }
+    }
+
+    /// Connection card → Wake URL → Save ([feedback outside-agents-wake-ios-2026-10-28]). An empty
+    /// URL clears the URL and the header value together; an empty value with a URL keeps the stored
+    /// value (it is never shown back, so blank means "unchanged"). Returns the relay's short reason
+    /// when it refused, `nil` when saved.
+    func saveOutsideWake(_ projectId: Id, url: String, auth: String) async -> String? {
+        let url = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        let auth = auth.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            let info = url.isEmpty
+                ? try await api.setOutsideWake(projectId, url: "", auth: "")
+                : try await api.setOutsideWake(projectId, url: url, auth: auth.isEmpty ? nil : auth)
+            if let info { outsideInfo[projectId] = info }
+            return nil
+        } catch let e as RelayError where !e.message.isEmpty {
+            return e.message
+        } catch {
+            return "Could not reach the relay"
+        }
+    }
+
+    /// Connection card → Wake URL → Send test wake: `(ok, text)` for the line under the buttons.
+    func testOutsideWake(_ projectId: Id) async -> (ok: Bool, text: String) {
+        let result: (ok: Bool, text: String)
+        do {
+            result = try await api.testOutsideWake(projectId)
+        } catch let e as RelayError where !e.message.isEmpty {
+            result = (false, e.message)
+        } catch {
+            result = (false, "Could not reach the relay")
+        }
+        await refreshOutsideInfo(projectId)
+        return result
     }
 
     // MARK: Create sheet pictures (Jacob, 2026-10-25)

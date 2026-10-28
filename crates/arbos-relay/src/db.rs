@@ -540,6 +540,13 @@ impl Db {
         )?;
         c.execute_batch(SCHEMA)?;
         c.execute_batch(crate::outside::SCHEMA)?;
+        c.execute_batch(crate::outside_log::SCHEMA)?;
+        for m in crate::outside::MIGRATIONS {
+            let _ = c.execute(m, []);
+        }
+        for m in crate::outside_wake::MIGRATIONS {
+            let _ = c.execute(m, []);
+        }
         // Forward-only, additive migrations (D50).
         let _ = c.execute(
             "ALTER TABLE projects ADD COLUMN color TEXT NOT NULL DEFAULT '#8b7cf6'",

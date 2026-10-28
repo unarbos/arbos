@@ -883,9 +883,12 @@ final class CoreFixturesTests: XCTestCase {
         )
     }
 
-    // MARK: Animated image frames (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG)
+    // MARK: Animated image frames (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG /
+    // app-01M61EZD0GJ2XGV1EW4SCVXENK)
 
     /// GIF and animated WebP fixtures decode to 3 frames; a PNG stays still (`nil`).
+    /// The side helper keeps common reaction GIFs animated within the 48 MB budget;
+    /// only https page URLs become via-caption links.
     func testAnimatedImageFramesFixtures() throws {
         let gif = try fixtureData("anim_three.gif")
         let gifFrames = try XCTUnwrap(AnimatedImageFrames.frames(from: gif))
@@ -897,5 +900,22 @@ final class CoreFixturesTests: XCTestCase {
 
         let png = try fixtureData("anim_still.png")
         XCTAssertNil(AnimatedImageFrames.frames(from: png), "PNG is still")
+
+        XCTAssertEqual(AnimatedImageFrames.animationFrameSide(frameCount: 60, width: 480, height: 270), 480)
+        let side150 = try XCTUnwrap(AnimatedImageFrames.animationFrameSide(frameCount: 150, width: 480, height: 480))
+        XCTAssertGreaterThanOrEqual(side150, AnimatedImageFrames.sideFloor)
+        XCTAssertLessThanOrEqual(side150, AnimatedImageFrames.sideStart)
+        let side300 = try XCTUnwrap(AnimatedImageFrames.animationFrameSide(frameCount: 300, width: 1000, height: 1000))
+        XCTAssertGreaterThanOrEqual(side300, AnimatedImageFrames.sideFloor)
+        let scale = Double(side300) / 1000.0
+        let sw = max(Int((1000.0 * scale).rounded()), 1)
+        let sh = max(Int((1000.0 * scale).rounded()), 1)
+        XCTAssertLessThanOrEqual(300 * sw * sh * 4, AnimatedImageFrames.maxDecodedBytes)
+        XCTAssertNil(AnimatedImageFrames.animationFrameSide(frameCount: 301, width: 480, height: 270))
+
+        XCTAssertNotNil(AttachmentSource.httpsPageURL(from: "https://example.com/g/1"))
+        XCTAssertNil(AttachmentSource.httpsPageURL(from: "http://example.com/g/1"))
+        XCTAssertNil(AttachmentSource.httpsPageURL(from: "file:///tmp/x.gif"))
+        XCTAssertNil(AttachmentSource.httpsPageURL(from: "javascript:alert(1)"))
     }
 }

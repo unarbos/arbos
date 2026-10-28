@@ -46,6 +46,9 @@ mod moderation;
 mod notices;
 mod notify;
 mod outside;
+mod outside_log;
+mod outside_sidecar;
+mod outside_wake;
 mod people;
 mod perf;
 mod proxy;
@@ -590,15 +593,29 @@ async fn main() -> anyhow::Result<()> {
         .route("/outside-agents", get(outside::list).post(outside::create))
         .route(
             "/outside-agents/{id}",
-            get(outside::get).delete(outside::revoke),
+            get(outside::get)
+                .patch(outside::patch)
+                .delete(outside::revoke),
         )
         .route("/outside-agents/{id}/rotate", post(outside::rotate))
+        .route("/outside-agents/{id}/wake/test", post(outside::wake_test))
         // … and the agent side (bearer arbk_ key).
         .route("/asp/me", get(outside::me))
+        .route("/asp/wake/test", post(outside::asp_wake_test))
         .route("/asp/inbox", get(outside::inbox))
         .route("/asp/events", post(outside::events))
         .route("/asp/socket", get(outside::socket))
+        .route("/asp/files/{slot}/{key}", get(outside::file))
+        .route("/asp/chats/{id}/messages", get(outside::history))
         .route("/asp/connect/{id}", get(outside::connect_page))
+        // Sidecar support (#2189): members, and the public texts an agent is handed.
+        .route("/asp/chats/{id}/members", get(outside_sidecar::members))
+        .route("/llms.txt", get(outside_sidecar::llms_txt))
+        .route("/agents/llms.txt", get(outside_sidecar::llms_txt))
+        .route("/sidecar/install.sh", get(outside_sidecar::install_sh))
+        // Session log (spec §13.3): the sidecar uploads, the owner reads.
+        .route("/asp/log", post(outside_log::upload))
+        .route("/outside-agents/{id}/log", get(outside_log::read))
         .route(
             "/projects/{project_id}/chats/{chat_id}/notify",
             post(notify::notify_project_chat),

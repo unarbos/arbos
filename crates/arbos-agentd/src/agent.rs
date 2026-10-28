@@ -4569,16 +4569,6 @@ impl Agent {
                 "result",
                 Some(&voice_text),
             );
-            if self.people.is_people_chat(chat_id) {
-                self.dispatch_agent_mentions(
-                    chat_id,
-                    host,
-                    &turn.user_msg_id,
-                    &assistant_msg_id,
-                    announce,
-                )
-                .await;
-            }
         }
         if !turn.ack_text.trim().is_empty() {
             let _ = self.store.t3_append(
