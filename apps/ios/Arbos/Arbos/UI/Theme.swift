@@ -949,9 +949,11 @@ extension View {
 /// ([feedback iphone-list-top-fade-2026-10-26]: the tabs no longer scroll with the list, so the
 /// fade can be opaque through them).
 extension HomeChrome {
-    /// Tab pill (32) with `filterTop` above and 4 below.
+    /// Tab pill (32) with `filterTop` above and `filterBottom` below — the whole band is the
+    /// tabs' hit area ([feedback iphone-filter-tab-taps-2026-10-28]: 44 pt tall taps).
     static let filterTop: CGFloat = 8
-    static let filterBand: CGFloat = filterTop + 32 + 4
+    static let filterBottom: CGFloat = 4
+    static let filterBand: CGFloat = filterTop + PaneTabsMetrics.pill + filterBottom
     /// Rows scrolling under the tabs vanish over this band; the first row sits at its end at rest.
     static let fadeBand: CGFloat = 20
     /// The list's first row starts this far under the safe-area top: bar + tabs + the fade band.
