@@ -679,7 +679,7 @@ struct MachinePage: View {
                                     ProgressView().controlSize(.mini).tint(theme.muted)
                                     Text("Restarting…")
                                 } else {
-                                    Circle().fill(machineDotColor(m.state, theme: theme)).frame(width: 8, height: 8) // presence-badge: inline (a status row, not on a picture)
+                                    Circle().fill(machineDotColor(m.state, theme: theme)).frame(width: 8, height: 8)
                                     Text(stateText(m))
                                 }
                             }
