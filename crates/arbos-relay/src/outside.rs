@@ -704,8 +704,10 @@ pub async fn create(
         description: format!("Connected agent ({transport})"),
         primary_chat_id: None,
         avatar_color_index: b.avatar_color_index,
-        avatar_leaf: None,
-        avatar_leaf_color: None,
+        // The Create sheets' rule (Jacob, 2026-10-25): the name's initial on a neutral disc,
+        // never an automatic leaf; a picture can be set from the profile like any agent.
+        avatar_leaf: Some(i64::from(arbos_core::avatar::leaf::NEUTRAL)),
+        avatar_leaf_color: Some(i64::from(arbos_core::avatar::leaf::NEUTRAL)),
         image_key: None,
         avatar_version: 0,
     };
