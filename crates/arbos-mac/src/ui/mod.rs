@@ -28,6 +28,7 @@ pub mod highlight;
 pub mod hoverpick;
 pub mod icons;
 pub mod identity;
+pub mod link_card;
 pub mod link_tile;
 pub mod local;
 pub mod lottie;
