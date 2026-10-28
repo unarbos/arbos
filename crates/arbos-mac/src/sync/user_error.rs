@@ -396,6 +396,15 @@ fn class_for_status(status: u16, kind: Option<&str>, sentence: Option<String>) -
     if kind == "unsupported_media" || kind == "unsupported_type" {
         return ErrorClass::Upload(UploadFault::Unsupported);
     }
+    // A 403 that is a permission answer, not a dead session: the relay names the rule
+    // (`admin_only`, `owner_only`, `not_member`, …) and says it in one sentence. The bare
+    // `forbidden` / `token_expired` kinds are the session.
+    if status == 403
+        && !kind.is_empty()
+        && !matches!(kind, "forbidden" | "token_expired" | "unauthorized")
+    {
+        return ErrorClass::Refused { message: sentence };
+    }
     match status {
         401 | 403 => ErrorClass::AuthExpired,
         404 | 410 => ErrorClass::NotFound,
@@ -682,6 +691,32 @@ mod tests {
             "Couldn't save the secret. Something went wrong."
         );
         assert_eq!(e.action(), Action::TryAgain);
+    }
+
+    /// A permission 403 (`admin_only`) is the relay's sentence, not "You were signed out".
+    #[test]
+    fn a_permission_403_reads_as_the_relays_sentence() {
+        let e = UserError::classify(
+            "rename the group",
+            &relay(
+                403,
+                r#"{"error":{"type":"admin_only","message":"Only the group's owner and admins can change its name, picture and description."}}"#,
+            ),
+        );
+        assert_eq!(
+            e.sentence(),
+            "Couldn't rename the group. Only the group's owner and admins can change its name, picture and description."
+        );
+        assert_eq!(e.action(), Action::None);
+        // A session 403 still signs out.
+        let e = UserError::classify(
+            "send your message",
+            &relay(
+                403,
+                r#"{"error":{"type":"forbidden","message":"forbidden"}}"#,
+            ),
+        );
+        assert_eq!(e.class, ErrorClass::AuthExpired);
     }
 
     #[test]
