@@ -52,7 +52,8 @@ use super::dto::{
 use super::store::{self, Store};
 use super::user_error::{ErrorClass, Fault, UserError};
 use super::{
-    ClientCommand, DraftPicture, PictureSource, PictureTarget, PushRefusal, SyncEvent, SyncSource,
+    ClientCommand, CopyBlob, DraftPicture, PictureSource, PictureTarget, PushRefusal, SyncEvent,
+    SyncSource,
 };
 use crate::model::{
     new_id, now_ms, trace_rows, AccountView, Attachment, AttachmentKind, BoxReport, BoxState, Call,
@@ -7490,6 +7491,48 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         let _ = shared.events.send(SyncEvent::ThumbnailFailed { key });
                     }
                 }
+            });
+        }
+        ClientCommand::FetchCopyBlobs {
+            project_id,
+            request,
+            keys,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                // Every blob at once; one that fails leaves a hole, the rest still copy.
+                let fetches = keys.iter().map(|key| {
+                    let shared = shared.clone();
+                    let project_id = project_id.clone();
+                    let key = key.clone();
+                    async move {
+                        let mut attempt = 0u32;
+                        loop {
+                            match fetch_blob_bytes(&shared, &project_id, &key).await {
+                                Ok((mime, bytes)) => {
+                                    break Some(CopyBlob {
+                                        key,
+                                        mime,
+                                        bytes: Arc::new(bytes),
+                                    })
+                                }
+                                Err(err) => {
+                                    let text = format!("{err:#}");
+                                    if diagnostics::is_transient(&text) && attempt < 2 {
+                                        attempt += 1;
+                                        sleep(Duration::from_millis(400 * u64::from(attempt)))
+                                            .await;
+                                        continue;
+                                    }
+                                    shared.diagnostic("copy", format!("{key}: {text}"));
+                                    break None;
+                                }
+                            }
+                        }
+                    }
+                });
+                let blobs = futures::future::join_all(fetches).await;
+                let _ = shared.events.send(SyncEvent::CopyBlobs { request, blobs });
             });
         }
         ClientCommand::DownloadAttachment {
