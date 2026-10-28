@@ -167,3 +167,83 @@ final class MessageButtonTests: XCTestCase {
         XCTAssertEqual(Theme.control, Controls.diameter, "the pill is the control family's height")
     }
 }
+
+/// Jacob 2026-10-27 ([feedback add-your-agent-row-removal-ios-2026-10-27]; Mac
+/// `[feedback add-your-agent-row-removal-mac-2026-10-27]`): every info pane that adds
+/// members has exactly ONE add row — "Add members" — whose picker adds people and agents
+/// through an "Agents" section; no "Add agent" / "Add your agent" row anywhere (group,
+/// server, person pane, empty chat). The Mac twin is `profiles::group::render_tests`.
+final class OneAddRowPerPaneTests: XCTestCase {
+    private func source(_ rel: String) throws -> String {
+        let file = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Arbos/\(rel)")
+        guard FileManager.default.fileExists(atPath: file.path) else {
+            throw XCTSkip("sources not beside the test bundle (CI without the tree)")
+        }
+        return try String(contentsOf: file, encoding: .utf8)
+    }
+
+    /// The body of one `struct <name>` in a source file (up to the next top-level struct).
+    private func body(of name: String, in text: String) -> String {
+        let after = text.components(separatedBy: "struct \(name): View").dropFirst().joined()
+        return after.components(separatedBy: "\nstruct ").first ?? after
+    }
+
+    private func member(_ id: String, _ handle: String, agent: Bool = false, owner: String? = nil, ownerHandle: String? = nil, name: String? = nil) -> ChatMember {
+        ChatMember(id: id, kind: agent ? .agent : .user, member: "\(agent ? "agent" : "user"):\(id)", role: "member",
+                   handle: handle, avatarUrl: nil, name: name, status: "member", joinedAt: 0,
+                   project: nil, ownerId: owner, ownerHandle: ownerHandle, replyPolicy: nil)
+    }
+
+    /// Launch week: me, Sam, Priya; my agent Comms and Priya's agents Ledger and Atlas.
+    private func launchWeek() -> PeopleChat {
+        PeopleChat(id: "g1", kind: "group", createdBy: "gh_me", createdAt: 0, title: "Launch week", pending: false,
+                   members: [member("gh_me", "unconst"), member("gh_2", "samir"), member("gh_3", "priya"),
+                             member("a-comms", "comms", agent: true, owner: "gh_me", ownerHandle: "unconst", name: "Comms"),
+                             member("a-ledger", "ledger", agent: true, owner: "gh_3", ownerHandle: "priya", name: "Ledger"),
+                             member("a-atlas", "atlas", agent: true, owner: "gh_3", ownerHandle: "priya", name: "Atlas")],
+                   headSeq: 0, readSeq: 0, unread: false, lockState: "people_only", lastActivityAt: 0, myRole: "owner", muted: false, silenced: false)
+    }
+
+    func testEveryPaneDrawsOneAddMembersRowAndNoAddAgentRow() throws {
+        let pages = try source("UI/ProfilePages.swift")
+        let addRow = "PaneRow(leading: .glyph(\"person.badge.plus\"), title: \"Add members\")"
+        for (pane, count) in [("GroupProfileView", 1), ("ServerProfileView", 1), ("UserProfileView", 0)] {
+            let text = body(of: pane, in: pages)
+            XCTAssertFalse(text.isEmpty, "\(pane) is in ProfilePages.swift")
+            XCTAssertEqual(text.components(separatedBy: addRow).count - 1, count, "\(pane): Add members rows")
+            for gone in ["Add agent", "Add your agent", "One of yours", "Bring one of yours", ".glyph(\"sparkles\")", ".tile(\"sparkles\")"] {
+                XCTAssertFalse(text.contains(gone), "\(pane): `\(gone)` is gone for good")
+            }
+        }
+        // The group's description is a labelled row in the same card as Add members, never a bare block.
+        let group = body(of: "GroupProfileView", in: pages)
+        XCTAssertTrue(group.contains("title: \"Description\""), "a labelled Description row")
+        // The empty chat offers no "Add agent" control either.
+        let chat = try source("UI/ChatView.swift")
+        XCTAssertFalse(chat.contains("\"Add agent\""), "no Add agent control in the chat pane")
+    }
+
+    func testThePickerHasAnAgentsSectionMineFirstThenTheOthersAlreadyIn() throws {
+        XCTAssertEqual(AddMembersAgents.sectionTitle, "Agents")
+        XCTAssertEqual(AddMembersAgents.peopleTitle, "People")
+        let sheet = body(of: "NewGroupView", in: try source("UI/PeopleSheets.swift"))
+        XCTAssertFalse(sheet.contains("YOUR AGENTS"), "the section is Agents, not Your agents")
+        let agents = sheet.range(of: "AddMembersAgents.sectionTitle.uppercased()")
+        let people = sheet.range(of: "AddMembersAgents.peopleTitle.uppercased()")
+        XCTAssertNotNil(agents); XCTAssertNotNil(people)
+        if let agents, let people { XCTAssertLessThan(agents.lowerBound, people.lowerBound, "Agents above People") }
+        XCTAssertTrue(sheet.contains("ForEach(Array(othersAgents.enumerated())"), "the other members' agents follow mine")
+
+        // The other members' agents already in the chat: not mine, by name, narrowed by the query.
+        let chat = launchWeek()
+        XCTAssertEqual(AddMembersAgents.others(in: chat, meId: "gh_me", query: "").map(\.id), ["a-atlas", "a-ledger"])
+        XCTAssertEqual(AddMembersAgents.others(in: chat, meId: "gh_me", query: "led").map(\.id), ["a-ledger"])
+        XCTAssertEqual(AddMembersAgents.others(in: chat, meId: "gh_me", query: "@ATLAS").map(\.id), ["a-atlas"])
+        XCTAssertEqual(AddMembersAgents.others(in: chat, meId: "gh_3", query: "").map(\.id), ["a-comms"], "Priya sees mine, not hers")
+        XCTAssertEqual(AddMembersAgents.others(in: nil, meId: "gh_me", query: ""), [], "New group: no chat, no others")
+        XCTAssertEqual(AddMembersAgents.note(for: chat.agents[1]), "run by @priya")
+        XCTAssertNil(AddMembersAgents.note(for: member("x", "x", agent: true)))
+    }
+}
