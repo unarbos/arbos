@@ -242,6 +242,11 @@ pub struct AppState {
     /// a people room asks the judge the same question about one message, and one answer for
     /// all of them is what makes their verdicts agree.
     pub decisions_cache: Arc<std::sync::Mutex<crate::proxy::DecisionsCache>>,
+    /// Identical decision requests in flight at the same moment (the three agents of one box
+    /// judge a message within milliseconds of each other): one per-key lock so the first
+    /// call fills the cache and the rest read it, instead of three upstream calls with three
+    /// different answers (2026-10-28 06:30: two takers for one "any of you" ask).
+    pub decisions_inflight: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     /// user_id → wakes that produced no hello within the deadline (stale-box detector).
     pub stale_bounces: Arc<Mutex<HashMap<String, u32>>>,
     pub conn_seq: Arc<std::sync::atomic::AtomicU64>,
@@ -609,6 +614,7 @@ pub(crate) mod test_support {
             wake_started: Arc::new(Mutex::new(HashMap::new())),
             last_client_push: Arc::new(Mutex::new(HashMap::new())),
             decisions_cache: Arc::new(std::sync::Mutex::new(Default::default())),
+            decisions_inflight: Arc::new(Mutex::new(HashMap::new())),
             conn_seq: Arc::new(AtomicU64::new(0)),
             relay_key: Arc::new(RelayKey::derive("test-key")),
             jwt_key: Arc::new(RelayKey::derive("test-key").subkey("jwt")),
