@@ -2529,6 +2529,28 @@ class Loop:
             bounced = self.release_bounced_pins()
             if bounced:
                 log(f"Gate: pinned item(s) {', '.join(bounced)} are back with their owner; pin released, the pool runs on")
+        # Anti-starvation (coordinator 2026-10-28 19:00: 35 unpinned items, no pool batch for ~3 h because operator pins
+        # ran back to back): whatever the pins, the pool gets a batch at least every POOL_MAX_GAP_MIN. When the last
+        # SETTLED pool batch is older than that and the pool has items, one pool batch runs ahead of the pinned set;
+        # the pins run right after it. A pinned bisect in progress (plan[0] ⊆ pins) is never pre-empted.
+        pool_unpinned = [(f, st) for f, st in ready if not st.get("gate_pinned") and not st.get("awaiting") and not st.get("do_not_merge")]
+        last_settled = cur.get("last_pool_batch_at") or ""
+        pool_overdue = bool(pool_unpinned) and bool(last_settled) and minutes_between(last_settled, iso()) >= self.POOL_MAX_GAP_MIN
+        if members and pool_overdue and not (plan and set(plan[0]) <= set(members)):
+            pool_members = self.pool_batches(pool_unpinned, cur, plan)
+            if pool_members:
+                log(f"Gate: pool anti-starvation — a pool batch of {len(pool_members)} runs ahead of {len(members)} pinned item(s); "
+                    f"the last pool batch settled {int(minutes_between(last_settled, iso()))} min ago (limit {self.POOL_MAX_GAP_MIN})")
+                self.store.event("_loop", "pool_anti_starvation", pinned_waiting=sorted(members), pool=sorted(pool_members),
+                                 gap_min=int(minutes_between(last_settled, iso())))
+                cur["rust_gate_plan"] = plan
+                self.store.save_cursor(cur)
+                self.rust_gate_start(pool_members)
+                cur = self.store.cursor()
+                if cur.get("rust_gate"):
+                    cur["rust_gate"]["pool_batch"] = True
+                    self.store.save_cursor(cur)
+                return
         # Pool-first (coordinator 2026-10-26 02:50: no pool batch had completed since 22:49 — pins, aborts, solo
         # slots and deferred-fairness batches pre-empted it for 4 h): while `pool_first` is set, solo slots and
         # the deferred-fairness batch do NOT jump the pool; bisect / plan halves still finish first; pins (Jacob
@@ -3173,6 +3195,7 @@ class Loop:
     DEFER_AFTER = 2
     SHIP_CARRIER_GAP_MIN = 15  # a carrying run that did not fail is replaced by its successor within this; the ship clock stays paused
     POOL_STARVED_MIN = 120  # no pool batch merged for this long while plan halves run → pool-first arms itself
+    POOL_MAX_GAP_MIN = 60  # whatever the pins: a pool batch runs ahead of them when the last settled pool batch is this old
     SIBLING_LIMIT = 4
     # Solo slot (operator rule, 2026-10-23 23:34): an item bumped 3× by siblings, or sent to its owner twice for a
     # main conflict caused by pool landings, runs ALONE in the slot right after the current run once its owner
