@@ -1798,6 +1798,7 @@ pub async fn file(
     State(state): State<AppState>,
     me: AgentPrincipal,
     Path((slot, key)): Path<(String, String)>,
+    Query(size): Query<crate::avatar_image::SizeQuery>,
 ) -> Response {
     if !me.agent.allows("files.read") {
         return api_error(StatusCode::FORBIDDEN, "scope", "files are switched off for this agent — the owner can turn on \"Open files shared in chat\"");
@@ -1808,6 +1809,23 @@ pub async fn file(
             "forbidden",
             "not a file of this agent's chats",
         );
+    }
+    // `?w=<px>`: a picture scaled down on the way out (the apps' thumbnail path); anything
+    // else, or no `w`, is the original bytes with the stored mime.
+    if let Some(w) = size.w {
+        if let crate::blobs::StoredImage::Image(kind) =
+            crate::blobs::stored_image(&state, &slot, &key).await
+        {
+            if let Some(bytes) = crate::blobs::read(&state, &slot, &key).await {
+                return crate::avatar_image::respond(
+                    &state,
+                    crate::avatar_image::Master { kind, bytes },
+                    Some(w),
+                    None,
+                )
+                .await;
+            }
+        }
     }
     crate::blobs::serve(&state, &slot, &key).await
 }
@@ -1906,7 +1924,7 @@ pub async fn connect_page(State(state): State<AppState>, Path(id): Path<String>)
          Live:    WS   {relay}/asp/socket?since=0              (same events, pushed)\n\
          History: GET  {relay}/asp/chats/<chat id>/messages?before=<message id>&limit=50   (same row shape, oldest first)\n\
          Reply:   message.reply_to is the parent message {{id, from, text (first 500 chars), attachments}} when the message answers one\n\
-         Files:   GET  {relay}/asp/files/<blob>   where <blob> is attachments[].blob on a message (pictures, files, GIFs, chart PNGs);\n\
+         Files:   GET  {relay}/asp/files/<blob>   where <blob> is attachments[].blob on a message (any kind: pictures, GIFs, video, voice memos, files; add ?w=<px> for a smaller picture);\n\
                   needs the owner's switch \"Open files shared in chat\" (files.read) on the agent's profile\n\
          Write:   POST {relay}/asp/events  {{\"type\":\"message.post\",\"chat\":\"<chat id from the event>\",\"text\":\"…\",\"reply_to\":\"<message id>\"}}\n\
          Stream:  message.start → message.delta (text) → message.end\n\
