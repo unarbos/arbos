@@ -1,0 +1,31 @@
+{
+ "id": "j2-job-output-or-inline",
+ "lane": "c",
+ "category": "background",
+ "title": "A job must produce its output (or the agent falls back inline and says so); an empty completion is not 'done'",
+ "regression": "#1804 (jobs died in 400 ms with an empty result: worker session dir root-owned; fixed 0.1.138) — verified PASS on 0.1.141 in run 7",
+ "turns": [
+  {
+   "prompt": "Run this as a background job — start a job, do not do it in this turn: count the words in every .txt file under {D}/docs and write one line per file, '<name> <words>', to {D}/wordcount.txt. When the job is done, tell me the grand total of words.",
+   "seed": "mkdir -p {D}/docs && python3 - <<'PY'\nimport os\nD=os.environ['D']\nfor name,n in (('a.txt',10),('b.txt',20),('c.txt',30)):\n    open(f'{D}/docs/{name}','w').write(' '.join(['word']*n)+'\\n')\nPY",
+   "background": true,
+   "latency_max_s": 10,
+   "timeout_s": 120
+  }
+ ],
+ "verify_wait": {
+  "wait_s": 360,
+  "settle_s": 10,
+  "verify": "f={D}/wordcount.txt; test -s $f || { echo FAIL: wordcount.txt missing or empty; exit 0; }; n=$(grep -c . $f); echo \"SHOW lines=$n $(tr '\\n' '|' < $f)\"; [ $n -eq 3 ] && grep -q 'a.txt 10' $f && grep -q 'c.txt 30' $f && echo PASS || echo FAIL: wrong lines",
+  "text_regex": "\\b60\\b",
+  "rubric": {
+   "criteria": "Judge the whole chat. Pass if the job (or an honest inline fallback that says the job path was not used) produced wordcount.txt and the final bubble states the grand total 60. Fail if any bubble says done/complete/finished while the file is missing or empty, if the total is wrong, or if the chat ends with a 'started' note and nothing else.",
+   "min": 3
+  }
+ },
+ "doc_checks": {
+  "no_truncated_reply": true,
+  "no_repeated_sentence": true
+ },
+ "cleanup_routines": true
+}

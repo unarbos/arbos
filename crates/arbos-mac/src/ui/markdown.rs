@@ -1,9 +1,14 @@
-//! A small markdown block splitter. One transcript row = one block
-//! (zeron-study §4.1). Inline: `code`, **bold**, *italic*, links, and TeX
-//! math (`$…$`, `\(…\)`; `$$…$$` / `\[…\]` as a block). Enough for agent
-//! replies; swap for pulldown-cmark when more is needed.
+//! The Mac's view of the shared chat Markdown parser
+//! (`arbos_core::markdown`, [feedback chat-markdown-mac-2026-10-27]): the same
+//! blocks and inline runs the iPhone renders, plus what only this renderer
+//! needs — typeset math runs, the named link's icon cell, URL wrap hints, and
+//! the chart card as one more block kind.
+
+use arbos_core::markdown as core;
 
 use super::math;
+use super::urlwrap;
+use crate::model::LinkPreview;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Block {
@@ -12,6 +17,8 @@ pub enum Block {
         level: u8,
         text: String,
     },
+    /// `> ` lines: a quote holds any block, including another quote.
+    Quote(Vec<Block>),
     Bullets(Vec<String>),
     Numbered(Vec<String>),
     Code {
@@ -28,223 +35,44 @@ pub enum Block {
     Math {
         source: String,
     },
+    /// A chart bubble's card ([feedback chart-bubble-mac-2026-10-26]): not markdown, but one
+    /// block of the agent's bubble like a code card. `spec` is the `chart` part's JSON (the
+    /// validated `arbos_core::chart::Chart`), `table` its markdown table (what a copy carries).
+    Chart {
+        part_id: String,
+        spec: String,
+        table: String,
+    },
+    /// A link preview card ([feedback link-embeds-mac-2026-10-27]): the relay's
+    /// `link_preview` part as one block of the bubble, under the prose that held the link.
+    LinkPreview {
+        part_id: String,
+        preview: Box<LinkPreview>,
+    },
 }
 
+impl From<core::Block> for Block {
+    fn from(block: core::Block) -> Self {
+        match block {
+            core::Block::Paragraph(text) => Block::Paragraph(text),
+            core::Block::Heading { level, text } => Block::Heading { level, text },
+            core::Block::Quote(inner) => Block::Quote(inner.into_iter().map(Into::into).collect()),
+            core::Block::Bullets(items) => Block::Bullets(items),
+            core::Block::Numbered(items) => Block::Numbered(items),
+            core::Block::Code { lang, code } => Block::Code { lang, code },
+            core::Block::Table { header, rows } => Block::Table { header, rows },
+            core::Block::Math { source } => Block::Math { source },
+        }
+    }
+}
+
+/// Split a message into blocks (the shared grammar, `docs/mac-design-rules.md`
+/// § Message formatting).
 pub fn split_blocks(source: &str) -> Vec<Block> {
-    let mut blocks = Vec::new();
-    let mut lines = source.lines().peekable();
-    let mut paragraph: Vec<&str> = Vec::new();
-
-    fn flush(paragraph: &mut Vec<&str>, blocks: &mut Vec<Block>) {
-        if !paragraph.is_empty() {
-            // Keep soft newlines (chat-style): a single Enter is a line break,
-            // not a space. Blank lines still split paragraphs above.
-            blocks.push(Block::Paragraph(paragraph.join("\n")));
-            paragraph.clear();
-        }
-    }
-
-    while let Some(line) = lines.next() {
-        let trimmed = line.trim_end();
-        if trimmed.trim().is_empty() {
-            flush(&mut paragraph, &mut blocks);
-            continue;
-        }
-        // Leading spaces are fine (iOS parity; CommonMark allows a short indent).
-        if let Some(rest) = trimmed.trim_start().strip_prefix("```") {
-            flush(&mut paragraph, &mut blocks);
-            let lang = rest.trim().to_string();
-            let mut code = String::new();
-            for code_line in lines.by_ref() {
-                if code_line.trim_end().trim_start().starts_with("```") {
-                    break;
-                }
-                if !code.is_empty() {
-                    code.push('\n');
-                }
-                code.push_str(code_line);
-            }
-            blocks.push(Block::Code { lang, code });
-            continue;
-        }
-        if let Some((opener, closer)) = display_math_delimiters(trimmed) {
-            let rest = &trimmed.trim_start()[opener.len()..];
-            if let Some(inner) = rest.trim_end().strip_suffix(closer) {
-                if !inner.trim().is_empty() {
-                    flush(&mut paragraph, &mut blocks);
-                    blocks.push(Block::Math {
-                        source: inner.trim().to_string(),
-                    });
-                    continue;
-                }
-            }
-            // `$$` opening a multi-line block: everything up to the closing
-            // line. Never closed, the lines are prose as typed.
-            let mut body: Vec<&str> = Vec::new();
-            if !rest.trim().is_empty() {
-                body.push(rest.trim());
-            }
-            let mut consumed: Vec<&str> = Vec::new();
-            let mut closed = false;
-            while let Some(next) = lines.peek() {
-                let line = next.trim_end();
-                lines.next();
-                if line.trim().is_empty() {
-                    continue;
-                }
-                consumed.push(line);
-                if let Some(inner) = line.trim().strip_suffix(closer) {
-                    if !inner.trim().is_empty() {
-                        body.push(inner.trim());
-                    }
-                    closed = true;
-                    break;
-                }
-                body.push(line.trim());
-            }
-            if closed {
-                flush(&mut paragraph, &mut blocks);
-                blocks.push(Block::Math {
-                    source: body.join("\n"),
-                });
-            } else {
-                paragraph.push(trimmed.trim());
-                paragraph.extend(consumed.iter().map(|l| l.trim()));
-            }
-            continue;
-        }
-        if trimmed.starts_with('#') {
-            let level = trimmed.chars().take_while(|c| *c == '#').count().min(6) as u8;
-            let text = trimmed[level as usize..].trim().to_string();
-            if !text.is_empty() {
-                flush(&mut paragraph, &mut blocks);
-                blocks.push(Block::Heading { level, text });
-                continue;
-            }
-        }
-        if is_table_row(trimmed) {
-            if let Some(next) = lines.peek() {
-                if is_table_separator(next.trim_end()) {
-                    flush(&mut paragraph, &mut blocks);
-                    let header = split_table_row(trimmed);
-                    lines.next();
-                    let mut rows = Vec::new();
-                    while let Some(row) = lines.peek() {
-                        let row = row.trim_end();
-                        if !is_table_row(row) {
-                            break;
-                        }
-                        rows.push(split_table_row(row));
-                        lines.next();
-                    }
-                    blocks.push(Block::Table { header, rows });
-                    continue;
-                }
-                // Pipe rows with no separator row are not a GFM table. Rather
-                // than paint them as prose with raw `|`, they degrade to one
-                // monospace block that keeps its columns and scrolls sideways.
-                if is_table_row(next.trim_end()) {
-                    flush(&mut paragraph, &mut blocks);
-                    let mut code = trimmed.trim().to_string();
-                    while let Some(row) = lines.peek() {
-                        let row = row.trim_end();
-                        if !is_table_row(row) {
-                            break;
-                        }
-                        code.push('\n');
-                        code.push_str(row.trim());
-                        lines.next();
-                    }
-                    blocks.push(Block::Code {
-                        lang: String::new(),
-                        code,
-                    });
-                    continue;
-                }
-            }
-        }
-        if let Some(item) = bullet_item(trimmed) {
-            flush(&mut paragraph, &mut blocks);
-            let mut items = vec![item.to_string()];
-            while let Some(next) = lines.peek() {
-                match bullet_item(next.trim_end()) {
-                    Some(item) => {
-                        items.push(item.to_string());
-                        lines.next();
-                    }
-                    None => break,
-                }
-            }
-            blocks.push(Block::Bullets(items));
-            continue;
-        }
-        if let Some(item) = numbered_item(trimmed) {
-            flush(&mut paragraph, &mut blocks);
-            let mut items = vec![item.to_string()];
-            while let Some(next) = lines.peek() {
-                match numbered_item(next.trim_end()) {
-                    Some(item) => {
-                        items.push(item.to_string());
-                        lines.next();
-                    }
-                    None => break,
-                }
-            }
-            blocks.push(Block::Numbered(items));
-            continue;
-        }
-        paragraph.push(trimmed.trim());
-    }
-    flush(&mut paragraph, &mut blocks);
-    blocks
-}
-
-/// The opener a display-math line starts with and the closer that ends it.
-fn display_math_delimiters(line: &str) -> Option<(&'static str, &'static str)> {
-    let t = line.trim_start();
-    if t.starts_with("$$") {
-        Some(("$$", "$$"))
-    } else if t.starts_with("\\[") {
-        Some(("\\[", "\\]"))
-    } else {
-        None
-    }
-}
-
-fn is_table_row(line: &str) -> bool {
-    let t = line.trim();
-    t.starts_with('|') && t.ends_with('|') && t.len() > 2
-}
-
-fn is_table_separator(line: &str) -> bool {
-    let t = line.trim();
-    is_table_row(t)
-        && t.chars()
-            .all(|c| c == '|' || c == '-' || c == ':' || c == ' ')
-        && t.contains('-')
-}
-
-fn split_table_row(line: &str) -> Vec<String> {
-    let t = line.trim();
-    let inner = &t[1..t.len() - 1];
-    inner.split('|').map(|c| c.trim().to_string()).collect()
-}
-
-fn bullet_item(line: &str) -> Option<&str> {
-    let t = line.trim_start();
-    t.strip_prefix("- ")
-        .or_else(|| t.strip_prefix("* "))
-        .or_else(|| t.strip_prefix("• "))
-}
-
-fn numbered_item(line: &str) -> Option<&str> {
-    let t = line.trim_start();
-    let digits = t.chars().take_while(|c| c.is_ascii_digit()).count();
-    if digits == 0 {
-        return None;
-    }
-    let rest = &t[digits..];
-    rest.strip_prefix(". ").or_else(|| rest.strip_prefix(") "))
+    core::parse_blocks(source)
+        .into_iter()
+        .map(Into::into)
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -252,10 +80,14 @@ pub struct InlineStyle {
     pub code: bool,
     pub bold: bool,
     pub italic: bool,
+    pub strike: bool,
     pub link: bool,
     /// Typeset TeX: painted in the math face; `italic` marks its variables,
     /// `bold` its `\mathbf`.
     pub math: bool,
+    /// 0 outside a spoiler, else the spoiler's 1-based index in its text: the
+    /// run is hidden until the viewer clicks it.
+    pub spoiler: u16,
 }
 
 /// One inline run: text, style, and the link target when `style.link`. A named link
@@ -308,7 +140,7 @@ fn label_is_url(label: &str) -> bool {
 /// headings, lists and table cells; never inside code fences), each host once, in order.
 pub fn link_hosts(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    let mut push = |t: &str| {
+    fn push(t: &str, out: &mut Vec<String>) {
         for span in inline_spans(t) {
             if let Some(h) = span.icon {
                 if !out.contains(&h) {
@@ -316,261 +148,118 @@ pub fn link_hosts(text: &str) -> Vec<String> {
                 }
             }
         }
-    };
-    for block in split_blocks(text) {
-        match block {
-            Block::Paragraph(t) | Block::Heading { text: t, .. } => push(&t),
-            Block::Bullets(items) | Block::Numbered(items) => items.iter().for_each(|i| push(i)),
-            Block::Table { header, rows } => {
-                header.iter().for_each(|c| push(c));
-                rows.iter().flatten().for_each(|c| push(c));
+    }
+    fn walk(blocks: &[Block], out: &mut Vec<String>) {
+        for block in blocks {
+            match block {
+                Block::Paragraph(t) | Block::Heading { text: t, .. } => push(t, out),
+                Block::Quote(inner) => walk(inner, out),
+                Block::Bullets(items) | Block::Numbered(items) => {
+                    items.iter().for_each(|i| push(i, out))
+                }
+                Block::Table { header, rows } => {
+                    header.iter().for_each(|c| push(c, out));
+                    rows.iter().flatten().for_each(|c| push(c, out));
+                }
+                Block::Code { .. }
+                | Block::Math { .. }
+                | Block::Chart { .. }
+                | Block::LinkPreview { .. } => {}
             }
-            Block::Code { .. } | Block::Math { .. } => {}
         }
     }
+    walk(&split_blocks(text), &mut out);
     out
 }
 
-type Styled = (String, InlineStyle, Option<String>, Option<String>);
-
-/// Split inline markdown into styled spans. Unterminated markers are shown
-/// literally so a half-streamed `**bold` does not flicker. Links:
-/// `[text](url)` and bare `https://…`.
+/// Split inline markdown into styled spans: the shared runs, with math typeset
+/// into its italic / upright / bold pieces, a named link's icon cell prepended
+/// to its first run, and wrap hints inside addresses.
 pub fn inline_spans(text: &str) -> Vec<Span> {
-    inline_styled(text)
-        .into_iter()
-        .map(|(text, style, href, icon)| Span {
-            text,
-            style,
-            href,
-            icon,
-        })
-        .collect()
+    let runs = core::inline_spans(text);
+    let mut spans: Vec<Span> = Vec::with_capacity(runs.len());
+    let mut i = 0;
+    while i < runs.len() {
+        let run = &runs[i];
+        let style = InlineStyle {
+            code: run.style.code,
+            bold: run.style.bold,
+            italic: run.style.italic,
+            strike: run.style.strike,
+            link: run.style.link,
+            math: run.style.math,
+            spoiler: run.style.spoiler,
+        };
+        if run.style.math {
+            for piece in math::typeset(&run.text) {
+                spans.push(Span {
+                    text: piece.text,
+                    style: InlineStyle {
+                        italic: piece.style == math::MathStyle::Italic,
+                        bold: piece.style == math::MathStyle::Bold,
+                        ..style
+                    },
+                    href: run.href.clone(),
+                    icon: None,
+                });
+            }
+            i += 1;
+            continue;
+        }
+        let Some(href) = run.href.as_deref().filter(|_| run.style.link) else {
+            spans.push(Span {
+                text: run.text.clone(),
+                style,
+                href: None,
+                icon: None,
+            });
+            i += 1;
+            continue;
+        };
+        // The runs of one link share its href; the first carries the cell.
+        let mut end = i + 1;
+        while end < runs.len()
+            && runs[end].style.link
+            && runs[end].href.as_deref() == Some(href)
+            && !runs[end].style.math
+        {
+            end += 1;
+        }
+        let label: String = runs[i..end].iter().map(|r| r.text.as_str()).collect();
+        let icon = (!label_is_url(&label)).then(|| link_host(href)).flatten();
+        for (k, r) in runs[i..end].iter().enumerate() {
+            let text = if k == 0 && icon.is_some() {
+                format!("{LINK_ICON_CELL}{}", r.text)
+            } else if label_is_url(&label) {
+                // An address as the label wraps like a bare URL.
+                urlwrap::breakable(&r.text)
+            } else {
+                r.text.clone()
+            };
+            spans.push(Span {
+                text,
+                style: InlineStyle {
+                    code: r.style.code,
+                    bold: r.style.bold,
+                    italic: r.style.italic,
+                    strike: r.style.strike,
+                    link: true,
+                    math: false,
+                    spoiler: r.style.spoiler,
+                },
+                href: Some(href.to_owned()),
+                icon: if k == 0 { icon.clone() } else { None },
+            });
+        }
+        i = end;
+    }
+    spans
 }
 
 /// The text `inline_spans` renders, markers removed: what the user sees and
 /// what a selection copies.
 pub fn inline_plain(text: &str) -> String {
-    inline_styled(text)
-        .into_iter()
-        .map(|(text, _, _, _)| text)
-        .collect()
-}
-
-fn inline_styled(text: &str) -> Vec<Styled> {
-    let mut spans: Vec<Styled> = Vec::new();
-    let style = InlineStyle::default();
-    let mut current = String::new();
-    let chars: Vec<char> = text.chars().collect();
-    let mut i = 0;
-
-    let push = |current: &mut String, style: InlineStyle, spans: &mut Vec<Styled>| {
-        if !current.is_empty() {
-            spans.push((std::mem::take(current), style, None, None));
-        }
-    };
-
-    while i < chars.len() {
-        let c = chars[i];
-        if c == '\\' && chars.get(i + 1) == Some(&'$') {
-            current.push('$');
-            i += 2;
-            continue;
-        }
-        if let Some((source, end)) = math_at(&chars, i) {
-            push(&mut current, style, &mut spans);
-            for run in math::typeset(&source) {
-                spans.push((
-                    run.text,
-                    InlineStyle {
-                        math: true,
-                        italic: run.style == math::MathStyle::Italic,
-                        bold: run.style == math::MathStyle::Bold,
-                        ..style
-                    },
-                    None,
-                    None,
-                ));
-            }
-            i = end;
-            continue;
-        }
-        if c == '[' {
-            if let Some(close) = find_from(&chars, i + 1, &[']']) {
-                if close + 1 < chars.len() && chars[close + 1] == '(' {
-                    if let Some(end) = find_from(&chars, close + 2, &[')']) {
-                        push(&mut current, style, &mut spans);
-                        let label: String = chars[i + 1..close].iter().collect();
-                        let href: String = chars[close + 2..end].iter().collect();
-                        let icon = (!label_is_url(&label)).then(|| link_host(&href)).flatten();
-                        let text = match &icon {
-                            Some(_) => format!("{LINK_ICON_CELL}{label}"),
-                            None => label,
-                        };
-                        spans.push((
-                            text,
-                            InlineStyle {
-                                link: true,
-                                ..style
-                            },
-                            Some(href),
-                            icon,
-                        ));
-                        i = end + 1;
-                        continue;
-                    }
-                }
-            }
-        }
-        if c == 'h' && (slice_starts(&chars, i, "https://") || slice_starts(&chars, i, "http://")) {
-            let end = (i..chars.len())
-                .find(|&j| chars[j].is_whitespace() || chars[j] == ')' || chars[j] == '"')
-                .unwrap_or(chars.len());
-            let mut url_end = end;
-            while url_end > i && matches!(chars[url_end - 1], '.' | ',' | ';' | ':') {
-                url_end -= 1;
-            }
-            push(&mut current, style, &mut spans);
-            let url: String = chars[i..url_end].iter().collect();
-            spans.push((
-                url.clone(),
-                InlineStyle {
-                    link: true,
-                    ..style
-                },
-                Some(url),
-                None,
-            ));
-            i = url_end;
-            continue;
-        }
-        if c == '`' {
-            if let Some(end) = find_from(&chars, i + 1, &['`']) {
-                push(&mut current, style, &mut spans);
-                let code: String = chars[i + 1..end].iter().collect();
-                spans.push((
-                    code,
-                    InlineStyle {
-                        code: true,
-                        ..style
-                    },
-                    None,
-                    None,
-                ));
-                i = end + 1;
-                continue;
-            }
-        }
-        if c == '*' && i + 1 < chars.len() && chars[i + 1] == '*' {
-            if let Some(end) = find_pair(&chars, i + 2) {
-                push(&mut current, style, &mut spans);
-                let inner: String = chars[i + 2..end].iter().collect();
-                for (t, s, href, icon) in inline_styled(&inner) {
-                    spans.push((
-                        t,
-                        InlineStyle {
-                            bold: true,
-                            ..merge(style, s)
-                        },
-                        href,
-                        icon,
-                    ));
-                }
-                i = end + 2;
-                continue;
-            }
-        }
-        if c == '*' || c == '_' {
-            let prev_ws = i == 0 || chars[i - 1].is_whitespace();
-            if prev_ws {
-                if let Some(end) = find_from(&chars, i + 1, &[c]) {
-                    if end > i + 1 {
-                        push(&mut current, style, &mut spans);
-                        let inner: String = chars[i + 1..end].iter().collect();
-                        spans.push((
-                            inner,
-                            InlineStyle {
-                                italic: true,
-                                ..style
-                            },
-                            None,
-                            None,
-                        ));
-                        i = end + 1;
-                        continue;
-                    }
-                }
-            }
-        }
-        current.push(c);
-        i += 1;
-    }
-    push(&mut current, style, &mut spans);
-    spans
-}
-
-fn merge(a: InlineStyle, b: InlineStyle) -> InlineStyle {
-    InlineStyle {
-        code: a.code || b.code,
-        bold: a.bold || b.bold,
-        italic: a.italic || b.italic,
-        link: a.link || b.link,
-        math: a.math || b.math,
-    }
-}
-
-/// An inline math span starting at `chars[i]`: the LaTeX inside and the index
-/// after the closing delimiter. `\( … \)`, `\[ … \]` and `$$ … $$` always;
-/// `$ … $` by Pandoc's rule so prices stay prose: the opening `$` is not
-/// glued to a word and has a non-space right after it, the closing `$` has a
-/// non-space right before it and no digit after it, and the span stays on one
-/// line — "$5 and $10", "US$3" and a lone "$" are text.
-fn math_at(chars: &[char], i: usize) -> Option<(String, usize)> {
-    let inner = |from: usize, to: usize| -> String { chars[from..to].iter().collect() };
-    let find_pair = |from: usize, a: char, b: char| -> Option<usize> {
-        (from..chars.len().saturating_sub(1)).find(|&j| chars[j] == a && chars[j + 1] == b)
-    };
-    if chars[i] == '\\' {
-        let open = *chars.get(i + 1)?;
-        let close = match open {
-            '(' => ')',
-            '[' => ']',
-            _ => return None,
-        };
-        let end = find_pair(i + 2, '\\', close)?;
-        let source = inner(i + 2, end);
-        return (!source.trim().is_empty()).then(|| (source.trim().to_string(), end + 2));
-    }
-    if chars[i] != '$' {
-        return None;
-    }
-    if chars.get(i + 1) == Some(&'$') {
-        let end = find_pair(i + 2, '$', '$')?;
-        let source = inner(i + 2, end);
-        return (!source.trim().is_empty()).then(|| (source.trim().to_string(), end + 2));
-    }
-    if i > 0 && chars[i - 1].is_alphanumeric() {
-        return None;
-    }
-    let first = *chars.get(i + 1)?;
-    if first.is_whitespace() {
-        return None;
-    }
-    let mut j = i + 1;
-    while j < chars.len() {
-        match chars[j] {
-            '\n' => return None,
-            '$' if chars[j - 1] != '\\' => break,
-            _ => j += 1,
-        }
-    }
-    if j >= chars.len() || chars[j - 1].is_whitespace() {
-        return None;
-    }
-    if chars.get(j + 1).is_some_and(|c| c.is_ascii_digit()) {
-        return None;
-    }
-    Some((inner(i + 1, j), j + 1))
+    inline_spans(text).into_iter().map(|s| s.text).collect()
 }
 
 /// Display polish for assistant bubbles already in the doc: insert a missing space
@@ -635,12 +324,6 @@ fn polish_outside_fences(text: &str, polish: impl Fn(&str) -> String) -> String 
         out.pop();
     }
     out
-}
-
-/// True when `text` contains at least one fenced ``` code block opener.
-pub fn has_fenced_code(text: &str) -> bool {
-    text.lines()
-        .any(|line| line.trim_end().trim_start().starts_with("```"))
 }
 
 /// True when `chars[i]` (lowercase) is glued to an uppercase letter that starts a new
@@ -784,19 +467,6 @@ fn is_short_tool_narration(sentence: &str) -> bool {
     ]
     .iter()
     .any(|p| l.starts_with(p))
-}
-
-fn slice_starts(chars: &[char], at: usize, needle: &str) -> bool {
-    let n: Vec<char> = needle.chars().collect();
-    at + n.len() <= chars.len() && chars[at..at + n.len()] == n[..]
-}
-
-fn find_from(chars: &[char], from: usize, needles: &[char]) -> Option<usize> {
-    (from..chars.len()).find(|&i| needles.contains(&chars[i]))
-}
-
-fn find_pair(chars: &[char], from: usize) -> Option<usize> {
-    (from..chars.len().saturating_sub(1)).find(|&i| chars[i] == '*' && chars[i + 1] == '*')
 }
 
 #[cfg(test)]

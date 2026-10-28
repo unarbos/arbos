@@ -45,19 +45,26 @@ mod migrate;
 mod moderation;
 mod notices;
 mod notify;
+mod outside;
 mod people;
+mod perf;
 mod proxy;
+mod push;
 mod releases;
 mod restart;
 mod room_health;
 mod rooms;
 mod routines;
 mod secrets;
+mod settings_audit;
 mod shell_grants;
 mod signin;
+mod site_icons;
+mod sites;
 mod skills;
 mod smoke;
 mod state;
+mod unfurl;
 mod upgrade;
 mod upgrade_carry;
 mod vault;
@@ -329,6 +336,7 @@ async fn main() -> anyhow::Result<()> {
         box_conns: Arc::new(Mutex::new(HashMap::new())),
         wake_started: Arc::new(Mutex::new(HashMap::new())),
         last_client_push: Arc::new(Mutex::new(HashMap::new())),
+        decisions_cache: Arc::new(std::sync::Mutex::new(Default::default())),
         stale_bounces: Arc::new(Mutex::new(HashMap::new())),
         conn_seq: Arc::new(AtomicU64::new(0)),
         relay_key,
@@ -338,7 +346,7 @@ async fn main() -> anyhow::Result<()> {
         upgrading: Arc::new(Mutex::new(HashMap::new())),
         upgrade_refused: Arc::new(Mutex::new(HashMap::new())),
         refresh_grace: Arc::new(Mutex::new(HashMap::new())),
-        push: apns::from_env().unwrap_or_else(|| Arc::new(apns::Pusher::Off)),
+        push: Arc::new(push::Push::from_env(db.clone())),
         focus: Arc::new(Mutex::new(HashMap::new())),
         fallback_sent: Arc::new(Mutex::new(HashMap::new())),
         livekit: livekit::from_env(),
@@ -392,6 +400,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     db.local_devices_reset()?;
+    state.push.spawn_worker();
     rooms::spawn_sweeper(state.clone()).await;
     boxes::spawn_wake_runner(state.clone()).await;
     routines::spawn_scheduler(state.clone()).await;
@@ -401,6 +410,7 @@ async fn main() -> anyhow::Result<()> {
     boxes::spawn_always_on(state.clone()).await;
     upgrade::spawn_history_sweeper(state.clone()).await;
     secrets::spawn_sweeper(state.clone()).await;
+    outside::spawn_sweeper(state.clone()).await;
     calls::spawn_sweeper(state.clone()).await;
     images::spawn_health_probe(state.clone());
     matrix::worker::spawn(state.clone());
@@ -433,6 +443,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/projects/{file}/avatar.jpg", get(images::project_avatar))
         .route("/me/pushes", get(people::me_pushes))
         .route("/me/unread", get(notify::me_unread))
+        .route(
+            "/me/notifications",
+            get(notify::me_notifications).put(notify::put_me_notifications),
+        )
         .route("/chats/{id}/calls", post(calls::start_people_call))
         .route("/chats/{id}/call", get(calls::people_chat_call))
         .route(
@@ -543,6 +557,10 @@ async fn main() -> anyhow::Result<()> {
             "/admin/matrix/reads/{user}",
             put(matrix::appservice::set_reads),
         )
+        .route(
+            "/admin/matrix/pushers",
+            post(matrix::appservice::backfill_pushers),
+        )
         .route("/admin/installs", get(releases::admin_installs))
         .route("/releases/current", get(releases::current))
         .route("/box/voice", get(voice::ws_box_voice))
@@ -567,6 +585,19 @@ async fn main() -> anyhow::Result<()> {
             post(notify::register_push).delete(notify::unregister_push),
         )
         .route("/chats/{id}/notify", post(notify::notify_people_chat))
+        // Outside agents (#2140): owner side …
+        .route("/outside-agents", get(outside::list).post(outside::create))
+        .route(
+            "/outside-agents/{id}",
+            get(outside::get).delete(outside::revoke),
+        )
+        .route("/outside-agents/{id}/rotate", post(outside::rotate))
+        // … and the agent side (bearer arbk_ key).
+        .route("/asp/me", get(outside::me))
+        .route("/asp/inbox", get(outside::inbox))
+        .route("/asp/events", post(outside::events))
+        .route("/asp/socket", get(outside::socket))
+        .route("/asp/connect/{id}", get(outside::connect_page))
         .route(
             "/projects/{project_id}/chats/{chat_id}/notify",
             post(notify::notify_project_chat),
@@ -626,6 +657,14 @@ async fn main() -> anyhow::Result<()> {
             post(people::member_unban),
         )
         .route("/box/people/{id}", get(people::box_people_chat))
+        .route(
+            "/box/people/{id}/gate",
+            post(room_health::post_gate_decision),
+        )
+        .route(
+            "/admin/room-health/{id}",
+            get(room_health::admin_room_health),
+        )
         .route(
             "/projects/{id}/members",
             get(people::project_members_list).post(people::project_member_add),
@@ -733,6 +772,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/admin/push", get(admin::push_status))
         .route("/admin/push/test", post(admin::push_test))
+        .route("/admin/push/drain", post(admin::push_drain))
         .route(
             "/admin/fleet",
             get(fleet::admin_fleet).put(fleet::admin_fleet_update),
@@ -748,6 +788,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/admin/users/{id}/credits",
             axum::routing::put(admin::set_credits),
+        )
+        .route(
+            "/admin/projects/{id}/spend-cap",
+            axum::routing::put(admin::set_project_cap),
         )
         .route(
             "/admin/killswitch",
@@ -811,8 +855,13 @@ async fn main() -> anyhow::Result<()> {
             "/room/{project}/{chat}/messages/{message_id}",
             delete(moderation::delete_message),
         )
+        .route(
+            "/room/{project}/{chat}/messages/{message_id}/preview",
+            delete(moderation::remove_preview),
+        )
         .route("/blob/{project}/{key}", get(blobs::get).put(blobs::put))
         .route("/link-icon", get(link_icons::get))
+        .route("/unfurl/icon", get(site_icons::get))
         .route("/feedback", post(feedback::submit))
         .route("/feedback/capture/{id}", post(feedback::device_capture))
         .route("/box/feedback/capture", post(feedback::box_capture_request))
@@ -820,11 +869,34 @@ async fn main() -> anyhow::Result<()> {
             "/box/feedback/capture/{id}",
             get(feedback::box_capture_status),
         )
+        .route("/perf/report", post(perf::submit))
+        .route("/admin/perf", get(perf::admin_list))
+        .route("/admin/perf/summary", get(perf::admin_summary))
+        .route("/admin/perf/{id}", get(perf::admin_item))
         .route("/admin/feedback", get(feedback::admin_list))
         .route("/admin/feedback/{id}/image", get(feedback::admin_image))
         .route(
             "/admin/feedback/{id}/issue",
             post(feedback::admin_set_issue),
+        )
+        // Agent-hosted sites (#2060): box publish API, owner list/unpublish, admin takedown.
+        .route("/sites", get(sites::list).delete(sites::unpublish_all))
+        .route("/sites/{app}", delete(sites::unpublish))
+        .route("/sites/{app}/begin", post(sites::begin))
+        .route("/sites/{app}/blob/{sha}", put(sites::put_blob))
+        .route("/sites/{app}/commit", post(sites::commit))
+        .route("/admin/sites", get(sites::admin_list))
+        .route("/admin/sites/events", get(sites::admin_events))
+        .route("/admin/sites/move/{user}", post(sites::admin_move))
+        .route("/admin/sites/quota/{user}", put(sites::admin_set_quota))
+        .route("/admin/sites/{user}/{app}", delete(sites::admin_purge))
+        .route(
+            "/admin/sites/{user}/{app}/takedown",
+            post(sites::admin_takedown),
+        )
+        .route(
+            "/admin/sites/{user}/{app}/restore",
+            post(sites::admin_restore),
         )
         .route("/bootstrap/{file}", get(blobs::bootstrap))
         .route("/proxy/v1/models", get(proxy::openai_models))
@@ -943,6 +1015,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/box/secrets/{id}/scrub", get(secrets::box_scrub))
         .route("/box/secrets/request", post(secrets::box_request))
+        .route("/box/secrets/from-message", post(secrets::box_from_message))
         .route(
             "/box/secrets/requests/{id}",
             get(secrets::box_request_status),
@@ -965,7 +1038,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/secrets/pause", post(secrets::admin_pause))
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
         .layer(tower_http::trace::TraceLayer::new_for_http())
-        .layer(axum::middleware::from_fn(
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
             api_error_layer::rewrite_plain_api_errors,
         ))
         .with_state(state.clone());

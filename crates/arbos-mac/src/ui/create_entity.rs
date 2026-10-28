@@ -23,6 +23,7 @@ use gpui::{div, prelude::*, px, Context, Div, FontWeight, Hsla, MouseButton};
 use crate::ui::avatar_picker::{self, Picker, Tab};
 use crate::ui::avatars;
 use crate::ui::frost::{frosted, PANEL_BLUR};
+use crate::ui::highlight;
 use crate::ui::icons::icon;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Appearance, Theme};
@@ -54,6 +55,8 @@ pub(crate) const HEIGHT: f32 = FOOTER_TOP + FOOTER_H;
 /// The server explainer (13 pt, two lines at this width) plus its gap: everything under the
 /// field moves down by this much.
 const EXPLAINER_SHIFT: f32 = 40.0;
+/// Connect an agent (#2141): the transport capsules under the explainer (28 pt row + gap).
+const TRANSPORT_SHIFT: f32 = 40.0;
 
 /// What the sheet creates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,6 +64,58 @@ pub enum Kind {
     Agent,
     Group,
     Server,
+    /// Connect an outside agent (#2141): same screen, then the key reveal instead of a box.
+    Connect,
+}
+
+/// Where a connected agent runs — the three rows of the approved type picker, as capsules.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Transport {
+    /// Claude Code / Codex on this Mac over the Agent Client Protocol (`arbos-acp`).
+    #[default]
+    Acp,
+    /// A Grok Bot assistant: a routine calls the relay over HTTPS.
+    Grok,
+    /// Any bot that speaks HTTPS or a WebSocket with the key.
+    Custom,
+}
+
+impl Transport {
+    pub const ALL: [Transport; 3] = [Transport::Acp, Transport::Grok, Transport::Custom];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Transport::Acp => "Claude Code / Codex on this Mac",
+            Transport::Grok => "Grok",
+            Transport::Custom => "Custom bot",
+        }
+    }
+
+    /// The relay's word.
+    pub fn wire(self) -> &'static str {
+        match self {
+            Transport::Acp => "acp",
+            Transport::Grok => "grok",
+            Transport::Custom => "custom",
+        }
+    }
+
+    pub fn from_wire(s: &str) -> Transport {
+        match s {
+            "acp" => Transport::Acp,
+            "grok" => Transport::Grok,
+            _ => Transport::Custom,
+        }
+    }
+
+    /// The one line under the key that says what to do with it.
+    pub fn how_to(self) -> &'static str {
+        match self {
+            Transport::Acp => "In Terminal: cargo install --git https://github.com/unarbos/arbos arbos-acp, then run arbos-acp with the key — it starts Claude Code or Codex for you.",
+            Transport::Grok => "In Grok, add a routine that calls the link every few minutes with the key. Arbos handles the rest.",
+            Transport::Custom => "Your bot calls the link with the key: read its inbox, post replies. The link opens the short how-to.",
+        }
+    }
 }
 
 impl Kind {
@@ -69,12 +124,13 @@ impl Kind {
             Kind::Agent => "Create New Agent",
             Kind::Group => "Create New Group",
             Kind::Server => "Create New Server",
+            Kind::Connect => "Connect an Agent",
         }
     }
 
     pub fn placeholder(self) -> &'static str {
         match self {
-            Kind::Agent => "Name your agent",
+            Kind::Agent | Kind::Connect => "Name your agent",
             Kind::Group => "Name your group",
             Kind::Server => "Name your server",
         }
@@ -83,7 +139,7 @@ impl Kind {
     /// The footer action: groups continue to the member picker.
     fn action(self) -> &'static str {
         match self {
-            Kind::Agent | Kind::Server => "Create",
+            Kind::Agent | Kind::Server | Kind::Connect => "Create",
             Kind::Group => "Next",
         }
     }
@@ -93,16 +149,22 @@ impl Kind {
             Kind::Server => Some(
                 "A server has channels and an invite link. You start as its owner, in #general.",
             ),
+            Kind::Connect => Some(
+                "An agent you already run joins your chats as a member. You get a key to give it.",
+            ),
             Kind::Agent | Kind::Group => None,
         }
     }
 
     fn shift(self) -> f32 {
+        let mut shift = 0.0;
         if self.explainer().is_some() {
-            EXPLAINER_SHIFT
-        } else {
-            0.0
+            shift += EXPLAINER_SHIFT;
         }
+        if self == Kind::Connect {
+            shift += TRANSPORT_SHIFT;
+        }
+        shift
     }
 }
 
@@ -178,12 +240,13 @@ pub fn sheet(shell: &Shell, kind: Kind, cx: &mut Context<Shell>) -> Div {
     let p = palette(&theme);
     let picker = shell.create_picker.clone();
     let input = match kind {
-        Kind::Agent | Kind::Group => shell.project_input.clone(),
+        Kind::Agent | Kind::Group | Kind::Connect => shell.project_input.clone(),
         Kind::Server => shell.server_input.clone(),
     };
     let typed = input.read(cx).text().trim().to_string();
     let busy = match kind {
         Kind::Server => shell.state.read(cx).server_busy,
+        Kind::Connect => shell.state.read(cx).awaiting_new_project,
         Kind::Agent | Kind::Group => false,
     };
     let can_go = !typed.is_empty() && !busy && !picker.generating;
@@ -219,7 +282,7 @@ pub fn sheet(shell: &Shell, kind: Kind, cx: &mut Context<Shell>) -> Div {
                 .justify_center()
                 .rounded_full()
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
+                .map(|el| highlight::button(el, &theme))
                 .child(icon("xmark", 10.0, hex(0xD2D2D2)))
                 .on_click(
                     cx.listener(move |this, _, window, cx| this.cancel_create(kind, window, cx)),
@@ -267,6 +330,53 @@ pub fn sheet(shell: &Shell, kind: Kind, cx: &mut Context<Shell>) -> Div {
             .text_center()
             .text_color(p.placeholder)
             .child(text)
+    });
+    // Connect an agent: the transport capsules (the approved type picker's three rows) under
+    // the explainer, where the explainer's gap ends.
+    let transport_row = (kind == Kind::Connect).then(|| {
+        let selected = shell.connect_transport;
+        let label_muted = match theme.appearance {
+            Appearance::Dark => hex(0x9A9A9A),
+            Appearance::Light => theme.text_muted,
+        };
+        let mut row = div().h(px(OPTIONS_H)).flex().items_center().gap(px(2.0));
+        for t in Transport::ALL {
+            let on = t == selected;
+            row = row.child(
+                div()
+                    .id(gpui::ElementId::Name(gpui::SharedString::from(format!(
+                        "connect-transport-{}",
+                        t.wire()
+                    ))))
+                    .debug_selector(move || format!("connect-transport-{}", t.wire()))
+                    .h(px(OPTIONS_H))
+                    .px(px(11.0))
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .when(on, |d| d.bg(p.cancel_bg).text_color(p.title))
+                    .when(!on, |d| d.text_color(label_muted))
+                    .cursor_pointer()
+                    .hover(|s| s.opacity(0.85))
+                    .child(t.label())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.connect_transport = t;
+                        cx.notify();
+                    })),
+            );
+        }
+        div()
+            .id("connect-transports")
+            .debug_selector(|| "connect-transports".into())
+            .absolute()
+            .left_0()
+            .right_0()
+            .top(px(FIELD_TOP + FIELD_H + 8.0 + EXPLAINER_SHIFT - HEADER))
+            .flex()
+            .justify_center()
+            .child(row)
     });
 
     // ----- the two options: Upload | Generate, then the chosen one's body ------------------
@@ -402,6 +512,7 @@ pub fn sheet(shell: &Shell, kind: Kind, cx: &mut Context<Shell>) -> Div {
                 .child(preview)
                 .child(field)
                 .children(explainer)
+                .children(transport_row)
                 .child(options)
                 .children(body)
                 .child(footer),
@@ -554,6 +665,9 @@ mod render_tests {
             Kind::Group => shell.update_in(vcx, |this, window, cx| {
                 this.open_create_group(window, cx);
             }),
+            Kind::Connect => shell.update_in(vcx, |this, window, cx| {
+                this.open_connect_agent(window, cx);
+            }),
             Kind::Server => state.update(vcx, |s, cx| {
                 s.open_server_sheet(crate::app::ServerSheet::NewServer, cx)
             }),
@@ -561,7 +675,7 @@ mod render_tests {
         let name = name.to_owned();
         shell.update(vcx, |this, cx| {
             let input = match kind {
-                Kind::Agent | Kind::Group => this.project_input.clone(),
+                Kind::Agent | Kind::Group | Kind::Connect => this.project_input.clone(),
                 Kind::Server => this.server_input.clone(),
             };
             input.update(cx, |input, cx| input.set_text(name, cx));
@@ -621,6 +735,45 @@ mod render_tests {
             settle(&shell, vcx);
             assert!(!drawn(vcx, "create-entity-card"), "{kind:?}: closed");
         }
+    }
+
+    /// Connect an agent (#2141): the same Create screen with the three transport capsules under
+    /// the explainer, the ACP one selected first; Cancel closes it.
+    #[gpui::test]
+    fn the_connect_sheet_shows_the_transport_capsules(cx: &mut TestAppContext) {
+        let (_rt, state, shell, vcx) = mount(cx);
+        open(Kind::Connect, "Grok Bot", &state, &shell, vcx);
+        assert!(drawn(vcx, "create-entity-card"), "the sheet is up");
+        assert!(
+            drawn(vcx, "connect-transports"),
+            "the transport row is drawn"
+        );
+        for id in [
+            "connect-transport-acp",
+            "connect-transport-grok",
+            "connect-transport-custom",
+        ] {
+            assert!(drawn(vcx, id), "{id} capsule");
+        }
+        assert_eq!(
+            shell.read_with(vcx, |this, _| this.connect_transport),
+            Transport::Acp
+        );
+        shell.update(vcx, |this, cx| {
+            this.connect_transport = Transport::Grok;
+            cx.notify();
+        });
+        settle(&shell, vcx);
+        assert_eq!(
+            shell.read_with(vcx, |this, _| this.connect_transport),
+            Transport::Grok
+        );
+        shell.update_in(vcx, |this, window, cx| {
+            this.cancel_create(Kind::Connect, window, cx)
+        });
+        settle(&shell, vcx);
+        assert!(!drawn(vcx, "create-entity-card"), "closed");
+        assert!(!state.read_with(vcx, |s, _| s.connect_open));
     }
 
     /// With neither option used, the preview is the neutral initial — no leaf element at all

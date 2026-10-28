@@ -52,10 +52,17 @@ pub const BACKOFF_RESET_AFTER: Duration = Duration::from_secs(30);
 pub const RATE_LIMIT_RETRY_DEFAULT: Duration = Duration::from_secs(5);
 /// Cap on the doubled wait between `rate_limited` refusals.
 pub const RATE_LIMIT_RETRY_MAX: Duration = Duration::from_secs(60);
-/// First wait before resending after `not_available` on this connection.
+/// First wait before resending after a transient `not_available` on this connection.
 pub const PUSH_REFUSE_RETRY_DEFAULT: Duration = Duration::from_secs(60);
-/// Cap on the doubled wait between `not_available` retries (10 min).
+/// Cap on the doubled wait between transient `not_available` retries (10 min).
 pub const PUSH_REFUSE_RETRY_MAX: Duration = Duration::from_secs(600);
+/// Fixed wait between retries while the refusal is standing ([`RefusalKind::Standing`]): a
+/// block or a mute is lifted by a person, not by time, so the timer is only a backstop behind
+/// the reconnect and reason-change resends ([feedback 2005]).
+pub const PUSH_REFUSE_STANDING_RETRY: Duration = Duration::from_secs(3600);
+/// Reason-change nudges ([`RoomSession::retry_refused`]) closer than this collapse into one
+/// resend, so a burst of chat events cannot hammer the relay.
+pub const PUSH_REFUSE_NUDGE_MIN: Duration = Duration::from_secs(2);
 /// Pending batch ids for history heals start with this prefix so a resend keeps `heal: true`.
 pub const HEAL_BATCH_PREFIX: &str = "heal-";
 
@@ -106,9 +113,20 @@ pub enum RoomAction {
     /// `rate_limited` stays Live (no this action); `not_available` refuses pushes with no redial
     /// and also emits [`RoomAction::PushRefused`].
     SessionError { code: String, message: String },
-    /// A `not_available` refusal for a push on this connection (`batchId` from the error header).
-    /// Host: keep the room link live; show a per-chat notice. Cleared by the next [`RoomAction::Ack`].
-    PushRefused { batch_id: Option<String> },
+    /// A `not_available` refusal for a push on this connection (`batchId` from the error
+    /// header). Host: keep the room link live; show a per-chat notice. Cleared by the next
+    /// [`RoomAction::Ack`]. Since [feedback blocked-state-relay-2026-10-26] the frame also says
+    /// why — `reason` (`blocked_by` / `blocks_member` / `silenced` / `chat_unavailable`) and,
+    /// on a block, the other party (`by_handle`, `by_name`) — so the notice can name them; the
+    /// code itself never changes, so older clients read it as before. The session retries by
+    /// itself ([`RefusalKind`]); the host may also call [`RoomSession::retry_refused`].
+    PushRefused {
+        batch_id: Option<String>,
+        code: String,
+        reason: Option<String>,
+        by_handle: Option<String>,
+        by_name: Option<String>,
+    },
     /// Another device's presence / call / typing (host maps to UI events).
     /// `header` is the full inbound PRESENCE header (Swift reads `user` / `at`).
     Presence {
@@ -123,6 +141,55 @@ pub enum RoomAction {
     DroppedOversize { bytes: usize },
     /// A pending PUSH was acknowledged (host may clear UI “unacked” marks).
     Ack { batch_id: String, seq: i64 },
+}
+
+/// How a `not_available` refusal is retried, read from the error frame's `reason`
+/// ([feedback blocked-state-relay-2026-10-26]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalKind {
+    /// `blocked_by` / `blocks_member` / `silenced`: someone's setting stands in the way. Only
+    /// an unblock, an unmute or a membership change lifts it, so the session resends on
+    /// reconnect and on a reason-change nudge, and otherwise once an hour.
+    Standing,
+    /// `chat_unavailable`, or no reason (an older relay): 60 s doubling to 10 min, as before.
+    Transient,
+}
+
+impl RefusalKind {
+    pub fn from_reason(reason: Option<&str>) -> Self {
+        match reason {
+            Some("blocked_by") | Some("blocks_member") | Some("silenced") => Self::Standing,
+            _ => Self::Transient,
+        }
+    }
+
+    /// The wait before the next timed resend, given the wait used last time (0 = none yet).
+    fn next_wait_ms(self, used_ms: u64) -> u64 {
+        match self {
+            Self::Standing => PUSH_REFUSE_STANDING_RETRY.as_millis() as u64,
+            Self::Transient => {
+                if used_ms == 0 {
+                    PUSH_REFUSE_RETRY_DEFAULT.as_millis() as u64
+                } else {
+                    used_ms
+                        .saturating_mul(2)
+                        .min(PUSH_REFUSE_RETRY_MAX.as_millis() as u64)
+                }
+            }
+        }
+    }
+}
+
+/// A live `not_available` refusal on this connection: local commits queue, nothing is
+/// pushed until it clears. Cleared by any ACK, by [`RoomSession::prepare_reconnect`] (the
+/// refusal is per connection) and by a reason-change nudge ([`RoomSession::retry_refused`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Refusal {
+    kind: RefusalKind,
+    /// Host clock when to resend pending (one timer per connection).
+    resend_at_ms: Option<u64>,
+    /// Wait the current timer was scheduled with (0 = none yet); the next one derives from it.
+    wait_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,14 +242,10 @@ pub struct RoomSession {
     /// Wait used for the next `rate_limited` schedule; 0 → take `retryS` (or 5 s) from the error.
     /// Doubles up to [`RATE_LIMIT_RETRY_MAX`] after each timed resend; reset on ACK.
     rate_limit_backoff_ms: u64,
-    /// `not_available` on this connection: queue local commits, do not PUSH until cleared.
-    /// Cleared by any ACK or by [`Self::prepare_reconnect`] (refusal is per connection).
-    push_refused: bool,
-    /// Host clock when to resend pending after `not_available` (one timer per connection).
-    push_refuse_resend_at_ms: Option<u64>,
-    /// Wait used for the next `not_available` schedule; 0 → [`PUSH_REFUSE_RETRY_DEFAULT`].
-    /// Doubles up to [`PUSH_REFUSE_RETRY_MAX`] after each timed resend; reset on ACK.
-    push_refuse_backoff_ms: u64,
+    /// The live `not_available` refusal on this connection, if any (see [`Refusal`]).
+    refusal: Option<Refusal>,
+    /// Host clock of the last reason-change nudge that resent (collapses bursts).
+    last_nudge_ms: Option<u64>,
     /// Lowest row seq whose import Loro parked as *pending* (its dependencies are not in the
     /// doc yet). Parked ops live only in memory: a relaunch loses them, so the persisted cursor
     /// never passes this row and the next catch-up re-requests it (Loro drops what it already
@@ -219,9 +282,8 @@ impl RoomSession {
             awaiting_heal: false,
             rate_limit_resend_at_ms: None,
             rate_limit_backoff_ms: 0,
-            push_refused: false,
-            push_refuse_resend_at_ms: None,
-            push_refuse_backoff_ms: 0,
+            refusal: None,
+            last_nudge_ms: None,
             first_pending_seq: None,
             pending_this_session: false,
         }
@@ -264,6 +326,49 @@ impl RoomSession {
 
     pub fn is_closed(&self) -> bool {
         self.phase == Phase::Closed
+    }
+
+    /// This connection stands refused (`not_available`): local commits queue until an ACK,
+    /// a reconnect or a nudge clears it.
+    pub fn push_refused(&self) -> bool {
+        self.refusal.is_some()
+    }
+
+    /// How the live refusal is retried, if there is one.
+    pub fn refusal_kind(&self) -> Option<RefusalKind> {
+        self.refusal.map(|r| r.kind)
+    }
+
+    /// Host clock when the refusal's timer fires next, if one is set (diagnostics / tests).
+    pub fn refusal_resend_at_ms(&self) -> Option<u64> {
+        self.refusal.and_then(|r| r.resend_at_ms)
+    }
+
+    /// The condition behind a refusal may have changed — the host saw a people-chat event
+    /// for this room (members, settings, a lifted mute) or the user unblocked someone. While
+    /// Live and refused: drop the refusal and its timer and resend every unACKed pending
+    /// batch now, with the same batch ids (the relay's `UNIQUE(room, batch_id)` and its
+    /// version-vector cover answer `dup` for anything it already holds). Returns true when a
+    /// resend went out. Nudges inside [`PUSH_REFUSE_NUDGE_MIN`] of the last one, or with no
+    /// refusal to lift, do nothing ([feedback 2005]).
+    pub fn retry_refused(&mut self, now_ms: u64) -> bool {
+        self.last_now_ms = self.last_now_ms.max(now_ms);
+        if self.phase != Phase::Live || self.refusal.is_none() {
+            return false;
+        }
+        if self.last_nudge_ms.is_some_and(|last| {
+            now_ms.saturating_sub(last) < PUSH_REFUSE_NUDGE_MIN.as_millis() as u64
+        }) {
+            return false;
+        }
+        self.last_nudge_ms = Some(now_ms);
+        self.refusal = None;
+        if self.awaiting_heal {
+            // The post-handshake heal is about to resend everything anyway.
+            return false;
+        }
+        self.resend_pending();
+        true
     }
 
     pub fn drain_actions(&mut self) -> Vec<RoomAction> {
@@ -595,9 +700,7 @@ impl RoomSession {
             self.rate_limit_resend_at_ms = None;
         }
         // Any ACK in the room clears a `not_available` refusal so the next push goes out.
-        self.push_refused = false;
-        self.push_refuse_backoff_ms = 0;
-        self.push_refuse_resend_at_ms = None;
+        self.refusal = None;
         self.push(RoomAction::Ack {
             batch_id: header.batch_id,
             seq: header.seq,
@@ -657,19 +760,14 @@ impl RoomSession {
         }
         if header.code == "not_available" {
             // Stay Live; keep pending; no redial. Refusal is for this connection only.
-            self.push_refused = true;
             self.rate_limit_resend_at_ms = None;
-            if self.push_refuse_resend_at_ms.is_none() && self.phase == Phase::Live {
-                let wait_ms = if self.push_refuse_backoff_ms > 0 {
-                    self.push_refuse_backoff_ms
-                } else {
-                    PUSH_REFUSE_RETRY_DEFAULT.as_millis() as u64
-                };
-                self.push_refuse_backoff_ms = wait_ms;
-                self.push_refuse_resend_at_ms = Some(self.last_now_ms.saturating_add(wait_ms));
-            }
+            self.note_refusal(RefusalKind::from_reason(header.reason.as_deref()));
             self.push(RoomAction::PushRefused {
                 batch_id: header.batch_id,
+                code: header.code.clone(),
+                reason: header.reason,
+                by_handle: header.by_handle,
+                by_name: header.by_name,
             });
             self.push(RoomAction::SessionError {
                 code: header.code,
@@ -682,6 +780,29 @@ impl RoomSession {
             message: header.message,
         });
         self.close_for_reconnect(Some(self.last_now_ms));
+    }
+
+    /// Record a `not_available` refusal and arm its one timer (while Live). A refusal that
+    /// arrives while one stands keeps the running timer unless its kind changed — a mute
+    /// lifted into a plain `chat_unavailable` should not wait out the hour, and a transient
+    /// refusal that turns into a block should stop doubling.
+    fn note_refusal(&mut self, kind: RefusalKind) {
+        let mut refusal = self.refusal.unwrap_or(Refusal {
+            kind,
+            resend_at_ms: None,
+            wait_ms: 0,
+        });
+        if refusal.kind != kind {
+            refusal.kind = kind;
+            refusal.resend_at_ms = None;
+            refusal.wait_ms = 0;
+        }
+        if refusal.resend_at_ms.is_none() && self.phase == Phase::Live {
+            let wait_ms = kind.next_wait_ms(refusal.wait_ms);
+            refusal.wait_ms = wait_ms;
+            refusal.resend_at_ms = Some(self.last_now_ms.saturating_add(wait_ms));
+        }
+        self.refusal = Some(refusal);
     }
 
     fn on_presence(&mut self, frame: Frame) {
@@ -715,7 +836,7 @@ impl RoomSession {
         let batch_id = ulid();
         self.pending.push((batch_id.clone(), bytes.clone()));
         self.push(RoomAction::Pending(self.pending.clone()));
-        if self.phase == Phase::Live && !self.awaiting_heal && !self.push_refused {
+        if self.phase == Phase::Live && !self.awaiting_heal && self.refusal.is_none() {
             let header = serde_json::to_value(PushHeader {
                 batch_id,
                 heal: false,
@@ -760,15 +881,11 @@ impl RoomSession {
                     self.resend_pending();
                 }
             }
-            if let Some(at) = self.push_refuse_resend_at_ms {
-                if now_ms >= at {
-                    let used = self
-                        .push_refuse_backoff_ms
-                        .max(PUSH_REFUSE_RETRY_DEFAULT.as_millis() as u64);
-                    self.push_refuse_resend_at_ms = None;
-                    self.push_refuse_backoff_ms = used
-                        .saturating_mul(2)
-                        .min(PUSH_REFUSE_RETRY_MAX.as_millis() as u64);
+            if let Some(refusal) = self.refusal.as_mut() {
+                if refusal.resend_at_ms.is_some_and(|at| now_ms >= at) {
+                    // The timer is spent; a refusal of this resend re-arms it from `wait_ms`
+                    // (doubled for a transient refusal, the same hour for a standing one).
+                    refusal.resend_at_ms = None;
                     self.resend_pending();
                 }
             }
@@ -834,11 +951,11 @@ impl RoomSession {
         self.awaiting_heal = false;
         self.rate_limit_resend_at_ms = None;
         // `rate_limit_backoff_ms` stays: the doubling chain outlives one socket.
-        // `push_refused` is per connection: clear so the next dial's heal / pending
-        // resend run as normal; another `not_available` re-applies the same rule.
-        self.push_refused = false;
-        self.push_refuse_resend_at_ms = None;
-        self.push_refuse_backoff_ms = 0;
+        // The refusal is per connection: clear it (timer and backoff chain included) so the
+        // next dial's heal / pending resend run as normal; another `not_available` re-applies
+        // the same rule with a fresh schedule.
+        self.refusal = None;
+        self.last_nudge_ms = None;
     }
 
     pub fn wake(&mut self, reason: impl Into<String>) {
@@ -1681,7 +1798,12 @@ mod tests {
             .any(|a| matches!(a, RoomAction::ScheduleReconnect { .. })));
         assert!(actions.iter().any(|a| matches!(
             a,
-            RoomAction::PushRefused { batch_id: Some(id) } if id == "b1"
+            RoomAction::PushRefused {
+                batch_id: Some(id),
+                code,
+                reason: None,
+                ..
+            } if id == "b1" && code == "not_available"
         )));
         assert!(actions.iter().any(|a| matches!(
             a,
@@ -1744,6 +1866,46 @@ mod tests {
         assert_eq!(pushes[0].payload.as_ref(), b"now");
     }
 
+    /// A block refusal ([feedback blocked-state-relay-2026-10-26]) is still `not_available`
+    /// on the wire (live, no redial, pending kept) and hands the host the reason and the
+    /// other party for its sentence.
+    #[test]
+    fn a_block_refusal_stays_not_available_and_names_the_other_party() {
+        let mut s = RoomSession::new("dev:me", "proj/chat", 0, Vec::new());
+        s.on_open(1_000);
+        let _ = s.drain_actions();
+        s.on_frame(&state_frame(0, Vec::new()));
+        let _ = s.drain_actions();
+        s.on_frame(&rows_done(0));
+        let _ = s.drain_actions();
+
+        s.on_frame(&error_frame(
+            "not_available",
+            "someone in this chat has blocked you",
+            json!({ "batchId": "b1", "reason": "blocked_by", "byHandle": "sami", "byName": "Sami Kassab" }),
+        ));
+        let actions = s.drain_actions();
+        assert!(s.is_live());
+        assert!(s.push_refused());
+        assert!(!actions
+            .iter()
+            .any(|a| matches!(a, RoomAction::ScheduleReconnect { .. })));
+        assert!(actions.iter().any(|a| matches!(
+            a,
+            RoomAction::PushRefused {
+                batch_id: Some(id),
+                code,
+                reason: Some(reason),
+                by_handle: Some(handle),
+                by_name: Some(name),
+            } if id == "b1" && code == "not_available" && reason == "blocked_by" && handle == "sami" && name == "Sami Kassab"
+        )));
+        s.on_local_commit(b"held".to_vec());
+        let after = s.drain_actions();
+        assert!(take_sends(&after).iter().all(|f| f.ty != FrameType::Push));
+        assert_eq!(s.pending().len(), 1);
+    }
+
     #[test]
     fn not_available_clears_on_reconnect_so_heal_and_pending_resend() {
         let pending = vec![("batch-1".into(), b"x".to_vec())];
@@ -1767,13 +1929,13 @@ mod tests {
             json!({ "batchId": "batch-1" }),
         ));
         let _ = s.drain_actions();
-        assert!(s.push_refused);
+        assert!(s.push_refused());
 
         // Transport close (not a refusal redial): next connection clears refusal.
         s.on_close(2_000);
         let _ = s.drain_actions();
         s.prepare_reconnect();
-        assert!(!s.push_refused);
+        assert!(!s.push_refused());
 
         s.on_open(3_000);
         let _ = s.drain_actions();
@@ -1792,6 +1954,260 @@ mod tests {
         assert!(
             !pushes.is_empty(),
             "pending resend goes out again on the new connection"
+        );
+    }
+
+    // ---- refused-send retry ([feedback 2005]) -------------------------------------------------
+
+    /// Open a session, finish the handshake with no checkpoint and no version vector, drain.
+    fn live_session(pending: Vec<(String, Vec<u8>)>) -> RoomSession {
+        let mut s = RoomSession::new("dev:me", "people/dm", 0, pending);
+        s.on_open(1_000);
+        let _ = s.drain_actions();
+        s.on_frame(&state_frame(0, Vec::new()));
+        let _ = s.drain_actions();
+        s.on_frame(&rows_done(0));
+        let _ = s.drain_actions();
+        s.on_tick(1_000);
+        s
+    }
+
+    fn pushes_in(actions: &[RoomAction]) -> Vec<Frame> {
+        take_sends(actions)
+            .into_iter()
+            .filter(|f| f.ty == FrameType::Push)
+            .collect()
+    }
+
+    fn batch_ids(pushes: &[Frame]) -> Vec<String> {
+        pushes
+            .iter()
+            .filter_map(|f| f.header.get("batchId").and_then(Value::as_str))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn blocked_by_frame(batch_id: &str) -> Vec<u8> {
+        error_frame(
+            "not_available",
+            "someone in this chat has blocked you",
+            json!({ "batchId": batch_id, "reason": "blocked_by", "byHandle": "sami", "byName": "Sami Kassab" }),
+        )
+    }
+
+    /// `blocked_by` / `blocks_member` / `silenced` are standing: the session must not loop on
+    /// a setting only a person can change. The timer is hourly and does not double; the
+    /// generic and `chat_unavailable` refusals keep the 60 s → 10 min schedule.
+    #[test]
+    fn a_standing_refusal_retries_hourly_and_a_transient_one_keeps_doubling() {
+        assert_eq!(
+            RefusalKind::from_reason(Some("blocked_by")),
+            RefusalKind::Standing
+        );
+        assert_eq!(
+            RefusalKind::from_reason(Some("blocks_member")),
+            RefusalKind::Standing
+        );
+        assert_eq!(
+            RefusalKind::from_reason(Some("silenced")),
+            RefusalKind::Standing
+        );
+        assert_eq!(
+            RefusalKind::from_reason(Some("chat_unavailable")),
+            RefusalKind::Transient
+        );
+        assert_eq!(RefusalKind::from_reason(None), RefusalKind::Transient);
+
+        let mut s = live_session(Vec::new());
+        s.on_local_commit(b"hi".to_vec());
+        let _ = s.drain_actions();
+        s.on_frame(&blocked_by_frame(&s.pending()[0].0));
+        let _ = s.drain_actions();
+        assert_eq!(s.refusal_kind(), Some(RefusalKind::Standing));
+        assert_eq!(s.refusal_resend_at_ms(), Some(1_000 + 3_600_000));
+
+        // Nothing at 10 min (where the transient schedule would have fired twice).
+        s.on_tick(1_000 + 600_000);
+        assert!(pushes_in(&s.drain_actions()).is_empty());
+        // The hour: one resend with the same batch id.
+        s.on_tick(1_000 + 3_600_000);
+        let pushes = pushes_in(&s.drain_actions());
+        assert_eq!(batch_ids(&pushes), vec![s.pending()[0].0.clone()]);
+        assert!(s.push_refused(), "still refused until the relay answers");
+
+        // Refused again: the next timer is another hour, not two.
+        s.on_frame(&blocked_by_frame(&s.pending()[0].0));
+        let _ = s.drain_actions();
+        assert_eq!(
+            s.refusal_resend_at_ms(),
+            Some(1_000 + 3_600_000 + 3_600_000)
+        );
+    }
+
+    /// The host saw the condition change (a chat event for this room, the user unblocked
+    /// someone): every unACKed batch goes out at once with its original id, the refusal and
+    /// its timer are dropped, and a burst of nudges collapses into one resend.
+    #[test]
+    fn a_reason_change_nudge_resends_every_pending_batch_once_with_the_same_ids() {
+        let mut s = live_session(Vec::new());
+        s.on_local_commit(b"first".to_vec());
+        let _ = s.drain_actions();
+        let first = s.pending()[0].0.clone();
+        s.on_frame(&blocked_by_frame(&first));
+        let _ = s.drain_actions();
+        // A second message typed while refused is held, not sent.
+        s.on_local_commit(b"second".to_vec());
+        assert!(pushes_in(&s.drain_actions()).is_empty());
+        let second = s.pending()[1].0.clone();
+
+        // Nothing to lift → nothing sent (and no refusal to lift on a healthy room).
+        let mut healthy = live_session(Vec::new());
+        assert!(!healthy.retry_refused(5_000));
+        assert!(healthy.drain_actions().is_empty());
+
+        assert!(s.retry_refused(10_000));
+        let pushes = pushes_in(&s.drain_actions());
+        assert_eq!(batch_ids(&pushes), vec![first.clone(), second.clone()]);
+        assert_eq!(pushes[0].payload.as_ref(), b"first");
+        assert_eq!(pushes[1].payload.as_ref(), b"second");
+        assert!(!s.push_refused(), "the nudge lifts the refusal");
+        assert_eq!(s.refusal_resend_at_ms(), None, "and its timer");
+
+        // A second nudge 1 s later is collapsed; one after the window is not.
+        assert!(!s.retry_refused(11_000));
+        assert!(pushes_in(&s.drain_actions()).is_empty());
+        s.on_frame(&blocked_by_frame(&first));
+        let _ = s.drain_actions();
+        assert!(s.push_refused());
+        assert!(!s.retry_refused(11_500), "inside PUSH_REFUSE_NUDGE_MIN");
+        assert!(s.retry_refused(12_100));
+        assert_eq!(pushes_in(&s.drain_actions()).len(), 2);
+
+        // The relay already holds the first (dup ACK): pending shrinks, the flag clears, and
+        // a fresh local commit goes out at once.
+        s.on_frame(&ack_frame(&first, 7));
+        let acked = s.drain_actions();
+        assert!(acked
+            .iter()
+            .any(|a| matches!(a, RoomAction::Ack { batch_id, .. } if *batch_id == first)));
+        assert_eq!(s.pending().len(), 1);
+        assert!(!s.push_refused());
+        s.on_local_commit(b"third".to_vec());
+        assert_eq!(pushes_in(&s.drain_actions()).len(), 1);
+    }
+
+    /// A reconnect starts the refusal over: the new connection resends every pending batch
+    /// after ROWS_DONE (heal first when the relay sent a version vector) and a refusal on it
+    /// schedules from the first wait again, not from where the old chain left off.
+    #[test]
+    fn a_reconnect_resends_pending_after_rows_done_and_resets_the_refusal_chain() {
+        let mut s = live_session(vec![("b1".into(), b"x".to_vec())]);
+        // Transient refusal, timer fired once (60 s), refused again → 120 s chain.
+        s.on_frame(&error_frame(
+            "not_available",
+            "this chat is not available",
+            json!({ "batchId": "b1", "reason": "chat_unavailable" }),
+        ));
+        let _ = s.drain_actions();
+        assert_eq!(s.refusal_kind(), Some(RefusalKind::Transient));
+        s.on_tick(1_000 + 60_000);
+        assert_eq!(pushes_in(&s.drain_actions()).len(), 1);
+        s.on_frame(&error_frame(
+            "not_available",
+            "this chat is not available",
+            json!({ "batchId": "b1", "reason": "chat_unavailable" }),
+        ));
+        let _ = s.drain_actions();
+        assert_eq!(s.refusal_resend_at_ms(), Some(1_000 + 60_000 + 120_000));
+
+        s.on_close(1_000 + 70_000);
+        let _ = s.drain_actions();
+        s.prepare_reconnect();
+        assert!(!s.push_refused());
+        assert_eq!(s.refusal_kind(), None);
+
+        s.on_open(200_000);
+        let _ = s.drain_actions();
+        s.on_frame(&state_frame(0, Vec::new()));
+        assert!(
+            pushes_in(&s.drain_actions()).is_empty(),
+            "pending waits for ROWS_DONE"
+        );
+        s.on_frame(&rows_done_with_vv(0, b"relay-vv"));
+        let actions = s.drain_actions();
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, RoomAction::HealCheck { .. })));
+        assert!(pushes_in(&actions).is_empty(), "held for the heal answer");
+        s.on_heal(Vec::new());
+        let pushes = pushes_in(&s.drain_actions());
+        assert_eq!(batch_ids(&pushes), vec!["b1".to_string()]);
+
+        // Refused on the new connection: a fresh 60 s, not the old chain's 240 s.
+        s.on_tick(200_500);
+        s.on_frame(&error_frame(
+            "not_available",
+            "this chat is not available",
+            json!({ "batchId": "b1" }),
+        ));
+        let _ = s.drain_actions();
+        assert_eq!(s.refusal_resend_at_ms(), Some(200_500 + 60_000));
+    }
+
+    /// A refusal whose reason changes kind re-arms the timer by the new kind: a mute lifted
+    /// into `chat_unavailable` retries in 60 s instead of waiting out the hour, and a
+    /// transient refusal that turns into a block stops doubling.
+    #[test]
+    fn a_refusal_that_changes_kind_reschedules_by_the_new_kind() {
+        let mut s = live_session(vec![("b1".into(), b"x".to_vec())]);
+        s.on_frame(&error_frame(
+            "not_available",
+            "you are muted",
+            json!({ "batchId": "b1", "reason": "silenced" }),
+        ));
+        let _ = s.drain_actions();
+        assert_eq!(s.refusal_resend_at_ms(), Some(1_000 + 3_600_000));
+
+        s.on_tick(2_000);
+        s.on_frame(&error_frame(
+            "not_available",
+            "this chat is not available",
+            json!({ "batchId": "b1", "reason": "chat_unavailable" }),
+        ));
+        let _ = s.drain_actions();
+        assert_eq!(s.refusal_kind(), Some(RefusalKind::Transient));
+        assert_eq!(s.refusal_resend_at_ms(), Some(2_000 + 60_000));
+
+        s.on_tick(3_000);
+        s.on_frame(&blocked_by_frame("b1"));
+        let _ = s.drain_actions();
+        assert_eq!(s.refusal_kind(), Some(RefusalKind::Standing));
+        assert_eq!(s.refusal_resend_at_ms(), Some(3_000 + 3_600_000));
+    }
+
+    /// A nudge while the post-handshake heal is still pending lifts the refusal but sends
+    /// nothing itself: the heal answer resends everything once.
+    #[test]
+    fn a_nudge_while_awaiting_heal_leaves_the_resend_to_the_heal_path() {
+        let mut s = RoomSession::new("dev:me", "people/dm", 0, vec![("b1".into(), b"x".to_vec())]);
+        s.on_open(1_000);
+        let _ = s.drain_actions();
+        s.on_frame(&state_frame(0, Vec::new()));
+        let _ = s.drain_actions();
+        s.on_frame(&rows_done_with_vv(0, b"relay-vv"));
+        let _ = s.drain_actions();
+        // A refusal frame for a push of the previous socket can still land here.
+        s.on_frame(&blocked_by_frame("b1"));
+        let _ = s.drain_actions();
+        assert!(s.push_refused());
+
+        assert!(!s.retry_refused(5_000));
+        assert!(!s.push_refused());
+        assert!(pushes_in(&s.drain_actions()).is_empty());
+        s.on_heal(Vec::new());
+        assert_eq!(
+            batch_ids(&pushes_in(&s.drain_actions())),
+            vec!["b1".to_string()]
         );
     }
 

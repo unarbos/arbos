@@ -1,0 +1,29 @@
+{
+ "id": "n1-address-by-profile-name",
+ "lane": "a",
+ "category": "identity",
+ "title": "The user is addressed by their profile name (Jacob), never by the device's sender name (Const)",
+ "regression": "address: profile name wins over the device/sender name; #1803 verified on 0.1.155 with a fresh 'Const' device",
+ "turns": [
+  {
+   "assert_state": "named",
+   "prompt": "Quick one: greet me by my name, then tell me what 7 × 8 is.",
+   "reply_regex": "\\bJacob\\b",
+   "reply_regex_not": "\\bConst\\b",
+   "expect_each_answered": true,
+   "rubric": {
+    "criteria": "Judge the shown text. Pass if the agent greets the user as Jacob (the profile name) and answers 56; fail if it calls the user Const (the device name), uses no name when asked to, or gets 56 wrong.",
+    "min": 3
+   }
+  }
+ ],
+ "setup_actions": [
+  {
+   "kind": "named_user_turn",
+   "handle": "lt-named",
+   "name": "Jacob Eval",
+   "device_name": "Const",
+   "prompt": "Quick one: greet me by my name, then tell me what 7 × 8 is."
+  }
+ ]
+}

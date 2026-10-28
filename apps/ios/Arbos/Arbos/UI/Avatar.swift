@@ -4,6 +4,7 @@
 // palette, derivation and initials rule live in Shared/AvatarPalette.swift
 // so the notification extension draws the identical circle.
 
+import ArbosFFI
 import SwiftUI
 
 /// The circle with initials. Size is the diameter; text ≈ 42 % of it.
@@ -63,18 +64,32 @@ struct AgentAvatar: View {
     var idle: Bool = false
     @State private var gust = 0
 
+    /// Jacob's rule (2026-10-26): every surface draws an agent through ONE resolver, keyed by
+    /// agent id and avatar version — never the copy it happened to be handed. The caller's
+    /// `project` names the agent (id, name, machine dot); what is drawn comes from the model's
+    /// newest copy (`AppModel.newestAgentAvatar`): a stale record or roster copy on some screen
+    /// (the mention table's raw `model.projects` entry, a roster row's `project`) can no longer
+    /// show a different picture than the row next to it.
+    private var shown: Project {
+        guard let model = AppModel.current, let facts = model.newestAgentAvatar(project.id) else { return project }
+        var p = project
+        p.imageKey = facts.imageKey
+        p.avatarLeaf = facts.avatarLeaf
+        p.avatarLeafColor = facts.avatarLeafColor
+        p.avatarVersion = facts.version
+        p.imageURL = model.agentPictureURL(id: project.id, imageKey: facts.imageKey, version: facts.version)
+        return p
+    }
+
     var body: some View {
+        let project = shown
         ZStack(alignment: .bottomTrailing) {
             if let url = project.imageURL, !url.isEmpty {
-                // D92 amendment: the uploaded / generated picture wins over the leaf.
+                // D92 amendment: the uploaded / generated picture wins over the leaf. While the
+                // picture loads the disc is the neutral initial — never the leaf, which would
+                // read as "the agent's avatar changed" for a moment (Jacob, 2026-10-26).
                 AgentPicture(url: url, size: size) {
-                    if LeafArt.isNeutral(project.avatarLeaf) {
-                        NeutralAvatar(name: project.name, size: size)
-                    } else if flag.on {
-                        LeafAvatar(pick: LeafArt.pick(project), size: size)
-                    } else {
-                        Circle().fill(theme.field)
-                    }
+                    NeutralAvatar(name: project.name, size: size)
                 }
             } else if LeafArt.isNeutral(project.avatarLeaf) {
                 // Jacob, 2026-10-25: created with no leaf — the name's initial on a neutral disc.
@@ -137,6 +152,78 @@ struct AgentPicture<Placeholder: View>: View {
             }
         }
     }
+}
+
+/// A people group's picture — the resolver's group case ([feedback group-row-avatar-ios-2026-10-27]).
+/// Every surface that lists a group (home row, a person's Groups tab, search, mention chips,
+/// Forward to) draws this and never builds its own URL or picks its own glyph. Keyed by chat id
+/// + image key: the key names the upload, so a changed picture is a new URL (nothing stale can
+/// win), and what is drawn is the model's copy of the chat — the one `setGroupImageKey`, the
+/// relay re-reads and pushes land in — not the value a list happened to hold. The uploaded or
+/// generated picture wins; else the neutral initial or leaf the group was created with; else
+/// the placeholder: the stacked member heads when `members` are given, otherwise the two-person
+/// glyph on a disc. The model is passed, not read from the environment: mention chips render
+/// their caps through `ImageRenderer`, where no environment object exists.
+struct GroupAvatar: View {
+    @ObservedObject private var flag = LeafAvatarsFlag.shared
+    @Environment(\.theme) private var theme
+    let chat: PeopleChat
+    let model: AppModel
+    var size: CGFloat = Theme.avatar
+    /// Members for the stacked-heads placeholder (Forward to); nil draws the glyph disc.
+    var members: [ChatMember]? = nil
+
+    /// The group's picture URL, or nil when it has none: the tokenised blob route under the
+    /// `people:` slot, which `AvatarImageCache` sizes and caches by URL.
+    static func pictureURL(_ chat: PeopleChat, model: AppModel) -> String? {
+        guard chat.isGroup, let key = chat.imageKey, !key.isEmpty else { return nil }
+        return model.blobURL(projectId: "\(peopleSlot):\(chat.id)", key: key)?.absoluteString
+    }
+
+    /// Picture URL, then neutral initial, then leaf, then placeholder — the order every
+    /// surface agrees on.
+    static func resolution(_ chat: PeopleChat, model: AppModel, leafArtOn: Bool) -> GroupAvatarResolution {
+        if let url = pictureURL(chat, model: model) { return .picture(url) }
+        if chat.isNeutralAvatar { return .neutral }
+        if let leaf = chat.leafPick, leafArtOn { return .leaf(leaf) }
+        return .placeholder
+    }
+
+    private var shown: PeopleChat { model.peopleChat(chat.id) ?? chat }
+
+    var body: some View {
+        let chat = shown
+        switch GroupAvatar.resolution(chat, model: model, leafArtOn: flag.on) {
+        case .picture(let url):
+            // While the picture loads the disc is the neutral initial — never a stale copy.
+            AgentPicture(url: url, size: size) { NeutralAvatar(name: chat.title, size: size) }
+        case .neutral:
+            NeutralAvatar(name: chat.title, size: size)
+        case .leaf(let pick):
+            LeafAvatar(pick: pick, size: size)
+        case .placeholder:
+            if let members, !members.isEmpty {
+                AvatarCluster(members: members, size: size)
+            } else {
+                ZStack {
+                    Circle().fill(theme.card)
+                    Image(systemName: "person.2.fill")
+                        .font(theme.font(size * 0.36, weight: .medium))
+                        .foregroundStyle(theme.accent)
+                }
+                .frame(width: size, height: size)
+                .accessibilityHidden(true)
+            }
+        }
+    }
+}
+
+/// What `GroupAvatar` draws for a chat, in priority order.
+enum GroupAvatarResolution {
+    case picture(String)
+    case neutral
+    case leaf(LeafPick)
+    case placeholder
 }
 
 /// Small coloured dot for machine / workspace state.

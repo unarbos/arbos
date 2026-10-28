@@ -20,6 +20,10 @@ struct MentionEntry {
     let target: ProfileTarget
     /// What the chip's picture is drawn from.
     let picture: AnyView
+    /// The picture's URL when the entity has one: the cap is rendered through `ImageRenderer`,
+    /// which draws only what `AvatarImageCache` already holds, so the cap's cache key carries
+    /// whether the picture had landed — a cap drawn before the download is redrawn after it.
+    var pictureURL: String? = nil
 }
 
 /// Everyone the app knows right now, keyed by handle (lower-case).
@@ -48,9 +52,12 @@ final class MentionTable {
     init() {}
 
     init(model: AppModel, theme: Theme) {
-        for p in model.projects {
-            let slug = mentionSlug(p.name)
+        for record in model.projects {
+            let slug = mentionSlug(record.name)
             guard !slug.isEmpty else { continue }
+            // Through the shared resolver, like every other surface (Jacob, 2026-10-26: the
+            // chip drew the record's copy while the working row drew the resolver's).
+            let p = model.agent(id: record.id, name: record.name)
             add(slug, MentionEntry(
                 name: p.name.trimmingCharacters(in: .whitespaces),
                 target: .agent(projectId: p.id),
@@ -80,15 +87,16 @@ final class MentionTable {
             if chat.isGroup {
                 let slug = mentionSlug(chat.title)
                 guard !slug.isEmpty else { continue }
-                let picture: AnyView
-                if chat.isNeutralAvatar {
-                    picture = AnyView(NeutralAvatar(name: chat.title, size: Self.picture))
-                } else if let leaf = chat.leafPick, LeafAvatarsFlag.shared.on {
-                    picture = AnyView(LeafAvatar(pick: leaf, size: Self.picture))
-                } else {
-                    picture = AnyView(PersonAvatar(url: nil, handle: chat.title, size: Self.picture, name: chat.title, id: chat.id))
-                }
-                add(slug, MentionEntry(name: chat.title, target: .group(chatId: chat.id, projectId: nil), picture: picture))
+                // The group's picture through the resolver (the chip drew initials even for
+                // a group with a picture); the stamp below carries the image key.
+                let url = GroupAvatar.pictureURL(chat, model: model)
+                if let url { AvatarImageCache.shared.fetch(url) }
+                add(slug, MentionEntry(
+                    name: chat.title,
+                    target: .group(chatId: chat.id, projectId: nil),
+                    picture: AnyView(GroupAvatar(chat: chat, model: model, size: Self.picture)),
+                    pictureURL: url
+                ))
             }
         }
         for person in model.directory {
@@ -138,6 +146,10 @@ final class MentionTable {
                 h.combine(p.id)
                 h.combine(p.name)
                 h.combine(p.avatarColorIndex)
+                h.combine(p.avatarLeaf)
+                h.combine(p.avatarLeafColor)
+                h.combine(p.imageKey)
+                h.combine(p.avatarVersion)
             }
             // Sorted: a chat moving to the top on activity must not change the table.
             for chat in model.peopleChats.sorted(by: { $0.id < $1.id }) {
@@ -145,6 +157,7 @@ final class MentionTable {
                 h.combine(chat.title)
                 h.combine(chat.avatarLeaf)
                 h.combine(chat.avatarLeafColor)
+                h.combine(chat.imageKey)
                 for m in chat.members {
                     h.combine(m.id)
                     h.combine(m.handle)
@@ -154,6 +167,7 @@ final class MentionTable {
                     h.combine(m.project?.avatarLeaf)
                     h.combine(m.project?.avatarLeafColor)
                     h.combine(m.project?.imageKey)
+                    h.combine(m.project?.avatarVersion)
                     h.combine(m.isAgent)
                 }
             }
@@ -282,7 +296,8 @@ final class MentionTable {
 
     /// The pill's left end with the picture in it, rendered once per entity / pill colour.
     func leftCap(for entry: MentionEntry, pill: Color, lineHeight: CGFloat, key: String) -> UIImage? {
-        let cacheKey = "L|\(key)|\(pill.description)|\(lineHeight)"
+        let landed = entry.pictureURL.map { AvatarImageCache.shared.image(for: $0) != nil } ?? false
+        let cacheKey = "L|\(key)|\(entry.pictureURL ?? "")|\(landed)|\(pill.description)|\(lineHeight)"
         if let hit = Self.capCache[cacheKey] { return hit }
         let h = lineHeight + Self.padY * 2
         let view = ZStack(alignment: .leading) {

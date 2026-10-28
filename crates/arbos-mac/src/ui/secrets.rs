@@ -21,6 +21,7 @@ use crate::ui::composer::ComposerInput;
 use crate::ui::error_note;
 use crate::ui::frost::{frosted, MENU_BLUR};
 use crate::ui::glass;
+use crate::ui::highlight::{self, Shape};
 use crate::ui::icons::icon;
 use crate::ui::profiles::kit;
 use crate::ui::theme::{Theme, PANEL_RADIUS, RAIL_WIDTH, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
@@ -580,6 +581,9 @@ impl SecretsPanel {
             .min_h(px(52.0))
             .px(px(16.0))
             .py(px(8.0))
+            // Lights for rows that join `kit::HOT` (vault / secret rows, the
+            // switch rows); a plain detail row never does.
+            .child(highlight::layer(false, Shape::Nested(PANEL_RADIUS), theme))
             .child(kit::hairline_below(theme))
             .child(glass::icon_tile(glyph, theme).when(dim, |el| el.opacity(0.55)))
             .child(
@@ -625,7 +629,7 @@ impl SecretsPanel {
             .text_size(px(TEXT_BODY))
             .text_color(theme.text)
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), theme))
             .child(
                 div()
                     .size(px(30.0))
@@ -669,7 +673,7 @@ impl SecretsPanel {
             .text_size(px(TEXT_BODY))
             .text_color(if danger { theme.danger } else { theme.text })
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), theme))
             .child(label.into())
     }
 
@@ -718,14 +722,13 @@ impl SecretsPanel {
             .h(px(26.0))
             .px(px(10.0))
             .rounded_full()
-            .bg(theme.field)
             .flex()
             .items_center()
             .text_size(px(TEXT_TINY))
             .font_weight(FontWeight::MEDIUM)
             .text_color(if danger { theme.danger } else { theme.text })
             .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .map(|el| highlight::washed(el, theme.field, theme))
             .child(label.into())
     }
 
@@ -737,7 +740,7 @@ impl SecretsPanel {
     ) -> Stateful<Div> {
         let _ = id;
         row.cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .group(kit::HOT)
             .child(glass::switch(on, theme))
     }
 
@@ -920,7 +923,7 @@ impl SecretsPanel {
                         theme,
                     )
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme.surface_2))
+                    .group(kit::HOT)
                     .child(icon("chevron-right", 13.0, theme.text_faint))
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.go(Page::Vault(vid.clone()), cx)),
@@ -960,15 +963,19 @@ impl SecretsPanel {
                     format!("secret-{}", s.id),
                     s.glyph(),
                     s.env.clone(),
-                    Some(format!(
-                        "{who} · {}",
-                        secret_usage(s.last_used_at, None, true)
-                    )),
+                    Some(match s.source_label() {
+                        // Secret hand-off: "Arbos · given in chat · never used".
+                        Some(given) => format!(
+                            "{who} · {given} · {}",
+                            secret_usage(s.last_used_at, None, true)
+                        ),
+                        None => format!("{who} · {}", secret_usage(s.last_used_at, None, true)),
+                    }),
                     paused,
                     theme,
                 )
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
+                .group(kit::HOT)
                 .child(icon("chevron-right", 13.0, theme.text_faint))
                 .on_click(
                     cx.listener(move |this, _, _, cx| this.go(Page::Secret(sid.clone()), cx)),
@@ -1055,6 +1062,10 @@ impl SecretsPanel {
         let mut g = Self::group(theme).child(Self::value_row("Kind", s.kind_label(), theme));
         if s.name != s.env {
             g = g.child(Self::value_row("Name", s.name.clone(), theme));
+        }
+        // Secret hand-off: where it came from ("In chat with Arbos").
+        if let Some(added) = s.added_label() {
+            g = g.child(Self::value_row("Added", added, theme));
         }
         if let Some(u) = s.username.as_deref().filter(|u| !u.is_empty()) {
             g = g.child(Self::value_row("Username", u.to_string(), theme));
@@ -1167,11 +1178,8 @@ impl SecretsPanel {
         let ask = s.ask_every_time;
         let sid_ask = sid.clone();
         g = g.child(
-            glass::row("Ask every time", theme)
-                .id("secret-ask")
+            glass::hot_row("secret-ask", "Ask every time", theme)
                 .border_b_0()
-                .cursor_pointer()
-                .hover(|st| st.bg(theme.surface_2))
                 .child(glass::switch(ask, theme))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let id = sid_ask.clone();
@@ -1241,7 +1249,19 @@ impl SecretsPanel {
             sub.push(secret_usage(a.last_used_at, a.disabled_at, a.enabled));
             let avatar = match projects.iter().find(|p| p.id == a.project_id) {
                 Some(p) => avatars::project_with(images.get(&p.id).cloned(), p, 30.0, theme),
-                None => avatars::agent(&a.project_id, &a.name, None, None, None, 30.0, theme),
+                None => avatars::agent_picture(
+                    &arbos_core::avatar::identity::resolve(
+                        &avatars::AgentQuery {
+                            sender: &a.project_id,
+                            handle: None,
+                            name: Some(&a.name),
+                        },
+                        &[],
+                    ),
+                    None,
+                    30.0,
+                    theme,
+                ),
             };
             let (sid_a, pid_a, on) = (sid.clone(), a.project_id.clone(), a.enabled);
             g = g.child(
@@ -1256,7 +1276,7 @@ impl SecretsPanel {
                     .relative()
                     .child(kit::hairline_below(theme))
                     .cursor_pointer()
-                    .hover(|st| st.bg(theme.surface_2))
+                    .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), theme))
                     .child(avatar)
                     .child(
                         div()
@@ -1402,7 +1422,7 @@ impl SecretsPanel {
                     .relative()
                     .child(kit::hairline_below(theme))
                     .cursor_pointer()
-                    .hover(|st| st.bg(theme.surface_2))
+                    .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), theme))
                     .child(avatars::element(
                         &d.user_id,
                         &d.display_name(),
@@ -2229,7 +2249,19 @@ impl SecretsPanel {
         for a in &v.agents {
             let avatar = match projects.iter().find(|p| p.id == a.project_id) {
                 Some(p) => avatars::project_with(images.get(&p.id).cloned(), p, 30.0, theme),
-                None => avatars::agent(&a.project_id, &a.name, None, None, None, 30.0, theme),
+                None => avatars::agent_picture(
+                    &arbos_core::avatar::identity::resolve(
+                        &avatars::AgentQuery {
+                            sender: &a.project_id,
+                            handle: None,
+                            name: Some(&a.name),
+                        },
+                        &[],
+                    ),
+                    None,
+                    30.0,
+                    theme,
+                ),
             };
             let (vid, pid, on) = (v.id.clone(), a.project_id.clone(), a.enabled);
             g = g.child(
@@ -2244,7 +2276,7 @@ impl SecretsPanel {
                     .relative()
                     .child(kit::hairline_below(theme))
                     .cursor_pointer()
-                    .hover(|st| st.bg(theme.surface_2))
+                    .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), theme))
                     .child(avatar)
                     .child(
                         div()
@@ -2373,7 +2405,7 @@ impl SecretsPanel {
                     .relative()
                     .child(kit::hairline_below(theme))
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme.surface_2))
+                    .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), theme))
                     .child(
                         div()
                             .flex_1()

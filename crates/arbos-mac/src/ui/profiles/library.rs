@@ -31,7 +31,9 @@ use crate::app::{AppState, ViewerItem};
 use crate::model::{now_ms, AttachmentKind, Person};
 use crate::ui::avatars;
 use crate::ui::glass::{self, MENU_CARD_BORDER, MENU_CARD_PADDING, MENU_GAP, MENU_ROW_HEIGHT};
+use crate::ui::highlight::{self, Shape};
 use crate::ui::icons::icon;
+use crate::ui::link_tile;
 use crate::ui::message_menu::place;
 use crate::ui::people;
 use crate::ui::shell::Shell;
@@ -46,6 +48,8 @@ pub const ROW_H: f32 = kit::ROW_MIN_H;
 /// The thumbnail / type tile and its corners (mock: 32, radius 7).
 pub const THUMB: f32 = 32.0;
 pub const THUMB_RADIUS: f32 = 7.0;
+/// The link tile in the hover preview's picture frame (the 36 pt globe it replaces, as a tile).
+pub const PREVIEW_TILE: f32 = 72.0;
 /// Right padding of a row: the ⋯ disc sits 10 from the card's edge.
 pub const ROW_PAD_RIGHT: f32 = 10.0;
 /// The hover ⋯ disc.
@@ -460,6 +464,23 @@ pub(super) fn sections(
     let now = now_ms();
     let today = Local::now().date_naive();
     let days = group_days(entries, |(e, _)| local_date(e.when()), today);
+    // The Links rows' tiles want the relay's icon for hosts without a bundled brand mark
+    // ([feedback link-icons-mac-adopt-2026-10-27]); asked once per host per session.
+    let wants: Vec<String> = days
+        .iter()
+        .flat_map(|(_, rows)| rows.iter())
+        .filter_map(|(e, _)| match e {
+            Entry::Link(l) if link_tile::Brand::for_url(&l.url).is_none() => {
+                Some(super::link_icon_host(&l.url))
+            }
+            _ => None,
+        })
+        .collect();
+    shell.state.update(cx, |s, _| {
+        for host in wants {
+            s.want_link_icon(host);
+        }
+    });
     let cx: &Context<Shell> = cx;
     let state = shell.state.read(cx);
     let epoch = state.profile_opened;
@@ -529,8 +550,15 @@ fn row(
         .text_size(px(TEXT_SMALL))
         .text_color(theme.text)
         .cursor_pointer()
-        .when(hovered, |el| el.bg(theme.surface_2))
-        .child(thumb(&entry, theme))
+        .group(kit::HOT)
+        // The armed row (state, after the hover delay) draws the pill lit;
+        // an unarmed one lights it from the group hover like every row.
+        .child(if hovered {
+            highlight::armed_layer(Shape::Nested(kit::CARD_RADIUS), theme)
+        } else {
+            highlight::layer(false, Shape::Nested(kit::CARD_RADIUS), theme)
+        })
+        .child(thumb(&entry, state, theme))
         .child(
             div()
                 .flex_1()
@@ -555,11 +583,17 @@ fn row(
                 .size(px(MORE_DISC))
                 .flex_shrink_0()
                 .rounded_full()
-                .bg(theme.border_strong)
                 .flex()
                 .items_center()
                 .justify_center()
-                .hover(|s| s.bg(theme.text_faint))
+                // The disc sits on the lit row: an opaque step over the card.
+                .map(|el| {
+                    highlight::washed(
+                        el,
+                        highlight::over(theme.pane_card, theme.border_strong),
+                        theme,
+                    )
+                })
                 .child(icon("ellipsis", 14.0, theme.text))
                 .on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
                     cx.stop_propagation();
@@ -648,7 +682,7 @@ fn show_more(
         .text_size(px(TEXT_SMALL))
         .text_color(theme.text_muted)
         .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
+        .map(|el| highlight::row(el, false, Shape::Nested(kit::CARD_RADIUS), theme))
         .child(if expanded { "Show less" } else { "Show more" })
         .child(icon(
             if expanded {
@@ -665,8 +699,9 @@ fn show_more(
 }
 
 /// The 32 pt leading: the picture (aspect-fill), a play glyph over a video
-/// without one, the type on a tile for files, the link glyph for links.
-fn thumb(entry: &Entry, theme: &Theme) -> Div {
+/// without one, the type on a tile for files, the link tile for links (brand
+/// mark, the relay's icon, or the host's letter — `link_tile`).
+fn thumb(entry: &Entry, state: &AppState, theme: &Theme) -> Div {
     let tile = div()
         .size(px(THUMB))
         .flex_shrink_0()
@@ -695,8 +730,19 @@ fn thumb(entry: &Entry, theme: &Theme) -> Div {
                 None => tile.child(icon("doc", 16.0, theme.text_muted)),
             },
         },
-        Entry::Link(_) => tile.child(icon("link", 15.0, theme.text_muted)),
+        Entry::Link(l) => link_tile::tile(link_icon(l, state), THUMB, theme),
     }
+}
+
+/// The link tile's icon for a Library link: its brand, else the relay's picture when it has
+/// arrived, else the host's letter.
+fn link_icon<'a>(l: &Link, state: &'a AppState) -> link_tile::Icon<'a> {
+    let icon_host = super::link_icon_host(&l.url);
+    link_tile::icon_for(
+        &l.url,
+        &super::link_host(&l.url),
+        state.link_icon(&icon_host),
+    )
 }
 
 /// The sender's 18 pt picture for the card's last line.
@@ -706,7 +752,7 @@ fn sender_picture(sender: &Sender, state: &AppState, theme: &Theme) -> AnyElemen
             people::avatar(state.avatar(&p.avatar_url), p, CARD_AVATAR, theme).into_any_element()
         }
         Sender::Agent(pid) => match state.project(pid) {
-            Some(p) => avatars::project(p, CARD_AVATAR, theme).into_any_element(),
+            Some(p) => avatars::project_in(state, p, CARD_AVATAR, theme).into_any_element(),
             None => avatars::element(pid, "Agent", None, CARD_AVATAR, theme).into_any_element(),
         },
         Sender::Me => {
@@ -774,7 +820,7 @@ fn preview(entry: &Entry, state: &AppState, theme: &Theme) -> AnyElement {
                 None => frame.child(icon("doc", 36.0, theme.text_muted)),
             },
         },
-        Entry::Link(_) => frame.child(icon("globe", 36.0, theme.text_muted)),
+        Entry::Link(l) => frame.child(link_tile::tile(link_icon(l, state), PREVIEW_TILE, theme)),
     };
     let when = sidebar::stamp_label(entry.when());
     glass::popover(
@@ -841,6 +887,9 @@ fn preview(entry: &Entry, state: &AppState, theme: &Theme) -> AnyElement {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MenuItem {
     Open,
+    /// The picture (or file) itself on the pasteboard, original bytes under their
+    /// own type ([feedback copy-image-messages-mac-2026-10-27]).
+    Copy,
     Forward,
     Download,
     OpenLink,
@@ -851,6 +900,7 @@ impl MenuItem {
     pub fn label(self) -> &'static str {
         match self {
             MenuItem::Open => "Open",
+            MenuItem::Copy => "Copy",
             MenuItem::Forward => "Forward",
             MenuItem::Download => "Download",
             MenuItem::OpenLink => "Open link",
@@ -861,6 +911,7 @@ impl MenuItem {
     pub fn glyph(self) -> &'static str {
         match self {
             MenuItem::Open => "photo",
+            MenuItem::Copy => "copy",
             MenuItem::Forward => "forward",
             MenuItem::Download => "arrow-down",
             MenuItem::OpenLink => "globe",
@@ -869,11 +920,16 @@ impl MenuItem {
     }
 }
 
-/// What a row's ⋯ offers: attachments open, forward, download; links open
+/// What a row's ⋯ offers: attachments open, copy, forward, download; links open
 /// and copy. Pure, for the test.
 pub(crate) fn menu_items(target: &Target) -> Vec<MenuItem> {
     match target {
-        Target::Attachment { .. } => vec![MenuItem::Open, MenuItem::Forward, MenuItem::Download],
+        Target::Attachment { .. } => vec![
+            MenuItem::Open,
+            MenuItem::Copy,
+            MenuItem::Forward,
+            MenuItem::Download,
+        ],
         Target::Link { .. } => vec![MenuItem::OpenLink, MenuItem::CopyLink],
     }
 }
@@ -916,6 +972,11 @@ pub(crate) fn menu(shell: &Shell, window: &Window, cx: &mut Context<Shell>) -> O
                 this.library.menu = None;
                 match (item, &target) {
                     (MenuItem::Open, _) => open(this, &target, cx),
+                    (MenuItem::Copy, Target::Attachment { album, index }) => {
+                        if let Some(item) = album.get(*index).cloned() {
+                            this.state.update(cx, |s, cx| s.copy_viewer_item(&item, cx));
+                        }
+                    }
                     (MenuItem::Forward, Target::Attachment { .. }) => {
                         open(this, &target, cx);
                         this.state
@@ -934,7 +995,10 @@ pub(crate) fn menu(shell: &Shell, window: &Window, cx: &mut Context<Shell>) -> O
                     (MenuItem::CopyLink, Target::Link { url }) => {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(url.clone()));
                     }
-                    (MenuItem::Forward | MenuItem::Download, Target::Link { .. })
+                    (
+                        MenuItem::Copy | MenuItem::Forward | MenuItem::Download,
+                        Target::Link { .. },
+                    )
                     | (MenuItem::CopyLink, Target::Attachment { .. }) => {}
                 }
                 cx.notify();
@@ -1055,7 +1119,12 @@ mod tests {
         };
         assert_eq!(
             menu_items(&file),
-            [MenuItem::Open, MenuItem::Forward, MenuItem::Download]
+            [
+                MenuItem::Open,
+                MenuItem::Copy,
+                MenuItem::Forward,
+                MenuItem::Download
+            ]
         );
     }
 
@@ -1125,6 +1194,7 @@ mod render_tests {
                 bytes: Some(212_000),
                 kind: Some(kind),
                 title: None,
+                chart_part: None,
             },
         }
     }
@@ -1289,6 +1359,31 @@ mod render_tests {
         assert!(vcx.debug_bounds("library-row-6").is_none(), "folded again");
     }
 
+    /// [feedback link-icons-mac-adopt-2026-10-27]: the newest row is the arbos.life link; its
+    /// leading is the link tile with the bundled Arbos mark (32 → mark 18, centred), not the
+    /// shared `link` glyph.
+    #[gpui::test]
+    fn the_link_row_draws_the_brand_tile(cx: &mut TestAppContext) {
+        let (_rt, _state, shell, vcx) = mount(cx);
+        settle(&shell, vcx);
+        let row = vcx.debug_bounds("library-row-0").expect("the link row");
+        let mark = vcx
+            .debug_bounds(link_tile::MARK_SELECTOR)
+            .expect("the brand mark on the link row");
+        assert_eq!(f32::from(mark.size.width), link_tile::mark_side(THUMB));
+        assert_eq!(f32::from(mark.size.width), 18.0);
+        assert!(
+            mark.top() >= row.top() && mark.bottom() <= row.bottom(),
+            "the mark sits inside the link row"
+        );
+        let inset = f32::from(mark.left() - row.left());
+        assert_eq!(
+            inset,
+            kit::INSET + (THUMB - link_tile::mark_side(THUMB)) / 2.0,
+            "tile at the row inset, mark centred in the tile"
+        );
+    }
+
     #[gpui::test]
     fn hover_swaps_the_time_for_the_dots_then_floats_the_card(cx: &mut TestAppContext) {
         let (_rt, _state, shell, vcx) = mount(cx);
@@ -1360,7 +1455,7 @@ mod render_tests {
         settle(&shell, vcx);
         assert!(vcx.debug_bounds("library-menu-open-link").is_none());
 
-        // A file row: Open · Forward · Download.
+        // A file row: Open · Copy · Forward · Download.
         let row = vcx.debug_bounds("library-row-2").expect("row");
         vcx.simulate_mouse_move(centre(row), None, Modifiers::default());
         settle(&shell, vcx);

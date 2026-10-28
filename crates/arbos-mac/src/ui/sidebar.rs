@@ -24,8 +24,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    div, prelude::*, px, Context, CursorStyle, Div, DragMoveEvent, ElementId, Focusable as _,
-    FontWeight, MouseButton, Render, RenderImage, SharedString, Window,
+    div, prelude::*, px, AnyElement, App, Context, CursorStyle, Div, DragMoveEvent, ElementId,
+    Focusable as _, FontWeight, MouseButton, Render, RenderImage, SharedString, Window,
 };
 
 use crate::app::AppState;
@@ -33,14 +33,16 @@ use crate::model::{Id, MachineState, Message, Project, Role, ServerInfo};
 use crate::search;
 use crate::ui::avatars;
 use crate::ui::composer::Composer;
-use crate::ui::frost::edge_faded;
+use crate::ui::frost::{edge_faded, edge_faded_sides};
 use crate::ui::glass::{self, WindowDrag};
 use crate::ui::groups;
+use crate::ui::highlight::{self, Shape};
 use crate::ui::icons::icon;
 use crate::ui::identity;
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::shell::{Shell, TRAFFIC_LIGHTS_INSET};
+use crate::ui::sidebar_fit;
 use crate::ui::theme::{
     Theme, AVATAR_ROW, CONTROL, CONTROL_GAP, CONTROL_GLYPH, CONTROL_GLYPH_WIDE, HEADER_HEIGHT,
     PANEL_RADIUS, SIDEBAR_RESIZE_HANDLE, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
@@ -48,7 +50,7 @@ use crate::ui::theme::{
 
 /// Drag payload for the chat-list column's right-edge resize handle.
 #[derive(Clone)]
-struct SidebarResizeDrag;
+pub(crate) struct SidebarResizeDrag;
 
 struct SidebarResizeDragGhost;
 
@@ -56,6 +58,48 @@ impl Render for SidebarResizeDragGhost {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
     }
+}
+
+/// The column's right-edge resize handle — the expanded sidebar's and the
+/// rail's are the same element (`id`s differ), so one drag runs across the
+/// snap between them: a slim hit target (col-resize cursor), the drag's
+/// start resets the gesture, every move goes to
+/// `AppState::drag_sidebar_edge` with the pointer's x
+/// ([feedback app-01M5MJ9Y91W9ZET71KTCE7PS65], [feedback sidebar-narrow-wrap-2026-10-27]).
+pub(crate) fn resize_handle(
+    id: &'static str,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> gpui::Stateful<Div> {
+    div()
+        .id(id)
+        .absolute()
+        .top_0()
+        .right_0()
+        .h_full()
+        .w(px(SIDEBAR_RESIZE_HANDLE))
+        .cursor(CursorStyle::ResizeColumn)
+        // hover-fill: exception handle
+        .hover(|s| s.bg(Theme::with_alpha(theme.primary, 0.45)))
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_drag(SidebarResizeDrag, {
+            let shell = cx.entity().downgrade();
+            move |_, _, _, cx| {
+                if let Some(shell) = shell.upgrade() {
+                    shell.update(cx, |this, cx| {
+                        this.state.update(cx, |s, _| s.begin_sidebar_edge_drag());
+                    });
+                }
+                cx.new(|_| SidebarResizeDragGhost)
+            }
+        })
+        .on_drag_move(
+            cx.listener(|this, ev: &DragMoveEvent<SidebarResizeDrag>, _, cx| {
+                // The column docks at the window's left, so mouse x is the width.
+                let x = f32::from(ev.event.position.x);
+                this.state.update(cx, |s, cx| s.drag_sidebar_edge(x, cx));
+            }),
+        )
 }
 
 /// The drag strip beside the traffic lights: Grok Bot's top band, the same
@@ -101,6 +145,8 @@ pub(crate) const FILTER_PAD_X: f32 = 10.0;
 /// there: 60 + 4 ([feedback topbar-grok-parity-2026-10-24]; was 44 + 6 = 50).
 pub(crate) const FILTER_TOP: f32 = 4.0;
 pub(crate) const FILTER_BOTTOM: f32 = 8.0;
+/// The side fade on the capsule row when it scrolls (a narrow column).
+pub(crate) const FILTER_FADE_BAND: f32 = 12.0;
 /// Server rows draw their picture as a rounded square (corner = this fraction
 /// of the size) so they read apart from the agent and people discs.
 pub(crate) const SERVER_PICTURE_CORNER: f32 = 11.0 / 36.0;
@@ -131,8 +177,13 @@ pub(crate) const FOOTER_ROW_PAD_Y: f32 = FOOTER_BOTTOM - (FOOTER_ROW_HEIGHT - FO
 /// The machine dot scales with the avatar (28 → 36 carried 7 / 11 to 9 / 13):
 /// a 9 pt dot in a 13 pt ring of the sidebar colour, 2 pt past the avatar's
 /// bottom-right edge.
+/// Measured pins; the mark's ring is drawn from `marks::corner_metrics(FOOTER_AVATAR)`
+/// (the same 9 / 13 / 2) — the numbers stay here for the footer tests.
+#[cfg(test)]
 pub(crate) const FOOTER_DOT: f32 = 9.0;
+#[cfg(test)]
 pub(crate) const FOOTER_DOT_RING: f32 = 13.0;
+#[cfg(test)]
 pub(crate) const FOOTER_DOT_OVERHANG: f32 = 2.0;
 
 /// Grok Bot's update button at the footer's right end
@@ -145,10 +196,6 @@ pub(crate) const FOOTER_DOT_OVERHANG: f32 = 2.0;
 pub(crate) const FOOTER_DISC: f32 = CONTROL;
 pub(crate) const FOOTER_DISC_INSET: f32 = STRIP_INSET;
 pub(crate) const FOOTER_DISC_GLYPH: f32 = 20.0;
-/// Hover / pressed: the solid fill lifted in lightness — brighter under the
-/// pointer, brighter still while down (the chip rule, [feedback mention-chips]).
-pub(crate) const DISC_HOVER_LIFT: f32 = 0.06;
-pub(crate) const DISC_PRESSED_LIFT: f32 = 0.12;
 /// While the disc works (download / install / relaunch) its fill pulses
 /// between this alpha and 1.
 pub(crate) const DISC_BUSY_ALPHA_MIN: f32 = 0.55;
@@ -358,7 +405,8 @@ fn latest<'a>(state: &'a AppState, space: &Project) -> Option<&'a Message> {
             .messages_of(&chat.id)
             .iter()
             .rev()
-            .find(|m| !m.plain_text().trim().is_empty())
+            // A row hidden for me (someone I blocked) never previews.
+            .find(|m| !m.plain_text().trim().is_empty() && !state.hides_message(&chat.id, m))
         {
             if best.map(|b| m.created_at > b.created_at).unwrap_or(true) {
                 best = Some(m);
@@ -387,6 +435,12 @@ pub fn plain(s: &str) -> String {
         t = t.replace(mark, "");
     }
     t.trim().to_string()
+}
+
+/// `preview` for the headless tests.
+#[cfg(test)]
+pub(crate) fn preview_for_tests(state: &AppState, space: &Project) -> String {
+    preview(state, space)
 }
 
 fn preview(state: &AppState, space: &Project) -> String {
@@ -478,22 +532,13 @@ pub fn stamp_label(ms: u64) -> String {
     }
 }
 
-pub fn machine_dot(state: MachineState, theme: &Theme) -> gpui::Hsla {
-    match state {
-        MachineState::Awake => theme.online,
-        MachineState::Waking => theme.warn,
-        MachineState::Error => theme.danger,
-        MachineState::Asleep | MachineState::Stopped | MachineState::Unknown => theme.text_faint,
-    }
-}
-
 /// My picture with the machine dot — the footer's 36 pt disc, drawn the same
 /// at the foot of the expanded list and of the collapsed rail.
 pub(crate) fn account_avatar(
     shell: &Shell,
     machine: MachineState,
     theme: &Theme,
-    cx: &Context<Shell>,
+    cx: &mut Context<Shell>,
 ) -> Div {
     let state = shell.state.read(cx);
     let picture = match state.account.as_ref() {
@@ -524,37 +569,20 @@ pub(crate) fn account_avatar(
             .justify_center()
             .child(icon("person", FOOTER_AVATAR / 2.0, theme.text)),
     };
-    div()
-        .relative()
-        .size(px(FOOTER_AVATAR))
-        .flex_shrink_0()
-        .debug_selector(|| "sidebar-account-avatar".into())
-        .child(picture)
-        .child(
-            div()
-                .absolute()
-                .right(px(-FOOTER_DOT_OVERHANG))
-                .bottom(px(-FOOTER_DOT_OVERHANG))
-                .size(px(FOOTER_DOT_RING))
-                .rounded_full()
-                .bg(theme.sidebar)
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    div()
-                        .size(px(FOOTER_DOT))
-                        .rounded_full()
-                        .bg(Theme::with_alpha(
-                            machine_dot(machine, theme),
-                            if machine == MachineState::Waking {
-                                0.4 + 0.6 * PulseClock::phase(cx, 1100)
-                            } else {
-                                1.0
-                            },
-                        )),
-                ),
-        )
+    // The machine mark in front of the picture (`ui::marks::machine_corner`, its
+    // own paint layer), ringed in the sidebar colour. Never a coloured dot
+    // (Jacob, 2026-10-27): the spinner while the machine wakes, the red `!` on a
+    // fault, nothing at rest — then the bare picture in the same box.
+    crate::ui::marks::machine_corner(
+        FOOTER_AVATAR,
+        picture,
+        machine,
+        theme.sidebar,
+        |ring| ring.debug_selector(|| "dot-ring".into()),
+        theme,
+        cx,
+    )
+    .debug_selector(|| "sidebar-account-avatar".into())
 }
 
 pub(crate) struct RowView {
@@ -562,12 +590,13 @@ pub(crate) struct RowView {
     pub(crate) selected: bool,
     pub(crate) streaming: bool,
     pub(crate) unread: bool,
+    /// Missed messages across the space's tabs (≥ 1 whenever `unread`).
+    pub(crate) unread_count: usize,
     pub(crate) typing: bool,
     pub(crate) preview: String,
     pub(crate) time: String,
     pub(crate) person_image: Option<Arc<RenderImage>>,
     pub(crate) guests: people::PeopleWithAvatars,
-    pub(crate) avatar_state: avatars::AvatarState,
 }
 
 /// A server in the chat list (D88 rule 1): the same row as a group — disc, name, preview,
@@ -576,6 +605,7 @@ pub(crate) struct ServerRowView {
     pub(crate) server: ServerInfo,
     pub(crate) selected: bool,
     pub(crate) unread: bool,
+    pub(crate) unread_count: usize,
     pub(crate) preview: String,
     pub(crate) time: String,
 }
@@ -609,9 +639,17 @@ impl ListEntry {
         }
     }
 
-    pub(crate) fn typing(&self) -> bool {
+    pub(crate) fn unread_count(&self) -> usize {
         match self {
-            ListEntry::Chat(r) => r.typing,
+            ListEntry::Chat(r) => r.unread_count,
+            ListEntry::Server(r) => r.unread_count,
+        }
+    }
+
+    /// The space's agent is working (the rail's spinner badge).
+    pub(crate) fn working(&self) -> bool {
+        match self {
+            ListEntry::Chat(r) => r.streaming,
             ListEntry::Server(_) => false,
         }
     }
@@ -673,6 +711,7 @@ pub(crate) fn list_entries(shell: &Shell, cx: &Context<Shell>) -> Vec<ListEntry>
             ListEntry::Server(Box::new(ServerRowView {
                 selected,
                 unread: state.space_row(s).is_some_and(|r| r.unread > 0),
+                unread_count: state.space_row(s).map_or(0, |r| r.unread as usize),
                 preview: hit.reason.unwrap_or_else(|| server_preview(state, s)),
                 time: time_label(at),
                 server: s.clone(),
@@ -703,6 +742,11 @@ pub(crate) fn list_entries(shell: &Shell, cx: &Context<Shell>) -> Vec<ListEntry>
             selected: selected.as_deref() == Some(p.id.as_str()),
             streaming,
             unread: state.project_unread(&p.id) > 0,
+            unread_count: state
+                .visible_tabs(&p.id)
+                .iter()
+                .map(|c| c.missed_count())
+                .sum(),
             typing: !state.typing_in(&p.id).is_empty(),
             preview: hit.reason.unwrap_or_else(|| preview(state, p)),
             time: time_label(last_activity(state, p)),
@@ -714,7 +758,6 @@ pub(crate) fn list_entries(shell: &Shell, cx: &Context<Shell>) -> Vec<ListEntry>
                     (person, img)
                 })
                 .collect(),
-            avatar_state: state.avatar_state(&p.id),
             space: p.clone(),
         };
         rows.push((
@@ -989,17 +1032,28 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
     let strip = strip.window_drag();
     // ----- filter: All · Agents · People · Servers (the iPhone home's PaneTabs) --
     // Bare labels, the selected one on a capsule, centred; no track, no border.
+    // Narrow column ([feedback sidebar-narrow-wrap-2026-10-27]): the capsules
+    // scroll horizontally under an edge fade when they do not fit, like Grok
+    // Bot's iPhone filter row — the first and last capsule carry `auto` side
+    // margins, which centre the set while there is room and resolve to 0 (a
+    // left-aligned, scrollable row) once there is not; the selected capsule
+    // is scrolled into view (`Shell::filter_scroll`).
+    let filter_count = ListFilter::ALL.len();
+    if let Some(ix) = ListFilter::ALL.iter().position(|f| *f == filter) {
+        shell.filter_scroll.scroll_to_item(ix);
+    }
     let filter_bar = div()
         .id("sidebar-filter")
         .flex_shrink_0()
         .flex()
         .items_center()
-        .justify_center()
         .gap(px(FILTER_GAP))
         .pt(px(FILTER_TOP))
         .pb(px(FILTER_BOTTOM))
         .px(px(8.0))
-        .children(ListFilter::ALL.into_iter().map(|f| {
+        .overflow_x_scroll()
+        .track_scroll(&shell.filter_scroll)
+        .children(ListFilter::ALL.into_iter().enumerate().map(|(ix, f)| {
             let on = f == filter;
             div()
                 .id(ElementId::Name(SharedString::from(format!(
@@ -1009,16 +1063,30 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
                 .h(px(FILTER_HEIGHT))
                 .px(px(FILTER_PAD_X))
                 .flex()
+                .flex_shrink_0()
                 .items_center()
                 .justify_center()
+                .map(|mut el| {
+                    if ix == 0 {
+                        el.style().margin.left = Some(gpui::Length::Auto);
+                    }
+                    if ix + 1 == filter_count {
+                        el.style().margin.right = Some(gpui::Length::Auto);
+                    }
+                    el
+                })
                 .rounded_full()
                 .cursor_pointer()
-                .bg(if on {
-                    theme.bubble_assistant
-                } else {
-                    gpui::transparent_black()
+                // On: the bubble fill, Grok's (§ Chat-list filter); off: the
+                // highlight token's washes plus the label brightening.
+                .map(|el| {
+                    if on {
+                        highlight::washed(el, theme.bubble_assistant, &theme)
+                    } else {
+                        let text = theme.text;
+                        highlight::button_with(el, &theme, move |s| s.text_color(text))
+                    }
                 })
-                .hover(move |s| if on { s } else { s.text_color(theme.text) })
                 .text_size(px(TEXT_BODY))
                 .font_weight(if on {
                     FontWeight::SEMIBOLD
@@ -1214,7 +1282,7 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
                 .text_size(px(TEXT_SMALL))
                 .text_color(theme.text_muted)
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
+                .map(|el| highlight::row(el, false, Shape::Own, &theme))
                 .child(format!("Hidden chats · {hidden_count}"))
                 .child(icon("chevron-right", 12.0, theme.text_faint))
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -1245,75 +1313,57 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
     // Grok Bot's footer avatar: 36 pt at x 13, 12 above the bottom edge
     // ([feedback footer-avatar-grok-size-2026-10-24]; the constants above).
     let snap_footer = snap.clone();
-    let account_row = footer_row_frame()
-        .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
-        .child(
-            div()
-                .flex_shrink_0()
-                .on_children_prepainted(move |bounds, _, _| {
-                    if let Some(b) = bounds.first() {
-                        snap_footer.borrow_mut().footer = Some(*b);
-                    }
-                })
-                .child(
-                    account_avatar(shell, machine, &theme, cx)
-                        .when(hide_morphing, |el| el.opacity(0.0)),
-                ),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .text_size(px(TEXT_SMALL + 1.0))
-                .text_color(theme.text)
-                .child(who),
-        )
-        // My avatar opens my profile and every setting in the right pane
-        // (three-pane rule, mockup g); a second click folds it away.
-        .on_mouse_down(
-            gpui::MouseButton::Left,
-            cx.listener(|this, _, window, cx| {
-                cx.stop_propagation();
-                this.menu_open = false;
-                let open = this.state.read(cx).profile == Some(crate::app::ProfilePage::Me);
-                if open {
-                    this.close_profile(window, cx);
-                } else {
-                    this.state.update(cx, |s, cx| {
-                        s.open_profile(crate::app::ProfilePage::Me, cx);
-                        s.set_profile_tab(1, cx);
-                    });
+    let account_row = highlight::row(
+        footer_row_frame().cursor_pointer(),
+        false,
+        Shape::Own,
+        &theme,
+    )
+    .child(
+        div()
+            .flex_shrink_0()
+            .on_children_prepainted(move |bounds, _, _| {
+                if let Some(b) = bounds.first() {
+                    snap_footer.borrow_mut().footer = Some(*b);
                 }
-                cx.notify();
-            }),
-        );
+            })
+            .child(
+                account_avatar(shell, machine, &theme, cx)
+                    .when(hide_morphing, |el| el.opacity(0.0)),
+            ),
+    )
+    .child(
+        div()
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .text_size(px(TEXT_SMALL + 1.0))
+            .text_color(theme.text)
+            .child(who),
+    )
+    // My avatar opens my profile and every setting in the right pane
+    // (three-pane rule, mockup g); a second click folds it away.
+    .on_mouse_down(
+        gpui::MouseButton::Left,
+        cx.listener(|this, _, window, cx| {
+            cx.stop_propagation();
+            this.menu_open = false;
+            let open = this.state.read(cx).profile == Some(crate::app::ProfilePage::Me);
+            if open {
+                this.close_profile(window, cx);
+            } else {
+                this.state.update(cx, |s, cx| {
+                    s.open_profile(crate::app::ProfilePage::Me, cx);
+                    s.set_profile_tab(1, cx);
+                });
+            }
+            cx.notify();
+        }),
+    );
 
-    // Drag handle on the right edge: a slim hit target (col-resize cursor) that
-    // lets the user make the chat list slimmer or wider
-    // ([feedback app-01M5MJ9Y91W9ZET71KTCE7PS65]).
-    let resize = div()
-        .id("sidebar-resize")
-        .absolute()
-        .top_0()
-        .right_0()
-        .h_full()
-        .w(px(SIDEBAR_RESIZE_HANDLE))
-        .cursor(CursorStyle::ResizeColumn)
-        .hover(|s| s.bg(Theme::with_alpha(theme.primary, 0.45)))
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_drag(SidebarResizeDrag, |_, _, _, cx| {
-            cx.new(|_| SidebarResizeDragGhost)
-        })
-        .on_drag_move(
-            cx.listener(|this, ev: &DragMoveEvent<SidebarResizeDrag>, _, cx| {
-                // The column docks at the window's left, so mouse x is the width.
-                let width = f32::from(ev.event.position.x);
-                this.state
-                    .update(cx, |s, cx| s.set_sidebar_width(width, cx));
-            }),
-        );
+    // Drag handle on the right edge: slimmer or wider, and past the snap
+    // point the column collapses to the rail (`ui::sidebar_fit`).
+    let resize = resize_handle("sidebar-resize", &theme, cx);
 
     let column = div()
         .relative()
@@ -1328,7 +1378,7 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
         .child(strip)
         // The filter belongs to the chat list, not to a server's channel list.
         .when(filter_shown(open_server.is_some()), |el| {
-            el.child(filter_bar)
+            el.child(edge_faded_sides(FILTER_FADE_BAND, filter_bar))
         })
         .child(match open_server.as_ref() {
             // Inside a server the left pane shows its channels (mockup h).
@@ -1411,6 +1461,7 @@ fn render_server_row(
             server: row.server.clone(),
             selected: row.selected,
             unread: row.unread,
+            unread_count: row.unread_count,
             preview: String::new(),
             time: String::new(),
         }))
@@ -1420,6 +1471,7 @@ fn render_server_row(
         server,
         selected,
         unread,
+        unread_count,
         preview,
         time,
     } = row;
@@ -1437,18 +1489,7 @@ fn render_server_row(
         .px(px(12.0))
         .py(px(11.0))
         .rounded(px(PANEL_RADIUS - 4.0))
-        .bg(if selected && !hide_morphing {
-            theme.surface_2
-        } else {
-            gpui::transparent_black()
-        })
-        .hover(|s| {
-            s.bg(if selected {
-                theme.surface_2
-            } else {
-                Theme::with_alpha(theme.surface_2, 0.55)
-            })
-        })
+        .map(|el| highlight::row(el, selected && !hide_morphing, Shape::Own, theme))
         .cursor_pointer()
         .on_click(
             cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
@@ -1515,13 +1556,9 @@ fn render_server_row(
                                 .child(server.name.clone()),
                         )
                         .child(div().flex_1())
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .text_size(px(TEXT_TINY))
-                                .text_color(theme.text_muted)
-                                .child(time),
-                        ),
+                        .when_some(row_time_size(shell, cx), |el, size| {
+                            el.child(time_el(time, size, theme))
+                        }),
                 )
                 .child(
                     div()
@@ -1537,8 +1574,9 @@ fn render_server_row(
                                 .text_color(theme.text_muted)
                                 .child(preview),
                         )
+                        // Unread = the count pill, never a dot (Jacob, 2026-10-27).
                         .when(unread, |el| {
-                            el.child(div().size(px(8.0)).rounded_full().bg(theme.accent))
+                            el.child(crate::ui::marks::unread_pill(unread_count, theme))
                         }),
                 ),
         )
@@ -1662,18 +1700,7 @@ fn server_channels(
                 .px(px(12.0))
                 .py(px(11.0))
                 .rounded(px(PANEL_RADIUS - 4.0))
-                .bg(if selected {
-                    theme.surface_2
-                } else {
-                    gpui::transparent_black()
-                })
-                .hover(|s| {
-                    s.bg(if selected {
-                        theme.surface_2
-                    } else {
-                        Theme::with_alpha(theme.surface_2, 0.55)
-                    })
-                })
+                .map(|el| highlight::row(el, selected, Shape::Own, theme))
                 .cursor_pointer()
                 .child(
                     div()
@@ -1713,13 +1740,9 @@ fn server_channels(
                                 )
                                 .when(locked, |el| el.child(icon("lock", 11.0, theme.text_faint)))
                                 .child(div().flex_1())
-                                .child(
-                                    div()
-                                        .flex_shrink_0()
-                                        .text_size(px(TEXT_TINY))
-                                        .text_color(theme.text_muted)
-                                        .child(time),
-                                ),
+                                .when_some(row_time_size(shell, cx), |el, size| {
+                                    el.child(time_el(time, size, theme))
+                                }),
                         )
                         .child(
                             div()
@@ -1736,7 +1759,10 @@ fn server_channels(
                                         .child(preview),
                                 )
                                 .when(unread, |el| {
-                                    el.child(div().size(px(8.0)).rounded_full().bg(theme.accent))
+                                    el.child(crate::ui::marks::unread_pill(
+                                        room.as_ref().map_or(1, |r| r.unread as usize),
+                                        theme,
+                                    ))
                                 }),
                         ),
                 )
@@ -1895,6 +1921,26 @@ pub fn channel_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
 /// A row's picture wrapped for the rail morph: its resting bounds are recorded
 /// under the row's id every frame it is painted; while the morph runs the
 /// overlay paints it instead (`invisible` keeps the slot).
+/// The rows' time size at the column's width — `None` hides it: the name
+/// wins as the column narrows (`ui::sidebar_fit::row_time`,
+/// [feedback sidebar-narrow-wrap-2026-10-27]).
+fn row_time_size(shell: &Shell, cx: &Context<Shell>) -> Option<f32> {
+    match sidebar_fit::row_time(shell.state.read(cx).sidebar_width) {
+        sidebar_fit::RowTime::Full => Some(TEXT_TINY),
+        sidebar_fit::RowTime::Small => Some(sidebar_fit::TIME_SMALL_SIZE),
+        sidebar_fit::RowTime::Hidden => None,
+    }
+}
+
+fn time_el(time: String, size: f32, theme: &Theme) -> Div {
+    div()
+        .flex_shrink_0()
+        .text_size(px(size))
+        .text_color(theme.text_muted)
+        .debug_selector(|| "row-time".into())
+        .child(time)
+}
+
 fn recorded_picture(shell: &Shell, id: &Id, hide_morphing: bool, picture: Div) -> Div {
     let snap = shell.morph.clone();
     let id = id.clone();
@@ -1928,12 +1974,12 @@ fn render_row(
         selected,
         streaming,
         unread,
+        unread_count,
         typing,
         preview,
         time,
         person_image: _,
         guests: _,
-        avatar_state,
     } = row;
     let id: Id = space.id.clone();
     let menu_id: Id = space.id.clone();
@@ -1945,18 +1991,23 @@ fn render_row(
         .renaming_project
         .as_ref()
         .is_some_and(|p| p == &space.id);
-    if typing || avatar_state != avatars::AvatarState::Idle {
-        PulseClock::request(cx);
-    }
-    let phase = PulseClock::phase(cx, 900);
+    // No pulse-clock request from a row any more: the typing pulse is gone
+    // (never a coloured dot — Jacob, 2026-10-27; "typing…" is the preview), and
+    // the old working-row request made the window redraw at 30 fps for nothing.
+    // The spinner has its own shared 11 fps ticker (`ui::working`).
 
     // Groups: the chat title (custom or member handles from the relay),
     // matching iOS PeopleRow. DMs: the other person's display name.
     let name = row_name(&space);
+    // The name wins over the time as the column narrows: the time shrinks,
+    // then hides, and the `@handle` goes first (`ui::sidebar_fit::row_time`,
+    // [feedback sidebar-narrow-wrap-2026-10-27]).
+    let handle_shown = sidebar_fit::handle_shown(shell.state.read(cx).sidebar_width);
     // A group row reads like an agent row: name and preview, no member count.
     let handle = space
         .person()
         .filter(|_| space.is_people() && !space.is_people_group())
+        .filter(|_| handle_shown)
         .map(|p| format!("@{}", p.handle));
     let preview = if typing {
         "typing…".to_string()
@@ -1975,20 +2026,7 @@ fn render_row(
         .px(px(12.0))
         .py(px(11.0))
         .rounded(px(PANEL_RADIUS - 4.0))
-        .bg(if selected && !hide_morphing {
-            theme.surface_2
-        } else {
-            gpui::transparent_black()
-        })
-        // Hover is a lighter tint of the selected fill in both modes (in light,
-        // the old white hover read brighter than the selected row).
-        .hover(|s| {
-            s.bg(if selected {
-                theme.surface_2
-            } else {
-                Theme::with_alpha(theme.surface_2, 0.55)
-            })
-        })
+        .map(|el| highlight::row(el, selected && !hide_morphing, Shape::Own, theme))
         .cursor_pointer()
         .on_click({
             let id = id.clone();
@@ -2100,19 +2138,19 @@ fn render_row(
                             )
                         })
                         .child(div().flex_1())
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .text_size(px(TEXT_TINY))
-                                .text_color(theme.text_muted)
-                                .child(time),
-                        ),
+                        .when_some(row_time_size(shell, cx), |el, size| {
+                            el.child(
+                                time_el(time, size, theme)
+                                    .debug_selector(|| format!("row-time-{id}")),
+                            )
+                        }),
                 )
                 .child(
                     div()
                         .flex()
                         .items_center()
                         .gap(px(6.0))
+                        .debug_selector(|| format!("row-preview-line-{id}"))
                         .child(
                             div()
                                 .flex_1()
@@ -2122,22 +2160,76 @@ fn render_row(
                                 .text_color(theme.text_muted)
                                 .child(preview),
                         )
-                        // No "agent is working" dot on rows (Jacob, 2026-10-22): the
-                        // working state lives in the header / activity line. A person
-                        // typing keeps its green pulse; unread keeps its accent dot.
-                        .when(typing, |el| {
-                            el.child(
-                                div()
-                                    .size(px(7.0))
-                                    .rounded_full()
-                                    .bg(Theme::with_alpha(theme.online, 0.35 + 0.65 * phase)),
-                            )
-                        })
-                        .when(!typing && unread, |el| {
-                            el.child(div().size(px(8.0)).rounded_full().bg(theme.accent))
-                        }),
+                        // The status cell under the time (Jacob, 2026-10-27): the
+                        // braille spinner while the chat's agent works (one shared
+                        // ticker); the unread count pill; nothing for a person typing
+                        // (the preview says "typing…") or a quiet read chat. Never a
+                        // coloured dot.
+                        .children(row_status_cell(
+                            RowStatus::of(streaming, typing, unread),
+                            unread_count,
+                            &id,
+                            theme,
+                            cx,
+                        )),
                 ),
         )
+}
+
+/// What the status cell under a row's time shows (Jacob, 2026-10-27,
+/// [feedback working-braille-spinner-mac-2026-10-27] + [feedback
+/// neon-dots-mac-2026-10-27]). One cell, one mark, never a coloured dot: a
+/// person typing shows nothing in the cell (the spinner is the *agent's*
+/// working sign, never a human's; the preview reads "typing…"); the spinner
+/// while the chat's agent works; the unread **count pill** otherwise; a quiet
+/// read chat shows nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowStatus {
+    /// A person is typing: no mark in the cell (the preview carries it).
+    Typing,
+    /// The chat's agent is working: the braille spinner.
+    Working,
+    /// Unread messages: the count pill.
+    Unread,
+    /// Nothing.
+    Quiet,
+}
+
+impl RowStatus {
+    pub fn of(streaming: bool, typing: bool, unread: bool) -> Self {
+        // Typing draws nothing, so it never hides the spinner or the pill.
+        if streaming {
+            RowStatus::Working
+        } else if unread {
+            RowStatus::Unread
+        } else if typing {
+            RowStatus::Typing
+        } else {
+            RowStatus::Quiet
+        }
+    }
+}
+
+fn row_status_cell(
+    status: RowStatus,
+    unread_count: usize,
+    id: &Id,
+    theme: &Theme,
+    cx: &mut App,
+) -> Option<AnyElement> {
+    match status {
+        RowStatus::Typing | RowStatus::Quiet => None,
+        RowStatus::Working => Some(
+            crate::ui::working::glyph(theme, cx)
+                .debug_selector(|| format!("row-status-working-{id}"))
+                .into_any_element(),
+        ),
+        RowStatus::Unread => Some(
+            crate::ui::marks::unread_pill(unread_count, theme)
+                .debug_selector(|| format!("row-status-unread-{id}"))
+                .into_any_element(),
+        ),
+    }
 }
 
 /// The right-click menu of a sidebar row, anchored at the click. An agent
@@ -2380,11 +2472,13 @@ pub(crate) fn confirm_button(
                 .hover(|s| s.opacity(0.88))
         })
         .when(!danger, |el| {
-            el.bg(theme.field)
-                .border_1()
-                .border_color(theme.field_border)
-                .text_color(theme.text)
-                .hover(|s| s.bg(theme.surface_2))
+            highlight::washed(
+                el.border_1()
+                    .border_color(theme.field_border)
+                    .text_color(theme.text),
+                theme.field,
+                theme,
+            )
         })
         .child(label)
 }
@@ -2580,13 +2674,8 @@ mod strip_tests {
     use crate::ui::shell::TRAFFIC_LIGHTS_INSET;
     use crate::ui::theme::{
         CONTROL, CONTROL_GAP, CONTROL_GLYPH, CONTROL_GLYPH_WIDE, CONTROL_LINE, HEADER_HEIGHT,
-        TRAFFIC_LIGHT_POSITION,
+        TRAFFIC_LIGHT_LINE, TRAFFIC_LIGHT_POSITION,
     };
-
-    /// The real lights' centre line: macOS 26 draws a 14 pt disc in the frame
-    /// GPUI places at `TRAFFIC_LIGHT_POSITION` (measured on the v0.6.213
-    /// build: position 14 → centre 21).
-    const TRAFFIC_LIGHT_LINE: f32 = TRAFFIC_LIGHT_POSITION + 7.0;
 
     /// Grok Bot's strip, measured on `ref-grok-round-search-plus.png` (project
     /// store, 2 px/pt, window top at image row 2) — Jacob 2026-10-24: "the
@@ -2916,11 +3005,10 @@ mod footer_tests {
     use gpui::{div, prelude::*, px, TestAppContext};
 
     use super::{
-        footer_disc_frame, footer_frame, footer_row_frame, DISC_HOVER_LIFT, DISC_PRESSED_LIFT,
-        FOOTER_AVATAR, FOOTER_BOTTOM, FOOTER_DISC, FOOTER_DISC_GLYPH, FOOTER_DISC_INSET,
-        FOOTER_DOT, FOOTER_DOT_OVERHANG, FOOTER_DOT_RING, FOOTER_HEIGHT, FOOTER_INSET,
-        FOOTER_ROW_HEIGHT, FOOTER_ROW_INSET, FOOTER_ROW_PAD_X, FOOTER_ROW_PAD_Y, STRIP_BUTTON,
-        STRIP_GAP, STRIP_INSET,
+        footer_disc_frame, footer_frame, footer_row_frame, FOOTER_AVATAR, FOOTER_BOTTOM,
+        FOOTER_DISC, FOOTER_DISC_GLYPH, FOOTER_DISC_INSET, FOOTER_DOT, FOOTER_DOT_OVERHANG,
+        FOOTER_DOT_RING, FOOTER_HEIGHT, FOOTER_INSET, FOOTER_ROW_HEIGHT, FOOTER_ROW_INSET,
+        FOOTER_ROW_PAD_X, FOOTER_ROW_PAD_Y, STRIP_BUTTON, STRIP_GAP, STRIP_INSET,
     };
     use crate::ui::theme::{Theme, CONTROL, CONTROL_LINE, HEADER_HEIGHT};
 
@@ -2977,6 +3065,12 @@ mod footer_tests {
         assert_eq!(FOOTER_DOT_OVERHANG, 2.0);
         // 28 → 36 scaled the 7 / 11 dot to 9 / 14; the ring stays 2 pt.
         assert_eq!(FOOTER_DOT, (7.0f32 * 36.0 / 28.0).round());
+        // The mark's ring is drawn from `marks::corner_metrics`: the same numbers.
+        let m = crate::ui::marks::corner_metrics(FOOTER_AVATAR);
+        assert_eq!(
+            (m.glyph, m.ring, m.overhang),
+            (FOOTER_DOT, FOOTER_DOT_RING, FOOTER_DOT_OVERHANG)
+        );
     }
 
     /// The footer as `render` frames it, laid out for real at the bottom of a
@@ -3117,11 +3211,18 @@ mod footer_tests {
             let glyph: gpui::Rgba = theme.on_update_disc.into();
             assert_eq!(rgb_u32(fill), grok_disc::FILL, "disc fill");
             assert_eq!(rgb_u32(glyph), grok_disc::GLYPH_FILL, "glyph fill");
-            let hover = Theme::lighter(theme.update_disc, DISC_HOVER_LIFT);
-            let pressed = Theme::lighter(theme.update_disc, DISC_PRESSED_LIFT);
-            assert!(hover.l > theme.update_disc.l, "brighter under the pointer");
-            assert!(pressed.l > hover.l, "brighter still while pressed");
-            assert_eq!(hover.h, theme.update_disc.h, "same hue");
+            // Hover / pressed come from the highlight token: the text-colour
+            // wash over the blue — brighter in dark (white wash), darker in
+            // light (black wash) — one step, then one more.
+            let f = crate::ui::highlight::fills(&theme);
+            let hover = crate::ui::highlight::over(theme.update_disc, f.hover);
+            let pressed = crate::ui::highlight::over(theme.update_disc, f.pressed);
+            assert_ne!(hover, theme.update_disc, "changes under the pointer");
+            if theme.is_light() {
+                assert!(hover.l < theme.update_disc.l && pressed.l < hover.l);
+            } else {
+                assert!(hover.l > theme.update_disc.l && pressed.l > hover.l);
+            }
         }
     }
 
@@ -3313,5 +3414,328 @@ mod row_bounds_tests {
                 assert!(offset < -(ROW_H * 2.0), "the list scrolled ({offset})");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod status_cell_tests {
+    use std::time::Duration;
+
+    use futures::future::BoxFuture;
+    use gpui::{AppContext as _, Bounds, Entity, Pixels, TestAppContext, VisualTestContext};
+    use tokio::sync::mpsc;
+
+    use super::RowStatus;
+    use crate::app::AppState;
+    use crate::model::{Chat, Message, Person, Project, SpaceKind};
+    use crate::sync::{ClientCommand, SyncEvent, SyncSource};
+    use crate::ui::marks::UNREAD_PILL_H;
+    use crate::ui::motion::PulseClock;
+    use crate::ui::shell::Shell;
+    use crate::ui::theme::{Surface, Theme};
+    use crate::ui::working::{WorkingClock, CELL_H, CELL_W, FRAME_MS};
+
+    struct Idle;
+
+    impl SyncSource for Idle {
+        fn name(&self) -> &'static str {
+            "idle"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            _commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    /// The rule as code: the agent's spinner beats unread, unread beats a
+    /// person typing (which draws nothing — the spinner is never a human's
+    /// sign), typing beats quiet.
+    #[test]
+    fn the_cell_shows_one_thing_in_this_order() {
+        assert_eq!(RowStatus::of(false, true, false), RowStatus::Typing);
+        assert_eq!(
+            RowStatus::of(false, true, true),
+            RowStatus::Unread,
+            "typing draws nothing, so it hides nothing"
+        );
+        assert_eq!(RowStatus::of(true, true, false), RowStatus::Working);
+        assert_eq!(RowStatus::of(true, false, true), RowStatus::Working);
+        assert_eq!(RowStatus::of(false, false, true), RowStatus::Unread);
+        assert_eq!(RowStatus::of(false, false, false), RowStatus::Quiet);
+        assert_eq!(CELL_W, 8.0, "the cell is the old dot's width");
+    }
+
+    fn message(id: &str, chat: &str, role: &str, status: &str, text: &str, at: u64) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "chatId": chat, "role": role, "sender": role, "status": status,
+            "createdAt": at, "completedAt": at,
+            "parts": [{ "id": format!("{id}-t"), "kind": "text", "text": text }],
+        }))
+        .expect("message")
+    }
+
+    fn chat(id: &str, project: &str, unread: bool, at: u64) -> Chat {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "project_id": project, "title": "Main", "is_pinned": true,
+            "is_system": false, "unread": unread, "last_message_at": at,
+        }))
+        .expect("chat")
+    }
+
+    fn person(id: &str, handle: &str, name: &str) -> Person {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "handle": handle, "name": name, "status": "active",
+        }))
+        .expect("person")
+    }
+
+    /// Four rows: an agent working (`working`), an agent with unread
+    /// (`unread`), a quiet read agent (`quiet`), a DM whose person is typing
+    /// (`dm`). The quiet one is selected so the others keep their state.
+    fn mount(
+        cx: &mut TestAppContext,
+    ) -> (
+        tokio::runtime::Runtime,
+        Entity<AppState>,
+        Entity<Shell>,
+        &mut VisualTestContext,
+    ) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| {
+            gpui_tokio::init_from_handle(cx, handle);
+            cx.set_global(Theme::dark(Surface::Matte));
+            if !cx.has_global::<PulseClock>() {
+                PulseClock::init(cx);
+            }
+            WorkingClock::init(cx);
+        });
+        let state = cx.new(|cx| AppState::new(Box::new(Idle), cx));
+        let now = crate::model::now_ms();
+        state.update(cx, |s, cx| {
+            for (pid, name, kind, people) in [
+                ("working", "Affine", SpaceKind::Project, vec![]),
+                ("unread", "Lium", SpaceKind::Project, vec![]),
+                ("quiet", "Arbos", SpaceKind::Project, vec![]),
+                (
+                    "dm",
+                    "Sam Rivera",
+                    SpaceKind::Dm,
+                    vec![person("gh_2", "sam", "Sam Rivera")],
+                ),
+            ] {
+                s.projects.push(Project {
+                    id: pid.into(),
+                    name: name.into(),
+                    kind,
+                    people,
+                    ..Project::default()
+                });
+                let room = format!("room-{pid}");
+                let at = now - 60_000;
+                let mut rows = vec![
+                    message(
+                        "u",
+                        &room,
+                        "user",
+                        "done",
+                        "Can you look at the surf report?",
+                        at,
+                    ),
+                    message("a", &room, "assistant", "done", "On it.", at + 1_000),
+                ];
+                if pid == "working" {
+                    rows.push(message(
+                        "w",
+                        &room,
+                        "assistant",
+                        "streaming",
+                        "",
+                        now - 2_000,
+                    ));
+                }
+                s.chats.insert(
+                    pid.into(),
+                    vec![chat(&room, pid, pid == "unread", at + 1_000)],
+                );
+                s.messages.insert(room.clone(), rows);
+                if pid == "dm" {
+                    // Typing marks are keyed by the space id (`typing_in(&p.id)`).
+                    s.typing
+                        .insert(pid.into(), vec![("sam".to_string(), now + 60_000)]);
+                }
+            }
+            s.selected_project = Some("quiet".into());
+            cx.notify();
+        });
+        let (shell, vcx) = cx.add_window_view(|window, cx| Shell::new(state.clone(), window, cx));
+        vcx.run_until_parked();
+        (rt, state, shell, vcx)
+    }
+
+    fn close(a: f32, b: f32) -> bool {
+        (a - b).abs() <= 0.5
+    }
+
+    fn right(b: Bounds<Pixels>) -> f32 {
+        f32::from(b.right())
+    }
+
+    fn centre_y(b: Bounds<Pixels>) -> f32 {
+        f32::from(b.origin.y) + f32::from(b.size.height) / 2.0
+    }
+
+    /// The spinner sits exactly where the dot sat: its right edge is the time
+    /// label's right edge (the unread dot's too), it is centred on the preview
+    /// line, and it is the fixed cell. The unread row keeps its accent dot,
+    /// the quiet row shows nothing, the typing DM keeps its green pulse.
+    #[gpui::test]
+    fn the_spinner_sits_under_the_time_where_the_dot_was(cx: &mut TestAppContext) {
+        let (_rt, _state, _shell, vcx) = mount(cx);
+        let spinner = vcx
+            .debug_bounds("row-status-working-working")
+            .expect("the working agent's row draws the spinner");
+        let time = vcx
+            .debug_bounds("row-time-working")
+            .expect("its time label");
+        let line = vcx
+            .debug_bounds("row-preview-line-working")
+            .expect("its preview line");
+        assert_eq!(f32::from(spinner.size.width), CELL_W, "cell width");
+        assert_eq!(f32::from(spinner.size.height), CELL_H, "cell height");
+        assert!(
+            close(right(spinner), right(time)),
+            "spinner right {} = time right {}",
+            right(spinner),
+            right(time)
+        );
+        assert!(
+            close(centre_y(spinner), centre_y(line)),
+            "spinner centre {} = preview line centre {}",
+            centre_y(spinner),
+            centre_y(line)
+        );
+        assert!(
+            f32::from(spinner.origin.y)
+                > f32::from(time.origin.y) + f32::from(time.size.height) - 1.0,
+            "under the time, not beside it"
+        );
+
+        let pill = vcx
+            .debug_bounds("row-status-unread-unread")
+            .expect("the unread agent's row shows the count pill (never a dot)");
+        assert_eq!(f32::from(pill.size.height), UNREAD_PILL_H);
+        assert!(
+            f32::from(pill.size.width) >= UNREAD_PILL_H,
+            "at least as wide as tall"
+        );
+        assert!(
+            close(
+                right(pill),
+                right(vcx.debug_bounds("row-time-unread").expect("time"))
+            ),
+            "the pill ends under its time too"
+        );
+        assert!(
+            close(right(pill), right(spinner)),
+            "pill and spinner share the right edge under the time"
+        );
+        assert!(
+            vcx.debug_bounds("row-status-working-unread").is_none(),
+            "an unread row that is not working shows no spinner"
+        );
+
+        assert!(vcx.debug_bounds("row-status-working-quiet").is_none());
+        assert!(vcx.debug_bounds("row-status-unread-quiet").is_none());
+
+        assert!(
+            vcx.debug_bounds("row-status-working-dm").is_none(),
+            "a person typing never shows the agent's spinner"
+        );
+        assert!(
+            vcx.debug_bounds("row-status-unread-dm").is_none(),
+            "a person typing shows no mark in the cell (the preview says typing…)"
+        );
+    }
+
+    /// One spinning row (the typing DM pulses, it does not spin), one ticker;
+    /// the cell's box never moves while the glyph turns; Reduce Motion keeps
+    /// the cell (still glyph) and no ticker.
+    #[gpui::test]
+    fn rows_share_one_ticker_and_the_cell_never_moves(cx: &mut TestAppContext) {
+        let (_rt, _state, _shell, vcx) = mount(cx);
+        let first = vcx
+            .debug_bounds("row-status-working-working")
+            .expect("spinner drawn");
+        let t = vcx.update(|_, cx| WorkingClock::trace(cx));
+        assert!(t.running, "spinners on screen → ticker running");
+        assert_eq!(t.starts, 1, "one ticker");
+        let ticks0 = t.ticks;
+        for _ in 0..10 {
+            vcx.executor()
+                .advance_clock(Duration::from_millis(FRAME_MS));
+            vcx.run_until_parked();
+            let b = vcx
+                .debug_bounds("row-status-working-working")
+                .expect("spinner drawn");
+            assert_eq!(b, first, "the cell's box is the same every frame");
+        }
+        let t = vcx.update(|_, cx| WorkingClock::trace(cx));
+        assert_eq!(t.starts, 1, "still one ticker");
+        assert_eq!(
+            t.ticks - ticks0,
+            10,
+            "ten frames for ten periods, not twenty"
+        );
+        assert_eq!(
+            t.drawn_last_frame, 1,
+            "one spinner cell on screen: the working agent's (the DM pulses)"
+        );
+        // The typing DM's pulse rides the 30 fps clock, so the window draws
+        // more than once per 90 ms period here; the ticker itself adds one.
+        assert!(t.draws_last_tick >= 1);
+
+        // Nobody typing: the ticker alone draws the Shell once per period.
+        _state.update(vcx, |s, cx| {
+            s.typing.clear();
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        for _ in 0..3 {
+            vcx.executor()
+                .advance_clock(Duration::from_millis(FRAME_MS));
+            vcx.run_until_parked();
+        }
+        let t = vcx.update(|_, cx| WorkingClock::trace(cx));
+        assert_eq!(t.drawn_last_frame, 1);
+        assert_eq!(
+            t.draws_last_tick, 1,
+            "the ticker alone draws the Shell once per period"
+        );
+        assert_eq!(t.starts, 1, "still the one ticker");
+
+        vcx.update(|_, cx| cx.set_reduce_motion(true));
+        for _ in 0..3 {
+            vcx.executor()
+                .advance_clock(Duration::from_millis(FRAME_MS));
+            vcx.run_until_parked();
+        }
+        assert_eq!(
+            vcx.debug_bounds("row-status-working-working"),
+            Some(first),
+            "Reduce Motion keeps the still glyph in the same cell"
+        );
+        let t = vcx.update(|_, cx| WorkingClock::trace(cx));
+        assert!(
+            !t.running,
+            "Reduce Motion: nothing asks for frames, the ticker parks"
+        );
     }
 }

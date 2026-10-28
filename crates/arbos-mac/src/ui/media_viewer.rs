@@ -4,7 +4,10 @@
 //! in order) pages with ← → or the chevrons; × / Close / Esc / backdrop /
 //! swipe-down (scroll) close it and return to the chat
 //! ([feedback app-01M5N9BJNZX8T1EQCX3RAB7GXD]). Caption top-left (who, when,
-//! file), counter top-centre, Close · Download · Forward pills at the bottom.
+//! file), counter top-centre, Close · Copy · Download · Forward pills at the bottom
+//! (Copy — and ⌘C while the viewer is up — puts the picture itself on the
+//! pasteboard, original bytes under its own type,
+//! [feedback copy-image-messages-mac-2026-10-27]).
 //! Video shows its poster with Play (QuickTime Player); a file shows its tile
 //! with Quick Look. Forward opens a picker of DMs, agents and groups; one
 //! click sends the item there as a new message. The same picker serves the
@@ -19,12 +22,13 @@ use gpui::{
 use crate::app::{AppState, ForwardTarget, ViewerItem};
 use crate::model::AttachmentKind;
 use crate::ui::avatars;
+use crate::ui::highlight;
 use crate::ui::icons::icon;
 use crate::ui::modal::modal_overlay;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, TEXT_SMALL, TEXT_TINY};
 
-actions!(media_viewer, [Prev, Next]);
+actions!(media_viewer, [Prev, Next, CopyItem]);
 
 /// Backdrop over the window.
 const BACKDROP: f32 = 0.88;
@@ -92,6 +96,7 @@ fn control(id: &'static str, glyph: &'static str, enabled: bool) -> Stateful<Div
         .items_center()
         .justify_center()
         .when(enabled, |el| {
+            // hover-fill: exception overlay
             el.cursor_pointer().hover(|s| s.bg(white(0.28)))
         })
         .child(icon(glyph, 14.0, white(if enabled { 1.0 } else { 0.35 })))
@@ -110,6 +115,7 @@ fn pill(id: &'static str, glyph: &'static str, label: &'static str) -> Stateful<
         .items_center()
         .gap(px(8.0))
         .cursor_pointer()
+        // hover-fill: exception overlay
         .hover(|s| s.bg(white(0.26)))
         .text_size(px(13.0))
         .font_weight(FontWeight::MEDIUM)
@@ -165,6 +171,8 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
     let act_next = shell.state.clone();
     let download = shell.state.clone();
     let forward = shell.state.clone();
+    let copy = shell.state.clone();
+    let act_copy = shell.state.clone();
 
     // ----- caption, counter, × -------------------------------------------
     let mut subline = if is_profile_picture {
@@ -275,6 +283,7 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
                                 .justify_center()
                                 .when(can_act && !busy, |el| {
                                     el.cursor_pointer()
+                                        // hover-fill: exception overlay
                                         .hover(|s| s.bg(Theme::with_alpha(gpui::black(), 0.62)))
                                 })
                                 .child(icon("play", 30.0, white(1.0)))
@@ -309,6 +318,9 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
         })
         .on_action(move |_: &Next, _, cx| {
             act_next.update(cx, |s, cx| s.media_viewer_step(1, cx));
+        })
+        .on_action(move |_: &CopyItem, _, cx| {
+            act_copy.update(cx, |s, cx| s.media_viewer_copy(cx));
         })
         .absolute()
         .inset_0()
@@ -395,7 +407,7 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
     // when the album has more than one item.
     root = root.child(close_btn);
 
-    // ----- Close · Download · Forward (a profile picture: Close only) -----
+    // ----- Close · Copy · Download · Forward (a profile picture: Close only) -----
     root = root.child(
         div()
             .absolute()
@@ -413,6 +425,12 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
             )
             .when(!is_profile_picture, |el| {
                 el.child(
+                    pill("media-viewer-copy", "copy", "Copy").on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        copy.update(cx, |s, cx| s.media_viewer_copy(cx));
+                    }),
+                )
+                .child(
                     pill("media-viewer-download", "arrow-down", "Download").on_click(
                         move |_, _, cx| {
                             cx.stop_propagation();
@@ -623,7 +641,7 @@ fn forward_picker(
                 .items_center()
                 .gap(px(12.0))
                 .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
+                .map(|el| highlight::row(el, false, highlight::Shape::Own, theme))
                 .child(avatar)
                 .child(
                     div()
@@ -707,7 +725,7 @@ fn forward_picker(
                         .items_center()
                         .justify_center()
                         .cursor_pointer()
-                        .hover(|s| s.bg(theme.surface_2))
+                        .map(|el| highlight::button(el, theme))
                         .child(icon("xmark", 11.0, theme.text_muted))
                         .on_click(move |_, _, cx| {
                             cx.stop_propagation();

@@ -771,6 +771,9 @@ fn push_fixture_events() -> Vec<(&'static str, PushEventDto)> {
                 sender: sender.clone(),
                 project_id: None,
                 text: None,
+                chat_kind: None,
+                chat_title: None,
+                chat_image_key: None,
             }),
         ),
         (
@@ -969,6 +972,14 @@ fn push_fixture_events() -> Vec<(&'static str, PushEventDto)> {
                 project_id: "01FIXTUREAGENT".into(),
                 avatar_version: FIXED_AT,
                 image_key: Some("avatar-1700000000000.jpg".into()),
+            }),
+        ),
+        (
+            "push_notifications_cleared.json",
+            PushEventDto::NotificationsCleared(arbos_core::api::NotificationsClearedPayloadDto {
+                chat_id: "people_dm".into(),
+                project_id: "people".into(),
+                badge: 2,
             }),
         ),
     ]

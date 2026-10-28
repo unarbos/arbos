@@ -67,6 +67,21 @@ and a 250 GB volume (five leftover 13 GB test-simulator clones took it from 60 t
 - The clean script's sweep (idle clones > 30 min, idle rig checkouts > 30 min, stale `Deleting-*` dirs) is the
   backstop, not the plan; a run that leaves the box under 20 GB free is a regression to raise on your issue.
 
+## One avatar resolver on both platforms (Jacob, 2026-10-26, ARB-394)
+
+- Every agent avatar on the Mac and the iPhone — typing/status/activity row, chat header, sidebar
+  and chat list, bubbles, mention chips, profile hero, members, search, notifications, call tiles,
+  Secrets picker — is drawn through one resolver keyed by agent id + `avatar_version`: Mac
+  `ui::avatars` (`project_in` / `project_with` / `member_picture` / `agent_identity` +
+  `agent_picture`, newest copy from `sync::agent_avatar`), iPhone `AgentAvatar(project:)`
+  (resolves through `AppModel.newestAgentAvatar`) and `model.projectImageURL(_:)`.
+- No surface builds its own picture URL or reads the copy it was handed (`.image_url` /
+  `.imageURL`). `scripts/avatar-lint.sh` scans both trees in CI's Layout job and fails the build;
+  a line that must draw a group / server / person picture carries `// avatar-lint: allow (<why>)`.
+- The stamp is the only truth: a newer known version never loses to a cached or older copy; at
+  equal stamps the caller's order holds (chat roster, my records, other rosters). While a picture
+  loads, the disc is the neutral initial — never an older picture, never the leaf.
+
 ## Rigs take a heavy slot on the shared EC2 Mac (2026-10-26 20:30 UTC)
 
 The Mac's heavy-job cap (`/usr/local/bin/arbos-heavy-slot.sh`, versioned at `scripts/runner/arbos-heavy-slot.sh`;
@@ -105,6 +120,31 @@ Rule: do not ssh to the Mac directly. Hop through the relay host, which every wo
 goes for `scp` and for VNC (:5900 is allowlisted the same way): tunnel it over the jump. A worker that needs the
 list widened for a fixed address (a self-hosted machine, not a VM) asks the coordinator; the security group is
 Jacob's and is not edited by workers.
+
+## Two shared command runners on the EC2 Mac: `runner.sh` captures, `ax-runner.sh` clicks (2026-10-27)
+
+No single TCC identity on the Mac has both grants: Terminal (which runs `/Users/Shared/arbos-run/runner.sh`)
+has Screen Recording but Accessibility is denied; `sshd-keygen-wrapper` (which runs `ax-runner.sh`, started
+via `launchctl asuser` from ssh) has Accessibility but no Screen Recording. So a rig step captures in
+`runner.sh` and clicks in the ax-runner: `ax <command…>` queues one command there and returns its output and
+exit code; `axbin/osascript` is a shim on `runner.sh`'s PATH that forwards every `osascript` call the same way.
+
+- Never put `/Users/Shared/arbos-run/axbin` on PATH inside an `ax` command, a `cmd-*.sh` that calls `ax`, or
+  anything that already runs in the ax-runner. 05:53–06:03 Oct 27: a rig's shoot.sh did, the osascript inside
+  the ax-runner resolved to the forwarding shim and queued itself behind itself, and both shared runners were
+  dead for 9 min. Inside an ax command call `/usr/bin/osascript` explicitly. The runner strips axbin from PATH
+  and sets `ARBOS_AX_RUNNER=<pid>`; the shim and `ax` refuse to forward when that variable is set and run the
+  command in place — a guard, not a licence.
+- An ax job is killed after `AX_JOB_MAX_S` (600 s) with rc 124 and a line in `ax-runner.status` and syslog; a
+  caller waits at most `AX_TIMEOUT_S` (600 s) for its result. A click step that needs longer is doing something
+  wrong — split it.
+- GPUI windows (the Arbos Mac app) ignore `System Events click at …` — that is an Accessibility *action*, and GPUI
+  exposes no per-element AX tree, so the click lands nowhere. For a real click use `cgclick` (a CGEvent mouse
+  click; `/Users/Shared/arbos-tools/bin/cgclick`, source `/Users/Shared/arbos-tools/src/cgclick.swift`) through
+  the ax-runner: `ax /Users/Shared/arbos-tools/bin/cgclick <x> <y>`. CGEvent posting needs the same
+  Accessibility grant, which is why it must go through `ax`, never directly from a `runner.sh` command.
+- After a reboot both runners are gone: start `ax-runner.sh` via `sudo launchctl asuser 502 sudo -u arbosgui …`
+  from ssh and `runner.sh` via `open /Users/Shared/arbos-run/start-runner.command` (Terminal identity).
 
 ## Standing rules that this does not change
 

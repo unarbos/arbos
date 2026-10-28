@@ -101,6 +101,68 @@ struct MessageActionsLayout: Equatable {
     }
 }
 
+/// The menu's rows as rectangles in the menu's own space (feedback
+/// iphone-bubble-menu-hit-area-2026-10-26). Every row's **hit rect is its whole
+/// frame** — full width, full height, the padding and the space right of the label
+/// included — and the rows tile the menu top to bottom with no gap: the hairline
+/// divider is drawn inside the bottom of the row above it and the 8 pt band before
+/// Delete is the top of the Delete row, so no tap lands on a dead zone.
+struct MessageActionsMenuRows: Equatable {
+    struct Row: Equatable {
+        let item: MessageMenuItem
+        /// Full-width rect in menu space; also the hit target.
+        let frame: CGRect
+        /// Height of the band drawn inside the row's top (destructive group separator).
+        let bandAbove: CGFloat
+        /// A hairline is drawn along the row's bottom edge (inside `frame`).
+        let dividerBelow: Bool
+
+        var hitRect: CGRect { frame }
+        /// Where the label row (icon + text) sits inside the frame, under the band.
+        var labelRect: CGRect {
+            CGRect(x: frame.minX, y: frame.minY + bandAbove, width: frame.width, height: frame.height - bandAbove)
+        }
+        var dividerRect: CGRect? {
+            guard dividerBelow else { return nil }
+            return CGRect(x: frame.minX + MessageActionsMenuRows.dividerInset, y: frame.maxY - MessageActionsMenuRows.dividerHeight,
+                          width: frame.width - MessageActionsMenuRows.dividerInset, height: MessageActionsMenuRows.dividerHeight)
+        }
+    }
+
+    static let rowHeight: CGFloat = 44
+    static let destructiveBand: CGFloat = 8
+    static let dividerHeight: CGFloat = 0.5
+    static let dividerInset: CGFloat = 50
+
+    let rows: [Row]
+    let width: CGFloat
+    var height: CGFloat { rows.last?.frame.maxY ?? 0 }
+
+    static func compute(items: [MessageMenuItem], width: CGFloat) -> MessageActionsMenuRows {
+        var rows: [Row] = []
+        var y: CGFloat = 0
+        for (i, item) in items.enumerated() {
+            let band = item.isDestructive && i > 0 ? destructiveBand : 0
+            let next = items.indices.contains(i + 1) ? items[i + 1] : nil
+            let divider = next.map { !$0.isDestructive } ?? false
+            let h = band + rowHeight
+            rows.append(Row(item: item, frame: CGRect(x: 0, y: y, width: width, height: h), bandAbove: band, dividerBelow: divider))
+            y += h
+        }
+        return MessageActionsMenuRows(rows: rows, width: width)
+    }
+}
+
+extension ReactionCapsule {
+    /// The capsule's cells (palette + add-emoji) in the capsule's own space; each cell's
+    /// hit rect is its whole cell, and the cells tile the capsule's content width.
+    static var cellFrames: [CGRect] {
+        (0 ..< palette.count + 1).map { i in
+            CGRect(x: padding + CGFloat(i) * cell, y: padding, width: cell, height: cell)
+        }
+    }
+}
+
 /// What happens to the composer's keyboard around the bubble menu
 /// (feedback iphone-bubble-menu-keyboard-2026-10-25): it goes down when the menu
 /// opens (iMessage / Grok Bot), the typed draft stays (`ComposerDraft` is its own
@@ -113,7 +175,7 @@ enum MessageActionsKeyboard {
         guard wasFocused else { return false }
         guard let item else { return true }
         switch item {
-        case .copy, .delete:
+        case .copy, .delete, .removePreview:
             return true
         case .reply, .edit:
             // These focus the composer themselves (reply preview / editing bar).

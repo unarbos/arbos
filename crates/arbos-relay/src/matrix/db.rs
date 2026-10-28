@@ -126,6 +126,29 @@ impl Db {
         })
     }
 
+    /// Message ids of this chat's unfinished `message` jobs: announced rows the worker has not
+    /// applied yet. The resync must not count them as unannounced (#2120).
+    pub fn matrix_pending_message_ids(
+        &self,
+        chat_key: &str,
+    ) -> Result<std::collections::HashSet<String>> {
+        self.with(|c| {
+            let mut st = c.prepare(
+                "SELECT payload FROM matrix_outbox WHERE chat_key = ?1 AND kind = 'message' AND done_at IS NULL",
+            )?;
+            let rows = st.query_map(params![chat_key], |r| r.get::<_, String>(0))?;
+            let mut out = std::collections::HashSet::new();
+            for payload in rows {
+                if let Ok(Job::Message { message_id, .. }) =
+                    serde_json::from_str::<Job>(&payload?)
+                {
+                    out.insert(message_id);
+                }
+            }
+            Ok(out)
+        })
+    }
+
     /// Due jobs whose chat has no earlier unfinished job (order per chat is kept), oldest first.
     pub fn matrix_outbox_due(&self, limit: i64) -> Result<Vec<OutboxRow>> {
         let now = now_ms();
@@ -483,6 +506,15 @@ impl Db {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()
+        })
+    }
+
+    /// Every user that has at least one device with a Matrix identity (pusher backfill).
+    pub fn matrix_device_users(&self) -> Result<Vec<String>> {
+        self.with(|c| {
+            let mut st = c.prepare("SELECT DISTINCT user_id FROM matrix_devices")?;
+            let rows = st.query_map([], |r| r.get(0))?;
+            rows.collect()
         })
     }
 

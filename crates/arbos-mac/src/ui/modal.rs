@@ -27,29 +27,44 @@ pub fn modal_overlay(
     overlay_at(id, dismiss, card, None)
 }
 
-/// The same backdrop with `card` hung `top` points under the window's top
-/// edge instead of centred — Spotlight's shape, for the command palette
-/// ([feedback search-palette-2026-10-24]).
-pub fn modal_overlay_top(
-    id: impl Into<ElementId>,
-    dismiss: impl Fn(&mut Window, &mut App) + 'static,
-    top: f32,
-    card: impl IntoElement,
-) -> Stateful<Div> {
-    overlay_at(id, dismiss, card, Some(top))
-}
-
 fn overlay_at(
     id: impl Into<ElementId>,
     dismiss: impl Fn(&mut Window, &mut App) + 'static,
     card: impl IntoElement,
     top: Option<f32>,
 ) -> Stateful<Div> {
+    backdrop(id, top)
+        .occlude()
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            cx.stop_propagation();
+            dismiss(window, cx);
+        })
+        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+        .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(modal_card(card))
+}
+
+/// The palette's backdrop ([feedback search-toggle-click-outside-mac-2026-10-27],
+/// Jacob 2026-10-27): a click outside the panel dismisses it **and still lands
+/// on what is under it** — a message, a sidebar row, a button answers in the
+/// same click. So this backdrop does not occlude and takes no mouse-down of
+/// its own; the dismissal is the shell's capture-phase click-outside
+/// (`Shell::click_outside`). It still dims, and still swallows the wheel so
+/// the transcript stays put (#1632). `card` keeps the modal card's own
+/// mouse-down stop, so a click inside the panel never reaches the chat.
+pub fn modal_overlay_top_passthrough(
+    id: impl Into<ElementId>,
+    top: f32,
+    card: impl IntoElement,
+) -> Stateful<Div> {
+    backdrop(id, Some(top)).child(modal_card(card))
+}
+
+fn backdrop(id: impl Into<ElementId>, top: Option<f32>) -> Stateful<Div> {
     div()
         .id(id)
         .absolute()
         .inset_0()
-        .occlude()
         .flex()
         .flex_col()
         .items_center()
@@ -61,13 +76,6 @@ fn overlay_at(
         // Wheel / trackpad scrolling over the sheet — list or backdrop — ends
         // here; the transcript underneath stays still.
         .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-            cx.stop_propagation();
-            dismiss(window, cx);
-        })
-        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
-        .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(modal_card(card))
 }
 
 /// Keep the keyboard inside the open sheet: when neither `owner` nor anything

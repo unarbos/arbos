@@ -1,0 +1,33 @@
+{
+ "id": "h3-long-post-read-whole",
+ "lane": "a",
+ "category": "group",
+ "title": "A long code post by the colleague is read whole (chat_messages), not from a silent 500-char cut (#1929)",
+ "regression": "#1929 (no silent truncation: markers + chat_messages; the mentioned/reply-to message passes whole); #1929 verified on 0.1.155",
+ "turns": [
+  {
+   "prompt": "[peer] Here is the pipeline I mentioned, for the record:\n\n```python\ndef step_01(x):\n    # stage 1: normalise, then fold the running total\n    return (x * 1 + 7) % 97\n\ndef step_02(x):\n    # stage 2: normalise, then fold the running total\n    return (x * 2 + 14) % 97\n\ndef step_03(x):\n    # stage 3: normalise, then fold the running total\n    return (x * 3 + 21) % 97\n\ndef step_04(x):\n    # stage 4: normalise, then fold the running total\n    return (x * 4 + 28) % 97\n\ndef step_05(x):\n    # stage 5: normalise, then fold the running total\n    return (x * 5 + 35) % 97\n\ndef step_06(x):\n    # stage 6: normalise, then fold the running total\n    return (x * 6 + 42) % 97\n\ndef step_07(x):\n    # stage 7: normalise, then fold the running total\n    return (x * 7 + 49) % 97\n\ndef step_08(x):\n    # stage 8: normalise, then fold the running total\n    return (x * 8 + 56) % 97\n\ndef step_09(x):\n    # stage 9: normalise, then fold the running total\n    return (x * 9 + 63) % 97\n\ndef step_10(x):\n    # stage 10: normalise, then fold the running total\n    return (x * 10 + 70) % 97\n\ndef step_11(x):\n    # stage 11: normalise, then fold the running total\n    return (x * 11 + 77) % 97\n\ndef step_12(x):\n    # stage 12: normalise, then fold the running total\n    return (x * 12 + 84) % 97\n\ndef step_13(x):\n    # stage 13: normalise, then fold the running total\n    return (x * 13 + 91) % 97\n\ndef step_14(x):\n    # stage 14: normalise, then fold the running total\n    return (x * 14 + 98) % 97\n\ndef step_15(x):\n    # stage 15: normalise, then fold the running total\n    return (x * 15 + 105) % 97\n\ndef step_16(x):\n    # stage 16: normalise, then fold the running total\n    return (x * 16 + 112) % 97\n\ndef step_17(x):\n    # stage 17: normalise, then fold the running total\n    return (x * 17 + 119) % 97\n\ndef step_18(x):\n    # stage 18: normalise, then fold the running total\n    return (x * 18 + 126) % 97\n\ndef step_19(x):\n    # stage 19: normalise, then fold the running total\n    return (x * 19 + 133) % 97\n\ndef step_20(x):\n    # stage 20: normalise, then fold the running total\n    return (x * 20 + 140) % 97\n\ndef step_21(x):\n    # stage 21: normalise, then fold the running total\n    return (x * 21 + 147) % 97\n\ndef step_22(x):\n    # stage 22: normalise, then fold the running total\n    return (x * 22 + 154) % 97\n\ndef step_23(x):\n    # stage 23: normalise, then fold the running total\n    return (x * 23 + 161) % 97\n\ndef step_24(x):\n    # stage 24: normalise, then fold the running total\n    return (x * 24 + 168) % 97\n\ndef step_25(x):\n    # stage 25: normalise, then fold the running total\n    return (x * 25 + 175) % 97\n\ndef step_26(x):\n    # stage 26: normalise, then fold the running total\n    return (x * 26 + 182) % 97\n\ndef step_27(x):\n    # stage 27: normalise, then fold the running total\n    return (x * 27 + 189) % 97\n\ndef step_28(x):\n    # stage 28: normalise, then fold the running total\n    return (x * 28 + 196) % 97\n\ndef step_29(x):\n    # stage 29: normalise, then fold the running total\n    return (x * 29 + 203) % 97\n\ndef step_30(x):\n    # stage 30: normalise, then fold the running total\n    return (x * 30 + 210) % 97\n\ndef step_31(x):\n    # stage 31: normalise, then fold the running total\n    return (x * 31 + 217) % 97\n\ndef step_32(x):\n    # stage 32: normalise, then fold the running total\n    return (x * 32 + 224) % 97\n\ndef step_33(x):\n    # stage 33: normalise, then fold the running total\n    return (x * 33 + 231) % 97\n\ndef step_34(x):\n    # stage 34: normalise, then fold the running total\n    return (x * 34 + 238) % 97\n\ndef step_35(x):\n    # stage 35: normalise, then fold the running total\n    return (x * 35 + 245) % 97\n\ndef step_36(x):\n    # stage 36: normalise, then fold the running total\n    return (x * 36 + 252) % 97\n\ndef step_37(x):\n    # stage 37: normalise, then fold the running total\n    return (x * 37 + 259) % 97\n\ndef step_38(x):\n    # stage 38: normalise, then fold the running total\n    return (x * 38 + 266) % 97\n\ndef step_39(x):\n    # stage 39: normalise, then fold the running total\n    return (x * 39 + 273) % 97\n\ndef step_40(x):\n    # stage 40: normalise, then fold the running total\n    return (x * 40 + 280) % 97\n\ndef final_reconcile_quetzal(x):\n    return step_40(x) ^ 0x2A\n```",
+   "chat": "dm",
+   "peer": true,
+   "expect_no_reply_s": 8,
+   "timeout_s": 20
+  },
+  {
+   "prompt": "@lane-a what is the name of the LAST function defined in the code my colleague just posted, and how many functions are there in total? Read the whole post before answering.",
+   "chat": "dm",
+   "reply_regex": "final_reconcile_quetzal",
+   "reply_regex_not": "(?i)(cut off|truncated|only (see|saw) part|can'?t see the (rest|whole))",
+   "timeout_s": 240,
+   "rubric": {
+    "criteria": "Pass if the reply names final_reconcile_quetzal as the last function and gives 41 (or 40 + the final one) as the count; fail if it names step_NN as the last function, guesses, or says the post was cut off without fetching the rest.",
+    "min": 3
+   }
+  }
+ ],
+ "setup_actions": [
+  {
+   "kind": "people_dm",
+   "peer_handle": "lt-peer"
+  }
+ ]
+}

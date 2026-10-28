@@ -28,7 +28,9 @@ use crate::model::{
 
 use super::doc::ChatDoc;
 use super::user_error::{ErrorClass, UserError};
-use super::{ClientCommand, DraftPicture, PictureSource, PictureTarget, SyncEvent, SyncSource};
+use super::{
+    ClientCommand, DraftPicture, PictureSource, PictureTarget, PushRefusal, SyncEvent, SyncSource,
+};
 use crate::model::{
     new_id, now_ms, ApprovalRisk, ApprovalState, Attachment, AttachmentKind, BoxReport, BoxState,
     BoxWorkspace, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelPlatformState,
@@ -235,6 +237,7 @@ impl SyncSource for FixtureSource {
             emit_servers_hook(&shared);
             let _ = events.send(SyncEvent::Link(Link::Live));
             emit_link_hook(&shared);
+            emit_blocked_hook(&shared);
             emit_failure_hook(&shared);
             emit_typing_hook(&shared);
             emit_working_hook(&shared);
@@ -389,7 +392,7 @@ fn emit_link_hook(shared: &Arc<Shared>) {
 }
 
 /// Screenshot rig for the shared error element ([feedback error-messages-mac-2026-10-26]):
-/// `ARBOS_RIG_FAILURE=toast|composer|delivery|machine|secrets|people` raises that surface's
+/// `ARBOS_RIG_FAILURE=toast|toast-repeat|toast-many|composer|delivery|machine|secrets|people` raises that surface's
 /// note 1.5 s after start (so the opened chat / pane is up): `toast` = an error toast (a
 /// download that timed out, with Try again); `composer` = the opened chat's last own message
 /// refused, offline; `delivery` = that chat's pushes refused; `machine` = the machine in error;
@@ -427,6 +430,40 @@ fn emit_failure_hook(shared: &Arc<Shared>) {
                 .collect()
         };
         match spec.as_str() {
+            // [feedback toast-stack-mac-2026-10-27]: Jacob's shape — the secrets poll failing
+            // with the resolver's words eight times in a row — and five distinct failures for
+            // the "N more" fold.
+            "toast-repeat" | "toast-many" => {
+                let offline = |path: &str| {
+                    anyhow::anyhow!(
+                        "error sending request for url (https://relay.arbos.life{path}): client error (Connect): dns error: failed to lookup address information: nodename nor servname provided, or not known"
+                    )
+                    .context(format!("GET {path}"))
+                };
+                if spec == "toast-repeat" {
+                    for _ in 0..8 {
+                        let _ = shared.events.send(SyncEvent::Failure {
+                            error: UserError::classify("load your secrets", &offline("/secrets")),
+                            retry: None,
+                        });
+                        sleep(Duration::from_millis(250)).await;
+                    }
+                } else {
+                    for (verb, path) in [
+                        ("load your secrets", "/secrets"),
+                        ("load the voices", "/voices"),
+                        ("download report-q3.pdf", "/blobs/x/report-q3.pdf"),
+                        ("save the secret", "/secrets"),
+                        ("load the devices", "/devices"),
+                    ] {
+                        let _ = shared.events.send(SyncEvent::Failure {
+                            error: UserError::classify(verb, &offline(path)),
+                            retry: None,
+                        });
+                        sleep(Duration::from_millis(250)).await;
+                    }
+                }
+            }
             "toast" => {
                 let raw = anyhow::anyhow!(
                     "error sending request for url (https://relay.arbos.life/blobs/x/report-q3.pdf): operation timed out"
@@ -456,6 +493,24 @@ fn emit_failure_hook(shared: &Arc<Shared>) {
                     let _ = shared.events.send(SyncEvent::PushRefused {
                         chat_id,
                         refused: true,
+                        why: PushRefusal::code("not_available"),
+                    });
+                }
+            }
+            // Rig ([feedback blocked-state-mac-2026-10-26]): the relay refused the push
+            // because of a block — `blocked-by` (Sam blocked me) / `blocks-member` (I
+            // blocked Sam, a DM) — in every chat, so the open one shows the sentence.
+            "blocked-by" | "blocks-member" => {
+                for (chat_id, _) in targets {
+                    let _ = shared.events.send(SyncEvent::PushRefused {
+                        chat_id,
+                        refused: true,
+                        why: PushRefusal {
+                            code: "not_available".into(),
+                            reason: Some(spec.replace('-', "_")),
+                            by_handle: Some("sam".into()),
+                            by_name: Some("Sam Rivera".into()),
+                        },
                     });
                 }
             }
@@ -1065,7 +1120,6 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::StartDm { .. }
         | ClientCommand::CreatePeopleGroup { .. }
         | ClientCommand::SetTyping { .. }
-        | ClientCommand::AddAgent { .. }
         | ClientCommand::RemoveAgent { .. }
         | ClientCommand::AddMembers { .. }
         | ClientCommand::RemoveMember { .. }
@@ -1078,6 +1132,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::RemoveMessageGrant { .. }
         | ClientCommand::FetchAvatar { .. }
         | ClientCommand::DeleteProject { .. }
+        | ClientCommand::ConnectAgent { .. }
+        | ClientCommand::OutsideAgentStatus { .. }
+        | ClientCommand::OutsideAgentRotate { .. }
+        | ClientCommand::OutsideAgentRevoke { .. }
         | ClientCommand::DeletePeopleChat { .. }
         | ClientCommand::RenameGroup { .. }
         | ClientCommand::SetGroupImage { .. }
@@ -1217,6 +1275,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     bytes: None,
                     kind: None,
                     title: None,
+                    chart_part: None,
                 })
                 .collect();
             send_user(
@@ -1277,18 +1336,26 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             }
             let _ = shared.events.send(SyncEvent::AttachmentOpened { key });
         }
-        ClientCommand::ForwardText {
+        ClientCommand::ForwardMessage {
             chat_id,
             message_id,
             text,
+            attachments,
+            charts,
             forwarded_from,
+            ..
         } => {
+            // No blob store to copy between: the row lands with the same keys,
+            // so its pictures are already cached. A chart travels as its
+            // fallback picture here (the fixture doc writer has no chart parts).
+            let mut attachments = attachments;
+            attachments.extend(charts.into_iter().filter_map(|c| c.fallback));
             send_user(
                 shared,
                 chat_id,
                 message_id,
                 text,
-                Vec::new(),
+                attachments,
                 None,
                 Some(forwarded_from),
                 None,
@@ -1330,6 +1397,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 bytes: None,
                 kind: Some(AttachmentKind::Audio),
                 title: None,
+                chart_part: None,
             }];
             send_user(
                 shared,
@@ -1474,6 +1542,18 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let docs = shared.docs.lock().unwrap();
             if let Some(doc) = docs.get(&chat_id) {
                 let _ = doc.core.transact(|d| d.delete_message(&message_id));
+            }
+        }
+        ClientCommand::RemoveLinkPreview {
+            chat_id,
+            message_id,
+        } => {
+            let docs = shared.docs.lock().unwrap();
+            if let Some(doc) = docs.get(&chat_id) {
+                doc.core.transact(|d| {
+                    d.set_message_fields(&message_id, &[("preview", serde_json::json!("off"))]);
+                    d.remove_parts_of_kind(&message_id, "link_preview");
+                });
             }
         }
         ClientCommand::Approve {
@@ -1859,6 +1939,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 description,
                 owner_person: None,
                 machine_info: None,
+                outside: None,
                 muted: false,
                 archived_at: None,
                 primary_chat: None,
@@ -1872,6 +1953,8 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 image_url: image_url.clone(),
                 avatar_version: 0,
                 message_grants: Vec::new(),
+                blocked_senders: Vec::new(),
+                my_role: None,
             });
             if let Some(url) = &image_url {
                 emit_avatar(shared, url);
@@ -1940,6 +2023,34 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 bytes: Arc::new(fixture_png(&key)),
                 key,
             });
+        }
+        ClientCommand::FetchCopyBlobs { request, keys, .. } => {
+            // The fixture's pictures are PNGs; a key that reads as a file gets a small text body.
+            let blobs = keys
+                .into_iter()
+                .map(|key| {
+                    let is_picture = key.ends_with(".png")
+                        || key.ends_with(".jpg")
+                        || key.ends_with(".jpeg")
+                        || key.contains("Screenshot")
+                        || key.starts_with("fixture-g")
+                        || key.starts_with("img-");
+                    let (mime, bytes) = if is_picture {
+                        ("image/png".to_owned(), fixture_png(&key))
+                    } else {
+                        (
+                            "text/plain".to_owned(),
+                            format!("Fixture attachment {key}.\n").into_bytes(),
+                        )
+                    };
+                    Some(super::CopyBlob {
+                        key,
+                        mime,
+                        bytes: Arc::new(bytes),
+                    })
+                })
+                .collect();
+            let _ = shared.events.send(SyncEvent::CopyBlobs { request, blobs });
         }
         ClientCommand::FetchLinkIcon { host } => {
             // The real icons of the fixture replies' sites (`assets/link-icons`), so the
@@ -2099,6 +2210,59 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 },
             });
         }
+        ClientCommand::SecretHandoffSave {
+            chat_id,
+            approval_id,
+            project_id,
+            name,
+            purpose,
+            ..
+        } => {
+            let env = crate::model::secret_env_name(&name);
+            {
+                let mut view = shared.secrets.lock().unwrap();
+                view.secrets.retain(|s| s.env != env);
+                let project_name = shared
+                    .projects
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|p| p.id == project_id)
+                    .map(|p| p.name.clone());
+                view.secrets.push(Secret {
+                    id: new_id(),
+                    name: name.clone(),
+                    env: env.clone(),
+                    kind: "key".into(),
+                    note: purpose.clone(),
+                    hosts: Vec::new(),
+                    ask_every_time: false,
+                    inject_env: false,
+                    expires_at: None,
+                    version: 1,
+                    created_at: now_ms() as i64,
+                    last_used_at: None,
+                    username: None,
+                    vault_name: "Arbos".into(),
+                    agents: vec![fixture_agent(&project_id, "", true, &purpose)],
+                    directors: Vec::new(),
+                    others_ask: "refuse".into(),
+                    source: Some(crate::model::SecretSource {
+                        kind: "chat".into(),
+                        project_id: Some(project_id.clone()),
+                        project_name,
+                        chat_id: Some(chat_id.clone()),
+                    }),
+                });
+                view.secrets.sort_by(|a, b| a.env.cmp(&b.env));
+            }
+            emit_secrets(shared);
+            let _ = shared.events.send(SyncEvent::SecretHandoff {
+                approval_id: approval_id.clone(),
+                result: Ok(env),
+            });
+            decide_approval(shared, chat_id, approval_id, ApprovalState::Approved, None)
+        }
         ClientCommand::SecretAdd { item } => {
             {
                 let mut view = shared.secrets.lock().unwrap();
@@ -2131,6 +2295,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     agents,
                     directors: Vec::new(),
                     others_ask: "refuse".into(),
+                    source: None,
                 });
                 view.secrets.sort_by(|a, b| a.env.cmp(&b.env));
             }
@@ -2768,6 +2933,7 @@ fn seed_secrets() -> SecretsView {
         agents,
         directors: Vec::new(),
         others_ask: "refuse".into(),
+        source: None,
     };
     let mut stripe = secret(
         "STRIPE_KEY",
@@ -2789,6 +2955,27 @@ fn seed_secrets() -> SecretsView {
     // The iPhone fixture's twin: the Stripe key is a real value in the agents' environment,
     // and Sam may ask for it (Samir's row is off).
     stripe.inject_env = true;
+    // Secret hand-off rig: the key was given to Arbos in chat (list "given in chat", page
+    // "Added · In chat with Arbos").
+    if std::env::var("ARBOS_FIXTURE_SECRET_HANDOFF").is_ok() {
+        stripe.inject_env = false;
+        stripe.hosts = Vec::new();
+        stripe.note = "For the refunds report. Read-only until you say otherwise.".into();
+        stripe.last_used_at = None;
+        stripe.created_at = now - 120_000;
+        stripe.agents = vec![fixture_agent(
+            PROJECT_ARBOS,
+            "Arbos",
+            true,
+            "the refunds report",
+        )];
+        stripe.source = Some(crate::model::SecretSource {
+            kind: "chat".into(),
+            project_id: Some(PROJECT_ARBOS.into()),
+            project_name: Some("Arbos".into()),
+            chat_id: Some(CHAT_ARBOS_MAIN.into()),
+        });
+    }
     let dir = directory();
     stripe.directors = vec![
         fixture_person(&dir[0], true, "reports only", Some(120_000)),
@@ -3071,6 +3258,14 @@ fn emit_box_report(shared: &Shared) {
                 || streaming
                     .iter()
                     .any(|c| chats.iter().any(|ch| &ch.id == c && ch.project_id == p.id));
+            // Settings › Machine's per-agent breakdown: a share per workspace, the busy ones
+            // biggest ([feedback machine-page-mac-2026-10-26]).
+            let (cpu, mem, disk) = match (running, i) {
+                (true, 0) => (61.0, 1_900, 2_300),
+                (true, _) => (9.0, 1_100, 900),
+                (false, 1) => (0.0, 300, 1_600),
+                (false, _) => (0.0, 200 + 50 * i as u64, 100 + 150 * i as u64),
+            };
             BoxWorkspace {
                 project_id: p.id.clone(),
                 name: p.name.clone(),
@@ -3078,9 +3273,22 @@ fn emit_box_report(shared: &Shared) {
                 running,
                 elapsed_ms: running.then_some(42_000),
                 tool_calls: running.then_some(7),
+                jobs_running: Some(if running && i == 0 { 1 } else { 0 }),
+                cpu_pct: Some(cpu),
+                mem_mb: Some(mem),
+                pids: Some(if running { 40 } else { 12 }),
+                disk_mb: Some(disk),
             }
         })
         .collect();
+    // `ARBOS_FIXTURE_MACHINE=near-limit`: disk 92 % and memory 88 % used, CPU 71 % — the
+    // warning state of the Machine page on the rig.
+    let near_limit = std::env::var("ARBOS_FIXTURE_MACHINE").is_ok_and(|v| v == "near-limit");
+    let (disk_avail, mem_avail, cpu_pct, rx, tx) = if near_limit {
+        (819, 983, 71.0, 4_800_000.0, 300_000.0)
+    } else {
+        (6_900, 5_300, 23.0, 1_200_000.0, 80_000.0)
+    };
     let report = BoxReport {
         fetched_at: now_ms(),
         state: state.into(),
@@ -3093,10 +3301,23 @@ fn emit_box_report(shared: &Shared) {
         unreachable_reason: (!reachable).then(|| "box has no url yet (asleep or starting)".into()),
         uptime_s: reachable.then_some(5 * 3600 + 12 * 60),
         load_1m: reachable.then_some(0.42),
+        load_is_host: true,
         mem_total_mb: reachable.then_some(8 * 1024),
-        mem_available_mb: reachable.then_some(5_300),
+        mem_available_mb: reachable.then_some(mem_avail),
         disk_total_mb: reachable.then_some(10 * 1024),
-        disk_available_mb: reachable.then_some(6_900),
+        disk_available_mb: reachable.then_some(disk_avail),
+        cpu_cores: reachable.then_some(4.0),
+        cpu_pct: reachable.then_some(cpu_pct),
+        inodes_total: reachable.then_some(131_072),
+        inodes_avail: reachable.then_some(if near_limit { 1_200 } else { 93_000 }),
+        net_rx_bps: reachable.then_some(rx),
+        net_tx_bps: reachable.then_some(tx),
+        net_rx_today: reachable.then_some(if near_limit {
+            6_100_000_000
+        } else {
+            2_000_000_000
+        }),
+        net_tx_today: reachable.then_some(if near_limit { 300_000_000 } else { 100_000_000 }),
         workspaces: if reachable { workspaces } else { Vec::new() },
     };
     let _ = shared.events.send(SyncEvent::BoxReport(report));
@@ -3358,6 +3579,52 @@ fn emit_projects(shared: &Shared) {
     let _ = shared.events.send(SyncEvent::Projects(projects));
 }
 
+/// `ARBOS_FIXTURE_BLOCKED=<handle>[,<handle>…]` (screenshot rig, [feedback
+/// blocked-state-mac-2026-10-26]): those people are on my block list from launch, as the
+/// relay's `GET /blocks` would list them — the Blocked chip / tag, the Unblock confirm and the
+/// DM's "You blocked X" bar can be shot without a second account.
+fn emit_blocked_hook(shared: &Arc<Shared>) {
+    let Ok(spec) = std::env::var("ARBOS_FIXTURE_BLOCKED") else {
+        return;
+    };
+    let handles: Vec<String> = spec
+        .split(',')
+        .map(|h| h.trim().trim_start_matches('@').to_lowercase())
+        .filter(|h| !h.is_empty())
+        .collect();
+    if handles.is_empty() {
+        return;
+    }
+    let people: Vec<Person> = shared
+        .projects
+        .lock()
+        .unwrap()
+        .iter()
+        .flat_map(|p| p.people.iter().cloned())
+        .filter(|p| handles.contains(&p.handle.to_lowercase()))
+        .fold(Vec::new(), |mut acc: Vec<Person>, p| {
+            if !acc.iter().any(|q| q.handle == p.handle) {
+                acc.push(p);
+            }
+            acc
+        });
+    *shared.blocked.lock().unwrap() = people.clone();
+    // The relay's `blockedSenders` hint on every people group that holds them.
+    {
+        let ids: Vec<String> = people.iter().map(|p| format!("user:{}", p.id)).collect();
+        let mut projects = shared.projects.lock().unwrap();
+        for p in projects.iter_mut().filter(|p| p.is_people_group()) {
+            p.blocked_senders = ids
+                .iter()
+                .filter(|id| p.people.iter().any(|m| format!("user:{}", m.id) == **id))
+                .cloned()
+                .collect();
+        }
+    }
+    emit_projects(shared);
+    emit_blocked(shared);
+}
+
 fn emit_blocked(shared: &Shared) {
     let blocked = shared.blocked.lock().unwrap().clone();
     let _ = shared.events.send(SyncEvent::Blocked(blocked));
@@ -3566,7 +3833,21 @@ const LIMA_REPLY: &[&str] = &[
 
 /// The reply to "Read the latest from the New York post" (agent Bubble, 2026-10-25, Jacob's
 /// screenshot): seven linked headlines as bullets, then one line of prose.
+/// Jacob's 2026-10-27 bubble (Mac v0.6.296): the URL wrapped as `https:/` | `/treatment-…`
+/// and would not open ([feedback link-click-mac-2026-10-27]).
+const LINK_REPLY: &str = "https://treatment-perfume-marble-tournaments.trycloudflare.com/jacob/competitors.html\n\nI checked it from outside and it loads. No zip or file card needed.";
+
 const NYPOST_REPLY: &str = "- [Syringe attack: lawyer claims mistaken identity](https://nypost.com/2026/10/25/us-news/syringe-attack-lawyer-claims-mistaken-identity/)\n- [Arrest story: a second Jewish victim minutes earlier](https://nypost.com/2026/10/25/us-news/arrest-story-second-jewish-victim-minutes-earlier/)\n- [Ex-NYPD cop charged in a George Washington Bridge killing, free on $1M bail](https://nypost.com/2026/10/25/us-news/ex-nypd-cop-charged-in-gw-bridge-killing-free-on-1m-bail/)\n- [Thomas Markle home search, child pornography, Philippine official’s comment](https://nypost.com/2026/10/25/world-news/thomas-markle-home-search-philippine-official-comment/)\n- [Musk says SpaceX cut Ukraine’s Starlink access](https://nypost.com/2026/10/25/business/musk-says-spacex-cut-ukraines-starlink-access/)\n- [Giants beat the Texans in overtime in J. J. McCarthy’s first start](https://nypost.com/2026/10/25/sports/giants-beat-texans-in-overtime-mccarthy-first-start/)\n- [McCarthy’s wife after that win](https://nypost.com/2026/10/25/sports/mccarthys-wife-after-that-win/)\n\nNo times or bylines were on the page text I read. Want one of these opened?";
+
+/// The chat-formatting sample sheet, my own bubble: one line per format, labelled
+/// ([feedback chat-markdown-mac-2026-10-27]). `ARBOS_FIXTURE_REPLY=markdown`.
+pub const MARKDOWN_SAMPLE_USER: &str = "> quote: a line that starts with \"> \"\n> second quoted line\n>> nested quote inside it\n\nbold: **bold text** · italic: *italic* and _italic_ · strike: ~~gone~~\ninline code: `cargo test -p arbos-core` · spoiler (click): ||the butler did it||\nlink: [Arbos docs](https://docs.arbos.life/formatting) · bare: https://arbos.life/x_y · mention: @sam · emoji: 🎉 👍🏽\n\n# Heading 1\n## Heading 2\n### Heading 3\n\n- bullet one\n- bullet **two**\n* star bullet\n\n1. first\n2. second\n\n```python\ndef hello(name):\n    return f\"hi {name}\"  # fenced, copyable\n```\n\nescapes: \\*not italic\\* \\> not a quote \\`not code\\`";
+
+/// The agent's answer on the sample sheet: the same grammar in a grey bubble.
+pub const MARKDOWN_SAMPLE_REPLY: &str = "> quote: what you sent, quoted back\n> with a second line\n\nEvery format renders the same on both sides: **bold**, *italic*, ~~strike~~, `code`, ||spoiler||, [a named link](https://docs.arbos.life/formatting) and https://arbos.life/x_y.\n\n## Heading 2 in a reply\n\n- list item with `code`\n- and a [link](https://arbos.life)\n\n1. numbered\n2. list\n\n```rust\nlet quoted = parse_blocks(\"> hello\");\n```\n\nMath stays math: $O(n^2)$, and prices stay prices: $5 and $10.";
+
+/// The must-not-mangle lines: plain text the grammar must leave exactly as typed.
+pub const MARKDOWN_SAMPLE_PLAIN: &str = "plain, must not change:\nsnake_case_word __init__ some_var_name\n2*3*4 = 24 and 5 * 3 = 15\nhttps://example.com/some_path_with_underscores\njacob_s@example.com\n>5 means more than five · a > b · lone > here\n<b>html</b> stays <i>text</i>\n#hashtag #1 fan C++ C# 100%\n** not bold ** · a*b · trailing* · *leading";
 
 /// The reply to "write bubble sort in python" from Jacob's 2026-10-26 10:50 Mac screenshot,
 /// byte for byte: a Python code card, then prose whose `$O(n^2)$` showed its dollars and
@@ -4848,6 +5129,7 @@ fn seed_projects() -> Vec<Project> {
             description: None,
             owner_person: None,
             machine_info: None,
+            outside: None,
             muted: false,
             archived_at: None,
             primary_chat: None,
@@ -4860,6 +5142,8 @@ fn seed_projects() -> Vec<Project> {
             image_url: None,
             avatar_version: 0,
             message_grants: Vec::new(),
+            blocked_senders: Vec::new(),
+            my_role: None,
         },
         Project {
             id: PROJECT_COMMS.into(),
@@ -4884,6 +5168,7 @@ fn seed_projects() -> Vec<Project> {
             description: None,
             owner_person: None,
             machine_info: None,
+            outside: None,
             muted: false,
             archived_at: None,
             primary_chat: None,
@@ -4896,6 +5181,8 @@ fn seed_projects() -> Vec<Project> {
             image_url: None,
             avatar_version: 0,
             message_grants: Vec::new(),
+            blocked_senders: Vec::new(),
+            my_role: None,
         },
         Project {
             id: PROJECT_ARBOS.into(),
@@ -4920,6 +5207,7 @@ fn seed_projects() -> Vec<Project> {
             description: None,
             owner_person: None,
             machine_info: None,
+            outside: None,
             muted: false,
             archived_at: None,
             primary_chat: None,
@@ -4932,6 +5220,8 @@ fn seed_projects() -> Vec<Project> {
             image_url: None,
             avatar_version: 0,
             message_grants: Vec::new(),
+            blocked_senders: Vec::new(),
+            my_role: None,
         },
     ]
 }
@@ -5408,6 +5698,7 @@ fn attachment(name: &str, mime: &str, kind: AttachmentKind, title: &str, bytes: 
             bytes: Some(bytes),
             kind: Some(kind),
             title: Some(title.into()),
+            chart_part: None,
         },
     }
 }
@@ -5565,6 +5856,36 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
                     vec![text(NYPOST_REPLY)],
                 );
             }
+            // `ARBOS_FIXTURE_REPLY=link`: Jacob's competitors-page turn — a bare URL
+            // long enough to wrap, then a line of prose ([feedback link-click-mac-2026-10-27]).
+            Ok("link") => {
+                s.user("Where is the competitors page?");
+                s.assistant(TurnKind::Reply, MessageStatus::Done, vec![text(LINK_REPLY)]);
+            }
+            // `ARBOS_FIXTURE_REPLY=markdown`: the chat-formatting sample sheet — every
+            // format in my own bubble, the agent's answer with the same, then the
+            // must-not-mangle lines ([feedback chat-markdown-mac-2026-10-27]).
+            Ok("markdown") => {
+                s.user(MARKDOWN_SAMPLE_USER);
+                s.assistant(
+                    TurnKind::Reply,
+                    MessageStatus::Done,
+                    vec![text(MARKDOWN_SAMPLE_REPLY)],
+                );
+                s.user(MARKDOWN_SAMPLE_PLAIN);
+            }
+            // `ARBOS_FIXTURE_REPLY=quote`: Jacob's report — "> hello" typed in the
+            // composer, and the agent quoting it back ([feedback chat-markdown-mac-2026-10-27]).
+            Ok("quote") => {
+                s.user("> hello\nthat is what the quote looks like now");
+                s.assistant(
+                    TurnKind::Reply,
+                    MessageStatus::Done,
+                    vec![text(
+                        "> hello\n\nYes — a `> ` line is a quote: inset, muted, with the bar. **Bold**, *italic*, ~~strike~~ and ||spoilers|| work too.",
+                    )],
+                );
+            }
             // `ARBOS_FIXTURE_REPLY=math`: Jacob's bubble-sort turn — a Python code card,
             // then prose with inline `$O(n^2)$` math ([feedback math-render-mac-2026-10-26]).
             Ok("math") => {
@@ -5573,6 +5894,116 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
                     TurnKind::Reply,
                     MessageStatus::Done,
                     vec![text(BUBBLE_SORT_REPLY)],
+                );
+            }
+            _ => {}
+        }
+        // Secret hand-off rig (`ARBOS_FIXTURE_SECRET_HANDOFF=offer|saved|ghost|detect`): the
+        // request card open / saved, the "save this" ghost row, the offer card for a pasted key.
+        let handoff_card = |approval_id: &str,
+                            state: ApprovalState,
+                            payload: Value,
+                            title: &str,
+                            summary: &str| Part::Approval {
+            id: new_id(),
+            approval_id: approval_id.into(),
+            title: title.into(),
+            summary: summary.into(),
+            risk: ApprovalRisk::Credential,
+            payload,
+            state,
+            expires_at: Some(base + 600_000),
+            decided_at: (state != ApprovalState::Pending).then_some(base + 90_000),
+            decided_by: (state != ApprovalState::Pending)
+                .then(|| "user:01J9USER0JACOB000000000000".to_owned()),
+            reason: None,
+            grant: None,
+        };
+        match std::env::var("ARBOS_FIXTURE_SECRET_HANDOFF").as_deref() {
+            Ok(mode @ ("offer" | "saved")) => {
+                s.user("Can I give you a secret? It's the Stripe key for the refunds report.");
+                let state = if mode == "saved" {
+                    ApprovalState::Approved
+                } else {
+                    ApprovalState::Pending
+                };
+                s.assistant(
+                    TurnKind::Act,
+                    MessageStatus::Done,
+                    vec![
+                        text("Yes. Use the box below. It goes straight to your vault, never into this chat."),
+                        handoff_card(
+                            "01J9APPROVAL0SECRETOFFER00",
+                            state,
+                            json!({ "kind": "secret_offer", "name": "STRIPE_KEY", "purpose": "the refunds report",
+                                "agent": "Arbos", "projectId": PROJECT_ARBOS, "chatId": CHAT_ARBOS_MAIN, "answers": [] }),
+                            "Give Arbos a secret",
+                            "the refunds report",
+                        ),
+                    ],
+                );
+                if mode == "saved" {
+                    s.assistant(
+                        TurnKind::Reply,
+                        MessageStatus::Done,
+                        vec![text("Got it. I'll use STRIPE_KEY for the refunds report and keep the value out of this chat.")],
+                    );
+                }
+            }
+            Ok("ghost") => {
+                s.user("Let's do the refunds report next.");
+                s.assistant(
+                    TurnKind::Reply,
+                    MessageStatus::Done,
+                    vec![text("Sure — I need the Stripe key for that.")],
+                );
+                s.user("save this");
+                let id = main
+                    .core
+                    .messages()
+                    .last()
+                    .map(|m| m.id.clone())
+                    .unwrap_or_default();
+                main.core.redact_message_as_secret(
+                    &id,
+                    &arbos_core::doc::SecretRedaction {
+                        secret_id: "01J9SECRET0STRIPE000000000".into(),
+                        name: "STRIPE_KEY".into(),
+                        env: "STRIPE_KEY".into(),
+                        saved_by: "user:01J9USER0JACOB000000000000".into(),
+                        agent: Some(PROJECT_ARBOS.into()),
+                    },
+                );
+                s.assistant(
+                    TurnKind::Reply,
+                    MessageStatus::Done,
+                    vec![text("Saved as STRIPE_KEY and removed from this chat — also from my memory and working context. I can use it; the value stays in your vault. Running the refunds report now.")],
+                );
+            }
+            Ok("detect") => {
+                s.user("Let's do the refunds report next.");
+                s.assistant(
+                    TurnKind::Reply,
+                    MessageStatus::Done,
+                    vec![text("Sure — I need the Stripe key for that.")],
+                );
+                s.user(concat!(
+                    "sk_",
+                    "test_FIXTURE51HxQ9mT3vK2pLnR8wZ4eYc7bD1fG6hJ0kM9nP5qS2tU8vW3xA1"
+                ));
+                s.assistant(
+                    TurnKind::Act,
+                    MessageStatus::Done,
+                    vec![handoff_card(
+                        "01J9APPROVAL0SECRETDETECT0",
+                        ApprovalState::Pending,
+                        json!({ "kind": "secret_detected", "optional": true, "name": "STRIPE_KEY", "agent": "Arbos",
+                            "chatId": CHAT_ARBOS_MAIN, "messageId": "", "answers": [
+                                { "id": "save", "label": "Save as STRIPE_KEY and remove" },
+                                { "id": "deny", "label": "Leave it here" } ] }),
+                        "That looks like a key. Save it to your vault as STRIPE_KEY and remove it from this chat?",
+                        "Nothing is saved until you choose.",
+                    )],
                 );
             }
             _ => {}
@@ -5917,6 +6348,7 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
                 bytes: None,
                 kind: Some(AttachmentKind::Audio),
                 title: None,
+                chart_part: None,
             }],
         );
         s.assistant(
@@ -6100,6 +6532,7 @@ fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
         description: None,
         owner_person: None,
         machine_info: None,
+        outside: None,
         muted: false,
         archived_at: None,
         primary_chat: None,
@@ -6112,6 +6545,8 @@ fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
         image_url: None,
         avatar_version: 0,
         message_grants: Vec::new(),
+        blocked_senders: Vec::new(),
+        my_role: None,
     }
 }
 
@@ -6177,6 +6612,20 @@ fn launch_week() -> Project {
     space.icon = "L".into();
     space.people = members;
     space.owner_handle = Some(ME_HANDLE.into());
+    space.my_role = Some("owner".into());
+    // `ARBOS_FIXTURE_GROUP_ROLE=member|admin` (screenshot rig, [feedback
+    // group-settings-mac-2026-10-27]): I am that in "Launch week" and Sam owns it, so the
+    // pane can be shot as a plain member (no crayon, no name field) without a second account.
+    if let Ok(role) = std::env::var("ARBOS_FIXTURE_GROUP_ROLE") {
+        let role = role.trim().to_lowercase();
+        if role == "member" || role == "admin" {
+            if let Some(sam) = space.people.first_mut() {
+                sam.role = "owner".into();
+                space.owner_handle = Some(sam.handle.clone());
+            }
+            space.my_role = Some(role);
+        }
+    }
     space
 }
 
@@ -6209,6 +6658,7 @@ fn seed_people_projects() -> Vec<Project> {
             description: None,
             owner_person: None,
             machine_info: None,
+            outside: None,
             muted: false,
             archived_at: None,
             primary_chat: None,
@@ -6221,6 +6671,8 @@ fn seed_people_projects() -> Vec<Project> {
             image_url: None,
             avatar_version: 0,
             message_grants: Vec::new(),
+            blocked_senders: Vec::new(),
+            my_role: None,
         },
     ]
 }
@@ -6281,6 +6733,7 @@ fn human_message(chat_id: &str, who: &Person, text: &str, at: u64) -> Message {
         subagent_id: None,
         subagent_name: None,
         handoff_messages: None,
+        notice: None,
         worker: false,
         job: None,
         hidden: false,
@@ -6313,6 +6766,7 @@ fn human_message(chat_id: &str, who: &Person, text: &str, at: u64) -> Message {
         parts: vec![text_part(text)],
         hidden_parts: Vec::new(),
         greeting: false,
+        preview: None,
     }
 }
 
@@ -6454,6 +6908,24 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
         "Sending in a sec. Also: can we add your Arbos agent here so it can pull the numbers while we talk?",
         base + 150_000,
     ));
+    if std::env::var("ARBOS_FIXTURE_LINKS").is_ok_and(|v| v == "1") {
+        // Sam's Links tab ([feedback link-icons-mac-tile-2026-10-27] shots): a brand with a
+        // mono mark, one with a colour, X, and a site with no bundled mark.
+        for (i, text) in [
+            "The repo: https://github.com/unarbos/arbos",
+            "Launch playlist https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M?si=abc",
+            "Their post https://x.com/arbos/status/1982341234567890123",
+            "Background reading https://nypost.com/2026/10/25/business/musk-says-spacex-cut-ukraines-starlink-access/",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            insert_message_via_core(
+                &doc,
+                &human_message(DM_SAM, &sam(), text, base + 160_000 + i as u64 * 5_000),
+            );
+        }
+    }
     // The Launch week group's rows are built here so the DM can quote them
     // (`ARBOS_FIXTURE_REPLY_DM=1`, #1835: Reply in DM carries the original).
     let samir = person("gh_457", "samir", Some("Samir Haddad"), "member");
@@ -6560,6 +7032,25 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
     }
     insert_message_via_core(&group, &deck);
     insert_message_via_core(&group, &ask);
+    // Scout's photo (Jacob, 2026-10-27, [feedback forward-attachments-mac-2026-10-27]): an
+    // agent's picture-only message in a group right before its words — it must carry the
+    // same disc and name as the bubble under it.
+    let mut agent_picture = human_message(GROUP_LAUNCH, &sam(), "", base + 358_000);
+    agent_picture.role = Role::Assistant;
+    agent_picture.sender = format!("agent:{PROJECT_ARBOS}");
+    agent_picture.sender_name = Some("Arbos".into());
+    agent_picture.sender_handle = Some("arbos".into());
+    agent_picture.sender_avatar = None;
+    agent_picture.asked_by_handle = Some("sam".into());
+    agent_picture.owner_handle = Some(ME_HANDLE.into());
+    agent_picture.parts = vec![attachment(
+        "slide-04-signups.png",
+        "image/png",
+        AttachmentKind::Image,
+        "Slide 4 · signups",
+        212_000,
+    )];
+    insert_message_via_core(&group, &agent_picture);
     let mut agent = human_message(GROUP_LAUNCH, &sam(), "", base + 360_000);
     agent.role = Role::Assistant;
     agent.sender = format!("agent:{PROJECT_ARBOS}");
@@ -7118,6 +7609,7 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             space.people = members;
             space.pending = space.people.iter().any(|p| p.status == "invited");
             space.owner_handle = Some(ME_HANDLE.into());
+            space.my_role = Some("owner".into());
             shared.projects.lock().unwrap().push(space);
             shared.chats.lock().unwrap().push(Chat {
                 id: id.clone(),
@@ -7142,51 +7634,6 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             true
         }
         ClientCommand::SetTyping { .. } => true,
-        ClientCommand::AddAgent {
-            chat_id,
-            project_id,
-        } => {
-            let agent = {
-                let projects = shared.projects.lock().unwrap();
-                projects
-                    .iter()
-                    .find(|p| p.id == *project_id && !p.is_people())
-                    .map(|p| AgentMember {
-                        project_id: p.id.clone(),
-                        name: p.name.clone(),
-                        icon: p.icon.clone(),
-                        color: p.color.clone(),
-                        handle: Project::mention_slug(&p.name),
-                        owner_id: ME_ID.into(),
-                        owner_handle: ME_HANDLE.into(),
-                        reply_policy: ReplyPolicy::Mention,
-                        avatar: p.avatar.clone(),
-                        avatar_color: p.avatar_color.clone(),
-                        avatar_color_index: p.avatar_color_index,
-                        avatar_leaf: p.avatar_leaf,
-                        avatar_leaf_color: p.avatar_leaf_color,
-                        image_url: None,
-                        avatar_version: 0,
-                        description: None,
-                        model: None,
-                        owner: None,
-                    })
-            };
-            if let Some(agent) = agent {
-                let mut projects = shared.projects.lock().unwrap();
-                if let Some(space) = projects.iter_mut().find(|p| p.id == *chat_id) {
-                    if !space
-                        .agents
-                        .iter()
-                        .any(|a| a.project_id == agent.project_id)
-                    {
-                        space.agents.push(agent);
-                    }
-                }
-            }
-            emit_projects(shared);
-            true
-        }
         ClientCommand::RemoveAgent {
             chat_id,
             project_id,
@@ -7976,6 +8423,7 @@ mod seed_parity_tests {
         ("01J9GROUPLAUNCH00000000000", &[
             "User Done user:gh_457 name=Some(\"Samir Haddad\") h=Some(\"samir\") asked=None turn=None wa=false [text] hidden=[] text=93 r=0 dt=0 ct=Some(0)",
             "User Done user:gh_456 name=Some(\"Sam Rivera\") h=Some(\"sam\") asked=None turn=None wa=false [text] hidden=[] text=71 r=0 dt=30000 ct=Some(0)",
+            "Assistant Done agent:01J9ARBOS00000000000000000 name=Some(\"Arbos\") h=Some(\"arbos\") asked=Some(\"sam\") turn=None wa=false [attachment:Slide 4 · signups:Some(212000):Image] hidden=[] text=0 r=0 dt=58000 ct=Some(0)",
             "Assistant Done agent:01J9ARBOS00000000000000000 name=Some(\"Arbos\") h=Some(\"arbos\") asked=Some(\"sam\") turn=None wa=false [text] hidden=[] text=96 r=0 dt=60000 ct=Some(0)",
             "User Done user:gh_457 name=Some(\"Samir Haddad\") h=Some(\"samir\") asked=None turn=None wa=false [attachment:Slide 4 · signups:Some(212000):Image,attachment:Launch dashboard:Some(348000):Image,attachment:Launch day, the team:Some(1204000):Image,attachment:Signup funnel:Some(156000):Image,attachment:Press kit v3:Some(1840000):Pdf,attachment:Launch teaser:Some(6420000):Video,text] hidden=[] text=54 r=0 dt=80000 ct=Some(0)",
             "User Done user:gh_457 name=Some(\"Samir Haddad\") h=Some(\"samir\") asked=None turn=None wa=false [text] hidden=[] text=112 r=0 dt=90000 ct=Some(0)",

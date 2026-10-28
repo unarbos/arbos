@@ -10,12 +10,10 @@ use crate::ui::error_note;
 use crate::ui::motion::PulseClock;
 use crate::ui::theme::{Theme, PANEL_RADIUS};
 
-pub fn spinner(theme: &Theme, cx: &App) -> Div {
-    let phase = PulseClock::phase(cx, 900);
-    div()
-        .size(px(8.0))
-        .rounded_full()
-        .bg(Theme::with_alpha(theme.accent, 0.35 + 0.65 * phase))
+/// The small working mark in banners: the braille spinner (never a pulsing
+/// dot — Jacob, 2026-10-27).
+pub fn spinner(theme: &Theme, cx: &mut App) -> Div {
+    crate::ui::working::glyph(theme, cx)
 }
 
 /// Grok Bot's activity spinner — the blue eight-spoke dial that steps round
@@ -28,34 +26,21 @@ pub fn activity_spinner(size: f32, theme: &Theme, cx: &App) -> gpui::Svg {
     )
 }
 
-/// The chat's single working indicator: a pulsing dot that breathes a short
-/// shimmer line beside it. Amber while the message is queued for a sleeping
-/// box. No words.
-pub fn indicator(queued: bool, theme: &Theme, cx: &App) -> Div {
-    let phase = PulseClock::phase(cx, 1100);
-    let base = if queued { theme.warn } else { theme.accent };
+/// The chat's single working indicator: the braille spinner on its own row
+/// (Jacob, 2026-10-27 — no pulsing dot, no shimmer line). While the message
+/// is queued for a sleeping box the spinner is followed by nothing either;
+/// the status row's words say "waiting for the machine".
+pub fn indicator(queued: bool, theme: &Theme, cx: &mut App) -> Div {
+    let _ = queued;
     div()
         .w_full()
         .py(px(6.0))
         .flex()
         .items_center()
-        .gap(px(8.0))
-        .child(
-            div()
-                .size(px(8.0))
-                .rounded_full()
-                .bg(Theme::with_alpha(base, 0.35 + 0.65 * phase)),
-        )
-        .child(
-            div()
-                .h(px(2.0))
-                .w(px(28.0 + 36.0 * phase))
-                .rounded_full()
-                .bg(Theme::with_alpha(base, 0.25 + 0.35 * (1.0 - phase))),
-        )
+        .child(crate::ui::working::glyph(theme, cx))
 }
 
-pub fn status_row(code: StatusKind, text: &str, live: bool, theme: &Theme, cx: &App) -> Div {
+pub fn status_row(code: StatusKind, text: &str, live: bool, theme: &Theme, cx: &mut App) -> Div {
     match code {
         StatusKind::AskUser => div()
             .w_full()

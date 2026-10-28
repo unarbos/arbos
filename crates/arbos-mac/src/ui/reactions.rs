@@ -3,7 +3,8 @@
 //! emoji picker. Opened from the smiley on a bubble's hover rail; a pick
 //! toggles my reaction on that message (`AppState::toggle_reaction`, a
 //! reaction row in the chat doc, synced like any other op) and closes it.
-//! The chips under the bubble (`RowKind::Reactions`) show the result.
+//! The chips under the bubble (`RowKind::Reactions`) show the result; hovering
+//! a chip lists who used that emoji (iPhone `reactionSenders`).
 
 use gpui::{
     div, point, prelude::*, px, size, Context, Div, Entity, Focusable, Pixels, Point, Size, Window,
@@ -11,6 +12,7 @@ use gpui::{
 
 use crate::model::{Id, REACTION_PALETTE};
 use crate::ui::composer::ComposerInput;
+use crate::ui::highlight;
 use crate::ui::icons::icon;
 use crate::ui::shell::Shell;
 use crate::ui::theme::Theme;
@@ -219,7 +221,7 @@ fn cell(
         .rounded_full()
         .cursor_pointer()
         .when(on, |el| el.bg(Theme::with_alpha(theme.accent, 0.22)))
-        .hover(|s| s.bg(theme.surface_2))
+        .map(|el| highlight::button(el, theme))
         .child(content)
         .on_click(on_click)
 }

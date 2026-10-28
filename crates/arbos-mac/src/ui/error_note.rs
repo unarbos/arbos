@@ -8,8 +8,11 @@
 //! Placement is the caller's, by the rule in `docs/mac-design-rules.md` § "Error messages":
 //! sheets → top of the body under the bar / tab pill; pane pages → under the pane header;
 //! composer failures → directly above the composer; chat-level → the slot under the header;
-//! toasts → the notice stack top-right. The note takes space (pushes content) everywhere but
-//! the toast stack; it is never absolute over other controls.
+//! toasts → the one toast slot just below the header pill, top centre of the chat column
+//! (`shell::render_notices`: newest three, older ones folded into an "N more" line, the same
+//! failure again is a ×N on its note, never a second note — Jacob 2026-10-27, [feedback
+//! toast-stack-mac-2026-10-27]). The note takes space (pushes content) everywhere but the toast
+//! slot; it is never absolute over other controls.
 //!
 //! Tokens (`theme.rs`): fill `danger_soft` over the surface, radius 10, padding 10 / 12, disc
 //! 15 in `danger` with a white "!", sentence `TEXT_SMALL` 13 / 17 in `text`, Try again a 24 pt
@@ -78,11 +81,23 @@ pub struct Handlers {
     pub sign_in: Option<Handler>,
     pub toggle_details: Option<Handler>,
     pub dismiss: Option<Handler>,
+    /// One surface-specific capsule before Details — the chat note's **Unblock** when the
+    /// relay refused a post because of my own block ([feedback blocked-state-mac-2026-10-26]).
+    /// Its id is `{id}-{label}` lower-cased.
+    pub extra: Option<(&'static str, Handler)>,
+    /// How many times this same failure has arrived while the note stands; 2 and up draws a
+    /// small "×N" after the sentence (`{id}-count`) instead of a second note.
+    pub count: u32,
 }
 
 impl Handlers {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn count(mut self, count: u32) -> Self {
+        self.count = count;
+        self
     }
 
     pub fn try_again(mut self, f: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
@@ -107,6 +122,15 @@ impl Handlers {
         self.dismiss = Some(Box::new(f));
         self
     }
+
+    pub fn extra(
+        mut self,
+        label: &'static str,
+        f: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.extra = Some((label, Box::new(f)));
+        self
+    }
 }
 
 struct HandlersWithFlags {
@@ -114,7 +138,9 @@ struct HandlersWithFlags {
     sign_in: Option<Handler>,
     toggle_details: Option<Handler>,
     dismiss: Option<Handler>,
+    extra: Option<(&'static str, Handler)>,
     toggle_details_present: bool,
+    count: u32,
 }
 
 impl From<Handlers> for HandlersWithFlags {
@@ -125,6 +151,8 @@ impl From<Handlers> for HandlersWithFlags {
             sign_in: h.sign_in,
             toggle_details: h.toggle_details,
             dismiss: h.dismiss,
+            extra: h.extra,
+            count: h.count,
         }
     }
 }
@@ -181,6 +209,13 @@ pub fn render(
         }
         Action::None => {}
     }
+    let has_extra = handlers.extra.is_some();
+    if let Some((label, f)) = handlers.extra {
+        actions = actions.child(
+            capsule(label, format!("{id}-{}", label.to_ascii_lowercase()), theme)
+                .on_click(move |e, w, cx| f(e, w, cx)),
+        );
+    }
     if let Some(f) = handlers.toggle_details {
         let did = format!("{id}-details");
         let did2 = did.clone();
@@ -212,7 +247,8 @@ pub fn render(
     // The sentence row (disc + sentence, wrapping), then the actions right-aligned on their own
     // row under it — one deterministic shape at every width, so a 273 pt sheet and an 876 pt
     // column read the same.
-    let has_actions = !matches!(action, Action::None) || handlers.toggle_details_present;
+    let has_actions =
+        !matches!(action, Action::None) || handlers.toggle_details_present || has_extra;
     let row = div()
         .flex()
         .items_start()
@@ -233,7 +269,10 @@ pub fn render(
                 .line_height(px(LINE))
                 .text_color(theme.text)
                 .child(sentence),
-        );
+        )
+        .when(handlers.count >= 2, |d| {
+            d.child(count_badge(id, handlers.count, theme))
+        });
     let actions_row = has_actions.then(|| {
         div()
             .mt(px(8.0))
@@ -287,6 +326,26 @@ pub fn render(
         }
     }
     note
+}
+
+/// "×N" after the sentence: the same failure arrived N times while this note stood.
+fn count_badge(id: &str, count: u32, theme: &Theme) -> Stateful<Div> {
+    let cid = format!("{id}-count");
+    let cid2 = cid.clone();
+    div()
+        .id(SharedString::from(cid))
+        .debug_selector(move || cid2.clone())
+        .flex_shrink_0()
+        .h(px(LINE))
+        .px(px(6.0))
+        .rounded_full()
+        .bg(theme.surface_2)
+        .flex()
+        .items_center()
+        .text_size(px(ACTION_TEXT - 1.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(theme.text_muted)
+        .child(format!("×{count}"))
 }
 
 /// The red disc with the white "!" — the only red in the note.
@@ -505,6 +564,7 @@ mod error_ui_lint {
             ("update-error", "ui/profiles/me.rs"),
             ("routine-error", "ui/routines.rs"),
             ("question-card-error", "ui/widgets.rs"),
+            ("secret-offer-", "ui/secret_card.rs"),
             ("connector-error-", "ui/connectors.rs"),
         ];
         let all = sources();

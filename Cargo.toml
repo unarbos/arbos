@@ -14,13 +14,15 @@ members = [
     "crates/arbos-relay",
     "crates/arbos-agentd",
     "crates/arbosctl",
+    # Outside agents (#2143): ACP agent ⇄ relay bridge. Depends on nothing in the workspace.
+    "crates/arbos-acp",
     "crates/arbos-local",
     "crates/arbos-mac",
     "crates/arbos-update",
 ]
 
 [workspace.package]
-version = "0.6.285"
+version = "0.6.317"
 edition = "2021"
 license = "UNLICENSED"
 publish = false
@@ -38,6 +40,7 @@ uniffi = "=0.32.2"
 
 anyhow = "1"
 thiserror = "2"
+syntect = { version = "5.3", default-features = false, features = ["parsing", "default-syntaxes", "regex-fancy", "dump-load"] }
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 futures = "0.3"

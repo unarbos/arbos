@@ -332,6 +332,33 @@ public struct ChannelBindingDto: Codable {
 	}
 }
 
+/// `channel_message` payload: a message in a server channel (Matrix room), fanned out by the
+/// relay's push gateway (`POST /_matrix/push/v1/notify`) to every member device the homeserver's
+/// push rules name — never the sender's own, never a server the recipient archived. Clients post
+/// a local banner "<sender> in #channel" unless that channel is on screen; a tap opens it.
+public struct ChannelMessagePayloadDto: Codable {
+	public let server_id: String
+	public let server_name: String
+	public let channel_id: String
+	public let channel_name: String
+	public let room_id: String
+	public let event_id: String
+	public let sender: SenderDto
+	/// First line of the message, when it has text.
+	public let text: String?
+
+	public init(server_id: String, server_name: String, channel_id: String, channel_name: String, room_id: String, event_id: String, sender: SenderDto, text: String?) {
+		self.server_id = server_id
+		self.server_name = server_name
+		self.channel_id = channel_id
+		self.channel_name = channel_name
+		self.room_id = room_id
+		self.event_id = event_id
+		self.sender = sender
+		self.text = text
+	}
+}
+
 /// Active pairing code on `GET /channels` / `POST /channels/pair/new` (`pair_json`).
 public struct ChannelPairingDto: Codable {
 	public let code: String
@@ -1510,6 +1537,26 @@ public struct MessageGrantsDto: Codable {
 	}
 }
 
+/// `message_redacted` payload: a message's value moved into the vault and the row became the
+/// "Secret saved as NAME" ghost. Devices drop the old text from search and notifications and
+/// persist a shallow snapshot of the room. Names only.
+public struct MessageRedactedPayloadDto: Codable {
+	public let chat_id: String
+	/// Absent for a people chat.
+	public let project_id: String?
+	public let message_id: String
+	public let secret_id: String
+	public let name: String
+
+	public init(chat_id: String, project_id: String?, message_id: String, secret_id: String, name: String) {
+		self.chat_id = chat_id
+		self.project_id = project_id
+		self.message_id = message_id
+		self.secret_id = secret_id
+		self.name = name
+	}
+}
+
 /// One row of `GET /proxy/v1/models` `data[]` (id only; unknown upstream keys ignored).
 public struct ModelListItemDto: Codable {
 	public let id: String
@@ -1525,6 +1572,23 @@ public struct ModelListDto: Codable {
 
 	public init(data: [ModelListItemDto]) {
 		self.data = data
+	}
+}
+
+/// `notifications_cleared` payload: the user read `chat_id` on one of their devices
+/// (`PUT /chats/{id}/read`), so every other device drops the banners it still shows for that
+/// chat and sets its app badge to `badge` — the user's unread total across chats after the
+/// read (Fluxer-style clear-on-read, carried on `/me/pushes` today and as a silent push when
+/// APNs is live). `project_id` is `people` for DMs and groups, else the agent's project.
+public struct NotificationsClearedPayloadDto: Codable {
+	public let chat_id: String
+	public let project_id: String
+	public let badge: Int64
+
+	public init(chat_id: String, project_id: String, badge: Int64) {
+		self.chat_id = chat_id
+		self.project_id = project_id
+		self.badge = badge
 	}
 }
 
@@ -1613,10 +1677,14 @@ public struct PeopleChatDto: Codable {
 	public let last_activity_at: Int64
 	public let read_seq: Int64
 	public let unread: Bool
+	/// Members this viewer has blocked, as `user:<id>` ([feedback
+	/// blocked-state-relay-2026-10-26]): the clients hide their rows for the viewer alone;
+	/// the relay's pushes, alerts and unread counts for the viewer skip them too.
+	public let blocked_senders: [String]?
 	public let lock_state: String
 	public let me: ChatMeDto
 
-	public init(id: String, archived_at: Int64?, kind: String, created_by: String, created_at: Int64, title: String, image_key: String?, avatar_leaf: Int64?, avatar_leaf_color: Int64?, description: String?, pending: Bool, members: [ChatMemberDto], banned: [ChatMemberDto]?, room: String, head_seq: Int64, last_activity_at: Int64, read_seq: Int64, unread: Bool, lock_state: String, me: ChatMeDto) {
+	public init(id: String, archived_at: Int64?, kind: String, created_by: String, created_at: Int64, title: String, image_key: String?, avatar_leaf: Int64?, avatar_leaf_color: Int64?, description: String?, pending: Bool, members: [ChatMemberDto], banned: [ChatMemberDto]?, room: String, head_seq: Int64, last_activity_at: Int64, read_seq: Int64, unread: Bool, blocked_senders: [String]?, lock_state: String, me: ChatMeDto) {
 		self.id = id
 		self.archived_at = archived_at
 		self.kind = kind
@@ -1635,6 +1703,7 @@ public struct PeopleChatDto: Codable {
 		self.last_activity_at = last_activity_at
 		self.read_seq = read_seq
 		self.unread = unread
+		self.blocked_senders = blocked_senders
 		self.lock_state = lock_state
 		self.me = me
 	}
@@ -1713,8 +1782,15 @@ public struct PeopleMessagePayloadDto: Codable {
 	/// The announced message's first line, when the sender announced one (agents do; a
 	/// device's row-level push has none and the banner says "New message").
 	public let text: String?
+	/// `dm` | `group` | `project` (shared project chat). Absent on an older relay → `dm`.
+	/// Since 2026-10-27: a group banner is titled with the chat, the sender goes in the body.
+	public let chat_kind: String?
+	/// The chat's name as this recipient sees it (groups and shared project chats; a DM has none).
+	public let chat_title: String?
+	/// Blob key of the group picture under `people:{chat_id}` (people groups with a picture).
+	public let chat_image_key: String?
 
-	public init(chat_id: String, from: String, from_handle: String, seq: Int64, sender: SenderDto, project_id: String?, text: String?) {
+	public init(chat_id: String, from: String, from_handle: String, seq: Int64, sender: SenderDto, project_id: String?, text: String?, chat_kind: String?, chat_title: String?, chat_image_key: String?) {
 		self.chat_id = chat_id
 		self.from = from
 		self.from_handle = from_handle
@@ -1722,6 +1798,9 @@ public struct PeopleMessagePayloadDto: Codable {
 		self.sender = sender
 		self.project_id = project_id
 		self.text = text
+		self.chat_kind = chat_kind
+		self.chat_title = chat_title
+		self.chat_image_key = chat_image_key
 	}
 }
 
@@ -2123,6 +2202,24 @@ public struct SecretDirectorDto: Codable {
 	}
 }
 
+/// Where a secret came from: `settings` (the New secret form) or `chat` (handed to an agent in
+/// a chat — the request card or "save this"). Names and ids only.
+public struct SecretSourceDto: Codable {
+	/// `settings | chat`.
+	public let kind: String
+	/// The agent it was given to, when `chat`.
+	public let project_id: String?
+	public let project_name: String?
+	public let chat_id: String?
+
+	public init(kind: String, project_id: String?, project_name: String?, chat_id: String?) {
+		self.kind = kind
+		self.project_id = project_id
+		self.project_name = project_name
+		self.chat_id = chat_id
+	}
+}
+
 /// Secret as clients see it (`secret_json`). Never carries a secret value.
 public struct SecretDto: Codable {
 	public let id: String
@@ -2149,8 +2246,10 @@ public struct SecretDto: Codable {
 	public let people: [SecretDirectorDto]?
 	/// `refuse | card`: what a non-listed person's ask does (absent = refuse).
 	public let others_ask: String?
+	/// Where it came from (absent on an older relay = settings).
+	public let source: SecretSourceDto?
 
-	public init(id: String, name: String, env: String, kind: String, note: String, hosts: [String], ask_every_time: Bool, inject_env: Bool, expires_at: Int64?, version: Int64, created_at: Int64, updated_at: Int64, last_used_at: Int64?, username: String?, vault_name: String, ref: String, agents: [SecretAccessDto], directors: [SecretDirectorDto], people: [SecretDirectorDto]?, others_ask: String?) {
+	public init(id: String, name: String, env: String, kind: String, note: String, hosts: [String], ask_every_time: Bool, inject_env: Bool, expires_at: Int64?, version: Int64, created_at: Int64, updated_at: Int64, last_used_at: Int64?, username: String?, vault_name: String, ref: String, agents: [SecretAccessDto], directors: [SecretDirectorDto], people: [SecretDirectorDto]?, others_ask: String?, source: SecretSourceDto?) {
 		self.id = id
 		self.name = name
 		self.env = env
@@ -2171,6 +2270,7 @@ public struct SecretDto: Codable {
 		self.directors = directors
 		self.people = people
 		self.others_ask = others_ask
+		self.source = source
 	}
 }
 
@@ -2627,6 +2727,7 @@ public struct VoipRegisterResponseDto: Codable {
 /// boxing breaks the typeshare / Swift shape and the wire JSON is unchanged either way.
 public enum PushEventDto: Codable {
 	case peopleMessage(PeopleMessagePayloadDto)
+	case channelMessage(ChannelMessagePayloadDto)
 	case peopleChatUpdated(PeopleChatUpdatedPayloadDto)
 	case peopleMemberAdded(PeopleMemberAddedPayloadDto)
 	case peopleMemberRemoved(PeopleMemberRemovedPayloadDto)
@@ -2640,6 +2741,7 @@ public enum PushEventDto: Codable {
 	case spaceArchived(SpaceArchivedPayloadDto)
 	case peopleInviteAccepted(PeopleInviteAcceptedPayloadDto)
 	case feedbackCapture(FeedbackCapturePayloadDto)
+	case messageRedacted(MessageRedactedPayloadDto)
 	case serverMemberRemoved(ServerMemberRemovedPayloadDto)
 	case serverMemberJoined(ServerMemberJoinedPayloadDto)
 	case serverUpdated(ServerUpdatedPayloadDto)
@@ -2654,9 +2756,11 @@ public enum PushEventDto: Codable {
 	case secretExpiring(SecretExpiringPayloadDto)
 	case profileUpdated(ProfileUpdatedPayloadDto)
 	case agentProfileUpdated(AgentProfileUpdatedPayloadDto)
+	case notificationsCleared(NotificationsClearedPayloadDto)
 
 	enum CodingKeys: String, CodingKey, Codable {
 		case peopleMessage = "people_message",
+			channelMessage = "channel_message",
 			peopleChatUpdated = "people_chat_updated",
 			peopleMemberAdded = "people_member_added",
 			peopleMemberRemoved = "people_member_removed",
@@ -2670,6 +2774,7 @@ public enum PushEventDto: Codable {
 			spaceArchived = "space_archived",
 			peopleInviteAccepted = "people_invite_accepted",
 			feedbackCapture = "feedback_capture",
+			messageRedacted = "message_redacted",
 			serverMemberRemoved = "server_member_removed",
 			serverMemberJoined = "server_member_joined",
 			serverUpdated = "server_updated",
@@ -2683,7 +2788,8 @@ public enum PushEventDto: Codable {
 			secretsPaused = "secrets_paused",
 			secretExpiring = "secret_expiring",
 			profileUpdated = "profile_updated",
-			agentProfileUpdated = "agent_profile_updated"
+			agentProfileUpdated = "agent_profile_updated",
+			notificationsCleared = "notifications_cleared"
 	}
 
 	private enum ContainerCodingKeys: String, CodingKey {
@@ -2697,6 +2803,11 @@ public enum PushEventDto: Codable {
 			case .peopleMessage:
 				if let content = try? container.decode(PeopleMessagePayloadDto.self, forKey: .payload) {
 					self = .peopleMessage(content)
+					return
+				}
+			case .channelMessage:
+				if let content = try? container.decode(ChannelMessagePayloadDto.self, forKey: .payload) {
+					self = .channelMessage(content)
 					return
 				}
 			case .peopleChatUpdated:
@@ -2762,6 +2873,11 @@ public enum PushEventDto: Codable {
 			case .feedbackCapture:
 				if let content = try? container.decode(FeedbackCapturePayloadDto.self, forKey: .payload) {
 					self = .feedbackCapture(content)
+					return
+				}
+			case .messageRedacted:
+				if let content = try? container.decode(MessageRedactedPayloadDto.self, forKey: .payload) {
+					self = .messageRedacted(content)
 					return
 				}
 			case .serverMemberRemoved:
@@ -2834,6 +2950,11 @@ public enum PushEventDto: Codable {
 					self = .agentProfileUpdated(content)
 					return
 				}
+			case .notificationsCleared:
+				if let content = try? container.decode(NotificationsClearedPayloadDto.self, forKey: .payload) {
+					self = .notificationsCleared(content)
+					return
+				}
 			}
 		}
 		throw DecodingError.typeMismatch(PushEventDto.self, DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "Wrong type for PushEventDto"))
@@ -2844,6 +2965,9 @@ public enum PushEventDto: Codable {
 		switch self {
 		case .peopleMessage(let content):
 			try container.encode(CodingKeys.peopleMessage, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .channelMessage(let content):
+			try container.encode(CodingKeys.channelMessage, forKey: .kind)
 			try container.encode(content, forKey: .payload)
 		case .peopleChatUpdated(let content):
 			try container.encode(CodingKeys.peopleChatUpdated, forKey: .kind)
@@ -2883,6 +3007,9 @@ public enum PushEventDto: Codable {
 			try container.encode(content, forKey: .payload)
 		case .feedbackCapture(let content):
 			try container.encode(CodingKeys.feedbackCapture, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .messageRedacted(let content):
+			try container.encode(CodingKeys.messageRedacted, forKey: .kind)
 			try container.encode(content, forKey: .payload)
 		case .serverMemberRemoved(let content):
 			try container.encode(CodingKeys.serverMemberRemoved, forKey: .kind)
@@ -2925,6 +3052,9 @@ public enum PushEventDto: Codable {
 			try container.encode(content, forKey: .payload)
 		case .agentProfileUpdated(let content):
 			try container.encode(CodingKeys.agentProfileUpdated, forKey: .kind)
+			try container.encode(content, forKey: .payload)
+		case .notificationsCleared(let content):
+			try container.encode(CodingKeys.notificationsCleared, forKey: .kind)
 			try container.encode(content, forKey: .payload)
 		}
 	}

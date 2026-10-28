@@ -797,7 +797,7 @@ mod tests {
             openai_route: crate::state::OpenAiRoute::Auto,
         };
         AppState {
-            db,
+            db: db.clone(),
             cfg: Arc::new(cfg),
             http: reqwest::Client::new(),
             daytona: None,
@@ -807,6 +807,7 @@ mod tests {
             box_conns: Arc::new(Mutex::new(HashMap::new())),
             wake_started: Arc::new(Mutex::new(HashMap::new())),
             last_client_push: Arc::new(Mutex::new(HashMap::new())),
+            decisions_cache: Arc::new(std::sync::Mutex::new(Default::default())),
             conn_seq: Arc::new(AtomicU64::new(0)),
             relay_key: Arc::new(RelayKey::derive("test-key")),
             jwt_key: Arc::new(RelayKey::derive("test-key").subkey("jwt")),
@@ -816,9 +817,7 @@ mod tests {
             stale_bounces: Arc::new(Mutex::new(HashMap::new())),
             local_conns: Arc::new(Mutex::new(HashMap::new())),
             refresh_grace: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-            push: Arc::new(crate::apns::Pusher::Capture(tokio::sync::Mutex::new(
-                Vec::new(),
-            ))),
+            push: Arc::new(crate::push::Push::capture(db.clone())),
             focus: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             fallback_sent: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             livekit: None,
