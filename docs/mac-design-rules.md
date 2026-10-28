@@ -163,7 +163,7 @@ the sidebar's left edge and the window's bottom edge.
 |---|---|---|
 | Band | avatar, "Connect apps" pill and update disc all on rows 1574–1645 px → 36 tall, 12 above the bottom, centre 30 | `FOOTER_HEIGHT` = `HEADER_HEIGHT` 60; everything centred → centre `CONTROL_LINE` 30 |
 | My avatar | 72 px disc at x 26–97 → **36**, left edge **13**, bottom **12** | `FOOTER_AVATAR` = `CONTROL` 36 at `FOOTER_INSET` 13, `FOOTER_BOTTOM` 12 (was 28 at x 18, 16 above the bottom) |
-| Machine dot | — (Grok has none) | scales with the avatar: 9 pt dot in a 13 pt ring of the sidebar colour, 2 pt past the bottom-right edge (`badge::metrics(36)`; the pins `FOOTER_DOT` / `FOOTER_DOT_RING` / `FOOTER_DOT_OVERHANG`; was 7 / 11 / 2), drawn by the one presence badge (§ Avatars) in front of the picture |
+| Machine dot | — (Grok has none) | scales with the avatar: 9 pt dot in a 13 pt ring of the sidebar colour, 2 pt past the bottom-right edge (`FOOTER_DOT` / `FOOTER_DOT_RING` / `FOOTER_DOT_OVERHANG`; was 7 / 11 / 2) |
 | Hover card | — | 44 tall, inset 8 like the rows, pad 5 so the avatar lands at 13; name `TEXT_SMALL` + 1, 10 after the avatar |
 | "Connect apps" pill | 36 tall, x 114–432 px, 8 after the avatar, 8 before the update disc, fill `#1F1F1F`, 1 px `#2C2C2C` rim, text `#B8B8B8` | not built (no connectors pill in Arbos's footer; the name sits there) |
 | Update disc | 72 px solid circle at x 449–520 px (the same x as the strip's "+" disc), same rows → **36**, right inset 16.5 in a 276.5 sidebar, fill **`#326CCB`**, glyph `#F5F5F5` cloud-with-arrow boxed 26 × 28 px → **13 × 14**, ~2.5 px stroke | `FOOTER_DISC` = `CONTROL` 36 at `FOOTER_DISC_INSET` = `STRIP_INSET` 12 (under our strip's last disc, as Grok's sits under its "+"), `STRIP_GAP` 8 after the hover card; `theme.update_disc` / `on_update_disc`; icon `cloud-download` at `FOOTER_DISC_GLYPH` 20 (traced path, 15.6 × 16.2 on the 24 grid at a 1.5 stroke) |
@@ -1324,40 +1324,6 @@ Code: `ui/slide.rs` (`PaneSlides::step` derives the motion from
 `Shell::chat_frame`; pinned by `slide::tests` (state machine, reduce-motion
 snap, mid-slide reversal, no slide on a page swap or a width drag) and
 `slide::layout_tests`.
-
-## Avatars
-
-### Presence badge: in front of the picture, ringed in the surface colour (Jacob 2026-10-27, [feedback presence-dot-layering-mac-2026-10-27], iPhone [feedback presence-dot-layering-ios-2026-10-27])
-
-**A status dot on a picture — the machine dot under my footer picture and
-under the agent in the chat header's pill, the rail's typing pulse and
-unread dot, the agent mini-picture and the guest stack on a sidebar row —
-sits on top of the z-order, never clipped or covered by the picture's
-circle, in a thin ring of the colour of the surface the picture rests on
-(the macOS / iOS presence-badge shape).** Jacob's report (Mac, dark, a
-sidebar picture): the green dot rendered behind the photo and only a
-crescent showed past the circle.
-
-| Rule | Mac (`ui::badge`) | iPhone (`PresenceBadge` in `UI/Avatar.swift`) |
-|---|---|---|
-| One component | every picture-with-badge goes through `badge::badged(size, picture, Badge)` (dot + ring) or `badge::corner(size, picture, overlay, overhang)` (a mini-picture, a stack); nothing draws a corner dot of its own | every picture-with-dot goes through `.presenceBadge(color, size:)` — `AgentAvatar(dot:)` and the home account circle; nothing draws a corner dot of its own |
-| Dot size | `size / 4`, rounded, clamped 6–12: **9** on the 36 pt footer / rail picture, **6** on the 22 pt header disc, 12 on a 48 pt row picture (Grok's) | the same rule: 12 on the 48 pt home circle, 8 on the 32 pt header-pill picture |
-| Ring | **2 pt**, so the ring box is dot + 4 (13 / 10 / 16) | 2 pt |
-| Place | the ring box hangs **2 pt** past the picture's bottom-right edge (`badge::OVERHANG`); the dot's centre lies outside the picture's circle | the same 2 pt |
-| Ring colour | the surface under the picture, opaque: sidebar / rail at rest → `theme.sidebar` (`badge::ring::sidebar`); a selected row or tile → the highlight token's selected step over the sidebar (`ring::selected` = `highlight::over(sidebar, fills.selected)`); a row, tile or the footer row under the pointer → the token's hover step over the sidebar (`ring::hovered`, by `group_hover` on the row's group — the lint's `badge-ring` exception); the header pill → its glass fill composited over the page (`ring::header_pill`) | the ring is **cut out of the picture** (a mask), so whatever surface is behind — the page, a card, the header pill's material or Liquid Glass — shows through; no colour is guessed per surface |
-| Z-order | the badge is painted in a GPUI layer of its own (`badge::above`): the sidebar, the rail and the header pill paint through `frost::frosted`, one `paint_layer` per panel, and inside a layer the renderer draws every quad before every photo — so a dot drawn after a photo still landed under it. A nested layer takes an order above everything already painted under its box | the dot is the last layer of the `ZStack`; nothing clips the composed avatar (no `clipShape` on the whole) |
-
-Pinned by `badge::ordering_tests` (the renderer rule against the pinned GPUI
-revision: inside one layer a later quad is batched under a photo; a nested
-layer is drawn after it; a popover painted later still wins),
-`badge::layout_tests` (overhang 2, ring 2, dot per size, the badge opens its
-own layer, the ring colour per surface on both appearances × both surfaces),
-`sidebar::footer_tests` (the footer's 9 / 13 / 2 through the component) and
-`rail::tests` (typing 9, unread 8 in a 12 ring). iPhone: `PresenceBadgeTests`.
-
-Not a badge: the sidebar row's end-of-row typing pulse and unread dot (they
-sit after the preview text, not on the picture), the presence row's picture
-stack (no dot), the Computer tab's inline status dot.
 
 ## Create sheets: Upload | Generate, neutral initial (Jacob 2026-10-25, [feedback create-sheet-avatar-upload-generate-mac-2026-10-25])
 
