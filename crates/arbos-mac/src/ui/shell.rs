@@ -29,6 +29,7 @@ use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
 use crate::ui::chart_viewer;
 use crate::ui::chat_search;
 use crate::ui::composer::{self, Composer, ComposerEvent, ComposerInput};
+use crate::ui::connect_agent;
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
 use crate::ui::create_entity::{self, Kind as CreateKind};
 use crate::ui::dropzone;
@@ -240,6 +241,8 @@ pub struct Shell {
     pub(crate) create_picker: avatar_picker::Picker,
     /// Create group, step 1 (picture + name) showing over the New Message backdrop.
     pub(crate) create_group_open: bool,
+    /// Connect an agent (#2141): the transport picked on the Create screen.
+    pub(crate) connect_transport: create_entity::Transport,
     /// The avatar picker sheet (D92 amendment) while it is open: whose picture, which tab,
     /// the pending choice.
     pub(crate) avatar_picker: Option<avatar_picker::Picker>,
@@ -725,6 +728,8 @@ impl Shell {
                     let _ = weak.update(cx, |this, cx| {
                         let kind = if this.create_group_open {
                             CreateKind::Group
+                        } else if this.state.read(cx).connect_open {
+                            CreateKind::Connect
                         } else {
                             CreateKind::Agent
                         };
@@ -1072,6 +1077,7 @@ impl Shell {
             new_agent_color: None,
             create_picker,
             create_group_open,
+            connect_transport: create_entity::Transport::default(),
             avatar_picker: None,
             avatar_prompt_input,
             search_input,
@@ -1661,6 +1667,26 @@ impl Shell {
         });
     }
 
+    /// "Connect an agent" in the New Message sheet (#2141): the Create screen in its connect
+    /// form (name + transport), then the key reveal.
+    pub(crate) fn open_connect_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.reset_create_picture(cx);
+        self.create_group_open = false;
+        self.connect_transport = create_entity::Transport::default();
+        self.state.update(cx, |s, cx| {
+            s.new_project_open = false;
+            s.connect_open = true;
+            cx.notify();
+        });
+        self.project_input.update(cx, |input, cx| {
+            input.set_placeholder(CreateKind::Connect.placeholder());
+            input.clear(cx);
+        });
+        let handle = self.project_input.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
     /// Open the Create group screen (step 1) over the New Message backdrop.
     pub(crate) fn open_create_group(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.create_group_open = true;
@@ -1687,6 +1713,23 @@ impl Shell {
     ) {
         match kind {
             CreateKind::Agent => self.submit_project(window, cx),
+            CreateKind::Connect => {
+                let name = self.project_input.read(cx).text().trim().to_string();
+                if name.is_empty() {
+                    return;
+                }
+                let transport = self.connect_transport;
+                self.project_input.update(cx, |input, cx| input.clear(cx));
+                let color = self.new_agent_color.take();
+                // The picture options are drawn but a connected agent starts with the neutral
+                // initial; a picture can be set from its profile like any agent.
+                let _ = self.take_create_picture(cx);
+                self.state.update(cx, |s, cx| {
+                    s.close_new_chat(cx);
+                    s.connect_agent(name, transport.wire(), color, cx);
+                });
+                Composer::focus(&self.composer, window, cx);
+            }
             CreateKind::Group => {
                 let name = self.project_input.read(cx).text().trim().to_string();
                 if name.is_empty() {
@@ -1731,6 +1774,10 @@ impl Shell {
     ) {
         match kind {
             CreateKind::Agent | CreateKind::Group => self.close_new_chat_sheet(window, cx),
+            CreateKind::Connect => {
+                self.state.update(cx, |s, _| s.connect_open = false);
+                self.close_new_chat_sheet(window, cx);
+            }
             CreateKind::Server => self.close_server_sheet(window, cx),
         }
     }
@@ -5263,6 +5310,8 @@ impl Render for Shell {
             // (a group goes on to the member picker as step 2).
             if self.state.read(cx).new_project_open {
                 root = root.child(create_entity::sheet(self, CreateKind::Agent, cx));
+            } else if self.state.read(cx).connect_open {
+                root = root.child(create_entity::sheet(self, CreateKind::Connect, cx));
             } else if self.create_group_open {
                 root = root.child(create_entity::sheet(self, CreateKind::Group, cx));
             } else {
@@ -5274,6 +5323,9 @@ impl Render for Shell {
                 ServerSheet::NewServer => create_entity::sheet(self, CreateKind::Server, cx),
                 other => servers::sheet(self, &other, cx),
             });
+        }
+        if let Some(reveal) = self.state.read(cx).connect_reveal.clone() {
+            root = root.child(connect_agent::reveal_sheet(self, &reveal, cx));
         }
         if self.feedback.read(cx).is_open() {
             root = root.child(self.feedback.clone());
