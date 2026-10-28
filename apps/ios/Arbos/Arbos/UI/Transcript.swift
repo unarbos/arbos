@@ -3107,13 +3107,12 @@ struct ImageBubble: View {
                             .accessibilityIdentifier("photo-caption")
                             .accessibilityLabel("Description")
                     }
-                    // GIF-picker attribution (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG).
-                    // `SwiftUI.Link`: model `Link` is the chat connection state.
-                    if let source, let url = URL(string: source.pageUrl), !source.pageUrl.isEmpty {
-                        SwiftUI.Link("via \(source.provider)", destination: url)
-                            .font(theme.font(11))
-                            .foregroundStyle(theme.muted)
-                            .accessibilityIdentifier("photo-via-source")
+                    // GIF-picker attribution (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG /
+                    // app-01M61EZD0GJ2XGV1EW4SCVXENK). https `pageUrl` is a link;
+                    // any other scheme stays plain text.
+                    if let source, !source.provider.isEmpty {
+                        MediaViaCaption(source: source, fallback: nil, fontSize: 11, color: theme.muted,
+                                        accessibilityId: "photo-via-source")
                     }
                 }
                 .padding(.horizontal, Theme.bubbleHPad)
@@ -3202,29 +3201,73 @@ struct ImageBubble: View {
 }
 
 /// GIF / animated WebP frames for chat bubbles and tests
-/// (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG). Caps match the Mac decoder.
+/// (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG / app-01M61EZD0GJ2XGV1EW4SCVXENK).
+/// Caps match the Mac decoder.
 enum AnimatedImageFrames {
     static let maxFrames = 300
-    static let maxDecodedBytes = 20 * 1024 * 1024
+    static let maxDecodedBytes = 48 * 1024 * 1024
+    static let sideStart = 480
+    static let sideFloor = 200
+
+    /// Target longer side for animation frames, or `nil` → first frame only.
+    /// Starts at 480 (never upscale); shrinks until the RGBA budget fits;
+    /// floor 200. More than 300 frames, or not fitting at 200, means still.
+    static func animationFrameSide(frameCount: Int, width: Int, height: Int) -> Int? {
+        guard frameCount > 0, frameCount <= maxFrames else { return nil }
+        let width = max(width, 1)
+        let height = max(height, 1)
+        let long = max(width, height)
+        let start = min(sideStart, long)
+        if decodedBytes(frameCount: frameCount, width: width, height: height, side: sideFloor) > maxDecodedBytes {
+            return nil
+        }
+        var lo = sideFloor
+        var hi = start
+        while lo < hi {
+            let mid = lo + (hi - lo + 1) / 2
+            if decodedBytes(frameCount: frameCount, width: width, height: height, side: mid) <= maxDecodedBytes {
+                lo = mid
+            } else {
+                hi = mid - 1
+            }
+        }
+        return lo
+    }
+
+    private static func decodedBytes(frameCount: Int, width: Int, height: Int, side: Int) -> Int {
+        let long = max(width, height, 1)
+        let scale = Double(side) / Double(long)
+        let sw = max(Int((Double(width) * scale).rounded()), 1)
+        let sh = max(Int((Double(height) * scale).rounded()), 1)
+        return frameCount &* sw &* sh &* 4
+    }
 
     /// Frame list + total duration for an animated GIF/WebP, or `nil` for a
     /// still (PNG, JPEG, single-frame WebP) or when the caps force a still.
+    /// Frames are decoded as thumbnails at the helper's side — full-size
+    /// frames are never held (feedback app-01M61EZD0GJ2XGV1EW4SCVXENK).
     static func frames(from data: Data) -> (images: [UIImage], duration: TimeInterval)? {
         guard looksAnimated(data) else { return nil }
         guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
         let count = CGImageSourceGetCount(src)
         guard count > 1 else { return nil }
 
+        let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
+        let pixelW = (props?[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0
+        let pixelH = (props?[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0
+        guard let side = animationFrameSide(frameCount: count, width: pixelW, height: pixelH) else {
+            return nil
+        }
+
+        let opts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: side,
+        ]
         var images: [UIImage] = []
         var total: TimeInterval = 0
-        var decoded = 0
-        images.reserveCapacity(min(count, maxFrames))
+        images.reserveCapacity(count)
         for i in 0..<count {
-            if images.count >= maxFrames { return nil }
-            guard let cg = CGImageSourceCreateImageAtIndex(src, i, nil) else { continue }
-            let bytes = cg.bytesPerRow * cg.height
-            if decoded + bytes > maxDecodedBytes { return nil }
-            decoded += bytes
+            guard let cg = CGImageSourceCreateThumbnailAtIndex(src, i, opts as CFDictionary) else { continue }
             let delay = frameDelay(source: src, index: i)
             total += delay
             images.append(UIImage(cgImage: cg))

@@ -57,6 +57,7 @@ use crate::ui::secrets::{SecretsEvent, SecretsPanel};
 use crate::ui::servers;
 use crate::ui::sf_symbols;
 use crate::ui::sidebar;
+use crate::ui::sidebar_fit;
 use crate::ui::skills::{self, SkillsPanel};
 use crate::ui::slide::{self, ChatSlide, PaneSlides};
 use crate::ui::theme::{
@@ -354,6 +355,10 @@ pub struct Shell {
     /// The sidebar filter capsules' horizontal scroll (a narrow column,
     /// [feedback sidebar-narrow-wrap-2026-10-27]).
     pub(crate) filter_scroll: ScrollHandle,
+    /// Scrolls the selected capsule into view once per selection / width, so
+    /// the strip stays scrollable back to "All" ([feedback
+    /// server-strip-scroll-2026-10-28]).
+    pub(crate) filter_pin: sidebar_fit::FilterPin,
     /// Rig: `ARBOS_RIG_FULLSCREEN=1` lays the chrome out as native full
     /// screen (no layout difference since the rail keeps the lights' slot) where the platform
     /// cannot report it (headless Linux renders).
@@ -1197,6 +1202,7 @@ impl Shell {
             split_drag: Default::default(),
             rail_scroll: ScrollHandle::new(),
             filter_scroll: ScrollHandle::new(),
+            filter_pin: sidebar_fit::FilterPin::default(),
             rig_fullscreen: std::env::var("ARBOS_RIG_FULLSCREEN").is_ok_and(|v| v == "1"),
             rig_rail_t: std::env::var("ARBOS_RIG_RAIL_T")
                 .ok()

@@ -1067,10 +1067,16 @@ pub(crate) fn render_with(shell: &Shell, hide_morphing: bool, cx: &mut Context<S
     // Bot's iPhone filter row — the first and last capsule carry `auto` side
     // margins, which centre the set while there is room and resolve to 0 (a
     // left-aligned, scrollable row) once there is not; the selected capsule
-    // is scrolled into view (`Shell::filter_scroll`).
+    // is scrolled into view (`Shell::filter_scroll`) once per selection /
+    // width — not every frame, or a scroll back toward "All" is undone by the
+    // next paint (`sidebar_fit::FilterPin`, [feedback
+    // server-strip-scroll-2026-10-28]).
     let filter_count = ListFilter::ALL.len();
     if let Some(ix) = ListFilter::ALL.iter().position(|f| *f == filter) {
-        shell.filter_scroll.scroll_to_item(ix);
+        let measured = shell.filter_scroll.bounds().size.width > px(0.0);
+        if shell.filter_pin.take(ix, sidebar_width, measured) {
+            shell.filter_scroll.scroll_to_item(ix);
+        }
     }
     let filter_bar = div()
         .id("sidebar-filter")
@@ -3052,6 +3058,172 @@ mod strip_tests {
         assert_eq!(ListFilter::parse("servers"), Some(ListFilter::Servers));
         assert_eq!(ListFilter::parse("nope"), None);
         assert_eq!(ListFilter::default(), ListFilter::All);
+    }
+
+    /// The filter row as `render_with` builds it in a column too narrow for
+    /// the four capsules: a horizontal scroll under `scroll`, the selected
+    /// capsule pinned into view through `pin` — once per selection / width,
+    /// or on every frame when `pin_every_frame` (the behaviour before
+    /// [feedback server-strip-scroll-2026-10-28], kept here to show the test
+    /// tells the two apart).
+    struct NarrowFilter {
+        scroll: gpui::ScrollHandle,
+        pin: crate::ui::sidebar_fit::FilterPin,
+        pin_every_frame: bool,
+        selected: usize,
+        width: f32,
+    }
+
+    impl gpui::Render for NarrowFilter {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let measured = self.scroll.bounds().size.width > px(0.0);
+            if self.pin_every_frame || self.pin.take(self.selected, self.width, measured) {
+                self.scroll.scroll_to_item(self.selected);
+            }
+            let count = ListFilter::ALL.len();
+            let row = div()
+                .id("narrow-filter")
+                .debug_selector(|| "filter-row".into())
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .gap(px(super::FILTER_GAP))
+                .px(px(8.0))
+                .overflow_x_scroll()
+                .track_scroll(&self.scroll)
+                .children(ListFilter::ALL.into_iter().enumerate().map(|(ix, f)| {
+                    let sel: &'static str =
+                        Box::leak(format!("capsule-{}", f.label()).into_boxed_str());
+                    div()
+                        .h(px(FILTER_HEIGHT))
+                        .px(px(super::FILTER_PAD_X))
+                        .flex_shrink_0()
+                        .map(|mut el| {
+                            if ix == 0 {
+                                el.style().margin.left = Some(gpui::Length::Auto);
+                            }
+                            if ix + 1 == count {
+                                el.style().margin.right = Some(gpui::Length::Auto);
+                            }
+                            el
+                        })
+                        .debug_selector(move || sel.into())
+                        .child(f.label())
+                }));
+            div()
+                .w(px(self.width))
+                .h(px(120.0))
+                .flex()
+                .flex_col()
+                .child(row)
+        }
+    }
+
+    fn narrow_filter(scroll: &gpui::ScrollHandle, pin_every_frame: bool) -> NarrowFilter {
+        NarrowFilter {
+            scroll: scroll.clone(),
+            pin: Default::default(),
+            pin_every_frame,
+            selected: 3,
+            // Narrower than the four capsules need: the row scrolls.
+            width: 150.0,
+        }
+    }
+
+    /// Affinity, Arbonites, 2026-10-28 ("if on server cannot scroll back to
+    /// make 'all' visible again"; Scout confirmed): with Servers selected in
+    /// a narrow column the strip opens scrolled so Servers shows (All
+    /// clipped) — and after the user scrolls back, the offset must be able to
+    /// reach 0 with "All" fully in view, and stay there across repaints.
+    #[gpui::test]
+    fn the_strip_scrolls_back_to_all_and_stays_there(cx: &mut TestAppContext) {
+        let scroll = gpui::ScrollHandle::new();
+        let (view, vcx) = cx.add_window_view(|_, _| narrow_filter(&scroll, false));
+        // The pin lands on the frame after the one that measured the capsules.
+        for _ in 0..3 {
+            view.update(vcx, |_, cx| cx.notify());
+            vcx.run_until_parked();
+        }
+        let row = vcx.debug_bounds("filter-row").expect("the row");
+        let all = vcx.debug_bounds("capsule-All").expect("All");
+        let servers = vcx.debug_bounds("capsule-Servers").expect("Servers");
+        assert!(
+            f32::from(scroll.max_offset().x) > 0.0,
+            "the column is narrow enough for the row to scroll"
+        );
+        assert!(
+            f32::from(scroll.offset().x) < 0.0,
+            "opens pinned to the selected capsule: offset {:?}",
+            scroll.offset()
+        );
+        assert!(
+            servers.right() <= row.right() + px(0.5),
+            "Servers in view: {servers:?} in {row:?}"
+        );
+        assert!(all.left() < row.left(), "All clipped on the left: {all:?}");
+
+        // The user scrolls back to the start (what the wheel / trackpad does
+        // to the handle's offset), and the strip repaints.
+        scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+        view.update(vcx, |_, cx| cx.notify());
+        vcx.run_until_parked();
+        let row = vcx.debug_bounds("filter-row").expect("the row");
+        let all = vcx.debug_bounds("capsule-All").expect("All");
+        assert_eq!(
+            f32::from(scroll.offset().x),
+            0.0,
+            "the offset reaches 0 and holds across the repaint"
+        );
+        assert!(
+            all.left() >= row.left() && all.right() <= row.right(),
+            "All fully visible: {all:?} in {row:?}"
+        );
+        // And another frame (a hover, a notify) does not drag it back either.
+        view.update(vcx, |_, cx| cx.notify());
+        vcx.run_until_parked();
+        assert_eq!(f32::from(scroll.offset().x), 0.0, "still 0 a frame later");
+
+        // The same row pinned on every frame — the bug — snaps back to Servers.
+        let scroll = gpui::ScrollHandle::new();
+        let (view, vcx) = cx.add_window_view(|_, _| narrow_filter(&scroll, true));
+        for _ in 0..3 {
+            view.update(vcx, |_, cx| cx.notify());
+            vcx.run_until_parked();
+        }
+        assert!(f32::from(scroll.offset().x) < 0.0, "pinned to Servers");
+        scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+        view.update(vcx, |_, cx| cx.notify());
+        vcx.run_until_parked();
+        assert!(
+            f32::from(scroll.offset().x) < 0.0,
+            "pinning every frame undoes the scroll back (the old behaviour)"
+        );
+    }
+
+    /// The pin fires once per selection and once per width (after the handle
+    /// has a frame behind it); otherwise never.
+    #[test]
+    fn the_pin_fires_on_selection_and_width_changes_only() {
+        let pin = crate::ui::sidebar_fit::FilterPin::default();
+        assert!(pin.take(3, 220.0, false), "before the first frame: ask");
+        assert!(
+            pin.take(3, 220.0, false),
+            "…and keep asking until one can land"
+        );
+        assert!(pin.take(3, 220.0, true), "the first measured frame");
+        assert!(!pin.take(3, 220.0, true), "a repaint");
+        assert!(
+            !pin.take(3, 220.2, true),
+            "sub-pixel width noise is the same width"
+        );
+        assert!(pin.take(0, 220.0, true), "the selection moved");
+        assert!(!pin.take(0, 220.0, true));
+        assert!(pin.take(0, 260.0, true), "the column was resized");
+        assert!(!pin.take(0, 260.0, true));
     }
 
     /// The filter stays in the sidebar unchanged (Jacob, search-palette item
