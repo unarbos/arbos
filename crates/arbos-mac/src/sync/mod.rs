@@ -9,6 +9,7 @@
 
 pub mod agent_avatar;
 pub mod avatar_master;
+pub mod chat_send_queue;
 pub mod credentials;
 pub mod diagnostics;
 pub mod doc;
