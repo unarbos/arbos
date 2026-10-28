@@ -13,6 +13,9 @@ struct AuthDevice: Identifiable, Equatable {
     var kind: String
     var createdAt: Int64
     var lastSeenAt: Int64?
+    /// Set once the device signed out or was revoked: its session ended, so
+    /// it is not a device I am logged in on and the list leaves it out.
+    var revokedAt: Int64? = nil
     /// The device that made the request — this iPhone.
     var current: Bool
 
@@ -24,8 +27,20 @@ struct AuthDevice: Identifiable, Equatable {
             kind: (d["kind"] as? String) ?? "",
             createdAt: (d["created_at"] as? NSNumber)?.int64Value ?? 0,
             lastSeenAt: (d["last_seen_at"] as? NSNumber)?.int64Value,
+            revokedAt: (d["revoked_at"] as? NSNumber)?.int64Value,
             current: (d["current"] as? Bool) ?? false
         )
+    }
+
+    /// Whether this row is still a session (nothing signed it out).
+    var isLive: Bool { revokedAt == nil }
+
+    /// What Settings → Devices shows: live rows only, this iPhone first, the
+    /// rest in the relay's order (oldest sign-in first). A tester who had
+    /// signed four Macs out still saw "9 devices" before this filter.
+    static func visible(_ list: [AuthDevice]) -> [AuthDevice] {
+        let live = list.filter(\.isLive)
+        return live.filter(\.current) + live.filter { !$0.current }
     }
 
     /// The row's name, never empty.
@@ -121,13 +136,13 @@ extension AppModel {
     /// Settings → Devices opened: read the list (the fixture seeds three).
     func refreshDevices() async {
         if isFixture {
-            devices = AuthDevice.fixture()
+            devices = AuthDevice.visible(AuthDevice.fixture())
             devicesLoaded = true
             return
         }
         guard credentials != nil else { return }
         do {
-            devices = try await relay.devices()
+            devices = try await AuthDevice.visible(relay.devices())
             devicesError = nil
         } catch {
             devicesError = UserError.classify("load your devices", error)

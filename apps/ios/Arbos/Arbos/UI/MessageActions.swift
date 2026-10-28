@@ -27,6 +27,24 @@ enum ReactionCapsule {
     }
 }
 
+/// The add-emoji field's one answer. UIKit reports a single keyboard insert to the
+/// field twice — `shouldChangeCharactersIn` first, then `.editingChanged` — and each
+/// report toggled the reaction, so a pick from the emoji keyboard switched it on and
+/// straight off again while the overlay closed on the first toggle
+/// ([feedback iphone-emoji-picker-reaction-2026-10-28]). The first emoji wins; every
+/// later report is dropped.
+struct ReactionPick {
+    private(set) var emoji: String?
+
+    /// The emoji to react with, exactly once per field; nil for non-emoji text and for
+    /// every report after the first pick.
+    mutating func take(_ text: String) -> String? {
+        guard emoji == nil, let picked = ReactionCapsule.pickedEmoji(text) else { return nil }
+        emoji = picked
+        return picked
+    }
+}
+
 /// Where each row sits, for the overlay (only the pressed row reports).
 struct RowFrameKey: PreferenceKey {
     static let defaultValue: [String: Anchor<CGRect>] = [:]
@@ -54,7 +72,6 @@ struct MessageActionsOverlay<Bubble: View>: View {
     @ViewBuilder let bubble: () -> Bubble
 
     @State private var pickOpen = false
-    @State private var picked = ""
     /// The bubble's frame when the press landed. The composer's keyboard goes down as
     /// the overlay opens and the transcript reflows under the blur; the held bubble
     /// stays where the finger is (iMessage) instead of following that reflow.
@@ -107,11 +124,10 @@ struct MessageActionsOverlay<Bubble: View>: View {
         .ignoresSafeArea()
         .overlay {
             if pickOpen {
-                EmojiKeyboardField(text: $picked) { text in
-                    if let emoji = ReactionCapsule.pickedEmoji(text) { onReact(emoji) }
-                }
-                .frame(width: 1, height: 1)
-                .opacity(0.01)
+                EmojiKeyboardField(onPick: onReact)
+                    .frame(width: 1, height: 1)
+                    .opacity(0.01)
+                    .accessibilityIdentifier("reaction-pick-field")
             }
         }
         .transition(.opacity)
@@ -309,10 +325,10 @@ final class KeyboardFrameObserver: ObservableObject {
 }
 
 /// A one-character field that raises the **emoji** keyboard (the system picker
-/// on iPhone): `textInputMode` is pinned to the emoji input mode.
+/// on iPhone): `textInputMode` is pinned to the emoji input mode. `onPick` is
+/// called once, with the first emoji typed (`ReactionPick`).
 struct EmojiKeyboardField: UIViewRepresentable {
-    @Binding var text: String
-    let onChange: (String) -> Void
+    let onPick: (String) -> Void
 
     func makeUIView(context: Context) -> EmojiTextField {
         let field = EmojiTextField()
@@ -327,22 +343,27 @@ struct EmojiKeyboardField: UIViewRepresentable {
 
     func updateUIView(_ uiView: EmojiTextField, context: Context) {}
 
-    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    func makeCoordinator() -> Coordinator { Coordinator(onPick: onPick) }
 
     final class Coordinator: NSObject, UITextFieldDelegate {
-        var parent: EmojiKeyboardField
-        init(_ parent: EmojiKeyboardField) { self.parent = parent }
-        @objc func changed(_ field: UITextField) {
-            parent.text = field.text ?? ""
-            parent.onChange(parent.text)
+        let onPick: (String) -> Void
+        private var pick = ReactionPick()
+
+        init(onPick: @escaping (String) -> Void) { self.onPick = onPick }
+
+        /// Both delegate paths funnel here; `ReactionPick` lets only the first emoji through.
+        func report(_ text: String) {
+            if let emoji = pick.take(text) { onPick(emoji) }
         }
-        // The emoji keyboard's insert arrives here first; `editingChanged` does
-        // not always follow for a non-text key.
+
+        @objc func changed(_ field: UITextField) {
+            report(field.text ?? "")
+        }
+
+        // The emoji keyboard's insert arrives here first; `editingChanged` usually
+        // follows with the same character, sometimes not (a non-text key).
         func textField(_ textField: UITextField, shouldChangeCharactersIn range: NSRange, replacementString string: String) -> Bool {
-            if !string.isEmpty {
-                parent.text = string
-                parent.onChange(string)
-            }
+            report(string)
             return true
         }
     }
