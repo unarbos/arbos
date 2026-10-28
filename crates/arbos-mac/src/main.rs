@@ -116,6 +116,7 @@ fn main() {
         cx.set_global(Theme::for_pref(pref, surface, cx));
         cx.set_reduce_motion(motion::system_reduce_motion());
         PulseClock::init(cx);
+        ui::working::WorkingClock::init(cx);
         bind_keys(cx);
         set_menus(cx);
 
