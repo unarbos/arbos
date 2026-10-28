@@ -664,6 +664,8 @@ async fn handle_frame(
                         Some(chat) => {
                             let agents = match &chat.project_id {
                                 None => wake_owners,
+                                // An outside agent's chat (#2140): the relay hosts it, no box.
+                                Some(pid) if crate::outside::is_outside(state, pid) => Vec::new(),
                                 Some(pid) => state
                                     .user_of(pid)
                                     .map(|owner| {
@@ -676,6 +678,7 @@ async fn handle_frame(
                             };
                             boxes::after_person_row(state, room, chat, &agents).await;
                         }
+                        None if crate::outside::is_outside(state, project_id) => {}
                         None => {
                             if let Some(u) = state.user_of(project_id) {
                                 state
