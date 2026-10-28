@@ -91,9 +91,12 @@
 		A1DE700000000000000000B2 /* MentionChips.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DE700000000000000000B1 /* MentionChips.swift */; };
 		A1F7B0000000000000000002 /* BlockedState.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F7B0000000000000000001 /* BlockedState.swift */; };
 		A1F100000000000000000006 /* LinkIcons.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F100000000000000000005 /* LinkIcons.swift */; };
+		A1F100000000000000000101 /* LinkTile.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F100000000000000000100 /* LinkTile.swift */; };
 		A1F10000000000000000000A /* MathText.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F100000000000000000009 /* MathText.swift */; };
 		A1F10000000000000000000E /* CodeHighlight.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F10000000000000000000D /* CodeHighlight.swift */; };
 		A1C4A2700000000000000002 /* ChartCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C4A2700000000000000001 /* ChartCard.swift */; };
+		A1C4A2700000000000000012 /* LinkPreviewCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C4A2700000000000000011 /* LinkPreviewCard.swift */; };
+		A1C4A2700000000000000014 /* LinkPreviewCardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C4A2700000000000000013 /* LinkPreviewCardTests.swift */; };
 		A1DE700000000000000000C2 /* MentionComposer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DE700000000000000000C1 /* MentionComposer.swift */; };
 		A1DE700000000000000000D2 /* MentionDraftTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DE700000000000000000D1 /* MentionDraftTests.swift */; };
 		A1D8800000000000000000D2 /* LeafAvatar.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D8800000000000000000D1 /* LeafAvatar.swift */; };
@@ -130,6 +133,7 @@
 		A1F100000000000000000002 /* NoAnswerLineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F100000000000000000001 /* NoAnswerLineTests.swift */; };
 		A1F100000000000000000004 /* MarkdownTableTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F100000000000000000003 /* MarkdownTableTests.swift */; };
 		A1F100000000000000000008 /* LinkIconTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F100000000000000000007 /* LinkIconTests.swift */; };
+		A1F100000000000000000103 /* LinkTileTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F100000000000000000102 /* LinkTileTests.swift */; };
 		A1F10000000000000000000C /* MathTextTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F10000000000000000000B /* MathTextTests.swift */; };
 		A1F100000000000000000010 /* CodeHighlightTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F10000000000000000000F /* CodeHighlightTests.swift */; };
 		A1F100000000000000000012 /* ChatMarkdownTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F100000000000000000011 /* ChatMarkdownTests.swift */; };
@@ -295,9 +299,12 @@
 		A1DE700000000000000000B1 /* MentionChips.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MentionChips.swift; sourceTree = "<group>"; };
 		A1F7B0000000000000000001 /* BlockedState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlockedState.swift; sourceTree = "<group>"; };
 		A1F100000000000000000005 /* LinkIcons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkIcons.swift; sourceTree = "<group>"; };
+		A1F100000000000000000100 /* LinkTile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkTile.swift; sourceTree = "<group>"; };
 		A1F100000000000000000009 /* MathText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MathText.swift; sourceTree = "<group>"; };
 		A1F10000000000000000000D /* CodeHighlight.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeHighlight.swift; sourceTree = "<group>"; };
 		A1C4A2700000000000000001 /* ChartCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChartCard.swift; sourceTree = "<group>"; };
+		A1C4A2700000000000000011 /* LinkPreviewCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkPreviewCard.swift; sourceTree = "<group>"; };
+		A1C4A2700000000000000013 /* LinkPreviewCardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkPreviewCardTests.swift; sourceTree = "<group>"; };
 		A1DE700000000000000000C1 /* MentionComposer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MentionComposer.swift; sourceTree = "<group>"; };
 		A1DE700000000000000000D1 /* MentionDraftTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MentionDraftTests.swift; sourceTree = "<group>"; };
 		A1D8800000000000000000D1 /* LeafAvatar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LeafAvatar.swift; sourceTree = "<group>"; };
@@ -335,6 +342,7 @@
 		A1F100000000000000000001 /* NoAnswerLineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NoAnswerLineTests.swift; sourceTree = "<group>"; };
 		A1F100000000000000000003 /* MarkdownTableTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownTableTests.swift; sourceTree = "<group>"; };
 		A1F100000000000000000007 /* LinkIconTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkIconTests.swift; sourceTree = "<group>"; };
+		A1F100000000000000000102 /* LinkTileTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkTileTests.swift; sourceTree = "<group>"; };
 		A1F10000000000000000000B /* MathTextTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MathTextTests.swift; sourceTree = "<group>"; };
 		A1F10000000000000000000F /* CodeHighlightTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodeHighlightTests.swift; sourceTree = "<group>"; };
 		A1F100000000000000000011 /* ChatMarkdownTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatMarkdownTests.swift; sourceTree = "<group>"; };
@@ -556,9 +564,11 @@
 				A1DE700000000000000000B1 /* MentionChips.swift */,
 				A1F7B0000000000000000001 /* BlockedState.swift */,
 				A1F100000000000000000005 /* LinkIcons.swift */,
+				A1F100000000000000000100 /* LinkTile.swift */,
 				A1F100000000000000000009 /* MathText.swift */,
 				A1F10000000000000000000D /* CodeHighlight.swift */,
 				A1C4A2700000000000000001 /* ChartCard.swift */,
+				A1C4A2700000000000000011 /* LinkPreviewCard.swift */,
 				A1DE700000000000000000C1 /* MentionComposer.swift */,
 				A11B0000000000000000A001 /* LibraryList.swift */,
 				A15EC9000000000000000001 /* AgentPicker.swift */,
@@ -628,10 +638,12 @@
 				A1F100000000000000000001 /* NoAnswerLineTests.swift */,
 				A1F100000000000000000003 /* MarkdownTableTests.swift */,
 				A1F100000000000000000007 /* LinkIconTests.swift */,
+				A1F100000000000000000102 /* LinkTileTests.swift */,
 				A1F10000000000000000000B /* MathTextTests.swift */,
 				A1F10000000000000000000F /* CodeHighlightTests.swift */,
 				A1F100000000000000000011 /* ChatMarkdownTests.swift */,
 				A1C4A2700000000000000003 /* ChartCardTests.swift */,
+				A1C4A2700000000000000013 /* LinkPreviewCardTests.swift */,
 				A1A9D0000000000000000003 /* AgentIdentityTests.swift */,
 				A1AF11000000000000000001 /* AgentAvatarFlipTests.swift */,
 				A15EC9000000000000000003 /* AgentPickerTests.swift */,
@@ -856,9 +868,11 @@
 				A1DE700000000000000000B2 /* MentionChips.swift in Sources */,
 				A1F7B0000000000000000002 /* BlockedState.swift in Sources */,
 				A1F100000000000000000006 /* LinkIcons.swift in Sources */,
+				A1F100000000000000000101 /* LinkTile.swift in Sources */,
 				A1F10000000000000000000A /* MathText.swift in Sources */,
 				A1F10000000000000000000E /* CodeHighlight.swift in Sources */,
 				A1C4A2700000000000000002 /* ChartCard.swift in Sources */,
+				A1C4A2700000000000000012 /* LinkPreviewCard.swift in Sources */,
 				A1DE700000000000000000C2 /* MentionComposer.swift in Sources */,
 				A1D8800000000000000000D2 /* LeafAvatar.swift in Sources */,
 				A1D8800000000000000000A8 /* AvatarPickerSheet.swift in Sources */,
@@ -972,10 +986,12 @@
 				A1F100000000000000000002 /* NoAnswerLineTests.swift in Sources */,
 				A1F100000000000000000004 /* MarkdownTableTests.swift in Sources */,
 				A1F100000000000000000008 /* LinkIconTests.swift in Sources */,
+				A1F100000000000000000103 /* LinkTileTests.swift in Sources */,
 				A1F10000000000000000000C /* MathTextTests.swift in Sources */,
 				A1F100000000000000000010 /* CodeHighlightTests.swift in Sources */,
 				A1F100000000000000000012 /* ChatMarkdownTests.swift in Sources */,
 				A1C4A2700000000000000004 /* ChartCardTests.swift in Sources */,
+				A1C4A2700000000000000014 /* LinkPreviewCardTests.swift in Sources */,
 				A1A9D0000000000000000004 /* AgentIdentityTests.swift in Sources */,
 				A1AF11000000000000000002 /* AgentAvatarFlipTests.swift in Sources */,
 				A15EC9000000000000000004 /* AgentPickerTests.swift in Sources */,
