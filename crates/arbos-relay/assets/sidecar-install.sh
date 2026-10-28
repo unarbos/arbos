@@ -118,5 +118,5 @@ fi
 say ""
 say "Register the MCP server in your agent:  command: $bin   args: [\"mcp\"]"
 say "  Claude Code:  claude mcp add arbos -- $bin mcp"
-say "  Codex:        codex mcp add arbos -- $bin mcp"
+say "  Codex:        codex mcp add arbos -- $bin mcp   (then add default_tools_approval_mode = \"approve\" under [mcp_servers.arbos] in ~/.codex/config.toml)"
 say "  Cursor:       .cursor/mcp.json → {\"mcpServers\":{\"arbos\":{\"command\":\"$bin\",\"args\":[\"mcp\"]}}}"

@@ -223,6 +223,19 @@ impl Relay {
         Ok((bytes.to_vec(), mime))
     }
 
+    /// `POST /asp/log` (#2224): the text-free session log, ≤ 100 entries.
+    pub async fn upload_log(&self, entries: &[Value]) -> RelayResult<Value> {
+        let r = self
+            .auth(
+                self.http
+                    .post(format!("{}/asp/log", self.base))
+                    .json(&json!({ "entries": entries })),
+            )
+            .send()
+            .await?;
+        Ok(Self::check(r).await?.json().await?)
+    }
+
     /// `POST /asp/wake/test` (#2185) — only meaningful when the owner set a Wake URL.
     pub async fn wake_test(&self) -> RelayResult<Value> {
         let r = self
