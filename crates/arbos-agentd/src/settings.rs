@@ -22,13 +22,12 @@ pub struct Slot {
     pub effort: String,
 }
 
-/// Who makes the "which agents reply" decision in group chats (`decision_model.provider`).
+/// `decision_model.provider`, kept so old project settings still parse. There is one judge
+/// (`responders.rs`, a System One decision model through OpenRouter's Decisions API); `llm`
+/// is accepted and means the same thing — the chat-model router it named is gone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecisionProvider {
-    /// A System One decision model (TypeSafe Jev through OpenRouter's Decisions API): one
-    /// calibrated yes/no probability per agent, thresholded. Falls open to `Llm`.
     Jev,
-    /// The previous router: the `decision_model.id` chat model answering with JSON.
     Llm,
 }
 

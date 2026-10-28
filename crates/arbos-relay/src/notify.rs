@@ -499,8 +499,10 @@ pub async fn clear_on_read(
     user_id: &str,
     except_device: &str,
     chat: &ChatRef,
+    read_upto: &str,
 ) -> Vec<String> {
     let badge = crate::matrix::reads::unread_total(state, user_id).await;
+    silent_clear(state, user_id, except_device, chat, read_upto, badge);
     let event = arbos_core::api::PushEventDto::NotificationsCleared(
         arbos_core::api::NotificationsClearedPayloadDto {
             chat_id: chat.chat_id.clone(),
@@ -531,6 +533,48 @@ pub async fn clear_on_read(
             Vec::new()
         }
     }
+}
+
+/// A clear-on-read push stays worth sending about as long as a badge count.
+pub const CLEAR_TTL_MS: i64 = BADGE_TTL_MS;
+
+/// The APNs form of [`clear_on_read`]: one background push (`PushKind::Clear`, `type: clear`,
+/// `chat_id`, `badge`) per other device with a token, so a phone that is not running the app
+/// drops the chat's banners too. `read_upto` (the row the reader got to) is the kind's
+/// `upto_message_id`: it makes a later read of the same chat a new push instead of a dedupe
+/// hit, while the same cursor re-sent (the apps re-PUT on foreground) pushes once. Nothing
+/// is queued while no provider can reach a device.
+fn silent_clear(
+    state: &AppState,
+    user_id: &str,
+    except_device: &str,
+    chat: &ChatRef,
+    read_upto: &str,
+    badge: i64,
+) {
+    if !state.push.is_on() {
+        return;
+    }
+    let kind = PushKind::Clear {
+        chat_id: chat.chat_id.clone(),
+        upto_message_id: Some(read_upto.to_owned()),
+    };
+    let pushes: Vec<NewPush> = state
+        .db
+        .push_tokens_of_user(user_id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|t| t.device_id != except_device)
+        .map(|t| NewPush {
+            user_id: t.user_id.clone(),
+            device_id: t.device_id.clone(),
+            collapse_id: Some(kind.collapse_id(user_id)),
+            kind: kind.clone(),
+            payload: payload::clear(&chat.chat_id, Some(read_upto), badge),
+            ttl_ms: CLEAR_TTL_MS,
+        })
+        .collect();
+    state.push.enqueue(pushes);
 }
 
 /// The user read something somewhere: every other device gets the new badge count.
@@ -1424,6 +1468,73 @@ mod tests {
                 .all(|(_, k, p, _)| !(k == "people_message" && p["chat_id"] == chat_id)),
             "the agent's in-app banner for the read chat is dropped too"
         );
+    }
+
+    /// The APNs form of the clear: a background `type: clear` push per other device with a
+    /// token (never the reader's), collapse id `clear:<chat>`, carrying the chat and the badge;
+    /// the same read cursor re-sent is one push, a later read of the same chat is a new one.
+    #[tokio::test]
+    async fn a_read_queues_one_silent_clear_push_per_other_device() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _alice_dev) = person(&state, 1);
+        let (bob, bob_phone) = person(&state, 2);
+        let bob_pad = second_device(&state, &bob);
+        let dm_chat = dm(&state, &alice, &bob);
+        let other = dm(&state, &alice, &bob);
+        let phone_tok = register(&state, &bob_phone, &bob);
+        let pad_tok = register(&state, &bob_pad, &bob);
+        let alice_s = Sender::user(&state, &alice);
+        announce(&state, &ChatRef::people(&dm_chat), &alice_s, "d1", "one").await;
+        announce(&state, &ChatRef::people(&other), &alice_s, "o1", "two").await;
+        let before = pushed(&state).await.len();
+
+        let read = |dev: Principal, seq: i64| {
+            let state = state.clone();
+            let chat = dm_chat.clone();
+            async move {
+                let r = crate::people::chat_read(
+                    State(state),
+                    dev,
+                    Path(chat),
+                    Json(crate::people::ReadBody { seq }),
+                )
+                .await;
+                assert_eq!(r.status(), StatusCode::NO_CONTENT);
+            }
+        };
+        read(bob_phone.clone(), 1).await;
+        read(bob_phone.clone(), 1).await; // the app re-PUTs the same cursor on foreground
+        let sent = pushed(&state).await;
+        let clears: Vec<_> = sent[before..]
+            .iter()
+            .filter(|o| o.payload["type"] == "clear")
+            .collect();
+        assert_eq!(clears.len(), 1, "one silent clear, to the pad: {clears:?}");
+        let c = clears[0];
+        assert_eq!(c.device_token, pad_tok);
+        assert_ne!(c.device_token, phone_tok);
+        assert_eq!(c.push_type, "background");
+        assert_eq!(
+            c.collapse_id.as_deref(),
+            Some(format!("clear:{dm_chat}").as_str())
+        );
+        assert_eq!(c.payload["aps"]["content-available"], 1);
+        assert_eq!(c.payload["chat_id"], dm_chat);
+        assert_eq!(c.payload["badge"], 1, "the other chat is still unread");
+        assert_eq!(c.payload["upto_message_id"], "seq:1");
+
+        // Further along in the same chat: a new push, not a dedupe hit.
+        announce(&state, &ChatRef::people(&dm_chat), &alice_s, "d2", "three").await;
+        read(bob_phone.clone(), 2).await;
+        let sent = pushed(&state).await;
+        let clears: Vec<_> = sent[before..]
+            .iter()
+            .filter(|o| o.payload["type"] == "clear")
+            .collect();
+        assert_eq!(clears.len(), 2, "{clears:?}");
+        assert_eq!(clears[1].payload["upto_message_id"], "seq:2");
+        assert_eq!(clears[1].payload["badge"], 1);
+        assert_eq!(clears[1].device_token, pad_tok);
     }
 
     #[test]

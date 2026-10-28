@@ -433,9 +433,9 @@ impl Agent {
         });
     }
 
-    /// Which participant project ids should answer this user message: the responder decision
-    /// (`responders.rs`; Jev per-agent probabilities, then the LLM router). When every provider
-    /// fails, falls open to every participant (previous behaviour).
+    /// Which participant project ids should answer this user message: the judge
+    /// (`responders.rs`). When it fails, falls open to every participant (a project group is
+    /// the user with their own agents; the people-chat gate fails closed instead).
     pub async fn decide_group_responders(
         &self,
         gt: &GroupTurn,
@@ -446,7 +446,7 @@ impl Agent {
         if known.is_empty() {
             return vec![self.cfg.project_id.clone()];
         }
-        let candidates: Vec<Candidate> = gt
+        let mut candidates: Vec<Candidate> = gt
             .participants_detail
             .iter()
             .filter_map(|p| {
@@ -468,6 +468,7 @@ impl Agent {
                 })
             })
             .collect();
+        candidates.sort_by(|a, b| a.id.cmp(&b.id));
         let room = Room {
             kind: "project_group",
             chat_id: gt.group_chat_id.clone(),
@@ -477,14 +478,16 @@ impl Agent {
             recent: gt.recent.clone(),
             candidates,
             people: Vec::new(),
+            reply_to: None,
         };
         match self.decide_responders(&room).await {
             Ok(d) => {
                 self.log_responder_decision(&room, user_msg_id, Ok(&d), None);
                 d.chosen
             }
-            Err(errors) => {
-                self.log_responder_decision(&room, user_msg_id, Err(&errors), Some(("ALL", known)));
+            Err(e) => {
+                let error = e.to_string();
+                self.log_responder_decision(&room, user_msg_id, Err(&error), Some(("ALL", known)));
                 known.clone()
             }
         }
