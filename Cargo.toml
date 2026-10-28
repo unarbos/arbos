@@ -16,6 +16,8 @@ members = [
     "crates/arbosctl",
     # Outside agents (#2143): ACP agent ⇄ relay bridge. Depends on nothing in the workspace.
     "crates/arbos-acp",
+    # Outside agents (#2190): the sidecar on the agent's own machine. Depends on nothing in the workspace.
+    "crates/arbos-sidecar",
     "crates/arbos-local",
     "crates/arbos-mac",
     "crates/arbos-update",

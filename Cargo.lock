@@ -548,6 +548,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "arbos-sidecar"
+version = "0.6.331"
+dependencies = [
+ "anyhow",
+ "clap",
+ "dirs",
+ "hex",
+ "hmac 0.12.1",
+ "nix 0.29.0",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "toml 0.8.23",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "arbos-update"
 version = "0.6.331"
 dependencies = [
