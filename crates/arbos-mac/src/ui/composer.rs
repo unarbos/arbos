@@ -389,13 +389,20 @@ impl ComposerInput {
     /// range touches goes whole (the range grows to cover it), chips after it
     /// shift. Returns the range actually replaced.
     fn splice(&mut self, range: Range<usize>, new_text: &str) -> Range<usize> {
-        let mut range = range;
+        // Drop chips that no longer sit inside the buffer (a stale range used
+        // to grow the splice past `content.len()` and panic on backspace —
+        // [feedback app-01M61JH8TSB6RY0S44GJXYTAG9]).
+        let len = self.content.len();
+        self.tokens
+            .retain(|t| t.range.end <= len && t.range.start < t.range.end);
+        let mut range = clamp_byte_range(&self.content, range);
         for t in &self.tokens {
             if t.range.start < range.end && t.range.end > range.start {
                 range.start = range.start.min(t.range.start);
                 range.end = range.end.max(t.range.end);
             }
         }
+        range = clamp_byte_range(&self.content, range);
         let delta = new_text.len() as isize - range.len() as isize;
         self.tokens
             .retain(|t| t.range.end <= range.start || t.range.start >= range.end);
@@ -420,13 +427,14 @@ impl ComposerInput {
     /// Move an offset that fell inside a chip to its nearer edge (`forward`
     /// picks the end on a tie).
     fn snap(&self, offset: usize, forward: bool) -> usize {
+        let offset = clamp_byte_offset(&self.content, offset);
         match self.token_around(offset) {
             Some(t) => {
                 let (a, b) = (offset - t.range.start, t.range.end - offset);
                 if a < b || (a == b && !forward) {
                     t.range.start
                 } else {
-                    t.range.end
+                    t.range.end.min(self.content.len())
                 }
             }
             None => offset,
@@ -1236,17 +1244,19 @@ impl ComposerInput {
     }
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let offset = clamp_byte_offset(&self.content, offset);
         self.selected_range = offset..offset;
         self.caret_downstream = false;
         cx.notify()
     }
 
     fn cursor_offset(&self) -> usize {
-        if self.selection_reversed {
+        let raw = if self.selection_reversed {
             self.selected_range.start
         } else {
             self.selected_range.end
-        }
+        };
+        clamp_byte_offset(&self.content, raw)
     }
 
     fn index_for_mouse_position(&self, position: Point<Pixels>) -> usize {
@@ -1277,6 +1287,7 @@ impl ComposerInput {
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let offset = clamp_byte_offset(&self.content, offset);
         self.caret_downstream = false;
         if self.selection_reversed {
             self.selected_range.start = offset
@@ -1326,6 +1337,7 @@ impl ComposerInput {
 
     /// One step left: a whole chip when the caret sits at its end.
     fn previous_boundary(&self, offset: usize) -> usize {
+        let offset = clamp_byte_offset(&self.content, offset);
         if let Some(t) = self.tokens.iter().find(|t| t.range.end == offset) {
             return t.range.start;
         }
@@ -1340,8 +1352,9 @@ impl ComposerInput {
 
     /// One step right: a whole chip when the caret sits at its start.
     fn next_boundary(&self, offset: usize) -> usize {
+        let offset = clamp_byte_offset(&self.content, offset);
         if let Some(t) = self.tokens.iter().find(|t| t.range.start == offset) {
-            return t.range.end;
+            return t.range.end.min(self.content.len());
         }
         let next = self
             .content
@@ -1477,6 +1490,26 @@ impl ComposerInput {
             layout.bounds.size.width,
             self.text_center,
         )
+    }
+}
+
+/// Byte offset inside `text`, snapped down to a char boundary.
+fn clamp_byte_offset(text: &str, mut offset: usize) -> usize {
+    offset = offset.min(text.len());
+    while offset > 0 && !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
+}
+
+/// Byte range inside `text`, both ends on char boundaries.
+fn clamp_byte_range(text: &str, range: Range<usize>) -> Range<usize> {
+    let start = clamp_byte_offset(text, range.start);
+    let end = clamp_byte_offset(text, range.end);
+    if start <= end {
+        start..end
+    } else {
+        end..start
     }
 }
 
