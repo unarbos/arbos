@@ -135,7 +135,7 @@ pub(super) fn page(
         name,
         badge: None,
         subtitle: Some(subtitle.into()),
-        subtitle_color: theme.text_muted,
+        subtitle_color: theme.label_muted(),
         subtitle_click: None,
         subtitle_element: None,
         editor: None,
@@ -251,11 +251,11 @@ fn channels_tab(
                             .size(px(kit::AVATAR))
                             .flex_shrink_0()
                             .rounded(px(10.0))
-                            .bg(theme.surface_2)
+                            .bg(theme.control_fill())
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(sf_symbols::glyph("number", 18.0, theme.text_muted)),
+                            .child(sf_symbols::glyph("number", 18.0, theme.label_muted())),
                     )
                     .child(
                         div()
@@ -266,7 +266,7 @@ fn channels_tab(
                             .flex()
                             .items_center()
                             .rounded(px(8.0))
-                            .bg(theme.field)
+                            .bg(theme.field_fill())
                             .border_1()
                             .border_color(theme.primary)
                             .text_size(px(TEXT_BODY))
@@ -317,7 +317,7 @@ fn channels_tab(
                         .opacity(0.0)
                         .group_hover(group, |s| s.opacity(1.0))
                         .map(|el| highlight::button(el, theme))
-                        .child(sf_symbols::glyph("xmark", 11.0, theme.text_muted))
+                        .child(sf_symbols::glyph("xmark", 11.0, theme.label_muted()))
                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
@@ -400,7 +400,7 @@ fn channels_tab(
                 .items_center()
                 .rounded_full()
                 .cursor_pointer()
-                .map(|el| highlight::washed(el, theme.field, theme))
+                .map(|el| highlight::washed(el, theme.field_fill(), theme))
                 .text_size(px(TEXT_SMALL))
                 .text_color(theme.text)
                 .child("Unarchive")
@@ -521,7 +521,7 @@ fn members_tab(
                             if is_admin {
                                 theme.warn
                             } else {
-                                theme.text_muted
+                                theme.label_muted()
                             },
                         ))
                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -550,7 +550,7 @@ fn members_tab(
                         .opacity(0.0)
                         .group_hover(group, |s| s.opacity(1.0))
                         .map(|el| highlight::button(el, theme))
-                        .child(sf_symbols::glyph("xmark", 11.0, theme.text_muted))
+                        .child(sf_symbols::glyph("xmark", 11.0, theme.label_muted()))
                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
@@ -568,7 +568,7 @@ fn members_tab(
                 people::avatar(images[i].clone(), m, kit::AVATAR, theme).into_any_element(),
                 title,
                 subtitle,
-                theme.text_muted,
+                theme.label_muted(),
                 trailing,
                 theme,
             )
@@ -705,7 +705,7 @@ fn settings_tab(
             .justify_center()
             .cursor_pointer()
             .map(|el| highlight::button(el, theme))
-            .child(sf_symbols::glyph("xmark", 11.0, theme.text_muted))
+            .child(sf_symbols::glyph("xmark", 11.0, theme.label_muted()))
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
@@ -846,7 +846,7 @@ fn leave_footer(
             .child(
                 div()
                     .text_size(px(TEXT_SMALL))
-                    .text_color(theme.text_muted)
+                    .text_color(theme.label_muted())
                     .child(note),
             )
             .child(

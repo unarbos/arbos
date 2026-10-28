@@ -156,7 +156,7 @@ fn glyph_tile(glyph: &'static str, theme: &Theme) -> AnyElement {
     div()
         .size(px(HERO_AVATAR))
         .rounded(px(HERO_AVATAR * 0.28))
-        .bg(theme.surface_2)
+        .bg(theme.control_fill())
         .flex()
         .items_center()
         .justify_center()
@@ -209,7 +209,7 @@ fn section(part: Section, theme: &Theme, cx: &mut Context<Shell>) -> AnyElement 
                     .px(px(kit::INSET))
                     .pb(px(12.0))
                     .text_size(px(TEXT_TINY))
-                    .text_color(theme.text_muted)
+                    .text_color(theme.label_muted())
                     .child(note),
             )
             .into_any_element(),
@@ -262,7 +262,7 @@ pub fn render(pane: ProfilePane, shell: &Shell, cx: &mut Context<Shell>) -> Stat
             .items_center()
             .gap(px(6.0))
             .child(pane.hero.name)
-            .child(sf_symbols::glyph(glyph, 14.0, theme.text_muted))
+            .child(sf_symbols::glyph(glyph, 14.0, theme.label_muted()))
             .into_any_element(),
         None => pane.hero.name,
     };
