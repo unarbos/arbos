@@ -47,6 +47,7 @@ mod notices;
 mod notify;
 mod outside;
 mod outside_sidecar;
+mod outside_wake;
 mod people;
 mod perf;
 mod proxy;
@@ -596,8 +597,10 @@ async fn main() -> anyhow::Result<()> {
                 .delete(outside::revoke),
         )
         .route("/outside-agents/{id}/rotate", post(outside::rotate))
+        .route("/outside-agents/{id}/wake/test", post(outside::wake_test))
         // … and the agent side (bearer arbk_ key).
         .route("/asp/me", get(outside::me))
+        .route("/asp/wake/test", post(outside::asp_wake_test))
         .route("/asp/inbox", get(outside::inbox))
         .route("/asp/events", post(outside::events))
         .route("/asp/socket", get(outside::socket))
