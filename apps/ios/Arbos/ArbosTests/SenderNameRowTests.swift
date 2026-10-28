@@ -28,7 +28,7 @@ final class SenderNameRowTests: XCTestCase {
     private func names(_ rows: [Row]) -> [(String, Bool)] {
         rows.compactMap { row in
             switch row.kind {
-            case .other(let text, _, _, let named, _): return (text, named)
+            case .other(let text, _, _, let named, _, _): return (text, named)
             case .member(_, _, _, _, _, let named, _, _): return ("agent", named)
             case .user: return ("mine", false)
             default: return nil
@@ -76,7 +76,7 @@ final class SenderNameRowTests: XCTestCase {
         reply.replyTo = "m0"
         let rows = Transcript.rows([person(0, sender: "user:fx-u3", handle: "mira-k", "question"), reply],
                                    projectId: "people:\(chat)", me: "user:fx-me", people: true, multiParty: true)
-        guard case .other(let text, _, _, let named, let quote)? = rows.last?.kind else {
+        guard case .other(let text, _, _, let named, let quote, _)? = rows.last?.kind else {
             return XCTFail("the reply is someone else's bubble: \(String(describing: rows.last?.kind))")
         }
         XCTAssertTrue(named)
