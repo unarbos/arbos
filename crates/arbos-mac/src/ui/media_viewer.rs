@@ -8,11 +8,13 @@
 //! (Copy — and ⌘C while the viewer is up — puts the picture itself on the
 //! pasteboard, original bytes under its own type,
 //! [feedback copy-image-messages-mac-2026-10-27]).
-//! Video shows its poster with Play (QuickTime Player); a file shows its tile
-//! with Quick Look. Forward opens a picker of DMs, agents and groups; one
-//! click sends the item there as a new message. The same picker serves the
-//! bubble menu's Forward (feedback app-01M5MXRZ7609S70P9S9P2RZDDF), over the
-//! chat instead of the lightbox.
+//! Video shows its poster with Play; Play fetches the clip and plays it
+//! inline in the viewer (macOS AVPlayerView — [feedback
+//! app-01M6147S9TPNBQA7KSDEY0K8C4]); Download stays a separate pill. A file
+//! shows its tile with Quick Look. Forward opens a picker of DMs, agents and
+//! groups; one click sends the item there as a new message. The same picker
+//! serves the bubble menu's Forward (feedback app-01M5MXRZ7609S70P9S9P2RZDDF),
+//! over the chat instead of the lightbox.
 
 use gpui::{
     actions, div, img, prelude::*, px, AnyElement, Context, Div, ElementId, FocusHandle,
@@ -249,65 +251,73 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> A
         },
         AttachmentKind::Video => {
             let play = shell.state.clone();
-            div()
-                .relative()
-                .w_full()
-                .h_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    div()
-                        .w_full()
-                        .h_full()
-                        .rounded(px(8.0))
-                        .bg(white(0.06))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(sf_symbols::glyph("video", 44.0, white(0.25))),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .justify_center()
-                        .gap(px(14.0))
-                        .child(
-                            div()
-                                .id("media-viewer-play")
-                                .size(px(76.0))
-                                .rounded_full()
-                                .bg(Theme::with_alpha(gpui::black(), 0.47))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .when(can_act && !busy, |el| {
-                                    el.cursor_pointer()
-                                        // hover-fill: exception overlay
-                                        .hover(|s| s.bg(Theme::with_alpha(gpui::black(), 0.62)))
-                                })
-                                .child(sf_symbols::glyph("play.fill", 30.0, white(1.0)))
-                                .on_click(move |_, _, cx| {
-                                    cx.stop_propagation();
-                                    play.update(cx, |s, cx| s.media_viewer_open_external(cx));
-                                }),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(white(0.67))
-                                .child(if busy {
-                                    "Opening…"
-                                } else {
-                                    "Opens in QuickTime Player"
-                                }),
-                        ),
-                )
-                .into_any_element()
+            let playing = viewer.playing.is_some();
+            // While the native AVPlayerView is up, leave the body empty — the
+            // player sits on top of this frame (ui::video_player).
+            if playing {
+                div()
+                    .w_full()
+                    .h_full()
+                    .rounded(px(8.0))
+                    .bg(white(0.06))
+                    .into_any_element()
+            } else {
+                div()
+                    .relative()
+                    .w_full()
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .w_full()
+                            .h_full()
+                            .rounded(px(8.0))
+                            .bg(white(0.06))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(sf_symbols::glyph("video", 44.0, white(0.25))),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .justify_center()
+                            .gap(px(14.0))
+                            .child(
+                                div()
+                                    .id("media-viewer-play")
+                                    .size(px(76.0))
+                                    .rounded_full()
+                                    .bg(Theme::with_alpha(gpui::black(), 0.47))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .when(can_act && !busy, |el| {
+                                        el.cursor_pointer()
+                                            // hover-fill: exception overlay
+                                            .hover(|s| s.bg(Theme::with_alpha(gpui::black(), 0.62)))
+                                    })
+                                    .child(sf_symbols::glyph("play.fill", 30.0, white(1.0)))
+                                    .on_click(move |_, _, cx| {
+                                        cx.stop_propagation();
+                                        play.update(cx, |s, cx| s.media_viewer_open_external(cx));
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(white(0.67))
+                                    .child(if busy { "Loading…" } else { "Play" }),
+                            ),
+                    )
+                    .into_any_element()
+            }
         }
         _ => file_body(&item, busy, can_act, shell.state.clone(), &theme).into_any_element(),
     };
