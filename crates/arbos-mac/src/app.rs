@@ -7853,6 +7853,39 @@ impl AppState {
         let Some(project) = self.project(&project_id) else {
             return;
         };
+        // A message in a group (people group, shared project chat): the banner is titled
+        // with the group and the sender moves into the body — "Arbonites" / "Doug: Five." —
+        // with the group's picture; the same shape as the iPhone and the relay's APNs payload
+        // (Jacob 2026-10-27: "cannot tell which group a message came from"). A DM keeps the
+        // sender as the title.
+        let group = (kind.is_message() && project.is_groupish() && sender.is_some()).then(|| {
+            (
+                project.name.clone(),
+                project
+                    .image_url
+                    .as_deref()
+                    .and_then(|u| self.person_notification_png(u))
+                    .or_else(|| {
+                        crate::ui::avatars::notification_png(
+                            &project.id,
+                            &project.name,
+                            project.avatar_color_index,
+                            crate::ui::theme::system_is_dark(),
+                        )
+                    }),
+            )
+        });
+        let (detail, sender, image) = match group {
+            Some((group_name, group_image)) => {
+                let (title, body) = notify::group_frame(
+                    &group_name,
+                    sender.as_deref().unwrap_or_default(),
+                    &detail,
+                );
+                (body, Some(title), group_image.or(image))
+            }
+            None => (detail, sender, image),
+        };
         let mut event = NotifyEvent::new(project.id.clone(), project.name.clone(), kind, detail);
         event.chat_id = chat_id.map(str::to_string);
         event.sender = sender;
@@ -8183,16 +8216,16 @@ impl AppState {
         } else {
             format!("@{}", sender.handle)
         };
+        // Same shape as a group banner: title = where ("Server › #channel"), body = "Sender: text".
+        let (banner_title, body) = notify::channel_frame(server_name, channel_name, &title, text);
         let mut event = NotifyEvent::new(
             key,
             server_name.to_string(),
             NotifyKind::DirectMessage,
-            text.filter(|t| !t.is_empty())
-                .map(|t| format!("#{channel_name}: {t}"))
-                .unwrap_or_else(|| format!("#{channel_name}: new message")),
+            body,
         );
         event.chat_id = Some(room_id.to_string());
-        event.sender = Some(title);
+        event.sender = Some(banner_title);
         event.image = if sender.kind == "agent" {
             crate::ui::avatars::notification_png(
                 &sender.id,
