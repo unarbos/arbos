@@ -399,7 +399,7 @@ pub fn poll_step(polling: bool, on_page: bool) -> PollStep {
 
 fn level_color(level: Level, theme: &Theme) -> gpui::Hsla {
     match level {
-        Level::Ok => theme.text_faint,
+        Level::Ok => theme.label_faint(),
         Level::Warn => theme.warn,
         Level::Crit => theme.danger,
     }
@@ -410,7 +410,7 @@ fn level_color(level: Level, theme: &Theme) -> gpui::Hsla {
 pub fn gauge_row(title: &str, g: &Gauge, theme: &Theme) -> Div {
     let color = level_color(g.level, theme);
     let value_color = match g.level {
-        Level::Ok => theme.text_muted,
+        Level::Ok => theme.label_muted(),
         _ => color,
     };
     div()
@@ -462,7 +462,7 @@ pub fn gauge_row(title: &str, g: &Gauge, theme: &Theme) -> Div {
                 div()
                     .mt(px(-2.0))
                     .text_size(px(TEXT_SMALL))
-                    .text_color(theme.text_muted)
+                    .text_color(theme.label_muted())
                     .truncate()
                     .child(sub),
             )
@@ -501,7 +501,7 @@ pub fn warning_row(w: &Warning, theme: &Theme) -> Div {
                 .child(
                     div()
                         .text_size(px(TEXT_SMALL))
-                        .text_color(theme.text_muted)
+                        .text_color(theme.label_muted())
                         .child(w.body.clone()),
                 ),
         )
@@ -548,7 +548,7 @@ pub fn agent_row(picture: AnyElement, w: &BoxWorkspace, theme: &Theme, cx: &mut 
                         .child(
                             div()
                                 .text_size(px(TEXT_TINY))
-                                .text_color(theme.text_muted)
+                                .text_color(theme.label_muted())
                                 .truncate()
                                 .child(agent_status(w)),
                         ),
@@ -565,7 +565,7 @@ pub fn agent_row(picture: AnyElement, w: &BoxWorkspace, theme: &Theme, cx: &mut 
                     el.child(
                         div()
                             .text_size(px(TEXT_SMALL))
-                            .text_color(theme.text_muted)
+                            .text_color(theme.label_muted())
                             .child(c),
                     )
                 })
@@ -573,7 +573,7 @@ pub fn agent_row(picture: AnyElement, w: &BoxWorkspace, theme: &Theme, cx: &mut 
                     el.child(
                         div()
                             .text_size(px(TEXT_TINY))
-                            .text_color(theme.text_muted)
+                            .text_color(theme.label_muted())
                             .child(m),
                     )
                 }),
