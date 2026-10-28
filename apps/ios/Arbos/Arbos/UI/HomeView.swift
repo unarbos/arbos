@@ -664,10 +664,10 @@ struct HomeView: View {
         VStack(spacing: 0) {
             topBarRow
             if showsFilterBar {
+                // The tabs' hit bands are the chrome's own 8 over / 4 under
+                // (`HomeChrome.filterBand`), so every tab is 44 pt tall end to end.
                 listFilterBar
                     .padding(.horizontal, 20)
-                    .padding(.top, 8)
-                    .padding(.bottom, 4)
             }
         }
         .zIndex(1)
@@ -829,7 +829,8 @@ struct HomeView: View {
                 withAnimation(.snappy(duration: 0.2)) { listFilter = next }
             }
         )
-        return PaneTabs(tabs: HomeListFilter.allCases.map(\.rawValue), selected: selected)
+        return PaneTabs(tabs: HomeListFilter.allCases.map(\.rawValue), selected: selected,
+                        hitAbove: HomeChrome.filterTop, hitBelow: HomeChrome.filterBottom)
             .accessibilityIdentifier("home-list-filter")
     }
 
