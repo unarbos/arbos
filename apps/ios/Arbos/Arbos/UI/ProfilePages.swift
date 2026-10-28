@@ -2604,27 +2604,9 @@ struct GroupEditSheet: View {
                 .padding(.top, 28)
             }
             .background(theme.bg)
-            .navigationTitle("Edit group")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(theme.bg, for: .navigationBar)
-            .toolbarBackground(.visible, for: .navigationBar)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Cancel") { dismiss() }.foregroundStyle(theme.text)
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { Task { await save() } } label: {
-                        Text(saving ? "Saving…" : "Save")
-                            .font(theme.font(Theme.small, weight: .semibold))
-                            .foregroundStyle(theme.onPrimary)
-                            .padding(.horizontal, 12).frame(height: 32)
-                            .background(Capsule().fill(theme.primary))
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(saving)
-                    .opacity(saving ? 0.55 : 1)
-                }
-            }
+            .sheetHeader(title: "Edit group", onLeading: { dismiss() },
+                         action: saving ? "Saving…" : "Save", actionEnabled: !saving,
+                         onAction: { Task { await save() } })
             .onAppear {
                 name = people?.title ?? ""
                 descriptionText = people?.description ?? ""

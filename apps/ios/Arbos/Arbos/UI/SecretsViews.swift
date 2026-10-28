@@ -712,20 +712,11 @@ private struct SheetFrame<Content: View>: View {
         }
         .scrollDismissesKeyboard(.interactively)
         .background(theme.bg)
-        .navigationTitle(title)
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                Button("Cancel") { dismiss() }.foregroundStyle(theme.text)
-            }
-            ToolbarItem(placement: .topBarTrailing) {
-                Button(busy ? "Saving…" : action) { save() }
-                    .font(theme.font(Theme.body, weight: .semibold))
-                    .foregroundStyle(theme.text)
-                    .disabled(!canSave || busy)
-                    .opacity(canSave && !busy ? 1 : 0.45)
-            }
-        }
+        // Titles here can be a secret's env name or a person's display name: the shared
+        // header keeps Save / Replace / Connect whole and shrinks the title instead.
+        .sheetHeader(title: title, onLeading: { dismiss() },
+                     action: busy ? "Saving…" : action, actionStyle: .text,
+                     actionEnabled: canSave && !busy, onAction: { save() })
     }
 }
 
