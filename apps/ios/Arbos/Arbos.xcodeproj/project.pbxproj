@@ -14,6 +14,9 @@
 		A1EE00000000000000000002 /* UserError.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EE00000000000000000001 /* UserError.swift */; };
 		A1BB87570AFC8FD22F77F310 /* ArbosApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1EF7B8D4ACE5D286ED5271D /* ArbosApp.swift */; };
 		A1B8CC06713710E1DE0950B9 /* DebugHooks.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B4441E009E79A1090EF589 /* DebugHooks.swift */; };
+		A1CE000000000000000000A2 /* RigTriggers.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CE000000000000000000A1 /* RigTriggers.swift */; };
+		A1CE000000000000000000B2 /* ScreenshotTranscriptUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CE000000000000000000B1 /* ScreenshotTranscriptUITests.swift */; };
+		A1CE000000000000000000C2 /* TranscriptReanchorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CE000000000000000000C1 /* TranscriptReanchorTests.swift */; };
 		A134D74DFA78D38A472BF229 /* Call.swift in Sources */ = {isa = PBXBuildFile; fileRef = A17AB0DF610F874C5BE921E3 /* Call.swift */; };
 		A1547843CA4E6FD14D625E8D /* Model.swift in Sources */ = {isa = PBXBuildFile; fileRef = A123D7A2CAFBECAE6ECFCF29 /* Model.swift */; };
 		A117280222D51C2ECDBA9FC8 /* People.swift in Sources */ = {isa = PBXBuildFile; fileRef = A19AC72230E7AD9814A783A6 /* People.swift */; };
@@ -39,6 +42,7 @@
 		A17FC3E175B29A6CC8654F7C /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D946C1D0D3D6797F9935E9 /* ChatView.swift */; };
 		A1C1E00000000000000000A2 /* PresenceRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C1E00000000000000000A1 /* PresenceRow.swift */; };
 		A1B7A11E00000000000000A2 /* WorkingSpinner.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B7A11E00000000000000A1 /* WorkingSpinner.swift */; };
+		A1CE000000000000000000D2 /* TranscriptReanchor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CE000000000000000000D1 /* TranscriptReanchor.swift */; };
 		A1B7A11E00000000000000B2 /* WorkingSpinnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B7A11E00000000000000B1 /* WorkingSpinnerTests.swift */; };
 		A1B7A11E00000000000000C2 /* StatusMarks.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B7A11E00000000000000C1 /* StatusMarks.swift */; };
 		A1B7A11E00000000000000D2 /* StatusDotLintTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B7A11E00000000000000D1 /* StatusDotLintTests.swift */; };
@@ -239,6 +243,9 @@
 		A1E59E8E49DC7AEE0EE9D0F3 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A1EF7B8D4ACE5D286ED5271D /* ArbosApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArbosApp.swift; sourceTree = "<group>"; };
 		A1B4441E009E79A1090EF589 /* DebugHooks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugHooks.swift; sourceTree = "<group>"; };
+		A1CE000000000000000000A1 /* RigTriggers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RigTriggers.swift; sourceTree = "<group>"; };
+		A1CE000000000000000000B1 /* ScreenshotTranscriptUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotTranscriptUITests.swift; sourceTree = "<group>"; };
+		A1CE000000000000000000C1 /* TranscriptReanchorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptReanchorTests.swift; sourceTree = "<group>"; };
 		A17AB0DF610F874C5BE921E3 /* Call.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Call.swift; sourceTree = "<group>"; };
 		A123D7A2CAFBECAE6ECFCF29 /* Model.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Model.swift; sourceTree = "<group>"; };
 		A19AC72230E7AD9814A783A6 /* People.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = People.swift; sourceTree = "<group>"; };
@@ -264,6 +271,7 @@
 		A1D946C1D0D3D6797F9935E9 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
 		A1C1E00000000000000000A1 /* PresenceRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PresenceRow.swift; sourceTree = "<group>"; };
 		A1B7A11E00000000000000A1 /* WorkingSpinner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkingSpinner.swift; sourceTree = "<group>"; };
+		A1CE000000000000000000D1 /* TranscriptReanchor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptReanchor.swift; sourceTree = "<group>"; };
 		A1B7A11E00000000000000B1 /* WorkingSpinnerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkingSpinnerTests.swift; sourceTree = "<group>"; };
 		A1B7A11E00000000000000C1 /* StatusMarks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusMarks.swift; sourceTree = "<group>"; };
 		A1B7A11E00000000000000D1 /* StatusDotLintTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusDotLintTests.swift; sourceTree = "<group>"; };
@@ -493,6 +501,7 @@
 			children = (
 				A1EF7B8D4ACE5D286ED5271D,
 				A1B4441E009E79A1090EF589,
+				A1CE000000000000000000A1 /* RigTriggers.swift */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -597,6 +606,7 @@
 				A1D8800000000000000000A7 /* AvatarPickerSheet.swift */,
 				A1C1E00000000000000000A1 /* PresenceRow.swift */,
 				A1B7A11E00000000000000A1 /* WorkingSpinner.swift */,
+				A1CE000000000000000000D1 /* TranscriptReanchor.swift */,
 				A1B7A11E00000000000000C1 /* StatusMarks.swift */,
 				A1DE700000000000000000B1 /* MentionChips.swift */,
 				A1F7B0000000000000000001 /* BlockedState.swift */,
@@ -642,6 +652,7 @@
 				A1F7A0000000000000000003 /* ProfileToggleTests.swift */,
 				A1660000000000000000A030 /* HeaderGlassStructureTests.swift */,
 				A1F6000000000000000000C3 /* ChatSearchShortcutTests.swift */,
+				A1CE000000000000000000C1 /* TranscriptReanchorTests.swift */,
 				A1AD0000000000000000B003 /* SheetHeaderLayoutTests.swift */,
 				A1AD0000000000000000B005 /* AddMembersActionTests.swift */,
 				A1670000000000000000A050 /* ControlTokenLintTests.swift */,
@@ -707,6 +718,7 @@
 				A1BB00000000000000000005 /* BackSwipeUITests.swift */,
 				A1BB00000000000000000030 /* ScrollPerfUITests.swift */,
 				A1BB00000000000000000032 /* HomeFilterTabsUITests.swift */,
+				A1CE000000000000000000B1 /* ScreenshotTranscriptUITests.swift */,
 			);
 			path = ArbosUITests;
 			sourceTree = "<group>";
@@ -890,6 +902,7 @@
 				A1EE00000000000000000002 /* UserError.swift in Sources */,
 				A1BB87570AFC8FD22F77F310 /* ArbosApp.swift in Sources */,
 				A1B8CC06713710E1DE0950B9 /* DebugHooks.swift in Sources */,
+				A1CE000000000000000000A2 /* RigTriggers.swift in Sources */,
 				A134D74DFA78D38A472BF229 /* Call.swift in Sources */,
 				A1547843CA4E6FD14D625E8D /* Model.swift in Sources */,
 				A117280222D51C2ECDBA9FC8 /* People.swift in Sources */,
@@ -949,6 +962,7 @@
 				A17FC3E175B29A6CC8654F7C /* ChatView.swift in Sources */,
 				A1C1E00000000000000000A2 /* PresenceRow.swift in Sources */,
 				A1B7A11E00000000000000A2 /* WorkingSpinner.swift in Sources */,
+				A1CE000000000000000000D2 /* TranscriptReanchor.swift in Sources */,
 				A1B7A11E00000000000000C2 /* StatusMarks.swift in Sources */,
 				A10A6AAB1A89692C252B33E4 /* FeedbackSheet.swift in Sources */,
 				A19DEA501A654ADE6E17D7D0 /* HomeView.swift in Sources */,
@@ -1006,6 +1020,7 @@
 				A1F7A0000000000000000004 /* ProfileToggleTests.swift in Sources */,
 				A1660000000000000000A031 /* HeaderGlassStructureTests.swift in Sources */,
 				A1F6000000000000000000C4 /* ChatSearchShortcutTests.swift in Sources */,
+				A1CE000000000000000000C2 /* TranscriptReanchorTests.swift in Sources */,
 				A1AD0000000000000000B004 /* SheetHeaderLayoutTests.swift in Sources */,
 				A1AD0000000000000000B006 /* AddMembersActionTests.swift in Sources */,
 				A1670000000000000000A051 /* ControlTokenLintTests.swift in Sources */,
@@ -1070,6 +1085,7 @@
 				A1BB00000000000000000006 /* BackSwipeUITests.swift in Sources */,
 				A1BB00000000000000000031 /* ScrollPerfUITests.swift in Sources */,
 				A1BB00000000000000000033 /* HomeFilterTabsUITests.swift in Sources */,
+				A1CE000000000000000000B2 /* ScreenshotTranscriptUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

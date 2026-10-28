@@ -55,6 +55,7 @@ struct RootView: View {
             PerfDiagnostics.shared.start(model: model)
             #if DEBUG
             if DebugHooks.perfChanges { setlinebuf(stdout) }
+            RigTriggers.install()
             #endif
             if DebugHooks.show == "onboarding" {
                 model.demoFirstLogin(stage: DebugHooks.onboardingStage)

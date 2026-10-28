@@ -312,6 +312,11 @@ final class RowFrameIndex {
         guard let hit = frames.first(where: { $0.value.contains(point) }) else { return nil }
         return replyable.contains(hit.key) ? hit.key : nil
     }
+
+    /// Every row the lazy list holds right now, with its frame (the drawn-check after a return).
+    func realized() -> [TranscriptReanchor.Realized] {
+        frames.map { TranscriptReanchor.Realized(id: $0.key, frame: $0.value) }
+    }
 }
 
 enum TranscriptSpace {

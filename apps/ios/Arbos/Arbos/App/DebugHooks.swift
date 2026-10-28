@@ -100,6 +100,9 @@ enum DebugHooks {
     static var fakeVision: Bool { value("ARBOS_FAKE_VISION") == "1" }
     /// Text to put in the feedback sheet and send as soon as it opens (endpoint check).
     static var autoFeedback: String? { value("ARBOS_AUTO_FEEDBACK") }
+    /// `ARBOS_TRACE_TRANSCRIPT=1`: print the drawn-check after every return to a chat
+    /// (rows, shown slice, realised rows, verdict — [feedback iphone-chat-empties-after-screenshot-2026-10-28]).
+    static var traceTranscript: Bool { value("ARBOS_TRACE_TRANSCRIPT") == "1" }
     /// Fixture machine reports `always_on` (D73 policy screens).
     static var alwaysOn: Bool { value("ARBOS_ALWAYS_ON") == "1" }
     /// keyboard | settings | voice | threads | model | profile | member — opened on the chat screen

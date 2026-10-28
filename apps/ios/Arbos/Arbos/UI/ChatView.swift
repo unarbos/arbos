@@ -239,6 +239,14 @@ struct ChatSession: View {
     @State private var replySwipe = ReplySwipe()
     /// Row frames in the transcript space, for the recognizer's row-by-location lookup.
     @State private var rowFrames = RowFrameIndex()
+    /// The scroll view's visible rect, for the drawn-check after a return (`TranscriptReanchor`).
+    @State private var viewport = TranscriptViewport()
+    /// Identity of the lazy row container. Bumped only when a return found nothing drawn and a
+    /// scroll did not bring the rows back: a fresh container realises the viewport again.
+    @State private var transcriptEpoch = 0
+    /// Cancels an older drawn-check when returns stack up (sheet gone, then scene active).
+    @State private var drawnCheck = 0
+    @Environment(\.scenePhase) private var scenePhase
     /// Long-press → Forward: the text to send and who wrote it (Forward sheet).
     @State private var pendingForward: PendingForward?
     /// The tasks sheet (duplex §2.4): open while the user looks at the agent's jobs.
@@ -266,11 +274,10 @@ struct ChatSession: View {
         return h.finalize()
     }
 
-    /// The newest `windowCount` of `visibleRows`: what the VStack actually holds.
+    /// The newest `windowCount` of `visibleRows`: what the VStack actually holds. Never empty
+    /// while `visibleRows` has rows (`TranscriptReanchor.window`).
     private var windowedRows: [Row] {
-        let all = visibleRows
-        let kept = windowSkipEnd > 0 && windowSkipEnd < all.count ? all.dropLast(windowSkipEnd) : all[...]
-        return kept.count > windowCount ? Array(kept.suffix(windowCount)) : Array(kept)
+        TranscriptReanchor.window(visibleRows, count: windowCount, skipEnd: windowSkipEnd, fallback: Self.windowInitial)
     }
 
     /// Nearing the top: bring the next older slice into the view tree. The scroll view is
@@ -857,6 +864,9 @@ struct ChatSession: View {
                         ToastHost().environmentObject(model)
                     }
                     .zIndex(2)
+                #if DEBUG
+                transcriptProbe
+                #endif
                 // The chat-level note (Jacob 2026-10-26): pinned under the header pill, 16 inset —
                 // the pushes refused for this chat, or the machine in error. One element.
                 chatNote.padding(.horizontal, 16)
@@ -1883,6 +1893,8 @@ struct ChatSession: View {
                     // (`Theme.presenceLift`).
                     Color.clear.frame(height: Theme.transcriptTail).id("bottom")
                 }
+                // Rebuilt only by `recoverIfBlank` (a return that found no row drawn).
+                .id(transcriptEpoch)
                 .padding(.horizontal, 16)
                 // The rows report their frames in this space; the one swipe recognizer for
                 // reply (right, on a row) and time peek (left) lives on the scroll view.
@@ -1917,6 +1929,17 @@ struct ChatSession: View {
                 // each delta glides with layout instead of fighting a scroll animation.
                 proxy.scrollTo("bottom", anchor: .bottom)
             })
+            .modifier(TranscriptViewportReporter(viewport: viewport))
+            // A return to this chat — the feedback sheet a system screenshot opened is gone, or
+            // the scene is active again — must find rows drawn; a lazy list that came out of the
+            // covered spell with nothing realised near its viewport is re-anchored
+            // ([feedback iphone-chat-empties-after-screenshot-2026-10-28]).
+            .onReceive(FeedbackCenter.shared.$isPresented.removeDuplicates().dropFirst()) { up in
+                if !up { scheduleDrawnCheck(proxy) }
+            }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active { scheduleDrawnCheck(proxy) }
+            }
             // Nearing the top: the next older slice of rows joins the view tree; a channel
             // also asks the server for one older page.
             .modifier(NearTopReporter(enabled: true) {
@@ -2145,6 +2168,66 @@ struct ChatSession: View {
         DispatchQueue.main.async { proxy.scrollTo("bottom", anchor: .bottom) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { proxy.scrollTo("bottom", anchor: .bottom) }
     }
+
+    /// After a return (sheet dismissed, scene active): once layout has had a beat, make sure a
+    /// row is drawn in the viewport; first a scroll to where the reader was, and if that did
+    /// not bring the rows back, a fresh lazy container at the same place.
+    private func scheduleDrawnCheck(_ proxy: ScrollViewProxy) {
+        drawnCheck &+= 1
+        let gen = drawnCheck
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            guard gen == drawnCheck else { return }
+            let recovered = recoverIfBlank(proxy, rebuild: false)
+            guard recovered else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                guard gen == drawnCheck else { return }
+                recoverIfBlank(proxy, rebuild: true)
+            }
+        }
+    }
+
+    /// The transcript's chrome over its edges: the floating header (plus the search bar and call
+    /// bars) and the composer area, in content points.
+    private var transcriptHeaderInset: CGFloat { (showsMemberChips ? 104 : 64) + headerExtra }
+    private var transcriptFooterInset: CGFloat { Theme.transcriptTail + 40 }
+
+    /// Returns true when something had to be done (nothing was drawn).
+    @discardableResult
+    private func recoverIfBlank(_ proxy: ScrollViewProxy, rebuild: Bool) -> Bool {
+        let verdict = TranscriptReanchor.verdict(rowsEmpty: windowedRows.isEmpty, pinned: pinnedToBottom,
+                                                 realized: rowFrames.realized(), visibleRect: viewport.visibleRect,
+                                                 headerInset: transcriptHeaderInset, footerInset: transcriptFooterInset)
+        #if DEBUG
+        if DebugHooks.traceTranscript {
+            print("[transcript] return check rebuild=\(rebuild) verdict=\(verdict) rows=\(rows.count) shown=\(windowedRows.count) realized=\(rowFrames.realized().count) pinned=\(pinnedToBottom) window=\(windowCount) skip=\(windowSkipEnd) visible=\(viewport.visibleRect.map { "\($0)" } ?? "nil")")
+        }
+        #endif
+        switch verdict {
+        case .drawn:
+            return false
+        case .toTail:
+            if rebuild { transcriptEpoch &+= 1 }
+            settleToBottom(proxy)
+            return true
+        case .toRow(let id, let anchor):
+            if rebuild { transcriptEpoch &+= 1 }
+            var t = Transaction()
+            t.disablesAnimations = true
+            withTransaction(t) { proxy.scrollTo(id, anchor: anchor) }
+            DispatchQueue.main.async { withTransaction(t) { proxy.scrollTo(id, anchor: anchor) } }
+            return true
+        }
+    }
+
+    #if DEBUG
+    /// Rig probe (`transcript-probe`): what the transcript holds, for the UI test's failure lines.
+    private var transcriptProbe: some View {
+        Color.clear.frame(width: 1, height: 1)
+            .accessibilityElement()
+            .accessibilityIdentifier("transcript-probe")
+            .accessibilityValue("rows=\(rows.count) shown=\(windowedRows.count) realized=\(rowFrames.realized().count) pinned=\(pinnedToBottom) window=\(windowCount) skip=\(windowSkipEnd) epoch=\(transcriptEpoch) search=\(showSearch)")
+    }
+    #endif
 
     private func m_text(_ row: Row) -> String {
         messageById[row.messageId]?.plainText ?? ""
