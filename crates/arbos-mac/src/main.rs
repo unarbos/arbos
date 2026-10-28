@@ -321,6 +321,12 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-}", shell::NextTab, None),
         KeyBinding::new("ctrl-{", shell::PrevTab, None),
         KeyBinding::new("ctrl-}", shell::NextTab, None),
+        // Braces need ⌥ on German, French, Spanish, Italian and the Nordic
+        // layouts, so `cmd-{` / `cmd-}` cannot be typed there ([feedback
+        // mention-hotkey-layout-2026-10-28] audit). ⌃⇥ / ⌃⇧⇥ are the
+        // layout-independent macOS tab chords (Safari, Terminal, Xcode).
+        KeyBinding::new("ctrl-tab", shell::NextTab, None),
+        KeyBinding::new("ctrl-shift-tab", shell::PrevTab, None),
         KeyBinding::new("ctrl-t", shell::NewTab, None),
         KeyBinding::new("cmd-b", shell::ToggleRail, None),
         // Chat-Markdown chords ([feedback chat-markdown-composer-2026-10-27]):
@@ -573,6 +579,61 @@ mod keymap_tests {
     #[gpui::test]
     fn send_feedback_moved_to_cmd_alt_f(cx: &mut TestAppContext) {
         assert_eq!(actions_for(cx, "cmd-alt-f"), vec!["feedback::SendFeedback"]);
+    }
+
+    /// Non-US layouts ([feedback mention-hotkey-layout-2026-10-28], Scout):
+    /// GPUI's macOS layer delivers German ⌃⌥L — one of that layout's two ways
+    /// to type `@` — as a bare `ctrl-alt-l` with no character, so no binding
+    /// may claim it (the composer types the layout's character instead,
+    /// `composer::layout_chord_tests`); ⌥L arrives as `alt-l` carrying `@`
+    /// and must stay unbound too, so the platform types it. Every letter chord
+    /// is matched on the character the layout reports under ⌘, so ⌘B / ⌘I /
+    /// ⌘⇧X / ⌘F / ⌘⇧F / ⌘K resolve the same way from a QWERTZ or AZERTY
+    /// keyboard; only braces move under ⌥ there, hence ⌃⇥ / ⌃⇧⇥ for tabs.
+    #[gpui::test]
+    fn non_us_at_sign_chords_are_nobodys_and_tabs_have_layout_free_chords(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            bind_keys(cx);
+            let mut composer = gpui::KeyContext::default();
+            composer.add("ComposerInput");
+            let root = gpui::KeyContext::default();
+            let keymap = cx.key_bindings();
+            let first = |keys: &str, stack: &[gpui::KeyContext]| {
+                let stroke = Keystroke::parse(keys).expect("keystroke");
+                keymap
+                    .borrow()
+                    .bindings_for_input(&[stroke], stack)
+                    .0
+                    .first()
+                    .map(|b| b.action().name().to_string())
+            };
+            for keys in ["ctrl-alt-l", "alt-l->@", "alt-g->@", "alt-2->@"] {
+                assert_eq!(first(keys, std::slice::from_ref(&composer)), None, "{keys}");
+                assert_eq!(first(keys, std::slice::from_ref(&root)), None, "{keys}");
+            }
+            for (keys, action) in [
+                ("cmd-b", "composer::Bold"),
+                ("cmd-i", "composer::Italic"),
+                ("cmd-shift-x", "composer::Strike"),
+                ("cmd-f", "chat_search::Open"),
+                ("cmd-shift-f", "shell::OpenPalette"),
+                ("cmd-k", "shell::OpenPalette"),
+            ] {
+                assert_eq!(
+                    first(keys, std::slice::from_ref(&composer)).as_deref(),
+                    Some(action),
+                    "{keys}"
+                );
+            }
+            assert_eq!(
+                first("ctrl-tab", std::slice::from_ref(&root)).as_deref(),
+                Some("shell::NextTab")
+            );
+            assert_eq!(
+                first("ctrl-shift-tab", std::slice::from_ref(&root)).as_deref(),
+                Some("shell::PrevTab")
+            );
+        });
     }
 
     #[gpui::test]

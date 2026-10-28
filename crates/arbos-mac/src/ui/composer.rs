@@ -19,8 +19,8 @@ use gpui::{
     ClipboardEntry, ClipboardItem, Context, Corners, CursorStyle, DispatchPhase, Div, Element,
     ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
     Focusable, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
-    IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
-    PaintQuad, Pixels, Point, Render, RenderImage, Role as AriaRole, ScrollWheelEvent,
+    IntoElement, KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ObjectFit, PaintQuad, Pixels, Point, Render, RenderImage, Role as AriaRole, ScrollWheelEvent,
     SharedString, Stateful, Style, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
     WrappedLine,
 };
@@ -34,6 +34,7 @@ use crate::ui::error_note;
 use crate::ui::frost::{frosted, PANEL_BLUR};
 use crate::ui::glass;
 use crate::ui::highlight;
+use crate::ui::key_layout::{self, KeyboardLayout, SystemLayout};
 use crate::ui::mention::{self, Mention, MentionToken, Mentions};
 use crate::ui::select::{self, word_range};
 use crate::ui::sf_symbols;
@@ -281,6 +282,10 @@ pub struct ComposerInput {
     /// display name in `content`; the caret never stops inside one, an edit
     /// that touches one removes it whole, and the sent text reads `@handle`.
     tokens: Vec<MentionToken>,
+    /// The keyboard layout consulted for Control chords GPUI delivers without
+    /// a character (German ⌃⌥L = `@`, [feedback
+    /// mention-hotkey-layout-2026-10-28]); the system's, a table in tests.
+    keyboard_layout: Rc<dyn KeyboardLayout>,
 }
 
 /// Separators that complete a typed `@handle` (#1596, behaviour 5): the token
@@ -321,7 +326,29 @@ impl ComposerInput {
             font_size: INPUT_FONT_SIZE,
             mentions: Mentions::empty(),
             tokens: Vec::new(),
+            keyboard_layout: Rc::new(SystemLayout),
         }
+    }
+
+    /// Tests: stand in a fixed layout table for the system's.
+    #[cfg(test)]
+    pub fn set_keyboard_layout(&mut self, layout: Rc<dyn KeyboardLayout>) {
+        self.keyboard_layout = layout;
+    }
+
+    /// A key no binding took. A Control+Option chord that the layout defines
+    /// as a character (German ⌃⌥L = `@`) reaches us with no `key_char` —
+    /// GPUI's macOS layer drops the character whenever Control is held and
+    /// AppKit never sends such a chord to `insertText:` — so the layout is
+    /// asked and its text typed, as `NSTextView` would. Everything else
+    /// propagates untouched.
+    fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(text) = key_layout::typed_text(&event.keystroke, self.keyboard_layout.as_ref())
+        else {
+            return;
+        };
+        self.replace_text_in_range(None, &text, window, cx);
+        cx.stop_propagation();
     }
 
     /// Who `@handle` resolves to while typing (composer accent highlight).
@@ -2670,6 +2697,7 @@ impl Render for ComposerInput {
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::undo))
             .on_action(cx.listener(Self::redo))
+            .on_key_down(cx.listener(Self::on_key_down))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -6283,5 +6311,132 @@ mod staged_tests {
                 "a disc never reaches its neighbour"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod layout_chord_tests {
+    //! Typing `@` on a non-US layout ([feedback mention-hotkey-layout-2026-10-28],
+    //! Scout, German Mac): the chords are dispatched exactly as GPUI's macOS
+    //! layer delivers them — ⌃⌥L as a bare `ctrl-alt-l` with no character,
+    //! ⌥L as `alt-l` carrying `@` — through the real keymap (`bind_keys`) in a
+    //! headless window, against layout tables read off the real macOS layouts.
+    use super::*;
+    use crate::ui::key_layout::test_layouts::{GERMAN, US};
+    use gpui::{TestAppContext, VisualTestContext};
+
+    struct Harness {
+        input: Entity<ComposerInput>,
+    }
+
+    impl Render for Harness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(480.0))
+                .h(px(300.0))
+                .flex()
+                .child(self.input.clone())
+        }
+    }
+
+    fn field(
+        cx: &mut TestAppContext,
+        layout: Rc<dyn KeyboardLayout>,
+    ) -> (Entity<ComposerInput>, &mut VisualTestContext) {
+        cx.update(|cx| {
+            let theme = crate::ui::theme::Theme::for_pref(
+                crate::ui::theme::AppearancePref::Dark,
+                crate::ui::theme::Surface::Matte,
+                cx,
+            );
+            cx.set_global(theme);
+            crate::ui::motion::PulseClock::init(cx);
+            crate::bind_keys(cx);
+        });
+        let (view, vcx) = cx.add_window_view(|_, cx| Harness {
+            input: cx.new(|cx| {
+                let mut input = ComposerInput::new(cx);
+                input.set_keyboard_layout(layout);
+                input
+            }),
+        });
+        let input = vcx.update(|_, cx| view.read(cx).input.clone());
+        vcx.update(|window, cx| {
+            let handle = input.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        });
+        vcx.run_until_parked();
+        (input, vcx)
+    }
+
+    fn text(input: &Entity<ComposerInput>, cx: &mut VisualTestContext) -> String {
+        cx.update(|_, cx| input.read(cx).text().to_string())
+    }
+
+    fn open_mention(input: &Entity<ComposerInput>, cx: &mut VisualTestContext) -> Option<String> {
+        cx.update(|_, cx| input.read(cx).open_mention_token().map(str::to_string))
+    }
+
+    #[gpui::test]
+    fn german_control_option_l_types_at_and_opens_the_mention_picker(cx: &mut TestAppContext) {
+        let (input, cx) = field(cx, Rc::new(GERMAN));
+        cx.simulate_keystrokes("ctrl-alt-l");
+        assert_eq!(text(&input, cx), "@", "⌃⌥L on the German layout types @");
+        assert_eq!(
+            open_mention(&input, cx).as_deref(),
+            Some(""),
+            "an @ at a word start opens the mention picker with an empty query"
+        );
+        // The picker then filters on what follows, as with any typed @.
+        cx.simulate_keystrokes("s a");
+        assert_eq!(text(&input, cx), "@sa");
+        assert_eq!(open_mention(&input, cx).as_deref(), Some("sa"));
+    }
+
+    #[gpui::test]
+    fn german_option_l_arrives_with_its_character_and_is_typed_once(cx: &mut TestAppContext) {
+        let (input, cx) = field(cx, Rc::new(GERMAN));
+        // What `parse_keystroke` builds for ⌥L on German: key `l`, key_char `@`.
+        cx.simulate_keystrokes("alt-l->@");
+        assert_eq!(
+            text(&input, cx),
+            "@",
+            "the platform's character is typed, and only once"
+        );
+        assert_eq!(open_mention(&input, cx).as_deref(), Some(""));
+    }
+
+    #[gpui::test]
+    fn control_option_l_mid_word_types_at_without_a_picker(cx: &mut TestAppContext) {
+        let (input, cx) = field(cx, Rc::new(GERMAN));
+        cx.simulate_keystrokes("m a i l");
+        cx.simulate_keystrokes("ctrl-alt-l");
+        assert_eq!(text(&input, cx), "mail@");
+        assert_eq!(
+            open_mention(&input, cx),
+            None,
+            "an @ glued to a word is an address, not a mention — same as a typed @"
+        );
+    }
+
+    #[gpui::test]
+    fn us_control_option_l_is_a_control_character_and_types_nothing(cx: &mut TestAppContext) {
+        let (input, cx) = field(cx, Rc::new(US));
+        cx.simulate_keystrokes("ctrl-alt-l");
+        assert_eq!(
+            text(&input, cx),
+            "",
+            "TextEdit types nothing for ⌃⌥L on US; neither do we"
+        );
+        assert_eq!(open_mention(&input, cx), None);
+    }
+
+    #[gpui::test]
+    fn the_chord_reaches_only_the_focused_composer(cx: &mut TestAppContext) {
+        let (input, cx) = field(cx, Rc::new(GERMAN));
+        cx.update(|window, _| window.blur());
+        cx.run_until_parked();
+        cx.simulate_keystrokes("ctrl-alt-l");
+        assert_eq!(text(&input, cx), "", "blurred: nothing is typed anywhere");
     }
 }
