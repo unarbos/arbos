@@ -850,10 +850,20 @@ fn fonts() -> &'static Mutex<(cosmic_text::FontSystem, cosmic_text::SwashCache)>
     static FONTS: OnceLock<Mutex<(cosmic_text::FontSystem, cosmic_text::SwashCache)>> =
         OnceLock::new();
     FONTS.get_or_init(|| {
-        Mutex::new((
-            cosmic_text::FontSystem::new(),
-            cosmic_text::SwashCache::new(),
-        ))
+        // Bundled Inter SemiBold (same subset as chart PNGs: Latin letters +
+        // digits). cosmic-text's default sans is "Open Sans", which macOS does
+        // not ship — shaping then panics with "no default font found" when
+        // building the notification attachment
+        // (feedback app-01M61N05XSVV6PFWWAW0R2BJYP).
+        const INTER_SEMIBOLD: &[u8] =
+            include_bytes!("../../../arbos-core/assets/Inter-SemiBold-subset.ttf");
+        let mut font_system = cosmic_text::FontSystem::new();
+        {
+            let db = font_system.db_mut();
+            db.load_font_data(INTER_SEMIBOLD.to_vec());
+            db.set_sans_serif_family("Inter");
+        }
+        Mutex::new((font_system, cosmic_text::SwashCache::new()))
     })
 }
 
@@ -891,7 +901,7 @@ pub fn notification_png(seed: &str, name: &str, index: Option<u8>, dark: bool) -
 }
 
 /// White semibold initials centred on the disc, through cosmic-text and the
-/// system's sans-serif.
+/// bundled Inter sans (loaded in [`fonts`]).
 fn draw_initials(out: &mut image::RgbaImage, text: &str) {
     use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Weight};
     let Ok(mut guard) = fonts().lock() else {
