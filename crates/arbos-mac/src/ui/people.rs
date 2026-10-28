@@ -1213,31 +1213,22 @@ pub fn members_popover(
         .child(frosted(PANEL_RADIUS, MENU_BLUR, card))
 }
 
-/// Stacked avatars for a project with people in it (a sidebar row's corner,
-/// through `badge::corner`). Each head wears a 1 pt rim in `ring` — the
-/// surface the row rests on — and `hover`'s colour while that hover group is
-/// under the pointer.
+/// Stacked avatars for a project with people in it (tile corner / header).
 pub fn avatar_stack(
     people: &[(Person, Option<Arc<RenderImage>>)],
     size: f32,
     max: usize,
-    ring: gpui::Hsla,
-    hover: Option<(SharedString, gpui::Hsla)>,
     theme: &Theme,
 ) -> Div {
     let mut row = div().flex().items_center();
     for (i, (p, image)) in people.iter().take(max).enumerate() {
         let image = image.clone();
-        let hover = hover.clone();
         row = row.child(
             div()
                 .when(i > 0, |el| el.ml(px(-size * 0.3)))
                 .rounded_full()
                 .border_1()
-                .border_color(ring)
-                .when_some(hover, |el, (group, color)| {
-                    el.group_hover(group, move |s| s.border_color(color))
-                })
+                .border_color(theme.bg)
                 .child(avatar(image, p, size, theme)),
         );
     }
