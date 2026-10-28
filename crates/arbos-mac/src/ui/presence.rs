@@ -678,7 +678,7 @@ mod placement_tests {
     use crate::sync::{ClientCommand, SyncEvent, SyncSource};
     use crate::ui::shell::Shell;
     use crate::ui::theme::COMPOSER_HEIGHT;
-    use crate::ui::transcript::{LAST_BUBBLE_TO_COMPOSER, ROW_GAP_HALF, TURN_GAP_EXTRA};
+    use crate::ui::transcript::{LAST_BUBBLE_TO_COMPOSER, ROW_GAP_HALF};
 
     struct Idle;
 
@@ -891,7 +891,9 @@ mod placement_tests {
         );
 
         // The reply lands: the row goes, the reply takes the next slot under
-        // the ack (the turn gap), and the pill and its 54 pt stand still.
+        // the ack — the in-run gap, since the answer follows the same agent's
+        // ack within the run window (grouped messages, Jacob 2026-10-28) —
+        // and the pill and its 54 pt stand still.
         state.update(vcx, |s, cx| {
             let list = s.messages.get_mut("c1").expect("chat");
             list.pop();
@@ -910,14 +912,11 @@ mod placement_tests {
                 sh.transcript.read(cx).row_frame("m3#m3-t.0")
             })
             .expect("the reply was drawn");
-        let answer_top = f32::from(answer.top()) + TURN_GAP_EXTRA + ROW_GAP_HALF;
+        let answer_top = f32::from(answer.top()) + ROW_GAP_HALF;
         let answer_bottom = f32::from(answer.bottom()) - ROW_GAP_HALF;
         assert!(
-            close(
-                answer_top - landed.ack_bottom,
-                2.0 * ROW_GAP_HALF + TURN_GAP_EXTRA
-            ),
-            "ack → reply {} (want the turn gap)",
+            close(answer_top - landed.ack_bottom, 2.0 * ROW_GAP_HALF),
+            "ack → reply {} (want the in-run gap)",
             answer_top - landed.ack_bottom
         );
         assert!(
