@@ -5154,35 +5154,6 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 let _ = room.cmds.send(RoomCmd::Typing(active));
             }
         }
-        ClientCommand::AddAgent {
-            chat_id,
-            project_id,
-        } => {
-            let shared = shared.clone();
-            tokio::spawn(async move {
-                match shared
-                    .post_json(
-                        &format!("/chats/{chat_id}/agents"),
-                        json!({ "project_id": project_id }),
-                    )
-                    .await
-                {
-                    Ok(_) => {
-                        if let Err(err) = refresh_registry(&shared).await {
-                            shared.diagnostic("refresh", format!("{err:#}"));
-                        }
-                    }
-                    Err(err) => {
-                        let _ = shared
-                            .events
-                            .send(SyncEvent::PeopleError(UserError::classify(
-                                "add the agent",
-                                &err,
-                            )));
-                    }
-                }
-            });
-        }
         ClientCommand::RemoveAgent {
             chat_id,
             project_id,

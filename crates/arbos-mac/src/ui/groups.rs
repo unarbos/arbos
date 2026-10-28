@@ -33,18 +33,6 @@ pub fn picture(space: &Project, state: &AppState, size: f32, theme: &Theme) -> D
     }
 }
 
-/// `#rrggbb` → colour; anything else falls back.
-pub fn project_color(hex: &str, fallback: Hsla) -> Hsla {
-    let h = hex.trim().trim_start_matches('#');
-    if h.len() != 6 {
-        return fallback;
-    }
-    match u32::from_str_radix(h, 16) {
-        Ok(v) => gpui::rgb(v).into(),
-        Err(_) => fallback,
-    }
-}
-
 /// A stable accent for a sender id when its Project is not in the registry (e.g. in a
 /// participant's "Projects ⇄" tab): a hue from the id, the theme's saturation.
 pub fn sender_color(seed: &str, theme: &Theme) -> Hsla {

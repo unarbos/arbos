@@ -27,6 +27,9 @@ use super::{editable_name, hero_picture, kit, list_row, HeroClick, HERO_AVATAR};
 
 pub(super) const TABS: [&str; 3] = ["Channels", "Members", "Settings"];
 
+/// The Members tab's one add row (people only — servers hold no agents).
+pub(crate) const ADD_MEMBERS_ID: &str = "server-add-members";
+
 /// Owner first, then admins, then members, each group by handle.
 fn sorted_members(server: &ServerInfo) -> Vec<Person> {
     let rank = |m: &Person| match m.role.as_str() {
@@ -449,7 +452,7 @@ fn members_tab(
         let sid = server.id.clone();
         list.push(
             kit::row(
-                "server-add-members",
+                ADD_MEMBERS_ID,
                 kit::Leading::Glyph("person-plus"),
                 "Add members",
                 None,
@@ -458,6 +461,7 @@ fn members_tab(
                 false,
                 theme,
             )
+            .debug_selector(|| ADD_MEMBERS_ID.into())
             .cursor_pointer()
             .group(kit::HOT)
             .on_click(cx.listener(move |this, _, _, cx| {
