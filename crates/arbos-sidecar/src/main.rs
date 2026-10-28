@@ -8,11 +8,14 @@
 mod config;
 mod control;
 mod daemon;
+mod log;
 mod mcp;
 mod mirror;
 mod redact;
 mod relay;
 mod service;
+mod session;
+mod turns;
 mod waker;
 
 use std::path::PathBuf;
@@ -50,9 +53,17 @@ enum Cmd {
         /// Non-secret webhook URL (local catchers); prefer --webhook-url-file.
         #[arg(long)]
         webhook_url: Option<String>,
-        /// Command waker, one string: 'claude -p {prompt}'
+        /// Command waker, one string: 'claude -p {prompt}' (stateless; prefer --agent)
         #[arg(long)]
         command: Option<String>,
+        /// Command waker with a persistent session: claude | codex | cursor | hermes
+        #[arg(long)]
+        agent: Option<String>,
+        /// Custom session templates ({session} is the id): 'mybot --new {session} {prompt}'
+        #[arg(long)]
+        command_new: Option<String>,
+        #[arg(long)]
+        command_resume: Option<String>,
         #[arg(long)]
         timeout_s: Option<u64>,
         /// Read the key from stdin instead of the terminal.
@@ -80,6 +91,27 @@ enum Cmd {
     },
     /// Serve MCP over stdio.
     Mcp,
+    /// Open your reply bubble with one line naming your first step (then `reply`).
+    Ack {
+        chat: String,
+        message: String,
+        text: String,
+    },
+    /// The owner-facing session log (newest first; no message text).
+    Log {
+        #[arg(long)]
+        chat: Option<String>,
+        /// wake | ack | reply | error | session
+        #[arg(long)]
+        kind: Option<String>,
+        #[arg(short = 'n', long, default_value_t = 50)]
+        limit: u64,
+    },
+    /// The agent session record; `session rotate` starts a new one on the next wake.
+    Session {
+        #[arg(value_parser = ["show", "rotate"], default_value = "show")]
+        action: String,
+    },
     /// Your chats.
     Chats,
     /// Wake rows you have not answered.
@@ -165,6 +197,9 @@ fn init(
     webhook_auth_file: Option<String>,
     webhook_url: Option<String>,
     command: Option<String>,
+    agent: Option<String>,
+    command_new: Option<String>,
+    command_resume: Option<String>,
     timeout_s: Option<u64>,
     key_stdin: bool,
     key_file: Option<PathBuf>,
@@ -192,12 +227,24 @@ fn init(
             w.url = webhook_url;
         }
         WakerKind::Command => {
-            let c = command.context("--waker command needs --command 'claude -p {prompt}'")?;
-            let argv = shell_words(&c);
-            if argv.is_empty() {
-                bail!("empty --command");
+            if let Some(a) = &agent {
+                if session::preset(a).is_none() {
+                    bail!("--agent must be claude | codex | cursor | hermes (or use --command-new/--command-resume)");
+                }
+                w.agent = Some(a.clone());
+            } else if let (Some(n), Some(r)) = (&command_new, &command_resume) {
+                w.command_new = Some(shell_words(n));
+                w.command_resume = Some(shell_words(r));
+            } else {
+                let c = command.context(
+                    "--waker command needs --agent claude|codex|cursor|hermes, or --command 'claude -p {prompt}'",
+                )?;
+                let argv = shell_words(&c);
+                if argv.is_empty() {
+                    bail!("empty --command");
+                }
+                w.command = Some(argv);
             }
-            w.command = Some(argv);
         }
         WakerKind::File | WakerKind::None => {}
     }
@@ -238,9 +285,12 @@ fn init(
     }
     cfg.save(paths)?;
     eprintln!(
-        "Config written to {} — waker: {}.",
+        "Config written to {} — waker: {}{}.",
         paths.config_file().display(),
-        waker
+        waker,
+        agent
+            .map(|a| format!(" ({a} session preset)"))
+            .unwrap_or_default()
     );
     Ok(())
 }
@@ -306,6 +356,8 @@ async fn status(paths: &Paths) -> Result<()> {
         "pending": m.pending(waker.stale_wake_s as i64 * 1000).len(),
         "waker": w,
         "last_wake": last,
+        "session": cfg.as_ref().filter(|c| c.waker.agent.is_some() || c.waker.command_new.is_some()).map(|c| session::Store::new(m.clone(), c.waker.max_turns_per_session).json()),
+        "log": log::SessionLog::new(paths).summary(),
         "paths": { "config": paths.config_dir, "data": paths.data_dir, "log": paths.log_file() },
     }));
     Ok(())
@@ -364,6 +416,9 @@ fn real_main() -> Result<i32> {
                 webhook_auth_file,
                 webhook_url,
                 command,
+                agent,
+                command_new,
+                command_resume,
                 timeout_s,
                 key_stdin,
                 key_file,
@@ -377,6 +432,9 @@ fn real_main() -> Result<i32> {
                     webhook_auth_file,
                     webhook_url,
                     command,
+                    agent,
+                    command_new,
+                    command_resume,
                     timeout_s,
                     key_stdin,
                     key_file,
@@ -413,11 +471,43 @@ fn real_main() -> Result<i32> {
                 mcp::serve(paths, cfg).await?;
                 Ok(0)
             }
+            Cmd::Session { action } => {
+                let op = if action == "rotate" {
+                    "session_rotate"
+                } else {
+                    "session"
+                };
+                match control::call(&paths, &json!({ "op": op })).await {
+                    Ok(v) => print(&v),
+                    Err(_) => {
+                        let m = mirror::Mirror::new(paths.clone());
+                        let cfg = Config::load(&paths)?;
+                        let st = session::Store::new(m, cfg.waker.max_turns_per_session);
+                        if action == "rotate" {
+                            st.request_rotation()?;
+                        }
+                        print(&st.json());
+                    }
+                }
+                Ok(0)
+            }
             other => {
                 let cfg = Config::load(&paths).ok();
                 let (name, args) = match other {
                     Cmd::Chats => ("arbos_chats", json!({})),
                     Cmd::Pending => ("arbos_pending", json!({})),
+                    Cmd::Ack {
+                        chat,
+                        message,
+                        text,
+                    } => (
+                        "arbos_ack",
+                        json!({ "chat": chat, "message": message, "text": text }),
+                    ),
+                    Cmd::Log { chat, kind, limit } => (
+                        "arbos_log",
+                        json!({ "chat": chat, "kind": kind, "limit": limit }),
+                    ),
                     Cmd::Read {
                         chat,
                         limit,

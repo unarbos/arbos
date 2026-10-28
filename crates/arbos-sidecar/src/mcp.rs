@@ -11,6 +11,10 @@ use crate::mirror::Mirror;
 
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
+/// The response template every connected agent gets (spec §13.1; also in `llms.txt` §5 and the
+/// command waker's `{prompt}` text).
+pub const INSTRUCTIONS: &str = "Arbos chat tools. When you are woken: (1) within a few seconds call arbos_ack with ONE line naming your first step — no greeting, no restating the question; (2) do the work; (3) call arbos_reply once with the answer — it appears under your ack in the same bubble; (4) more bubbles only when the answer needs them (arbos_post). Never send a second ack, never repeat the ack in the answer, never post \"done\" alone. Start with arbos_pending; reply only where you are addressed; post nothing if you decide not to answer.";
+
 fn obj(props: Value, required: &[&str]) -> Value {
     json!({ "type": "object", "properties": props, "required": required, "additionalProperties": false })
 }
@@ -31,7 +35,9 @@ pub fn tools() -> Vec<Value> {
         t("arbos_brief", "A short rolling summary of a chat (counts and the last five rows).", obj(json!({ "chat": chat }), &["chat"])),
         t("arbos_fetch_file", "Download a picture or file named by attachments[].blob to a local path (needs the files.read switch).",
           obj(json!({ "chat": chat, "blob": { "type": "string" } }), &["chat", "blob"])),
-        t("arbos_post", "Say something in a chat.", obj(json!({ "chat": chat, "text": text }), &["chat", "text"])),
+        t("arbos_ack", "FIRST, within seconds of a wake: one line naming your first step. Opens your reply bubble at once; arbos_reply then fills it in. One ack per wake.",
+          obj(json!({ "chat": chat, "message": message, "text": { "type": "string", "maxLength": 140 } }), &["chat", "message", "text"])),
+        t("arbos_post", "Say something in a chat (a further bubble; use arbos_reply for the answer to a wake).", obj(json!({ "chat": chat, "text": text }), &["chat", "text"])),
         t("arbos_reply", "Answer one specific message (preferred over arbos_post when you were addressed).",
           obj(json!({ "chat": chat, "message": message, "text": text }), &["chat", "message", "text"])),
         t("arbos_react", "Add or remove an emoji reaction on a message.",
@@ -40,6 +46,8 @@ pub fn tools() -> Vec<Value> {
         t("arbos_status", "Set the working line under the composer, present tense, up to 40 characters (\"reading Stripe\").",
           obj(json!({ "chat": chat, "text": { "type": "string", "maxLength": 40 } }), &["chat", "text"])),
         t("arbos_me", "Who you are, your scopes, and the sidecar's health.", obj(json!({}), &[])),
+        t("arbos_log", "Your own session log: wakes, acks, replies with latencies, session events, errors (newest first; no message text).",
+          obj(json!({ "chat": chat, "kind": { "type": "string", "description": "wake | ack | reply | error | session" }, "limit": { "type": "integer", "minimum": 1, "maximum": 200 } }), &[])),
     ]
 }
 
@@ -54,6 +62,7 @@ fn error_result(msg: &str) -> Value {
 /// Run one tool. Public so the CLI shares it.
 pub async fn call_tool(paths: &Paths, cfg: Option<&Config>, name: &str, args: &Value) -> Value {
     let mirror = Mirror::new(paths.clone());
+    let slog = crate::log::SessionLog::new(paths);
     let s = |k: &str| args[k].as_str().unwrap_or("").to_owned();
     let stale_ms = cfg
         .map(|c| c.waker.stale_wake_s as i64 * 1000)
@@ -77,7 +86,12 @@ pub async fn call_tool(paths: &Paths, cfg: Option<&Config>, name: &str, args: &V
                 .collect();
             text_result(&json!(chats))
         }
-        "arbos_pending" => text_result(&json!(mirror.pending(stale_ms))),
+        "arbos_pending" => {
+            let p = mirror.pending(stale_ms);
+            let rows: usize = p.iter().map(|c| c["rows"].as_array().map(|a| a.len()).unwrap_or(0)).sum();
+            let _ = slog.append(json!({ "kind": "read", "tool": "arbos_pending", "rows": rows }));
+            text_result(&json!(p))
+        }
         "arbos_read_chat" => {
             let chat = s("chat");
             if chat.is_empty() {
@@ -88,6 +102,7 @@ pub async fn call_tool(paths: &Paths, cfg: Option<&Config>, name: &str, args: &V
                 let _ = control::call(paths, &json!({ "op": "history", "chat": chat })).await;
             }
             let (rows, has_more) = mirror.read(&chat, limit, args["before"].as_str());
+            let _ = slog.append(json!({ "kind": "read", "tool": "arbos_read_chat", "chat": chat, "rows": rows.len() }));
             let before = rows.first().and_then(|r| r["id"].as_str()).map(str::to_owned);
             text_result(&json!({
                 "chat": chat, "messages": rows, "has_more": has_more,
@@ -127,6 +142,23 @@ pub async fn call_tool(paths: &Paths, cfg: Option<&Config>, name: &str, args: &V
                 Ok(v) => text_result(&v),
                 Err(e) => error_result(&e.to_string()),
             }
+        }
+        "arbos_ack" => {
+            let text = s("text");
+            if text.trim().is_empty() {
+                return error_result("text is required: one line naming your first step");
+            }
+            match control::action(paths, &json!({ "op": "ack", "chat": s("chat"), "message": s("message"), "text": text })).await {
+                Ok(v) => text_result(&json!({ "message": v["message"], "chat": v["chat"], "next": "do the work, then arbos_reply once" })),
+                Err(e) => error_result(&e.to_string()),
+            }
+        }
+        "arbos_log" => {
+            let limit = args["limit"].as_u64().unwrap_or(50).clamp(1, 200) as usize;
+            text_result(&json!({
+                "entries": slog.read(args["chat"].as_str(), args["kind"].as_str(), limit),
+                "summary": slog.summary(),
+            }))
         }
         "arbos_post" | "arbos_reply" => {
             let op = if name == "arbos_post" { "post" } else { "reply" };
@@ -198,7 +230,7 @@ pub async fn handle(paths: &Paths, cfg: Option<&Config>, msg: &Value) -> Option<
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": { "tools": { "listChanged": false } },
                 "serverInfo": { "name": "arbos-sidecar", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": "Arbos chat tools. Start with arbos_pending, read the chat, answer with arbos_reply. Reply only where you are addressed; post nothing if you decide not to answer.",
+                "instructions": INSTRUCTIONS,
             }),
         ),
         "ping" => rpc_result(&id, json!({})),
@@ -290,8 +322,13 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names.len(), 13);
+        assert_eq!(names.len(), 15);
         assert!(names.contains(&"arbos_reply") && names.contains(&"arbos_pending"));
+        assert!(names.contains(&"arbos_ack") && names.contains(&"arbos_log"));
+        assert!(init["result"]["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("arbos_ack"));
         // Buzz L9: truncation is explicit.
         let read = handle(
             &paths,
