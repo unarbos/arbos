@@ -97,7 +97,7 @@ final class ComposerMetricsTests: XCTestCase {
         // Three nested inner strokes — 1, 2/3, 1/3 pt — so the outer pixel is brightest
         // (58 / 47 / 40 luminance over #181818, Grok's edges top, bottom, left and right).
         let layers = Theme.composerRimLayers
-        XCTAssertEqual(layers.map(\.width), [1, 2 / 3, 1 / 3])
+        XCTAssertEqual(layers.map(\.width), [CGFloat(1), CGFloat(2) / 3, CGFloat(1) / 3])
         var lum: [Double] = []
         var value = 24.0  // #181818
         for layer in layers {
