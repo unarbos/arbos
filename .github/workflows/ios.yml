@@ -79,7 +79,10 @@ jobs:
     # The repository variable ARBOS_IOS_RUNNER (e.g. `arbos-mac`, the self-hosted EC2 Mac) moves
     # the lane off GitHub's hosted pool once that runner has fastlane; empty = macos-15.
     runs-on: ${{ inputs.runner || vars.ARBOS_IOS_RUNNER || 'macos-15' }}
-    timeout-minutes: 45
+    # 45 was hit on 2026-10-27 23:15 (#2122's build): the archive waited for the shared Mac's heavy slot, then
+    # Apple's processing took > 18 min and the job was cancelled inside "Wait for processing" with the build
+    # already uploaded — the run had to be redone by the next push. The wait itself is bounded in the step.
+    timeout-minutes: 90
     env:
       APP_DIR: apps/ios/Arbos
       HAVE_OP: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN != '' }}

@@ -59,6 +59,17 @@ final class UserErrorTests: XCTestCase {
         XCTAssertEqual(unknown.action, .tryAgain)
     }
 
+    /// A permission 403 (`admin_only`, [feedback group-settings-permissions-2026-10-27]) reads as
+    /// the relay's sentence, not "You were signed out"; a session 403 still signs out.
+    func testAPermission403ReadsAsTheRelaysSentence() {
+        let sentence = "Only the group's owner and admins can change its name, picture and description."
+        let denied = UserError.classify("update the group", relay(403, "admin_only", sentence))
+        XCTAssertEqual(denied.sentence, "Couldn't update the group. \(sentence)")
+        XCTAssertEqual(denied.action, UserError.Action.none)
+        let session = UserError.classify("send your message", relay(403, "forbidden", "forbidden"))
+        XCTAssertEqual(session.class, .authExpired)
+    }
+
     func testARelayTimeoutKeepsTheMeasuredSecondsAndTheDetailForDetails() {
         let e = UserError.classify("generate the image",
                                    relay(504, "avatar_timeout", "Couldn't generate the image. The server took too long.",
