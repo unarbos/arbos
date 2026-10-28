@@ -940,7 +940,7 @@ mod tests {
                 .h(px(1079.0))
                 .child(disc("toggle", TOGGLE_TOP))
                 .child(disc("plus", PLUS_TOP))
-                .child(disc("search", SEARCH_TOP))
+                .child(disc("magnifyingglass", SEARCH_TOP))
                 .child(
                     div()
                         .absolute()
@@ -979,7 +979,7 @@ mod tests {
         };
         assert_eq!(at("toggle"), (24.0, 52.0, 36.0, 36.0));
         assert_eq!(at("plus"), (24.0, 96.0, 36.0, 36.0));
-        assert_eq!(at("search"), (24.0, 140.0, 36.0, 36.0));
+        assert_eq!(at("magnifyingglass"), (24.0, 140.0, 36.0, 36.0));
         let (tx, ty, tw, th) = at("tile-0");
         assert_eq!((ty, tw, th), (192.0, 54.0, 54.0));
         assert!(

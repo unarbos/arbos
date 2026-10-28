@@ -10,7 +10,6 @@ use gpui::{
 
 use crate::ui::frost::{frosted, frosted_always, MENU_BLUR, PANEL_BLUR};
 use crate::ui::highlight;
-use crate::ui::icons::icon;
 use crate::ui::profiles::kit;
 use crate::ui::sf_symbols;
 use crate::ui::theme::{Theme, CONTROL, PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
@@ -123,7 +122,7 @@ pub fn control_disc(
         .justify_center()
         .cursor_pointer()
         .map(|el| highlight::washed(el, theme.surface_2, theme))
-        .child(icon(glyph, glyph_size, theme.text))
+        .child(sf_symbols::glyph(glyph, glyph_size, theme.text))
 }
 
 /// What a chat-header control is made of ([feedback mac-header-glass-2026-10-25],
@@ -353,7 +352,7 @@ pub fn icon_tile_sized(glyph: &str, size: f32, theme: &Theme) -> Div {
         .flex()
         .items_center()
         .justify_center()
-        .child(icon(glyph, size * 0.5, gpui::white()))
+        .child(sf_symbols::glyph(glyph, size * 0.5, gpui::white()))
 }
 
 /// Segmented choice inside a row: `[Dark] Light`.

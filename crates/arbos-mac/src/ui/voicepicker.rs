@@ -8,7 +8,7 @@ use gpui::{div, prelude::*, px, Context, Div, ElementId, FontWeight, SharedStrin
 use crate::model::{Project, Voice};
 use crate::ui::glass;
 use crate::ui::highlight::{self, Shape};
-use crate::ui::icons::icon;
+use crate::ui::sf_symbols;
 use crate::ui::shell::Shell;
 use crate::ui::theme::{Appearance, Theme, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 use crate::ui::widgets::CardPalette;
@@ -115,7 +115,9 @@ pub fn list(
             .flex()
             .items_center()
             .justify_center()
-            .when(on, |el| el.child(icon("check", 16.0, theme.accent)))
+            .when(on, |el| {
+                el.child(sf_symbols::glyph("checkmark", 16.0, theme.accent))
+            })
     };
 
     let eid = |suffix: String| ElementId::Name(SharedString::from(format!("{ids}-{suffix}")));
@@ -147,8 +149,8 @@ pub fn list(
             })
             .when(!has, |el| el.opacity(0.35))
             .hover(|s| s.opacity(0.85))
-            .child(icon(
-                if playing { "stop" } else { "play" },
+            .child(sf_symbols::glyph(
+                if playing { "stop.fill" } else { "play.fill" },
                 13.0,
                 if playing { theme.bg } else { theme.text },
             ))

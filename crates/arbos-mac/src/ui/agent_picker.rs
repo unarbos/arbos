@@ -22,9 +22,9 @@ use crate::model::{Id, Project};
 use crate::ui::avatars;
 use crate::ui::composer::ComposerInput;
 use crate::ui::highlight::{self, Shape};
-use crate::ui::icons::icon;
 use crate::ui::people::agent_picker_rows;
 use crate::ui::secrets::SecretsPanel;
+use crate::ui::sf_symbols;
 use crate::ui::theme::{Theme, TEXT_SMALL, TEXT_TINY};
 
 /// A granted agent's chip and the Add button: 30 tall (the member-chip family).
@@ -230,7 +230,7 @@ pub fn render(
                             let text = theme.text;
                             highlight::button_with(el, theme, move |s| s.text_color(text))
                         })
-                        .child(icon("xmark", 9.0, theme.text_muted))
+                        .child(sf_symbols::glyph("xmark", 9.0, theme.text_muted))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             cx.stop_propagation();
                             this.agent_picker.remove(&id);
@@ -265,7 +265,7 @@ pub fn render(
             .text_color(theme.text)
             .cursor_pointer()
             .map(|el| highlight::washed(el, base, theme))
-            .child(icon("plus", 13.0, theme.text))
+            .child(sf_symbols::glyph("plus", 13.0, theme.text))
             .child("Add agent")
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, window, cx| {
@@ -338,7 +338,7 @@ fn dropdown(
         .border_b_1()
         .border_color(theme.border)
         .cursor_text()
-        .child(icon("search", 13.0, theme.text_muted))
+        .child(sf_symbols::glyph("magnifyingglass", 13.0, theme.text_muted))
         .child(
             div()
                 .flex_1()

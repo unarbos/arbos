@@ -26,7 +26,6 @@ use crate::ui::cards;
 use crate::ui::chat_search;
 use crate::ui::frost::edge_faded;
 use crate::ui::highlight;
-use crate::ui::icons::icon;
 use crate::ui::markdown::{
     self, inline_plain, inline_spans, polish_assistant_prose, split_blocks, Block,
 };
@@ -37,6 +36,7 @@ use crate::ui::people;
 use crate::ui::profile_target;
 use crate::ui::secret_card::SecretOfferCard;
 use crate::ui::select::{BubbleAt, BubbleSelectable, LinkIcons, Selectable, Span, TextSelection};
+use crate::ui::sf_symbols;
 use crate::ui::theme::{
     Theme, BUBBLE_PAD_X, BUBBLE_PAD_Y, BUBBLE_RADIUS, CHAT_BODY, CHAT_LINE_HEIGHT, COLUMN_MARGIN,
     COMPOSER_HEIGHT, COMPOSER_WIDTH, LINE_HEIGHT, PLUS_BUTTON, TEXT_SMALL, TEXT_TINY,
@@ -452,7 +452,7 @@ pub(crate) fn forwarded_header(by: String, text_color: gpui::Hsla) -> Stateful<D
         .items_center()
         .gap(px(6.0))
         .min_w_0()
-        .child(icon("forward", 12.0, muted))
+        .child(sf_symbols::glyph("arrowshape.turn.up.right", 12.0, muted))
         .child(
             div()
                 .min_w_0()
@@ -1866,7 +1866,7 @@ impl Transcript {
             .items_center()
             .gap(px(6.0))
             .min_w_0()
-            .child(icon("bubble", 12.0, muted))
+            .child(sf_symbols::glyph("bubble.left", 12.0, muted))
             .child(
                 div()
                     .min_w_0()
@@ -1964,7 +1964,7 @@ impl Transcript {
         });
         // Keep the checkmark readable even if the pointer leaves mid-feedback.
         let more_opacity = if just_copied { 1.0 } else { opacity };
-        let more_glyph = if just_copied { "check" } else { "ellipsis" };
+        let more_glyph = if just_copied { "checkmark" } else { "ellipsis" };
         let more_color = if just_copied {
             theme.online
         } else {
@@ -1982,7 +1982,7 @@ impl Transcript {
                 .cursor_pointer()
                 .opacity(opacity)
                 .map(|el| highlight::button(el, theme))
-                .child(icon(glyph, RAIL_GLYPH, color))
+                .child(sf_symbols::glyph(glyph, RAIL_GLYPH, color))
         };
         div()
             .flex()
@@ -1991,7 +1991,7 @@ impl Transcript {
             .child(
                 btn(
                     SharedString::from(format!("{row_id}#react")),
-                    "face-smile",
+                    "face.smiling",
                     opacity,
                     theme.text_muted,
                 )
@@ -2010,7 +2010,7 @@ impl Transcript {
             .child(
                 btn(
                     SharedString::from(format!("{row_id}#reply")),
-                    "reply",
+                    "arrowshape.turn.up.left",
                     opacity,
                     theme.text_muted,
                 )
@@ -3616,7 +3616,7 @@ impl Render for Transcript {
                                 .shadow_md()
                                 .cursor_pointer()
                                 .map(|el| highlight::washed(el, theme.card(), &theme))
-                                .child(icon("arrow-down", 15.0, theme.text))
+                                .child(sf_symbols::glyph("arrow.down", 15.0, theme.text))
                                 .on_click(cx.listener(|this, _, _, cx| this.jump_to_latest(cx)))
                                 .with_animation(
                                     "jump-in",
@@ -3845,7 +3845,7 @@ fn pending_glyph(theme: &Theme) -> Div {
         .items_center()
         .justify_center()
         .debug_selector(|| "own-bubble-pending-glyph".into())
-        .child(icon("hourglass", 12.0, theme.text_muted))
+        .child(sf_symbols::glyph("hourglass", 12.0, theme.text_muted))
 }
 
 /// The mark beside a bubble the relay refused: the red glyph, always visible, outside the
@@ -3859,7 +3859,11 @@ fn failed_glyph(theme: &Theme) -> Div {
         .items_center()
         .debug_selector(|| "own-bubble-failed-glyph".into())
         // error-ui: exception failed-bubble-mark (the glyph is the mark, not a message)
-        .child(icon("exclamation", RAIL_GLYPH, theme.danger))
+        .child(sf_symbols::glyph(
+            "exclamationmark.circle",
+            RAIL_GLYPH,
+            theme.danger,
+        ))
 }
 
 /// A text block that is really machine output (a JSON object/array) is not
@@ -5359,7 +5363,7 @@ fn secret_ghost_body(name: &str, from: Option<&Person>, theme: &Theme) -> AnyEle
         .flex()
         .items_center()
         .gap(px(7.0))
-        .child(icon("key", 13.0, theme.text_muted))
+        .child(sf_symbols::glyph("key", 13.0, theme.text_muted))
         .child(
             div()
                 .flex()
@@ -6326,9 +6330,9 @@ fn copy_pill(row_id: &str, code: &str, theme: &Theme, copy: &CodeCopy) -> AnyEle
         .child(if copied {
             div()
                 .debug_selector(|| "copy-check".into())
-                .child(icon("check", 13.0, fg))
+                .child(sf_symbols::glyph("checkmark", 13.0, fg))
         } else {
-            div().child(icon("copy", 13.0, fg))
+            div().child(sf_symbols::glyph("doc.on.doc", 13.0, fg))
         })
         .on_click(move |_, window, cx| {
             if let Some(on_copy) = &on_copy {
