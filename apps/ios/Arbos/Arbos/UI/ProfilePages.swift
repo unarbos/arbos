@@ -333,28 +333,72 @@ struct PaneSectionTitle: View {
     }
 }
 
-/// The one capsule tab pill (Profile | Settings, Links | Groups, Members | Library).
+/// The tab pill's numbers: Grok's 30-ish chip (`Controls.Exception.filterChips`) and the
+/// band a tap reaches around it.
+enum PaneTabsMetrics {
+    /// The drawn capsule.
+    static let pill: CGFloat = 32
+    /// Label → capsule end.
+    static let labelPad: CGFloat = 16
+    /// Between two capsules; half of it is hit area on either side so the row tiles.
+    static let gap: CGFloat = 4
+    /// Hit band above and below the capsule when the caller gives none: the whole tab is
+    /// Apple's 44 pt tall ([feedback iphone-filter-tab-taps-2026-10-28]).
+    static let hitBand: CGFloat = 6
+    static var hitHeight: CGFloat { pill + 2 * hitBand }
+}
+
+/// The one capsule tab pill (Profile | Settings, Links | Groups, Members | Library; Home's
+/// All | Agents | People | Servers).
+///
+/// Every tab takes a tap over its WHOLE area — capsule, the band above and below it and half
+/// the gap to its neighbours — not only over the glyphs of its label. Jacob, 2026-10-28
+/// (TestFlight 202610281148575584): "can't click All". A `.plain` Button hit-tests only what
+/// its label draws: an unselected tab's capsule is `.clear`, so its hit area was the text's
+/// own box (≈ 22 × 20 pt for "All"); the selected one reached its 32 pt capsule. Now the
+/// label carries the band and `.contentShape(Rectangle())`; the drawn pill is unchanged.
 struct PaneTabs: View {
     @Environment(\.theme) private var theme
     let tabs: [String]
     @Binding var selected: String
+    /// Hit band over the capsule (Home passes its chrome's 8).
+    var hitAbove: CGFloat = PaneTabsMetrics.hitBand
+    /// Hit band under the capsule (Home passes its chrome's 4).
+    var hitBelow: CGFloat = PaneTabsMetrics.hitBand
 
     // Redesign mocks b/g (same kit as the Mac): bare labels, the current one
     // on a capsule, centred — no track, no border.
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 0) {
             ForEach(tabs, id: \.self) { t in
                 Button { withAnimation(.snappy(duration: 0.2)) { selected = t } } label: {
                     Text(t)
                         .font(theme.font(Theme.body, weight: selected == t ? .semibold : .regular))
                         .foregroundStyle(selected == t ? theme.text : theme.muted)
-                        .padding(.horizontal, 16).frame(height: 32)
+                        .padding(.horizontal, PaneTabsMetrics.labelPad).frame(height: PaneTabsMetrics.pill)
                         .background(Capsule().fill(selected == t ? theme.bubbleAssistant : .clear))
+                        .padding(.horizontal, PaneTabsMetrics.gap / 2)
+                        .padding(.top, hitAbove)
+                        .padding(.bottom, hitBelow)
+                        .contentShape(Rectangle())
+                        .overlay { hitRectOverlay }
                 }
                 .buttonStyle(.plain)
+                .accessibilityAddTraits(selected == t ? .isSelected : [])
             }
         }
         .frame(maxWidth: .infinity)
+    }
+
+    /// Rig only (`ARBOS_HIT_RECTS=1`): strokes the tab's hit area so a shot shows what a tap reaches.
+    @ViewBuilder
+    private var hitRectOverlay: some View {
+        if DebugHooks.hitRects {
+            Rectangle()
+                .strokeBorder(Color.green, lineWidth: 1.5)
+                .background(Color.green.opacity(0.12))
+                .allowsHitTesting(false)
+        }
     }
 }
 
@@ -600,11 +644,17 @@ struct ProfileLinkRow: View {
     }
 }
 
-/// The tab pill at the pane's insets (profile pages lay out edge to edge).
+/// The tab pill at the pane's insets (profile pages lay out edge to edge). The hit band
+/// above and below the pill lies in the header stack's gaps (18 over, 4 + 18 under), so the
+/// pane's layout does not move: the band is taken back here.
 struct ProfileTabs: View {
     let tabs: [String]
     @Binding var selected: String
-    var body: some View { PaneTabs(tabs: tabs, selected: $selected).padding(.horizontal, PaneKit.inset) }
+    var body: some View {
+        PaneTabs(tabs: tabs, selected: $selected)
+            .padding(.vertical, -PaneTabsMetrics.hitBand)
+            .padding(.horizontal, PaneKit.inset)
+    }
 }
 
 /// Last-seen text: the relay's `online`/`last_seen_at` (§9) merged with the
