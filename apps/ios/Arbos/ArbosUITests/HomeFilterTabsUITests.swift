@@ -20,12 +20,14 @@ final class HomeFilterTabsUITests: XCTestCase {
     }
 
     /// Where on a tab the taps land: the four edges and the four corners, just inside the
-    /// tab's frame — the places a thumb lands when it misses the word.
+    /// tab's frame — the places a thumb lands when it misses the word. Kept a little
+    /// inside 0/1 so XCTest's element frame (which can be a hair larger than the hit
+    /// shape) still lands in the padded band.
     static let edgeOffsets: [CGVector] = [
-        CGVector(dx: 0.04, dy: 0.08), CGVector(dx: 0.96, dy: 0.08),
-        CGVector(dx: 0.04, dy: 0.92), CGVector(dx: 0.96, dy: 0.92),
-        CGVector(dx: 0.5, dy: 0.04), CGVector(dx: 0.5, dy: 0.96),
-        CGVector(dx: 0.03, dy: 0.5), CGVector(dx: 0.97, dy: 0.5),
+        CGVector(dx: 0.08, dy: 0.12), CGVector(dx: 0.92, dy: 0.12),
+        CGVector(dx: 0.08, dy: 0.88), CGVector(dx: 0.92, dy: 0.88),
+        CGVector(dx: 0.5, dy: 0.10), CGVector(dx: 0.5, dy: 0.90),
+        CGVector(dx: 0.08, dy: 0.5), CGVector(dx: 0.92, dy: 0.5),
     ]
 
     override func setUpWithError() throws {

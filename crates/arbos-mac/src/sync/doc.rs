@@ -120,7 +120,7 @@ fn container_map(v: Option<ValueOrContainer>) -> Option<LoroMap> {
 #[cfg(test)]
 mod core_writer_tests {
     use super::*;
-    use crate::model::Role;
+    use crate::model::{Part, Role};
     use arbos_core::doc::{UserAttachment, UserMessageOpts};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -186,6 +186,42 @@ mod core_writer_tests {
         assert_eq!(greet.plain_text(), "Hi, I'm Arbos.");
         assert!(greet.greeting);
         assert_eq!(greet.sender, "agent:proj");
+    }
+
+    /// Tester bug ([feedback picture-reply-quote-mac-2026-10-28]): a picture sent as a
+    /// reply — no words at all — must still leave the relay row with its `replyTo`,
+    /// so every device (sender's and recipient's) draws the quote.
+    #[test]
+    fn wordless_picture_reply_row_keeps_reply_to() {
+        let core = arbos_core::doc::ChatDoc::new(None, false);
+        core.transact(|d| {
+            d.append_user_message(
+                "m1",
+                "",
+                "dev:mac",
+                &UserMessageOpts {
+                    attachments: vec![UserAttachment {
+                        name: "IMG_0042.jpeg".into(),
+                        mime: "image/jpeg".into(),
+                        kind: Some("image".into()),
+                        blob_ref: Some("blob-42".into()),
+                        source: None,
+                    }],
+                    reply_to: Some("original".into()),
+                    ..UserMessageOpts::default()
+                },
+            )
+            .unwrap();
+        });
+        let rows = core.to_json()["messages"].as_array().cloned().unwrap();
+        assert_eq!(rows[0]["replyTo"], "original");
+        let user = message_from_core_row(&rows[0]);
+        assert_eq!(user.reply_to.as_deref(), Some("original"));
+        assert!(user.plain_text().is_empty());
+        assert!(matches!(
+            &user.parts[0],
+            Part::Attachment { attachment, .. } if attachment.blob_ref.as_deref() == Some("blob-42")
+        ));
     }
 
     #[test]

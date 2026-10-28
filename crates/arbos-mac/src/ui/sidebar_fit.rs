@@ -24,7 +24,10 @@
 //! * **Filter**: the All · Agents · People · Servers capsules scroll
 //!   horizontally with an edge fade when they do not fit (Grok Bot's iPhone
 //!   home pattern for its filter row), centred when they do; the selected
-//!   capsule is scrolled into view. No icons, no overflow menu
+//!   capsule is scrolled into view **once** — when the selection or the
+//!   column's width changes ([`FilterPin`]) — and the strip is the user's
+//!   after that, so "All" can always be scrolled back
+//!   ([feedback server-strip-scroll-2026-10-28]). No icons, no overflow menu
 //!   (`ui::sidebar::render_with`).
 //! * **Strip**: unchanged — it fits at every width ≥ [`SNAP_WIDTH`]
 //!   ([`strip_fits`]).
@@ -102,6 +105,40 @@ pub fn strip_fits(width: f32) -> bool {
     let needed =
         TRAFFIC_LIGHTS_INSET + STRIP_INSET + 3.0 * STRIP_BUTTON + 2.0 * STRIP_GAP + STRIP_INSET;
     width + 0.5 >= needed
+}
+
+/// When the filter strip scrolls its selected capsule into view.
+///
+/// Affinity (Arbonites, 2026-10-28, confirmed by Scout): with Servers selected
+/// in a narrow column, "All" was clipped on the left and could not be scrolled
+/// back. Cause: `render` asked the scroll handle to bring the selected capsule
+/// into view on **every** frame, and a scroll gesture is itself a frame — each
+/// wheel tick toward "All" was undone by the next paint. The pin now fires once
+/// per `(selection, column width)`; between those changes the strip holds
+/// whatever offset the user scrolled to, 0 included.
+#[derive(Debug, Default)]
+pub struct FilterPin {
+    last: std::cell::Cell<Option<(u8, i32)>>,
+}
+
+impl FilterPin {
+    /// `true` when the selected capsule (`selected`, its index) should be
+    /// scrolled into view this frame: the selection moved or the column was
+    /// resized since the last pin. `width` is the column's width in points;
+    /// `measured` says the scroll handle has been through a frame (GPUI applies
+    /// a pin against the previous frame's bounds and overflow, so a pin asked
+    /// for before the first frame is lost — keep asking until one can land).
+    pub fn take(&self, selected: usize, width: f32, measured: bool) -> bool {
+        if !measured {
+            return true;
+        }
+        let key = (selected as u8, width.round() as i32);
+        if self.last.get() == Some(key) {
+            return false;
+        }
+        self.last.set(Some(key));
+        true
+    }
 }
 
 /// One drag of the column's right edge (expanded or rail). Created when the
