@@ -17,7 +17,6 @@ use gpui::{
 use crate::app::ProfilePage;
 use crate::model::{Chat, LinkState, Project, ServerChannel, ServerInfo};
 use crate::ui::avatars;
-use crate::ui::badge;
 use crate::ui::blocked;
 use crate::ui::composer::Composer;
 use crate::ui::glass::{self, WindowDrag};
@@ -205,17 +204,30 @@ pub fn render(
         if avatar_state != avatars::AvatarState::Idle {
             PulseClock::request(cx);
         }
-        // The machine dot hangs off the disc's corner, inside the slot's box,
-        // in front of the picture (the pill is frosted on both surfaces:
-        // `ui::badge`), ringed in the pill's own colour over the page.
-        let picture = badge::badged(
-            AVATAR_HEADER,
-            picture_disc,
-            Some(badge::Badge::new(
-                machine_dot(machine, &theme),
-                badge::ring::header_pill(&theme),
-            )),
-        );
+        // The machine dot hangs off the disc's corner, inside the slot's box.
+        let picture = div()
+            .relative()
+            .size(px(AVATAR_HEADER))
+            .flex_shrink_0()
+            .child(picture_disc)
+            .child(
+                div()
+                    .absolute()
+                    .right(px(-2.0))
+                    .bottom(px(-2.0))
+                    .size(px(10.0))
+                    .rounded_full()
+                    .bg(theme.bg)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .size(px(6.0))
+                            .rounded_full()
+                            .bg(machine_dot(machine, &theme)),
+                    ),
+            );
         let part = profile_target::mark(name_part(picture, name_el, &theme), &space.name, showing);
         part.on_click(
             cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
