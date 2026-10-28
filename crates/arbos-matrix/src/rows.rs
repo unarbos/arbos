@@ -14,6 +14,10 @@ pub struct MessageRow {
     pub id: String,
     /// `user:<id>` | `agent:<project>` | `system`.
     pub sender: String,
+    /// The sender's Matrix display name: the relay registers people under their
+    /// **handle** and agents under their name, so for a `user:` row this is the
+    /// handle (the apps look the display name up in their rosters); empty for
+    /// a system line.
     pub sender_name: String,
     pub text: String,
     pub created_at: i64,
@@ -35,6 +39,10 @@ pub struct ChannelRow {
     pub can_post: bool,
     pub unread: u64,
     pub last_text: String,
+    /// The newest row's `sender` (`user:<id>` | `agent:<project>` | `system`), so the
+    /// list can label a person the way a group's preview does.
+    pub last_sender: String,
+    /// The newest row's [`MessageRow::sender_name`] (a person's handle).
     pub last_sender_name: String,
     pub last_ts: i64,
     pub order: String,
@@ -49,6 +57,8 @@ pub struct SpaceRow {
     pub member_count: u64,
     pub unread: u64,
     pub last_text: String,
+    /// See [`ChannelRow::last_sender`].
+    pub last_sender: String,
     pub last_sender_name: String,
     pub last_ts: i64,
     pub channel_ids: Vec<String>,
@@ -71,8 +81,13 @@ pub fn member_of_mxid(mxid: &str) -> String {
 }
 
 /// Build a [`MessageRow`] from one `m.room.message` event (JSON as the server sent it).
-/// `display_name` resolves the sender's name; `me` is this device's member string so the
-/// transcript can tell own messages apart (`role: user` for people, `assistant` for agents).
+/// `display_name` resolves the sender's Matrix display name — the relay registers a person
+/// under their **handle** (`matrix/worker.rs::display_name`), an agent under its name. A
+/// person's row therefore carries `senderHandle` and **no** `senderName`: the apps resolve
+/// the display name from their rosters (server members, people chats, the directory), the
+/// way a group bubble shows it ([feedback server-member-names-2026-10-28]; before, the
+/// handle was written into `senderName` too and every channel bubble read "A" for Scout).
+/// An agent's row keeps its name in `senderName`.
 pub fn message_row(
     ev: &Value,
     display_name: &dyn Fn(&str) -> Option<String>,
@@ -114,27 +129,31 @@ pub fn message_row(
                 .to_owned()
         })
     };
-    let handle = match sender.strip_prefix("user:") {
-        Some(_) => sender_name.clone(),
-        None => String::new(),
+    let person = sender.starts_with("user:");
+    let handle = if person {
+        sender_name.clone()
+    } else {
+        String::new()
     };
     let mut parts = vec![json!({ "id": format!("{event_id}#text"), "kind": "text", "text": text })];
     if let Some(extra) = content["life.arbos.parts"].as_array() {
         parts.extend(extra.iter().cloned());
     }
-    let row = json!({
+    let mut row = json!({
         "id": id,
         "eventId": event_id,
         "role": role,
         "sender": sender,
         "senderHandle": handle,
-        "senderName": sender_name,
         "status": "done",
         "createdAt": created_at,
         "completedAt": created_at,
         "parts": parts,
         "reactions": {},
     });
+    if !person {
+        row["senderName"] = json!(sender_name);
+    }
     Some(MessageRow {
         event_id,
         id,
@@ -169,11 +188,20 @@ mod tests {
         .unwrap();
         assert_eq!(row.id, "01ULID");
         assert_eq!(row.sender, "user:gh_7");
-        assert_eq!(row.sender_name, "kenobi");
+        assert_eq!(
+            row.sender_name, "kenobi",
+            "the Matrix display name = the handle"
+        );
         let v: Value = serde_json::from_str(&row.json).unwrap();
         assert_eq!(v["role"], "user");
         assert_eq!(v["parts"][0]["text"], "hi");
         assert_eq!(v["senderHandle"], "kenobi");
+        // A person's display name is not the handle: the row leaves it to the app's roster
+        // ([feedback server-member-names-2026-10-28]).
+        assert!(
+            v.get("senderName").is_none(),
+            "no senderName on a person's row: {v}"
+        );
         let agent = json!({
             "type": "m.room.message", "event_id": "$e2", "sender": "@_a_01x:arbos.life", "origin_server_ts": 1800,
             "content": { "msgtype": "m.text", "body": "done" }
@@ -182,6 +210,11 @@ mod tests {
         assert_eq!(row.sender, "agent:01X");
         let v: Value = serde_json::from_str(&row.json).unwrap();
         assert_eq!(v["role"], "assistant");
+        assert_eq!(v["senderHandle"], "", "agents carry no handle");
+        // An agent's Matrix display name is its name: kept on the row.
+        let named = message_row(&agent, &|_| Some("Comms".to_owned())).unwrap();
+        let v: Value = serde_json::from_str(&named.json).unwrap();
+        assert_eq!(v["senderName"], "Comms");
         assert!(message_row(&json!({ "type": "m.room.member" }), &|_| None).is_none());
         // A membership notice: the owner sent it, the content names the system.
         let notice = json!({
