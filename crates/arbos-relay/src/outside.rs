@@ -451,6 +451,11 @@ fn open_streams() -> &'static StdMutex<OpenStreams> {
     S.get_or_init(|| StdMutex::new(HashMap::new()))
 }
 
+#[cfg(test)]
+pub(crate) fn deliver_for_test(state: &AppState, project_id: &str, payload: Value) {
+    deliver(state, project_id, payload);
+}
+
 /// Does this queued event ask the agent to act: a `wake: true` row or a chat it was added to?
 fn wakes(payload: &Value) -> bool {
     payload["wake"].as_bool() == Some(true) || payload["type"] == "member.added"
@@ -1432,7 +1437,14 @@ pub async fn inbox(
     let limit = q.limit.unwrap_or(100).clamp(1, 500);
     let wait = q.wait.min(WAIT_MAX_S);
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(wait);
+    let n = waiter(&me.project.id);
     loop {
+        // Register interest *before* reading the table: `notify_waiters` wakes only waiters that
+        // already exist, so an event stored between the read and the wait would otherwise park
+        // this call until `wait` runs out (up to 25 s) instead of answering at once.
+        let notified = n.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         let mut events = state
             .db
             .asp_events_after(&me.project.id, q.since, limit)
@@ -1441,9 +1453,6 @@ pub async fn inbox(
             crate::outside_sidecar::attach_context(&state, &me.project, &mut events, q.context);
             return Json(events_json(events, q.since)).into_response();
         }
-        let n = waiter(&me.project.id);
-        let notified = n.notified();
-        tokio::pin!(notified);
         tokio::select! {
             _ = &mut notified => {}
             _ = tokio::time::sleep_until(deadline) => {
@@ -1750,7 +1759,7 @@ pub(crate) async fn apply_event(state: &AppState, me: &AgentPrincipal, e: &Value
             Ok(json!({ "ok": true, "type": ty, "message": msg_id, "chat": chat_id }))
         }
         "message.react" => {
-            if !crate::outside_sidecar::allows("chat.react") {
+            if !me.agent.allows("chat.react") {
                 return Err((
                     "scope",
                     "reacting is switched off for this agent".to_owned(),
@@ -1846,7 +1855,12 @@ async fn run_socket(
         return;
     }
     let mut lease = tokio::time::interval(std::time::Duration::from_secs(45));
+    let n = waiter(&pid);
     loop {
+        // Same ordering as the inbox: interest first, then the read, then the wait.
+        let notified = n.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         // Drain what is queued first.
         let mut events = state
             .db
@@ -1880,9 +1894,6 @@ async fn run_socket(
                 .await;
             return;
         }
-        let n = waiter(&pid);
-        let notified = n.notified();
-        tokio::pin!(notified);
         tokio::select! {
             _ = &mut notified => {}
             _ = lease.tick() => {
@@ -1940,6 +1951,7 @@ pub async fn file(
     State(state): State<AppState>,
     me: AgentPrincipal,
     Path((slot, key)): Path<(String, String)>,
+    Query(size): Query<crate::avatar_image::SizeQuery>,
 ) -> Response {
     if !me.agent.allows("files.read") {
         return api_error(StatusCode::FORBIDDEN, "scope", "files are switched off for this agent — the owner can turn on \"Open files shared in chat\"");
@@ -1950,6 +1962,23 @@ pub async fn file(
             "forbidden",
             "not a file of this agent's chats",
         );
+    }
+    // `?w=<px>`: a picture scaled down on the way out (the apps' thumbnail path); anything
+    // else, or no `w`, is the original bytes with the stored mime.
+    if let Some(w) = size.w {
+        if let crate::blobs::StoredImage::Image(kind) =
+            crate::blobs::stored_image(&state, &slot, &key).await
+        {
+            if let Some(bytes) = crate::blobs::read(&state, &slot, &key).await {
+                return crate::avatar_image::respond(
+                    &state,
+                    crate::avatar_image::Master { kind, bytes },
+                    Some(w),
+                    None,
+                )
+                .await;
+            }
+        }
     }
     crate::blobs::serve(&state, &slot, &key).await
 }
@@ -2048,7 +2077,7 @@ pub async fn connect_page(State(state): State<AppState>, Path(id): Path<String>)
          Live:    WS   {relay}/asp/socket?since=0              (same events, pushed)\n\
          History: GET  {relay}/asp/chats/<chat id>/messages?before=<message id>&limit=50   (same row shape, oldest first)\n\
          Reply:   message.reply_to is the parent message {{id, from, text (first 500 chars), attachments}} when the message answers one\n\
-         Files:   GET  {relay}/asp/files/<blob>   where <blob> is attachments[].blob on a message (pictures, files, GIFs, chart PNGs);\n\
+         Files:   GET  {relay}/asp/files/<blob>   where <blob> is attachments[].blob on a message (any kind: pictures, GIFs, video, voice memos, files; add ?w=<px> for a smaller picture);\n\
                   needs the owner's switch \"Open files shared in chat\" (files.read) on the agent's profile\n\
          Write:   POST {relay}/asp/events  {{\"type\":\"message.post\",\"chat\":\"<chat id from the event>\",\"text\":\"…\",\"reply_to\":\"<message id>\"}}\n\
          Stream:  message.start → message.delta (text) → message.end\n\
