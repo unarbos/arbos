@@ -335,9 +335,22 @@ final class RelayAPI {
     func outsideAgent(_ projectId: Id) async throws -> OutsideAgentInfo? {
         do {
             let v = try await json("GET", "/outside-agents/\(projectId)")
-            return OutsideAgentInfo(json: (v as? [String: Any])?["agent"])
+            let d = v as? [String: Any]
+            return OutsideAgentInfo(json: d?["agent"], log: d?["log"])
         } catch let e as RelayError where e.status == 404 {
             return nil
+        }
+    }
+
+    /// `GET /outside-agents/{id}/log?limit=500` (#2224): the connected agent's session log,
+    /// oldest first; an older relay (404) reads as no log.
+    func outsideAgentLog(_ projectId: Id) async throws -> [OutsideLogEntry] {
+        do {
+            let v = try await json("GET", "/outside-agents/\(projectId)/log?limit=500")
+            let entries = (v as? [String: Any])?["entries"] as? [Any] ?? []
+            return entries.compactMap { OutsideLogEntry(json: $0) }
+        } catch let e as RelayError where e.status == 404 {
+            return []
         }
     }
 
@@ -398,6 +411,18 @@ final class RelayAPI {
     /// `PUT /servers/{id}/archive {archived}` — same flag for a server row.
     func setServerArchived(_ serverId: String, archived: Bool) async throws {
         _ = try await request("PUT", "/servers/\(serverId)/archive", body: ["archived": archived])
+    }
+
+    /// `GET /me/pins` → my sidebar / Home pins, top first, and the relay's cap
+    /// ([feedback sidebar-pinning-ios-2026-10-28]).
+    func pins() async throws -> PinsDto {
+        try await decode(PinsDto.self, "GET", "/me/pins")
+    }
+
+    /// `PUT /me/pins {pins}` replaces the whole list; the answer is the list the relay kept.
+    /// Over the cap → `409 pin_cap`.
+    func setPins(_ pins: [String]) async throws -> PinsDto {
+        try await decode(PinsDto.self, "PUT", "/me/pins", body: ["pins": pins])
     }
 
     func setModel(projectId: Id, model: String, effort: Effort) async throws {
@@ -1505,9 +1530,13 @@ struct OutsideAgentInfo: Equatable {
     var wakeLast: OutsideWakeLast?
     /// True on a relay that has the Wake URL at all.
     var hasWake: Bool
+    /// The session log's header numbers (`log` beside `agent` on the record, #2224); nil on a
+    /// relay without the log — the card stays away.
+    var logSummary: OutsideLogSummary? = nil
 
-    init?(json: Any?) {
+    init?(json: Any?, log: Any? = nil) {
         guard let d = json as? [String: Any] else { return nil }
+        logSummary = OutsideLogSummary(json: log)
         status = d["status"] as? String ?? "never"
         connected = d["connected"] as? Bool ?? false
         transport = d["transport"] as? String ?? "custom"
@@ -1553,6 +1582,106 @@ struct OutsideAgentInfo: Equatable {
         case ("away", nil): return "Away"
         default: return "Waiting for the first heartbeat"
         }
+    }
+}
+
+/// `log {entries, last_at, last_reply_ms}` on a connected agent's record (#2224).
+struct OutsideLogSummary: Equatable {
+    var entries: Int
+    var lastAt: Int64?
+    var lastReplyMs: Int64?
+
+    init?(json: Any?) {
+        guard let d = json as? [String: Any] else { return nil }
+        entries = (d["entries"] as? NSNumber)?.intValue ?? 0
+        lastAt = (d["last_at"] as? NSNumber)?.int64Value
+        lastReplyMs = (d["last_reply_ms"] as? NSNumber)?.int64Value
+    }
+}
+
+/// One line of a connected agent's session log as the sidecar uploaded it (spec §13.3): a wake,
+/// an ack, a reply, a session event or an error — never message text.
+struct OutsideLogEntry: Equatable, Identifiable {
+    let id: Int64
+    let at: Int64
+    let kind: String
+    let chat: String?
+    let message: String?
+    let ms: [String: Int64]
+    let session: String?
+    let error: String?
+    let turns: Int?
+    let reason: String?
+    let handoffFrom: String?
+
+    init?(json: Any?) {
+        guard let d = json as? [String: Any], let kind = d["kind"] as? String else { return nil }
+        id = (d["id"] as? NSNumber)?.int64Value ?? 0
+        at = (d["at"] as? NSNumber)?.int64Value ?? 0
+        self.kind = kind
+        chat = d["chat"] as? String
+        message = d["message"] as? String
+        ms = (d["ms"] as? [String: Any])?.compactMapValues { ($0 as? NSNumber)?.int64Value } ?? [:]
+        session = d["session"] as? String
+        error = d["error"] as? String
+        turns = (d["turns"] as? NSNumber)?.intValue
+        reason = d["reason"] as? String
+        handoffFrom = d["handoff_from"] as? String
+    }
+
+    var isError: Bool { kind == "error" }
+    var isSession: Bool { kind.hasPrefix("session.") }
+    /// Rows worth a line on the card: replies, errors and session events; wakes, typing, reads
+    /// and uploads are the plumbing behind them.
+    var shown: Bool { kind == "reply" || kind == "post" || isError || isSession }
+
+    private static func secs(_ ms: Int64) -> String { String(format: "%.1f s", Double(ms) / 1000) }
+
+    /// The first line for a session event.
+    var sessionTitle: String {
+        switch kind {
+        case "session.new": return "new session"
+        case "session.resume": return "session resumed"
+        case "session.resume_failed": return "session could not be resumed"
+        case "session.rotate": return "session rotated"
+        default: return "session"
+        }
+    }
+
+    /// The muted second line: "ack 1.2 s · reply 9.8 s", "turn 12", or the error sentence.
+    var detail: String {
+        if let error { return error }
+        if isSession {
+            switch kind {
+            case "session.resume": return turns.map { "turn \($0)" } ?? ""
+            case "session.new": return handoffFrom.map { "handoff from \($0.prefix(4))…" } ?? "first session"
+            case "session.rotate": return reason ?? ""
+            default: return ""
+            }
+        }
+        var parts: [String] = []
+        if let a = ms["event_to_ack"] { parts.append("ack \(Self.secs(a))") }
+        if let r = ms["event_to_reply"] ?? ms["nudge_to_reply"] { parts.append("reply \(Self.secs(r))") }
+        return parts.joined(separator: " · ")
+    }
+
+    var date: Date { Date(timeIntervalSince1970: Double(at) / 1000) }
+
+    /// "17:02:11" in local time.
+    var clock: String {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        return f.string(from: date)
+    }
+
+    /// "Today", "Yesterday", or the weekday and date — the View all page's section headers.
+    var day: String {
+        let cal = Calendar.current
+        if cal.isDateInToday(date) { return "Today" }
+        if cal.isDateInYesterday(date) { return "Yesterday" }
+        let f = DateFormatter()
+        f.dateFormat = "EEEE, d MMMM"
+        return f.string(from: date)
     }
 }
 

@@ -123,6 +123,20 @@ const ICONS: &[(&str, &str)] = &[
     icon!("doc", "<path d=\"M7 3h7l5 5v13H7z\"/><path d=\"M14 3v5h5\"/>"),
     // Group pane's Description row (SF `text.alignleft`): three left-aligned lines.
     icon!("text-align-left", "<path d=\"M4 7h16M4 12h11M4 17h14\"/>"),
+    // Sidebar pins (fallbacks for SF `pin` / `pin.slash` / `pin.fill`): an upright
+    // pushpin — head, flange, needle — and the same with a slash / filled.
+    icon!(
+        "pin",
+        "<path d=\"M9 3.5h6v5.2l2.6 3.1a.6.6 0 0 1-.46 1H6.86a.6.6 0 0 1-.46-1L9 8.7z\"/><path d=\"M12 12.8V21\"/>"
+    ),
+    icon!(
+        "pin-slash",
+        "<path d=\"M9 3.5h6v5.2l2.6 3.1a.6.6 0 0 1-.46 1H6.86a.6.6 0 0 1-.46-1L9 8.7z\"/><path d=\"M12 12.8V21\"/><path d=\"M4.5 4.5l15 15\"/>"
+    ),
+    icon!(
+        "pin-fill",
+        "<path d=\"M9 3.5h6v5.2l2.6 3.1a.6.6 0 0 1-.46 1H6.86a.6.6 0 0 1-.46-1L9 8.7z\" fill=\"#000\"/><path d=\"M12 12.8V21\"/>"
+    ),
     // Settings → Secrets (D83): key tile, pause switch, vault.
     icon!("key", "<circle cx=\"8\" cy=\"15\" r=\"4\"/><path d=\"M11 12l9-9M16 6l2 2M13 9l2 2\"/>"),
     icon!("pause", "<rect x=\"6\" y=\"5\" width=\"4\" height=\"14\" rx=\"1\" fill=\"#000\"/><rect x=\"14\" y=\"5\" width=\"4\" height=\"14\" rx=\"1\" fill=\"#000\"/>"),
