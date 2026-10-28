@@ -242,12 +242,8 @@ struct ChatSession: View {
     @FocusState private var searchFocused: Bool
     @ObservedObject private var calls = CallManager.shared
     /// iMessage-style: drag the transcript left to peek message times (0…`RowView.timeRevealWidth`).
-    /// Driven by the transcript's one swipe recognizer (`TranscriptSwipeHost`).
+    /// Driven by the transcript's swipe recognizer (`TranscriptSwipeHost`).
     @State private var timeReveal: CGFloat = 0
-    /// The reply swipe in progress: which row follows the finger and how far (same recognizer).
-    @State private var replySwipe = ReplySwipe()
-    /// Row frames in the transcript space, for the recognizer's row-by-location lookup.
-    @State private var rowFrames = RowFrameIndex()
     /// Long-press → Forward: the text to send and who wrote it (Forward sheet).
     @State private var pendingForward: PendingForward?
     /// The tasks sheet (duplex §2.4): open while the user looks at the agent's jobs.
@@ -1096,8 +1092,8 @@ struct ChatSession: View {
     @ViewBuilder
     private var sessionRootCoreSheets: some View {
         sessionCanvas
-        // Custom back chevron; swipe right (edge pop or anywhere outside the composer
-        // bar) goes back one level — `BackSwipe.swift`, shared by every chat screen.
+        // Custom back chevron; the system's edge pop, or a swipe right anywhere outside the
+        // composer bar, goes back one level — `BackSwipe.swift`, shared by every chat screen.
         .backSwipeToPop()
         .fullScreenCover(item: $rigViewer) { v in
             MediaViewer(album: v.items, index: v.index, onClose: { rigViewer = nil }, openForward: rigViewerForward)
@@ -1911,22 +1907,13 @@ struct ChatSession: View {
         .accessibilityAction { jumpToLatest() }
     }
 
-    /// The transcript's swipe recognizer (`TranscriptSwipeHost`): the reply swipe on a row and
-    /// the iMessage time peek, both decided on the first points so a vertical pan is the
-    /// scroll view's alone. A nested table scrolling sideways undoes a peek in progress
-    /// ([feedback ACQD4mUCTPxH7z3Y7YO8Vjw]).
+    /// The transcript's swipe recognizer (`TranscriptSwipeHost`): the iMessage time peek,
+    /// decided on the first points so a vertical pan is the scroll view's alone. A nested
+    /// table scrolling sideways undoes a peek in progress ([feedback ACQD4mUCTPxH7z3Y7YO8Vjw]).
     private func handleTranscriptSwipe(_ event: TranscriptSwipeEvent) {
         var still = Transaction()
         still.disablesAnimations = true
         switch event {
-        case .replyChanged(let row, let dx):
-            let reveal = BubbleSwipe.reveal(for: dx)
-            let armed = BubbleSwipe.triggers(reveal: reveal)
-            if armed, !replySwipe.armed { Haptics.pick() }
-            withTransaction(still) { replySwipe = ReplySwipe(rowId: row, reveal: reveal, armed: armed) }
-        case .replyEnded(let row, let fire):
-            withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) { replySwipe = ReplySwipe() }
-            if fire, let target = windowedRows.first(where: { $0.id == row }) { beginReply(to: target) }
         case .timeChanged(let dx):
             if NestedHorizontalScroll.claiming {
                 if timeReveal != 0 { withTransaction(still) { timeReveal = 0 } }
@@ -2026,12 +2013,14 @@ struct ChatSession: View {
                     Color.clear.frame(height: Theme.transcriptTail).id("bottom")
                 }
                 .padding(.horizontal, 16)
-                // The rows report their frames in this space; the one swipe recognizer for
-                // reply (right, on a row) and time peek (left) lives on the scroll view.
-                .coordinateSpace(name: TranscriptSpace.name)
+                // The time peek's recognizer (swipe left) lives on the scroll view; the same
+                // host watches the scroll view's own pan: a scroll with the search bar open and
+                // nothing typed closes it (with a keyword the list IS the results, so scrolling
+                // them keeps the bar). No SwiftUI drag: it would run per move and contend with
+                // the system's edge pop.
                 .background {
-                    if ChatGestures.replySwipe || ChatGestures.timeReveal {
-                        TranscriptSwipeHost(frames: rowFrames, onEvent: handleTranscriptSwipe)
+                    TranscriptSwipeHost(timePeek: ChatGestures.timeReveal, onEvent: handleTranscriptSwipe) {
+                        if ChatSearchClose.scrollCloses(open: showSearch, query: searchText) { closeSearch() }
                     }
                 }
                 // The avatar column follows the `+` as the composer inset animates with the keyboard.
@@ -2071,13 +2060,6 @@ struct ChatSession: View {
                         if searchResultTapped == nil { closeSearch() }
                         searchResultTapped = nil
                     }
-                }
-            )
-            // A swipe on the list with the bar open and nothing typed closes it too; with a
-            // keyword the list IS the results, so scrolling them keeps the bar.
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 12).onChanged { _ in
-                    if ChatSearchClose.scrollCloses(open: showSearch, query: searchText) { closeSearch() }
                 }
             )
             .modifier(AwayFromBottomReporter(away: $awayFromBottom, pinned: $pinnedToBottom) {
@@ -2511,7 +2493,7 @@ struct ChatSession: View {
     }
 
     /// Reply to this row: composer preview + focus (people chats also address the agent).
-    /// Long-press → Reply on the bubble, and the bubble's swipe right (`BubbleSwipe`).
+    /// Long-press → Reply on the bubble, and the actions menu.
     private func beginReply(to row: Row) {
         guard let m = messageById[row.messageId] else { return }
         editing = nil
@@ -3914,22 +3896,13 @@ extension ChatSession {
                     onQuoteTap: { quote in revealQuoted(quote, from: row.messageId) },
                     highlighted: highlightedMessage == row.messageId,
                     searchHit: searchHitsActive && Self.isMessageBubble(row),
-                    canReply: reply,
-                    replyDrag: replySwipe.rowId == row.id ? replySwipe.reveal : 0,
-                    replyArmed: replySwipe.rowId == row.id && replySwipe.armed,
+                    isMessage: reply,
                     mentions: mentions)
                 .equatable()
                 // Search result rows take a tap (simultaneous, so links and chips still work).
                 .modifier(SearchResultTap(active: searchHitsActive && Self.isMessageBubble(row)) {
                     openSearchResult(row.messageId)
                 })
-                // Where this row is, for the swipe recognizer's row-by-location lookup. The
-                // transcript space scrolls with the content, so this fires on layout, not per
-                // scroll frame; the index is a plain class, so no view is invalidated.
-                .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(TranscriptSpace.name)) } action: { frame in
-                    rowFrames.set(row.id, frame: frame, canReply: reply)
-                }
-                .onDisappear { rowFrames.remove(row.id) }
                 .padding(.top, row.id == firstId ? 0 : row.gapBefore)
                 .id(row.id)
                 .onAppear {
