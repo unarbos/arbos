@@ -1247,6 +1247,12 @@ final class RelayAPI {
         _ = try await request("DELETE", "/room/\(room)/messages/\(messageId)")
     }
 
+    /// Remove a message's link preview for everyone (#2064): the relay checks who may (the
+    /// delete rule, 403 `not_yours`), writes `preview: "off"` and drops the part itself.
+    func removeLinkPreview(room: String, messageId: String) async throws {
+        _ = try await request("DELETE", "/room/\(room)/messages/\(messageId)/preview")
+    }
+
     /// `PUT /chats/{id}/settings {read_receipts?, muted?, archived?}` per member.
     func chatSettings(chatId: String, muted: Bool? = nil, readReceipts: Bool? = nil, archived: Bool? = nil) async throws {
         var body: [String: Any] = [:]

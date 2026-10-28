@@ -39,7 +39,7 @@ final class MessageMenuTests: XCTestCase {
             XCTAssertTrue(item.label.unicodeScalars.allSatisfy { $0.isASCII }, "\(item) label carries non-ASCII text")
             XCTAssertFalse(MessageReaction.palette.contains(item.label))
         }
-        XCTAssertEqual(MessageMenuItem.allCases.count, 7)
+        XCTAssertEqual(MessageMenuItem.allCases.count, 8)
     }
 
     func testOnlyDeleteIsDestructive() {
