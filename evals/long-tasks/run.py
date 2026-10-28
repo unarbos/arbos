@@ -215,6 +215,8 @@ class Lane(threading.Thread):
         project_for_send = self.project
         task_state = {"D": D, "secret_value": None, "group_chat": None, "old_name": None}
         tag_up = re.sub(r"[^A-Za-z0-9]", "_", tag).upper()
+        if task.get("repeat_of"):
+            tag_up = f"{tag_up}_R{task['id'].rsplit('-r', 1)[-1]}"  # a repeated copy gets its own secret / fixture names
         if task.get("setup_actions"):
             for act in task["setup_actions"]:
                 act = {k: (v.replace("{TAG}", tag_up) if isinstance(v, str) else v) for k, v in act.items()}
@@ -688,6 +690,7 @@ def main():
     ap.add_argument("--out", default="")
     ap.add_argument("--dry-run", action="store_true", help="list the tasks per lane and exit")
     ap.add_argument("--min-headroom-usd", type=float, default=float(os.environ.get("LT_MIN_HEADROOM_USD", "1.0")), help="refuse to start when the relay cap has less headroom than this (#1736 rules)")
+    ap.add_argument("--repeat", default="", help="run some tasks several times, e.g. 'v2-vault-env-secret:5' (comma list); copies get ids <id>#2…#N for flake counts")
     ap.add_argument("--skip-parity", action="store_true", help="leave the Grok-parity prompts out (the duplex owner runs their own scorecards; they are ~55 %% of a full run's cost)")
     ap.add_argument("--allow-stale-seed", action="store_true", help="run even when the box's pi-ext seed does not match its image commit (#1702)")
     ap.add_argument("--refresh-stale-seed", action="store_true", help="when the seed is stale, re-copy /etc/arbos from the image into the box's persisted /etc and restart it (test box only)")
@@ -699,6 +702,18 @@ def main():
     tasks = load_tasks(only, lanes)
     if args.skip_parity:
         tasks = [t for t in tasks if not t.get("parity")]
+    if args.repeat:
+        import copy
+        reps = {k: int(v) for k, v in (x.split(":") for x in args.repeat.split(",") if ":" in x)}
+        extra = []
+        for t in tasks:
+            for n in range(2, reps.get(t["id"], 1) + 1):
+                c = copy.deepcopy(t)
+                c["id"] = f"{t['id']}-r{n}"
+                c["repeat_of"] = t["id"]
+                extra.append(c)
+        tasks += extra
+        tasks.sort(key=lambda t: (t["lane"], t.get("same_chat_as") or t["id"], 0 if not t.get("same_chat_as") else 1, t["id"]))
     if args.dry_run:
         for ln in LANES:
             print(ln, [t["id"] for t in tasks if t["lane"] == ln])
