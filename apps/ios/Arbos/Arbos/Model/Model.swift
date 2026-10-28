@@ -492,6 +492,16 @@ struct AttachmentSource: Equatable {
     var provider: String
     var id: String
     var pageUrl: String
+
+    /// `pageUrl` as an https URL for the "via <provider>" caption, or `nil`
+    /// when the scheme is anything else (feedback app-01M61EZD0GJ2XGV1EW4SCVXENK).
+    static func httpsPageURL(from string: String) -> URL? {
+        guard let url = URL(string: string),
+              url.scheme?.lowercased() == "https",
+              url.host != nil
+        else { return nil }
+        return url
+    }
 }
 
 struct Attachment: Codable, Equatable {

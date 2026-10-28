@@ -12068,10 +12068,108 @@ pub fn trim_rect(img: &image::RgbaImage) -> Option<(u32, u32, u32, u32)> {
 }
 
 /// Cap on GIF/WebP frames kept for a chat bubble (feedback
-/// app-01M5TGH18WV3QCK5KZT6XKG7FG). Past this, only the first frame is shown.
+/// app-01M5TGH18WV3QCK5KZT6XKG7FG / app-01M61EZD0GJ2XGV1EW4SCVXENK).
+/// Past this, only the first frame is shown.
 pub const ANIM_MAX_FRAMES: usize = 300;
-/// Cap on decoded RGBA bytes across all frames. Past this, only the first frame.
-pub const ANIM_MAX_DECODED_BYTES: usize = 20 * 1024 * 1024;
+/// Cap on decoded RGBA bytes across all animation frames. Past this at the
+/// side floor, only the first frame is shown.
+pub const ANIM_MAX_DECODED_BYTES: usize = 48 * 1024 * 1024;
+/// Starting longer side for animation frames (never upscale past the canvas).
+pub const ANIM_SIDE_START: u32 = 480;
+/// Smallest longer side tried before falling back to the first frame.
+pub const ANIM_SIDE_FLOOR: u32 = 200;
+
+/// Target longer side for animation frames, or `None` → show the first frame
+/// only. Starts at [`ANIM_SIDE_START`] (capped to the canvas, never upscaled);
+/// shrinks until `frame_count × scaled_w × scaled_h × 4` fits in
+/// [`ANIM_MAX_DECODED_BYTES`]; floor [`ANIM_SIDE_FLOOR`]. More than
+/// [`ANIM_MAX_FRAMES`], or not fitting at the floor, means first-frame-only.
+/// At 200 px, 300 square frames always fit (feedback
+/// app-01M61EZD0GJ2XGV1EW4SCVXENK).
+pub fn animation_frame_side(frame_count: usize, width: u32, height: u32) -> Option<u32> {
+    if frame_count == 0 || frame_count > ANIM_MAX_FRAMES {
+        return None;
+    }
+    let width = width.max(1);
+    let height = height.max(1);
+    let long = width.max(height);
+    let start = ANIM_SIDE_START.min(long);
+    if anim_decoded_bytes(frame_count, width, height, ANIM_SIDE_FLOOR) > ANIM_MAX_DECODED_BYTES {
+        return None;
+    }
+    // Highest side in [FLOOR, start] that fits the budget.
+    let mut lo = ANIM_SIDE_FLOOR;
+    let mut hi = start;
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if anim_decoded_bytes(frame_count, width, height, mid) <= ANIM_MAX_DECODED_BYTES {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    Some(lo)
+}
+
+/// RGBA byte cost of `frame_count` frames scaled so the longer side is `side`.
+fn anim_decoded_bytes(frame_count: usize, width: u32, height: u32, side: u32) -> usize {
+    let long = width.max(height).max(1);
+    let scale = side as f64 / long as f64;
+    let sw = ((width as f64) * scale).round().max(1.0) as usize;
+    let sh = ((height as f64) * scale).round().max(1.0) as usize;
+    frame_count
+        .saturating_mul(sw)
+        .saturating_mul(sh)
+        .saturating_mul(4)
+}
+
+/// Shrink `img` so its longer side is at most `side` (never enlarged).
+fn downscale_to_side(img: image::RgbaImage, side: u32) -> image::RgbaImage {
+    let (w, h) = img.dimensions();
+    let long = w.max(h);
+    if side == 0 || long <= side {
+        return img;
+    }
+    let scale = side as f32 / long as f32;
+    let nw = ((w as f32) * scale).round().max(1.0) as u32;
+    let nh = ((h as f32) * scale).round().max(1.0) as u32;
+    image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle)
+}
+
+/// Re-scale already-decoded animation frames down to `side`.
+fn rescale_anim_frames(frames: Vec<image::Frame>, side: u32) -> Vec<image::Frame> {
+    frames
+        .into_iter()
+        .map(|frame| {
+            let delay = frame.delay();
+            let left = frame.left();
+            let top = frame.top();
+            image::Frame::from_parts(
+                downscale_to_side(frame.into_buffer(), side),
+                left,
+                top,
+                delay,
+            )
+        })
+        .collect()
+}
+
+fn frame_rgba_bytes(frame: &image::Frame) -> usize {
+    let (w, h) = frame.buffer().dimensions();
+    (w as usize).saturating_mul(h as usize).saturating_mul(4)
+}
+
+/// `page_url` is safe to open from a "via <provider>" caption: only `https`.
+pub fn is_https_page_url(url: &str) -> bool {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("https") {
+        return false;
+    }
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    !host.is_empty()
+}
 
 /// Still pixels, or every frame of an animation (already scaled, RGBA, with delays).
 enum DecodedPixels {
@@ -12106,9 +12204,13 @@ fn decode_pixels(bytes: &[u8]) -> Option<DecodedPixels> {
     Some(DecodedPixels::Still(decode_rgba(bytes)?))
 }
 
-/// All frames of a GIF or WebP, each scaled to [`CHAT_IMAGE_MAX_SIDE`]. A still
-/// WebP (or a single-frame GIF) becomes [`DecodedPixels::Still`]. Over the
-/// frame or memory cap → first frame only.
+/// All frames of a GIF or WebP, each scaled to the animation side helper.
+/// A still WebP (or a single-frame GIF) becomes [`DecodedPixels::Still`].
+/// Frame count is unknown up front: decode one frame at a time at the current
+/// side; when the running total would pass the budget at frame `n`, ask the
+/// helper with `2n` frames, rescale held frames, and continue — or fall back
+/// to the first frame when the helper says so (feedback
+/// app-01M61EZD0GJ2XGV1EW4SCVXENK).
 fn decode_animation_pixels(bytes: &[u8]) -> Option<DecodedPixels> {
     use image::AnimationDecoder;
     use std::io::Cursor;
@@ -12124,23 +12226,60 @@ fn decode_animation_pixels(bytes: &[u8]) -> Option<DecodedPixels> {
 
     let mut frames: Vec<image::Frame> = Vec::new();
     let mut decoded_bytes: usize = 0;
+    let mut side = ANIM_SIDE_START;
+    let mut canvas: Option<(u32, u32)> = None;
     for result in frames_iter {
         let frame = result.ok()?;
         let delay = frame.delay();
         let left = frame.left();
         let top = frame.top();
-        let scaled = downscale_for_chat(frame.into_buffer());
-        let (w, h) = scaled.dimensions();
-        let frame_bytes = (w as usize).saturating_mul(h as usize).saturating_mul(4);
-        if frames.len() >= ANIM_MAX_FRAMES
-            || decoded_bytes.saturating_add(frame_bytes) > ANIM_MAX_DECODED_BYTES
-        {
-            // Cap hit: keep only the first frame as a still.
+        let buffer = frame.into_buffer();
+        let (cw, ch) = buffer.dimensions();
+        if canvas.is_none() {
+            canvas = Some((cw.max(1), ch.max(1)));
+            side = ANIM_SIDE_START.min(cw.max(ch).max(1));
+        }
+        if frames.len() >= ANIM_MAX_FRAMES {
             return frames
                 .into_iter()
                 .next()
-                .map(|f| DecodedPixels::Still(f.into_buffer()))
-                .or(Some(DecodedPixels::Still(scaled)));
+                .map(|f| DecodedPixels::Still(f.into_buffer()));
+        }
+        let mut scaled = downscale_to_side(buffer, side);
+        let mut frame_bytes = {
+            let (w, h) = scaled.dimensions();
+            (w as usize).saturating_mul(h as usize).saturating_mul(4)
+        };
+        if decoded_bytes.saturating_add(frame_bytes) > ANIM_MAX_DECODED_BYTES {
+            // Running total would pass the budget at frame n (1-based).
+            let n = frames.len() + 1;
+            let (cw, ch) = canvas.expect("canvas set on first frame");
+            match animation_frame_side(n.saturating_mul(2), cw, ch) {
+                None => {
+                    return frames
+                        .into_iter()
+                        .next()
+                        .map(|f| DecodedPixels::Still(f.into_buffer()))
+                        .or(Some(DecodedPixels::Still(scaled)));
+                }
+                Some(new_side) => {
+                    if new_side < side {
+                        frames = rescale_anim_frames(frames, new_side);
+                        decoded_bytes = frames.iter().map(frame_rgba_bytes).sum();
+                        side = new_side;
+                        scaled = downscale_to_side(scaled, side);
+                        let (w, h) = scaled.dimensions();
+                        frame_bytes = (w as usize).saturating_mul(h as usize).saturating_mul(4);
+                    }
+                    if decoded_bytes.saturating_add(frame_bytes) > ANIM_MAX_DECODED_BYTES {
+                        return frames
+                            .into_iter()
+                            .next()
+                            .map(|f| DecodedPixels::Still(f.into_buffer()))
+                            .or(Some(DecodedPixels::Still(scaled)));
+                    }
+                }
+            }
         }
         decoded_bytes += frame_bytes;
         frames.push(image::Frame::from_parts(scaled, left, top, delay));
@@ -13086,8 +13225,11 @@ mod chat_image_scale_tests {
 #[cfg(test)]
 mod animated_image_tests {
     //! GIF / animated WebP decode to every frame; still WebP and PNG stay one
-    //! (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG).
-    use super::{decode_image, decode_image_pair, ANIM_MAX_DECODED_BYTES, ANIM_MAX_FRAMES};
+    //! (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG / app-01M61EZD0GJ2XGV1EW4SCVXENK).
+    use super::{
+        animation_frame_side, decode_image, decode_image_pair, is_https_page_url,
+        ANIM_MAX_DECODED_BYTES, ANIM_MAX_FRAMES, ANIM_SIDE_FLOOR, ANIM_SIDE_START,
+    };
     use image::{Delay, Frame, Rgba, RgbaImage};
     use std::io::Cursor;
 
@@ -13127,6 +13269,41 @@ mod animated_image_tests {
     }
 
     #[test]
+    fn animation_side_fits_common_reaction_gifs() {
+        assert_eq!(animation_frame_side(60, 480, 270), Some(480));
+        let side = animation_frame_side(150, 480, 480).expect("150 square frames animate");
+        assert!((ANIM_SIDE_FLOOR..=ANIM_SIDE_START).contains(&side));
+        let side = animation_frame_side(300, 1000, 1000).expect("300 large frames animate");
+        assert!(side >= ANIM_SIDE_FLOOR);
+        let (sw, sh) = {
+            let scale = side as f64 / 1000.0;
+            (
+                (1000.0 * scale).round().max(1.0) as usize,
+                (1000.0 * scale).round().max(1.0) as usize,
+            )
+        };
+        assert!(
+            300usize
+                .saturating_mul(sw)
+                .saturating_mul(sh)
+                .saturating_mul(4)
+                <= ANIM_MAX_DECODED_BYTES
+        );
+        assert_eq!(animation_frame_side(301, 480, 270), None);
+    }
+
+    #[test]
+    fn https_page_url_accepts_only_https() {
+        assert!(is_https_page_url("https://example.com/g/1"));
+        assert!(is_https_page_url("HTTPS://Example.COM/g"));
+        assert!(!is_https_page_url("http://example.com/g/1"));
+        assert!(!is_https_page_url("file:///tmp/x.gif"));
+        assert!(!is_https_page_url("javascript:alert(1)"));
+        assert!(!is_https_page_url("arbos://gif/1"));
+        assert!(!is_https_page_url("not a url"));
+    }
+
+    #[test]
     fn a_three_frame_gif_keeps_every_frame() {
         let bytes = encode_gif(three_color_frames());
         let image = decode_image(&bytes).expect("gif decodes");
@@ -13134,6 +13311,25 @@ mod animated_image_tests {
         let (full, trimmed) = decode_image_pair(&bytes).expect("pair");
         assert_eq!(full.frame_count(), 3);
         assert!(trimmed.is_none(), "animated pictures are not trimmed");
+    }
+
+    #[test]
+    fn a_120_frame_reaction_gif_animates_within_the_cap() {
+        let delay = Delay::from_numer_denom_ms(30, 1);
+        let frames: Vec<Frame> = (0..120)
+            .map(|i| {
+                let c = (i % 255) as u8;
+                Frame::from_parts(
+                    RgbaImage::from_pixel(480, 270, Rgba([c, 0, 255 - c, 255])),
+                    0,
+                    0,
+                    delay,
+                )
+            })
+            .collect();
+        let bytes = encode_gif(frames);
+        let image = decode_image(&bytes).expect("decodes");
+        assert_eq!(image.frame_count(), 120);
     }
 
     #[test]

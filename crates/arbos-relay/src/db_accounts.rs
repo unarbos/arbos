@@ -671,12 +671,27 @@ impl Db {
         })
     }
 
+    /// Every device row of a user, signed-out ones included (admin and debug views).
     pub fn devices_of_user(&self, user_id: &str) -> Result<Vec<serde_json::Value>> {
+        self.devices_of_user_filtered(user_id, true)
+    }
+
+    /// The user's signed-in devices only (`revoked_at IS NULL`) — what Settings → Devices shows.
+    pub fn live_devices_of_user(&self, user_id: &str) -> Result<Vec<serde_json::Value>> {
+        self.devices_of_user_filtered(user_id, false)
+    }
+
+    fn devices_of_user_filtered(
+        &self,
+        user_id: &str,
+        include_revoked: bool,
+    ) -> Result<Vec<serde_json::Value>> {
         self.with(|c| {
             let mut st = c.prepare(
-                "SELECT id, name, created_at, revoked_at, last_seen_at, kind FROM devices WHERE user_id = ?1 ORDER BY created_at",
+                "SELECT id, name, created_at, revoked_at, last_seen_at, kind FROM devices
+                 WHERE user_id = ?1 AND (?2 OR revoked_at IS NULL) ORDER BY created_at",
             )?;
-            let rows = st.query_map(params![user_id], |r| {
+            let rows = st.query_map(params![user_id, include_revoked], |r| {
                 Ok(serde_json::json!({
                     "id": r.get::<_, String>(0)?, "name": r.get::<_, String>(1)?, "created_at": r.get::<_, i64>(2)?,
                     "revoked_at": r.get::<_, Option<i64>>(3)?, "last_seen_at": r.get::<_, Option<i64>>(4)?,

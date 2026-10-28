@@ -3282,6 +3282,10 @@ pub struct DeviceView {
     pub created_at: i64,
     #[serde(default)]
     pub last_seen_at: Option<i64>,
+    /// Set once the device signed out or was revoked; such a row is no
+    /// longer a session and the Devices list leaves it out.
+    #[serde(default)]
+    pub revoked_at: Option<i64>,
     /// The device that made the request — this Mac.
     #[serde(default)]
     pub current: bool,

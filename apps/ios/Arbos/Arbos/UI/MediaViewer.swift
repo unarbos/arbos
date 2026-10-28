@@ -15,6 +15,42 @@ import UIKit
 // inline after Play; a file shows its tile with Open (Quick Look). Forward is a
 // sheet of DMs, agents and groups; one tap sends the item there as a new message.
 
+/// "via <provider>" for GIF-picker attribution. An https `pageUrl` is a link;
+/// any other scheme stays plain text. When `source` is missing and `fallback`
+/// is set, shows the fallback (the viewer's when/caption line) — feedback
+/// app-01M61EZD0GJ2XGV1EW4SCVXENK.
+struct MediaViaCaption: View {
+    @Environment(\.theme) private var theme
+    var source: AttachmentSource?
+    var fallback: String? = nil
+    var fontSize: CGFloat = 13
+    var color: Color? = nil
+    var accessibilityId: String = "viewer-via-source"
+
+    var body: some View {
+        let tint = color ?? Color.white.opacity(0.67)
+        if let source, !source.provider.isEmpty {
+            let label = "via \(source.provider)"
+            Group {
+                if let url = AttachmentSource.httpsPageURL(from: source.pageUrl) {
+                    SwiftUI.Link(label, destination: url)
+                } else {
+                    Text(label)
+                }
+            }
+            .font(theme.font(fontSize))
+            .foregroundStyle(tint)
+            .lineLimit(1)
+            .accessibilityIdentifier(accessibilityId)
+        } else if let fallback {
+            Text(fallback)
+                .font(theme.font(fontSize))
+                .foregroundStyle(tint)
+                .lineLimit(1)
+        }
+    }
+}
+
 /// One entry of the viewer's album.
 struct MediaItem: Identifiable, Equatable {
     enum Kind: Equatable { case image, video, file }
@@ -33,6 +69,9 @@ struct MediaItem: Identifiable, Equatable {
     /// instead of a chat blob — no Download / Forward, and `caption` under the name.
     var pictureURL: String? = nil
     var caption: String? = nil
+    /// GIF-picker attribution; the viewer shows "via <provider>" under the name
+    /// (feedback app-01M61EZD0GJ2XGV1EW4SCVXENK).
+    var source: AttachmentSource? = nil
 
     /// The line under the name: the caption of a profile picture, else when it was shared.
     var subline: String { caption ?? whenLabel }
@@ -91,7 +130,7 @@ enum MediaAlbum {
     static func item(id: String, message m: Message, attachment a: Attachment, kind: MediaItem.Kind, slot: String,
                      projectName: (String) -> String?) -> MediaItem {
         MediaItem(id: id, name: a.name, mime: a.mime, kind: kind, blobRef: a.blobRef, slot: slot,
-                  by: senderName(m, projectName: projectName), at: m.createdAt)
+                  by: senderName(m, projectName: projectName), at: m.createdAt, source: a.source)
     }
 
     /// Who shared it, for the caption: name, else `@handle`, else "You" / the agent.
@@ -252,7 +291,10 @@ struct MediaViewer: View {
             if let item {
                 VStack(spacing: 2) {
                     Text(item.by).font(theme.font(15, weight: .semibold)).foregroundStyle(.white).lineLimit(1)
-                    Text(item.subline).font(theme.font(13)).foregroundStyle(.white.opacity(0.67)).lineLimit(1)
+                    // GIF-picker "via <provider>" under the name when present;
+                    // else the when/caption subline (feedback
+                    // app-01M61EZD0GJ2XGV1EW4SCVXENK).
+                    MediaViaCaption(source: item.source, fallback: item.subline)
                 }
             }
 
