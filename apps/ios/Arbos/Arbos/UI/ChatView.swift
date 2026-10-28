@@ -203,6 +203,8 @@ struct ChatSession: View {
     @State private var appearedAt = Date()
     /// `chat-first-row` has been marked for this open (lazy rows re-appear when scrolled back to).
     @State private var firstRowMarked = false
+    /// When the history window last grew (the near-top reporter fires per scroll sample).
+    @State private var lastGrowAt = Date.distantPast
     /// Rows that arrived while the reader was away from the end — drives the
     /// "New messages" pill. Cleared when they re-pin or jump to the latest.
     @State private var newBelowCount = 0
@@ -1892,6 +1894,11 @@ struct ChatSession: View {
                 // grow step there (30 more bubbles) landed inside the open and cost a
                 // 200–300 ms frame on a long group. History waits a beat after appear.
                 guard Date().timeIntervalSince(appearedAt) > 1.0 else { return }
+                // One step per quarter second at most: the reporter now fires per scroll sample
+                // inside the top band (lazy rows), and a flick's deceleration there should bring
+                // a few slices in, not run away through the whole history.
+                guard Date().timeIntervalSince(lastGrowAt) > 0.25 else { return }
+                lastGrowAt = Date()
                 if windowCount + windowSkipEnd < visibleRows.count {
                     growWindow()
                 } else if isChannel {
@@ -3731,12 +3738,17 @@ private struct NearTopReporter: ViewModifier {
 
     func body(content: Content) -> some View {
         if #available(iOS 18, *), enabled {
-            content.onScrollGeometryChange(for: Bool.self) { g in
-                // About a screen ahead of the top edge, so the next slice is in place
-                // before the reader reaches it.
-                g.contentSize.height > g.containerSize.height && g.contentOffset.y < 900
-            } action: { _, near in
-                if near { onNear() }
+            content.onScrollGeometryChange(for: CGFloat.self) { g in
+                g.contentSize.height > g.containerSize.height ? g.contentOffset.y : .infinity
+            } action: { old, new in
+                // About a screen ahead of the top edge, so the next slice is in place before
+                // the reader reaches it. Fires on every sample inside the band while the offset
+                // is still falling: with lazy rows (#2149) the rows a grow step prepends have
+                // no height until they are measured, so the offset can stay inside the band
+                // across the step — a one-shot "near" flag never re-armed and the window
+                // stopped at its cap (rig: 90 flicks into history stuck after ~90 s). The
+                // caller rate-limits the steps.
+                if new < 900, new < old || old == .infinity { onNear() }
             }
         } else if enabled {
             content
