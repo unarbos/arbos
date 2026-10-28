@@ -175,7 +175,7 @@ struct HomeView: View {
         .onAppear {
             // Rig: the New Message sheet, which hosts the Create screens (`newagent`,
             // `newgroup`, `newserver`) and the group member picker (`newgroup2`).
-            if ["newchat", "newagent", "newgroup", "newgroup2", "newserver"].contains(DebugHooks.show ?? ""),
+            if ["newchat", "newagent", "newgroup", "newgroup2", "newserver", "newconnect"].contains(DebugHooks.show ?? ""),
                DebugHooks.openProject == nil {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showNewChat = true }
             }
