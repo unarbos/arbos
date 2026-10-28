@@ -397,7 +397,9 @@ pub fn reveal(path: &Path) {
 }
 
 /// Hand a fetched file to macOS: Quick Look (`qlmanage -p`) for documents, the
-/// default app for the rest (QuickTime Player for video). Elsewhere `xdg-open`.
+/// default app for the rest. Videos in the media viewer play inline instead
+/// ([feedback app-01M6147S9TPNBQA7KSDEY0K8C4]); this path is for Quick Look
+/// and non-mac fallbacks. Elsewhere `xdg-open`.
 pub fn open_with_system(path: &Path, quick_look: bool) {
     #[cfg(target_os = "macos")]
     let spawned = if quick_look {

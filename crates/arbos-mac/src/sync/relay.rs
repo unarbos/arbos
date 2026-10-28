@@ -7643,13 +7643,22 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         } => {
             let shared = shared.clone();
             tokio::spawn(async move {
+                let mut opened_path = None;
                 match fetch_blob_bytes(&shared, &project_id, &key).await {
                     Ok((_, bytes)) => {
                         let dir = std::env::temp_dir().join("arbos-media");
                         let _ = tokio::fs::create_dir_all(&dir).await;
                         let path = dir.join(safe_name(&name));
                         match tokio::fs::write(&path, &bytes).await {
-                            Ok(()) => crate::ui::attachments::open_with_system(&path, quick_look),
+                            Ok(()) => {
+                                // Videos play inline on macOS (AVPlayerView); Quick Look
+                                // and non-mac always hand the file to the system.
+                                let open_external = quick_look || !cfg!(target_os = "macos");
+                                if open_external {
+                                    crate::ui::attachments::open_with_system(&path, quick_look);
+                                }
+                                opened_path = Some(path);
+                            }
                             Err(err) => shared.fail(&format!("open {name}"), &err),
                         }
                     }
@@ -7658,7 +7667,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         shared.fail(&format!("open {name}"), &err);
                     }
                 }
-                let _ = shared.events.send(SyncEvent::AttachmentOpened { key });
+                let _ = shared.events.send(SyncEvent::AttachmentOpened {
+                    key,
+                    path: opened_path,
+                });
             });
         }
         ClientCommand::RefreshConnectors => {

@@ -85,6 +85,10 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = ["std", "UTType", "UTCoreTypes"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationAttachment", "UNNotificationSound", "UNNotificationTrigger", "UNNotificationAction", "UNNotificationCategory", "UNNotificationSettings"] }
 objc2-authentication-services = { version = "0.3", default-features = false, features = ["std", "block2", "ASWebAuthenticationSession", "ASFoundation"] }
+# Media viewer video: play inline with AVPlayerView instead of handing off to QuickTime
+# ([feedback app-01M6147S9TPNBQA7KSDEY0K8C4]).
+objc2-av-kit = { version = "0.3", default-features = false, features = ["std", "AVPlayerView", "objc2-app-kit", "objc2-av-foundation", "objc2-core-foundation"] }
+objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "AVPlayer", "AVPlayerItem", "AVAsset"] }
 
 [dev-dependencies]
 # `#[gpui::test]` for the composer: a headless app, keystrokes into a real window, no display needed.

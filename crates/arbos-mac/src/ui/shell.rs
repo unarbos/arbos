@@ -5357,25 +5357,37 @@ impl Render for Shell {
             } else if search.is_focused(window) {
                 window.focus(&self.viewer_focus, cx);
             }
+            // Inline video: keep the native AVPlayerView over the picture area
+            // (or tear it down when Play has not started / we paged away).
+            let playing = self
+                .state
+                .read(cx)
+                .media_viewer
+                .as_ref()
+                .and_then(|v| v.playing.clone());
+            crate::ui::video_player::sync(window, playing.as_deref());
             root = root.child(media_viewer::overlay(self, &self.viewer_focus, cx));
-        } else if chart_viewer_open {
-            // Esc closes; focus moves into the overlay once per opening.
-            if self.chart_viewer_focused_generation != chart_viewer_generation {
-                self.chart_viewer_focused_generation = chart_viewer_generation;
-                window.focus(&self.viewer_focus, cx);
+        } else {
+            crate::ui::video_player::sync(window, None);
+            if chart_viewer_open {
+                // Esc closes; focus moves into the overlay once per opening.
+                if self.chart_viewer_focused_generation != chart_viewer_generation {
+                    self.chart_viewer_focused_generation = chart_viewer_generation;
+                    window.focus(&self.viewer_focus, cx);
+                }
+                root = root.child(chart_viewer::overlay(self, &self.viewer_focus, cx));
+            } else if self.state.read(cx).forward_message.is_none()
+                && (self.viewer_focus.is_focused(window)
+                    || self
+                        .viewer_search
+                        .read(cx)
+                        .focus_handle(cx)
+                        .is_focused(window))
+            {
+                // Closed by × / the backdrop / Forward: typing goes back to the
+                // composer (unless the bubble menu's picker owns the field now).
+                Composer::focus(&self.composer, window, cx);
             }
-            root = root.child(chart_viewer::overlay(self, &self.viewer_focus, cx));
-        } else if self.state.read(cx).forward_message.is_none()
-            && (self.viewer_focus.is_focused(window)
-                || self
-                    .viewer_search
-                    .read(cx)
-                    .focus_handle(cx)
-                    .is_focused(window))
-        {
-            // Closed by × / the backdrop / Forward: typing goes back to the
-            // composer (unless the bubble menu's picker owns the field now).
-            Composer::focus(&self.composer, window, cx);
         }
         // The command palette: the topmost modal (over sheets and the viewer).
         let palette_scroll = self.palette_scroll.clone();

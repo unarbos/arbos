@@ -1326,8 +1326,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             let dir = std::env::temp_dir().join("arbos-media");
             let _ = std::fs::create_dir_all(&dir);
             let path = dir.join(name.replace('/', "_"));
+            let mut opened_path = None;
             match std::fs::write(&path, &bytes) {
-                Ok(()) => crate::ui::attachments::open_with_system(&path, quick_look),
+                Ok(()) => {
+                    let open_external = quick_look || !cfg!(target_os = "macos");
+                    if open_external {
+                        crate::ui::attachments::open_with_system(&path, quick_look);
+                    }
+                    opened_path = Some(path);
+                }
                 Err(err) => {
                     let _ = shared.events.send(SyncEvent::Failure {
                         error: UserError::from_text(format!("open {name}"), err.to_string()),
@@ -1335,7 +1342,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     });
                 }
             }
-            let _ = shared.events.send(SyncEvent::AttachmentOpened { key });
+            let _ = shared.events.send(SyncEvent::AttachmentOpened {
+                key,
+                path: opened_path,
+            });
         }
         ClientCommand::ForwardMessage {
             chat_id,
