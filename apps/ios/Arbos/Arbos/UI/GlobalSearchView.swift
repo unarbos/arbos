@@ -107,7 +107,8 @@ struct GlobalSearchResults: View {
                         .accessibilityIdentifier("search-section-\(group.section.label)")
                 }
             }
-            Color.clear.frame(height: 8)
+            // The last result at rest sits above the bottom fade (`BottomBarFadeView`).
+            Color.clear.frame(height: HomeChrome.listBottom)
                 .listRowInsets(EdgeInsets())
                 .listRowSeparator(.hidden)
                 .listRowBackground(Color.clear)

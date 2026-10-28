@@ -101,6 +101,11 @@ struct HomeView: View {
                 ListTopFade(screen: searching ? .homeSearch : .home)
                 topBar
             }
+            // The bottom search capsule floats over the list ([feedback iphone-home-bar-fades-
+            // 2026-10-28], see-through since [feedback iphone-composer-see-through-2026-10-28]):
+            // the fade is one layer at the canvas's bottom (over the rows, under the capsule),
+            // not the bar's own background; rows stay readable through and between the pills.
+            .overlay(alignment: .bottom) { BottomBarFadeView(spec: BottomBarFade.home) }
             .safeAreaInset(edge: .bottom, spacing: 0) { bottomBar }
             .animation(.easeOut(duration: 0.18), value: searching)
             .task(id: model.link) {
@@ -238,19 +243,14 @@ struct HomeView: View {
     }
 
     /// The one control on Home's bottom edge: the app-wide search capsule, 20 pt
-    /// side margins like the header, over a fade so rows slide under it. It sits in
-    /// the bottom safe-area inset, so it rides the keyboard and clears the home indicator.
+    /// side margins like the header. It sits in the bottom safe-area inset, so it rides the
+    /// keyboard and clears the home indicator; it floats over the rows on `BottomBarFadeView`
+    /// (no background of its own, [feedback iphone-home-bar-fades-2026-10-28]).
     private var bottomBar: some View {
-        VStack(spacing: 0) {
-            LinearGradient(colors: [theme.bg.opacity(0), theme.bg], startPoint: .top, endPoint: .bottom)
-                .frame(height: 18)
-                .allowsHitTesting(false)
-            HomeSearchBar(query: $query, focused: $searchFocused, active: searching, onClose: closeSearch)
-                .padding(.horizontal, 20)
-                .padding(.bottom, 8)
-                .background(theme.bg)
-        }
-        .accessibilityIdentifier("home-bottom-bar")
+        HomeSearchBar(query: $query, focused: $searchFocused, active: searching, onClose: closeSearch)
+            .padding(.horizontal, 20)
+            .padding(.bottom, HomeChrome.bottomPad)
+            .accessibilityIdentifier("home-bottom-bar")
     }
 
     private var homeList: some View {
@@ -521,6 +521,12 @@ struct HomeView: View {
                             .accessibilityHidden(true)
                             .onAppear { LaunchClock.mark("first-content", detail: "source=\(model.contentOrigin) rows=\(homeRows.count)") }
                     }
+                    // The last row at rest sits above the bottom fade (`BottomBarFadeView`).
+                    Color.clear.frame(height: HomeChrome.listBottom)
+                        .listRowInsets(EdgeInsets())
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
+                        .accessibilityHidden(true)
                 }
                 .listStyle(.plain)
                 .scrollContentBackground(.hidden)

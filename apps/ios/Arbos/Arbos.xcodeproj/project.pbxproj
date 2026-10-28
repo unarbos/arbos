@@ -169,7 +169,8 @@
 		A1AD0000000000000000B006 /* AddMembersActionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1AD0000000000000000B005 /* AddMembersActionTests.swift */; };
 		A1670000000000000000A051 /* ControlTokenLintTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1670000000000000000A050 /* ControlTokenLintTests.swift */; };
 		A1680000000000000000A061 /* ListTopFadeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1680000000000000000A060 /* ListTopFadeTests.swift */; };
-		A1CF0000000000000000B061 /* ComposerBottomBandTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CF0000000000000000B060 /* ComposerBottomBandTests.swift */; };
+		A1CF0000000000000000B071 /* HomeBarFadeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CF0000000000000000B070 /* HomeBarFadeTests.swift */; };
+		A1CF0000000000000000B061 /* BottomBarFadeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CF0000000000000000B060 /* BottomBarFadeTests.swift */; };
 		A1670000000000000000A041 /* ControlMetricsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1670000000000000000A040 /* ControlMetricsTests.swift */; };
 		A1CD0000000000000000D041 /* ChatDensityMetricsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1CD0000000000000000D040 /* ChatDensityMetricsTests.swift */; };
 		A1E3C0DE0000000000000004 /* EmojiNameTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1E3C0DE0000000000000003 /* EmojiNameTests.swift */; };
@@ -402,7 +403,8 @@
 		A1AD0000000000000000B005 /* AddMembersActionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddMembersActionTests.swift; sourceTree = "<group>"; };
 		A1670000000000000000A050 /* ControlTokenLintTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlTokenLintTests.swift; sourceTree = "<group>"; };
 		A1680000000000000000A060 /* ListTopFadeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ListTopFadeTests.swift; sourceTree = "<group>"; };
-		A1CF0000000000000000B060 /* ComposerBottomBandTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerBottomBandTests.swift; sourceTree = "<group>"; };
+		A1CF0000000000000000B070 /* HomeBarFadeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeBarFadeTests.swift; sourceTree = "<group>"; };
+		A1CF0000000000000000B060 /* BottomBarFadeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BottomBarFadeTests.swift; sourceTree = "<group>"; };
 		A1670000000000000000A040 /* ControlMetricsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlMetricsTests.swift; sourceTree = "<group>"; };
 		A1CD0000000000000000D040 /* ChatDensityMetricsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatDensityMetricsTests.swift; sourceTree = "<group>"; };
 		A1E3C0DE0000000000000003 /* EmojiNameTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmojiNameTests.swift; sourceTree = "<group>"; };
@@ -664,7 +666,8 @@
 				A1AD0000000000000000B005 /* AddMembersActionTests.swift */,
 				A1670000000000000000A050 /* ControlTokenLintTests.swift */,
 				A1680000000000000000A060 /* ListTopFadeTests.swift */,
-				A1CF0000000000000000B060 /* ComposerBottomBandTests.swift */,
+				A1CF0000000000000000B070 /* HomeBarFadeTests.swift */,
+				A1CF0000000000000000B060 /* BottomBarFadeTests.swift */,
 				A1670000000000000000A040 /* ControlMetricsTests.swift */,
 				A1CD0000000000000000D040 /* ChatDensityMetricsTests.swift */,
 				A1E3C0DE0000000000000003 /* EmojiNameTests.swift */,
@@ -1037,7 +1040,8 @@
 				A1AD0000000000000000B006 /* AddMembersActionTests.swift in Sources */,
 				A1670000000000000000A051 /* ControlTokenLintTests.swift in Sources */,
 				A1680000000000000000A061 /* ListTopFadeTests.swift in Sources */,
-				A1CF0000000000000000B061 /* ComposerBottomBandTests.swift in Sources */,
+				A1CF0000000000000000B071 /* HomeBarFadeTests.swift in Sources */,
+				A1CF0000000000000000B061 /* BottomBarFadeTests.swift in Sources */,
 				A1670000000000000000A041 /* ControlMetricsTests.swift in Sources */,
 				A1CD0000000000000000D041 /* ChatDensityMetricsTests.swift in Sources */,
 				A1E3C0DE0000000000000004 /* EmojiNameTests.swift in Sources */,
