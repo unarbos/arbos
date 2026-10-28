@@ -291,12 +291,48 @@ pub fn new_chat_sheet(
                 .child(icon("chevron-right", 13.0, theme.text_faint))
                 // D93: step 1 is the Create screen (picture + name); the picker below is step 2.
                 .on_click(cx.listener(|this, _, window, cx| this.open_create_group(window, cx)));
+            // Connect an agent (#2141): an agent that runs elsewhere joins as a member.
+            let connect_row = div()
+                .id("connect-agent")
+                .flex()
+                .items_center()
+                .gap(px(ROW_GAP))
+                .px(px(ROW_PADDING_X))
+                .py(px(10.0))
+                .cursor_pointer()
+                .map(|el| highlight::row(el, false, Shape::Nested(PANEL_RADIUS), &theme))
+                .child(
+                    glass::circle("connect-agent-glyph", ROW_GLYPH, &theme)
+                        .child(icon("link", 17.0, theme.text)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_size(px(TEXT_BODY))
+                                .text_color(theme.text)
+                                .child("Connect an agent"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(TEXT_SMALL))
+                                .text_color(theme.text_muted)
+                                .child("Claude Code, Grok or your own bot, with a key"),
+                        ),
+                )
+                .child(icon("chevron-right", 13.0, theme.text_faint))
+                .on_click(cx.listener(|this, _, window, cx| this.open_connect_agent(window, cx)));
             // Inside the scrolling body the card must keep its height, or the
             // expanded form is squeezed and clipped once the list below is long.
             let mut group = glass::group(&theme)
                 .flex_shrink_0()
                 .mx(px(CARD_INSET))
                 .child(agent_row);
+            group = group.child(kit::divider(&theme)).child(connect_row);
             group = group.child(kit::divider(&theme)).child(group_row);
             // D88 rule 8: servers, when this relay runs them.
             if servers_available {
