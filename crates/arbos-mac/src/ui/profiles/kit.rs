@@ -237,6 +237,16 @@ pub fn row_state(
         Leading::None | Leading::Tile(_) => FontWeight::NORMAL,
     };
     let leading = leading_el(leading, theme);
+    // A title over a subtitle (a member's name over "@handle") lifts an
+    // emoji-only name onto the baseline (`identity::name`); a one-line title
+    // is centred in the row, where Core Text's own emoji placement already
+    // sits level with capitals.
+    let title: SharedString = title.into();
+    let title_el = if subtitle.is_some() {
+        identity::name(title, TEXT_BODY)
+    } else {
+        div().truncate().child(title)
+    };
     div()
         .id(id)
         .relative()
@@ -263,12 +273,7 @@ pub fn row_state(
                 .flex()
                 .flex_col()
                 .gap(px(1.0))
-                .child(
-                    div()
-                        .truncate()
-                        .font_weight(title_weight)
-                        .child(title.into()),
-                )
+                .child(title_el.font_weight(title_weight))
                 .when_some(subtitle, |el, s| {
                     el.child(
                         div()
@@ -707,6 +712,82 @@ mod tests {
             assert_eq!(leading, trailing, "{name}: symmetric");
             assert_eq!(f(line.size.height), 1.0, "{name}: 1 pt line");
         }
+    }
+
+    /// A member row (avatar, name over `@handle`) for one name.
+    struct MemberRow(&'static str);
+
+    impl gpui::Render for MemberRow {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
+            let subtitle = div()
+                .debug_selector(|| "member-handle".into())
+                .child("@dawizzaa")
+                .into_any_element();
+            div().w(px(340.0)).h(px(120.0)).child(
+                card(&theme).debug_selector(|| "member-card".into()).child(
+                    row(
+                        "member",
+                        Leading::Avatar(div().size(px(AVATAR)).into_any_element()),
+                        self.0,
+                        Some("@dawizzaa".into()),
+                        None,
+                        Some(subtitle),
+                        false,
+                        &theme,
+                    )
+                    .debug_selector(|| "member-row".into()),
+                ),
+            )
+        }
+    }
+
+    /// [feedback emoji-name-handle-offset-mac-2026-10-28]: a member row whose
+    /// name is one emoji is as tall as a text name's row, its `@handle` sits at
+    /// the same place in it, and only the emoji name is drawn lifted.
+    #[gpui::test]
+    fn an_emoji_member_name_keeps_the_row_and_its_handle_in_place(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let theme = crate::ui::theme::Theme::for_pref(
+                crate::ui::theme::AppearancePref::Dark,
+                crate::ui::theme::Surface::Matte,
+                cx,
+            );
+            cx.set_global(theme);
+        });
+        let lay = |cx: &mut gpui::TestAppContext, name: &'static str| {
+            let (_view, vcx) = cx.add_window_view(|_, _| MemberRow(name));
+            vcx.run_until_parked();
+            let row = vcx.debug_bounds("member-row").expect("row");
+            let handle = vcx.debug_bounds("member-handle").expect("handle");
+            let divider = vcx.debug_bounds(DIVIDER_SELECTOR).expect("divider");
+            (
+                row.size,
+                handle.origin.y - row.origin.y,
+                divider.origin.y - row.origin.y,
+                vcx.debug_bounds(identity::LIFTED_SELECTOR),
+            )
+        };
+        let text = lay(cx, "Sam Rivera");
+        let emoji = lay(cx, "🧙🏽\u{200d}♂\u{fe0f}");
+        let mixed = lay(cx, "Cato 🌳");
+        assert_eq!(emoji.0, text.0, "row size");
+        assert_eq!(emoji.1, text.1, "handle offset in the row");
+        assert_eq!(emoji.2, text.2, "divider offset in the row");
+        assert_eq!(mixed.0, text.0, "row size (mixed)");
+        assert_eq!(mixed.1, text.1, "handle offset in the row (mixed)");
+        assert!(
+            text.3.is_none() && mixed.3.is_none(),
+            "text and mixed names are not lifted"
+        );
+        assert!(
+            emoji.3.is_some(),
+            "the emoji name is drawn lifted onto the baseline"
+        );
     }
 
     /// Headless GPUI render: a 1-row and a 3-row section draw without a panic
