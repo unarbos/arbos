@@ -33,10 +33,18 @@ impl DeviceRow {
     }
 }
 
-/// The rows, this Mac first, then the others as the relay orders them
-/// (oldest sign-in first).
+/// The devices that are still signed in. A row with `revoked_at` is a
+/// session that already ended (signed out here, from another device, or by
+/// the relay); it is not a device the user is logged in on, so it never
+/// reaches the list or its count.
+pub fn live(devices: &[DeviceView]) -> impl Iterator<Item = &DeviceView> {
+    devices.iter().filter(|d| d.revoked_at.is_none())
+}
+
+/// The rows, this Mac first, then the other live devices as the relay
+/// orders them (oldest sign-in first).
 pub fn rows(devices: &[DeviceView], now_ms: i64) -> Vec<DeviceRow> {
-    let mut out: Vec<DeviceRow> = devices.iter().map(|d| row(d, now_ms)).collect();
+    let mut out: Vec<DeviceRow> = live(devices).map(|d| row(d, now_ms)).collect();
     out.sort_by_key(|r| !r.current);
     out
 }
@@ -151,11 +159,45 @@ mod tests {
             kind: kind.into(),
             created_at: now - 9 * 24 * 3_600_000,
             last_seen_at: seen_ago_ms.map(|a| now - a),
+            revoked_at: None,
             current,
         }
     }
 
+    fn revoked(mut d: DeviceView) -> DeviceView {
+        d.revoked_at = Some(NOW - 3_600_000);
+        d
+    }
+
     const NOW: i64 = 1_761_200_000_000;
+
+    #[test]
+    fn signed_out_devices_are_not_listed_or_counted_and_this_mac_stays_first() {
+        // What the relay used to hand back for a tester who signed four Macs
+        // out: live rows mixed with revoked ones, this Mac in the middle.
+        let list = vec![
+            dev("p1", "iPhone", "github", false, Some(5 * 24 * 3_600_000)),
+            revoked(dev("m1", "Mac (Mac)", "github", false, Some(0))),
+            revoked(dev("m2", "Mac (Mac)", "github", false, Some(0))),
+            dev("me", "Mac (Mac)", "github", true, Some(10_000)),
+            revoked(dev("m3", "Mac (Mac)", "github", false, Some(0))),
+            dev("p2", "iPhone", "github", false, Some(60_000)),
+        ];
+        let shown = rows(&list, NOW);
+        assert_eq!(
+            shown.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["me", "p1", "p2"],
+            "only live rows, this Mac first, then the relay's order"
+        );
+        assert_eq!(
+            live(&list).count(),
+            3,
+            "the Settings summary counts live devices"
+        );
+        let all_revoked = vec![revoked(dev("m1", "Mac (Mac)", "github", false, Some(0)))];
+        assert!(rows(&all_revoked, NOW).is_empty());
+        assert!(live(&all_revoked).next().is_none());
+    }
 
     #[test]
     fn the_list_renders_this_mac_first_and_marks_it() {
