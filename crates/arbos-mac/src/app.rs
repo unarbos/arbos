@@ -1011,6 +1011,8 @@ pub struct AppState {
     /// D88: rooms that already got their second page of history (one extra page per session,
     /// asked for when the first page came back full).
     pub channel_paged: HashSet<String>,
+    /// Servers whose member list was asked for this session (`want_server_rosters`).
+    pub server_rosters_requested: HashSet<Id>,
     /// D88: the channel open in the centre (clears `selected_project` for the transcript).
     pub selected_channel: Option<ChannelSel>,
     /// D88: the server whose channel list the left pane slid into.
@@ -1384,6 +1386,7 @@ impl AppState {
             matrix_connected: false,
             channel_rows: HashMap::new(),
             channel_paged: HashSet::new(),
+            server_rosters_requested: HashSet::new(),
             selected_channel: None,
             open_server: None,
             server_sheet: None,
@@ -5400,7 +5403,13 @@ impl AppState {
         if m.sender.is_empty() {
             m.sender = row.sender.clone();
         }
-        if m.sender_name.as_deref().is_none_or(str::is_empty) && !row.sender_name.is_empty() {
+        let person = m.sender.starts_with("user:");
+        // An agent's Matrix display name is its name; a person's is their handle, never
+        // their name ([feedback server-member-names-2026-10-28]) — see `fill_channel_sender`.
+        if !person
+            && m.sender_name.as_deref().is_none_or(str::is_empty)
+            && !row.sender_name.is_empty()
+        {
             m.sender_name = Some(row.sender_name.clone());
         }
         if m.created_at == 0 && row.created_at > 0 {
@@ -5415,8 +5424,121 @@ impl AppState {
         if m.sender.eq_ignore_ascii_case(&self.me_member()) {
             m.sender = self.me_member();
             m.sender_handle = Some(self.me_handle());
+        } else if person {
+            self.fill_channel_sender(&mut m);
         }
         Some(m)
+    }
+
+    /// Who a channel row is from, as the rosters know them: the servers' member lists (by
+    /// user id, then handle), then every people chat's members and the directory. A Matrix
+    /// row only names its sender by handle (`arbos_matrix::message_row`), so this is where
+    /// a channel bubble gets the display name a group bubble shows
+    /// ([feedback server-member-names-2026-10-28]; Affinity, Arbonites 2026-10-28: "we are
+    /// referred to as our handles instead of our usernames in server").
+    pub fn channel_sender(&self, sender: &str, handle: Option<&str>) -> Option<Person> {
+        let id = sender.strip_prefix("user:")?;
+        let handle = handle.filter(|h| !h.is_empty());
+        self.servers
+            .iter()
+            .flat_map(|s| s.members.iter())
+            .find(|p| {
+                (!p.id.is_empty() && p.id.eq_ignore_ascii_case(id))
+                    || handle.is_some_and(|h| p.handle.eq_ignore_ascii_case(h))
+            })
+            .cloned()
+            .or_else(|| handle.and_then(|h| self.person_by_handle(h)))
+            .or_else(|| {
+                self.people_directory
+                    .iter()
+                    .find(|p| p.id.eq_ignore_ascii_case(id))
+                    .cloned()
+            })
+    }
+
+    /// Fill a person's channel row from the roster: the display name (when the roster has
+    /// one), the picture (when the row carries none) and the relay's spelling of the user id
+    /// (the Matrix localpart is lower-case; the disc's gradient is seeded by the id, so a
+    /// bubble and the Members row would otherwise draw two colours for one person). Returns
+    /// whether anything changed.
+    fn fill_channel_sender(&self, m: &mut Message) -> bool {
+        let Some(p) = self.channel_sender(&m.sender, m.sender_handle.as_deref()) else {
+            return false;
+        };
+        let mut changed = false;
+        if !p.id.is_empty() {
+            let member = format!("user:{}", p.id);
+            if m.sender != member && m.sender.eq_ignore_ascii_case(&member) {
+                m.sender = member;
+                changed = true;
+            }
+        }
+        if m.sender_name.as_deref().is_none_or(str::is_empty) {
+            if let Some(name) = p.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+                m.sender_name = Some(name.to_owned());
+                changed = true;
+            }
+        }
+        if m.sender_avatar.as_deref().is_none_or(str::is_empty) && !p.avatar_url.is_empty() {
+            m.sender_avatar = Some(p.avatar_url.clone());
+            changed = true;
+        }
+        changed
+    }
+
+    /// A roster arrived (server members, the list): name the channel rows it now knows.
+    /// Decoded rows are kept, so a channel opened before its server's detail came back
+    /// would otherwise keep reading handles.
+    fn refresh_channel_senders(&mut self, cx: &mut Context<Self>) {
+        let rooms: Vec<Id> = self.channel_rows.keys().cloned().collect();
+        let mut changed_rooms = Vec::new();
+        let mut avatars = Vec::new();
+        for room_id in rooms {
+            let Some(rows) = self.channel_rows.get(&room_id) else {
+                continue;
+            };
+            let mut rows = rows.clone();
+            let mut changed = false;
+            for m in rows.iter_mut().filter(|m| {
+                m.sender.starts_with("user:")
+                    && (m.sender_name.as_deref().is_none_or(str::is_empty)
+                        || m.sender_avatar.as_deref().is_none_or(str::is_empty))
+            }) {
+                if self.fill_channel_sender(m) {
+                    changed = true;
+                    if let Some(url) = m.sender_avatar.clone().filter(|u| !u.is_empty()) {
+                        avatars.push(url);
+                    }
+                }
+            }
+            if changed {
+                self.channel_rows.insert(room_id.clone(), rows);
+                changed_rooms.push(room_id);
+            }
+        }
+        for url in avatars {
+            self.want_avatar(url);
+        }
+        for room_id in changed_rooms {
+            cx.emit(AppEvent::TranscriptChanged { chat_id: room_id });
+        }
+    }
+
+    /// Members come only with `GET /servers/{id}`: ask once per server per session for
+    /// any server the list brought without them, so channel bubbles and the list's
+    /// previews can name people from the first paint.
+    fn want_server_rosters(&mut self) {
+        let wanted: Vec<Id> = self
+            .servers
+            .iter()
+            .filter(|s| s.members.is_empty())
+            .map(|s| s.id.clone())
+            .filter(|id| !self.server_rosters_requested.contains(id))
+            .collect();
+        for server_id in wanted {
+            self.server_rosters_requested.insert(server_id.clone());
+            self.command(ClientCommand::ServerFetch { server_id });
+        }
     }
 
     /// Composer send in a channel: optimistic row (id = ULID) that the echo replaces.
@@ -5538,6 +5660,8 @@ impl AppState {
             self.drop_server(&id, cx);
         }
         self.want_member_avatars();
+        self.want_server_rosters();
+        self.refresh_channel_senders(cx);
         self.resolve_pending_channel(cx);
         self.apply_open_server_hook(cx);
         cx.notify();
@@ -5627,6 +5751,7 @@ impl AppState {
             None => self.servers.push(server),
         }
         self.want_member_avatars();
+        self.refresh_channel_senders(cx);
         self.resolve_pending_channel(cx);
         cx.notify();
     }
@@ -5642,6 +5767,7 @@ impl AppState {
             None => self.servers.push(server),
         }
         self.want_member_avatars();
+        self.want_server_rosters();
         self.enter_server(id, cx);
     }
 
@@ -12400,6 +12526,241 @@ mod new_message_first_paint_tests {
         assert!(is_directory_query("@"));
         assert!(!is_directory_query("al"));
         assert!(!is_directory_query("@al"));
+    }
+}
+
+#[cfg(test)]
+mod channel_sender_tests {
+    //! Affinity (Arbonites, 2026-10-28 16:52 UTC, confirmed by Scout): "bug where we are
+    //! referred to as our handles instead of our usernames in server" — a channel bubble
+    //! read "A" where a group bubble reads "Scout". The homeserver names a person by handle;
+    //! the display name comes from the server's roster ([feedback
+    //! server-member-names-2026-10-28]).
+    use futures::future::BoxFuture;
+    use gpui::{AppContext as _, TestAppContext};
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::model::{AccountView, ServerInfo};
+
+    struct Idle;
+
+    impl SyncSource for Idle {
+        fn name(&self) -> &'static str {
+            "idle"
+        }
+
+        fn run(
+            self: Box<Self>,
+            _events: mpsc::UnboundedSender<SyncEvent>,
+            _commands: mpsc::UnboundedReceiver<ClientCommand>,
+        ) -> BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    const ROOM: &str = "!general:arbos.life";
+    const SERVER: &str = "01SERVERTEST0000000000000";
+
+    /// A homeserver event by `mxid` through the real row mapper, with the Matrix display
+    /// name the relay registers (the handle).
+    fn matrix_row(id: &str, mxid: &str, handle: &str, text: &str, at: i64) -> MessageRow {
+        let ev = serde_json::json!({
+            "type": "m.room.message", "event_id": format!("${id}"), "sender": mxid,
+            "origin_server_ts": at,
+            "content": { "msgtype": "m.text", "body": text, "life.arbos.id": id },
+        });
+        arbos_matrix::rows::message_row(&ev, &|_| Some(handle.to_owned())).expect("row")
+    }
+
+    fn scout() -> Person {
+        Person {
+            id: "test_01SCOUT".into(),
+            handle: "A".into(),
+            name: Some("Scout".into()),
+            avatar_url: "https://relay.test/a/scout.png".into(),
+            ..Person::default()
+        }
+    }
+
+    fn server(members: Vec<Person>) -> ServerInfo {
+        ServerInfo {
+            id: SERVER.into(),
+            name: "test server".into(),
+            members,
+            ..ServerInfo::default()
+        }
+    }
+
+    fn mount(cx: &mut TestAppContext) -> (tokio::runtime::Runtime, gpui::Entity<AppState>) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio");
+        let handle = rt.handle().clone();
+        cx.update(|cx| gpui_tokio::init_from_handle(cx, handle));
+        let state = cx.new(|cx| AppState::new(Box::new(Idle), cx));
+        state.update(cx, |s, _| {
+            s.account = Some(AccountView {
+                id: "test_01ME".into(),
+                login: "affinity".into(),
+                name: "Affinity".into(),
+                avatar_url: String::new(),
+                device_name: "test".into(),
+                balance_usd: 0.0,
+                spent_today_usd: 0.0,
+                daily_cap_usd: None,
+            });
+        });
+        (rt, state)
+    }
+
+    fn names(state: &AppState) -> Vec<(String, Option<String>, Option<String>)> {
+        state
+            .channel_rows
+            .get(ROOM)
+            .map(|rows| {
+                rows.iter()
+                    .map(|m| {
+                        (
+                            m.sender_handle.clone().unwrap_or_default(),
+                            m.sender_name.clone(),
+                            m.sender_avatar.clone(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// With the server's members known, a channel row by Scout (`@A`) is named "Scout" and
+    /// gets their picture; my own row keeps my member string; the handle stays the handle.
+    #[gpui::test]
+    fn a_channel_row_is_named_from_the_server_roster(cx: &mut TestAppContext) {
+        let (_rt, state) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.servers.push(server(vec![scout()]));
+            s.on_matrix_timeline(
+                ROOM.into(),
+                vec![
+                    matrix_row("m1", "@test_01scout:arbos.life", "A", "yo", 1_000),
+                    matrix_row("m2", "@test_01me:arbos.life", "affinity", "who is A", 2_000),
+                ],
+                cx,
+            );
+        });
+        let got = state.read_with(cx, |s, _| names(s));
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "A".into(),
+                    Some("Scout".into()),
+                    Some("https://relay.test/a/scout.png".into())
+                ),
+                ("affinity".into(), None, None),
+            ],
+            "Scout by display name, picture from the roster; mine untouched"
+        );
+        let senders: Vec<String> = state.read_with(cx, |s, _| {
+            s.channel_rows[ROOM]
+                .iter()
+                .map(|m| m.sender.clone())
+                .collect()
+        });
+        assert_eq!(
+            senders,
+            vec![
+                "user:test_01SCOUT".to_string(),
+                "user:test_01ME".to_string()
+            ],
+            "member strings take the relay's spelling of the id (one disc colour per person)"
+        );
+        // The bubble's name label comes from `Person::display_name()` of the row's sender.
+        let shown = state.read_with(cx, |s, _| {
+            let m = &s.channel_rows[ROOM][0];
+            Person {
+                handle: m.sender_handle.clone().unwrap_or_default(),
+                name: m.sender_name.clone(),
+                ..Person::default()
+            }
+            .display_name()
+        });
+        assert_eq!(shown, "Scout");
+    }
+
+    /// The roster can come after the rows (a channel opened before `GET /servers/{id}`
+    /// answered): the rows are named when it lands, and never read the handle as a name
+    /// in between. The list asks for every server's roster once.
+    #[gpui::test]
+    fn rows_are_renamed_when_the_roster_arrives(cx: &mut TestAppContext) {
+        let (_rt, state) = mount(cx);
+        state.update(cx, |s, cx| {
+            s.on_servers(vec![server(vec![])], cx);
+            s.on_matrix_timeline(
+                ROOM.into(),
+                vec![matrix_row(
+                    "m1",
+                    "@test_01scout:arbos.life",
+                    "A",
+                    "yo",
+                    1_000,
+                )],
+                cx,
+            );
+        });
+        assert_eq!(
+            state.read_with(cx, |s, _| names(s)),
+            vec![("A".into(), None, None)],
+            "no roster yet: no name (the handle is not written as the name)"
+        );
+        assert!(
+            state.read_with(cx, |s, _| s.server_rosters_requested.contains(SERVER)),
+            "the list asked for the server's members"
+        );
+        state.update(cx, |s, cx| s.on_server_detail(server(vec![scout()]), cx));
+        assert_eq!(
+            state.read_with(cx, |s, _| names(s)),
+            vec![(
+                "A".into(),
+                Some("Scout".into()),
+                Some("https://relay.test/a/scout.png".into())
+            )],
+            "named once the roster landed"
+        );
+    }
+
+    /// A member with no display name set stays by handle (the display-name fallback).
+    #[gpui::test]
+    fn a_member_without_a_name_keeps_the_handle(cx: &mut TestAppContext) {
+        let (_rt, state) = mount(cx);
+        state.update(cx, |s, cx| {
+            let mut nameless = scout();
+            nameless.name = None;
+            s.servers.push(server(vec![nameless]));
+            s.on_matrix_timeline(
+                ROOM.into(),
+                vec![matrix_row(
+                    "m1",
+                    "@test_01scout:arbos.life",
+                    "A",
+                    "yo",
+                    1_000,
+                )],
+                cx,
+            );
+        });
+        let got = state.read_with(cx, |s, _| names(s));
+        assert_eq!(got[0].0, "A");
+        assert_eq!(
+            got[0].1, None,
+            "no name to show: display_name() falls back to the handle"
+        );
+        assert_eq!(
+            got[0].2.as_deref(),
+            Some("https://relay.test/a/scout.png"),
+            "the picture still comes from the roster"
+        );
     }
 }
 

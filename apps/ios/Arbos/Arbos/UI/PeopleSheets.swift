@@ -423,6 +423,7 @@ struct PersonRow: View {
             PersonAvatar(url: person.avatarUrl, handle: person.handle, size: SheetRow.avatar, name: person.name, id: person.id, colorIndex: person.avatarColorIndex)
             VStack(alignment: .leading, spacing: 2) {
                 Text(person.displayName).font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)
+                    .emojiNameLift(person.displayName, size: theme.pt(Theme.body))
                 Text("@\(person.handle)").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(1)
             }
             Spacer()
@@ -1378,6 +1379,7 @@ struct ProjectMembersSheet: View {
                                         PersonAvatar(url: p.avatarUrl, handle: p.handle, size: 40, name: p.name, id: p.id, colorIndex: p.avatarColorIndex)
                                         VStack(alignment: .leading, spacing: 2) {
                                             Text(p.displayName).foregroundStyle(theme.text)
+                                                .emojiNameLift(p.displayName, size: theme.pt(Theme.body))
                                             Text("@\(p.handle)").font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
                                         }
                                         Spacer()
