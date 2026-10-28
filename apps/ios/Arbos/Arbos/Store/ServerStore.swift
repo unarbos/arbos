@@ -80,8 +80,13 @@ extension AppModel {
     }
 
     func channelUnread(_ channel: ServerChannel) -> Bool {
-        guard visibleChatId != channel.id else { return false }
-        return (matrixChannelRow(channel)?.unread ?? 0) > 0
+        channelUnreadCount(channel) > 0
+    }
+
+    /// Missed messages in the channel (0 while it is on screen) — the count pill's number.
+    func channelUnreadCount(_ channel: ServerChannel) -> Int {
+        guard visibleChatId != channel.id else { return 0 }
+        return Int(matrixChannelRow(channel)?.unread ?? 0)
     }
 
     /// Last activity (ms) for sorting and the time label; the relay's creation time until a row lands.
@@ -98,8 +103,12 @@ extension AppModel {
     }
 
     func serverUnread(_ server: Server) -> Bool {
-        if (matrixSpaceRow(server.id)?.unread ?? 0) > 0 { return true }
-        return server.channels.contains { channelUnread($0) }
+        serverUnreadCount(server) > 0
+    }
+
+    /// Missed messages across the server: the space row's count plus its channels'.
+    func serverUnreadCount(_ server: Server) -> Int {
+        Int(matrixSpaceRow(server.id)?.unread ?? 0) + server.channels.reduce(0) { $0 + channelUnreadCount($1) }
     }
 
     func serverActivity(_ server: Server) -> Int64 {
