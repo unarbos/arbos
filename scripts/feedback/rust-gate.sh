@@ -181,6 +181,13 @@ case "$cmd" in
       webrtc_scratch_check
       echo "== cargo build --release --locked -p arbos-mac"
       if cargo build --release --locked -p arbos-mac; then echo "== release build: passes"; else echo "== release build: FAILS"; status=1; fi
+      # The same smoke the Release job runs ("Composer type-and-Enter tests", release.yml): Mac-only test code that
+      # Linux CI never compiles. #2089 (54bc19da) passed the gate and then broke every Mac release from 06:58 to
+      # 08:1x Oct 28 in exactly this step. Debug profile, own small target dir (the release trees stay warm).
+      if [ "$status" -eq 0 ]; then
+        echo "== cargo test -p arbos-mac --locked enter_tests (release smoke)"
+        if CARGO_TARGET_DIR="${CARGO_TARGET_DIR}-smoke" cargo test -p arbos-mac --locked enter_tests; then echo "== release smoke: passes"; else echo "== release smoke: FAILS"; status=1; fi
+      fi
     fi
     echo "== done rc=$status"
     finish "$status"
