@@ -957,9 +957,13 @@ struct ChatSession: View {
                         },
                         onDismiss: { closeActions() },
                         bubble: {
+                            // showReactionSenders: holding the message lists who
+                            // used each emoji under the held bubble (chip hold
+                            // does the same one-emoji list in the transcript).
                             RowView(model: model, theme: theme, composerInset: composerSideInset, row: row, chatId: chatId, width: geo.size.width,
                                     people: isPeople || isChannel, timeReveal: 0,
-                                    mentions: MentionTable.Cache.shared.table(model: model, theme: theme))
+                                    mentions: MentionTable.Cache.shared.table(model: model, theme: theme),
+                                    showReactionSenders: !row.reactions.isEmpty)
                                 .padding(.horizontal, 16)
                         }
                     )
