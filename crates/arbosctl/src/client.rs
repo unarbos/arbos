@@ -174,6 +174,21 @@ impl Relay {
         .await
     }
 
+    /// `PUT` raw bytes (a blob upload: `/blob/{slot}/{key}`).
+    pub async fn put_bytes(&self, path: &str, mime: &str, bytes: Vec<u8>) -> Result<Value> {
+        self.need_token()?;
+        Self::finish(
+            self.http
+                .put(format!("{}{}", self.base, path))
+                .bearer_auth(&self.token)
+                .header("content-type", mime)
+                .body(bytes)
+                .send()
+                .await?,
+        )
+        .await
+    }
+
     pub async fn patch(&self, path: &str, body: &Value) -> Result<Value> {
         self.need_token()?;
         Self::finish(

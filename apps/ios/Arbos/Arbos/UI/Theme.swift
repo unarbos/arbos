@@ -221,9 +221,14 @@ struct Theme: Equatable {
     static let presenceAvatarOffset: CGFloat = 6
     static let presenceGap: CGFloat = 14
     static let presenceBottomGap: CGFloat = 68 / 3
+    /// The fade over the transcript's end, above the chat bar ([feedback
+    /// iphone-composer-bottom-fade-2026-10-28]): rows scrolling under the bar dissolve
+    /// into the band over this many points, Grok's short fade (`ComposerBottomBand`).
+    static let composerFade: CGFloat = 28
     /// The transcript's tail: the clear space under the last row, before the chat bar's
-    /// own top padding, so the last bubble never sits under the bar's fade.
-    static let transcriptTail: CGFloat = 28
+    /// own top padding — the fade's height, so the last bubble at rest sits fully above
+    /// the fade (`ComposerBottomBandTests`).
+    static let transcriptTail: CGFloat = composerFade
     /// The chat bar's padding over its first view (the status row or the composer).
     static let chatBarTopPad: CGFloat = 8
     /// Last bubble → the status picture's top: 42 px in the same Grok shot ([feedback
@@ -949,13 +954,81 @@ extension View {
 /// ([feedback iphone-list-top-fade-2026-10-26]: the tabs no longer scroll with the list, so the
 /// fade can be opaque through them).
 extension HomeChrome {
-    /// Tab pill (32) with `filterTop` above and 4 below.
+    /// Tab pill (32) with `filterTop` above and `filterBottom` below — the whole band is the
+    /// tabs' hit area ([feedback iphone-filter-tab-taps-2026-10-28]: 44 pt tall taps).
     static let filterTop: CGFloat = 8
-    static let filterBand: CGFloat = filterTop + 32 + 4
+    static let filterBottom: CGFloat = 4
+    static let filterBand: CGFloat = filterTop + PaneTabsMetrics.pill + filterBottom
     /// Rows scrolling under the tabs vanish over this band; the first row sits at its end at rest.
     static let fadeBand: CGFloat = 20
     /// The list's first row starts this far under the safe-area top: bar + tabs + the fade band.
     static let listTop: CGFloat = Controls.top + Controls.diameter + filterBand + fadeBand
     /// Lists with a bar and nothing under it (hidden chats, server channels, search results).
     static let barOnlyListTop: CGFloat = Controls.top + Controls.diameter + 12
+}
+
+// MARK: - Composer bottom band
+
+/// What the chat bar sits on ([feedback iphone-composer-bottom-fade-2026-10-28], Jacob
+/// 2026-10-28): in Grok Bot the messages dissolve into a solid band above the composer and
+/// nothing reads behind or between the controls. Ours was a 24 pt `bg → clear` gradient hung
+/// over the bar's own `bg`, under the ↓ chevron. Now one material in two pieces:
+/// - **band** — the bar's background, opaque from the bar's top edge (`chatBarTopPad` over the
+///   status row / composer) through the home indicator; with the keyboard up the bar's safe
+///   area is the keyboard, so the band ends on it and moves with it.
+/// - **fade** — `Theme.composerFade` pt above the bar's top, the same material masked from
+///   clear to full, over the transcript. It lives in the chat canvas (`ChatView.sessionCanvas`),
+///   not in the bar, so the ↓ chevron and the new-messages pill are drawn over it, crisp.
+/// Matte: the page colour. Glass: `.ultraThinMaterial` under the list top fade's 0.94 wash (the
+/// wash that hides text; 0.78 let a row read at half strength, #1988).
+/// `ComposerBottomBandTests` pins the geometry and the material's opacity.
+enum ComposerBottomBand {
+    static let fade: CGFloat = Theme.composerFade
+    static let glassWash: Double = ListTopFade.glassWash
+
+    /// The band's geometry for a bar of `bar` pt over a `safeBottom` pt home-indicator inset
+    /// (0 with the keyboard up: the keyboard is the safe area then).
+    struct Spec: Equatable {
+        /// The fade's height over the bar's top edge.
+        let fade: CGFloat
+        /// Opaque from the bar's top edge to the screen's (or the keyboard's) edge.
+        let band: CGFloat
+        /// How far the band stops short of the bottom edge: always 0.
+        let bottomInset: CGFloat
+    }
+
+    static func spec(bar: CGFloat, safeBottom: CGFloat) -> Spec {
+        Spec(fade: fade, band: bar + safeBottom, bottomInset: 0)
+    }
+
+    /// The material's own alpha on each surface — 1 on Matte, the wash on Glass (over a
+    /// material, so the result is opaque to text either way).
+    static func wash(glass: Bool) -> Double { glass ? glassWash : 1 }
+}
+
+/// The band's material: the page colour on Matte, material + wash on Glass.
+struct ComposerBandMaterial: View {
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        ZStack {
+            if theme.isGlass {
+                Rectangle().fill(.ultraThinMaterial)
+            }
+            theme.bg.opacity(ComposerBottomBand.wash(glass: theme.isGlass))
+        }
+    }
+}
+
+/// The fade: `ComposerBottomBand.fade` tall, clear at its top, the band's material at its
+/// bottom. Aligned to the bottom of the chat canvas — the bar's top edge — under the chevron.
+struct ComposerBottomFade: View {
+    var body: some View {
+        ComposerBandMaterial()
+            .frame(height: ComposerBottomBand.fade)
+            .mask(LinearGradient(colors: [.clear, .black], startPoint: .top, endPoint: .bottom))
+            .frame(maxWidth: .infinity)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
 }
