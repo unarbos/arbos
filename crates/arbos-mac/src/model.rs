@@ -199,6 +199,9 @@ pub struct OutsideInfo {
     pub last_seen_at: Option<i64>,
     #[serde(default)]
     pub connected_at: Option<i64>,
+    /// The nine switches (spec §4.3), effective values: `"files.read" → true`.
+    #[serde(default)]
+    pub scopes: std::collections::HashMap<String, bool>,
     /// The Wake URL (`agent.wake`), absent on a relay without it.
     #[serde(default)]
     pub wake: Option<WakeInfo>,
@@ -259,7 +262,44 @@ fn ago_seconds(now: i64, t: i64) -> String {
     }
 }
 
+/// The switches of the Can card, in the mockup's order: wire name, title, subtitle.
+pub const OUTSIDE_SCOPES: [(&str, &str, Option<&str>); 9] = [
+    (
+        "chat.read",
+        "Read messages",
+        Some("in chats it is a member of"),
+    ),
+    ("chat.post", "Post, edit and delete its own messages", None),
+    ("chat.react", "React", None),
+    ("presence", "Show typing and status", None),
+    (
+        "approval.request",
+        "Ask you to approve actions",
+        Some("approval cards in chat"),
+    ),
+    (
+        "secret.use",
+        "Use your secrets",
+        Some("by name only, never the value"),
+    ),
+    ("members.manage", "Add members or agents", None),
+    (
+        "files.read",
+        "Open files shared in chat",
+        Some("pictures, files, GIFs it was sent"),
+    ),
+    ("calls.join", "Join voice calls", None),
+];
+
 impl OutsideInfo {
+    /// A switch's value; a relay without scopes yet reads as the spec defaults.
+    pub fn scope(&self, name: &str) -> bool {
+        self.scopes.get(name).copied().unwrap_or(matches!(
+            name,
+            "chat.read" | "chat.post" | "chat.react" | "presence" | "approval.request"
+        ))
+    }
+
     /// The transport as the Details pane names it.
     pub fn transport_label(&self) -> &'static str {
         match self.transport.as_str() {

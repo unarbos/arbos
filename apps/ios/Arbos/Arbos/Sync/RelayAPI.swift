@@ -341,6 +341,13 @@ final class RelayAPI {
         }
     }
 
+    /// `PATCH /outside-agents/{id} {scopes: {name: on}}` — one switch of the Can card → the
+    /// agent with its effective set.
+    func setOutsideScope(_ projectId: Id, _ scope: String, on: Bool) async throws -> OutsideAgentInfo? {
+        let v = try await json("PATCH", "/outside-agents/\(projectId)", body: ["scopes": [scope: on]])
+        return OutsideAgentInfo(json: (v as? [String: Any])?["agent"])
+    }
+
     /// `POST /outside-agents/{id}/rotate` → a fresh key; the old one stops at once.
     func rotateOutsideKey(_ projectId: Id) async throws -> ConnectReveal {
         let v = try await json("POST", "/outside-agents/\(projectId)/rotate", body: [String: Any]())
@@ -1477,6 +1484,21 @@ struct OutsideAgentInfo: Equatable {
     /// `asp/1`.
     var proto: String
     var lastSeenAt: Int64?
+    /// The nine switches (spec §4.3), effective values: `"files.read": true`.
+    var scopes: [String: Bool]
+
+    /// The switches of the Can card in the mockup's order: wire name, title, subtitle.
+    static let scopeRows: [(name: String, title: String, subtitle: String?)] = [
+        ("chat.read", "Read messages", "in chats it is a member of"),
+        ("chat.post", "Post, edit and delete its own messages", nil),
+        ("chat.react", "React", nil),
+        ("presence", "Show typing and status", nil),
+        ("approval.request", "Ask you to approve actions", "approval cards in chat"),
+        ("secret.use", "Use your secrets", "by name only, never the value"),
+        ("members.manage", "Add members or agents", nil),
+        ("files.read", "Open files shared in chat", "pictures, files, GIFs it was sent"),
+        ("calls.join", "Join voice calls", nil),
+    ]
     /// The Wake URL (`agent.wake`): the URL is shown back, the Authorization value never is.
     var wakeURL: String?
     var wakeAuthSet: Bool
@@ -1491,11 +1513,18 @@ struct OutsideAgentInfo: Equatable {
         transport = d["transport"] as? String ?? "custom"
         proto = d["protocol"] as? String ?? "asp/1"
         if let t = d["last_seen_at"] as? NSNumber { lastSeenAt = t.int64Value } else { lastSeenAt = nil }
+        scopes = (d["scopes"] as? [String: Any])?.compactMapValues { $0 as? Bool } ?? [:]
         let wake = d["wake"] as? [String: Any]
         hasWake = wake != nil
         wakeURL = (wake?["url"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         wakeAuthSet = wake?["auth_set"] as? Bool ?? false
         wakeLast = OutsideWakeLast(json: wake?["last"])
+    }
+
+    /// A switch's value; a relay without scopes yet reads as the spec defaults.
+    func scope(_ name: String) -> Bool {
+        if let v = scopes[name] { return v }
+        return ["chat.read", "chat.post", "chat.react", "presence", "approval.request"].contains(name)
     }
 
     /// The transport as the Details pane names it.

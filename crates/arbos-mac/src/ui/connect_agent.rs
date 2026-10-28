@@ -8,7 +8,7 @@
 use gpui::{div, prelude::*, px, ClipboardItem, Context, Div, FontWeight, MouseButton};
 
 use crate::app::ConnectReveal;
-use crate::model::{now_ms, Id, OutsideInfo};
+use crate::model::{now_ms, Id, OutsideInfo, OUTSIDE_SCOPES};
 use crate::ui::create_entity::{self, hex, palette, Transport};
 use crate::ui::frost::{frosted, PANEL_BLUR};
 use crate::ui::highlight;
@@ -403,9 +403,38 @@ pub fn details_sections(
         .into_any_element(),
     ];
     out.push(Section::Card(rows));
+    // The Can card (spec §4.3, the approved mockup): one switch per scope, flipped on click.
+    out.push(Section::Title("Can".into()));
+    let switches: Vec<gpui::AnyElement> = OUTSIDE_SCOPES
+        .iter()
+        .map(|(name, title, subtitle)| {
+            let on = info.scope(name);
+            let pid = project_id.clone();
+            let id: gpui::SharedString = format!("outside-scope-{name}").into();
+            let sel = id.clone();
+            kit::row(
+                gpui::ElementId::Name(id),
+                Leading::None,
+                *title,
+                subtitle.map(|s| s.into()),
+                None,
+                Some(crate::ui::glass::switch(on, theme).into_any_element()),
+                false,
+                theme,
+            )
+            .debug_selector(move || sel.to_string())
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let pid = pid.clone();
+                this.state
+                    .update(cx, |s, cx| s.set_outside_scope(pid, name, !on, cx));
+            }))
+            .into_any_element()
+        })
+        .collect();
+    out.push(Section::Card(switches));
     out.push(Section::Footnote(
-        "It reads and posts in the chats it is in, reacts, and shows typing and status. Secrets and members stay off."
-            .into(),
+        "Changes apply at once. The agent sees only what is on.".into(),
     ));
     // The card needs the relay half (#2185): an older relay reports no `wake` at all.
     if info.status != "revoked" && info.wake.is_some() {
