@@ -162,6 +162,16 @@ final class CoreChatDoc {
         try doc.editMessage(messageId: messageId, text: text)
     }
 
+    /// Append one part to a message from its JSON object (`kind` + fields; a string `id`
+    /// is kept). Forward writes a chart part and its fallback picture with it
+    /// ([feedback forward-attachments-ios-2026-10-27]). Returns the part id.
+    @discardableResult
+    func insertPart(messageId: Id, part: [String: Any]) throws -> String {
+        let data = try JSONSerialization.data(withJSONObject: part)
+        let json = String(data: data, encoding: .utf8) ?? "{}"
+        return try doc.addPartJson(messageId: messageId, partJson: json)
+    }
+
     /// Append a `commands` row (`send`, `stop`, `answer`, `retry`, `retitle`). Does not commit.
     func pushCommand(_ kind: String, payload: [String: Any], device: String) throws {
         let data = try JSONSerialization.data(withJSONObject: payload)

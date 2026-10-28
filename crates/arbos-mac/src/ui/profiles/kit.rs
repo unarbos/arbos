@@ -24,6 +24,7 @@ use crate::ui::glass;
 use crate::ui::highlight::{self, Shape};
 use crate::ui::icons::icon;
 use crate::ui::identity;
+use crate::ui::sf_symbols;
 use crate::ui::theme::{Theme, CONTROL, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
 /// The group a clickable row joins so its highlight pill lights: every
@@ -366,15 +367,17 @@ pub fn action_row(
 /// The hero's action pill ("Message" on a person's pane,
 /// [feedback profile-message-button-mac-2026-10-25]): one of the Grok button
 /// family — [`CONTROL`] 36 tall, a capsule on the discs' `surface_2` fill,
-/// glyph and 13 pt semibold label in `text`; hover and pressed are the
+/// SF Symbol (the iPhone's `PanePillButton(glyph:)` name, semibold at the
+/// label's size) and 13 pt semibold label in `text`; hover and pressed are the
 /// highlight token's two steps over the fill (`highlight::washed`).
 pub const PILL_PAD_X: f32 = 18.0;
-pub const PILL_GLYPH: f32 = 17.0;
+pub const PILL_GLYPH: f32 = TEXT_SMALL;
+pub const PILL_GLYPH_SLOT: f32 = 18.0;
 pub const PILL_GAP: f32 = 7.0;
 
 pub fn pill_button(
     id: &'static str,
-    glyph: &'static str,
+    symbol: &'static str,
     label: &str,
     theme: &Theme,
 ) -> Stateful<Div> {
@@ -394,7 +397,13 @@ pub fn pill_button(
         .text_color(theme.text)
         .cursor_pointer();
     highlight::washed(frame, theme.surface_2, theme)
-        .child(icon(glyph, PILL_GLYPH, theme.text))
+        .child(sf_symbols::symbol(
+            symbol,
+            PILL_GLYPH,
+            sf_symbols::Weight::Semibold,
+            PILL_GLYPH_SLOT,
+            theme.text,
+        ))
         .child(label.to_string())
 }
 
