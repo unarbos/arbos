@@ -212,6 +212,8 @@ enum DebugHooks {
     /// transcript to its top and back, `type` appends 40 keystrokes to the composer,
     /// `typing` fakes a member's typing presence every second. Comma-separated.
     static var perfDrive: Set<String> { Set((value("ARBOS_PERF_DRIVE") ?? "").split(separator: ",").map(String.init)) }
+    /// With `ARBOS_PERF_DRIVE=switch`: the other people chat to alternate with (default the fixture DM).
+    static var perfSwitchTo: String? { value("ARBOS_PERF_SWITCH_TO") }
     /// Scroll rig (iphone-scroll-perf, 2026-10-27): log every touch sequence on the chat
     /// screen — touch-down → scroll pan began / first content-offset change (latency), and
     /// pans that moved the finger but never moved the transcript ("dropped") — to the `perf`
