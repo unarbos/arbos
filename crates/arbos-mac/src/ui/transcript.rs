@@ -8418,6 +8418,53 @@ mod transcript_smoke_tests {
         });
     }
 
+    /// An expanded link card under a long line (v0.6.310 proof shot, the YouTube row): the
+    /// bubble is as wide as the sentence, the card stops at 400 pt, and the card's title
+    /// wraps there — the card must still be tall enough for its own footer.
+    #[gpui::test]
+    fn expanded_link_card_under_a_long_line_keeps_its_footer(cx: &mut TestAppContext) {
+        let t = 1_700_000_000_000u64;
+        let mut m = message(
+            "m2",
+            "user",
+            "this one explains the render pipeline better than the docs, worth the ten minutes https://www.youtube.com/watch?v=aqz-KE-bpKQ",
+            t + 2_000,
+        );
+        m.parts.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "lp", "kind": "link_preview", "specVersion": 1,
+                "url": "https://www.youtube.com/watch?v=aqz-KE-bpKQ",
+                "canonicalUrl": "https://www.youtube.com/watch?v=aqz-KE-bpKQ",
+                "provider": "youtube", "providerName": "YouTube", "type": "video",
+                "title": "Big Buck Bunny 60fps 4K - Official Blender Foundation Short Film",
+                "description": "Blender", "facts": ["Blender"], "siteHost": "www.youtube.com",
+                "image": { "ref": "lp-yt.jpg", "width": 1280, "height": 720, "mime": "image/jpeg", "art": false },
+                "layout": "expanded", "fetchedAt": t
+            }))
+            .expect("preview part"),
+        );
+        let (_rt, _state, transcript) = mount_with(
+            cx,
+            vec![message("m1", "user", "How did the review go?", t), m],
+        );
+        let (_view, vcx) = cx.add_window_view(|_, _| Host {
+            transcript: transcript.clone(),
+        });
+        vcx.run_until_parked();
+        let card = vcx.debug_bounds("link-card").expect("the card draws");
+        let text = vcx
+            .debug_bounds("link-text")
+            .expect("the card's text block draws");
+        assert!(
+            card.size.width <= px(crate::ui::link_card::CARD_MAX_WIDTH + 0.5),
+            "the card stops at its width: {card:?}"
+        );
+        assert!(
+            text.bottom() + px(crate::ui::link_card::CARD_PAD) <= card.bottom() + px(0.5),
+            "the text block (title, line, footer) fits inside the card: text {text:?} card {card:?}"
+        );
+    }
+
     /// 2026-10-26, Mac 0.6.268: a row the code did not expect aborted the app at every
     /// launch (a panic on the main thread unwinds into AppKit → `abort()`). A sync event whose
     /// apply panics is skipped with a notice, the state keeps every other row, and the
