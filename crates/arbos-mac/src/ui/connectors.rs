@@ -359,7 +359,7 @@ impl ConnectorsPanel {
                     .child(
                         glass::menu_row(
                             format!("paste-{}", p.provider),
-                            "doc",
+                            "doc.on.clipboard",
                             "Paste a token…",
                             false,
                             theme,
