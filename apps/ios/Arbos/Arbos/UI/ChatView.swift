@@ -1070,21 +1070,16 @@ struct ChatSession: View {
     }
 
     /// Sheets, tasks, and appear/disappear hooks on top of `sessionCanvas`.
-    /// Split so the Swift type-checker can finish (ChatView.swift:1030 on main).
+    /// Split so the Swift type-checker can finish (ChatView.swift:1030 on main;
+    /// feedback app-01M61XC4KNXA8XP8CRNWN5VR4E).
     @ViewBuilder
     private var sessionRoot: some View {
-        sessionRootLifecycle
+        sessionLifecycle
     }
 
-    /// Sheets and the media viewer cover on top of the canvas.
+    /// Back swipe, full-screen cover, and the first sheet group on `sessionCanvas`.
     @ViewBuilder
-    private var sessionRootSheets: some View {
-        sessionRootMoreSheets
-    }
-
-    /// First sheet cluster (picker / secrets / settings / call / unblock).
-    @ViewBuilder
-    private var sessionRootCoreSheets: some View {
+    private var sessionCovers: some View {
         sessionCanvas
         // Custom back chevron; the system's edge pop, or a swipe right anywhere outside the
         // composer bar, goes back one level — `BackSwipe.swift`, shared by every chat screen.
@@ -1121,10 +1116,10 @@ struct ChatSession: View {
         }
     }
 
-    /// Remaining sheets (profile / forward / thread / tasks).
+    /// Remaining sheets on top of covers (`sessionPresentations`).
     @ViewBuilder
-    private var sessionRootMoreSheets: some View {
-        sessionRootCoreSheets
+    private var sessionPresentations: some View {
+        sessionCovers
         .sheet(isPresented: $showProfile) {
             AgentEditSheet(projectId: projectId).environmentObject(model).environment(\.theme, theme)
         }
@@ -1163,102 +1158,22 @@ struct ChatSession: View {
         }
     }
 
-    /// Tasks / appear / onChange hooks hanging off the sheets.
+    /// Async watches on top of presentations.
     @ViewBuilder
-    private var sessionRootLifecycle: some View {
-        sessionRootAppear
+    private var sessionTasks: some View {
+        sessionPresentations
+        .task(id: chatId) { await pollJobsWhileOpen() }
+        .task { await runLiveDemo() }
+        .task { await runFixtureDemo() }
+        .task(id: calls.activeByChat[chatId]?.callId) { await watchActiveJoinBar() }
     }
 
-    /// Async tasks hanging off the sheets (kept separate so the type-checker finishes).
+    /// Appear / disappear / onChange hooks on top of tasks.
     @ViewBuilder
-    private var sessionRootTasks: some View {
-        sessionRootDemoTasks
-            .task(id: calls.activeByChat[chatId]?.callId) {
-                // While the Join bar is up, re-check the relay so an ended call does not stick.
-                guard !isChannel, calls.activeByChat[chatId] != nil else { return }
-                while !Task.isCancelled {
-                    try? await Task.sleep(nanoseconds: 4_000_000_000)
-                    guard !Task.isCancelled, calls.activeByChat[chatId] != nil else { return }
-                    await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId)
-                }
-            }
-    }
-
-    /// Jobs poll + live/fixture demo tasks.
-    @ViewBuilder
-    private var sessionRootDemoTasks: some View {
-        sessionRootSheets
-        .task(id: chatId) {
-            // Polls the open chat's jobs while one is live (`AppModel.pollJobsIfNeeded`);
-            // cancelled with the view. The sheet lists live work only: nothing open → it
-            // closes itself.
-            if isJobTab { model.pollRolloutIfNeeded(chatId: chatId, force: true) }
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(AppModel.jobsPollMs))
-                guard !Task.isCancelled else { break }
-                model.pollJobsIfNeeded(chatId: chatId)
-                if isJobTab { model.pollRolloutIfNeeded(chatId: chatId) }
-                if showTasks, model.openJobs(chatId).isEmpty { showTasks = false }
-            }
-        }
-        .task {
-            guard DebugHooks.liveDemo, !model.demoStarted, DebugHooks.openChat == chatId || DebugHooks.openChat == nil, let text = DebugHooks.autoSend else { return }
-            model.demoStarted = true
-            while !model.caughtUp.contains(chatId) { try? await Task.sleep(nanoseconds: 200_000_000) }
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            composerFocused = true
-            try? await Task.sleep(nanoseconds: 800_000_000)
-            for ch in text { composerDraft.text.append(ch); try? await Task.sleep(nanoseconds: 45_000_000) }
-            try? await Task.sleep(nanoseconds: 600_000_000)
-            send()
-            try? await Task.sleep(nanoseconds: 400_000_000)
-            composerFocused = false
-            // Wait for the turn: streaming starts, then ends (cap 45 s).
-            var waited = 0
-            while !streaming && waited < 150 { try? await Task.sleep(nanoseconds: 200_000_000); waited += 1 }
-            while streaming && waited < 225 { try? await Task.sleep(nanoseconds: 200_000_000); waited += 1 }
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            if rows.count > 8 {
-                withAnimation(.easeInOut(duration: 1.2)) { scroller?.scrollTo(rows[rows.count - 8].id, anchor: .top) }
-                try? await Task.sleep(nanoseconds: 2_400_000_000)
-                withAnimation(.easeInOut(duration: 1.0)) { scroller?.scrollTo("bottom", anchor: .bottom) }
-                try? await Task.sleep(nanoseconds: 1_600_000_000)
-            }
-            demoQueue = ["model", "threads", "attach", "voice", "settings"]
-            demoPresentNext()
-        }
-        .task {
-            guard DebugHooks.demo, model.isFixture, !model.demoStarted else { return }
-            model.demoStarted = true
-            try? await Task.sleep(nanoseconds: 1_800_000_000)
-            composerFocused = true
-            try? await Task.sleep(nanoseconds: 900_000_000)
-            for ch in "Also keep your replies short, please." {
-                composerDraft.text.append(ch)
-                try? await Task.sleep(nanoseconds: 55_000_000)
-            }
-            try? await Task.sleep(nanoseconds: 500_000_000)
-            send()
-            try? await Task.sleep(nanoseconds: 300_000_000)
-            composerFocused = false
-            try? await Task.sleep(nanoseconds: 7_500_000_000)
-            dismiss()
-        }
-    }
-
-    /// Appear / disappear hooks (bodies live in helpers so the type-checker finishes —
-    /// feedback app-01M61EZD0GJ2XGV1EW4SCVXENK).
-    @ViewBuilder
-    private var sessionRootAppear: some View {
-        sessionRootChanges
-            .onAppear { handleSessionAppear() }
-            .onDisappear { handleSessionDisappear() }
-    }
-
-    /// onChange hooks hanging off the tasks (kept separate from appear/disappear).
-    @ViewBuilder
-    private var sessionRootChanges: some View {
-        sessionRootRowChanges
+    private var sessionLifecycle: some View {
+        sessionTasks
+        .onAppear { handleAppear() }
+        .onDisappear { handleDisappear() }
         // Profile "search" sets pendingSearchChat while this chat is already on screen
         // (sheet over us), so onAppear alone never sees it — watch the published flag.
         .onChange(of: model.pendingSearchChat) { _, _ in openPendingSearchIfNeeded() }
@@ -1267,31 +1182,24 @@ struct ChatSession: View {
         // A bottom-bar search result or a quote tap: the rows may land after appear (room backfill).
         .onChange(of: model.pendingReveal) { _, _ in revealPendingIfNeeded() }
         .onChange(of: rows.count) { _, _ in revealPendingIfNeeded() }
-    }
-
-    /// Message / membership / catch-up onChange hooks.
-    @ViewBuilder
-    private var sessionRootRowChanges: some View {
-        sessionRootTasks
         // The per-chat version, not the array: comparing 1 000+ messages on every
         // body (each keystroke, presence tick, publish) was a measurable share of
         // the Arbonites lag (arbonites-chat-lag, 2026-10-24).
-        .onChange(of: model.messagesVersion[chatId] ?? 0, initial: true) { _, new in
-            handleMessagesVersionChange(new)
-        }
+        .onChange(of: model.messagesVersion[chatId] ?? 0, initial: true) { _, new in handleMessagesVersionChange(new) }
         // Adding a person or agent updates membership without a new message — rebuild so "@handle joined" appears.
         // A member's rename re-words the membership lines that name them, so the key carries names.
-        .onChange(of: people?.members.map { "\($0.id):\($0.joinedAt):\($0.name ?? "")" } ?? []) { _, _ in
-            refreshRows()
-        }
+        .onChange(of: membersRebuildKey) { _, _ in refreshRows() }
         .onChange(of: model.user?.name) { _, _ in refreshRows() }
-        .onChange(of: model.caughtUp.contains(chatId), initial: true) { _, ready in
-            handleCaughtUpAutoSend(ready)
-        }
+        .onChange(of: model.caughtUp.contains(chatId), initial: true) { _, ready in handleCaughtUp(ready) }
+    }
+
+    /// Membership lines rebuild when ids, join times, or display names change.
+    private var membersRebuildKey: [String] {
+        people?.members.map { "\($0.id):\($0.joinedAt):\($0.name ?? "")" } ?? []
     }
 
     /// Chat appear: mark-read, restore draft, open channel / refresh call, rig hooks.
-    private func handleSessionAppear() {
+    private func handleAppear() {
         appearedAt = Date()
         LaunchClock.mark("chat-appear", detail: "messages=\(messages.count)")
         #if DEBUG
@@ -1357,65 +1265,14 @@ struct ChatSession: View {
         if let show = DebugHooks.show, !model.showHookDone {
             model.showHookDone = true
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(DebugHooks.showDelayMs)) {
-                self.handleDebugShowHook(show)
-            }
-        }
-    }
-
-    /// Chat disappear: keep draft, mark-read once more, clear visibleChatId.
-    private func handleSessionDisappear() {
-        // Keep the typed draft so coming back to this thread restores it.
-        model.setComposerDraft(composerDraft.text, for: chatId)
-        // Catch notifies that landed after the last onChange mark-read while we were still in the chat
-        // (including rows that arrived while the app was inactive on a call — isWatching was false).
-        if isPeople { model.markPeopleRead(chatId) }
-        else { model.markRead(chatId: chatId) }
-        if model.visibleChatId == chatId { model.visibleChatId = nil }
-    }
-
-    /// Refresh rows when `messagesVersion` moves; mark-read on a new last row.
-    private func handleMessagesVersionChange(_ new: Int) {
-        #if DEBUG
-        if SendTrace.traces(chatId) { SendTrace.mark("version-onchange", detail: "version=\(new)", once: false) }
-        #endif
-        let old = rowsSource
-        let newMessages = messages
-        let initial = old.isEmpty && rows.isEmpty
-        rowsSource = newMessages
-        refreshRows()
-        // Streaming tokens reassign `messages` with the same last id — do not
-        // mark-read on every delta. Initial call (`old == new`) and a new last
-        // row still mark; AppModel also skips/throttles the PUT.
-        if old.last?.id != newMessages.last?.id || initial {
-            model.markRead(chatId: chatId)
-            if isPeople { model.markPeopleRead(chatId) }
-        }
-        // A channel's read marker moves when a new row lands while it is on screen.
-        if isChannel, old.last?.id != newMessages.last?.id { model.markChannelRead(chatId) }
-    }
-
-    /// Rig auto-send once the chat is caught up (`ARBOS_AUTO_SEND`).
-    private func handleCaughtUpAutoSend(_ ready: Bool) {
-        guard ready, !sentOnce, !DebugHooks.liveDemo, let text = DebugHooks.autoSend, DebugHooks.openChat == chatId else { return }
-        // Several messages separated by " ||| " go out a few seconds apart
-        // (multitasking checks: the composer never waits for a reply).
-        let parts = text.components(separatedBy: " ||| ").filter { !$0.isEmpty }
-        composerDraft.text = parts.first ?? text
-        send()
-        if parts.count > 1 {
-            Task {
-                for p in parts.dropFirst() {
-                    try? await Task.sleep(nanoseconds: 3_000_000_000)
-                    composerDraft.text = p
-                    send()
-                }
+                self.applyDebugShow(show)
             }
         }
     }
 
     /// Rig / DebugHooks `ARBOS_SHOW=…` cases for chat appear (kept out of the
     /// view builder so the type-checker can finish).
-    private func handleDebugShowHook(_ show: String) {
+    private func applyDebugShow(_ show: String) {
         switch show {
                     case "keyboard": composerFocused = true
                     case "settings": showSettings = true
@@ -1609,6 +1466,125 @@ struct ChatSession: View {
                     }
     }
 
+    /// Chat disappear: keep draft, mark-read once more, clear visibleChatId.
+    private func handleDisappear() {
+        // Keep the typed draft so coming back to this thread restores it.
+        model.setComposerDraft(composerDraft.text, for: chatId)
+        // Catch notifies that landed after the last onChange mark-read while we were still in the chat
+        // (including rows that arrived while the app was inactive on a call — isWatching was false).
+        if isPeople { model.markPeopleRead(chatId) }
+        else { model.markRead(chatId: chatId) }
+        if model.visibleChatId == chatId { model.visibleChatId = nil }
+    }
+
+    private func pollJobsWhileOpen() async {
+        // Polls the open chat's jobs while one is live (`AppModel.pollJobsIfNeeded`);
+        // cancelled with the view. The sheet lists live work only: nothing open → it
+        // closes itself.
+        if isJobTab { model.pollRolloutIfNeeded(chatId: chatId, force: true) }
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(AppModel.jobsPollMs))
+            guard !Task.isCancelled else { break }
+            model.pollJobsIfNeeded(chatId: chatId)
+            if isJobTab { model.pollRolloutIfNeeded(chatId: chatId) }
+            if showTasks, model.openJobs(chatId).isEmpty { showTasks = false }
+        }
+    }
+
+    private func runLiveDemo() async {
+        guard DebugHooks.liveDemo, !model.demoStarted, DebugHooks.openChat == chatId || DebugHooks.openChat == nil, let text = DebugHooks.autoSend else { return }
+        model.demoStarted = true
+        while !model.caughtUp.contains(chatId) { try? await Task.sleep(nanoseconds: 200_000_000) }
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        composerFocused = true
+        try? await Task.sleep(nanoseconds: 800_000_000)
+        for ch in text { composerDraft.text.append(ch); try? await Task.sleep(nanoseconds: 45_000_000) }
+        try? await Task.sleep(nanoseconds: 600_000_000)
+        send()
+        try? await Task.sleep(nanoseconds: 400_000_000)
+        composerFocused = false
+        // Wait for the turn: streaming starts, then ends (cap 45 s).
+        var waited = 0
+        while !streaming && waited < 150 { try? await Task.sleep(nanoseconds: 200_000_000); waited += 1 }
+        while streaming && waited < 225 { try? await Task.sleep(nanoseconds: 200_000_000); waited += 1 }
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        if rows.count > 8 {
+            withAnimation(.easeInOut(duration: 1.2)) { scroller?.scrollTo(rows[rows.count - 8].id, anchor: .top) }
+            try? await Task.sleep(nanoseconds: 2_400_000_000)
+            withAnimation(.easeInOut(duration: 1.0)) { scroller?.scrollTo("bottom", anchor: .bottom) }
+            try? await Task.sleep(nanoseconds: 1_600_000_000)
+        }
+        demoQueue = ["model", "threads", "attach", "voice", "settings"]
+        demoPresentNext()
+    }
+
+    private func runFixtureDemo() async {
+        guard DebugHooks.demo, model.isFixture, !model.demoStarted else { return }
+        model.demoStarted = true
+        try? await Task.sleep(nanoseconds: 1_800_000_000)
+        composerFocused = true
+        try? await Task.sleep(nanoseconds: 900_000_000)
+        for ch in "Also keep your replies short, please." {
+            composerDraft.text.append(ch)
+            try? await Task.sleep(nanoseconds: 55_000_000)
+        }
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        send()
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        composerFocused = false
+        try? await Task.sleep(nanoseconds: 7_500_000_000)
+        dismiss()
+    }
+
+    private func watchActiveJoinBar() async {
+        // While the Join bar is up, re-check the relay so an ended call does not stick.
+        guard !isChannel, calls.activeByChat[chatId] != nil else { return }
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            guard !Task.isCancelled, calls.activeByChat[chatId] != nil else { return }
+            await model.refreshActiveCall(chatId: chatId, projectId: isPeople ? nil : projectId)
+        }
+    }
+
+    /// Refresh rows when `messagesVersion` moves; mark-read on a new last row.
+    private func handleMessagesVersionChange(_ new: Int) {
+        #if DEBUG
+        if SendTrace.traces(chatId) { SendTrace.mark("version-onchange", detail: "version=\(new)", once: false) }
+        #endif
+        let old = rowsSource
+        let newMessages = messages
+        let initial = old.isEmpty && rows.isEmpty
+        rowsSource = newMessages
+        refreshRows()
+        // Streaming tokens reassign `messages` with the same last id — do not
+        // mark-read on every delta. Initial call (`old == new`) and a new last
+        // row still mark; AppModel also skips/throttles the PUT.
+        if old.last?.id != newMessages.last?.id || initial {
+            model.markRead(chatId: chatId)
+            if isPeople { model.markPeopleRead(chatId) }
+        }
+        // A channel's read marker moves when a new row lands while it is on screen.
+        if isChannel, old.last?.id != newMessages.last?.id { model.markChannelRead(chatId) }
+    }
+
+    /// Rig auto-send once the chat is caught up (`ARBOS_AUTO_SEND`).
+    private func handleCaughtUp(_ ready: Bool) {
+        guard ready, !sentOnce, !DebugHooks.liveDemo, let text = DebugHooks.autoSend, DebugHooks.openChat == chatId else { return }
+        // Several messages separated by " ||| " go out a few seconds apart
+        // (multitasking checks: the composer never waits for a reply).
+        let parts = text.components(separatedBy: " ||| ").filter { !$0.isEmpty }
+        composerDraft.text = parts.first ?? text
+        send()
+        if parts.count > 1 {
+            Task {
+                for p in parts.dropFirst() {
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    composerDraft.text = p
+                    send()
+                }
+            }
+        }
+    }
 
     /// Demo tour: present the next sheet; each one auto-dismisses and its
     /// onDismiss schedules the next, so presentations never overlap.
