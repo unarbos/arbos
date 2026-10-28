@@ -393,13 +393,26 @@ pub fn device_time_zone() -> Option<String> {
         .filter(|z| !z.is_empty())
 }
 
-/// One attachment part on a client user message (`name` / `mime` / optional `kind` / `ref`).
+/// Where a GIF / sticker came from (a later picker fills this in). Old messages
+/// and pasted images have none. Written as an optional `source` map on the
+/// attachment: `{ provider, id, pageUrl }`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachmentSource {
+    pub provider: String,
+    pub id: String,
+    pub page_url: String,
+}
+
+/// One attachment part on a client user message (`name` / `mime` / optional `kind` / `ref`
+/// / optional `source`).
 #[derive(Debug, Clone)]
 pub struct UserAttachment {
     pub name: String,
     pub mime: String,
     pub kind: Option<String>,
     pub blob_ref: Option<String>,
+    /// Attribution for a GIF picker result; omitted when absent.
+    pub source: Option<AttachmentSource>,
 }
 
 fn lv_to_json(v: &LoroValue) -> Value {
@@ -786,6 +799,12 @@ impl ChatDoc {
             }
             if let Some(r) = att.blob_ref.as_deref() {
                 loro_err(a.insert("ref", r))?;
+            }
+            if let Some(src) = &att.source {
+                let s = loro_err(a.insert_container("source", LoroMap::new()))?;
+                loro_err(s.insert("provider", src.provider.as_str()))?;
+                loro_err(s.insert("id", src.id.as_str()))?;
+                loro_err(s.insert("pageUrl", src.page_url.as_str()))?;
             }
         }
         let part = loro_err(parts.push_container(LoroMap::new()))?;
@@ -2489,6 +2508,7 @@ mod tests {
                         mime: "image/png".into(),
                         kind: Some("image".into()),
                         blob_ref: Some("blob-1".into()),
+                        source: None,
                     }],
                     ..UserMessageOpts::default()
                 },
@@ -2511,6 +2531,8 @@ mod tests {
         assert!(row.get("reactions").is_some());
         assert_eq!(row["replyTo"], "prev");
         assert_eq!(row["senderHandle"], "ken");
+        // Pasted / ordinary attachments omit `source`.
+        assert!(row["parts"][0]["attachment"].get("source").is_none());
         let sys = &a.to_json()["messages"][1];
         assert_eq!(sys["callId"], "c1");
         assert!(sys.get("call_id").is_none());
@@ -2933,5 +2955,62 @@ mod tests {
         assert_eq!(json["parts"][0]["kind"], "text");
         assert_eq!(json["hiddenParts"].as_array().unwrap().len(), 1);
         assert_eq!(json["hiddenParts"][0]["kind"], "tool");
+    }
+
+    /// An attachment with and without `source` round-trips through the doc
+    /// (feedback app-01M5TGH18WV3QCK5KZT6XKG7FG): the picker attribution map
+    /// is optional and omitted when absent.
+    #[test]
+    fn attachment_source_round_trips_through_the_doc() {
+        let with = ChatDoc::new(None, false);
+        with.transact(|d| {
+            d.append_user_message(
+                "m-src",
+                "gif",
+                "dev:a",
+                &UserMessageOpts {
+                    attachments: vec![UserAttachment {
+                        name: "dance.gif".into(),
+                        mime: "image/gif".into(),
+                        kind: Some("image".into()),
+                        blob_ref: Some("blob-gif".into()),
+                        source: Some(AttachmentSource {
+                            provider: "giphy".into(),
+                            id: "abc".into(),
+                            page_url: "https://giphy.com/gifs/abc".into(),
+                        }),
+                    }],
+                    ..UserMessageOpts::default()
+                },
+            )
+            .unwrap();
+        });
+        let att = &with.to_json()["messages"][0]["parts"][0]["attachment"];
+        assert_eq!(att["source"]["provider"], "giphy");
+        assert_eq!(att["source"]["id"], "abc");
+        assert_eq!(att["source"]["pageUrl"], "https://giphy.com/gifs/abc");
+
+        let without = ChatDoc::new(None, false);
+        without.transact(|d| {
+            d.append_user_message(
+                "m-plain",
+                "pic",
+                "dev:a",
+                &UserMessageOpts {
+                    attachments: vec![UserAttachment {
+                        name: "shot.png".into(),
+                        mime: "image/png".into(),
+                        kind: Some("image".into()),
+                        blob_ref: Some("blob-png".into()),
+                        source: None,
+                    }],
+                    ..UserMessageOpts::default()
+                },
+            )
+            .unwrap();
+        });
+        let plain = &without.to_json()["messages"][0]["parts"][0]["attachment"];
+        assert!(plain.get("source").is_none());
+        assert_eq!(plain["name"], "shot.png");
     }
 }

@@ -147,6 +147,7 @@ mod core_writer_tests {
                         mime: "image/png".into(),
                         kind: Some("image".into()),
                         blob_ref: Some("ref1".into()),
+                        source: None,
                     }],
                     reply_to: Some("other".into()),
                     ..UserMessageOpts::default()

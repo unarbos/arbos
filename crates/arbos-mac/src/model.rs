@@ -1355,6 +1355,16 @@ impl AttachmentKind {
     }
 }
 
+/// Where a GIF / sticker came from. Written on the attachment as
+/// `{ provider, id, pageUrl }`; old messages and pastes have none.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentSource {
+    pub provider: String,
+    pub id: String,
+    pub page_url: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Attachment {
@@ -1375,6 +1385,10 @@ pub struct Attachment {
     /// ([feedback chart-bubble-mac-2026-10-26]).
     #[serde(default, rename = "chartPart", skip_serializing_if = "Option::is_none")]
     pub chart_part: Option<String>,
+    /// GIF-picker attribution; when set the bubble shows "via \<provider\>".
+    /// Boxed so [`Attachment`] stays small inside enums (Outgoing, library Entry).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<Box<AttachmentSource>>,
 }
 
 impl Attachment {
