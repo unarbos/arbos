@@ -383,7 +383,10 @@ struct PaneTabs: View {
                         .padding(.horizontal, PaneTabsMetrics.gap / 2)
                         .padding(.top, hitAbove)
                         .padding(.bottom, hitBelow)
-                        .contentShape(Rectangle())
+                        // `.interaction` so the padded band is the real hit target, not only
+                        // the accessibility frame (UITests were missing the bottom corners of
+                        // Home's All tab — feedback app-01M61EZD0GJ2XGV1EW4SCVXENK / filter taps).
+                        .contentShape(.interaction, Rectangle())
                         .overlay { hitRectOverlay }
                 }
                 .buttonStyle(.plain)
