@@ -133,7 +133,7 @@ struct MessageActionsOverlay<Bubble: View>: View {
                     Text(emoji)
                         .font(.system(size: ReactionCapsule.emojiSize))
                         .frame(width: ReactionCapsule.cell, height: ReactionCapsule.cell)
-                        .background(Circle().fill(held.contains(emoji) ? theme.accent.opacity(0.22) : Color.clear))
+                        .background(Circle().fill(held.contains(where: { MessageReaction.sameBase($0, emoji) }) ? theme.accent.opacity(0.22) : Color.clear))
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(CapsuleCellButtonStyle(pressed: theme.text.opacity(0.1)))

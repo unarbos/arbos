@@ -190,13 +190,7 @@ struct AddAgentSheet: View {
         }
         .scrollDismissesKeyboard(.interactively)
         .background(theme.bg)
-        .navigationTitle("Add agent")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                Button("Cancel") { dismiss() }.foregroundStyle(theme.text)
-            }
-        }
+        .sheetHeader(title: "Add agent", onLeading: { dismiss() })
         .onAppear {
             if let q = DebugHooks.agentPickerQuery, !q.isEmpty, query.isEmpty { query = q }
             searching = true
