@@ -453,11 +453,8 @@ pub fn new_chat_sheet(
                             .flex_1()
                             .min_w_0()
                             .child(
-                                div()
-                                    .text_size(px(TEXT_BODY))
-                                    .text_color(theme.text)
-                                    .truncate()
-                                    .child(person.display_name()),
+                                identity::name(person.display_name(), TEXT_BODY)
+                                    .text_color(theme.text),
                             )
                             .child(
                                 div()
@@ -884,11 +881,7 @@ fn new_group_body(
                         .flex_1()
                         .min_w_0()
                         .child(
-                            div()
-                                .text_size(px(TEXT_BODY))
-                                .text_color(theme.text)
-                                .truncate()
-                                .child(person.display_name()),
+                            identity::name(person.display_name(), TEXT_BODY).text_color(theme.text),
                         )
                         .child(
                             div()

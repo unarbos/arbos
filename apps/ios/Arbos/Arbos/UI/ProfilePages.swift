@@ -219,10 +219,13 @@ struct PaneRow: View {
         HStack(spacing: PaneKit.gap) {
             leadingView
             VStack(alignment: .leading, spacing: 2) {
+                // Over a subtitle (a member's @handle) an emoji-only title is raised onto
+                // the baseline; a one-line title stays centred where Core Text puts it.
                 Text(title)
                     .font(theme.font(Theme.body, weight: titleWeight))
                     .foregroundStyle(titleTint ?? theme.text)
                     .lineLimit(1)
+                    .emojiNameLift(subtitle?.isEmpty == false ? title : "", size: theme.pt(Theme.body))
                 if let subtitle, !subtitle.isEmpty {
                     Text(subtitle)
                         .font(theme.font(Theme.small))
@@ -464,10 +467,13 @@ struct PaneHeader<Avatar: View>: View {
 
     private var nameLine: some View {
         HStack(spacing: 6) {
+            // The subtitle (@handle) sits under this: an emoji-only name is raised
+            // onto the baseline so it keeps a text name's distance.
             Text(name)
                 .font(theme.font(28, weight: .semibold))
                 .foregroundStyle(theme.text)
                 .lineLimit(1)
+                .emojiNameLift(name, size: theme.pt(28))
             if let badge {
                 Image(systemName: badge).font(theme.font(15, weight: .semibold)).foregroundStyle(theme.muted)
             }
