@@ -1545,7 +1545,7 @@ impl Agent {
         // genuine nothing-to-say, and a silence announcement is still never posted.
         let reply_clause = match self.people.gate_verdict(user_msg_id) {
             Some(v) if v.wants => format!(
-                "The reply gate has already judged that this message is for you ({}); answer it plainly. Only if you truly have nothing to say, route `reply` with `reply` empty and no words — never post that you are staying silent, that the question is for someone else, or that you have nothing to add",
+                "The reply gate has already judged that this message is for you ({}); answer it plainly. A bare name ping (\"{my_slug}?\", \"hey {my_slug}\") wants a one-line presence answer, not silence. Only if you truly have nothing to say, route `reply` with `reply` empty and no words — never post that you are staying silent, that the question is for someone else, or that you have nothing to add",
                 v.reason
             ),
             _ => "If this message is for someone else, or only mentions or refers to you without asking you anything, say nothing: route `reply` with `reply` empty and no words — never post that you are staying silent, that the question is for someone else, or that you have nothing to add".to_owned(),
@@ -2551,6 +2551,12 @@ mod gate_record_tests {
             "{prelude}"
         );
         assert!(prelude.contains("never post that you are staying silent"));
+        // 0.1.173 proof: "Hezbola-rg? 😂" passed the gate (0.81) and the talking model still routed
+        // an empty reply; a name ping is an ask for presence.
+        assert!(
+            prelude.contains("A bare name ping (\"doug?\", \"hey doug\") wants a one-line presence answer, not silence."),
+            "{prelude}"
+        );
         let unjudged = append(&host, "morning", vec![]).await;
         let prelude = agent
             .people_turn_context(chat, &host, &unjudged)
