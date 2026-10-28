@@ -26,10 +26,6 @@ pub const SIDEBAR_WIDTH: f32 = 296.0;
 pub const SIDEBAR_WIDTH_MIN: f32 = 220.0;
 /// Widest the chat-list column may be dragged.
 pub const SIDEBAR_WIDTH_MAX: f32 = 480.0;
-/// Hit target on the sidebar's right edge for the resize drag.
-/// Slightly wider than a hairline so the col-resize cursor is easy to grab
-/// ([feedback app-01M5MWRQZ8TM4SS0Q25KSYYVV1]).
-pub const SIDEBAR_RESIZE_HANDLE: f32 = 10.0;
 /// Kept for the settings sub-panels, which open just right of the sidebar.
 pub const RAIL_WIDTH: f32 = SIDEBAR_WIDTH;
 
