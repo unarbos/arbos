@@ -1970,6 +1970,27 @@ impl Db {
         })
     }
 
+    /// [`Self::enqueue_push`] unless an identical push (kind and payload) is still undelivered:
+    /// a box told once to open a room need not be told again per row. Returns whether a row
+    /// was added.
+    pub fn enqueue_push_once(
+        &self,
+        project_id: &str,
+        kind: &str,
+        payload: &serde_json::Value,
+    ) -> Result<bool> {
+        let payload = payload.to_string();
+        self.with(|c| {
+            let n = c.execute(
+                "INSERT INTO push_queue(project_id, kind, payload, created_at)
+                 SELECT ?1, ?2, ?3, ?4
+                 WHERE NOT EXISTS (SELECT 1 FROM push_queue WHERE project_id = ?1 AND kind = ?2 AND payload = ?3 AND delivered_at IS NULL)",
+                params![project_id, kind, payload, now_ms()],
+            )?;
+            Ok(n > 0)
+        })
+    }
+
     pub fn take_pushes(&self, project_id: &str) -> Result<Vec<(i64, String, serde_json::Value)>> {
         self.with(|c| {
             let mut st = c.prepare("SELECT id, kind, payload FROM push_queue WHERE project_id = ?1 AND delivered_at IS NULL ORDER BY id")?;
