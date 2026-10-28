@@ -1174,6 +1174,21 @@ impl Transcript {
         self.measured.borrow().rows.get(row_id).copied()
     }
 
+    /// The bubble the pointer is over right now (its hover key) — what the
+    /// hover rail and the time are drawn for. `None` when nothing is hovered.
+    #[cfg(test)]
+    pub(crate) fn hovered_bubble(&self) -> Option<String> {
+        self.hover.over.as_ref().map(|(key, _)| key.clone())
+    }
+
+    /// Where the list is scrolled to (item index, pixels into it), for a
+    /// test to compare before and after an input.
+    #[cfg(test)]
+    pub(crate) fn scroll_position(&self) -> (usize, f32) {
+        let top = self.list.logical_scroll_top();
+        (top.item_ix, f32::from(top.offset_in_item))
+    }
+
     /// The first row of a message from a new sender opens the turn gap; a
     /// stamp between them already carries its own spacing.
     fn is_turn_start(&self, ix: usize) -> bool {
