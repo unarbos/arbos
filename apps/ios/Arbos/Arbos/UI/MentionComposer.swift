@@ -293,6 +293,8 @@ struct MentionTextView: UIViewRepresentable {
     /// matches the bubbles.
     var agentProject: (ChatMember) -> Project? = { $0.project }
     var maxLines: Int = 8
+    /// Pictures / files pasted into the field, for the owner to stage as attachments.
+    var onPasteMedia: (([AppModel.PendingAttachment]) -> Void)? = nil
     /// ⌫ with nothing to delete (an empty draft): the owner acts on it — the
     /// chat composer removes its last pending attachment
     /// ([feedback composer-attachment-removal-ios-2026-10-27]).
@@ -325,6 +327,7 @@ struct MentionTextView: UIViewRepresentable {
         }
         coordinator.apply(theme: theme, to: view)
         coordinator.rebuild(view, text: text, mentions: mentions, caret: caret)
+        view.onPasteMedia = onPasteMedia
         view.onDeleteBackwardEmpty = onDeleteBackwardEmpty
         view.onPasteImage = onPasteImage
         return view
@@ -333,6 +336,7 @@ struct MentionTextView: UIViewRepresentable {
     func updateUIView(_ view: MentionUITextView, context: Context) {
         let c = context.coordinator
         c.parent = self
+        view.onPasteMedia = onPasteMedia
         c.apply(theme: theme, to: view)
         view.onDeleteBackwardEmpty = onDeleteBackwardEmpty
         view.onPasteImage = onPasteImage
@@ -617,6 +621,11 @@ struct MentionTextView: UIViewRepresentable {
 final class MentionUITextView: UITextView {
     let placeholderLabel = UILabel()
     var onMoveToWindow: (() -> Void)?
+    /// Paste with pictures or files on the pasteboard: the owner stages them as
+    /// attachments ([feedback copy-image-messages-ios-2026-10-27]); the words, when the
+    /// same items carry any, still land at the caret.
+    var onPasteMedia: (([AppModel.PendingAttachment]) -> Void)?
+
     /// ⌫ on an empty field (software or hardware keyboard): the owner's call.
     var onDeleteBackwardEmpty: (() -> Void)?
     /// Paste of an image / GIF / WebP from the pasteboard.
@@ -631,18 +640,29 @@ final class MentionUITextView: UITextView {
     }
 
     override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
-        if action == #selector(paste(_:)), Self.pasteboardImage() != nil {
+        if action == #selector(paste(_:)),
+           (onPasteMedia != nil && MessagePasteboard.hasMedia()) || (onPasteImage != nil && Self.pasteboardImage() != nil) {
             return true
         }
         return super.canPerformAction(action, withSender: sender)
     }
 
+    /// One paste path: an owner with `onPasteMedia` takes every picture / file item
+    /// (the chat composer, [feedback copy-image-messages-ios-2026-10-27]); an owner with
+    /// only `onPasteImage` takes the first picture; the words on the pasteboard, if any,
+    /// still land at the caret.
     override func paste(_ sender: Any?) {
-        if let pasted = Self.pasteboardImage() {
+        let pasteboard = UIPasteboard.general
+        if let onPasteMedia {
+            let media = MessagePasteboard.pendingAttachments(from: pasteboard)
+            if !media.isEmpty { onPasteMedia(media) }
+        } else if let pasted = Self.pasteboardImage() {
             onPasteImage?(pasted.data, pasted.mime, pasted.ext)
             return
         }
-        super.paste(sender)
+        if pasteboard.hasStrings {
+            super.paste(sender)
+        }
     }
 
     /// Raw image bytes from the pasteboard, mime kept (GIF/WebP stay GIF/WebP).

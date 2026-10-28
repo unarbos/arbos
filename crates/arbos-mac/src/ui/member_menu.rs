@@ -39,7 +39,7 @@ impl MemberMenuItem {
 
     pub fn glyph(self) -> &'static str {
         match self {
-            MemberMenuItem::ViewProfile => "person",
+            MemberMenuItem::ViewProfile => "person.crop.circle",
             MemberMenuItem::Remove => "xmark",
         }
     }
