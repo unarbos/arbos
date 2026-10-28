@@ -3,7 +3,8 @@
 //! emoji picker. Opened from the smiley on a bubble's hover rail; a pick
 //! toggles my reaction on that message (`AppState::toggle_reaction`, a
 //! reaction row in the chat doc, synced like any other op) and closes it.
-//! The chips under the bubble (`RowKind::Reactions`) show the result.
+//! The chips under the bubble (`RowKind::Reactions`) show the result; hovering
+//! a chip lists who used that emoji (iPhone `reactionSenders`).
 
 use gpui::{
     div, point, prelude::*, px, size, Context, Div, Entity, Focusable, Pixels, Point, Size, Window,
