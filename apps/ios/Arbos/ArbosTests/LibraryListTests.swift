@@ -79,8 +79,8 @@ final class LibraryListTests: XCTestCase {
         XCTAssertEqual(LibraryList.kindLabel(item("d", kind: .file, title: "Makefile", at: now)), "File")
         XCTAssertEqual(LibraryList.kindLabel(item("e", kind: .link, title: "arbos.life", at: now)), "Link")
         XCTAssertEqual(LibraryList.fileExtension("odd.toolongext"), nil)
-        XCTAssertEqual(LibraryList.menuItems(item("a", kind: .media, title: "a.png", at: now, media: picture)), ["Open", "Forward", "Save to Photos"])
-        XCTAssertEqual(LibraryList.menuItems(item("c", kind: .file, title: "a.pdf", at: now)), ["Open", "Forward", "Save"])
+        XCTAssertEqual(LibraryList.menuItems(item("a", kind: .media, title: "a.png", at: now, media: picture)), ["Open", "Copy", "Forward", "Save to Photos"])
+        XCTAssertEqual(LibraryList.menuItems(item("c", kind: .file, title: "a.pdf", at: now)), ["Open", "Copy", "Forward", "Save"])
         XCTAssertEqual(LibraryList.menuItems(item("e", kind: .link, title: "arbos.life", at: now)), ["Open link", "Copy link"])
         XCTAssertEqual(LibraryList.bareURL(URL(string: "https://www.arbos.life/launch/")!), "arbos.life/launch")
     }

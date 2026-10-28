@@ -57,6 +57,7 @@ pub mod secret_card;
 pub mod secrets;
 pub mod select;
 pub mod servers;
+pub mod sf_symbols;
 pub mod shell;
 pub mod sidebar;
 pub mod sidebar_fit;
