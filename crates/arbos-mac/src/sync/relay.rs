@@ -2529,6 +2529,11 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
                 continue;
             }
         };
+        // Outside agents (#2141): an extra key beside the DTO.
+        let outside: Option<crate::model::OutsideInfo> = detail_val
+            .get("outside")
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok());
         let detail: GetProjectResponseDto = match serde_json::from_value(detail_val) {
             Ok(d) => d,
             Err(err) => {
@@ -2555,6 +2560,7 @@ async fn refresh_registry(shared: &Arc<Shared>) -> Result<()> {
             .find(|x| x.id == id)
             .cloned();
         let mut project = project_from_dto(&detail, members.as_ref());
+        project.outside = outside;
         // D92 amendment: the agent's uploaded / generated picture — the public versioned route.
         project.image_url = project_image_url(
             &shared.http_url,
@@ -7150,6 +7156,117 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         }
                     }
                     Err(err) => shared.fail("create the agent", &err),
+                }
+            });
+        }
+        ClientCommand::ConnectAgent {
+            name,
+            transport,
+            avatar_color_index,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let mut body = json!({ "name": name, "transport": transport });
+                if let Some(i) = avatar_color_index {
+                    body["avatar_color_index"] = json!(i);
+                }
+                match shared.post_json("/outside-agents", body).await {
+                    Ok(v) => {
+                        let _ = shared.events.send(SyncEvent::OutsideAgentKey {
+                            project_id: v["agent"]["project_id"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_owned(),
+                            name: v["agent"]["name"].as_str().unwrap_or(&name).to_owned(),
+                            transport: v["agent"]["transport"]
+                                .as_str()
+                                .unwrap_or(&transport)
+                                .to_owned(),
+                            key: v["key"].as_str().unwrap_or_default().to_owned(),
+                            link: v["link"].as_str().unwrap_or_default().to_owned(),
+                            relay_url: v["relay_url"].as_str().unwrap_or_default().to_owned(),
+                            chat_id: v["chat_id"].as_str().map(str::to_owned),
+                            rotated: false,
+                        });
+                        if let Err(err) = refresh_registry(&shared).await {
+                            shared.diagnostic("refresh", format!("{err:#}"));
+                        }
+                    }
+                    Err(err) => shared.fail("connect the agent", &err),
+                }
+            });
+        }
+        ClientCommand::OutsideAgentStatus { project_id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Ok(v) = shared
+                    .get_json(&format!("/outside-agents/{project_id}"))
+                    .await
+                {
+                    if let Ok(info) =
+                        serde_json::from_value::<crate::model::OutsideInfo>(v["agent"].clone())
+                    {
+                        let _ = shared
+                            .events
+                            .send(SyncEvent::OutsideAgentStatus { project_id, info });
+                    }
+                }
+            });
+        }
+        ClientCommand::OutsideAgentRotate { project_id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                match shared
+                    .post_json(&format!("/outside-agents/{project_id}/rotate"), json!({}))
+                    .await
+                {
+                    Ok(v) => {
+                        let _ = shared.events.send(SyncEvent::OutsideAgentKey {
+                            project_id: project_id.clone(),
+                            name: v["agent"]["name"].as_str().unwrap_or_default().to_owned(),
+                            transport: v["agent"]["transport"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_owned(),
+                            key: v["key"].as_str().unwrap_or_default().to_owned(),
+                            link: v["link"].as_str().unwrap_or_default().to_owned(),
+                            relay_url: v["relay_url"].as_str().unwrap_or_default().to_owned(),
+                            chat_id: None,
+                            rotated: true,
+                        });
+                        if let Ok(info) =
+                            serde_json::from_value::<crate::model::OutsideInfo>(v["agent"].clone())
+                        {
+                            let _ = shared
+                                .events
+                                .send(SyncEvent::OutsideAgentStatus { project_id, info });
+                        }
+                    }
+                    Err(err) => shared.fail("rotate the key", &err),
+                }
+            });
+        }
+        ClientCommand::OutsideAgentRevoke { project_id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .delete(&format!("/outside-agents/{project_id}"))
+                    .await
+                {
+                    shared.fail("revoke the agent's access", &err);
+                    return;
+                }
+                if let Ok(v) = shared
+                    .get_json(&format!("/outside-agents/{project_id}"))
+                    .await
+                {
+                    if let Ok(info) =
+                        serde_json::from_value::<crate::model::OutsideInfo>(v["agent"].clone())
+                    {
+                        let _ = shared
+                            .events
+                            .send(SyncEvent::OutsideAgentStatus { project_id, info });
+                    }
                 }
             });
         }

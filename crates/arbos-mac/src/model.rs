@@ -82,6 +82,10 @@ pub struct Project {
     /// API §9: `machine {state, class, snapshot, always_on, …}` of the agent's box.
     #[serde(default)]
     pub machine_info: Option<ProjectMachine>,
+    /// A connected (outside) agent (#2141): its brain runs elsewhere, the relay hosts the
+    /// member. `GET /projects/{id}` carries this beside the DTO; `None` = a native agent.
+    #[serde(default)]
+    pub outside: Option<OutsideInfo>,
     /// People chats: my `me.muted` on the relay (synced across devices).
     #[serde(default)]
     pub muted: bool,
@@ -174,6 +178,63 @@ pub struct Voice {
     pub description: Option<String>,
     #[serde(default, deserialize_with = "null_to_empty")]
     pub sample_url: String,
+}
+
+/// The connection of an outside agent, as `GET /outside-agents/{id}` / the project detail
+/// report it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct OutsideInfo {
+    /// `connected` | `away` | `never` | `revoked`.
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub connected: bool,
+    /// `acp` | `grok` | `custom`.
+    #[serde(default)]
+    pub transport: String,
+    /// `asp/1`.
+    #[serde(default)]
+    pub protocol: String,
+    #[serde(default)]
+    pub last_seen_at: Option<i64>,
+    #[serde(default)]
+    pub connected_at: Option<i64>,
+}
+
+impl OutsideInfo {
+    /// The transport as the Details pane names it.
+    pub fn transport_label(&self) -> &'static str {
+        match self.transport.as_str() {
+            "acp" => "ACP · on your Mac",
+            "grok" => "Grok · HTTPS",
+            _ => "Custom · HTTPS / WebSocket",
+        }
+    }
+
+    /// "Connected · 12 s ago", "Away · 40 min ago", "Waiting for the first heartbeat",
+    /// "Disconnected".
+    pub fn status_line(&self, now: i64) -> String {
+        let ago = |t: i64| {
+            let s = ((now - t).max(0) / 1000).max(0);
+            if s < 60 {
+                format!("{s} s ago")
+            } else if s < 3600 {
+                format!("{} min ago", s / 60)
+            } else if s < 86_400 {
+                format!("{} h ago", s / 3600)
+            } else {
+                format!("{} d ago", s / 86_400)
+            }
+        };
+        match (self.status.as_str(), self.last_seen_at) {
+            ("revoked", _) => "Disconnected".to_owned(),
+            ("connected", Some(t)) => format!("Connected · {}", ago(t)),
+            ("connected", None) => "Connected".to_owned(),
+            ("away", Some(t)) => format!("Away · {}", ago(t)),
+            ("away", None) => "Away".to_owned(),
+            _ => "Waiting for the first heartbeat".to_owned(),
+        }
+    }
 }
 
 /// API §9 `project.machine`.

@@ -578,6 +578,25 @@ pub struct ChatUi {
 /// Rows per history page the shared Matrix client fetches (`arbos_matrix::client::HISTORY_PAGE`).
 const CHANNEL_PAGE: usize = 50;
 
+/// The reveal sheet after Connect an agent (#2141): the key, shown once, and the live
+/// connection while the sheet is up.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConnectReveal {
+    pub project_id: Id,
+    pub name: String,
+    /// `acp` | `grok` | `custom`.
+    pub transport: String,
+    pub key: String,
+    pub link: String,
+    pub relay_url: String,
+    pub chat_id: Option<Id>,
+    /// After Rotate key…: the sheet says so instead of the first-time words.
+    pub rotated: bool,
+    pub status: Option<crate::model::OutsideInfo>,
+    /// Which Copy was pressed last ("key" | "link"), for the "Copied" tick.
+    pub copied: Option<&'static str>,
+}
+
 /// What the Create group screen (step 1) hands to the member picker (step 2).
 #[derive(Clone, Debug, PartialEq)]
 pub struct GroupDraft {
@@ -775,6 +794,10 @@ pub struct AppState {
     /// Bubble menu → Forward: the message the "Forward to" picker is open for.
     pub forward_message: Option<ForwardMessage>,
     pub new_project_open: bool,
+    /// Connect an agent (#2141): the Create screen in its connect form is up.
+    pub connect_open: bool,
+    /// Connect an agent: the key reveal sheet, after the relay answered.
+    pub connect_reveal: Option<ConnectReveal>,
     /// Debug: per-message "Show details" disclosures in the transcript.
     pub show_details: bool,
     /// The user's one machine (projects are workspaces on it).
@@ -895,7 +918,7 @@ pub struct AppState {
     /// reason; the speaker row under that reply offers a retry. Scoped to the
     /// message, never shown as an app-wide banner.
     pub speech_failed: HashMap<Id, String>,
-    awaiting_new_project: bool,
+    pub awaiting_new_project: bool,
     /// Calls v1: live calls I know about per chat (the "On a call · Join" bar).
     pub calls_in_chat: HashMap<Id, Call>,
     /// Someone is calling me (ringing): the call and who started it.
@@ -1234,6 +1257,8 @@ impl AppState {
             chart_viewer_generation: 0,
             forward_message: None,
             new_project_open: false,
+            connect_open: false,
+            connect_reveal: None,
             show_details: false,
             machine: Machine::default(),
             connectors: ConnectorsView::default(),
@@ -1654,6 +1679,45 @@ impl AppState {
             assert!(text != "panic!", "test poison event");
         }
         match event {
+            SyncEvent::OutsideAgentKey {
+                project_id,
+                name,
+                transport,
+                key,
+                link,
+                relay_url,
+                chat_id,
+                rotated,
+            } => {
+                self.awaiting_new_project = false;
+                self.connect_reveal = Some(ConnectReveal {
+                    project_id: project_id.clone(),
+                    name,
+                    transport,
+                    key,
+                    link,
+                    relay_url,
+                    chat_id,
+                    rotated,
+                    status: None,
+                    copied: None,
+                });
+                self.poll_connect_status(cx);
+                cx.notify();
+            }
+            SyncEvent::OutsideAgentStatus { project_id, info } => {
+                if let Some(r) = self
+                    .connect_reveal
+                    .as_mut()
+                    .filter(|r| r.project_id == project_id)
+                {
+                    r.status = Some(info.clone());
+                }
+                if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
+                    p.outside = Some(info);
+                }
+                cx.notify();
+            }
             SyncEvent::NeedsPairing { relay_url } => {
                 let mode = self
                     .pairing
@@ -6838,6 +6902,13 @@ impl AppState {
             _ => None,
         };
         if let ProfilePage::Agent { project_id } = &page {
+            // A connected agent's Details: a fresh "Connected · N s ago" (#2141).
+            if self
+                .project(project_id)
+                .is_some_and(|p| p.outside.is_some())
+            {
+                self.refresh_outside_status(project_id.clone());
+            }
             self.command(ClientCommand::ShellGrantsRefresh {
                 project_id: project_id.clone(),
             });
@@ -9657,6 +9728,84 @@ impl AppState {
         });
         self.push_notice("Creating project…");
         cx.notify();
+    }
+
+    /// Connect an outside agent (#2141): the relay makes the project and mints the key; the
+    /// reveal sheet opens on [`SyncEvent::OutsideAgentKey`].
+    pub fn connect_agent(
+        &mut self,
+        name: String,
+        transport: &str,
+        avatar_color_index: Option<u8>,
+        cx: &mut Context<Self>,
+    ) {
+        self.connect_open = false;
+        self.awaiting_new_project = true;
+        self.command(ClientCommand::ConnectAgent {
+            name,
+            transport: transport.to_owned(),
+            avatar_color_index,
+        });
+        self.push_notice("Connecting…");
+        cx.notify();
+    }
+
+    /// While the reveal sheet is up, ask the relay every 3 s whether the agent has checked in.
+    fn poll_connect_status(&mut self, cx: &mut Context<Self>) {
+        let Some(project_id) = self.connect_reveal.as_ref().map(|r| r.project_id.clone()) else {
+            return;
+        };
+        self.command(ClientCommand::OutsideAgentStatus {
+            project_id: project_id.clone(),
+        });
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(3))
+                .await;
+            let go = this.update(cx, |state, _| match state.connect_reveal.as_ref() {
+                Some(r) if r.project_id == project_id => {
+                    state.command(ClientCommand::OutsideAgentStatus {
+                        project_id: project_id.clone(),
+                    });
+                    true
+                }
+                _ => false,
+            });
+            if !matches!(go, Ok(true)) {
+                break;
+            }
+        })
+        .detach();
+    }
+
+    /// Done / × on the reveal sheet: the key is gone from the screen; open the agent's chat.
+    pub fn close_connect_reveal(&mut self, cx: &mut Context<Self>) {
+        if let Some(r) = self.connect_reveal.take() {
+            if !r.rotated {
+                if let Some(p) = self.projects.iter().find(|p| p.id == r.project_id) {
+                    let id = p.id.clone();
+                    self.select_project(id, cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Details pane → Key → Rotate key…: a fresh key, the old one stops at once.
+    pub fn rotate_outside_key(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        self.command(ClientCommand::OutsideAgentRotate { project_id });
+        cx.notify();
+    }
+
+    /// Details pane → Key → Revoke access.
+    pub fn revoke_outside_agent(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        self.command(ClientCommand::OutsideAgentRevoke { project_id });
+        cx.notify();
+    }
+
+    /// Details pane: refresh the connection line when the pane opens on an outside agent.
+    pub fn refresh_outside_status(&mut self, project_id: Id) {
+        self.command(ClientCommand::OutsideAgentStatus { project_id });
     }
 
     /// Grok / iPhone "Fork": a new agent with the same look and workspace
