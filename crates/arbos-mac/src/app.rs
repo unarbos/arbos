@@ -8987,6 +8987,12 @@ impl AppState {
         self.projects.iter().find(|p| p.id == pid)
     }
 
+    /// One of my agents into a people chat, the way the Add members picker
+    /// does it (optimistic "<me> added <agent>" line, then the batch
+    /// `AddMembers` call). Only the `ARBOS_RIG_ADD_AGENT` recording hook
+    /// calls it since the "Add agent" rows went ([feedback
+    /// add-your-agent-row-removal-mac-2026-10-27]); the picker goes through
+    /// [`Self::add_members_to_group`].
     pub fn add_agent(&mut self, chat_id: Id, project_id: Id, cx: &mut Context<Self>) {
         let names: Vec<String> = self
             .projects
@@ -8999,9 +9005,10 @@ impl AppState {
             id: project_id.clone(),
         }];
         self.show_membership_notice(&chat_id, &names, subjects, cx);
-        self.command(ClientCommand::AddAgent {
+        self.command(ClientCommand::AddMembers {
             chat_id,
-            project_id,
+            handles: Vec::new(),
+            agent_ids: vec![project_id],
         });
         cx.notify();
     }
